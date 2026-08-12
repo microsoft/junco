@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import {
   DataflowGraph,
@@ -83,23 +82,21 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   const groupAndFlattenId = graph.addNode({
     state: undefined,
     trigger: when(kvEdge),
-    step: stepNode<void, Msg, string>((_state, view) =>
-      pipe(
+    step: stepNode<void, Msg, string>((_state, view) => {
+      const groups = pipe(
         from(view, kvEdge),
         RA.filter((m): m is KV => m.kind === "kv"),
         RNEA.groupBy((kv) => kv.key),
-        RR.collect(S.Ord)((key, group) =>
-          pipe(
-            group,
-            RA.chain((kv): readonly Message<Msg>[] => {
-              const line: Line = { kind: "line", text: key + kv.value };
-              return [msg(formattedForSinkEdge, line), msg(formattedForOutputCsumEdge, line)];
-            }),
-          ),
-        ),
-        RA.flatten,
-      ),
-    ),
+      );
+      const events: Message<Msg>[] = [];
+      for (const key of Object.keys(groups).sort(S.Ord.compare)) {
+        for (const kv of groups[key]!) {
+          const line: Line = { kind: "line", text: key + kv.value };
+          events.push(msg(formattedForSinkEdge, line), msg(formattedForOutputCsumEdge, line));
+        }
+      }
+      return events;
+    }),
   });
 
   const inputCsumId = graph.addNode({

@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import {
   DataflowGraph,
@@ -45,17 +44,14 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   const sourceId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: emitOnce<void, Msg, string>(
-      () =>
-        pipe(
-          inputPairs,
-          RA.chain(([key, value]): readonly Message<Msg>[] => {
-            const pair: Pair = { kind: "pair", key, value };
-            return [msg(sumInEdge, pair), msg(multiplyInEdge, pair)];
-          }),
-        ),
-      "source done",
-    ),
+    step: emitOnce<void, Msg, string>(() => {
+      const events: Message<Msg>[] = [];
+      for (const [key, value] of inputPairs) {
+        const pair: Pair = { kind: "pair", key, value };
+        events.push(msg(sumInEdge, pair), msg(multiplyInEdge, pair));
+      }
+      return events;
+    }, "source done"),
   });
 
   const makeCombine = (
@@ -67,20 +63,23 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
     const id = graph.addNode({
       state: undefined,
       trigger: when(inputEdge),
-      step: stepNode<void, Msg, string>((_state, view) =>
-        pipe(
+      step: stepNode<void, Msg, string>((_state, view) => {
+        const groups = pipe(
           from(view, inputEdge),
           RA.filter((m): m is Pair => m.kind === "pair"),
           RNEA.groupBy((p) => p.key),
-          RR.collect(S.Ord)((key, group) =>
-            msg(outputEdge, {
-              kind: "result",
-              key,
-              value: pipe(group, RA.reduce(init, (a, p) => reduce(a, p.value))),
-            }),
-          ),
-        ),
-      ),
+        );
+        const events: Message<Msg>[] = [];
+        for (const key of Object.keys(groups).sort(S.Ord.compare)) {
+          const group = groups[key]!;
+          events.push(msg(outputEdge, {
+            kind: "result",
+            key,
+            value: pipe(group, RA.reduce(init, (a, p) => reduce(a, p.value))),
+          }));
+        }
+        return events;
+      }),
     });
     return id;
   };

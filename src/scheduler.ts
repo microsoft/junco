@@ -20,16 +20,16 @@ export type NodeSchedule = { readonly id: NodeId; readonly inputs: InputSchedule
 export type Schedule = readonly (readonly NodeSchedule[])[];
 
 /** What the runtime knows about one available node when it asks for a plan. */
-export type NodeAvailability<S, N, T> = {
+export type NodeAvailability<N, T> = {
   /** LIVE, non-destructive view of the node's inbound edges: queues are unconsumed. */
-  readonly view: ParentView<S, N, T>;
+  readonly view: ParentView<N, T>;
   readonly trigger: TriggerRule<N, T>;
   /** Rule edges carrying something right now, in rule insertion order. */
   readonly satisfied: readonly EdgeId[];
 };
 
 /** Pluggable planner deciding which available nodes run, in which lane, at which turn, reading how much. */
-export type DataflowScheduler<S, N, T> = {
+export type DataflowScheduler<N, T> = {
   /** Configure the planner. Called exactly once, by the graph constructor. */
   create(window: number, threads: number): void;
 
@@ -42,7 +42,7 @@ export type DataflowScheduler<S, N, T> = {
    * scheduler's responsibility — the runtime never forces progress. Each entry's `inputs` keys MUST
    * be inbound edges of that node, and a numeric count MUST be a positive integer.
    */
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<S, N, T>>): Schedule;
+  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule;
 };
 
 /**
@@ -56,7 +56,7 @@ export type DataflowScheduler<S, N, T> = {
  * A partially satisfied `"all"` rule reads NOTHING — atomicity. Reachable only when a custom
  * `is_available` hook reports a node available while its trigger is unsatisfied.
  */
-export const triggerInputs = <S, N, T>({ trigger, satisfied }: NodeAvailability<S, N, T>): InputSchedule => {
+export const triggerInputs = <N, T>({ trigger, satisfied }: NodeAvailability<N, T>): InputSchedule => {
   const inputs = new Map<EdgeId, MessageSchedule>();
   if (trigger.kind === "all") {
     if (satisfied.length !== trigger.rule.length) return inputs;
@@ -74,11 +74,11 @@ export const triggerInputs = <S, N, T>({ trigger, satisfied }: NodeAvailability<
  * Its lane count equals the number of available nodes, which can exceed any finite `threads`, so a
  * graph using it MUST be constructed with `threads: Number.POSITIVE_INFINITY`.
  */
-export class ReadyScheduler<S, N, T> implements DataflowScheduler<S, N, T> {
+export class ReadyScheduler<N, T> implements DataflowScheduler<N, T> {
   /** Ignores both knobs: this scheduler always plans exactly one turn over every available node. */
   create(_window: number, _threads: number): void {}
 
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<S, N, T>>): Schedule {
+  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
     return [...available].map(([id, availability]) => [{ id, inputs: triggerInputs(availability) }]);
   }
 }
@@ -90,7 +90,7 @@ export class ReadyScheduler<S, N, T> implements DataflowScheduler<S, N, T> {
  * duplicate; the rotating cursor guarantees a starved node is eventually reached when
  * `threads * window < available.size`.
  */
-export class RoundRobinScheduler<S, N, T> implements DataflowScheduler<S, N, T> {
+export class RoundRobinScheduler<N, T> implements DataflowScheduler<N, T> {
   #window = 1;
   #threads = 1;
   #cursor = 0;
@@ -100,7 +100,7 @@ export class RoundRobinScheduler<S, N, T> implements DataflowScheduler<S, N, T> 
     this.#threads = threads;
   }
 
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<S, N, T>>): Schedule {
+  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
     const ids = [...available.keys()];
     if (ids.length === 0) return [];
 

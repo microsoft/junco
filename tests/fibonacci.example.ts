@@ -16,7 +16,7 @@ import {
   stepNode,
   when,
 } from "../src/index.ts";
-import type { NodeGenerator, ParentView } from "../src/index.ts";
+import type { NodeGenerator } from "../src/index.ts";
 
 test("cookbook: fibonacci via self-loop", async () => {
   const fibSeed = messageEdge<number, string>("fibSeed");
@@ -39,10 +39,8 @@ test("cookbook: fibonacci via self-loop", async () => {
   const fibId = graph.addNode({
     state: undefined,
     trigger: anyOf(on(fibSeed), on(fibLoop)),
-    step: async function* (
-      view: ParentView<void, number, string>,
-    ): NodeGenerator<void, number, string> {
-      let inputs = view;
+    step: async function* (): NodeGenerator<number, string> {
+      let inputs = yield [];
       for (let i = 0; i < 10; i++) {
         const pair = (inputs.messages.get(fibSeed.id) ?? inputs.messages.get(fibLoop.id))!;
         const a = pair[0]!;

@@ -4,33 +4,33 @@ import fc from "fast-check";
 import { EdgeId, NodeId, ReadyScheduler, RoundRobinScheduler, allOf, always, anyOf, triggerInputs } from "../src/index.ts";
 import type { NodeAvailability, NodeIdType, ParentView, Schedule } from "../src/index.ts";
 
-const EMPTY_VIEW: ParentView<void, number, string> = { messages: new Map(), values: new Map() };
-const AVAILABLE: NodeAvailability<void, number, string> = {
+const EMPTY_VIEW: ParentView<number, string> = { messages: new Map(), values: new Map() };
+const AVAILABLE: NodeAvailability<number, string> = {
   view: EMPTY_VIEW,
   trigger: always<number, string>(),
   satisfied: [],
 };
 
-const availableOf = (...names: readonly string[]): ReadonlyMap<NodeIdType, NodeAvailability<void, number, string>> =>
+const availableOf = (...names: readonly string[]): ReadonlyMap<NodeIdType, NodeAvailability<number, string>> =>
   new Map(names.map((name) => [NodeId(name), AVAILABLE]));
 
 /** Existing assertions are about placement, not reads: project each plan back to its ids. */
 const ids = (schedule: Schedule): NodeIdType[][] => schedule.map((lane) => lane.map((entry) => entry.id));
 
 test("ReadyScheduler: one lane per available node, in iteration order", () => {
-  const scheduler = new ReadyScheduler<void, number, string>();
+  const scheduler = new ReadyScheduler<number, string>();
   scheduler.create(1, Number.POSITIVE_INFINITY);
   assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [["a"], ["b"], ["c"]]);
 });
 
 test("ReadyScheduler: nothing available plans nothing", () => {
-  const scheduler = new ReadyScheduler<void, number, string>();
+  const scheduler = new ReadyScheduler<number, string>();
   scheduler.create(1, Number.POSITIVE_INFINITY);
   assert.deepEqual(ids(scheduler.schedule(availableOf())), []);
 });
 
 test("RoundRobinScheduler: 2x2 over 5 ids fills lanes round-robin then resumes at the leftover", () => {
-  const scheduler = new RoundRobinScheduler<void, number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(2, 2);
   const available = availableOf("a", "b", "c", "d", "e");
   assert.deepEqual(ids(scheduler.schedule(available)), [["a", "c"], ["b", "d"]]);
@@ -38,13 +38,13 @@ test("RoundRobinScheduler: 2x2 over 5 ids fills lanes round-robin then resumes a
 });
 
 test("RoundRobinScheduler: capacity is clamped to the available count", () => {
-  const scheduler = new RoundRobinScheduler<void, number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(4, 4);
   assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [["a"], ["b"], ["c"]]);
 });
 
 test("RoundRobinScheduler: nothing available plans nothing", () => {
-  const scheduler = new RoundRobinScheduler<void, number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(2, 2);
   assert.deepEqual(ids(scheduler.schedule(availableOf())), []);
 });
@@ -56,7 +56,7 @@ test("RoundRobinScheduler: plans are duplicate-free, exactly min(n, threads*wind
       fc.integer({ min: 1, max: 4 }),
       fc.integer({ min: 1, max: 4 }),
       (names, threads, window) => {
-        const scheduler = new RoundRobinScheduler<void, number, string>();
+        const scheduler = new RoundRobinScheduler<number, string>();
         scheduler.create(window, threads);
         const schedule = scheduler.schedule(availableOf(...names));
         const flat = schedule.flat().map((entry) => entry.id);
@@ -72,7 +72,7 @@ test("RoundRobinScheduler: plans are duplicate-free, exactly min(n, threads*wind
 });
 
 test("RoundRobinScheduler: rotation eventually reaches every starved node", () => {
-  const scheduler = new RoundRobinScheduler<void, number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(1, 1);
   const available = availableOf("a", "b", "c");
   const seen = [

@@ -1,7 +1,5 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { pipe } from "fp-ts/lib/function.js";
-import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import {
   DataflowGraph,
   ReadyScheduler,
@@ -53,20 +51,21 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
   const splitterId = graph.addNode({
     state: undefined,
     trigger: when(linesEdge),
-    step: stepNode<void, Msg, string>((_state, view) =>
-      pipe(
-        view.messages.get(linesEdge.id) ?? [],
-        RA.filter((m): m is SourceLine => m.kind === "line"),
-        RA.chain((line): readonly Message<Msg>[] => [
-          msg(charCountEdge, { kind: "chars", length: line.text.length }),
-          ...Array.from(line.text.matchAll(/[A-Za-z']+/g), (match) => {
-            const word = match[0]!;
-            const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
-            return msg(targetEdge, { kind: "word", word });
-          }),
-        ]),
-      ),
-    ),
+    step: stepNode<void, Msg, string>((_state, view) => {
+      const lines = (view.messages.get(linesEdge.id) ?? []).filter(
+        (m): m is SourceLine => m.kind === "line",
+      );
+      const events: Message<Msg>[] = [];
+      for (const line of lines) {
+        events.push(msg(charCountEdge, { kind: "chars", length: line.text.length }));
+        for (const match of line.text.matchAll(/[A-Za-z']+/g)) {
+          const word = match[0]!;
+          const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
+          events.push(msg(targetEdge, { kind: "word", word }));
+        }
+      }
+      return events;
+    }),
   });
 
   const unifiedCounterId = graph.addNode({

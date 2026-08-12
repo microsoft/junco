@@ -20,11 +20,11 @@ import type { Width } from "./width.js";
  * holds no copy of either. It holds only what an edge cannot answer: which edges point AT this node
  * (ngraph exposes no inbound-only accessor) and a reusable view over them.
  */
-type NodeRuntime<S, N, T> = {
+type NodeRuntime<N, T> = {
   /** Inbound edge id -> the edge itself. Pure topology; all transport state lives in the `Edge`. */
   readonly inbound: Map<EdgeId, Edge<N, T>>;
   /** Stable, non-destructive readiness view reading through to `inbound`'s edges. */
-  readonly probe: ParentView<S, N, T>;
+  readonly probe: ParentView<N, T>;
 };
 
 /**
@@ -35,7 +35,7 @@ type NodeRuntime<S, N, T> = {
  * `messages` exposes an inbound message edge's live queue; `values` exposes only RESOLVED value
  * cells, which is what makes `values.has(id)` mean "this parent has returned".
  */
-const probeOf = <S, N, T>(inbound: ReadonlyMap<EdgeId, Edge<N, T>>): ParentView<S, N, T> => ({
+const probeOf = <N, T>(inbound: ReadonlyMap<EdgeId, Edge<N, T>>): ParentView<N, T> => ({
   messages: {
     get: (id) => {
       const edge = inbound.get(id);
@@ -78,10 +78,10 @@ const NO_KEYS: readonly never[] = [];
  * An absent batch answers every lookup empty and enumerates nothing, so a node whose plan read
  * `"none"` — or whose queues were empty — needs no batch object at all.
  */
-const viewOf = <S, N, T>(
+const viewOf = <N, T>(
   batch: ReadonlyMap<EdgeId, readonly N[]> | undefined,
   values: Lookup<EdgeId, T>,
-): ParentView<S, N, T> => ({
+): ParentView<N, T> => ({
   messages: {
     get: (id) => batch?.get(id),
     has: (id) => batch?.has(id) ?? false,
@@ -103,7 +103,7 @@ const viewOf = <S, N, T>(
 export class DataflowGraph<S, N, T, EH> {
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
-  readonly #runtime = new Map<NodeId, NodeRuntime<S, N, T>>();
+  readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
   /** Return value of every finished node, accumulated across runs. */
   readonly #results = new Map<NodeId, T>();
   #nextNodeIndex = 0;
@@ -115,7 +115,7 @@ export class DataflowGraph<S, N, T, EH> {
    * @param threads Max concurrent lanes per plan.
    */
   constructor(
-    readonly scheduler: DataflowScheduler<S, N, T>,
+    readonly scheduler: DataflowScheduler<N, T>,
     readonly window: Width,
     readonly threads: Width,
   ) {
@@ -145,7 +145,7 @@ export class DataflowGraph<S, N, T, EH> {
     }
 
     const inbound = new Map<EdgeId, Edge<N, T>>();
-    this.#runtime.set(id, { inbound, probe: probeOf<S, N, T>(inbound) });
+    this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
 
     // The default hook closes over `node`; it only ever runs after this initializer completes, so
     // there is no TDZ hazard, and `inbound` is read lazily so edges wired after `addNode` count.
@@ -224,8 +224,8 @@ export class DataflowGraph<S, N, T, EH> {
    * Iteration order is ngraph node-insertion order, which makes both shipped schedulers
    * deterministic.
    */
-  #available(): Map<NodeId, NodeAvailability<S, N, T>> {
-    const available = new Map<NodeId, NodeAvailability<S, N, T>>();
+  #available(): Map<NodeId, NodeAvailability<N, T>> {
+    const available = new Map<NodeId, NodeAvailability<N, T>>();
     this.#graph.forEachNode((graphNode) => {
       const node = graphNode.data;
       if (node.status === "done") return;
@@ -247,7 +247,7 @@ export class DataflowGraph<S, N, T, EH> {
    * `any` node body detect which branch fired. A short queue yields what it has rather than
    * failing: the scheduler planned against a snapshot, and `splice` already clamps.
    */
-  #consume(runtime: NodeRuntime<S, N, T>, inputs: InputSchedule): Map<EdgeId, N[]> | undefined {
+  #consume(runtime: NodeRuntime<N, T>, inputs: InputSchedule): Map<EdgeId, N[]> | undefined {
     let batch: Map<EdgeId, N[]> | undefined;
     for (const [edgeId, count] of inputs) {
       if (count === "none") continue;
@@ -310,7 +310,7 @@ export class DataflowGraph<S, N, T, EH> {
    *   input that is not an inbound edge or not a positive count, a duplicated id within one column,
    *   or a plan with no slots while work remains (a spin).
    */
-  #assertSchedule(schedule: Schedule, available: ReadonlyMap<NodeId, NodeAvailability<S, N, T>>): void {
+  #assertSchedule(schedule: Schedule, available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): void {
     if (Number.isFinite(this.threads) && schedule.length > this.threads) {
       throw new DataflowDefinitionError(`Dataflow schedule returned ${schedule.length} lanes, exceeding threads=${this.threads}`);
     }
@@ -360,23 +360,26 @@ export class DataflowGraph<S, N, T, EH> {
     }
   }
 
-  /** Read `entry`'s planned batch off the queues, deliver it, and resume the generator exactly once. */
+  /**
+   * Prime a ready node without consuming its planned inputs, or deliver a running node's planned
+   * batch, then advance the generator exactly once.
+   */
   async #runNode({ id, inputs }: NodeSchedule): Promise<void> {
     const node = this.#graph.getNode(id)!.data;
     const runtime = this.#runtime.get(id)!;
-    // Synchronous, before the first `await`, so every node in a concurrent column reads in lane order.
-    const view = viewOf<S, N, T>(this.#consume(runtime, inputs), runtime.probe.values);
 
     try {
-      let step: IteratorResult<readonly Message<N>[], T>;
+      let step: IteratorResult<Message<N>[], T>;
       if (node.status === "ready") {
-        node.generator = node.step(view); // method call, so a non-arrow body sees the node as `this`
+        node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
-        step = await node.generator.next(); // first next(): arg discarded; the batch came via step(view)
+        step = await node.generator.next();
       } else {
         if (node.generator === undefined) {
           throw new DataflowDefinitionError(`Dataflow node "${id}" is running without a generator`);
         }
+        // Synchronous before this branch's first `await`, so concurrent lanes consume in lane order.
+        const view = viewOf<N, T>(this.#consume(runtime, inputs), runtime.probe.values);
         step = await node.generator.next(view);
       }
 

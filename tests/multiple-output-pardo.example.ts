@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import {
   DataflowGraph,
@@ -60,18 +59,16 @@ test("cookbook: multiple output pardo split lines to words", async () => {
     state: undefined,
     trigger: when(linesEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const events = pipe(
-        from(view, linesEdge),
-        RA.filter((m): m is SourceLine => m.kind === "line"),
-        RA.chain((line): readonly Message<Msg>[] => [
-          msg(charCountEdge, { kind: "chars", length: line.text.length }),
-          ...Array.from(line.text.matchAll(/[A-Za-z']+/g), (match) => {
-            const word = match[0]!;
-            const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
-            return msg(targetEdge, { kind: "word", word });
-          }),
-        ]),
-      );
+      const lines = from(view, linesEdge).filter((m): m is SourceLine => m.kind === "line");
+      const events: Message<Msg>[] = [];
+      for (const line of lines) {
+        events.push(msg(charCountEdge, { kind: "chars", length: line.text.length }));
+        for (const match of line.text.matchAll(/[A-Za-z']+/g)) {
+          const word = match[0]!;
+          const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
+          events.push(msg(targetEdge, { kind: "word", word }));
+        }
+      }
       splitterFirings.push(events.length);
       return events;
     }),
@@ -91,14 +88,18 @@ test("cookbook: multiple output pardo split lines to words", async () => {
     const id = graph.addNode({
       state: undefined,
       trigger: when(inputEdge),
-      step: stepNode<void, Msg, string>((_state, view) =>
-        pipe(
+      step: stepNode<void, Msg, string>((_state, view) => {
+        const groups = pipe(
           from(view, inputEdge),
           RA.filter((m): m is WordMsg => m.kind === "word"),
           RNEA.groupBy((m) => m.word),
-          RR.collect(S.Ord)((word, group) => msg(outputEdge, { kind: "pair", word, count: group.length })),
-        ),
-      ),
+        );
+        const events: Message<Msg>[] = [];
+        for (const word of Object.keys(groups).sort(S.Ord.compare)) {
+          events.push(msg(outputEdge, { kind: "pair", word, count: groups[word]!.length }));
+        }
+        return events;
+      }),
     });
     return id;
   };

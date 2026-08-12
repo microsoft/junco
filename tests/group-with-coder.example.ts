@@ -2,7 +2,6 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import { pipe } from "fp-ts/lib/function.js";
 import {
@@ -18,6 +17,7 @@ import {
   stepNode,
   when,
 } from "../src/index.ts";
+import type { Message } from "../src/index.ts";
 
 class Player {
   constructor(readonly name: string) {}
@@ -70,20 +70,23 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
   const sumByPlayerId = graph.addNode({
     state: undefined,
     trigger: when(pairsEdge),
-    step: stepNode<void, Msg, string>((_state, view) =>
-      pipe(
+    step: stepNode<void, Msg, string>((_state, view) => {
+      const groups = pipe(
         from(view, pairsEdge),
         RA.filter((m): m is Pair => m.kind === "pair"),
         RNEA.groupBy((p) => p.player.name),
-        RR.collect(S.Ord)((playerName, group) =>
-          msg(totalsEdge, {
-            kind: "total",
-            playerName,
-            total: pipe(group, RA.reduce(0, (acc, p) => acc + p.score)),
-          }),
-        ),
-      ),
-    ),
+      );
+      const events: Message<Msg>[] = [];
+      for (const playerName of Object.keys(groups).sort(S.Ord.compare)) {
+        const group = groups[playerName]!;
+        events.push(msg(totalsEdge, {
+          kind: "total",
+          playerName,
+          total: pipe(group, RA.reduce(0, (acc, p) => acc + p.score)),
+        }));
+      }
+      return events;
+    }),
   });
 
   const sinkId = graph.addNode({

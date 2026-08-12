@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import {
   DataflowGraph,
@@ -106,32 +105,31 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
         ...kvs(phoneEdge, "phone"),
         ...kvs(snailmailEdge, "snailmail"),
       ];
-      return pipe(
-        allKvs,
-        RNEA.groupBy((kv) => kv.name),
-        RR.collect(S.Ord)((name, group): readonly Message<Msg>[] => {
-          const bySource = (src: KV["source"]): readonly string[] =>
-            pipe(
-              group,
-              RA.filter((kv) => kv.source === src),
-              RA.map((kv) => kv.value),
-            );
-          const grouped: Grouped = {
-            kind: "grouped",
-            name,
-            emails: bySource("email"),
-            phones: bySource("phone"),
-            snailmails: bySource("snailmail"),
-          };
-          return [
-            msg(groupedForTsvEdge, grouped),
-            msg(groupedForLudditesEdge, grouped),
-            msg(groupedForWritersEdge, grouped),
-            msg(groupedForNomadsEdge, grouped),
-          ];
-        }),
-        RA.flatten,
-      );
+      const groups = pipe(allKvs, RNEA.groupBy((kv) => kv.name));
+      const events: Message<Msg>[] = [];
+      for (const name of Object.keys(groups).sort(S.Ord.compare)) {
+        const group = groups[name]!;
+        const bySource = (src: KV["source"]): readonly string[] =>
+          pipe(
+            group,
+            RA.filter((kv) => kv.source === src),
+            RA.map((kv) => kv.value),
+          );
+        const grouped: Grouped = {
+          kind: "grouped",
+          name,
+          emails: bySource("email"),
+          phones: bySource("phone"),
+          snailmails: bySource("snailmail"),
+        };
+        events.push(
+          msg(groupedForTsvEdge, grouped),
+          msg(groupedForLudditesEdge, grouped),
+          msg(groupedForWritersEdge, grouped),
+          msg(groupedForNomadsEdge, grouped),
+        );
+      }
+      return events;
     }),
   });
 

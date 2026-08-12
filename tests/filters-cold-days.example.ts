@@ -1,7 +1,5 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import * as RA from "fp-ts/lib/ReadonlyArray.js";
-import { pipe } from "fp-ts/lib/function.js";
 import {
   DataflowGraph,
   ReadyScheduler,
@@ -49,14 +47,13 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   const sourceId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: emitOnce<void, Msg, string>(
-      () =>
-        pipe(
-          inputRows,
-          RA.chain((row): readonly Message<Msg>[] => [msg(rowsForMonthFilterEdge, row), msg(rowsForMeanEdge, row)]),
-        ),
-      "source done",
-    ),
+    step: emitOnce<void, Msg, string>(() => {
+      const events: Message<Msg>[] = [];
+      for (const row of inputRows) {
+        events.push(msg(rowsForMonthFilterEdge, row), msg(rowsForMeanEdge, row));
+      }
+      return events;
+    }, "source done"),
   });
 
   const monthFilterId = graph.addNode({

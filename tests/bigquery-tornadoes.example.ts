@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import * as S from "fp-ts/lib/string.js";
 import {
   DataflowGraph,
@@ -18,6 +17,7 @@ import {
   stepNode,
   when,
 } from "../src/index.ts";
+import type { Message } from "../src/index.ts";
 
 type Row = { readonly kind: "row"; readonly month: number; readonly day: number; readonly tornado: boolean };
 type Pair = { readonly kind: "pair"; readonly month: number; readonly count: number };
@@ -66,20 +66,23 @@ test("cookbook: bigquery tornadoes count per month", async () => {
   const combinePerKeyId = graph.addNode({
     state: undefined,
     trigger: when(pairsEdge),
-    step: stepNode<void, Msg, string>((_state, view) =>
-      pipe(
+    step: stepNode<void, Msg, string>((_state, view) => {
+      const groups = pipe(
         from(view, pairsEdge),
         RA.filter((m): m is Pair => m.kind === "pair"),
         RNEA.groupBy((p) => String(p.month)),
-        RR.collect(S.Ord)((month, group) =>
-          msg(resultsEdge, {
-            kind: "result",
-            month: Number(month),
-            tornado_count: pipe(group, RA.reduce(0, (acc, p) => acc + p.count)),
-          }),
-        ),
-      ),
-    ),
+      );
+      const events: Message<Msg>[] = [];
+      for (const month of Object.keys(groups).sort(S.Ord.compare)) {
+        const group = groups[month]!;
+        events.push(msg(resultsEdge, {
+          kind: "result",
+          month: Number(month),
+          tornado_count: pipe(group, RA.reduce(0, (acc, p) => acc + p.count)),
+        }));
+      }
+      return events;
+    }),
   });
 
   const sinkId = graph.addNode({

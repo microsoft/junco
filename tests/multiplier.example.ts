@@ -9,7 +9,7 @@ import type { DataflowScheduler, NodeAvailability, NodeGenerator, NodeIdType, Sc
  * (ready.includes(id)) return [id]; return ready.slice(0, 1); }` — exactly one node per turn,
  * picked by a priority list the test fills in once the node ids exist.
  */
-class PriorityScheduler implements DataflowScheduler<void, number, string> {
+class PriorityScheduler implements DataflowScheduler<number, string> {
   readonly #priority: readonly NodeIdType[];
 
   constructor(priority: readonly NodeIdType[]) {
@@ -18,7 +18,7 @@ class PriorityScheduler implements DataflowScheduler<void, number, string> {
 
   create(_window: number, _threads: number): void {}
 
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<void, number, string>>): Schedule {
+  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
     if (available.size === 0) return [];
     const plan = (id: NodeIdType): Schedule => [[{ id, inputs: triggerInputs(available.get(id)!) }]];
     for (const id of this.#priority) {
@@ -42,7 +42,7 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   const sourceId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: async function* (): NodeGenerator<void, number, string> {
+    step: async function* (): NodeGenerator<number, string> {
       yield [msg(sourceToMultiplier, 1)];
       yield [msg(sourceToMultiplier, 2)];
       yield [msg(sourceToMultiplier, 3)];

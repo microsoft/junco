@@ -20,6 +20,7 @@ import {
   msg,
   on,
   stepNode,
+  triggerInputs,
   valueEdge,
   when,
 } from "../src/index.ts";
@@ -47,9 +48,9 @@ const newGraph = (): Graph =>
 const queued = (edge: Edge<number, string>): readonly number[] => (E.isLeft(edge.transport) ? [...edge.transport.left] : []);
 
 /** One lane per available node, reading `count` off every edge that node's trigger names. */
-const fixedReader = (count: MessageSchedule): DataflowScheduler<void, number, string> => ({
+const fixedReader = (count: MessageSchedule): DataflowScheduler<number, string> => ({
   create(_window: number, _threads: number): void {},
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<void, number, string>>): Schedule {
+  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
     return [...available].map(([id, { trigger }]) => [
       { id, inputs: new Map<EdgeIdType, MessageSchedule>(trigger.rule.map((edgeId) => [edgeId, count])) },
     ]);
@@ -73,8 +74,8 @@ test("value edge signals end-of-input: the squarer drains messages, then returns
   const sq = graph.addNode({
     state: undefined,
     trigger: anyOf(on(e1), on(v)),
-    step: async function* (view) {
-      let inputs = view;
+    step: async function* () {
+      let inputs = yield [];
       while (true) {
         const batch = from(inputs, e1);
         for (const n of batch) seen.push(n);
@@ -87,7 +88,8 @@ test("value edge signals end-of-input: the squarer drains messages, then returns
   const sink = graph.addNode({
     state: undefined,
     trigger: when(e2),
-    step: async function* (view) {
+    step: async function* () {
+      const view = yield [];
       for (const n of from(view, e2)) got.push(n);
       return `sink:${got.join("+")}`;
     },
@@ -109,6 +111,47 @@ test("value edge signals end-of-input: the squarer drains messages, then returns
   assert.deepEqual(graph.result(sq), O.some("sq:1,2,3"));
   assert.deepEqual(queued(e1), []);
   assert.deepEqual(queued(e2), []);
+});
+
+test("a ready dependent is primed without consuming its queued activation batch", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const scheduled: NodeIdType[] = [];
+  let turn = 0;
+  const scheduler: DataflowScheduler<number, string> = {
+    create(_window: number, _threads: number): void {},
+    schedule(available) {
+      const id = scheduled[turn]!;
+      if (turn === 2) assert.deepEqual(queued(feed), [7]);
+      turn += 1;
+      return [[{ id, inputs: triggerInputs(available.get(id)!) }]];
+    },
+  };
+  const graph = new DataflowGraph<void, number, string, never>(scheduler, Width(1), UNBOUNDED);
+  const received: number[] = [];
+
+  const sourceId = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: emitOnce(() => [msg(feed, 7)], "source"),
+  });
+  const dependentId = graph.addNode({
+    state: undefined,
+    trigger: when(feed),
+    step: async function* (): NodeGenerator<number, string> {
+      const view = yield [];
+      received.push(...from(view, feed));
+      return "dependent";
+    },
+  });
+  graph.addEdge(sourceId, dependentId, feed);
+  scheduled.push(sourceId, dependentId, dependentId, sourceId);
+
+  const completed = await graph.run();
+
+  assert.equal(turn, 4);
+  assert.deepEqual(received, [7]);
+  assert.deepEqual(queued(feed), []);
+  assert.deepEqual(completed.get(dependentId), "dependent");
 });
 
 test("a partially satisfied `all` rule consumes nothing", async () => {
@@ -144,7 +187,7 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
   const failingId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: async function* (): NodeGenerator<void, number, string> {
+    step: async function* (): NodeGenerator<number, string> {
       throw new Error("boom");
     },
   });
@@ -209,7 +252,7 @@ test("definition error: run() is not re-entrant", async () => {
   const src = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: async function* (): NodeGenerator<void, number, string> {
+    step: async function* (): NodeGenerator<number, string> {
       await gate.promise;
       yield [msg(e, 1)];
       return "src";
@@ -244,7 +287,8 @@ test("one firing reads exactly its planned count and leaves the rest queued", as
         const consumer = graph.addNode({
           state: undefined,
           trigger: when(feed),
-          step: async function* (view) {
+          step: async function* () {
+            const view = yield [];
             for (const n of from(view, feed)) consumed.push(n);
             return "consumed";
           },
@@ -292,7 +336,7 @@ test("a depth threshold lives in `is_available`: the gate waits for three, then 
   const srcId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: async function* (): NodeGenerator<void, number, string> {
+    step: async function* (): NodeGenerator<number, string> {
       yield [msg(feed, 1)];
       yield [msg(feed, 2)];
       yield [msg(feed, 3)];

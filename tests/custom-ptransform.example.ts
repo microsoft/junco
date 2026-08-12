@@ -2,7 +2,6 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import * as RR from "fp-ts/lib/ReadonlyRecord.js";
 import { pipe } from "fp-ts/lib/function.js";
 import * as S from "fp-ts/lib/string.js";
 import { DataflowGraph, ReadyScheduler, UNBOUNDED, Width, always, emitOnce, messageEdge, msg, stepNode, when } from "../src/index.ts";
@@ -31,37 +30,36 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
   const sourceId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: emitOnce<void, Msg, string>(
-      () =>
-        pipe(
-          inputWords,
-          RA.chain((word): readonly Message<Msg>[] => {
-            const payload: WordMsg = { kind: "word", word };
-            return [msg(wordsForCount1Edge, payload), msg(wordsForCount2Edge, payload)];
-          }),
-        ),
-      "source done",
-    ),
+    step: emitOnce<void, Msg, string>(() => {
+      const events: Message<Msg>[] = [];
+      for (const word of inputWords) {
+        const payload: WordMsg = { kind: "word", word };
+        events.push(msg(wordsForCount1Edge, payload), msg(wordsForCount2Edge, payload));
+      }
+      return events;
+    }, "source done"),
   });
 
   const attachCount = (inputEdge: Edge<Msg, string>, outputEdge: Edge<Msg, string>, factor: number) => {
     const id = graph.addNode({
       state: undefined,
       trigger: when(inputEdge),
-      step: stepNode<void, Msg, string>((_state, view) =>
-        pipe(
+      step: stepNode<void, Msg, string>((_state, view) => {
+        const groups = pipe(
           view.messages.get(inputEdge.id) ?? [],
           RA.filter((m): m is WordMsg => m.kind === "word"),
           RNEA.groupBy((m) => m.word),
-          RR.collect(S.Ord)((word, group) =>
-            msg(outputEdge, {
-              kind: "count",
-              word,
-              count: group.length * factor,
-            }),
-          ),
-        ),
-      ),
+        );
+        const events: Message<Msg>[] = [];
+        for (const word of Object.keys(groups).sort(S.Ord.compare)) {
+          events.push(msg(outputEdge, {
+            kind: "count",
+            word,
+            count: groups[word]!.length * factor,
+          }));
+        }
+        return events;
+      }),
     });
     return id;
   };
