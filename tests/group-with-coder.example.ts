@@ -1,0 +1,108 @@
+import { test } from "bun:test";
+import assert from "node:assert/strict";
+import * as RA from "fp-ts/lib/ReadonlyArray.js";
+import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
+import * as RR from "fp-ts/lib/ReadonlyRecord.js";
+import * as S from "fp-ts/lib/string.js";
+import { pipe } from "fp-ts/lib/function.js";
+import {
+  DataflowGraph,
+  ReadyScheduler,
+  UNBOUNDED,
+  Width,
+  always,
+  emitOnce,
+  from,
+  messageEdge,
+  msg,
+  stepNode,
+  when,
+} from "../src/index.ts";
+
+class Player {
+  constructor(readonly name: string) {}
+}
+
+type Line = { readonly kind: "line"; readonly text: string };
+type Pair = { readonly kind: "pair"; readonly player: Player; readonly score: number };
+type Total = { readonly kind: "total"; readonly playerName: string; readonly total: number };
+type Msg = Line | Pair | Total;
+
+test("cookbook: group with coder — parse and sum by player name", async () => {
+  const linesEdge = messageEdge<Msg, string>("lines");
+  const pairsEdge = messageEdge<Msg, string>("pairs");
+  const totalsEdge = messageEdge<Msg, string>("totals");
+
+  const inputLines = ["Alice,10", "Bob,5", "Alice,20", "Bob,15", "Alice,3"];
+  const results: [string, number][] = [];
+
+  const graph = new DataflowGraph<void, Msg, string, never>(
+    new ReadyScheduler(),
+    Width(1),
+    UNBOUNDED,
+  );
+
+  const sourceId = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: emitOnce<void, Msg, string>(
+      () => inputLines.map((text) => msg(linesEdge, { kind: "line", text })),
+      "source done",
+    ),
+  });
+
+  const parseId = graph.addNode({
+    state: undefined,
+    trigger: when(linesEdge),
+    step: stepNode<void, Msg, string>((_state, view) => {
+      const lines = from(view, linesEdge).filter((m): m is Line => m.kind === "line");
+      return lines.map((l) => {
+        const [name, scoreText] = l.text.split(",", 2);
+        return msg(pairsEdge, {
+          kind: "pair",
+          player: new Player(name ?? ""),
+          score: Number(scoreText),
+        });
+      });
+    }),
+  });
+
+  const sumByPlayerId = graph.addNode({
+    state: undefined,
+    trigger: when(pairsEdge),
+    step: stepNode<void, Msg, string>((_state, view) =>
+      pipe(
+        from(view, pairsEdge),
+        RA.filter((m): m is Pair => m.kind === "pair"),
+        RNEA.groupBy((p) => p.player.name),
+        RR.collect(S.Ord)((playerName, group) =>
+          msg(totalsEdge, {
+            kind: "total",
+            playerName,
+            total: pipe(group, RA.reduce(0, (acc, p) => acc + p.score)),
+          }),
+        ),
+      ),
+    ),
+  });
+
+  const sinkId = graph.addNode({
+    state: undefined,
+    trigger: when(totalsEdge),
+    step: stepNode<void, Msg, string>((_state, view) => {
+      for (const m of from(view, totalsEdge)) {
+        if (m.kind === "total") results.push([m.playerName, m.total]);
+      }
+      return [];
+    }),
+  });
+
+  graph.addEdge(sourceId, parseId, linesEdge);
+  graph.addEdge(parseId, sumByPlayerId, pairsEdge);
+  graph.addEdge(sumByPlayerId, sinkId, totalsEdge);
+
+  const completed = await graph.run();
+
+  assert.deepEqual(results, [["Alice", 33], ["Bob", 20]]);
+  assert.equal(completed.get(sourceId), "source done");
+});
