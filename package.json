@@ -1,0 +1,34 @@
+{
+  "name": "junco-tools",
+  "version": "0.1.0",
+  "description": "Pi bash operations backed by marsh ShellMux",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "os": ["linux"],
+  "engines": { "node": ">=22.19.0" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./extension": { "types": "./dist/extension.d.ts", "import": "./dist/extension.js" },
+    "./native": { "types": "./native/index.d.ts", "import": "./native/index.js" }
+  },
+  "scripts": {
+    "build:native": "node scripts/with-junco-build-env.mjs napi build --platform --release --esm --output-dir native --js index.js --dts index.d.ts -- --locked",
+    "build:native:test": "node scripts/with-junco-build-env.mjs napi build --platform --esm --features test-fs --output-dir target/native-test --js index.js --dts index.d.ts -- --locked",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:native && npm run build:ts"
+  },
+  "napi": {
+    "binaryName": "junco_tools",
+    "targets": ["x86_64-unknown-linux-gnu"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@napi-rs/cli": "3.7.2",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
+}
