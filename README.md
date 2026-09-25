@@ -1,0 +1,184 @@
+# dataflow-engine
+
+Async-generator dataflow engine for TypeScript with pluggable schedulers.
+
+Each node is an `async function*`. The runtime resumes it with the inputs its trigger asked for, and routes whatever it yields onto its outbound edges. A pluggable scheduler decides which nodes run each turn and how much each one reads.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Definition
+    N["Node<br/>state, trigger, async function* step"]
+    E["Edge<br/>message queue (FIFO) or value cell (write-once)"]
+  end
+  subgraph "DataflowGraph.run()"
+    A["available nodes<br/>not done and trigger fires"] --> P["scheduler.schedule()<br/>lanes x turns + read counts"]
+    P --> K["validate plan"]
+    K --> X["run one turn of every lane concurrently<br/>pop inputs into a ParentView"]
+    X --> G["generator.next(view)"]
+    G -- "yield Message[]" --> Q["push onto outbound queues"]
+    G -- "return T" --> R["record result<br/>resolve value edges"]
+    Q --> A
+    R --> A
+  end
+  N --> A
+  E --> X
+  A -- "nothing available" --> Z(["resolve Map of NodeId to T"])
+```
+
+| Part | Role |
+|---|---|
+| `DataflowGraph<S, N, T, EH>` | Owns nodes and edges (an `ngraph.graph` multigraph) and drives `run()`. `N` is the message payload type, `T` the node return type, `S` the node state type and `EH` the error type that node bodies throw. |
+| `messageEdge` / `valueEdge` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
+| Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
+| `DataflowScheduler` | Decides **who** runs, in which lane and turn, and **how much** each node reads from each edge. |
+
+## Install
+
+The package isn't published to npm. Build it and install the tarball:
+
+```sh
+bun install && bun run build && bun pm pack     # writes dataflow-engine-0.1.0.tgz
+cd ../your-app && bun add ../dataflow-engine/dataflow-engine-0.1.0.tgz
+```
+
+Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import` condition serves the Bun-built `dist/index.js`, and types come from `dist/index.d.ts`.
+
+## Quick start
+
+```ts
+import {
+  DataflowGraph, ReadyScheduler, UNBOUNDED, Width,
+  always, emitOnce, from, messageEdge, msg, stepNode, when,
+} from "dataflow-engine";
+import type { NodeGenerator } from "dataflow-engine";
+
+const numbers = messageEdge<number, string>("numbers");
+const squares = messageEdge<number, string>("squares");
+const graph = new DataflowGraph<void, number, string, never>(
+  new ReadyScheduler(), Width(1), UNBOUNDED,
+);
+
+const source = graph.addNode({
+  state: undefined,
+  trigger: always(),
+  step: emitOnce(() => [msg(numbers, 1), msg(numbers, 2), msg(numbers, 3)], "source done"),
+});
+
+const square = graph.addNode({
+  state: undefined,
+  trigger: when(numbers),
+  step: async function* (): NodeGenerator<number, string> {
+    let view = yield []; // prime: the first activation delivers no input
+    while (true) view = yield from(view, numbers).map((n) => msg(squares, n * n));
+  },
+});
+
+const seen: number[] = [];
+const sink = graph.addNode({
+  state: undefined,
+  trigger: when(squares),
+  step: stepNode((_state, view) => {
+    seen.push(...from(view, squares));
+    return [];
+  }),
+});
+
+graph.addEdge(source, square, numbers).addEdge(square, sink, squares);
+const results = await graph.run();
+// seen = [1, 4, 9]; results.get(source) = "source done"; square and sink never return.
+```
+
+## Writing nodes as async generators
+
+A node body has the type `NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, ParentView<N, T>>`. Each activation advances its generator exactly once:
+
+1. **Prime.** On a node's first activation, the runtime calls `step()` and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
+2. **Deliver.** Every later activation pops the scheduled inputs and calls `next(view)`. `from(view, edge)` (or `view.messages.get(edge.id)`) is this turn's batch from that edge. A key exists only for an edge that actually delivered something, which is how an `anyOf` body tells which branch fired. `view.values` holds the value edges that have resolved.
+3. **Emit.** Each `yield` is the full list of messages for this turn, routed in order. `yield []` emits nothing and keeps the node alive.
+4. **Finish.** `return value` marks the node `done`, records `value` in `run()`'s result map and resolves every outbound value edge. A node that never returns, such as a sink or anything built with `stepNode`, is absent from the results.
+5. **Fail.** A throw terminates the node, and `run()` rejects with `DataflowNodeError` (`nodeId`, `error: EH`).
+
+A non-arrow body receives its `Node` as `this`, so it can read and write `this.state`.
+
+Local variables in a generator persist across activations. Here, taken from `examples/fibonacci.ts`, a node feeds itself through a self-loop and stops after ten turns:
+
+```ts
+const fib = graph.addNode({
+  state: undefined,
+  trigger: anyOf(on(seed), on(loop)),
+  step: async function* (): NodeGenerator<number, string> {
+    let view = yield [];
+    for (let i = 0; i < 10; i++) {
+      const [a, b] = (view.messages.get(seed.id) ?? view.messages.get(loop.id))!;
+      view = yield [msg(out, a), msg(loop, b), msg(loop, a + b)];
+    }
+    return "emitted 10";
+  },
+});
+graph.addEdge(seedId, fib, seed).addEdge(fib, fib, loop).addEdge(fib, sinkId, out);
+```
+
+A value edge passes a node's return value downstream:
+
+```ts
+const done = valueEdge<number, string>("done");
+const report = graph.addNode({
+  state: undefined,
+  trigger: when(done),
+  step: async function* (): NodeGenerator<number, string> {
+    const view = yield [];
+    return `source returned: ${view.values.get(done.id)}`;
+  },
+});
+graph.addEdge(source, report, done);
+```
+
+A value edge is never consumed: once resolved, it satisfies its trigger on every later turn. A node triggered only by value edges must therefore return, or `run()` never settles.
+
+## Triggers and schedulers
+
+| Trigger | Fires when |
+|---|---|
+| `always()` | every turn (use for sources) |
+| `when(e)` | `e` has a queued message or a resolved value |
+| `allOf(on(a), on(b))` | every entry is satisfied; when only some are, nothing is read |
+| `anyOf(on(a), on(b))` | the first satisfied entry, in the order given |
+
+A node that must wait for a deeper backlog can supply an `is_available(view)` hook.
+
+| Scheduler | Plan |
+|---|---|
+| `ReadyScheduler` | Runs every available node in one concurrent turn. Construct the graph with `threads = UNBOUNDED`. |
+| `RoundRobinScheduler` | Fills `threads` lanes x `window` turns, rotating so that no node starves. |
+| Custom | Implement `create(window, threads)` and `schedule(available)`. |
+
+```ts
+class OneAtATime implements DataflowScheduler<number, string> {
+  create(_window: number, _threads: number): void {}
+  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
+    const [first] = available;
+    return first ? [[{ id: first[0], inputs: triggerInputs(first[1]) }]] : [];
+  }
+}
+```
+
+`triggerInputs` reads each fired edge whole. To read fixed-size batches instead, return counts (`n`, `"all"` or `"none"`) per edge. The graph validates every plan against the lane and window limits, availability and read counts, and throws `DataflowDefinitionError` on a violation. Graph wiring mistakes throw the same error.
+
+`run()` resolves once no node is available. It can be resumed: add nodes or edges and call it again. It is not re-entrant.
+
+## Examples and development
+
+`bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with a custom priority scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
+
+| Script | Purpose |
+|---|---|
+| `bun run build` | ESM bundle and source map (Bun), plus declarations (`tsc`) |
+| `bun run typecheck` | Checks `src`, `tests` and `examples`, including the compile-only `Width` cases |
+| `bun run test` / `test:coverage` | Tests; the coverage run writes a text report and `coverage/lcov.info` |
+| `bun run check` / `format` | Biome lint and format |
+
+## License
+
+[MIT](LICENSE)
