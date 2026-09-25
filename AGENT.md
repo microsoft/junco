@@ -4,7 +4,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Scope and compatibility
 
-- This is a private, local TypeScript package with a Rust napi-rs addon. It replaces **Pi's agent `bash` tool** with real marsh ShellMux execution, not Pi's other tools.
+- This is a private, local TypeScript package with a Rust napi-rs addon. It replaces **Pi's agent `bash`, `read`, `edit`, `grep`, and `find` tools** and adds `ast_grep`, `ast_edit`, and `diff`. `bash` runs on marsh ShellMux; the file tools run on Oh My Pi's `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` engines, imported unmodified from a pinned public Git revision. Pi's `write`, `ls`, and `user_bash` stay untouched.
 - Target `@earendil-works/pi-coding-agent@0.80.6`, not Oh My Pi. Preserve Pi's public tool interface rather than introducing another schema or error-result convention.
 - Supported build target: Linux x86-64 GNU/glibc, Node.js >=22.19.0, Rust 1.95.0. Bun is not required by the package.
 - Keep changes scoped to the request. Preserve unrelated local work. Do not push, publish packages, change global Git settings, replace system Rust, or create/migrate filesystem subvolumes unless explicitly authorized.
@@ -17,26 +17,41 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `src/mux.rs` | Session ownership, principal admission, execution, cancellation, verdicts, and shutdown. |
 | `src/frontend.rs` | Snapshot-UID output routing, JS callback receipts, errors, and closure fences. |
 | `ts/operations.ts` | Pi `BashOperations` adapter, lazy mux ownership, timeout/abort handling, and teardown. |
+| `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted verbatim from the pinned revision (see `LICENSE.oh-my-pi`). `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
+| `src/task.rs`, `src/testing.rs`, `src/utils.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
+| `ts/tool-support.ts` | Shared adapter primitives: path resolution/display, editable-text normalization, bounded output, u32 validation, and `withNativeSignal`. |
+| `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
+| `ts/edit.ts` | The hashline edit tool: one `EditSession` per call plus the Node filesystem writer. |
+| `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
+| `ts/collection.ts` | `ToolCollection`: one `EditStore` and the complete ordered definition list. |
 | `ts/bash.ts`, `ts/index.ts` | Thin upstream factory wrappers and public exports. |
-| `ts/extension.ts` | Pi session hooks and same-name bash registration. |
+| `ts/extension.ts` | Pi session hooks and same-name collection registration. |
 | `scripts/with-junco-build-env.mjs` | Isolated Rust homes and authenticated process-local Cargo/Git environment. |
-| `tests/bash.test.mjs` | Three retained real-native regression cases. |
+| `scripts/rustc-bootstrap-shim.sh` | `RUSTC_WRAPPER` exporting `RUSTC_BOOTSTRAP` for `xutf` only; every other crate compiles as plain stable. |
+| `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane. |
+| `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree fixtures, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
+| `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
+| `tests/agent.test.mjs` | Real Agent loop and SDK `customTools` registration with scripted model responses. |
+| `tests/tools.test.mjs` | Collection file tools: hashline provenance, snapshot fidelity, staging, search boundaries, and SDK registration. |
+| `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
+| `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
+| `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension and owned muxes on a real btrfs seed. |
 
 `dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep both `Cargo.lock` and `package-lock.json` tracked.
 
 ## Build and verification commands
 
-Run from the repository root after installing the prerequisites in README:
+Run from the repository root after installing the prerequisites in README, with the sibling `marsh` checkout present at `../marsh`:
 
 ```sh
 npm ci
 npm run build
 npm run build:native:test
-timeout --signal=TERM --kill-after=5s 90s \
-  node --test --test-concurrency=1 tests/bash.test.mjs
+npm test
+npm run test:btrfs
 ```
 
-The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon.
+The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon. `npm test` needs the test addon; `npm run test:btrfs` needs the production addon and a `target/` on a writable btrfs mount carrying `user_subvol_rm_allowed`. It takes no arguments and no configuration: every run allocates its own `target/btrfs-test-*` root with a fresh empty seed subvolume, hands it to the child suites as their working directory, and deletes exactly that root afterwards. Without a suitable mount it fails with its filesystem prerequisite; never sudo, mount an image, or substitute the checkout or home subvolume.
 
 For focused Rust checks and formatting, use the same launcher as the npm native build scripts:
 
@@ -44,31 +59,36 @@ For focused Rust checks and formatting, use the same launcher as the npm native 
 node scripts/with-junco-build-env.mjs cargo check --locked
 # The minimal Rust profile does not include rustfmt; install it when needed.
 node scripts/with-junco-build-env.mjs rustup component add rustfmt --toolchain 1.95.0
-node scripts/with-junco-build-env.mjs cargo fmt --all
+node scripts/with-junco-build-env.mjs rustfmt --edition 2024 src/lib.rs src/mux.rs src/frontend.rs
 ```
+
+Format junco-authored files only. The transplanted `pi-natives` modules keep upstream's formatting so re-extracting them from a newer pinned revision stays a readable diff; `cargo fmt --all` would rewrite all of them.
 
 The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.local/share/junco-tools/rustup`, while preserving explicitly supplied homes and SSH settings. It supplies Cargo's CLI-fetch environment and the private junco HTTPS-to-SSH transport rewrite to child processes. Do not replace it with Cargo `[env]`, a consumer-only Git rewrite, or global credential configuration.
 
 ### Dependency changes
 
-- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved revisions. Do not silently switch to branch tips or local path dependencies to make a build pass.
-- Keep the consumer-root `[patch.crates-io]` for `brush-core`. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
-- Keep all direct and transitive marsh sibling crates on the same Git URL/revision and crate identity. Do not add the root `marsh` application or unrelated rmux patches to this package.
+- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved sources. The marsh crates are deliberately sibling `path` dependencies on `../marsh`; everything else stays on its pinned Git revision or registry version. Do not silently switch anything else to a branch tip or a local path to make a build pass.
+- Keep the consumer-root `[patch.crates-io]` for `brush-core`, now pointing at `../marsh/crates/brush-core`. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
+- Keep every direct and transitive marsh sibling crate resolving to that one checkout with a single crate identity each. Do not add the root `marsh` application or the rmux packages to this package, and never commit, publish or edit the sibling working tree from here.
 - The lockfile deliberately keeps `napi-derive-backend` at 5.0.4 for napi 3.9.0 compatibility. Review codegen compatibility before changing that resolution.
-- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one Git-patched brush-core, shared marsh source identities, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`.
+- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate resolving to `../marsh`, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
+- The Oh My Pi engines are pinned Git dependencies (`pi-ast`, `pi-diff`, `pi-walker`, `pi-edit` at `7ae76f8e4daca0c8f409f61bcd514260cd522365`). Import them unmodified from that one URL/revision so each package keeps a single crate identity. Do not vendor them, add a `path` dependency, follow a branch, or point any build step at a local Oh My Pi checkout.
+- `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, and keep the source/licence attribution.
+- Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.95.0 or export `RUSTC_BOOTSTRAP` globally.
 
 ## Native execution invariants
 
-1. Use marsh's real `MarshExecutor`, `ShellMux`, `PolicyValidator`, and spawn APIs. Production opens the caller's cwd with `MarshExecutor::open`; seed discovery, leasing, and recovery belong to marsh. Do not use a detached/default executor or another shell/process runner as a fallback.
-2. Use napi's existing long-lived Tokio runtime. Construct muxes inside an async factory; run blocking filesystem opening off the JS thread. Keep a fresh validator per seed/mux and the same builtin profile across muxes.
-3. Allocate cancellation state, the result watch, and the callback synchronously before scheduling a run. An immediate abort must not be lost. Never drop an in-progress spawn future and orphan its admitted job.
-4. Serialize one principal's runs in admission order through full cleanup, including cancelled queued runs. Use `ShellId::durable` for the caller-controlled agent identity, but create a fresh shell/snapshot for every call. Distinct agents must use distinct principals. Never reassign legacy snapshot-owned grants.
-5. Canonicalize cwd, require a directory within the mux's seed, and derive the relative directory with `strip_prefix`. Do not use a silent root fallback or interpolate cwd/environment values into shell text.
+1. Use marsh's real `ShellMux`, `PersistenceLayer` and `Shell` APIs. A factory discovers its seed with `PersistenceLayer::discover` and leases nothing; the seed's lease, its log recovery and its one validator belong to the first shell a command opens. Do not create a bootstrap shell to take a lease early, and do not use a detached executor or another shell/process runner as a fallback.
+2. Use napi's existing long-lived Tokio runtime. Construct muxes inside an async factory, on that runtime, and run blocking filesystem discovery off the JS thread. One `NativeMux` is one seed and one `Subvolumes` instance, used for both discovery and the session.
+3. Allocate cancellation state, the result watch, and the callback synchronously before scheduling a run. An immediate abort must not be lost. Never drop an in-progress `open_shell` future and orphan the shell it admitted.
+4. Serialize one principal's runs in admission order through full cleanup, including cancelled queued runs: upstream refuses a duplicate live principal and a concurrent command rather than queueing. Open a fresh pipe shell for every call and never `get_shell` to retain variables. Distinct agents must use distinct principals. A principal is an identity, not a claim on an earlier session's unsettled paths.
+5. Canonicalize cwd, require a directory within the mux's seed, and reject a working directory whose own discovered seed differs — before a shell exists, so a single-seed session cannot silently lease a nested seed. Do not use a silent root fallback or interpolate cwd/environment values into shell text.
 6. Use `JobIo::Pipes`, supply the complete exported environment, register the UID output route before command admission, and close stdin to provide real EOF. No hidden PTY.
 7. Route output by `SnapshotUid`, not reusable names, and retain only a weak mux reference in the frontend. Copy borrowed bytes once into an owned Buffer, dispatch nonblocking, and acknowledge a stream's receipt only after its JS callback returns successfully. Callback, enqueue, and I/O failures must reject the run, not disappear or become fatal Node exceptions.
-8. A command verdict is not an output fence. Wait for the verdict, job closure, frontend `Closed`, and every queued JS callback. Normal success requires `Outcome::Published` and an actual process status. A zero-exit policy denial or stale snapshot is still an error; do not invent an exit code or add `details.marsh`.
-9. Record user cancellation and timeout separately from publication outcomes. `abort()` records/notifies cancellation without synchronously re-entering the mux from a JS callback. Stop through ShellMux and await owned cleanup; an arbitrary discarded verdict is not proof of timeout.
-10. Close is idempotent: refuse new admissions, cancel/join pending runs, await mux shutdown, release callbacks and strong executor/mux ownership, and let concurrent close callers join the same completion. Retaining a completed `NativeRun` must not retain the seed lease.
+8. A command verdict is not an output fence. Wait for `run_command`, shell closure and every queued JS callback through the route's own drain. `run_command` resolving `Ok` already means `Outcome::Published`; never re-decide publication from the outcome, and still require an actual process status. Inspect a denial's outcome only for its diagnostics, and do not add `details.marsh`.
+9. Record user cancellation and timeout separately from publication outcomes. `abort()` records/notifies cancellation without synchronously re-entering the mux from a JS callback. Stop through the shell and await owned cleanup; a lost acceptance receipt is never permission to replay an effectful line, and an arbitrary discarded verdict is not proof of timeout.
+10. Close is idempotent: refuse new admissions synchronously on the JS call, cancel/join pending runs, await mux shutdown, release callbacks and strong mux ownership, and let concurrent close callers join the same completion. Retaining a completed `NativeRun` must not retain the seed lease.
 
 ## Pi adapter invariants
 
@@ -79,12 +99,23 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 - Omit undefined environment values; never stringify them or mutate `process.env`. Forward Buffer chunks directly. Pi owns streaming UTF-8 decoding, truncation, and full-output persistence.
 - Each default operations owner has one lazy opening promise, assigned before awaiting. Clear failed openings for later explicit invocations. The owner set is for teardown, not a seed cache/pool.
 - An explicitly supplied mux is borrowed and must be closed by its caller. Default-owner shutdown must dispose owners, join pending opens, and close successfully opened muxes even if another owner fails. Do not rely on asynchronous GC finalizers.
-- Register only the agent's `bash` tool on `session_start`, using the Pi session ID as its durable principal and Pi's public settings API for the persisted prefix. Await shutdown on `session_shutdown`. Do not intercept `user_bash` or instruct users to disable built-in bash.
+- Register the whole `ToolCollection` on `session_start`, using the Pi session ID as bash's stable principal and Pi's public settings API for the persisted prefix. Await shutdown on `session_shutdown`. Do not intercept `user_bash`, replace `write`/`ls`, or instruct users to disable built-in tools.
+
+## File-tool invariants
+
+- One collection owns exactly one native `EditStore`. Never use a process-global store, disable seen-line enforcement, or synthesize hash tags in TypeScript.
+- A `[path#TAG]` header may only be emitted for content the caller actually displayed, derived from the same buffer that produced the rows. Never re-read a file after display to mint its tag. Grep rows that native shortened, that disagree with the snapshot, or that fall past the output cap grant no provenance, and their section loses its tag.
+- The snapshot is pi-edit's editable view: one leading BOM stripped, CRLF/CR folded to LF, notebooks decoded to cell-marker text. Writes hand native-supplied text back verbatim, so BOM/CRLF/notebook serialization stays owned by pi-edit.
+- `edit` is Oh My Pi's hashline contract (`{ input: string }`), not Pi's replacement schema. Do not add `oldText`/`newText` aliases, a mode argument, automatic syntax repair, retries, or a second mutation engine. Build one `EditSession` per call and always `close()` it in `finally`.
+- Reject non-finite, fractional, or out-of-range numbers before they become NAPI `u32` fields; truncation there would silently change the requested search boundary.
+- Route every native worker call through `withNativeSignal`. The pinned napi runtime writes the supplied signal's `onabort`, so forward a fresh per-call controller instead of the caller's signal, and always await the worker to settlement rather than racing it.
+- Invalidate the walker scan cache in a `finally` around attempted mutations, covering both sides of a move, so a partially completed write cannot leave the cache looking fresh.
 
 ## Tests and operational boundaries
 
 - Verify execution changes with the **real Node addon, ShellMux, and Pi factory/registered tool**, not interface-shaped mocks or import-only checks. No provider request or LLM credentials are needed to invoke a registered tool directly.
-- The retained Node suite covers complete multi-chunk/final-marker output before settlement, callback-error rejection followed by session reuse, and zero-exit atomic policy denial. Keep cases isolated, bounded, and explicit about native close in `finally`. New tests should protect observable behavior, not source text, wiring, or incidental wording.
+- `npm test` covers Pi tool semantics (publication, streams, exit status, non-PTY stdin EOF, cwd/prefix/hook/env, seed containment, fresh shell over a durable filesystem), Pi's line/byte truncation and complete spills, abort/timeout retention, timeout validation, native admission/queue/close/borrowed-ownership boundaries, the real Agent loop, and SDK `customTools` registration. Keep cases isolated, bounded, and explicit about native close in `finally`. New tests should protect observable behavior, not source text, wiring, or incidental wording.
+- Use the shared `tests/helpers.mjs` fixture and held-child gate protocol for readiness: a held child prints a marker and polls a host-created gate file **outside** the snapshot. Never use a sleep, a preparatory builtin, or a gate inside the seed. Release test-owned resources through `cleanup(...)` so every step is attempted in order and every failure is reported; it is for releases, not for command execution or for unconditional deletion after a drain that was never proved.
 - `NativeMux.openCopyTree` is available only in the `test-fs` addon and requires an explicit existing fixture directory. Ordinary `NativeMux.open` still selects real btrfs, even in that addon. There is no environment-variable fake-filesystem fallback.
 - CopyTree verifies adapter/interpreter/policy/WAL behavior on ext4; it does not establish btrfs ioctl or storage-atomicity correctness. Report real-btrfs checks as untested when no suitable seed is available.
 - ShellMux is not OS confinement. Absolute-path writes and network effects remain possible. Cancellation can wait for commands racing the backend's stop scan; use external-process readiness markers for forced-stop fixtures, and do not hide delays by skipping cleanup or applying an OS-child idle-drain shortcut.
