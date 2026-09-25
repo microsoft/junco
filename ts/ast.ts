@@ -1,3 +1,4 @@
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AstFindResult, AstMatchStrictness, AstReplaceResult } from "../native/index.js";
@@ -78,11 +79,11 @@ const astEditSchema = Type.Object({
  * Match slices are spans, not full-line reads, so they intentionally grant no
  * hashline provenance: the model still needs `read` or `grep` for edit anchors.
  */
-export function createAstGrepToolDefinition(
+export function createAstGrepTool(
   cwd: string,
   native: NativeModule,
-): ToolDefinition<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
-  return {
+): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
+  const tool = {
     name: "ast_grep",
     label: "AST Grep",
     description: "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
@@ -112,7 +113,8 @@ export function createAstGrepToolDefinition(
       throwIfAborted(signal);
       return boundedToolResult(JSON.stringify(result, null, 2), result);
     },
-  };
+  } satisfies ToolDefinition<typeof astGrepSchema, BoundedToolDetails<AstFindResult>>;
+  return tool;
 }
 
 /**
@@ -122,11 +124,11 @@ export function createAstGrepToolDefinition(
  * proposal queue in this package, so an applying call mutates the filesystem
  * immediately and invalidates the walker's scan cache for the search root.
  */
-export function createAstEditToolDefinition(
+export function createAstEditTool(
   cwd: string,
   native: NativeModule,
-): ToolDefinition<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
-  return {
+): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
+  const tool = {
     name: "ast_edit",
     label: "AST Edit",
     description: "Preview structural rewrites by default; set dryRun to false to apply them.",
@@ -172,5 +174,6 @@ export function createAstEditToolDefinition(
       throwIfAborted(signal);
       return boundedToolResult(JSON.stringify(result, null, 2), result);
     },
-  };
+  } satisfies ToolDefinition<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>>;
+  return tool;
 }

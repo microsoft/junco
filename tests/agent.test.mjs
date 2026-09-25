@@ -4,13 +4,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { AuthStorage, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
 import {
-  AuthStorage,
-  SessionManager,
-  createAgentSession,
-  defineTool,
-} from "@earendil-works/pi-coding-agent";
-import { createBashTool, createBashToolDefinition, createShellMuxOperations } from "../dist/index.js";
+  createBashTool,
+  createEditTool,
+  createGrepTool,
+  createReadTool,
+  createShellMuxOperations,
+} from "../dist/index.js";
 import {
   cleanup,
   closeFixture,
@@ -256,6 +257,90 @@ for (const toolExecution of ["parallel", "sequential"]) {
   });
 }
 
+test("standalone AgentTools preserve shared hashline provenance", { timeout: 60_000 }, async () => {
+  const instance = await fixture();
+  let agent;
+  try {
+    await writeFile(join(instance.seed, "src/file0.txt"), "alpha\nbravo\n");
+    const native = await import("../native/index.js");
+    // Constructed independently, not through ToolCollection: only the explicitly
+    // shared store connects what read/grep displayed to what edit accepts.
+    const store = new native.EditStore();
+    const { faux, model, streamFn } = scriptedModel();
+    agent = new Agent({
+      initialState: {
+        model,
+        systemPrompt: "Test the standalone file tools.",
+        tools: [
+          createReadTool(instance.seed, store, native),
+          createGrepTool(instance.seed, store, native),
+          createEditTool(instance.seed, store, native),
+        ],
+      },
+      streamFn,
+    });
+
+    // Each factory only records the previous result and derives the next call from
+    // its advertised tag; faux would turn a thrown assertion into a model error.
+    const seen = {};
+    const tagPattern = /#([0-9A-Fa-f]{4})\]/;
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxToolCall("read", { path: "src/file0.txt", limit: 1 }, { id: "read-partial" }),
+      ], { stopReason: "toolUse" }),
+      (context) => {
+        seen.read = toolResult(context.messages, "read-partial");
+        const tag = tagPattern.exec(text(seen.read ?? { content: [] }))?.[1];
+        return fauxAssistantMessage([fauxToolCall("edit", {
+          input: `[src/file0.txt#${tag}]\nPUT 2.=2:\n+FORBIDDEN\n`,
+        }, { id: "edit-unseen" })], { stopReason: "toolUse" });
+      },
+      (context) => {
+        seen.denied = toolResult(context.messages, "edit-unseen");
+        return fauxAssistantMessage([
+          fauxToolCall("grep", { pattern: "bravo", path: "src/file0.txt" }, { id: "grep-hit" }),
+        ], { stopReason: "toolUse" });
+      },
+      (context) => {
+        seen.grep = toolResult(context.messages, "grep-hit");
+        const tag = tagPattern.exec(text(seen.grep ?? { content: [] }))?.[1];
+        return fauxAssistantMessage([fauxToolCall("edit", {
+          input: `[src/file0.txt#${tag}]\nPUT 2.=2:\n+BRAVO\n`,
+        }, { id: "edit-seen" })], { stopReason: "toolUse" });
+      },
+      (context) => {
+        seen.applied = toolResult(context.messages, "edit-seen");
+        return fauxAssistantMessage("verified");
+      },
+    ]);
+
+    await agent.prompt("Patch the second line");
+    await agent.waitForIdle();
+
+    assert.equal(seen.read?.isError, false);
+    const read = text(seen.read);
+    assert.match(read, /^\[src\/file0\.txt#[0-9A-Fa-f]{4}\]$/m, read);
+    assert.match(read, /^1:alpha$/m, read);
+    assert.doesNotMatch(read, /^2:/m, read);
+
+    assert.equal(seen.denied?.isError, true);
+    assert.match(text(seen.denied), /never displayed/);
+
+    assert.equal(seen.grep?.isError, false);
+    const grep = text(seen.grep);
+    assert.match(grep, /^\[src\/file0\.txt#[0-9A-Fa-f]{4}\]$/m, grep);
+    assert.match(grep, /^\*2:bravo$/m, grep);
+
+    assert.equal(seen.applied?.isError, false, seen.applied && text(seen.applied));
+    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "alpha\nBRAVO\n");
+  } finally {
+    await cleanup(
+      () => (agent ? settleAgent(agent) : undefined),
+      () => closeFixture(instance),
+    );
+  }
+});
+
 test("an SDK-registered bash override executes through marsh", { timeout: 60_000 }, async () => {
   const instance = await fixture();
   const errors = [];
@@ -278,7 +363,7 @@ test("an SDK-registered bash override executes through marsh", { timeout: 60_000
       resourceLoader,
       model,
       // `tools` is omitted so read/edit/write stay enabled beside the override.
-      customTools: [defineTool(createBashToolDefinition(instance.seed, { operations }))],
+      customTools: [createBashTool(instance.seed, { operations })],
     }));
     await session.bindExtensions({ onError: (error) => errors.push(error) });
     assert.deepEqual(errors, []);

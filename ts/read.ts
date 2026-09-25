@@ -1,7 +1,14 @@
 import { isUtf8 } from "node:buffer";
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import {
+  createReadTool as createPiReadTool,
+  createReadToolDefinition as createPiReadToolDefinition,
+  type ExtensionContext,
+  type ReadToolDetails,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import type { EditStore } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import { displayToolPath, normalizeEditableText, throwIfAborted } from "./tool-support.js";
@@ -51,22 +58,26 @@ function visibleLineNumbers(body: string, native: NativeModule): number[] {
  * the exact editable view behind that tag is recorded in `store` so the
  * hashline edit tool can verify both content and provenance. Images, binary,
  * invalid UTF-8, and oversized files fall through to Pi's reader unchanged.
+ *
+ * The runtime context is optional: Pi's SDK passes one (its model drives the
+ * non-vision image notice), while a bare Agent calls with four arguments and
+ * gets Pi's context-free reader behavior.
  */
-export function createHashlineReadToolDefinition(
+export function createReadTool(
   cwd: string,
   store: EditStore,
   native: NativeModule,
-): ReturnType<typeof createReadToolDefinition> {
-  const fallback = createReadToolDefinition(cwd);
-  return {
+): AgentTool<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined> {
+  const fallback = createPiReadToolDefinition(cwd);
+  const tool = {
     ...fallback,
     description: `${fallback.description} ${HASHLINE_NOTE}`,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) {
       throwIfAborted(signal);
       let captured: { absolutePath: string; view: string } | undefined;
       // Built per call: the operations close over this call's signal and
       // capture slot, so concurrent reads never observe each other's state.
-      const numbered = createReadToolDefinition(cwd, {
+      const numbered = createPiReadTool(cwd, {
         operations: {
           async access(absolutePath) {
             throwIfAborted(signal);
@@ -98,10 +109,11 @@ export function createHashlineReadToolDefinition(
       try {
         // The inner factory gets no signal: its immediate-abort wrapper could
         // otherwise settle while this read is still capturing a snapshot.
-        result = await numbered.execute(toolCallId, params, undefined, onUpdate, ctx);
+        result = await numbered.execute(toolCallId, params, undefined, onUpdate);
       } catch (error) {
         if (error instanceof Unsnapshottable) {
-          return fallback.execute(toolCallId, params, signal, onUpdate, ctx);
+          if (ctx !== undefined) return fallback.execute(toolCallId, params, signal, onUpdate, ctx);
+          return createPiReadTool(cwd).execute(toolCallId, params, signal, onUpdate);
         }
         throw error;
       }
@@ -126,5 +138,6 @@ export function createHashlineReadToolDefinition(
         ),
       };
     },
-  };
+  } satisfies ToolDefinition<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined>;
+  return tool;
 }

@@ -23,7 +23,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
 | `ts/edit.ts` | The hashline edit tool: one `EditSession` per call plus the Node filesystem writer. |
 | `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
-| `ts/collection.ts` | `ToolCollection`: one `EditStore` and the complete ordered definition list. |
+| `ts/collection.ts` | `ToolCollection`: one `EditStore` and the complete ordered tool list. |
 | `ts/bash.ts`, `ts/index.ts` | Thin upstream factory wrappers and public exports. |
 | `ts/extension.ts` | Pi session hooks and same-name collection registration. |
 | `scripts/with-junco-build-env.mjs` | Isolated Rust homes and authenticated process-local Cargo/Git environment. |
@@ -31,7 +31,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane. |
 | `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree fixtures, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
 | `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
-| `tests/agent.test.mjs` | Real Agent loop and SDK `customTools` registration with scripted model responses. |
+| `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, and SDK `customTools` registration, with scripted model responses. |
 | `tests/tools.test.mjs` | Collection file tools: hashline provenance, snapshot fidelity, staging, search boundaries, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
 | `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
@@ -92,9 +92,9 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 
 ## Pi adapter invariants
 
-- Import supported APIs from the **root** Pi package, not its unexported `dist/...` subpaths. Keep wrapper types exactly `typeof` the upstream factories and re-export Pi's existing tool types.
+- Import supported APIs from the **root** Pi packages, not their unexported `dist/...` subpaths. Keep the bash wrapper's type exactly `typeof` the upstream factory and re-export Pi's existing tool types.
 - Preserve caller-supplied operations, `commandPrefix`, `spawnHook`, and option types. Selecting operations intentionally supersedes `shellPath`.
-- For SDK `customTools`, use Pi's public `defineTool(createBashToolDefinition(...))` helper. It accommodates typed renderers in tool arrays without casts or competing schemas. `createAgentSession`'s `tools` option contains names; `pi.registerTool` directly accepts the typed definition.
+- Every public factory returns one Pi `AgentTool` (four-argument `execute`) that still carries Pi's prompt metadata and renderers. File tools are built as `satisfies ToolDefinition` and returned as `AgentTool`; bash merges upstream's `createBashTool` onto upstream's definition, both given one resolved options object. The same object serves a bare `Agent`, SDK `customTools`, and `pi.registerTool`; do not add `defineTool` wrapping, casts, or a parallel definition-producing API. An optional runtime context stays optional: `read` forwards it to Pi's fallback when present and uses Pi's context-free reader otherwise. `createAgentSession`'s `tools` option contains names.
 - Timeouts are seconds, optional with no default deadline. Match Pi's validation and abort/timeout sentinels before opening/starting work. Keep the abort listener for the whole operation, including pending opens and principal admission.
 - Omit undefined environment values; never stringify them or mutate `process.env`. Forward Buffer chunks directly. Pi owns streaming UTF-8 decoding, truncation, and full-output persistence.
 - Each default operations owner has one lazy opening promise, assigned before awaiting. Clear failed openings for later explicit invocations. The owner set is for teardown, not a seed cache/pool.
@@ -103,7 +103,7 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 
 ## File-tool invariants
 
-- One collection owns exactly one native `EditStore`. Never use a process-global store, disable seen-line enforcement, or synthesize hash tags in TypeScript.
+- One collection, or one standalone caller, owns exactly one native `EditStore` shared by its `read`, `grep`, and `edit`. Never create a store per tool, use a process-global store, disable seen-line enforcement, or synthesize hash tags in TypeScript.
 - A `[path#TAG]` header may only be emitted for content the caller actually displayed, derived from the same buffer that produced the rows. Never re-read a file after display to mint its tag. Grep rows that native shortened, that disagree with the snapshot, or that fall past the output cap grant no provenance, and their section loses its tag.
 - The snapshot is pi-edit's editable view: one leading BOM stripped, CRLF/CR folded to LF, notebooks decoded to cell-marker text. Writes hand native-supplied text back verbatim, so BOM/CRLF/notebook serialization stays owned by pi-edit.
 - `edit` is Oh My Pi's hashline contract (`{ input: string }`), not Pi's replacement schema. Do not add `oldText`/`newText` aliases, a mode argument, automatic syntax repair, retries, or a second mutation engine. Build one `EditSession` per call and always `close()` it in `finally`.

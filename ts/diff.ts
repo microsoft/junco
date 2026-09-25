@@ -1,3 +1,4 @@
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { DiffStreamResult } from "../native/index.js";
@@ -26,10 +27,10 @@ const diffSchema = Type.Object({
  * Unified diff between two in-memory texts, computed by pi-diff's exact Myers
  * implementation over JavaScript's own UTF-16 code units. Touches no files.
  */
-export function createDiffToolDefinition(
+export function createDiffTool(
   native: NativeModule,
-): ToolDefinition<typeof diffSchema, BoundedToolDetails<DiffStreamResult>> {
-  return {
+): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>> {
+  const tool = {
     name: "diff",
     label: "Diff",
     description: "Compute a unified diff between oldText and newText without changing files.",
@@ -61,5 +62,6 @@ export function createDiffToolDefinition(
       }
       return boundedToolResult(lines.join("\n"), result);
     },
-  };
+  } satisfies ToolDefinition<typeof diffSchema, BoundedToolDetails<DiffStreamResult>>;
+  return tool;
 }

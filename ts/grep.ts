@@ -1,6 +1,7 @@
 import { isAbsolute, resolve as resolveNodePath } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
-  createGrepToolDefinition,
+  createGrepToolDefinition as createPiGrepToolDefinition,
   formatSize,
   type GrepToolDetails,
   type ToolDefinition,
@@ -150,13 +151,13 @@ function renderRow(row: CollectedRow, snapshotLines: string[] | undefined): Rend
  * recorded snapshot carry hashline provenance; anything native shortened,
  * could not verify, or that did not survive the output cap does not.
  */
-export function createNativeGrepToolDefinition(
+export function createGrepTool(
   cwd: string,
   store: EditStore,
   native: NativeModule,
-): ToolDefinition<ReturnType<typeof createGrepToolDefinition>["parameters"], NativeGrepToolDetails> {
-  const base = createGrepToolDefinition(cwd);
-  return {
+): AgentTool<ReturnType<typeof createPiGrepToolDefinition>["parameters"], NativeGrepToolDetails> {
+  const base = createPiGrepToolDefinition(cwd);
+  const tool = {
     ...base,
     description: DESCRIPTION,
     async execute(_toolCallId, params, signal) {
@@ -293,7 +294,11 @@ export function createNativeGrepToolDefinition(
       if (notices.length > 0) text += `\n\n[${notices.join(". ")}]`;
       return { content: [{ type: "text", text }], details };
     },
-  };
+  } satisfies ToolDefinition<
+    ReturnType<typeof createPiGrepToolDefinition>["parameters"],
+    NativeGrepToolDetails
+  >;
+  return tool;
 }
 
 function headerText(section: Section, native: NativeModule): string {

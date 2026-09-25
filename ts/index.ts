@@ -1,7 +1,12 @@
-export { createBashTool, createBashToolDefinition } from "./bash.js";
+export { createAstEditTool, createAstGrepTool } from "./ast.js";
+export { createBashTool } from "./bash.js";
 export { ToolCollection, type ToolCollectionOptions } from "./collection.js";
-export type { HashlineEditDetails } from "./edit.js";
+export { createDiffTool } from "./diff.js";
+export { createEditTool, type HashlineEditDetails } from "./edit.js";
+export { createFindTool } from "./find.js";
+export { createGrepTool } from "./grep.js";
 export { createShellMuxOperations, shutdownShellMux } from "./operations.js";
+export { createReadTool } from "./read.js";
 export type {
   BashOperations,
   BashToolInput,

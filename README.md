@@ -79,14 +79,14 @@ Only `bash` runs inside marsh snapshots. The file tools read, search, and write 
 In another ESM TypeScript project, install the built checkout and the compatible Pi version:
 
 ```sh
-npm install "$HOME/git/junco-tools" @earendil-works/pi-coding-agent@0.80.6
+npm install "$HOME/git/junco-tools" @earendil-works/pi-coding-agent@0.80.6 @earendil-works/pi-agent-core@0.80.6
 ```
 
 Use the package-root imports shown below. The package ships compiled ESM and declarations; it does not require Bun. A NodeNext TypeScript configuration matches this repository.
 
 ### Pi SDK: the whole collection
 
-`ToolCollection.create` returns every definition already wrapped with `defineTool`, so `tools` goes straight into SDK `customTools`. Construction opens no shell mux and does not require a btrfs cwd; only executing `bash` does.
+`ToolCollection.create` returns Pi `AgentTool` objects that also keep Pi's prompt metadata and renderers, so `tools` goes straight into SDK `customTools`, `pi.registerTool`, or a bare `Agent`'s tools. Construction opens no shell mux and does not require a btrfs cwd; only executing `bash` does.
 
 ```ts
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -117,21 +117,42 @@ try {
 
 Each collection owns one snapshot store, so `read`, `grep`, and `edit` share anchors, seen-line provenance, and named clipboard registers; two collections share none of it. `EditSession` instances close per call, and the store is in-memory only, so a collection needs no explicit disposal. New files are still created with Pi's built-in `write`.
 
-### Pi SDK: bash only
+### Bare Agent: individual tools
 
-Wrap `createBashToolDefinition` with Pi's `defineTool` helper when placing it in **`customTools`**. The helper preserves typed parameters and renderers while making the definition usable in the SDK's tool array under strict TypeScript checking; it does not change the tool at runtime. In Pi 0.80.6, **`tools` is an allowlist of names**, not an array of tool objects.
+Every tool also has its own factory. The file tools take the native module explicitly, so a missing or mismatched addon fails at your `import`, not inside a tool call. Construct one `EditStore` and pass that same store to every `read`, `grep`, and `edit` you create: `edit` only accepts anchors that a tool sharing its store displayed.
 
 ```ts
-import {
-  createAgentSession,
-  defineTool,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-  createBashToolDefinition,
-  createShellMuxOperations,
-  shutdownShellMux,
-} from "junco-tools";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { createEditTool, createFindTool, createGrepTool, createReadTool } from "junco-tools";
+
+export async function createFileAgent(cwd: string, model: Model<Api>): Promise<Agent> {
+  const native = await import("junco-tools/native");
+  const store = new native.EditStore();
+  return new Agent({
+    initialState: {
+      model,
+      systemPrompt: "Read or grep before editing with hashline patches.",
+      tools: [
+        createReadTool(cwd, store, native),
+        createGrepTool(cwd, store, native),
+        createEditTool(cwd, store, native),
+        createFindTool(cwd, native),
+      ],
+    },
+  });
+}
+```
+
+The same objects work as SDK `customTools` and with `pi.registerTool`. There, `read` also receives Pi's runtime context, which adds Pi's notice when the active model cannot accept an image; a bare `Agent` calls tools without that context, exactly as Pi's own `createReadTool` does.
+
+### Pi SDK: bash only
+
+`createBashTool` returns an `AgentTool` that keeps Pi's bash renderers and prompt metadata, so it goes into **`customTools`** as is. In Pi 0.80.6, **`tools` is an allowlist of names**, not an array of tool objects.
+
+```ts
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createShellMuxOperations, shutdownShellMux } from "junco-tools";
 
 const sessionManager = SessionManager.create(process.cwd());
 const cwd = sessionManager.getCwd(); // Must be inside a btrfs seed.
@@ -143,7 +164,7 @@ try {
   const { session } = await createAgentSession({
     cwd,
     sessionManager,
-    customTools: [defineTool(createBashToolDefinition(cwd, { operations }))],
+    customTools: [createBashTool(cwd, { operations })],
     tools: ["bash"],
   });
   try {
@@ -156,7 +177,7 @@ try {
 }
 ```
 
-The custom `bash` definition replaces Pi's built-in one. This example enables only `bash`; omit `tools` to keep Pi's default tools alongside the override. Pi's other built-in tools, including its exact-text `edit` and its `write`, stay in place and do not pass through ShellMux.
+The custom `bash` tool replaces Pi's built-in one. This example enables only `bash`; omit `tools` to keep Pi's default tools alongside the override. Pi's other built-in tools, including its exact-text `edit` and its `write`, stay in place and do not pass through ShellMux.
 
 For resume, construct the session manager with `SessionManager.open(sessionFile)` or `SessionManager.continueRecent(cwd)` **before** deriving the principal. Reuse an identity only for the same agent. `SessionManager.create` starts a new session and therefore a new owner.
 
@@ -197,7 +218,7 @@ export default function extension(pi: ExtensionAPI): void {
 }
 ```
 
-Register `createBashToolDefinition(ctx.cwd, …)` alone instead when only the shell backend should change.
+Register `createBashTool(ctx.cwd, …)` alone instead when only the shell backend should change.
 
 Load your extension instead of the packaged one:
 
@@ -209,14 +230,15 @@ pi -e /absolute/path/to/my-junco-extension.ts
 
 | Export | Use |
 | --- | --- |
-| `ToolCollection.create(cwd, { bash? }?)` | Every tool definition (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`), pre-wrapped with `defineTool` in `collection.tools`. |
-| `createBashToolDefinition(cwd, options?)` | Pi `ToolDefinition` for `pi.registerTool` or SDK `customTools`. |
-| `createBashTool(cwd, options?)` | Pi `AgentTool` for hosts using the lower-level agent/tool interface. |
+| `ToolCollection.create(cwd, { bash? }?)` | Every tool (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`) in `collection.tools`, sharing one `EditStore`. |
+| `createBashTool(cwd, options?)` | `bash` through ShellMux. |
+| `createReadTool(cwd, store, native)`, `createGrepTool(cwd, store, native)`, `createEditTool(cwd, store, native)` | Hashline `read`, native `grep`, and hashline `edit`; pass them one shared `EditStore`. |
+| `createFindTool(cwd, native)`, `createAstGrepTool(cwd, native)`, `createAstEditTool(cwd, native)`, `createDiffTool(native)` | Native `find`, `ast_grep`, previewing `ast_edit`, and in-memory `diff`. |
 | `createShellMuxOperations({ principal?, mux? }?)` | Pi-compatible `BashOperations` backed by ShellMux. |
 | `shutdownShellMux()` | Dispose and close all default-owned operations sessions, including pending opens. |
 | `NativeMux` from `junco-tools/native` | Explicit native session ownership: `await NativeMux.open(cwd)`, `mux.seed`, and `await mux.close()`. |
 
-`BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
+Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata and renderers: pass it to a bare `Agent`, SDK `customTools`, or `pi.registerTool` without wrapping. `native` is `await import("junco-tools/native")`; `store` is `new native.EditStore()`. `BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
 
 - Without `mux`, each operations instance lazily opens **one** native mux on first execution. Later working directories must remain inside that mux's seed. Shutdown disposes the owner; create fresh operations for a later session.
 - Without `principal`, one `pi-`-prefixed UUID is generated per operations instance, not per command. Supply a stable, caller-controlled principal so one agent's commands are one principal's in the seed's history; it is an identity, not a claim on what an earlier session left unsettled.
