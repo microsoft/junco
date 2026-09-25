@@ -5,3 +5,4 @@
 /native/index.d.ts
 /node_modules/
 *.tsbuildinfo
+/graphify-out/
