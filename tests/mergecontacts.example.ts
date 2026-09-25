@@ -4,25 +4,30 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import type { Edge, Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   allOf,
   always,
   anyOf,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
   on,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Edge, Message } from "../src/index.ts";
 
-type KV = { readonly kind: "kv"; readonly source: "email" | "phone" | "snailmail"; readonly name: string; readonly value: string };
+type KV = {
+  readonly kind: "kv";
+  readonly source: "email" | "phone" | "snailmail";
+  readonly name: string;
+  readonly value: string;
+};
 type Grouped = {
   readonly kind: "grouped";
   readonly name: string;
@@ -30,7 +35,11 @@ type Grouped = {
   readonly phones: readonly string[];
   readonly snailmails: readonly string[];
 };
-type Count = { readonly kind: "count"; readonly label: string; readonly value: number };
+type Count = {
+  readonly kind: "count";
+  readonly label: string;
+  readonly value: number;
+};
 type Msg = KV | Grouped | Count;
 
 test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
@@ -83,7 +92,10 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
       state: undefined,
       trigger: always(),
       step: emitOnce<void, Msg, string>(
-        () => rows.map(([name, value]) => msg(edge, { kind: "kv", source, name, value })),
+        () =>
+          rows.map(([name, value]) =>
+            msg(edge, { kind: "kv", source, name, value }),
+          ),
         `${label} done`,
       ),
     });
@@ -92,20 +104,33 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
 
   const emailSourceId = makeKVSource(emailEdge, "email", emailInputs, "email");
   const phoneSourceId = makeKVSource(phoneEdge, "phone", phoneInputs, "phone");
-  const snailmailSourceId = makeKVSource(snailmailEdge, "snailmail", snailmailInputs, "snailmail");
+  const snailmailSourceId = makeKVSource(
+    snailmailEdge,
+    "snailmail",
+    snailmailInputs,
+    "snailmail",
+  );
 
   const groupByNameId = graph.addNode({
     state: undefined,
     trigger: allOf(on(emailEdge), on(phoneEdge), on(snailmailEdge)),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const kvs = <Src extends KV["source"]>(edge: Edge<Msg, string>, src: Src): readonly KV[] =>
-        from(view, edge).filter((m): m is KV => m.kind === "kv" && m.source === src);
+      const kvs = <Src extends KV["source"]>(
+        edge: Edge<Msg, string>,
+        src: Src,
+      ): readonly KV[] =>
+        from(view, edge).filter(
+          (m): m is KV => m.kind === "kv" && m.source === src,
+        );
       const allKvs: readonly KV[] = [
         ...kvs(emailEdge, "email"),
         ...kvs(phoneEdge, "phone"),
         ...kvs(snailmailEdge, "snailmail"),
       ];
-      const groups = pipe(allKvs, RNEA.groupBy((kv) => kv.name));
+      const groups = pipe(
+        allKvs,
+        RNEA.groupBy((kv) => kv.name),
+      );
       const events: Message<Msg>[] = [];
       for (const name of Object.keys(groups).sort(S.Ord.compare)) {
         const group = groups[name]!;
@@ -154,7 +179,9 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
       state: undefined,
       trigger: when(inputEdge),
       step: stepNode<void, Msg, string>((_state, view) => {
-        const groups = from(view, inputEdge).filter((m): m is Grouped => m.kind === "grouped");
+        const groups = from(view, inputEdge).filter(
+          (m): m is Grouped => m.kind === "grouped",
+        );
         const count = groups.filter(predicate).length;
         return [msg(outputEdge, { kind: "count", label, value: count })];
       }),
@@ -163,23 +190,37 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
   };
 
   const ludditesFilterCountId = makeFilterCount(
-    groupedForLudditesEdge, ludditesCountEdge, "luddites",
+    groupedForLudditesEdge,
+    ludditesCountEdge,
+    "luddites",
     (g) => g.emails.length === 0,
   );
   const writersFilterCountId = makeFilterCount(
-    groupedForWritersEdge, writersCountEdge, "writers",
+    groupedForWritersEdge,
+    writersCountEdge,
+    "writers",
     (g) => g.phones.length === 0,
   );
   const nomadsFilterCountId = makeFilterCount(
-    groupedForNomadsEdge, nomadsCountEdge, "nomads",
+    groupedForNomadsEdge,
+    nomadsCountEdge,
+    "nomads",
     (g) => g.snailmails.length === 0,
   );
 
   const statsSinkId = graph.addNode({
     state: undefined,
-    trigger: anyOf(on(ludditesCountEdge), on(writersCountEdge), on(nomadsCountEdge)),
+    trigger: anyOf(
+      on(ludditesCountEdge),
+      on(writersCountEdge),
+      on(nomadsCountEdge),
+    ),
     step: stepNode<void, Msg, string>((_state, view) => {
-      for (const edge of [ludditesCountEdge, writersCountEdge, nomadsCountEdge]) {
+      for (const edge of [
+        ludditesCountEdge,
+        writersCountEdge,
+        nomadsCountEdge,
+      ]) {
         for (const m of from(view, edge)) {
           if (m.kind === "count") stats.push(m);
         }
@@ -223,7 +264,11 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
 
   assert.deepEqual(
     stats.map((c) => [c.label, c.value]).sort(),
-    [["luddites", 1], ["nomads", 1], ["writers", 1]].sort(),
+    [
+      ["luddites", 1],
+      ["nomads", 1],
+      ["writers", 1],
+    ].sort(),
   );
 
   assert.equal(completed.get(emailSourceId), "email done");

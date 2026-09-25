@@ -1,13 +1,19 @@
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import createGraph from "ngraph.graph";
 import type { Graph } from "ngraph.graph";
+import createGraph from "ngraph.graph";
 import type { Edge } from "./edges.js";
 import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
-import { NodeId } from "./identity.js";
 import type { EdgeId } from "./identity.js";
+import { NodeId } from "./identity.js";
 import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
-import type { DataflowScheduler, InputSchedule, NodeAvailability, NodeSchedule, Schedule } from "./scheduler.js";
+import type {
+  DataflowScheduler,
+  InputSchedule,
+  NodeAvailability,
+  NodeSchedule,
+  Schedule,
+} from "./scheduler.js";
 import { evaluateTrigger, satisfiedEdges } from "./trigger.js";
 import type { Width } from "./width.js";
 
@@ -35,11 +41,15 @@ type NodeRuntime<N, T> = {
  * `messages` exposes an inbound message edge's live queue; `values` exposes only RESOLVED value
  * cells, which is what makes `values.has(id)` mean "this parent has returned".
  */
-const probeOf = <N, T>(inbound: ReadonlyMap<EdgeId, Edge<N, T>>): ParentView<N, T> => ({
+const probeOf = <N, T>(
+  inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
+): ParentView<N, T> => ({
   messages: {
     get: (id) => {
       const edge = inbound.get(id);
-      return edge !== undefined && E.isLeft(edge.transport) ? edge.transport.left : undefined;
+      return edge !== undefined && E.isLeft(edge.transport)
+        ? edge.transport.left
+        : undefined;
     },
     has: (id) => {
       const edge = inbound.get(id);
@@ -52,17 +62,24 @@ const probeOf = <N, T>(inbound: ReadonlyMap<EdgeId, Edge<N, T>>): ParentView<N, 
   values: {
     get: (id) => {
       const edge = inbound.get(id);
-      return edge !== undefined && E.isRight(edge.transport) && O.isSome(edge.transport.right)
+      return edge !== undefined &&
+        E.isRight(edge.transport) &&
+        O.isSome(edge.transport.right)
         ? edge.transport.right.value
         : undefined;
     },
     has: (id) => {
       const edge = inbound.get(id);
-      return edge !== undefined && E.isRight(edge.transport) && O.isSome(edge.transport.right);
+      return (
+        edge !== undefined &&
+        E.isRight(edge.transport) &&
+        O.isSome(edge.transport.right)
+      );
     },
     *keys() {
       for (const [id, edge] of inbound) {
-        if (E.isRight(edge.transport) && O.isSome(edge.transport.right)) yield id;
+        if (E.isRight(edge.transport) && O.isSome(edge.transport.right))
+          yield id;
       }
     },
   },
@@ -140,7 +157,9 @@ export class DataflowGraph<S, N, T, EH> {
     } else {
       id = spec.id;
       if (this.#graph.getNode(id) !== undefined) {
-        throw new DataflowDefinitionError(`Dataflow node id "${id}" is already registered`);
+        throw new DataflowDefinitionError(
+          `Dataflow node id "${id}" is already registered`,
+        );
       }
     }
 
@@ -156,7 +175,8 @@ export class DataflowGraph<S, N, T, EH> {
       trigger: spec.trigger,
       step: spec.step,
       generator: undefined,
-      is_available: spec.is_available ?? (() => evaluateTrigger(node.trigger, inbound, id)),
+      is_available:
+        spec.is_available ?? (() => evaluateTrigger(node.trigger, inbound, id)),
     };
 
     this.#graph.addNode(id, node);
@@ -171,19 +191,29 @@ export class DataflowGraph<S, N, T, EH> {
    */
   addEdge(from: NodeId, to: NodeId, edge: Edge<N, T>): this {
     const missingId =
-      this.#graph.getNode(from) === undefined ? from : this.#graph.getNode(to) === undefined ? to : undefined;
+      this.#graph.getNode(from) === undefined
+        ? from
+        : this.#graph.getNode(to) === undefined
+          ? to
+          : undefined;
     if (missingId !== undefined) {
-      throw new DataflowDefinitionError(`Dataflow edge references missing node: ${missingId}`);
+      throw new DataflowDefinitionError(
+        `Dataflow edge references missing node: ${missingId}`,
+      );
     }
 
     for (const link of this.#graph.getLinks(from) ?? []) {
       if (link.fromId === from && link.data.id === edge.id) {
-        throw new DataflowDefinitionError(`Dataflow edge id "${edge.id}" is not unique in node ${from}'s outbound set`);
+        throw new DataflowDefinitionError(
+          `Dataflow edge id "${edge.id}" is not unique in node ${from}'s outbound set`,
+        );
       }
     }
     for (const link of this.#graph.getLinks(to) ?? []) {
       if (link.toId === to && link.data.id === edge.id) {
-        throw new DataflowDefinitionError(`Dataflow edge id "${edge.id}" is not unique in node ${to}'s inbound set`);
+        throw new DataflowDefinitionError(
+          `Dataflow edge id "${edge.id}" is not unique in node ${to}'s inbound set`,
+        );
       }
     }
 
@@ -211,7 +241,9 @@ export class DataflowGraph<S, N, T, EH> {
   }
 
   /** Visit every graph link with its endpoints. */
-  forEachLink(callback: (from: NodeId, to: NodeId, edge: Edge<N, T>) => void): void {
+  forEachLink(
+    callback: (from: NodeId, to: NodeId, edge: Edge<N, T>) => void,
+  ): void {
     this.#graph.forEachLink((link) => {
       callback(link.fromId as NodeId, link.toId as NodeId, link.data);
     });
@@ -247,7 +279,10 @@ export class DataflowGraph<S, N, T, EH> {
    * `any` node body detect which branch fired. A short queue yields what it has rather than
    * failing: the scheduler planned against a snapshot, and `splice` already clamps.
    */
-  #consume(runtime: NodeRuntime<N, T>, inputs: InputSchedule): Map<EdgeId, N[]> | undefined {
+  #consume(
+    runtime: NodeRuntime<N, T>,
+    inputs: InputSchedule,
+  ): Map<EdgeId, N[]> | undefined {
     let batch: Map<EdgeId, N[]> | undefined;
     for (const [edgeId, count] of inputs) {
       if (count === "none") continue;
@@ -256,7 +291,8 @@ export class DataflowGraph<S, N, T, EH> {
       const queue = edge.transport.left;
       const taken = queue.splice(0, count === "all" ? queue.length : count);
       if (taken.length === 0) continue;
-      (batch ??= new Map<EdgeId, N[]>()).set(edgeId, taken);
+      batch ??= new Map<EdgeId, N[]>();
+      batch.set(edgeId, taken);
     }
     return batch;
   }
@@ -274,7 +310,8 @@ export class DataflowGraph<S, N, T, EH> {
    * @throws {DataflowNodeError} wrapping whatever a node body threw.
    */
   async run(): Promise<ReadonlyMap<NodeId, T>> {
-    if (this.#inFlight) throw new DataflowDefinitionError("Dataflow run() is already in flight");
+    if (this.#inFlight)
+      throw new DataflowDefinitionError("Dataflow run() is already in flight");
     this.#inFlight = true;
     try {
       while (true) {
@@ -283,7 +320,10 @@ export class DataflowGraph<S, N, T, EH> {
 
         const schedule = this.scheduler.schedule(available);
         this.#assertSchedule(schedule, available);
-        const turns = schedule.reduce((max, lane) => Math.max(max, lane.length), 0);
+        const turns = schedule.reduce(
+          (max, lane) => Math.max(max, lane.length),
+          0,
+        );
         for (let w = 0; w < turns; w++) {
           const column: NodeSchedule[] = [];
           for (const lane of schedule) {
@@ -293,8 +333,12 @@ export class DataflowGraph<S, N, T, EH> {
           if (column.length === 0) continue;
           // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
           // rejection, and the error thrown is deterministically the lowest-lane one.
-          const settled = await Promise.allSettled(column.map((entry) => this.#runNode(entry)));
-          const failed = settled.find((outcome) => outcome.status === "rejected");
+          const settled = await Promise.allSettled(
+            column.map((entry) => this.#runNode(entry)),
+          );
+          const failed = settled.find(
+            (outcome) => outcome.status === "rejected",
+          );
           if (failed !== undefined) throw failed.reason;
         }
       }
@@ -310,20 +354,29 @@ export class DataflowGraph<S, N, T, EH> {
    *   input that is not an inbound edge or not a positive count, a duplicated id within one column,
    *   or a plan with no slots while work remains (a spin).
    */
-  #assertSchedule(schedule: Schedule, available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): void {
+  #assertSchedule(
+    schedule: Schedule,
+    available: ReadonlyMap<NodeId, NodeAvailability<N, T>>,
+  ): void {
     if (Number.isFinite(this.threads) && schedule.length > this.threads) {
-      throw new DataflowDefinitionError(`Dataflow schedule returned ${schedule.length} lanes, exceeding threads=${this.threads}`);
+      throw new DataflowDefinitionError(
+        `Dataflow schedule returned ${schedule.length} lanes, exceeding threads=${this.threads}`,
+      );
     }
 
     let slots = 0;
     let turns = 0;
     for (const lane of schedule) {
       if (Number.isFinite(this.window) && lane.length > this.window) {
-        throw new DataflowDefinitionError(`Dataflow schedule lane holds ${lane.length} turns, exceeding window=${this.window}`);
+        throw new DataflowDefinitionError(
+          `Dataflow schedule lane holds ${lane.length} turns, exceeding window=${this.window}`,
+        );
       }
       for (const { id, inputs } of lane) {
         if (!available.has(id)) {
-          throw new DataflowDefinitionError(`Dataflow schedule returned node "${id}", which is not available`);
+          throw new DataflowDefinitionError(
+            `Dataflow schedule returned node "${id}", which is not available`,
+          );
         }
         const inbound = this.#runtime.get(id)!.inbound;
         for (const [edgeId, count] of inputs) {
@@ -332,7 +385,10 @@ export class DataflowGraph<S, N, T, EH> {
               `Dataflow schedule reads edge "${edgeId}" on node "${id}", which is not one of its inbound edges`,
             );
           }
-          if (typeof count === "number" && (!Number.isInteger(count) || count < 1)) {
+          if (
+            typeof count === "number" &&
+            (!Number.isInteger(count) || count < 1)
+          ) {
             throw new DataflowDefinitionError(
               `Dataflow schedule reads ${count} messages from edge "${edgeId}" on node "${id}"; a message count must be a positive integer, "all" or "none"`,
             );
@@ -349,14 +405,18 @@ export class DataflowGraph<S, N, T, EH> {
         const entry = lane[w];
         if (entry === undefined) continue;
         if (seen.has(entry.id)) {
-          throw new DataflowDefinitionError(`Dataflow schedule runs node "${entry.id}" twice in one turn`);
+          throw new DataflowDefinitionError(
+            `Dataflow schedule runs node "${entry.id}" twice in one turn`,
+          );
         }
         seen.add(entry.id);
       }
     }
 
     if (slots === 0 && available.size > 0) {
-      throw new DataflowDefinitionError("Dataflow schedule returned no work while nodes are available");
+      throw new DataflowDefinitionError(
+        "Dataflow schedule returned no work while nodes are available",
+      );
     }
   }
 
@@ -376,10 +436,15 @@ export class DataflowGraph<S, N, T, EH> {
         step = await node.generator.next();
       } else {
         if (node.generator === undefined) {
-          throw new DataflowDefinitionError(`Dataflow node "${id}" is running without a generator`);
+          throw new DataflowDefinitionError(
+            `Dataflow node "${id}" is running without a generator`,
+          );
         }
         // Synchronous before this branch's first `await`, so concurrent lanes consume in lane order.
-        const view = viewOf<N, T>(this.#consume(runtime, inputs), runtime.probe.values);
+        const view = viewOf<N, T>(
+          this.#consume(runtime, inputs),
+          runtime.probe.values,
+        );
         step = await node.generator.next(view);
       }
 
@@ -407,12 +472,16 @@ export class DataflowGraph<S, N, T, EH> {
       if (link.fromId !== fromId || link.data.id !== message.id) continue;
       const transport = link.data.transport;
       if (E.isRight(transport)) {
-        throw new DataflowDefinitionError(`Node ${fromId} emitted a message on value edge "${message.id}"`);
+        throw new DataflowDefinitionError(
+          `Node ${fromId} emitted a message on value edge "${message.id}"`,
+        );
       }
       transport.left.push(message.payload);
       return;
     }
-    throw new DataflowDefinitionError(`Node ${fromId} emitted on unwired edge "${message.id}"`);
+    throw new DataflowDefinitionError(
+      `Node ${fromId} emitted on unwired edge "${message.id}"`,
+    );
   }
 
   /** Record `nodeId`'s return value and fan it into every unresolved outbound value edge. */

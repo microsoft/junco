@@ -1,26 +1,50 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
-import { EdgeId, NodeId, ReadyScheduler, RoundRobinScheduler, allOf, always, anyOf, triggerInputs } from "../src/index.ts";
-import type { NodeAvailability, NodeIdType, ParentView, Schedule } from "../src/index.ts";
+import type {
+  NodeAvailability,
+  NodeIdType,
+  ParentView,
+  Schedule,
+} from "../src/index.ts";
+import {
+  allOf,
+  always,
+  anyOf,
+  EdgeId,
+  NodeId,
+  ReadyScheduler,
+  RoundRobinScheduler,
+  triggerInputs,
+} from "../src/index.ts";
 
-const EMPTY_VIEW: ParentView<number, string> = { messages: new Map(), values: new Map() };
+const EMPTY_VIEW: ParentView<number, string> = {
+  messages: new Map(),
+  values: new Map(),
+};
 const AVAILABLE: NodeAvailability<number, string> = {
   view: EMPTY_VIEW,
   trigger: always<number, string>(),
   satisfied: [],
 };
 
-const availableOf = (...names: readonly string[]): ReadonlyMap<NodeIdType, NodeAvailability<number, string>> =>
+const availableOf = (
+  ...names: readonly string[]
+): ReadonlyMap<NodeIdType, NodeAvailability<number, string>> =>
   new Map(names.map((name) => [NodeId(name), AVAILABLE]));
 
 /** Existing assertions are about placement, not reads: project each plan back to its ids. */
-const ids = (schedule: Schedule): NodeIdType[][] => schedule.map((lane) => lane.map((entry) => entry.id));
+const ids = (schedule: Schedule): NodeIdType[][] =>
+  schedule.map((lane) => lane.map((entry) => entry.id));
 
 test("ReadyScheduler: one lane per available node, in iteration order", () => {
   const scheduler = new ReadyScheduler<number, string>();
   scheduler.create(1, Number.POSITIVE_INFINITY);
-  assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [["a"], ["b"], ["c"]]);
+  assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [
+    ["a"],
+    ["b"],
+    ["c"],
+  ]);
 });
 
 test("ReadyScheduler: nothing available plans nothing", () => {
@@ -33,14 +57,24 @@ test("RoundRobinScheduler: 2x2 over 5 ids fills lanes round-robin then resumes a
   const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(2, 2);
   const available = availableOf("a", "b", "c", "d", "e");
-  assert.deepEqual(ids(scheduler.schedule(available)), [["a", "c"], ["b", "d"]]);
-  assert.deepEqual(ids(scheduler.schedule(available)), [["e", "b"], ["a", "c"]]);
+  assert.deepEqual(ids(scheduler.schedule(available)), [
+    ["a", "c"],
+    ["b", "d"],
+  ]);
+  assert.deepEqual(ids(scheduler.schedule(available)), [
+    ["e", "b"],
+    ["a", "c"],
+  ]);
 });
 
 test("RoundRobinScheduler: capacity is clamped to the available count", () => {
   const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(4, 4);
-  assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [["a"], ["b"], ["c"]]);
+  assert.deepEqual(ids(scheduler.schedule(availableOf("a", "b", "c"))), [
+    ["a"],
+    ["b"],
+    ["c"],
+  ]);
 });
 
 test("RoundRobinScheduler: nothing available plans nothing", () => {
@@ -52,7 +86,10 @@ test("RoundRobinScheduler: nothing available plans nothing", () => {
 test("RoundRobinScheduler: plans are duplicate-free, exactly min(n, threads*window) wide, within lane bounds", () => {
   fc.assert(
     fc.property(
-      fc.uniqueArray(fc.string({ minLength: 1, maxLength: 3 }), { minLength: 1, maxLength: 12 }),
+      fc.uniqueArray(fc.string({ minLength: 1, maxLength: 3 }), {
+        minLength: 1,
+        maxLength: 12,
+      }),
       fc.integer({ min: 1, max: 4 }),
       fc.integer({ min: 1, max: 4 }),
       (names, threads, window) => {
@@ -91,12 +128,24 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
   const conjunction = allOf<number, string>(a, b);
   assert.deepEqual(
     [...triggerInputs({ view, trigger: conjunction, satisfied: [a, b] })],
-    [[a, "all"], [b, "all"]],
+    [
+      [a, "all"],
+      [b, "all"],
+    ],
   );
   // Atomicity: a partially satisfied `all` reads nothing.
-  assert.deepEqual([...triggerInputs({ view, trigger: conjunction, satisfied: [a] })], []);
+  assert.deepEqual(
+    [...triggerInputs({ view, trigger: conjunction, satisfied: [a] })],
+    [],
+  );
 
   const disjunction = anyOf<number, string>(a, b);
-  assert.deepEqual([...triggerInputs({ view, trigger: disjunction, satisfied: [b, a] })], [[b, "all"]]);
-  assert.deepEqual([...triggerInputs({ view, trigger: disjunction, satisfied: [] })], []);
+  assert.deepEqual(
+    [...triggerInputs({ view, trigger: disjunction, satisfied: [b, a] })],
+    [[b, "all"]],
+  );
+  assert.deepEqual(
+    [...triggerInputs({ view, trigger: disjunction, satisfied: [] })],
+    [],
+  );
 });

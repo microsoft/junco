@@ -1,7 +1,16 @@
 {
   "name": "dataflow-engine",
   "version": "0.1.0",
-  "description": "Async generator dataflow graph runtime with a pluggable scheduler, over ngraph.graph.",
+  "description": "Async-generator dataflow engine for TypeScript with pluggable schedulers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junco-org/dataflow-engine.git"
+  },
+  "homepage": "https://github.com/junco-org/dataflow-engine#readme",
+  "bugs": {
+    "url": "https://github.com/junco-org/dataflow-engine/issues"
+  },
   "type": "module",
   "packageManager": "bun@1.3.14",
   "main": "./dist/index.js",
@@ -13,18 +22,35 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "bun run --cwd ../share build && tsc -p tsconfig.json",
-    "typecheck": "bun run --cwd ../share build && tsc -p tsconfig.typecheck.json",
-    "test": "bun test ./tests/*.test.ts ./tests/*.example.ts"
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run --bun tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "bun run --bun tsc -p tsconfig.typecheck.json",
+    "test": "bun test ./tests/*.test.ts ./tests/*.example.ts",
+    "test:coverage": "bun test --coverage ./tests/*.test.ts ./tests/*.example.ts",
+    "example:fibonacci": "bun run examples/fibonacci.ts",
+    "example:multiplier": "bun run examples/multiplier.ts",
+    "example:word-count": "bun run examples/word-count.ts",
+    "example:combine-per-key": "bun run examples/combine-per-key.ts",
+    "examples": "bun run example:fibonacci && bun run example:multiplier && bun run example:word-count && bun run example:combine-per-key",
+    "lint": "bun run --bun biome lint .",
+    "format": "bun run --bun biome format --write .",
+    "check": "bun run --bun biome check .",
+    "check:ci": "bun run --bun biome ci ."
   },
   "dependencies": {
     "fp-ts": "^2.16.11",
     "ngraph.graph": "^20.1.2",
-    "share": "workspace:*",
     "type-fest": "^5.8.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "1.3.14",
     "@types/node": "26.0.1",
     "fast-check": "^4.8.0",
     "typescript": "6.0.3"

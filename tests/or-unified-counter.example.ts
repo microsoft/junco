@@ -1,20 +1,20 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import type { Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
   anyOf,
+  DataflowGraph,
   emitOnce,
   messageEdge,
   msg,
   on,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Message } from "../src/index.ts";
 
 type SourceLine = { readonly kind: "line"; readonly text: string };
 type CharCount = { readonly kind: "chars"; readonly length: number };
@@ -57,7 +57,9 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
       );
       const events: Message<Msg>[] = [];
       for (const line of lines) {
-        events.push(msg(charCountEdge, { kind: "chars", length: line.text.length }));
+        events.push(
+          msg(charCountEdge, { kind: "chars", length: line.text.length }),
+        );
         for (const match of line.text.matchAll(/[A-Za-z']+/g)) {
           const word = match[0]!;
           const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
@@ -73,8 +75,12 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
     trigger: anyOf(on(shortWordsEdge), on(longWordsEdge)),
     step: stepNode<void, Msg, string>((_state, view) => {
       unifiedFireCount += 1;
-      const shortBatch = (view.messages.get(shortWordsEdge.id) ?? []).filter((m): m is WordMsg => m.kind === "word");
-      const longBatch = (view.messages.get(longWordsEdge.id) ?? []).filter((m): m is WordMsg => m.kind === "word");
+      const shortBatch = (view.messages.get(shortWordsEdge.id) ?? []).filter(
+        (m): m is WordMsg => m.kind === "word",
+      );
+      const longBatch = (view.messages.get(longWordsEdge.id) ?? []).filter(
+        (m): m is WordMsg => m.kind === "word",
+      );
       for (const { word } of [...shortBatch, ...longBatch]) {
         unifiedCounts.set(word, (unifiedCounts.get(word) ?? 0) + 1);
       }
@@ -86,7 +92,9 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
     state: undefined,
     trigger: when(charCountEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const chars = (view.messages.get(charCountEdge.id) ?? []).filter((m): m is CharCount => m.kind === "chars");
+      const chars = (view.messages.get(charCountEdge.id) ?? []).filter(
+        (m): m is CharCount => m.kind === "chars",
+      );
       const total = chars.reduce((acc, c) => acc + c.length, 0);
       return [msg(charSumEdge, { kind: "chars", length: total })];
     }),
@@ -112,8 +120,14 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
   const completed = await graph.run();
 
   const expected: [string, number][] = [
-    ["A", 2], ["fantastic", 1], ["new", 2], ["of", 1],
-    ["point", 1], ["view", 1], ["whole", 1], ["world", 1],
+    ["A", 2],
+    ["fantastic", 1],
+    ["new", 2],
+    ["of", 1],
+    ["point", 1],
+    ["view", 1],
+    ["whole", 1],
+    ["world", 1],
   ];
   assert.deepEqual([...unifiedCounts.entries()].sort(), expected.sort());
   assert.deepEqual(totalChars, [46]);

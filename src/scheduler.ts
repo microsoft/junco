@@ -9,7 +9,10 @@ export type MessageSchedule = number | "all" | "none";
 export type InputSchedule = ReadonlyMap<EdgeId, MessageSchedule>;
 
 /** One node occupying one turn of one lane, plus how much it reads on entry. */
-export type NodeSchedule = { readonly id: NodeId; readonly inputs: InputSchedule };
+export type NodeSchedule = {
+  readonly id: NodeId;
+  readonly inputs: InputSchedule;
+};
 
 /**
  * A planned window. `schedule[t][w]` is the entry lane `t` runs at turn offset `w` within the
@@ -56,7 +59,10 @@ export type DataflowScheduler<N, T> = {
  * A partially satisfied `"all"` rule reads NOTHING — atomicity. Reachable only when a custom
  * `is_available` hook reports a node available while its trigger is unsatisfied.
  */
-export const triggerInputs = <N, T>({ trigger, satisfied }: NodeAvailability<N, T>): InputSchedule => {
+export const triggerInputs = <N, T>({
+  trigger,
+  satisfied,
+}: NodeAvailability<N, T>): InputSchedule => {
   const inputs = new Map<EdgeId, MessageSchedule>();
   if (trigger.kind === "all") {
     if (satisfied.length !== trigger.rule.length) return inputs;
@@ -79,7 +85,9 @@ export class ReadyScheduler<N, T> implements DataflowScheduler<N, T> {
   create(_window: number, _threads: number): void {}
 
   schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
-    return [...available].map(([id, availability]) => [{ id, inputs: triggerInputs(availability) }]);
+    return [...available].map(([id, availability]) => [
+      { id, inputs: triggerInputs(availability) },
+    ]);
   }
 }
 
@@ -107,10 +115,16 @@ export class RoundRobinScheduler<N, T> implements DataflowScheduler<N, T> {
     const capacity = Math.min(ids.length, this.#threads * this.#window);
     // `min(threads, capacity)` is the exact lane count: any further lane would stay empty. It also
     // keeps the allocation finite when `threads` is `Number.POSITIVE_INFINITY`.
-    const lanes: NodeSchedule[][] = Array.from({ length: Math.min(this.#threads, capacity) }, () => []);
+    const lanes: NodeSchedule[][] = Array.from(
+      { length: Math.min(this.#threads, capacity) },
+      () => [],
+    );
     for (let k = 0; k < capacity; k++) {
       const id = ids[(this.#cursor + k) % ids.length]!;
-      lanes[k % this.#threads]!.push({ id, inputs: triggerInputs(available.get(id)!) });
+      lanes[k % this.#threads]!.push({
+        id,
+        inputs: triggerInputs(available.get(id)!),
+      });
     }
     this.#cursor = (this.#cursor + capacity) % ids.length;
     return lanes.filter((lane) => lane.length > 0);

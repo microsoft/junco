@@ -1,10 +1,29 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { DataflowGraph, ReadyScheduler, UNBOUNDED, Width, allOf, always, emitOnce, from, messageEdge, msg, on, stepNode, when } from "../src/index.ts";
 import type { Edge } from "../src/index.ts";
+import {
+  allOf,
+  always,
+  DataflowGraph,
+  emitOnce,
+  from,
+  messageEdge,
+  msg,
+  on,
+  ReadyScheduler,
+  stepNode,
+  UNBOUNDED,
+  Width,
+  when,
+} from "../src/index.ts";
 
 type StringMsg = { readonly kind: "str"; readonly value: string };
-type GroupMsg = { readonly kind: "group"; readonly id: string; readonly corpus: string; readonly word: string };
+type GroupMsg = {
+  readonly kind: "group";
+  readonly id: string;
+  readonly corpus: string;
+  readonly word: string;
+};
 type Msg = StringMsg | GroupMsg;
 
 test("cookbook: bigquery side inputs attach corpus and word", async () => {
@@ -28,7 +47,11 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
     UNBOUNDED,
   );
 
-  const makeStringSource = (edge: Edge<Msg, string>, values: readonly string[], label: string) =>
+  const makeStringSource = (
+    edge: Edge<Msg, string>,
+    values: readonly string[],
+    label: string,
+  ) =>
     graph.addNode({
       state: undefined,
       trigger: always(),
@@ -41,12 +64,26 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   const groupIdsSourceId = makeStringSource(groupIdsEdge, groupIds, "groupIds");
   const corpusSourceId = makeStringSource(corpusEdge, corpus, "corpus");
   const wordSourceId = makeStringSource(wordEdge, words, "word");
-  const ignoreCorpusSourceId = makeStringSource(ignoreCorpusEdge, [ignoreCorpus], "ignoreCorpus");
-  const ignoreWordSourceId = makeStringSource(ignoreWordEdge, [ignoreWord], "ignoreWord");
+  const ignoreCorpusSourceId = makeStringSource(
+    ignoreCorpusEdge,
+    [ignoreCorpus],
+    "ignoreCorpus",
+  );
+  const ignoreWordSourceId = makeStringSource(
+    ignoreWordEdge,
+    [ignoreWord],
+    "ignoreWord",
+  );
 
   const attachId = graph.addNode({
     state: undefined,
-    trigger: allOf(on(groupIdsEdge), on(corpusEdge), on(wordEdge), on(ignoreCorpusEdge), on(ignoreWordEdge)),
+    trigger: allOf(
+      on(groupIdsEdge),
+      on(corpusEdge),
+      on(wordEdge),
+      on(ignoreCorpusEdge),
+      on(ignoreWordEdge),
+    ),
     step: stepNode<void, Msg, string>((_state, view) => {
       const strings = (edge: Edge<Msg, string>): string[] =>
         from(view, edge)
@@ -68,7 +105,8 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
           id,
           corpus: firstCorpus,
           word: firstWord,
-        }));
+        }),
+      );
     }),
   });
 
@@ -94,7 +132,11 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
 
   assert.deepEqual(
     groups.map((g) => [g.id, g.corpus, g.word]),
-    [["A", "corpus2", "word2"], ["B", "corpus2", "word2"], ["C", "corpus2", "word2"]],
+    [
+      ["A", "corpus2", "word2"],
+      ["B", "corpus2", "word2"],
+      ["C", "corpus2", "word2"],
+    ],
   );
   assert.equal(completed.get(groupIdsSourceId), "groupIds done");
   assert.equal(completed.get(corpusSourceId), "corpus done");

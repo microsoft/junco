@@ -4,23 +4,31 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import type { Edge, Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Edge, Message } from "../src/index.ts";
 
-type Pair = { readonly kind: "pair"; readonly key: string; readonly value: number };
-type Result = { readonly kind: "result"; readonly key: string; readonly value: number };
+type Pair = {
+  readonly kind: "pair";
+  readonly key: string;
+  readonly value: number;
+};
+type Result = {
+  readonly kind: "result";
+  readonly key: string;
+  readonly value: number;
+};
 type Msg = Pair | Result;
 
 test("cookbook: combine-per-key sum and multiply from same source", async () => {
@@ -30,7 +38,12 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   const multiplyOutEdge = messageEdge<Msg, string>("multiplyOut");
 
   const inputPairs: [string, number][] = [
-    ["a", 1], ["b", 10], ["a", 2], ["a", 3], ["b", 20], ["c", 100],
+    ["a", 1],
+    ["b", 10],
+    ["a", 2],
+    ["a", 3],
+    ["b", 20],
+    ["c", 100],
   ];
 
   const sums: Result[] = [];
@@ -72,11 +85,16 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
         const events: Message<Msg>[] = [];
         for (const key of Object.keys(groups).sort(S.Ord.compare)) {
           const group = groups[key]!;
-          events.push(msg(outputEdge, {
-            kind: "result",
-            key,
-            value: pipe(group, RA.reduce(init, (a, p) => reduce(a, p.value))),
-          }));
+          events.push(
+            msg(outputEdge, {
+              kind: "result",
+              key,
+              value: pipe(
+                group,
+                RA.reduce(init, (a, p) => reduce(a, p.value)),
+              ),
+            }),
+          );
         }
         return events;
       }),
@@ -85,7 +103,12 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   };
 
   const sumCombineId = makeCombine(sumInEdge, sumOutEdge, 0, (a, b) => a + b);
-  const multiplyCombineId = makeCombine(multiplyInEdge, multiplyOutEdge, 1, (a, b) => a * b);
+  const multiplyCombineId = makeCombine(
+    multiplyInEdge,
+    multiplyOutEdge,
+    1,
+    (a, b) => a * b,
+  );
 
   const sumSinkId = graph.addNode({
     state: undefined,
@@ -116,7 +139,21 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
 
   const completed = await graph.run();
 
-  assert.deepEqual(sums.map((r) => [r.key, r.value]), [["a", 6], ["b", 30], ["c", 100]]);
-  assert.deepEqual(products.map((r) => [r.key, r.value]), [["a", 6], ["b", 200], ["c", 100]]);
+  assert.deepEqual(
+    sums.map((r) => [r.key, r.value]),
+    [
+      ["a", 6],
+      ["b", 30],
+      ["c", 100],
+    ],
+  );
+  assert.deepEqual(
+    products.map((r) => [r.key, r.value]),
+    [
+      ["a", 6],
+      ["b", 200],
+      ["c", 100],
+    ],
+  );
   assert.equal(completed.get(sourceId), "source done");
 });

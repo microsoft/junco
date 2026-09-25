@@ -1,4 +1,4 @@
-import type { Identifiable } from "share/identifiable";
+import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { TriggerRule } from "./trigger.js";
 
@@ -40,7 +40,11 @@ export type ParentView<N, T> = {
 export type NodeStatus = "ready" | "running" | "done";
 
 /** The generator a node body returns: yields message batches, is resumed with views, returns `T`. */
-export type NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, ParentView<N, T>>;
+export type NodeGenerator<N, T> = AsyncGenerator<
+  Message<N>[],
+  T,
+  ParentView<N, T>
+>;
 
 /**
  * A node body. Invoked as `node.step()`, so a non-arrow `async function*` receives the node as

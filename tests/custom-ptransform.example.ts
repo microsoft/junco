@@ -1,14 +1,29 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
-import { pipe } from "fp-ts/lib/function.js";
 import * as S from "fp-ts/lib/string.js";
-import { DataflowGraph, ReadyScheduler, UNBOUNDED, Width, always, emitOnce, messageEdge, msg, stepNode, when } from "../src/index.ts";
 import type { Edge, Message } from "../src/index.ts";
+import {
+  always,
+  DataflowGraph,
+  emitOnce,
+  messageEdge,
+  msg,
+  ReadyScheduler,
+  stepNode,
+  UNBOUNDED,
+  Width,
+  when,
+} from "../src/index.ts";
 
 type WordMsg = { readonly kind: "word"; readonly word: string };
-type CountMsg = { readonly kind: "count"; readonly word: string; readonly count: number };
+type CountMsg = {
+  readonly kind: "count";
+  readonly word: string;
+  readonly count: number;
+};
 type Msg = WordMsg | CountMsg;
 
 test("cookbook: custom-ptransform reusable count helper", async () => {
@@ -34,13 +49,20 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
       const events: Message<Msg>[] = [];
       for (const word of inputWords) {
         const payload: WordMsg = { kind: "word", word };
-        events.push(msg(wordsForCount1Edge, payload), msg(wordsForCount2Edge, payload));
+        events.push(
+          msg(wordsForCount1Edge, payload),
+          msg(wordsForCount2Edge, payload),
+        );
       }
       return events;
     }, "source done"),
   });
 
-  const attachCount = (inputEdge: Edge<Msg, string>, outputEdge: Edge<Msg, string>, factor: number) => {
+  const attachCount = (
+    inputEdge: Edge<Msg, string>,
+    outputEdge: Edge<Msg, string>,
+    factor: number,
+  ) => {
     const id = graph.addNode({
       state: undefined,
       trigger: when(inputEdge),
@@ -52,11 +74,13 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
         );
         const events: Message<Msg>[] = [];
         for (const word of Object.keys(groups).sort(S.Ord.compare)) {
-          events.push(msg(outputEdge, {
-            kind: "count",
-            word,
-            count: groups[word]!.length * factor,
-          }));
+          events.push(
+            msg(outputEdge, {
+              kind: "count",
+              word,
+              count: groups[word]!.length * factor,
+            }),
+          );
         }
         return events;
       }),
@@ -96,8 +120,16 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
 
   const completed = await graph.run();
 
-  assert.deepEqual(counts1, [["apple", 3], ["banana", 2], ["cherry", 1]]);
-  assert.deepEqual(counts2, [["apple", 6], ["banana", 4], ["cherry", 2]]);
+  assert.deepEqual(counts1, [
+    ["apple", 3],
+    ["banana", 2],
+    ["cherry", 1],
+  ]);
+  assert.deepEqual(counts2, [
+    ["apple", 6],
+    ["banana", 4],
+    ["cherry", 2],
+  ]);
   assert.notEqual(count1Id, count2Id);
   assert.equal(completed.get(sourceId), "source done");
 });

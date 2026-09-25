@@ -1,8 +1,23 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
-import { DataflowGraph, Width, always, messageEdge, msg, stepNode, triggerInputs, when } from "../src/index.ts";
-import type { DataflowScheduler, NodeAvailability, NodeGenerator, NodeIdType, Schedule } from "../src/index.ts";
+import type {
+  DataflowScheduler,
+  NodeAvailability,
+  NodeGenerator,
+  NodeIdType,
+  Schedule,
+} from "../src/index.ts";
+import {
+  always,
+  DataflowGraph,
+  messageEdge,
+  msg,
+  stepNode,
+  triggerInputs,
+  Width,
+  when,
+} from "../src/index.ts";
 
 /**
  * The original's `(self) => { const ready = self.ready(); for (const id of priority) if
@@ -18,9 +33,13 @@ class PriorityScheduler implements DataflowScheduler<number, string> {
 
   create(_window: number, _threads: number): void {}
 
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
+  schedule(
+    available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
+  ): Schedule {
     if (available.size === 0) return [];
-    const plan = (id: NodeIdType): Schedule => [[{ id, inputs: triggerInputs(available.get(id)!) }]];
+    const plan = (id: NodeIdType): Schedule => [
+      [{ id, inputs: triggerInputs(available.get(id)!) }],
+    ];
     for (const id of this.#priority) {
       if (available.has(id)) return plan(id);
     }

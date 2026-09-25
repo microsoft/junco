@@ -1,7 +1,7 @@
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { DataflowDefinitionError } from "./errors.js";
 import type { Edge } from "./edges.js";
+import { DataflowDefinitionError } from "./errors.js";
 import type { EdgeId, NodeId } from "./identity.js";
 
 /** Conjunction (`"all"`) or ordered disjunction (`"any"`) over a rule's entries. */
@@ -21,7 +21,10 @@ export type TriggerKind = "all" | "any";
  * `N`/`T` are phantom: they tie a rule to its graph's payload types without constraining the
  * structure, so `allOf(on(a), on(b))` needs no explicit type arguments at a call site.
  */
-export type TriggerRule<N, T> = { readonly kind: TriggerKind; readonly rule: readonly EdgeId[] };
+export type TriggerRule<N, T> = {
+  readonly kind: TriggerKind;
+  readonly rule: readonly EdgeId[];
+};
 
 /** One rule entry: the inbound edge to watch. */
 export const on = <N, T>(edge: Edge<N, T>): EdgeId => edge.id;
@@ -33,24 +36,33 @@ export const on = <N, T>(edge: Edge<N, T>): EdgeId => edge.id;
  * The rest-parameter array is freshly allocated per call and reachable from nowhere else, so it is
  * kept rather than copied. `indexOf` over a handful of entries beats allocating a `Set` to dedupe.
  */
-const buildRule = (who: string, entries: readonly EdgeId[]): readonly EdgeId[] => {
+const buildRule = (
+  who: string,
+  entries: readonly EdgeId[],
+): readonly EdgeId[] => {
   for (let i = 0; i < entries.length; i++) {
     const edgeId = entries[i]!;
     if (entries.indexOf(edgeId) !== i) {
-      throw new DataflowDefinitionError(`${who} received edge "${edgeId}" twice`);
+      throw new DataflowDefinitionError(
+        `${who} received edge "${edgeId}" twice`,
+      );
     }
   }
   return entries;
 };
 
 /** Conjunction: fires iff EVERY entry has something to offer. */
-export const allOf = <N, T>(...entries: readonly EdgeId[]): TriggerRule<N, T> => ({
+export const allOf = <N, T>(
+  ...entries: readonly EdgeId[]
+): TriggerRule<N, T> => ({
   kind: "all",
   rule: buildRule("allOf", entries),
 });
 
 /** Ordered disjunction: fires on the FIRST satisfied entry. */
-export const anyOf = <N, T>(...entries: readonly EdgeId[]): TriggerRule<N, T> => ({
+export const anyOf = <N, T>(
+  ...entries: readonly EdgeId[]
+): TriggerRule<N, T> => ({
   kind: "any",
   rule: buildRule("anyOf", entries),
 });
@@ -59,7 +71,8 @@ export const anyOf = <N, T>(...entries: readonly EdgeId[]): TriggerRule<N, T> =>
  * The single-edge conjunction: `when(e)` is `allOf(on(e))`. Named because a one-entry `allOf` is by
  * far the most common trigger shape.
  */
-export const when = <N, T>(edge: Edge<N, T>): TriggerRule<N, T> => allOf<N, T>(on(edge));
+export const when = <N, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
+  allOf<N, T>(on(edge));
 
 /** Fires every turn and names no edge — the source trigger. Identical to `allOf()`. */
 export const always = <N, T>(): TriggerRule<N, T> => allOf<N, T>();
@@ -73,14 +86,20 @@ export const never = <N, T>(): TriggerRule<N, T> => anyOf<N, T>();
  *
  * @throws {DataflowDefinitionError} when `edgeId` is not one of `nodeId`'s inbound edges.
  */
-const isSatisfied = <N, T>(edgeId: EdgeId, inbound: ReadonlyMap<EdgeId, Edge<N, T>>, nodeId: NodeId): boolean => {
+const isSatisfied = <N, T>(
+  edgeId: EdgeId,
+  inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
+  nodeId: NodeId,
+): boolean => {
   const edge = inbound.get(edgeId);
   if (edge === undefined) {
     throw new DataflowDefinitionError(
       `Node "${nodeId}" trigger references edge "${edgeId}" which is not one of its inbound edges`,
     );
   }
-  return E.isLeft(edge.transport) ? edge.transport.left.length > 0 : O.isSome(edge.transport.right);
+  return E.isLeft(edge.transport)
+    ? edge.transport.left.length > 0
+    : O.isSome(edge.transport.right);
 };
 
 /**

@@ -1,4 +1,4 @@
-import type { Newtype } from "share/newtype";
+import type { Newtype } from "./newtype.js";
 
 /** Branded identifier of a graph node. */
 export type NodeId = Newtype<string, "NodeId">;

@@ -1,9 +1,9 @@
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { emptyQueue } from "share/queue";
-import type { Queue } from "share/queue";
-import type { Identifiable } from "share/identifiable";
+import type { Identifiable } from "./identifiable.js";
 import { EdgeId } from "./identity.js";
+import type { Queue } from "./queue.js";
+import { emptyQueue } from "./queue.js";
 
 /**
  * A graph edge. Its `transport` is `Either<Queue<N>, Option<T>>`: **Left = message queue**, drained
@@ -19,7 +19,13 @@ export type Edge<N, T> = Identifiable<EdgeId> & {
 };
 
 /** Mint a message edge: a FIFO queue of `N`, drained per the destination node's trigger rule. */
-export const messageEdge = <N, T>(id: string): Edge<N, T> => ({ id: EdgeId(id), transport: E.left(emptyQueue<N>()) });
+export const messageEdge = <N, T>(id: string): Edge<N, T> => ({
+  id: EdgeId(id),
+  transport: E.left(emptyQueue<N>()),
+});
 
 /** Mint a value edge: a write-once cell holding the source node's return value `T`. */
-export const valueEdge = <N, T>(id: string): Edge<N, T> => ({ id: EdgeId(id), transport: E.right(O.none) });
+export const valueEdge = <N, T>(id: string): Edge<N, T> => ({
+  id: EdgeId(id),
+  transport: E.right(O.none),
+});

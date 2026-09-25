@@ -4,20 +4,20 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import type { Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Message } from "../src/index.ts";
 
 type Line = { readonly kind: "line"; readonly text: string };
 type KV = { readonly kind: "kv"; readonly key: string; readonly value: string };
@@ -29,7 +29,9 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   const linesForInputCsumEdge = messageEdge<Msg, string>("linesForInputCsum");
   const kvEdge = messageEdge<Msg, string>("kv");
   const formattedForSinkEdge = messageEdge<Msg, string>("formattedForSink");
-  const formattedForOutputCsumEdge = messageEdge<Msg, string>("formattedForOutputCsum");
+  const formattedForOutputCsumEdge = messageEdge<Msg, string>(
+    "formattedForOutputCsum",
+  );
   const inputCsumEdge = messageEdge<Msg, string>("inputCsum");
   const outputCsumEdge = messageEdge<Msg, string>("outputCsum");
 
@@ -68,7 +70,9 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
     state: undefined,
     trigger: when(linesForMainEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesForMainEdge).filter((m): m is Line => m.kind === "line");
+      const lines = from(view, linesForMainEdge).filter(
+        (m): m is Line => m.kind === "line",
+      );
       return lines.map((l) =>
         msg(kvEdge, {
           kind: "kv",
@@ -92,7 +96,10 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
       for (const key of Object.keys(groups).sort(S.Ord.compare)) {
         for (const kv of groups[key]!) {
           const line: Line = { kind: "line", text: key + kv.value };
-          events.push(msg(formattedForSinkEdge, line), msg(formattedForOutputCsumEdge, line));
+          events.push(
+            msg(formattedForSinkEdge, line),
+            msg(formattedForOutputCsumEdge, line),
+          );
         }
       }
       return events;
@@ -103,7 +110,9 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
     state: undefined,
     trigger: when(linesForInputCsumEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesForInputCsumEdge).filter((m): m is Line => m.kind === "line");
+      const lines = from(view, linesForInputCsumEdge).filter(
+        (m): m is Line => m.kind === "line",
+      );
       const total = lines.reduce((acc, l) => acc + l.text.length, 0);
       return [msg(inputCsumEdge, { kind: "len", total })];
     }),
@@ -113,7 +122,9 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
     state: undefined,
     trigger: when(formattedForOutputCsumEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, formattedForOutputCsumEdge).filter((m): m is Line => m.kind === "line");
+      const lines = from(view, formattedForOutputCsumEdge).filter(
+        (m): m is Line => m.kind === "line",
+      );
       const total = lines.reduce((acc, l) => acc + l.text.length, 0);
       return [msg(outputCsumEdge, { kind: "len", total })];
     }),

@@ -1,5 +1,5 @@
 import type { Integer, IsNegative, PositiveInfinity } from "type-fest";
-import type { Newtype } from "share/newtype";
+import type { Newtype } from "./newtype.js";
 
 /**
  * `W` when it is a legal width — a positive integer or `Infinity` — and `never` otherwise.
@@ -35,7 +35,8 @@ export type Width = Newtype<number, "Width">;
  * Width(1.5);          // compile error: not an integer
  * Width(runtimeValue); // compile error: a runtime `number` cannot be checked
  */
-export const Width = <W extends number>(value: ValidWidth<W>): Width => value as number as Width;
+export const Width = <W extends number>(value: ValidWidth<W>): Width =>
+  value as number as Width;
 
 /** `Infinity` as a {@link Width}: unbounded turns per lane, or unbounded lanes per plan. */
 export const UNBOUNDED: Width = Number.POSITIVE_INFINITY as Width;

@@ -3,27 +3,6 @@ import assert from "node:assert/strict";
 import fc from "fast-check";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import {
-  DataflowDefinitionError,
-  DataflowGraph,
-  DataflowNodeError,
-  NodeId,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
-  allOf,
-  always,
-  anyOf,
-  emitOnce,
-  from,
-  messageEdge,
-  msg,
-  on,
-  stepNode,
-  triggerInputs,
-  valueEdge,
-  when,
-} from "../src/index.ts";
 import type {
   DataflowScheduler,
   Edge,
@@ -33,6 +12,27 @@ import type {
   NodeGenerator,
   NodeIdType,
   Schedule,
+} from "../src/index.ts";
+import {
+  allOf,
+  always,
+  anyOf,
+  DataflowDefinitionError,
+  DataflowGraph,
+  DataflowNodeError,
+  emitOnce,
+  from,
+  messageEdge,
+  msg,
+  NodeId,
+  on,
+  ReadyScheduler,
+  stepNode,
+  triggerInputs,
+  UNBOUNDED,
+  valueEdge,
+  Width,
+  when,
 } from "../src/index.ts";
 
 type Graph = DataflowGraph<void, number, string, never>;
@@ -45,14 +45,24 @@ const newGraph = (): Graph =>
   );
 
 /** The live backlog still queued on `edge`, for asserting what a firing did and did not consume. */
-const queued = (edge: Edge<number, string>): readonly number[] => (E.isLeft(edge.transport) ? [...edge.transport.left] : []);
+const queued = (edge: Edge<number, string>): readonly number[] =>
+  E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
 /** One lane per available node, reading `count` off every edge that node's trigger names. */
-const fixedReader = (count: MessageSchedule): DataflowScheduler<number, string> => ({
+const fixedReader = (
+  count: MessageSchedule,
+): DataflowScheduler<number, string> => ({
   create(_window: number, _threads: number): void {},
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
+  schedule(
+    available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
+  ): Schedule {
     return [...available].map(([id, { trigger }]) => [
-      { id, inputs: new Map<EdgeIdType, MessageSchedule>(trigger.rule.map((edgeId) => [edgeId, count])) },
+      {
+        id,
+        inputs: new Map<EdgeIdType, MessageSchedule>(
+          trigger.rule.map((edgeId) => [edgeId, count]),
+        ),
+      },
     ]);
   },
 });
@@ -79,7 +89,8 @@ test("value edge signals end-of-input: the squarer drains messages, then returns
       while (true) {
         const batch = from(inputs, e1);
         for (const n of batch) seen.push(n);
-        if (batch.length === 0 && inputs.values.has(v.id)) return `sq:${seen.join(",")}`;
+        if (batch.length === 0 && inputs.values.has(v.id))
+          return `sq:${seen.join(",")}`;
         inputs = yield batch.map((n) => msg(e2, n * n));
       }
     },
@@ -126,7 +137,11 @@ test("a ready dependent is primed without consuming its queued activation batch"
       return [[{ id, inputs: triggerInputs(available.get(id)!) }]];
     },
   };
-  const graph = new DataflowGraph<void, number, string, never>(scheduler, Width(1), UNBOUNDED);
+  const graph = new DataflowGraph<void, number, string, never>(
+    scheduler,
+    Width(1),
+    UNBOUNDED,
+  );
   const received: number[] = [];
 
   const sourceId = graph.addNode({
@@ -187,6 +202,7 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
   const failingId = graph.addNode({
     state: undefined,
     trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must throw before its first yield.
     step: async function* (): NodeGenerator<number, string> {
       throw new Error("boom");
     },
@@ -195,50 +211,95 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
   await assert.rejects(
     () => graph.run(),
     (thrown: unknown) =>
-      thrown instanceof DataflowNodeError && thrown.nodeId === failingId && (thrown.error as Error).message === "boom",
+      thrown instanceof DataflowNodeError &&
+      thrown.nodeId === failingId &&
+      (thrown.error as Error).message === "boom",
   );
   assert.equal(graph.getNode(failingId)!.status, "done");
 });
 
 test("definition error: an explicitly duplicated node id is rejected", () => {
   const graph = newGraph();
-  graph.addNode({ state: undefined, id: NodeId("dup"), trigger: always(), step: stepNode(() => []) });
+  graph.addNode({
+    state: undefined,
+    id: NodeId("dup"),
+    trigger: always(),
+    step: stepNode(() => []),
+  });
   assert.throws(
-    () => graph.addNode({ state: undefined, id: NodeId("dup"), trigger: always(), step: stepNode(() => []) }),
+    () =>
+      graph.addNode({
+        state: undefined,
+        id: NodeId("dup"),
+        trigger: always(),
+        step: stepNode(() => []),
+      }),
     DataflowDefinitionError,
   );
 });
 
 test("definition error: an edge endpoint that is not a registered node is rejected", () => {
   const graph = newGraph();
-  const real = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => []) });
+  const real = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+  });
   assert.throws(
-    () => graph.addEdge(real, NodeId("ghost"), messageEdge<number, string>("e")),
+    () =>
+      graph.addEdge(real, NodeId("ghost"), messageEdge<number, string>("e")),
     DataflowDefinitionError,
   );
 });
 
 test("definition error: the same edge id twice in one node's inbound set is rejected", () => {
   const graph = newGraph();
-  const a = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => []) });
-  const b = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => []) });
-  const sink = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => []) });
+  const a = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+  });
+  const b = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+  });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+  });
   graph.addEdge(a, sink, messageEdge<number, string>("shared"));
-  assert.throws(() => graph.addEdge(b, sink, messageEdge<number, string>("shared")), DataflowDefinitionError);
+  assert.throws(
+    () => graph.addEdge(b, sink, messageEdge<number, string>("shared")),
+    DataflowDefinitionError,
+  );
 });
 
 test("definition error: emitting on an unwired edge id is rejected", async () => {
   const ghost = messageEdge<number, string>("ghost");
   const graph = newGraph();
-  graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => [msg(ghost, 1)]) });
+  graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => [msg(ghost, 1)]),
+  });
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
 });
 
 test("definition error: emitting a message on a value edge is rejected", async () => {
   const v = valueEdge<number, string>("v");
   const graph = newGraph();
-  const src = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => [msg(v, 1)]) });
-  const dst = graph.addNode({ state: undefined, trigger: always(), step: stepNode(() => []) });
+  const src = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => [msg(v, 1)]),
+  });
+  const dst = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+  });
   graph.addEdge(src, dst, v);
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
 });
@@ -258,7 +319,11 @@ test("definition error: run() is not re-entrant", async () => {
       return "src";
     },
   });
-  const sink = graph.addNode({ state: undefined, trigger: when(e), step: stepNode(() => []) });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: when(e),
+    step: stepNode(() => []),
+  });
   graph.addEdge(src, sink, e);
 
   const inFlight = graph.run();
@@ -270,13 +335,24 @@ test("definition error: run() is not re-entrant", async () => {
 test("one firing reads exactly its planned count and leaves the rest queued", async () => {
   await fc.assert(
     fc.asyncProperty(
-      fc.array(fc.integer({ min: 0, max: 999 }), { minLength: 1, maxLength: 8 }),
-      fc.oneof(fc.constant<MessageSchedule>("all"), fc.constant<MessageSchedule>("none"), fc.integer({ min: 1, max: 8 })),
+      fc.array(fc.integer({ min: 0, max: 999 }), {
+        minLength: 1,
+        maxLength: 8,
+      }),
+      fc.oneof(
+        fc.constant<MessageSchedule>("all"),
+        fc.constant<MessageSchedule>("none"),
+        fc.integer({ min: 1, max: 8 }),
+      ),
       async (items, count) => {
         fc.pre(typeof count !== "number" || count <= items.length);
 
         const feed = messageEdge<number, string>("feed");
-        const graph = new DataflowGraph<void, number, string, never>(fixedReader(count), Width(1), UNBOUNDED);
+        const graph = new DataflowGraph<void, number, string, never>(
+          fixedReader(count),
+          Width(1),
+          UNBOUNDED,
+        );
         const consumed: number[] = [];
 
         const producer = graph.addNode({
@@ -298,7 +374,10 @@ test("one firing reads exactly its planned count and leaves the rest queued", as
         await graph.run();
         const remaining = queued(feed);
         assert.deepEqual([...consumed, ...remaining], items);
-        assert.equal(consumed.length, count === "all" ? items.length : count === "none" ? 0 : count);
+        assert.equal(
+          consumed.length,
+          count === "all" ? items.length : count === "none" ? 0 : count,
+        );
       },
     ),
   );
@@ -308,7 +387,11 @@ test("the scheduler sizes each read: a pair-reading plan drains an `all` trigger
   const feed = messageEdge<number, string>("feed");
   const batches: number[][] = [];
 
-  const graph = new DataflowGraph<void, number, string, never>(fixedReader(2), Width(1), UNBOUNDED);
+  const graph = new DataflowGraph<void, number, string, never>(
+    fixedReader(2),
+    Width(1),
+    UNBOUNDED,
+  );
   const srcId = graph.addNode({
     state: undefined,
     trigger: always(),

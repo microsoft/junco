@@ -1,31 +1,39 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { pipe } from "fp-ts/lib/function.js";
+import type { Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Message } from "../src/index.ts";
 
 class Player {
   constructor(readonly name: string) {}
 }
 
 type Line = { readonly kind: "line"; readonly text: string };
-type Pair = { readonly kind: "pair"; readonly player: Player; readonly score: number };
-type Total = { readonly kind: "total"; readonly playerName: string; readonly total: number };
+type Pair = {
+  readonly kind: "pair";
+  readonly player: Player;
+  readonly score: number;
+};
+type Total = {
+  readonly kind: "total";
+  readonly playerName: string;
+  readonly total: number;
+};
 type Msg = Line | Pair | Total;
 
 test("cookbook: group with coder — parse and sum by player name", async () => {
@@ -55,7 +63,9 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
     state: undefined,
     trigger: when(linesEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesEdge).filter((m): m is Line => m.kind === "line");
+      const lines = from(view, linesEdge).filter(
+        (m): m is Line => m.kind === "line",
+      );
       return lines.map((l) => {
         const [name, scoreText] = l.text.split(",", 2);
         return msg(pairsEdge, {
@@ -79,11 +89,16 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
       const events: Message<Msg>[] = [];
       for (const playerName of Object.keys(groups).sort(S.Ord.compare)) {
         const group = groups[playerName]!;
-        events.push(msg(totalsEdge, {
-          kind: "total",
-          playerName,
-          total: pipe(group, RA.reduce(0, (acc, p) => acc + p.score)),
-        }));
+        events.push(
+          msg(totalsEdge, {
+            kind: "total",
+            playerName,
+            total: pipe(
+              group,
+              RA.reduce(0, (acc, p) => acc + p.score),
+            ),
+          }),
+        );
       }
       return events;
     }),
@@ -106,6 +121,9 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
 
   const completed = await graph.run();
 
-  assert.deepEqual(results, [["Alice", 33], ["Bob", 20]]);
+  assert.deepEqual(results, [
+    ["Alice", 33],
+    ["Bob", 20],
+  ]);
   assert.equal(completed.get(sourceId), "source done");
 });

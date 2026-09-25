@@ -1,23 +1,29 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import type { Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   allOf,
   always,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
   on,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Message } from "../src/index.ts";
 
-type Row = { readonly kind: "row"; readonly year: number; readonly month: number; readonly day: number; readonly mean_temp: number };
+type Row = {
+  readonly kind: "row";
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly mean_temp: number;
+};
 type Mean = { readonly kind: "mean"; readonly value: number };
 type Msg = Row | Mean;
 
@@ -50,7 +56,10 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
     step: emitOnce<void, Msg, string>(() => {
       const events: Message<Msg>[] = [];
       for (const row of inputRows) {
-        events.push(msg(rowsForMonthFilterEdge, row), msg(rowsForMeanEdge, row));
+        events.push(
+          msg(rowsForMonthFilterEdge, row),
+          msg(rowsForMeanEdge, row),
+        );
       }
       return events;
     }, "source done"),
@@ -60,8 +69,12 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
     state: undefined,
     trigger: when(rowsForMonthFilterEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const rows = from(view, rowsForMonthFilterEdge).filter((m): m is Row => m.kind === "row");
-      return rows.filter((r) => r.month === monthFilterValue).map((r) => msg(monthFilteredEdge, r));
+      const rows = from(view, rowsForMonthFilterEdge).filter(
+        (m): m is Row => m.kind === "row",
+      );
+      return rows
+        .filter((r) => r.month === monthFilterValue)
+        .map((r) => msg(monthFilteredEdge, r));
     }),
   });
 
@@ -69,7 +82,9 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
     state: undefined,
     trigger: when(rowsForMeanEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const rows = from(view, rowsForMeanEdge).filter((m): m is Row => m.kind === "row");
+      const rows = from(view, rowsForMeanEdge).filter(
+        (m): m is Row => m.kind === "row",
+      );
       if (rows.length === 0) return [];
       const total = rows.reduce((acc, r) => acc + r.mean_temp, 0);
       const value = total / rows.length;
@@ -81,11 +96,17 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
     state: undefined,
     trigger: allOf(on(monthFilteredEdge), on(meanEdge)),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const rows = from(view, monthFilteredEdge).filter((m): m is Row => m.kind === "row");
-      const means = from(view, meanEdge).filter((m): m is Mean => m.kind === "mean");
+      const rows = from(view, monthFilteredEdge).filter(
+        (m): m is Row => m.kind === "row",
+      );
+      const means = from(view, meanEdge).filter(
+        (m): m is Mean => m.kind === "mean",
+      );
       const mean = means[0];
       if (mean === undefined) return [];
-      return rows.filter((r) => r.mean_temp < mean.value).map((r) => msg(outEdge, r));
+      return rows
+        .filter((r) => r.mean_temp < mean.value)
+        .map((r) => msg(outEdge, r));
     }),
   });
 
@@ -110,7 +131,10 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
 
   assert.deepEqual(
     results.map((r) => [r.year, r.month, r.day]),
-    [[2010, 1, 1], [2012, 1, 2]],
+    [
+      [2010, 1, 1],
+      [2012, 1, 2],
+    ],
   );
   assert.equal(completed.get(sourceId), "source done");
 });

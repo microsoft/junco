@@ -4,25 +4,29 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import type { Edge, Message } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { Edge, Message } from "../src/index.ts";
 
 type SourceLine = { readonly kind: "line"; readonly text: string };
 type CharCount = { readonly kind: "chars"; readonly length: number };
 type WordMsg = { readonly kind: "word"; readonly word: string };
-type Pair = { readonly kind: "pair"; readonly word: string; readonly count: number };
+type Pair = {
+  readonly kind: "pair";
+  readonly word: string;
+  readonly count: number;
+};
 type Msg = SourceLine | CharCount | WordMsg | Pair;
 
 test("cookbook: multiple output pardo split lines to words", async () => {
@@ -59,10 +63,14 @@ test("cookbook: multiple output pardo split lines to words", async () => {
     state: undefined,
     trigger: when(linesEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesEdge).filter((m): m is SourceLine => m.kind === "line");
+      const lines = from(view, linesEdge).filter(
+        (m): m is SourceLine => m.kind === "line",
+      );
       const events: Message<Msg>[] = [];
       for (const line of lines) {
-        events.push(msg(charCountEdge, { kind: "chars", length: line.text.length }));
+        events.push(
+          msg(charCountEdge, { kind: "chars", length: line.text.length }),
+        );
         for (const match of line.text.matchAll(/[A-Za-z']+/g)) {
           const word = match[0]!;
           const targetEdge = word.length <= 3 ? shortWordsEdge : longWordsEdge;
@@ -78,13 +86,18 @@ test("cookbook: multiple output pardo split lines to words", async () => {
     state: undefined,
     trigger: when(charCountEdge),
     step: stepNode<void, Msg, string>((_state, view) => {
-      const chars = from(view, charCountEdge).filter((m): m is CharCount => m.kind === "chars");
+      const chars = from(view, charCountEdge).filter(
+        (m): m is CharCount => m.kind === "chars",
+      );
       const total = chars.reduce((acc, c) => acc + c.length, 0);
       return [msg(charSumEdge, { kind: "chars", length: total })];
     }),
   });
 
-  const attachCountWords = (inputEdge: Edge<Msg, string>, outputEdge: Edge<Msg, string>) => {
+  const attachCountWords = (
+    inputEdge: Edge<Msg, string>,
+    outputEdge: Edge<Msg, string>,
+  ) => {
     const id = graph.addNode({
       state: undefined,
       trigger: when(inputEdge),
@@ -96,7 +109,13 @@ test("cookbook: multiple output pardo split lines to words", async () => {
         );
         const events: Message<Msg>[] = [];
         for (const word of Object.keys(groups).sort(S.Ord.compare)) {
-          events.push(msg(outputEdge, { kind: "pair", word, count: groups[word]!.length }));
+          events.push(
+            msg(outputEdge, {
+              kind: "pair",
+              word,
+              count: groups[word]!.length,
+            }),
+          );
         }
         return events;
       }),
@@ -153,11 +172,25 @@ test("cookbook: multiple output pardo split lines to words", async () => {
   assert.deepEqual(totalChars, [46]);
   assert.deepEqual(
     [...shortCounts].sort(),
-    ([["A", 2], ["new", 2], ["of", 1]] as [string, number][]).sort(),
+    (
+      [
+        ["A", 2],
+        ["new", 2],
+        ["of", 1],
+      ] as [string, number][]
+    ).sort(),
   );
   assert.deepEqual(
     [...longCounts].sort(),
-    ([["whole", 1], ["world", 1], ["fantastic", 1], ["point", 1], ["view", 1]] as [string, number][]).sort(),
+    (
+      [
+        ["whole", 1],
+        ["world", 1],
+        ["fantastic", 1],
+        ["point", 1],
+        ["view", 1],
+      ] as [string, number][]
+    ).sort(),
   );
   assert.deepEqual(splitterFirings, [12]);
   assert.equal(completed.get(sourceId), "source done");

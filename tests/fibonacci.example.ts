@@ -1,22 +1,22 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
+import type { NodeGenerator } from "../src/index.ts";
 import {
-  DataflowGraph,
-  ReadyScheduler,
-  UNBOUNDED,
-  Width,
   always,
   anyOf,
+  DataflowGraph,
   emitOnce,
   from,
   messageEdge,
   msg,
   on,
+  ReadyScheduler,
   stepNode,
+  UNBOUNDED,
+  Width,
   when,
 } from "../src/index.ts";
-import type { NodeGenerator } from "../src/index.ts";
 
 test("cookbook: fibonacci via self-loop", async () => {
   const fibSeed = messageEdge<number, string>("fibSeed");
@@ -33,7 +33,10 @@ test("cookbook: fibonacci via self-loop", async () => {
   const seedId = graph.addNode({
     state: undefined,
     trigger: always(),
-    step: emitOnce<void, number, string>(() => [msg(fibSeed, 0), msg(fibSeed, 1)], "seeded"),
+    step: emitOnce<void, number, string>(
+      () => [msg(fibSeed, 0), msg(fibSeed, 1)],
+      "seeded",
+    ),
   });
 
   const fibId = graph.addNode({
@@ -42,7 +45,8 @@ test("cookbook: fibonacci via self-loop", async () => {
     step: async function* (): NodeGenerator<number, string> {
       let inputs = yield [];
       for (let i = 0; i < 10; i++) {
-        const pair = (inputs.messages.get(fibSeed.id) ?? inputs.messages.get(fibLoop.id))!;
+        const pair = (inputs.messages.get(fibSeed.id) ??
+          inputs.messages.get(fibLoop.id))!;
         const a = pair[0]!;
         const b = pair[1]!;
         inputs = yield [msg(fibOut, a), msg(fibLoop, b), msg(fibLoop, a + b)];
