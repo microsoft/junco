@@ -1,11 +1,25 @@
+// Oh My Pi native binding/grep modules transplanted from revision
+// 7ae76f8e4daca0c8f409f61bcd514260cd522365 — see LICENSE.oh-my-pi.
+mod ast;
+mod diff;
+mod edit;
 mod frontend;
+mod glob;
+mod glob_util;
+mod grep;
+mod iofs;
+mod js;
 mod mux;
+mod task;
+#[cfg(test)]
+mod testing;
+mod utils;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use marsh_core::MarshExecutor;
+use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
 use napi::bindgen_prelude::{Buffer, PromiseRaw};
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Env, Error, Result};
@@ -54,9 +68,9 @@ pub struct NativeMux {
 }
 
 impl NativeMux {
-    fn from_executor(executor: MarshExecutor) -> Result<Self> {
+    fn from_seed(seed: PathBuf, filesystem: Arc<dyn Subvolumes>) -> Result<Self> {
         Ok(Self {
-            session: Session::new(executor).map_err(Error::from_reason)?,
+            session: Session::new(seed, filesystem).map_err(Error::from_reason)?,
         })
     }
 }
@@ -65,11 +79,18 @@ impl NativeMux {
 impl NativeMux {
     #[napi(factory)]
     pub async fn open(cwd: String) -> Result<Self> {
-        let executor = tokio::task::spawn_blocking(move || MarshExecutor::open(Path::new(&cwd)))
-            .await
-            .map_err(|error| Error::from_reason(error.to_string()))?
-            .map_err(|error| Error::from_reason(error.to_string()))?;
-        Self::from_executor(executor)
+        let (seed, filesystem) = tokio::task::spawn_blocking(move || {
+            let filesystem: Arc<dyn Subvolumes> = Arc::new(LibBtrfs);
+            // Discovery only. Materialization, the seed's exclusive lease, its log recovery
+            // and its validator belong to the first shell this session opens, so an idle
+            // handle over a seed another process is publishing into is legal.
+            let (layer, _) = PersistenceLayer::discover(Path::new(&cwd), filesystem.as_ref())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+            Ok::<_, Error>((layer.seed, filesystem))
+        })
+        .await
+        .map_err(|error| Error::from_reason(error.to_string()))??;
+        Self::from_seed(seed, filesystem)
     }
 
     #[napi(getter)]
@@ -98,13 +119,16 @@ impl NativeMux {
         let mut closed = self.session.begin_close();
         env.spawn_future_with_callback(
             async move {
-                loop {
-                    if let Some(result) = closed.borrow_and_update().clone() {
-                        return result.map_err(Error::from_reason);
-                    }
-                    closed.changed().await.map_err(|_| {
-                        Error::from_reason("ShellMux close task ended without a result")
-                    })?;
+                let published = closed
+                    .wait_for(Option::is_some)
+                    .await
+                    .map_err(|_| Error::from_reason("ShellMux close task ended without a result"))?
+                    .clone();
+                match published {
+                    Some(result) => result.map_err(Error::from_reason),
+                    None => Err(Error::from_reason(
+                        "ShellMux close task ended without a result",
+                    )),
                 }
             },
             |_, ()| Ok(()),
@@ -117,7 +141,7 @@ impl NativeMux {
 impl NativeMux {
     #[napi(factory)]
     pub async fn open_copy_tree(seed: String) -> Result<Self> {
-        let executor = tokio::task::spawn_blocking(move || {
+        let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let seed = Path::new(&seed)
                 .canonicalize()
                 .map_err(|error| Error::from_reason(error.to_string()))?;
@@ -130,13 +154,17 @@ impl NativeMux {
                     seed.display()
                 )));
             }
-            let filesystem = Arc::new(marsh_btrfs::fake::CopyTree::new());
-            filesystem.register(&seed);
-            MarshExecutor::open_with(&seed, filesystem)
-                .map_err(|error| Error::from_reason(error.to_string()))
+            let fake = Arc::new(marsh_btrfs::fake::CopyTree::new());
+            fake.register(&seed);
+            // One instance for discovery and for the session: a second CopyTree would know
+            // none of this one's registered roots.
+            let filesystem: Arc<dyn Subvolumes> = fake;
+            let (layer, _) = PersistenceLayer::discover(&seed, filesystem.as_ref())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+            Ok::<_, Error>((layer.seed, filesystem))
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        Self::from_executor(executor)
+        Self::from_seed(seed, filesystem)
     }
 }

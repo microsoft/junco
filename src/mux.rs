@@ -5,13 +5,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use brush_core::{ShellVariable, env::ShellEnvironment};
+use marsh_btrfs::{PersistenceLayer, Subvolumes};
+use marsh_core::Outcome;
+use marsh_core::policy::Principal;
 use marsh_core::shellmux::{
-    CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, ShellFrontend,
-    ShellId, ShellMux, SpawnOptions, Spawned,
+    CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell, ShellFrontend,
+    ShellMux, SpawnOptions,
 };
-use marsh_core::{MarshExecutor, Outcome, PolicyValidator};
 use tokio::runtime::Handle;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
@@ -34,15 +36,16 @@ impl RunState {
     }
 
     pub(crate) async fn wait(&self) -> RunResult {
-        let mut result = self.result.clone();
-        loop {
-            if let Some(value) = result.borrow_and_update().clone() {
-                return value;
-            }
-            result
-                .changed()
-                .await
-                .map_err(|_| "ShellMux run task ended without a result".to_string())?;
+        let published = self
+            .result
+            .clone()
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| "ShellMux run task ended without a result".to_string())?
+            .clone();
+        match published {
+            Some(value) => value,
+            None => Err("ShellMux run task ended without a result".to_string()),
         }
     }
 
@@ -60,6 +63,9 @@ impl RunState {
 struct Backend {
     mux: Arc<ShellMux>,
     frontend: Arc<Mutex<Frontend>>,
+    /// The one filesystem this session discovers seeds through. A second instance would
+    /// know none of a CopyTree fixture's registered roots.
+    filesystem: Arc<dyn Subvolumes>,
 }
 
 struct TrackedRun {
@@ -82,19 +88,15 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(executor: MarshExecutor) -> Result<Arc<Self>, String> {
-        let seed = executor
-            .seed()
-            .ok_or_else(|| "ShellMux requires an executor with an open seed".to_string())?
-            .to_path_buf();
+    pub(crate) fn new(seed: PathBuf, filesystem: Arc<dyn Subvolumes>) -> Result<Arc<Self>, String> {
         let runtime = Handle::current();
         let frontend = Arc::new(Mutex::new(Frontend::new(24, 80)));
-        let validator = Arc::new(Mutex::new(PolicyValidator::new()));
-        let mux = ShellMux::new(
-            executor,
-            validator,
+        // Leases nothing: the seed's exclusive lease, its log recovery and its one validator
+        // are opened by the first shell whose working directory names it.
+        let mux = ShellMux::new_with(
             MuxProfile::default(),
             Arc::clone(&frontend),
+            Arc::clone(&filesystem),
         )
         .map_err(|error| error.to_string())?;
         let (closed, _) = watch::channel(None);
@@ -102,7 +104,11 @@ impl Session {
             seed,
             runtime,
             state: Mutex::new(SessionState {
-                backend: Some(Backend { mux, frontend }),
+                backend: Some(Backend {
+                    mux,
+                    frontend,
+                    filesystem,
+                }),
                 closing: false,
                 runs: HashMap::new(),
                 principals: HashMap::new(),
@@ -262,8 +268,9 @@ impl RunTask {
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
+        let filesystem = Arc::clone(&backend.filesystem);
         let directory = runtime
-            .spawn_blocking(move || working_directory(&cwd, &seed))
+            .spawn_blocking(move || working_directory(&cwd, &seed, filesystem.as_ref()))
             .await
             .map_err(|error| format!("Cannot resolve working directory: {error}"))??;
         if state.is_cancelled() {
@@ -280,32 +287,35 @@ impl RunTask {
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
-        // Never race this future against cancellation: spawn admits its job
-        // before building resources, and dropping it could orphan that job.
-        let job = backend
+        // Never race this future against cancellation: open_shell leases the seed and builds
+        // resources, and dropping it could orphan both. A fresh pipe shell every call, so a
+        // durable principal's variables never leak from one command into the next.
+        let shell = backend
             .mux
-            .spawn(
+            .open_shell(
                 &directory,
-                Some(ShellId::durable(principal_name)),
-                None,
+                Some(Principal::from(principal_name)),
                 SpawnOptions {
                     io: JobIo::Pipes,
                     environment: Some(environment),
+                    ..Default::default()
                 },
             )
             .await
             .map_err(|error| error.to_string())?;
+        // Register before the route's drain fence can be awaited: only a registered route ever
+        // observes FrontendEvent::Closed, and run_job's first act is the cancellation check.
         backend
             .frontend
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .register(job.sandbox().uid.clone(), Arc::clone(&route));
-        let result = run_job(&backend.mux, &job, &state, &route, &command, timeout).await;
+            .register(shell.sandbox().uid.clone(), Arc::clone(&route));
+        let result = run_job(&shell, &state, &route, &command, timeout).await;
         backend
             .frontend
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&job.sandbox().uid);
+            .remove(&shell.sandbox().uid);
         result
     }
 }
@@ -327,36 +337,34 @@ enum StopCause {
 }
 
 enum RunEvent {
-    Completed(Result<Arc<CommandCompletion>, String>),
+    Completed(RunResult),
     Stop(StopCause),
 }
 
 async fn run_job(
-    mux: &Arc<ShellMux>,
-    job: &Spawned,
+    shell: &Shell,
     state: &RunState,
     route: &OutputRoute,
     text: &str,
     timeout: Option<Duration>,
 ) -> RunResult {
     if state.is_cancelled() {
-        return stop_and_settle(mux, job, None, route, StopCause::Cancelled).await;
+        return stop_and_settle(shell, None, route, StopCause::Cancelled).await;
     }
-    if let Err(error) = mux.close_input(job).await {
-        return stop_and_settle(mux, job, None, route, StopCause::Failed(error.to_string())).await;
+    if let Err(error) = shell.close_input().await {
+        return stop_and_settle(shell, None, route, StopCause::Failed(error.to_string())).await;
     }
     if let Some(error) = route.failure() {
-        return stop_and_settle(mux, job, None, route, StopCause::Failed(error)).await;
+        return stop_and_settle(shell, None, route, StopCause::Failed(error)).await;
     }
-    // Admission is the deadline boundary. Neither opening the mux, waiting for
-    // this principal, canonicalization nor snapshot construction consumes it.
+    // Admission is the deadline boundary. Neither discovering the seed, waiting for this
+    // principal, canonicalization nor shell construction consumes it.
     let deadline = match timeout {
         Some(duration) => match Instant::now().checked_add(duration) {
             Some(deadline) => Some(deadline),
             None => {
                 return stop_and_settle(
-                    mux,
-                    job,
+                    shell,
                     None,
                     route,
                     StopCause::Failed(
@@ -369,76 +377,100 @@ async fn run_job(
         None => None,
     };
     if state.is_cancelled() {
-        return stop_and_settle(mux, job, None, route, StopCause::Cancelled).await;
+        return stop_and_settle(shell, None, route, StopCause::Cancelled).await;
     }
-    // start_in is also allowed to finish once entered. A cancellation recorded
-    // during admission is observed immediately afterwards by the watch below.
-    let command = match mux.start_in(job, text, CommandOptions::default()).await {
-        Ok(command) => command,
-        Err(error) => {
-            return stop_and_settle(mux, job, None, route, StopCause::Failed(error.to_string()))
-                .await;
-        }
-    };
+    // The sender goes into the completion branch and the receiver stays here. A branch that is
+    // never polled drops the sender and closes the channel; a polled one has already handed the
+    // sender to marsh's owned command task, so dropping the answer stops nothing.
+    let (accepted, receipt) = oneshot::channel();
     let event = tokio::select! {
         biased;
         error = route.failed() => RunEvent::Stop(StopCause::Failed(error)),
         _ = state.cancelled() => RunEvent::Stop(StopCause::Cancelled),
-        result = completed_job(&command, job, route) => RunEvent::Completed(result),
+        result = completed_job(shell, route, text, accepted) => RunEvent::Completed(result),
         _ = deadline_elapsed(deadline) => RunEvent::Stop(StopCause::TimedOut),
     };
+    // The unselected completion future is already dropped here, so its receipt channel is
+    // settled one way or the other before cleanup consults it.
     match event {
-        RunEvent::Completed(Ok(completion)) => published_result(&completion),
+        RunEvent::Completed(Ok(result)) => Ok(result),
+        // A policy, admission or IO failure still owes an idle shell and pending callbacks.
         RunEvent::Completed(Err(error)) => {
-            stop_and_settle(mux, job, Some(&command), route, StopCause::Failed(error)).await
+            stop_and_settle(shell, Some(receipt), route, StopCause::Failed(error)).await
         }
-        RunEvent::Stop(cause) => stop_and_settle(mux, job, Some(&command), route, cause).await,
+        RunEvent::Stop(cause) => stop_and_settle(shell, Some(receipt), route, cause).await,
     }
 }
 
 async fn completed_job(
-    command: &CommandHandle,
-    job: &Spawned,
+    shell: &Shell,
     route: &OutputRoute,
-) -> Result<Arc<CommandCompletion>, String> {
-    let completion = command.wait().await.map_err(|error| error.to_string())?;
-    let end = job.wait_closed().await.map_err(|error| error.to_string())?;
-    // wait_closed can precede the frontend's final output/Closed observation at
-    // this marsh revision. Only the route provides the JavaScript output fence.
+    text: &str,
+    accepted: oneshot::Sender<CommandHandle>,
+) -> RunResult {
+    // Ok means Outcome::Published and nothing else; a nonzero exit code is a process status,
+    // not a refusal, and is published like any other.
+    let completion = shell
+        .run_command(
+            text,
+            CommandOptions {
+                on_accept: Some(accepted),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(run_error)?;
+    let end = shell
+        .wait_closed()
+        .await
+        .map_err(|error| error.to_string())?;
+    // wait_closed sends the closure watch before the lifecycle task emits FrontendEvent::Closed,
+    // so neither it nor shutdown acknowledges a pending JavaScript callback. Only the route does.
     route.drained().await?;
     if let Some(error) = &end.error {
         return Err(error.to_string());
     }
-    Ok(completion)
+    let exit_code = completion
+        .exit_code
+        .ok_or_else(|| "Marsh published a command without a process exit status".to_string())?;
+    Ok(NativeRunResult {
+        exit_code: Some(exit_code),
+        cancelled: false,
+        timed_out: false,
+    })
 }
 
 async fn stop_and_settle(
-    mux: &Arc<ShellMux>,
-    job: &Spawned,
-    command: Option<&CommandHandle>,
+    shell: &Shell,
+    accepted: Option<oneshot::Receiver<CommandHandle>>,
     route: &OutputRoute,
     cause: StopCause,
 ) -> RunResult {
     let mut failure = None;
-    if !job.is_closed() {
-        match mux.stop(job, true).await {
+    if !shell.is_closed() {
+        match shell.stop(true).await {
             Ok(()) | Err(MuxError::StaleJob(_)) => {}
             Err(error) => remember_error(&mut failure, error.to_string()),
         }
     }
-    // Once cleanup starts it is never selected away. All callbacks are joined
-    // even when one failed, and every admitted command keeps its own verdict.
-    let completion = match command {
-        Some(command) => match command.wait().await {
-            Ok(completion) => Some(completion),
-            Err(error) => {
-                remember_error(&mut failure, error.to_string());
-                None
-            }
+    // Once cleanup starts it is never selected away. All callbacks are joined even when one
+    // failed, and every admitted command keeps its own verdict.
+    let completion = match accepted {
+        Some(receipt) => match receipt.await {
+            Ok(handle) => match handle.wait().await {
+                Ok(completion) => Some(completion),
+                Err(error) => {
+                    remember_error(&mut failure, error.to_string());
+                    None
+                }
+            },
+            // A closed channel means no line was ever admitted through this submission. There
+            // is no receipt to wait for, and success or an exit code must not be invented.
+            Err(_) => None,
         },
         None => None,
     };
-    match job.wait_closed().await {
+    match shell.wait_closed().await {
         Ok(end) => {
             if let Some(error) = &end.error {
                 remember_error(&mut failure, error.to_string());
@@ -458,6 +490,8 @@ async fn stop_and_settle(
             if let Some(error) = failure {
                 return Err(error);
             }
+            // The receipt's own code: JobEnd.completion can miss it when a concurrent stop
+            // reclaimed the shell during finalization.
             let exit_code = completion
                 .as_ref()
                 .and_then(|completion| completion.exit_code);
@@ -469,33 +503,20 @@ async fn stop_and_settle(
     }
 }
 
-fn published_result(completion: &CommandCompletion) -> RunResult {
-    match completion.outcome.as_ref() {
-        Ok(Outcome::Published { .. }) => {
-            let exit_code = completion.exit_code.ok_or_else(|| {
-                "Marsh published a command without a process exit status".to_string()
-            })?;
-            Ok(NativeRunResult {
-                exit_code: Some(exit_code),
-                cancelled: false,
-                timed_out: false,
-            })
+/// Upstream already decided publication; this only keeps a denial's diagnostics actionable.
+fn run_error(error: RunError) -> String {
+    let RunError::Policy(denied) = &error else {
+        // Display preserves the infrastructure cause for admission, unpublished and lost answers.
+        return error.to_string();
+    };
+    let mut message = format!("Marsh policy denied publication: {denied}");
+    if let Ok(Outcome::Denied { denials, .. }) = denied.completion().outcome.as_ref() {
+        for denial in denials {
+            message.push('\n');
+            message.push_str(&denial.to_string());
         }
-        Ok(Outcome::Denied { denials, .. }) => Err(format!(
-            "Marsh policy denied publication: {}",
-            denials
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-        )),
-        Ok(Outcome::Stale { stale, .. }) => Err(format!("Marsh snapshot is stale: {stale:?}")),
-        Ok(Outcome::Discarded) => Err("Marsh discarded a command without cancellation".to_string()),
-        Ok(Outcome::Detached) => {
-            Err("Marsh command unexpectedly ran without an attached seed".to_string())
-        }
-        Err(error) => Err(error.to_string()),
     }
+    message
 }
 
 fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> NativeRunResult {
@@ -537,7 +558,11 @@ fn native_timeout(milliseconds: Option<f64>) -> Result<Option<Duration>, String>
     Ok(Some(duration))
 }
 
-fn working_directory(cwd: &str, seed: &Path) -> Result<String, String> {
+fn working_directory(
+    cwd: &str,
+    seed: &Path,
+    filesystem: &dyn Subvolumes,
+) -> Result<PathBuf, String> {
     let directory = std::fs::canonicalize(cwd)
         .map_err(|error| format!("Cannot resolve working directory {cwd}: {error}"))?;
     let metadata = std::fs::metadata(&directory)
@@ -545,17 +570,29 @@ fn working_directory(cwd: &str, seed: &Path) -> Result<String, String> {
     if !metadata.is_dir() {
         return Err(format!("Working directory is not a directory: {cwd}"));
     }
-    let relative = directory.strip_prefix(seed).map_err(|_| {
-        format!(
+    if directory.strip_prefix(seed).is_err() {
+        return Err(format!(
             "Working directory {} is outside ShellMux seed {}",
             directory.display(),
             seed.display()
-        )
-    })?;
-    relative.to_str().map(str::to_owned).ok_or_else(|| {
-        format!(
+        ));
+    }
+    if directory.to_str().is_none() {
+        return Err(format!(
             "Working directory is not valid UTF-8: {}",
             directory.display()
-        )
-    })
+        ));
+    }
+    // Before a shell exists: a multi-seed mux would otherwise silently lease a nested seed for
+    // a session that was opened over exactly one.
+    let (layer, _) = PersistenceLayer::discover(&directory, filesystem)
+        .map_err(|error| format!("Cannot resolve working directory {cwd}: {error}"))?;
+    if layer.seed != seed {
+        return Err(format!(
+            "Working directory {cwd} belongs to a different ShellMux seed {} (expected {})",
+            layer.seed.display(),
+            seed.display()
+        ));
+    }
+    Ok(directory)
 }

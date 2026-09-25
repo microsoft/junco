@@ -84,8 +84,8 @@ export function createShellMuxOperations(options?: {
         if (signal?.aborted) throw new Error("aborted");
         if (owner?.disposed) throw new Error("ShellMux session is closed");
 
-        // Assign the owner's opening promise before awaiting it. An aborted caller leaves
-        // this promise owned by shutdown, including a lease acquired after the abort.
+        // Assign the owner's opening promise before awaiting it, so an aborted caller leaves
+        // the eventual native session owned by shutdown instead of orphaning it.
         const mux = borrowedMux ?? await beforeStart(openOwnedMux(owner!, cwd));
         if (signal?.aborted) throw new Error("aborted");
         if (owner?.disposed) throw new Error("ShellMux session is closed");

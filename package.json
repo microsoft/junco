@@ -16,16 +16,23 @@
     "build:native": "node scripts/with-junco-build-env.mjs napi build --platform --release --esm --output-dir native --js index.js --dts index.d.ts -- --locked",
     "build:native:test": "node scripts/with-junco-build-env.mjs napi build --platform --esm --features test-fs --output-dir target/native-test --js index.js --dts index.d.ts -- --locked",
     "build:ts": "tsc -p tsconfig.json",
-    "build": "npm run build:native && npm run build:ts"
+    "build": "npm run build:native && npm run build:ts",
+    "test": "timeout --signal=TERM --kill-after=5s 240s node --test --test-concurrency=1 tests/bash.test.mjs tests/agent.test.mjs tests/tools.test.mjs",
+    "test:btrfs": "node scripts/test-btrfs.mjs"
   },
   "napi": {
     "binaryName": "junco_tools",
     "targets": ["x86_64-unknown-linux-gnu"]
   },
+  "dependencies": {
+    "typebox": "1.1.38"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@napi-rs/cli": "3.7.2",
     "@types/node": "24.12.4",

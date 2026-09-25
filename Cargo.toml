@@ -14,19 +14,42 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-test-fs = ["dep:marsh-btrfs", "marsh-btrfs/fake"]
+test-fs = ["marsh-btrfs/fake"]
 
 [dependencies]
 napi = { version = "=3.9.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
 # Cargo.lock keeps napi-derive-backend at 5.0.4 for napi 3.9 codegen compatibility.
 napi-derive = "=3.5.6"
-marsh-core = { git = "ssh://git@github.com/junco-org/marsh.git", rev = "57c258de2deb113eba65d00664cadc4716f60cd1" }
-marsh-btrfs = { git = "ssh://git@github.com/junco-org/marsh.git", rev = "57c258de2deb113eba65d00664cadc4716f60cd1", optional = true }
+marsh-core = { path = "../marsh/crates/marsh-core" }
+marsh-btrfs = { path = "../marsh/crates/marsh-btrfs" }
 brush-core = "=0.5.0"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+
+# Unmodified Oh My Pi engines, imported from a pinned public Git revision.
+pi-ast = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
+pi-diff = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
+pi-walker = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
+pi-edit = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
+
+# Direct dependencies of the transplanted pi-natives binding/grep modules.
+async-trait = "0.1"
+ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
+flume = "0.12"
+globset = "0.4"
+grep-matcher = "0.1"
+grep-pcre2 = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+heapless = "0.9"
+parking_lot = "0.12.5"
+regex = "1"
+smallvec = { version = "1.16.1", features = ["serde", "write", "union", "const_new"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [build-dependencies]
 napi-build = "=2.3.2"
 
 [patch.crates-io]
-brush-core = { git = "ssh://git@github.com/junco-org/marsh.git", rev = "57c258de2deb113eba65d00664cadc4716f60cd1" }
+brush-core = { path = "../marsh/crates/brush-core" }
