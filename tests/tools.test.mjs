@@ -28,8 +28,7 @@ async function workspace(files = {}) {
     return {
       root,
       collection,
-      call: (name, input, signal) =>
-        byName.get(name).execute(`tools-${name}`, input, signal, undefined, undefined),
+      call: (name, input, signal) => byName.get(name).execute(`tools-${name}`, input, signal, undefined),
       file: (relative) => readFile(join(root, relative), "utf8"),
       write: (relative, content) => writeFile(join(root, relative), content),
       dispose: () => rm(root, { recursive: true, force: true }),

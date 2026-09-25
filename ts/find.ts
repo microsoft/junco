@@ -1,6 +1,12 @@
 import { access } from "node:fs/promises";
 import { resolve as resolveNodePath } from "node:path";
-import { createFindToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import {
+  createFindTool as createPiFindTool,
+  createFindToolDefinition as createPiFindToolDefinition,
+  type FindToolDetails,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import type { NativeModule } from "./native.js";
 import { requireU32, throwIfAborted, withNativeSignal } from "./tool-support.js";
 
@@ -12,18 +18,18 @@ import { requireU32, throwIfAborted, withNativeSignal } from "./tool-support.js"
  * downloading `fd`. `fileType` stays unset so matching directories and symlinks
  * remain discoverable exactly as Pi's `fd` path leaves them.
  */
-export function createNativeFindToolDefinition(
+export function createFindTool(
   cwd: string,
   native: NativeModule,
-): ReturnType<typeof createFindToolDefinition> {
-  const base = createFindToolDefinition(cwd);
-  return {
+): AgentTool<ReturnType<typeof createPiFindTool>["parameters"], FindToolDetails | undefined> {
+  const base = createPiFindToolDefinition(cwd);
+  const tool = {
     ...base,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate) {
       throwIfAborted(signal);
       if (params.limit !== undefined) requireU32("limit", params.limit, 1);
       // Built per call so concurrent invocations never share a mutable signal.
-      const scoped = createFindToolDefinition(cwd, {
+      const scoped = createPiFindTool(cwd, {
         operations: {
           async exists(absolutePath) {
             throwIfAborted(signal);
@@ -57,7 +63,8 @@ export function createNativeFindToolDefinition(
       });
       // No signal for the inner factory: its immediate-abort wrapper would
       // otherwise settle the call while a native worker is still draining.
-      return scoped.execute(toolCallId, params, undefined, onUpdate, ctx);
+      return scoped.execute(toolCallId, params, undefined, onUpdate);
     },
-  };
+  } satisfies ToolDefinition<ReturnType<typeof createPiFindTool>["parameters"], FindToolDetails | undefined>;
+  return tool;
 }

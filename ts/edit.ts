@@ -1,6 +1,7 @@
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { EditFileOutcome, EditStore, EditWriteRequest, EditWriteResponse } from "../native/index.js";
@@ -32,12 +33,12 @@ export interface HashlineEditDetails {
  * stage nothing; a writer error or cancellation between writes can leave
  * earlier files already written, exactly as the engine does natively.
  */
-export function createHashlineEditToolDefinition(
+export function createEditTool(
   cwd: string,
   store: EditStore,
   native: NativeModule,
-): ToolDefinition<typeof editSchema, HashlineEditDetails> {
-  return {
+): AgentTool<typeof editSchema, HashlineEditDetails> {
+  const tool = {
     name: "edit",
     label: "Edit",
     description: native.editDescription("hashline"),
@@ -119,5 +120,6 @@ export function createHashlineEditToolDefinition(
         details: { files: outcome.files },
       };
     },
-  };
+  } satisfies ToolDefinition<typeof editSchema, HashlineEditDetails>;
+  return tool;
 }
