@@ -7,24 +7,28 @@ Each node is an `async function*`. The runtime resumes it with the inputs its tr
 ## Architecture
 
 ```mermaid
-flowchart LR
-  subgraph Definition
-    N["Node<br/>state, trigger, async function* step"]
-    E["Edge<br/>message queue (FIFO) or value cell (write-once)"]
+%%{init: {"flowchart": {"wrappingWidth": 360}}}%%
+flowchart TB
+  subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(scheduler, window, threads: WidthType via Width() or UNBOUNDED)"]
+    N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*, stepNode, emitOnce)"]
+    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>messageEdge: Queue#lt;N#gt; FIFO<br/>valueEdge: write-once Option#lt;T#gt;"]
+    S["DataflowScheduler#lt;N, T#gt;<br/>ReadyScheduler, RoundRobinScheduler"]
   end
-  subgraph "DataflowGraph.run()"
-    A["available nodes<br/>not done and trigger fires"] --> P["scheduler.schedule()<br/>lanes x turns + read counts"]
-    P --> K["validate plan"]
-    K --> X["run one turn of every lane concurrently<br/>pop inputs into a ParentView"]
-    X --> G["generator.next(view)"]
-    G -- "yield Message[]" --> Q["push onto outbound queues"]
-    G -- "return T" --> R["record result<br/>resolve value edges"]
+  subgraph Run["run(): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
+    A["available: Map#lt;NodeIdType, NodeAvailability#gt;<br/>AvailabilityFn / evaluateTrigger / satisfiedEdges"] --> P["schedule(available): Schedule<br/>NodeSchedule lanes, InputSchedule reads<br/>triggerInputs default"]
+    P --> K["validate Schedule<br/>throws DataflowDefinitionError"]
+    K --> X["pop MessageSchedule counts<br/>into ParentView#lt;N, T#gt; (messages, values)"]
+    X --> G["NodeGenerator#lt;N, T#gt;.next(view)<br/>AsyncGenerator#lt;Message#lt;N#gt;[], T, ParentView#gt;"]
+    G -- "yield Message[] via msg()" --> Q["route to outbound Queue#lt;N#gt;"]
+    G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>resolve valueEdge cells"]
+    G -- "throw EH" --> F["reject: DataflowNodeError#lt;EH#gt;"]
     Q --> A
     R --> A
   end
   N --> A
   E --> X
-  A -- "nothing available" --> Z(["resolve Map of NodeId to T"])
+  S --> P
+  A -- "nothing available" --> Z(["ReadonlyMap#lt;NodeIdType, T#gt;"])
 ```
 
 | Part | Role |
