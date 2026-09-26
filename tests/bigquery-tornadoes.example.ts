@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
   always,
@@ -43,10 +44,12 @@ test("cookbook: bigquery tornadoes count per month", async () => {
   const resultsEdge = messageEdge<Msg, string>("results");
 
   const results: Result[] = [];
+  const tracer = createExampleTracer("cookbook/bigquery-tornadoes");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const inputRows: Row[] = [
@@ -120,14 +123,18 @@ test("cookbook: bigquery tornadoes count per month", async () => {
   graph.addEdge(filterAndPairId, combinePerKeyId, pairsEdge);
   graph.addEdge(combinePerKeyId, sinkId, resultsEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(results, [
-    { kind: "result", month: 1, tornado_count: 2 },
-    { kind: "result", month: 2, tornado_count: 1 },
-  ]);
-  assert.equal(completed.get(sourceId), "source done");
-  assert.equal(completed.has(filterAndPairId), false);
-  assert.equal(completed.has(combinePerKeyId), false);
-  assert.equal(completed.has(sinkId), false);
+    assert.deepEqual(results, [
+      { kind: "result", month: 1, tornado_count: 2 },
+      { kind: "result", month: 2, tornado_count: 1 },
+    ]);
+    assert.equal(completed.get(sourceId), "source done");
+    assert.equal(completed.has(filterAndPairId), false);
+    assert.equal(completed.has(combinePerKeyId), false);
+    assert.equal(completed.has(sinkId), false);
+  } finally {
+    await tracer.flush();
+  }
 });

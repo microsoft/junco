@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge, Message } from "../src/index.ts";
 import {
   allOf,
@@ -76,10 +77,12 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
   const tsvRows: Grouped[] = [];
   const stats: Count[] = [];
 
+  const tracer = createExampleTracer("cookbook/mergecontacts");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const makeKVSource = (
@@ -240,38 +243,42 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
   graph.addEdge(writersFilterCountId, statsSinkId, writersCountEdge);
   graph.addEdge(nomadsFilterCountId, statsSinkId, nomadsCountEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.equal(tsvRows.length, 5);
+    assert.equal(tsvRows.length, 5);
 
-  const larry = tsvRows.find((r) => r.name === "Larry Luddite");
-  assert(larry !== undefined);
-  assert.equal(larry.emails.length, 0);
-  assert.equal(larry.phones.length, 1);
-  assert.equal(larry.snailmails.length, 1);
+    const larry = tsvRows.find((r) => r.name === "Larry Luddite");
+    assert(larry !== undefined);
+    assert.equal(larry.emails.length, 0);
+    assert.equal(larry.phones.length, 1);
+    assert.equal(larry.snailmails.length, 1);
 
-  const nathan = tsvRows.find((r) => r.name === "Nathan Nomad");
-  assert(nathan !== undefined);
-  assert.equal(nathan.emails.length, 1);
-  assert.equal(nathan.phones.length, 1);
-  assert.equal(nathan.snailmails.length, 0);
+    const nathan = tsvRows.find((r) => r.name === "Nathan Nomad");
+    assert(nathan !== undefined);
+    assert.equal(nathan.emails.length, 1);
+    assert.equal(nathan.phones.length, 1);
+    assert.equal(nathan.snailmails.length, 0);
 
-  const wally = tsvRows.find((r) => r.name === "Wally Writer");
-  assert(wally !== undefined);
-  assert.equal(wally.emails.length, 1);
-  assert.equal(wally.phones.length, 0);
-  assert.equal(wally.snailmails.length, 1);
+    const wally = tsvRows.find((r) => r.name === "Wally Writer");
+    assert(wally !== undefined);
+    assert.equal(wally.emails.length, 1);
+    assert.equal(wally.phones.length, 0);
+    assert.equal(wally.snailmails.length, 1);
 
-  assert.deepEqual(
-    stats.map((c) => [c.label, c.value]).sort(),
-    [
-      ["luddites", 1],
-      ["nomads", 1],
-      ["writers", 1],
-    ].sort(),
-  );
+    assert.deepEqual(
+      stats.map((c) => [c.label, c.value]).sort(),
+      [
+        ["luddites", 1],
+        ["nomads", 1],
+        ["writers", 1],
+      ].sort(),
+    );
 
-  assert.equal(completed.get(emailSourceId), "email done");
-  assert.equal(completed.get(phoneSourceId), "phone done");
-  assert.equal(completed.get(snailmailSourceId), "snailmail done");
+    assert.equal(completed.get(emailSourceId), "email done");
+    assert.equal(completed.get(phoneSourceId), "phone done");
+    assert.equal(completed.get(snailmailSourceId), "snailmail done");
+  } finally {
+    await tracer.flush();
+  }
 });

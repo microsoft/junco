@@ -1,5 +1,11 @@
 export { emitOnce, from, msg, stepNode } from "./builders.js";
 export { DataflowGraph } from "./dataflow-graph.js";
+export type {
+  DataflowRunTrace,
+  DataflowStepTrace,
+  DataflowTracer,
+} from "./dataflow-tracer.js";
+export { DummyTracer } from "./dummy-tracer.js";
 export type { Edge } from "./edges.js";
 export { messageEdge, valueEdge } from "./edges.js";
 export { DataflowDefinitionError, DataflowNodeError } from "./errors.js";

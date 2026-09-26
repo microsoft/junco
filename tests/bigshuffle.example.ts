@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
   always,
@@ -46,10 +47,12 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   const inputSum: number[] = [];
   const outputSum: number[] = [];
 
+  const tracer = createExampleTracer("cookbook/bigshuffle");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -171,15 +174,19 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   graph.addEdge(inputCsumId, inputCsumSinkId, inputCsumEdge);
   graph.addEdge(outputCsumId, outputCsumSinkId, outputCsumEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(mainOutput, [
-    "AAAAAAAAAAvalue-1a",
-    "AAAAAAAAAAvalue-2a",
-    "BBBBBBBBBBvalue-1b",
-    "CCCCCCCCCCvalue-1c",
-  ]);
-  assert.deepEqual(inputSum, [72]);
-  assert.deepEqual(outputSum, [72]);
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(mainOutput, [
+      "AAAAAAAAAAvalue-1a",
+      "AAAAAAAAAAvalue-2a",
+      "BBBBBBBBBBvalue-1b",
+      "CCCCCCCCCCvalue-1c",
+    ]);
+    assert.deepEqual(inputSum, [72]);
+    assert.deepEqual(outputSum, [72]);
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

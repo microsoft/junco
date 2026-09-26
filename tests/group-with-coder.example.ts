@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
   always,
@@ -44,10 +45,12 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
   const inputLines = ["Alice,10", "Bob,5", "Alice,20", "Bob,15", "Alice,3"];
   const results: [string, number][] = [];
 
+  const tracer = createExampleTracer("cookbook/group-with-coder");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -119,11 +122,15 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
   graph.addEdge(parseId, sumByPlayerId, pairsEdge);
   graph.addEdge(sumByPlayerId, sinkId, totalsEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(results, [
-    ["Alice", 33],
-    ["Bob", 20],
-  ]);
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(results, [
+      ["Alice", 33],
+      ["Bob", 20],
+    ]);
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge, Message } from "../src/index.ts";
 import {
   always,
@@ -36,10 +37,12 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
   const counts1: [string, number][] = [];
   const counts2: [string, number][] = [];
 
+  const tracer = createExampleTracer("cookbook/custom-ptransform");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -118,18 +121,22 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
   graph.addEdge(count1Id, sink1Id, count1OutEdge);
   graph.addEdge(count2Id, sink2Id, count2OutEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(counts1, [
-    ["apple", 3],
-    ["banana", 2],
-    ["cherry", 1],
-  ]);
-  assert.deepEqual(counts2, [
-    ["apple", 6],
-    ["banana", 4],
-    ["cherry", 2],
-  ]);
-  assert.notEqual(count1Id, count2Id);
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(counts1, [
+      ["apple", 3],
+      ["banana", 2],
+      ["cherry", 1],
+    ]);
+    assert.deepEqual(counts2, [
+      ["apple", 6],
+      ["banana", 4],
+      ["cherry", 2],
+    ]);
+    assert.notEqual(count1Id, count2Id);
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

@@ -16,6 +16,7 @@ import {
   Width,
   when,
 } from "../src/index.ts";
+import { createExampleTracer } from "./tracing.ts";
 
 type Pair = {
   readonly kind: "pair";
@@ -45,10 +46,12 @@ const inputPairs: [string, number][] = [
 
 const sums: Result[] = [];
 const products: Result[] = [];
+const tracer = createExampleTracer("examples/combine-per-key");
 const graph = new DataflowGraph<void, Msg, string, never>(
   new ReadyScheduler(),
   Width(1),
   UNBOUNDED,
+  tracer,
 );
 
 const sourceId = graph.addNode({
@@ -134,11 +137,15 @@ graph.addEdge(sourceId, multiplyCombineId, multiplyInEdge);
 graph.addEdge(sumCombineId, sumSinkId, sumOutEdge);
 graph.addEdge(multiplyCombineId, multiplySinkId, multiplyOutEdge);
 
-await graph.run();
+try {
+  await graph.run();
 
-console.log(
-  JSON.stringify({
-    sums: sums.map((r) => [r.key, r.value]),
-    products: products.map((r) => [r.key, r.value]),
-  }),
-);
+  console.log(
+    JSON.stringify({
+      sums: sums.map((r) => [r.key, r.value]),
+      products: products.map((r) => [r.key, r.value]),
+    }),
+  );
+} finally {
+  await tracer.flush();
+}

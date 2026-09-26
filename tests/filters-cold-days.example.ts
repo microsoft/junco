@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
   allOf,
@@ -44,10 +45,12 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   ];
 
   const results: Row[] = [];
+  const tracer = createExampleTracer("cookbook/filters-cold-days");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -127,14 +130,18 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   graph.addEdge(meanCombineId, belowMeanFilterId, meanEdge);
   graph.addEdge(belowMeanFilterId, sinkId, outEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(
-    results.map((r) => [r.year, r.month, r.day]),
-    [
-      [2010, 1, 1],
-      [2012, 1, 2],
-    ],
-  );
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(
+      results.map((r) => [r.year, r.month, r.day]),
+      [
+        [2010, 1, 1],
+        [2012, 1, 2],
+      ],
+    );
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

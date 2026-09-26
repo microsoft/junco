@@ -2,6 +2,11 @@ import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import type { Graph } from "ngraph.graph";
 import createGraph from "ngraph.graph";
+import type {
+  DataflowRunTrace,
+  DataflowStepTrace,
+  DataflowTracer,
+} from "./dataflow-tracer.js";
 import type { Edge } from "./edges.js";
 import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
@@ -130,11 +135,13 @@ export class DataflowGraph<S, N, T, EH> {
    * @param scheduler Plans each window; `create` is invoked here, exactly once.
    * @param window Max turns one lane may hold per plan.
    * @param threads Max concurrent lanes per plan.
+   * @param tracer Optional execution observer; omitted means untraced. Never flushed by the graph.
    */
   constructor(
     readonly scheduler: DataflowScheduler<N, T>,
     readonly window: Width,
     readonly threads: Width,
+    readonly tracer?: DataflowTracer,
   ) {
     this.#graph = createGraph<Node<S, N, T>, Edge<N, T>>({ multigraph: true });
     this.scheduler.create(window, threads);
@@ -313,10 +320,18 @@ export class DataflowGraph<S, N, T, EH> {
     if (this.#inFlight)
       throw new DataflowDefinitionError("Dataflow run() is already in flight");
     this.#inFlight = true;
+    let execution: DataflowRunTrace<N, T> | undefined;
     try {
+      const tracer = this.tracer;
+      if (tracer !== undefined)
+        execution = this.#observe(() => tracer.startRun(this));
       while (true) {
         const available = this.#available();
-        if (available.size === 0) return this.#results;
+        if (available.size === 0) {
+          const run = execution;
+          if (run !== undefined) this.#observe(() => run.end(this.#results));
+          return this.#results;
+        }
 
         const schedule = this.scheduler.schedule(available);
         this.#assertSchedule(schedule, available);
@@ -334,7 +349,7 @@ export class DataflowGraph<S, N, T, EH> {
           // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
           // rejection, and the error thrown is deterministically the lowest-lane one.
           const settled = await Promise.allSettled(
-            column.map((entry) => this.#runNode(entry)),
+            column.map((entry) => this.#runNode(entry, execution)),
           );
           const failed = settled.find(
             (outcome) => outcome.status === "rejected",
@@ -342,8 +357,25 @@ export class DataflowGraph<S, N, T, EH> {
           if (failed !== undefined) throw failed.reason;
         }
       }
+    } catch (error) {
+      const run = execution;
+      if (run !== undefined) this.#observe(() => run.fail(error));
+      throw error;
     } finally {
       this.#inFlight = false;
+    }
+  }
+
+  /**
+   * Invoke one tracer callback, isolating the computation from it: a synchronous observer
+   * exception is reported and swallowed, so it can neither become a node error nor mask one.
+   */
+  #observe<U>(callback: () => U): U | undefined {
+    try {
+      return callback();
+    } catch (error) {
+      console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+      return undefined;
     }
   }
 
@@ -422,15 +454,24 @@ export class DataflowGraph<S, N, T, EH> {
 
   /**
    * Prime a ready node without consuming its planned inputs, or deliver a running node's planned
-   * batch, then advance the generator exactly once.
+   * batch, then advance the generator exactly once. `execution`, when present, observes the
+   * activation: `"prime"` with no view, `"resume"` with exactly the delivered view.
    */
-  async #runNode({ id, inputs }: NodeSchedule): Promise<void> {
+  async #runNode(
+    { id, inputs }: NodeSchedule,
+    execution?: DataflowRunTrace<N, T>,
+  ): Promise<void> {
     const node = this.#graph.getNode(id)!.data;
     const runtime = this.#runtime.get(id)!;
+    let activation: DataflowStepTrace<N, T> | undefined;
 
     try {
       let step: IteratorResult<Message<N>[], T>;
       if (node.status === "ready") {
+        if (execution !== undefined)
+          activation = this.#observe(() =>
+            execution.startNode(id, "prime", undefined),
+          );
         node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
         step = await node.generator.next();
@@ -445,17 +486,25 @@ export class DataflowGraph<S, N, T, EH> {
           this.#consume(runtime, inputs),
           runtime.probe.values,
         );
+        if (execution !== undefined)
+          activation = this.#observe(() =>
+            execution.startNode(id, "resume", view),
+          );
         step = await node.generator.next(view);
       }
 
       if (step.done === true) {
         node.status = "done";
         this.#recordReturn(id, step.value);
-        return;
+      } else {
+        for (const message of step.value) this.#route(id, message);
       }
-      for (const message of step.value) this.#route(id, message);
+      const finished = activation;
+      if (finished !== undefined) this.#observe(() => finished.end(step));
     } catch (cause) {
       node.status = "done";
+      const failed = activation;
+      if (failed !== undefined) this.#observe(() => failed.fail(cause));
       // A wiring violation raised while routing a yield is a graph bug, not a node error.
       if (cause instanceof DataflowDefinitionError) throw cause;
       throw new DataflowNodeError<EH>(id, cause as EH);

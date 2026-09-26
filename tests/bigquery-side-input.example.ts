@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge } from "../src/index.ts";
 import {
   allOf,
@@ -41,10 +42,12 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   const ignoreWord = "word1";
 
   const groups: GroupMsg[] = [];
+  const tracer = createExampleTracer("cookbook/bigquery-side-input");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const makeStringSource = (
@@ -128,17 +131,21 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   graph.addEdge(ignoreWordSourceId, attachId, ignoreWordEdge);
   graph.addEdge(attachId, sinkId, resultsEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(
-    groups.map((g) => [g.id, g.corpus, g.word]),
-    [
-      ["A", "corpus2", "word2"],
-      ["B", "corpus2", "word2"],
-      ["C", "corpus2", "word2"],
-    ],
-  );
-  assert.equal(completed.get(groupIdsSourceId), "groupIds done");
-  assert.equal(completed.get(corpusSourceId), "corpus done");
-  assert.equal(completed.get(wordSourceId), "word done");
+    assert.deepEqual(
+      groups.map((g) => [g.id, g.corpus, g.word]),
+      [
+        ["A", "corpus2", "word2"],
+        ["B", "corpus2", "word2"],
+        ["C", "corpus2", "word2"],
+      ],
+    );
+    assert.equal(completed.get(groupIdsSourceId), "groupIds done");
+    assert.equal(completed.get(corpusSourceId), "corpus done");
+    assert.equal(completed.get(wordSourceId), "word done");
+  } finally {
+    await tracer.flush();
+  }
 });

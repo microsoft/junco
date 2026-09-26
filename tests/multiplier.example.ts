@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type {
   DataflowScheduler,
   NodeAvailability,
@@ -52,10 +53,12 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   const multiplierToSink = messageEdge<number, string>("multiplierToSink");
   const results: number[] = [];
   const priority: NodeIdType[] = [];
+  const tracer = createExampleTracer("cookbook/multiplier");
   const graph = new DataflowGraph<void, number, string, never>(
     new PriorityScheduler(priority),
     Width(1),
     Width(1),
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -95,12 +98,16 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
   graph.addEdge(multiplierId, sinkId, multiplierToSink);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(results, [2, 4, 6]);
-  assert.equal(completed.get(sourceId), "source done");
-  assert.equal(completed.has(multiplierId), false);
-  assert.equal(completed.has(sinkId), false);
-  assert.deepEqual(graph.result(multiplierId), O.none);
-  assert.deepEqual(graph.result(sinkId), O.none);
+    assert.deepEqual(results, [2, 4, 6]);
+    assert.equal(completed.get(sourceId), "source done");
+    assert.equal(completed.has(multiplierId), false);
+    assert.equal(completed.has(sinkId), false);
+    assert.deepEqual(graph.result(multiplierId), O.none);
+    assert.deepEqual(graph.result(sinkId), O.none);
+  } finally {
+    await tracer.flush();
+  }
 });

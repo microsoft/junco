@@ -35,7 +35,7 @@ jobs:
         run: bun run test:coverage
 
       - name: Examples
-        run: bun run examples
+        run: bun run examples --no-tracing
 
       - name: Upload coverage
         if: always()

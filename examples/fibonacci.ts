@@ -14,16 +14,19 @@ import {
   Width,
   when,
 } from "../src/index.ts";
+import { createExampleTracer } from "./tracing.ts";
 
 const fibSeed = messageEdge<number, string>("fibSeed");
 const fibLoop = messageEdge<number, string>("fibLoop");
 const fibOut = messageEdge<number, string>("fibOut");
 
 const results: number[] = [];
+const tracer = createExampleTracer("examples/fibonacci");
 const graph = new DataflowGraph<void, number, string, never>(
   new ReadyScheduler(),
   Width(1),
   UNBOUNDED,
+  tracer,
 );
 
 const seedId = graph.addNode({
@@ -64,6 +67,10 @@ graph.addEdge(seedId, fibId, fibSeed);
 graph.addEdge(fibId, fibId, fibLoop);
 graph.addEdge(fibId, sinkId, fibOut);
 
-await graph.run();
+try {
+  await graph.run();
 
-console.log(JSON.stringify(results));
+  console.log(JSON.stringify(results));
+} finally {
+  await tracer.flush();
+}

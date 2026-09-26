@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge, Message } from "../src/index.ts";
 import {
   always,
@@ -44,10 +45,12 @@ test("cookbook: multiple output pardo split lines to words", async () => {
   const totalChars: number[] = [];
   const splitterFirings: number[] = [];
 
+  const tracer = createExampleTracer("cookbook/multiple-output-pardo");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -167,31 +170,35 @@ test("cookbook: multiple output pardo split lines to words", async () => {
   graph.addEdge(shortCountId, shortSinkId, shortCountsEdge);
   graph.addEdge(longCountId, longSinkId, longCountsEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(totalChars, [46]);
-  assert.deepEqual(
-    [...shortCounts].sort(),
-    (
-      [
-        ["A", 2],
-        ["new", 2],
-        ["of", 1],
-      ] as [string, number][]
-    ).sort(),
-  );
-  assert.deepEqual(
-    [...longCounts].sort(),
-    (
-      [
-        ["whole", 1],
-        ["world", 1],
-        ["fantastic", 1],
-        ["point", 1],
-        ["view", 1],
-      ] as [string, number][]
-    ).sort(),
-  );
-  assert.deepEqual(splitterFirings, [12]);
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(totalChars, [46]);
+    assert.deepEqual(
+      [...shortCounts].sort(),
+      (
+        [
+          ["A", 2],
+          ["new", 2],
+          ["of", 1],
+        ] as [string, number][]
+      ).sort(),
+    );
+    assert.deepEqual(
+      [...longCounts].sort(),
+      (
+        [
+          ["whole", 1],
+          ["world", 1],
+          ["fantastic", 1],
+          ["point", 1],
+          ["view", 1],
+        ] as [string, number][]
+      ).sort(),
+    );
+    assert.deepEqual(splitterFirings, [12]);
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

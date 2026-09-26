@@ -15,6 +15,7 @@ import {
   Width,
   when,
 } from "../src/index.ts";
+import { createExampleTracer } from "./tracing.ts";
 
 /**
  * Exactly one node per turn, picked by a priority list filled in once the node ids exist.
@@ -47,10 +48,12 @@ const sourceToMultiplier = messageEdge<number, string>("sourceToMultiplier");
 const multiplierToSink = messageEdge<number, string>("multiplierToSink");
 const results: number[] = [];
 const priority: NodeIdType[] = [];
+const tracer = createExampleTracer("examples/multiplier");
 const graph = new DataflowGraph<void, number, string, never>(
   new PriorityScheduler(priority),
   Width(1),
   Width(1),
+  tracer,
 );
 
 const sourceId = graph.addNode({
@@ -87,6 +90,10 @@ priority.push(sinkId, multiplierId, sourceId);
 graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
 graph.addEdge(multiplierId, sinkId, multiplierToSink);
 
-await graph.run();
+try {
+  await graph.run();
 
-console.log(JSON.stringify(results));
+  console.log(JSON.stringify(results));
+} finally {
+  await tracer.flush();
+}

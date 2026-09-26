@@ -13,6 +13,7 @@ import {
   Width,
   when,
 } from "../src/index.ts";
+import { createExampleTracer } from "./tracing.ts";
 
 type SourceLine = { readonly kind: "line"; readonly text: string };
 type CharCount = { readonly kind: "chars"; readonly length: number };
@@ -29,10 +30,12 @@ const inputLines = ["A whole new world", "A new fantastic point of view"];
 const totalChars: number[] = [];
 const unifiedCounts = new Map<string, number>();
 
+const tracer = createExampleTracer("examples/word-count");
 const graph = new DataflowGraph<void, Msg, string, never>(
   new ReadyScheduler(),
   Width(1),
   UNBOUNDED,
+  tracer,
 );
 
 const sourceId = graph.addNode({
@@ -112,13 +115,17 @@ graph.addEdge(splitterId, unifiedCounterId, longWordsEdge);
 graph.addEdge(splitterId, charSumId, charCountEdge);
 graph.addEdge(charSumId, charSumSinkId, charSumEdge);
 
-await graph.run();
+try {
+  await graph.run();
 
-console.log(
-  JSON.stringify({
-    counts: [...unifiedCounts.entries()].sort(([a], [b]) =>
-      a < b ? -1 : a > b ? 1 : 0,
-    ),
-    totalCharacters: totalChars.reduce((acc, n) => acc + n, 0),
-  }),
-);
+  console.log(
+    JSON.stringify({
+      counts: [...unifiedCounts.entries()].sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      ),
+      totalCharacters: totalChars.reduce((acc, n) => acc + n, 0),
+    }),
+  );
+} finally {
+  await tracer.flush();
+}

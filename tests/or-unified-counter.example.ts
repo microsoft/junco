@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
   always,
@@ -33,10 +34,12 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
   const unifiedCounts = new Map<string, number>();
   let unifiedFireCount = 0;
 
+  const tracer = createExampleTracer("cookbook/or-unified-counter");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -117,20 +120,24 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
   graph.addEdge(splitterId, charSumId, charCountEdge);
   graph.addEdge(charSumId, charSumSinkId, charSumEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  const expected: [string, number][] = [
-    ["A", 2],
-    ["fantastic", 1],
-    ["new", 2],
-    ["of", 1],
-    ["point", 1],
-    ["view", 1],
-    ["whole", 1],
-    ["world", 1],
-  ];
-  assert.deepEqual([...unifiedCounts.entries()].sort(), expected.sort());
-  assert.deepEqual(totalChars, [46]);
-  assert.equal(unifiedFireCount, 2);
-  assert.equal(completed.get(sourceId), "source done");
+    const expected: [string, number][] = [
+      ["A", 2],
+      ["fantastic", 1],
+      ["new", 2],
+      ["of", 1],
+      ["point", 1],
+      ["view", 1],
+      ["whole", 1],
+      ["world", 1],
+    ];
+    assert.deepEqual([...unifiedCounts.entries()].sort(), expected.sort());
+    assert.deepEqual(totalChars, [46]);
+    assert.equal(unifiedFireCount, 2);
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

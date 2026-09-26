@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge, Message } from "../src/index.ts";
 import {
   always,
@@ -48,10 +49,12 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
 
   const sums: Result[] = [];
   const products: Result[] = [];
+  const tracer = createExampleTracer("cookbook/combine-per-key");
   const graph = new DataflowGraph<void, Msg, string, never>(
     new ReadyScheduler(),
     Width(1),
     UNBOUNDED,
+    tracer,
   );
 
   const sourceId = graph.addNode({
@@ -137,23 +140,27 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   graph.addEdge(sumCombineId, sumSinkId, sumOutEdge);
   graph.addEdge(multiplyCombineId, multiplySinkId, multiplyOutEdge);
 
-  const completed = await graph.run();
+  try {
+    const completed = await graph.run();
 
-  assert.deepEqual(
-    sums.map((r) => [r.key, r.value]),
-    [
-      ["a", 6],
-      ["b", 30],
-      ["c", 100],
-    ],
-  );
-  assert.deepEqual(
-    products.map((r) => [r.key, r.value]),
-    [
-      ["a", 6],
-      ["b", 200],
-      ["c", 100],
-    ],
-  );
-  assert.equal(completed.get(sourceId), "source done");
+    assert.deepEqual(
+      sums.map((r) => [r.key, r.value]),
+      [
+        ["a", 6],
+        ["b", 30],
+        ["c", 100],
+      ],
+    );
+    assert.deepEqual(
+      products.map((r) => [r.key, r.value]),
+      [
+        ["a", 6],
+        ["b", 200],
+        ["c", 100],
+      ],
+    );
+    assert.equal(completed.get(sourceId), "source done");
+  } finally {
+    await tracer.flush();
+  }
 });

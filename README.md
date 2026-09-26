@@ -9,7 +9,7 @@ Each node is an `async function*`. The runtime resumes it with the inputs its tr
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 360}}}%%
 flowchart TB
-  subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(scheduler, window, threads: WidthType via Width() or UNBOUNDED)"]
+  subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(scheduler, window, threads: WidthType via Width() or UNBOUNDED, tracer?: DataflowTracer)"]
     N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*, stepNode, emitOnce)"]
     E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>messageEdge: Queue#lt;N#gt; FIFO<br/>valueEdge: write-once Option#lt;T#gt;"]
     S["DataflowScheduler#lt;N, T#gt;<br/>ReadyScheduler, RoundRobinScheduler"]
@@ -172,16 +172,72 @@ class OneAtATime implements DataflowScheduler<number, string> {
 
 `run()` resolves once no node is available. It can be resumed: add nodes or edges and call it again. It is not re-entrant.
 
+## Tracing
+
+Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `run()` and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures and the run's end or failure. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
+
+`DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikDataflowTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation. This package never depends on Opik.
+
 ## Examples and development
 
 `bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with a custom priority scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
 
+Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` typechecks and bundles all sixteen programs into `examples/dist/{opik,dummy}` before running any of them. The Opik build constructs the SDK client once as a preflight, so a missing optional dependency, a type error or an invalid Opik configuration fails the build before any example runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
+
+The Opik build needs the private examples package's optional dependencies (`dataflow-engine-opik` from the sibling checkout, and `opik`): run `bun install` in `examples/`, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. `bun install --omit optional` gives a Dummy-only environment. A successful build does not prove that traces were ingested later.
+
 | Script | Purpose |
 |---|---|
 | `bun run build` | ESM bundle and source map (Bun), plus declarations (`tsc`) |
-| `bun run typecheck` | Checks `src`, `tests` and `examples`, including the compile-only `Width` cases |
-| `bun run test` / `test:coverage` | Tests; the coverage run writes a text report and `coverage/lcov.info` |
+| `bun run typecheck` | Checks `src`, `tests` and `examples` with the Dummy tracer selected, including the compile-only `Width` cases |
+| `bun run test` / `test:coverage` | Tests and cookbook fixtures with the Dummy tracer; the coverage run writes a text report and `coverage/lcov.info` |
+| `bun run examples` / `example:<name>` | Build and run the standalone examples (Opik; add `--no-tracing` for Dummy) |
+| `bun run examples:cookbook` | Build and run the twelve cookbook fixtures (Opik; add `--no-tracing` for Dummy) |
+| `bun run examples:build` | Build only (`--no-tracing` for Dummy) |
 | `bun run check` / `format` | Biome lint and format |
+
+### Running Fibonacci with Opik
+
+Prerequisites: Bun, Docker with Compose, and this repository checked out next to [`dataflow-engine-opik`](../dataflow-engine-opik):
+
+```text
+git/
+├── dataflow-engine/
+└── dataflow-engine-opik/
+```
+
+1. Build the engine, then the Opik integration, which consumes the engine's build output:
+
+   ```sh
+   cd dataflow-engine && bun install && bun run build
+   cd ../dataflow-engine-opik && bun install && bun run build
+   ```
+
+2. Install the examples' optional dependencies (`dataflow-engine-opik` and `opik`):
+
+   ```sh
+   cd ../dataflow-engine/examples && bun install
+   ```
+
+3. Start a local Opik with its UI and API on port 8888:
+
+   ```sh
+   git clone https://github.com/comet-ml/opik.git ../../opik
+   cd ../../opik && NGINX_PORT=8888 ./opik.sh
+   ```
+
+4. Run the example from this repository:
+
+   ```sh
+   cd ../dataflow-engine
+   OPIK_PROJECT_NAME=dataflow-engine bun run example:fibonacci
+   ```
+
+   It prints `[0,1,1,2,3,5,8,13,21,34]`. Without `OPIK_PROJECT_NAME` the trace goes to Opik's "Default Project".
+
+5. Open <http://localhost:8888>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
+
+6. Stop Opik when finished: `cd ../opik && ./opik.sh --stop`.
 
 ## License
 
