@@ -1,0 +1,41 @@
+{
+  "name": "dataflow-engine-opik",
+  "version": "0.1.0",
+  "description": "Opik execution tracing for dataflow-engine.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "LICENSE"],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run --bun tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "bun run --bun tsc -p tsconfig.typecheck.json"
+  },
+  "dependencies": {
+    "fp-ts": "^2.16.11"
+  },
+  "peerDependencies": {
+    "dataflow-engine": "^0.1.0",
+    "opik": "^2.2.81"
+  },
+  "peerDependenciesMeta": {
+    "dataflow-engine": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "26.0.1",
+    "dataflow-engine": "file:../dataflow-engine",
+    "opik": "2.2.81",
+    "typescript": "6.0.3"
+  }
+}

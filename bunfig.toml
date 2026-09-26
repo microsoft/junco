@@ -1,0 +1,4 @@
+[install]
+# Bun 1.3 corrupts a `file:` folder dependency that is also declared as a peer under the hoisted
+# linker (self-referential symlinks); the isolated linker installs it correctly.
+linker = "isolated"
