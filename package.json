@@ -1,0 +1,33 @@
+{
+  "name": "junco-agent",
+  "version": "0.1.0",
+  "description": "Barebones Pi async-generator agent with junco-tools.",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "workspaces": ["packages/*"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun run --cwd packages/model-auth build && tsc -p tsconfig.json",
+    "typecheck": "bun run --cwd packages/model-auth build && tsc -p tsconfig.json --noEmit",
+    "test": "bun test ./test/*.test.ts"
+  },
+  "dependencies": {
+    "model-auth": "workspace:*",
+    "junco-tools": "file:../junco-tools",
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.1",
+    "typebox": "1.1.38",
+    "typescript": "6.0.3"
+  }
+}
