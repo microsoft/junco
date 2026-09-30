@@ -3,8 +3,9 @@ import type { NodeId } from "./identity.js";
 import type { Message, ParentView } from "./node.js";
 
 /**
- * Pluggable execution observer. {@link DataflowGraph.run} calls `startRun` once per invocation and
- * reports every actual generator activation through the returned handle.
+ * Pluggable execution observer. {@link DataflowGraph.run} and {@link DataflowGraph.step} call
+ * `startRun` once per invocation and report every actual generator activation through the returned
+ * handle.
  *
  * CONTRACT: every run/step callback is a SYNCHRONOUS observer. It MUST NOT mutate the graph, the
  * views, the messages or the results it receives; anything retained past the callback must be
@@ -13,7 +14,7 @@ import type { Message, ParentView } from "./node.js";
  * asynchronous operation and is caller-owned: the graph never awaits it.
  */
 export interface DataflowTracer {
-  /** Begin observing one `run()` invocation, after its re-entry check and before execution. */
+  /** Begin observing one `run()`/`step()` invocation, after its re-entry check and before execution. */
   startRun<S, N, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
@@ -21,7 +22,7 @@ export interface DataflowTracer {
   flush(): Promise<void>;
 }
 
-/** Observer for one `run()` invocation. */
+/** Observer for one `run()`/`step()` invocation. */
 export type DataflowRunTrace<N, T> = {
   /**
    * One generator activation is about to advance. `"prime"` activations receive no view;
@@ -32,9 +33,12 @@ export type DataflowRunTrace<N, T> = {
     phase: "prime" | "resume",
     inputs: ParentView<N, T> | undefined,
   ): DataflowStepTrace<N, T>;
-  /** The run quiesced; `results` is the graph's cumulative completed-node map. */
+  /**
+   * The invocation finished: `run()` quiesced, or `step()` completed its (at most one) window.
+   * `results` is the graph's cumulative completed-node map.
+   */
   end(results: ReadonlyMap<NodeId, T>): void;
-  /** The run rejects with exactly `error`. */
+  /** The invocation rejects with exactly `error`. */
   fail(error: unknown): void;
 };
 

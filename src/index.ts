@@ -1,4 +1,5 @@
 export { emitOnce, from, msg, stepNode } from "./builders.js";
+export type { DataflowRunOptions } from "./dataflow-graph.js";
 export { DataflowGraph } from "./dataflow-graph.js";
 export type {
   DataflowRunTrace,

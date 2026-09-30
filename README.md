@@ -9,12 +9,12 @@ Each node is an `async function*`. The runtime resumes it with the inputs its tr
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 360}}}%%
 flowchart TB
-  subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(scheduler, window, threads: WidthType via Width() or UNBOUNDED, tracer?: DataflowTracer)"]
+  subgraph Definition["new DataflowGraph#lt;S, N, T, EH, Q#gt;(scheduler: Q, window, threads: WidthType via Width() or UNBOUNDED, tracer?: DataflowTracer)"]
     N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*, stepNode, emitOnce)"]
     E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>messageEdge: Queue#lt;N#gt; FIFO<br/>valueEdge: write-once Option#lt;T#gt;"]
     S["DataflowScheduler#lt;N, T#gt;<br/>ReadyScheduler, RoundRobinScheduler"]
   end
-  subgraph Run["run(): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
+  subgraph Run["step(options?) / run(options?): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
     A["available: Map#lt;NodeIdType, NodeAvailability#gt;<br/>AvailabilityFn / evaluateTrigger / satisfiedEdges"] --> P["schedule(available): Schedule<br/>NodeSchedule lanes, InputSchedule reads<br/>triggerInputs default"]
     P --> K["validate Schedule<br/>throws DataflowDefinitionError"]
     K --> X["pop MessageSchedule counts<br/>into ParentView#lt;N, T#gt; (messages, values)"]
@@ -33,7 +33,7 @@ flowchart TB
 
 | Part | Role |
 |---|---|
-| `DataflowGraph<S, N, T, EH>` | Owns nodes and edges (an `ngraph.graph` multigraph) and drives `run()`. `N` is the message payload type, `T` the node return type, `S` the node state type and `EH` the error type that node bodies throw. |
+| `DataflowGraph<S, N, T, EH, Q>` | Owns nodes and edges (an `ngraph.graph` multigraph) and drives `step()`/`run()`. `N` is the message payload type, `T` the node return type, `S` the node state type and `EH` the error type that node bodies throw. The optional `Q` (default `DataflowScheduler<N, T>`) keeps the concrete scheduler type on `graph.scheduler`. |
 | `messageEdge` / `valueEdge` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
 | Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
 | `DataflowScheduler` | Decides **who** runs, in which lane and turn, and **how much** each node reads from each edge. |
@@ -156,7 +156,7 @@ A node that must wait for a deeper backlog can supply an `is_available(view)` ho
 |---|---|
 | `ReadyScheduler` | Runs every available node in one concurrent turn. Construct the graph with `threads = UNBOUNDED`. |
 | `RoundRobinScheduler` | Fills `threads` lanes x `window` turns, rotating so that no node starves. |
-| Custom | Implement `create(window, threads)` and `schedule(available)`. |
+| Custom | Implement `create(window, threads)` and `schedule(available)`, and optionally `resolveInputs(entry, live)`. |
 
 ```ts
 class OneAtATime implements DataflowScheduler<number, string> {
@@ -170,11 +170,24 @@ class OneAtATime implements DataflowScheduler<number, string> {
 
 `triggerInputs` reads each fired edge whole. To read fixed-size batches instead, return counts (`n`, `"all"` or `"none"`) per edge. The graph validates every plan against the lane and window limits, availability and read counts, and throws `DataflowDefinitionError` on a violation. Graph wiring mistakes throw the same error.
 
-`run()` resolves once no node is available. It can be resumed: add nodes or edges and call it again. It is not re-entrant.
+A `Schedule` is **lanes × turns**: `schedule[lane][turn]`. Turn `w` runs index `w` of every lane concurrently, and the next turn starts only after all of them settle. So `[[A, A], [B]]` runs A and B together, then A alone. A ready node's first occurrence primes its generator and counts as a turn.
+
+The whole window is validated before it starts. Before each turn, the graph takes a fresh availability snapshot and skips any planned node that has since finished or become unavailable. A skipped node is not advanced, reads nothing and is not replaced. For each kept node that is already running, the optional synchronous, pure `resolveInputs(entry, live)` hook recomputes its reads from that snapshot; without the hook, the planned `inputs` are used unchanged, including deliberate partial reads. Every read map in a turn is validated before any node in that turn advances.
+
+### Driving a graph
+
+| Call | Executes |
+|---|---|
+| `step(options?)` | At most one scheduler window. If nothing is available, it returns the results without calling the scheduler. |
+| `run(options?)` | Windows until no node is available. |
+
+Both calls resolve to the cumulative map of finished nodes, and `available()` returns the current non-destructive snapshot. Execution is resumable: add nodes or edges, then call either method again. Calling either method while one is in flight rejects with `DataflowDefinitionError`.
+
+`options.signal` (an `AbortSignal`) is checked before planning, before each turn and after each turn settles. When it is aborted, the call rejects with `signal.reason` and starts no further turn. Node activations that are already running are always awaited, never abandoned. Earlier turns are not rolled back.
 
 ## Tracing
 
-Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `run()` and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures and the run's end or failure. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
+Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `step()` or `run()` invocation and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures, and the end or failure of the invocation. For `step()`, `end` means that window finished, not that the graph is quiescent. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
 
 `DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikDataflowTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation. This package never depends on Opik.
 

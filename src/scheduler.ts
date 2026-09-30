@@ -15,10 +15,11 @@ export type NodeSchedule = {
 };
 
 /**
- * A planned window. `schedule[t][w]` is the entry lane `t` runs at turn offset `w` within the
- * window. The runtime executes turn `w` by taking index `w` from every lane and running that
- * column concurrently, for `w = 0 .. maxLaneLength-1`; when the window is exhausted it re-plans.
- * Lanes may be ragged and may be fewer than `threads`.
+ * A planned window, lanes x turns. `schedule[t][w]` is the entry lane `t` runs at turn offset `w`
+ * within the window. The runtime executes turn `w` by taking index `w` from every lane and running
+ * that column concurrently, for `w = 0 .. maxLaneLength-1`; so `[[A, A], [B]]` runs A and B
+ * together, then A alone if it is still available. A ready node's first occurrence only primes its
+ * generator (reading nothing). Lanes may be ragged and may be fewer than `threads`.
  */
 export type Schedule = readonly (readonly NodeSchedule[])[];
 
@@ -46,6 +47,20 @@ export type DataflowScheduler<N, T> = {
    * be inbound edges of that node, and a numeric count MUST be a positive integer.
    */
   schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule;
+
+  /**
+   * Recompute the reads of a planned occurrence of an already-running node from `live`, the
+   * availability snapshot taken just before its column runs. Called once per such occurrence per
+   * column, never for a prime. Absent, the planned `entry.inputs` are used unchanged.
+   *
+   * CONTRACT: SYNCHRONOUS and pure — it MUST NOT mutate the graph or `live`. The result is held to
+   * the same inbound-edge and positive-count rules as {@link schedule}; a violation, or a throw,
+   * rejects the invocation before any node of that column advances.
+   */
+  resolveInputs?(
+    entry: NodeSchedule,
+    live: NodeAvailability<N, T>,
+  ): InputSchedule;
 };
 
 /**

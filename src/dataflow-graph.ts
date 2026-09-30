@@ -112,6 +112,16 @@ const viewOf = <N, T>(
   values,
 });
 
+/** Options accepted by {@link DataflowGraph.step} and {@link DataflowGraph.run}. */
+export type DataflowRunOptions = {
+  /**
+   * Stops the invocation between columns: checked before planning, before each column reads its
+   * inputs and after each column drains. An aborted signal rejects with `signal.reason` without
+   * starting a later column; node activations already running are always awaited, never abandoned.
+   */
+  readonly signal?: AbortSignal;
+};
+
 /**
  * An async, generator-driven dataflow graph.
  *
@@ -119,10 +129,19 @@ const viewOf = <N, T>(
  * write-once return cell; readiness is decided by a declarative `TriggerRule`; and which nodes run
  * each turn is delegated to `scheduler`, which plans `threads` lanes x `window` turns at a time.
  *
- * {@link run} is resumable: it returns when nothing is available, leaving node status, generators
- * and queues intact, so calling it again after adding nodes or edges continues the same graph.
+ * Execution is resumable: {@link step} runs at most one planned window and {@link run} runs windows
+ * until nothing is available. Both leave node status, generators and queues intact, so calling
+ * either again after adding nodes or edges continues the same graph.
+ *
+ * `Q` preserves the concrete scheduler type through `scheduler`; it defaults to the plain contract.
  */
-export class DataflowGraph<S, N, T, EH> {
+export class DataflowGraph<
+  S,
+  N,
+  T,
+  EH,
+  Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
+> {
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
   readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
@@ -138,7 +157,7 @@ export class DataflowGraph<S, N, T, EH> {
    * @param tracer Optional execution observer; omitted means untraced. Never flushed by the graph.
    */
   constructor(
-    readonly scheduler: DataflowScheduler<N, T>,
+    readonly scheduler: Q,
     readonly window: Width,
     readonly threads: Width,
     readonly tracer?: DataflowTracer,
@@ -257,6 +276,14 @@ export class DataflowGraph<S, N, T, EH> {
   }
 
   /**
+   * Every node that could run now, with what the scheduler would see for it. Non-destructive: a
+   * fresh snapshot of live state that reads no queue.
+   */
+  available(): ReadonlyMap<NodeId, NodeAvailability<N, T>> {
+    return this.#available();
+  }
+
+  /**
    * Plan the next window's candidates. Non-destructive: the queues are untouched, so the scheduler
    * sees each node's inbound state live and decides for itself how much of it to read.
    *
@@ -305,64 +332,108 @@ export class DataflowGraph<S, N, T, EH> {
   }
 
   /**
+   * Execute at most one scheduler window, then resolve to every finished node's return value.
+   * Nothing available resolves immediately without consulting the scheduler.
+   *
+   * @throws {DataflowDefinitionError} when either `step` or `run` is already in flight, or on any
+   *   schedule or wiring violation.
+   * @throws {DataflowNodeError} wrapping whatever a node body threw.
+   * @throws `options.signal.reason` once the signal is observed aborted between columns.
+   */
+  step(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeId, T>> {
+    return this.#drive(false, options?.signal);
+  }
+
+  /**
    * Drive the graph until no node is available, then resolve to every finished node's return value.
    *
-   * Each iteration plans one window and executes it column by column: turn `w` runs index `w` of
-   * every lane concurrently. A column reads its batches synchronously in lane order before any body
-   * runs, which keeps a concurrent column deterministic; a later turn in the same window does see
-   * messages an earlier turn emitted.
-   *
-   * @throws {DataflowDefinitionError} when re-entered while already in flight, or on any wiring
-   *   violation detected mid-run.
+   * @throws {DataflowDefinitionError} when either `step` or `run` is already in flight, or on any
+   *   schedule or wiring violation.
    * @throws {DataflowNodeError} wrapping whatever a node body threw.
+   * @throws `options.signal.reason` once the signal is observed aborted between columns.
    */
-  async run(): Promise<ReadonlyMap<NodeId, T>> {
+  run(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeId, T>> {
+    return this.#drive(true, options?.signal);
+  }
+
+  /** The single-flight, traced invocation shared by {@link step} and {@link run}. */
+  async #drive(
+    untilQuiescent: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<ReadonlyMap<NodeId, T>> {
     if (this.#inFlight)
-      throw new DataflowDefinitionError("Dataflow run() is already in flight");
+      throw new DataflowDefinitionError(
+        "Dataflow execution is already in flight",
+      );
     this.#inFlight = true;
     let execution: DataflowRunTrace<N, T> | undefined;
     try {
       const tracer = this.tracer;
       if (tracer !== undefined)
         execution = this.#observe(() => tracer.startRun(this));
-      while (true) {
+      do {
+        signal?.throwIfAborted();
         const available = this.#available();
-        if (available.size === 0) {
-          const run = execution;
-          if (run !== undefined) this.#observe(() => run.end(this.#results));
-          return this.#results;
-        }
-
-        const schedule = this.scheduler.schedule(available);
-        this.#assertSchedule(schedule, available);
-        const turns = schedule.reduce(
-          (max, lane) => Math.max(max, lane.length),
-          0,
-        );
-        for (let w = 0; w < turns; w++) {
-          const column: NodeSchedule[] = [];
-          for (const lane of schedule) {
-            const entry = lane[w];
-            if (entry !== undefined) column.push(entry);
-          }
-          if (column.length === 0) continue;
-          // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
-          // rejection, and the error thrown is deterministically the lowest-lane one.
-          const settled = await Promise.allSettled(
-            column.map((entry) => this.#runNode(entry, execution)),
-          );
-          const failed = settled.find(
-            (outcome) => outcome.status === "rejected",
-          );
-          if (failed !== undefined) throw failed.reason;
-        }
-      }
+        if (available.size === 0) break;
+        await this.#window(available, execution, signal);
+      } while (untilQuiescent);
+      const run = execution;
+      if (run !== undefined) this.#observe(() => run.end(this.#results));
+      return this.#results;
     } catch (error) {
       const run = execution;
       if (run !== undefined) this.#observe(() => run.fail(error));
       throw error;
     } finally {
       this.#inFlight = false;
+    }
+  }
+
+  /**
+   * Plan one window over `available` and execute it column by column: turn `w` runs index `w` of
+   * every lane concurrently. The whole plan is validated before anything runs.
+   *
+   * Each column first takes one live availability snapshot and keeps only its planned nodes that
+   * are still available, so a node that finished or went idle in an earlier column is skipped
+   * rather than re-advanced. A kept running node's reads come from
+   * {@link DataflowScheduler.resolveInputs} when present, else from its plan unchanged; every read
+   * map is validated before any node in the column advances. A column then reads its batches
+   * synchronously in lane order before any body runs, which keeps it deterministic; a later turn
+   * does see messages an earlier turn emitted.
+   */
+  async #window(
+    available: ReadonlyMap<NodeId, NodeAvailability<N, T>>,
+    execution: DataflowRunTrace<N, T> | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const schedule = this.scheduler.schedule(available);
+    const turns = this.#assertSchedule(schedule, available);
+    for (let w = 0; w < turns; w++) {
+      signal?.throwIfAborted();
+      const live = this.#available();
+      const column: NodeSchedule[] = [];
+      for (const lane of schedule) {
+        const entry = lane[w];
+        if (entry === undefined) continue;
+        const availability = live.get(entry.id);
+        if (availability === undefined) continue;
+        const inputs =
+          this.#graph.getNode(entry.id)!.data.status === "running"
+            ? (this.scheduler.resolveInputs?.(entry, availability) ??
+              entry.inputs)
+            : entry.inputs;
+        column.push({ id: entry.id, inputs });
+      }
+      for (const { id, inputs } of column) this.#assertInputs(id, inputs);
+      if (column.length === 0) continue;
+      // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
+      // rejection, and the error thrown is deterministically the lowest-lane one.
+      const settled = await Promise.allSettled(
+        column.map((entry) => this.#runNode(entry, execution)),
+      );
+      const failed = settled.find((outcome) => outcome.status === "rejected");
+      if (failed !== undefined) throw failed.reason;
+      signal?.throwIfAborted();
     }
   }
 
@@ -380,16 +451,16 @@ export class DataflowGraph<S, N, T, EH> {
   }
 
   /**
-   * Enforce the {@link DataflowScheduler.schedule} contract.
+   * Enforce the {@link DataflowScheduler.schedule} contract and return the validated window height.
    *
    * @throws {DataflowDefinitionError} on too many lanes, an over-long lane, an unavailable id, an
-   *   input that is not an inbound edge or not a positive count, a duplicated id within one column,
-   *   or a plan with no slots while work remains (a spin).
+   *   invalid read map (see {@link #assertInputs}), a duplicated id within one column, or a plan
+   *   with no slots while work remains (a spin).
    */
   #assertSchedule(
     schedule: Schedule,
     available: ReadonlyMap<NodeId, NodeAvailability<N, T>>,
-  ): void {
+  ): number {
     if (Number.isFinite(this.threads) && schedule.length > this.threads) {
       throw new DataflowDefinitionError(
         `Dataflow schedule returned ${schedule.length} lanes, exceeding threads=${this.threads}`,
@@ -410,22 +481,7 @@ export class DataflowGraph<S, N, T, EH> {
             `Dataflow schedule returned node "${id}", which is not available`,
           );
         }
-        const inbound = this.#runtime.get(id)!.inbound;
-        for (const [edgeId, count] of inputs) {
-          if (!inbound.has(edgeId)) {
-            throw new DataflowDefinitionError(
-              `Dataflow schedule reads edge "${edgeId}" on node "${id}", which is not one of its inbound edges`,
-            );
-          }
-          if (
-            typeof count === "number" &&
-            (!Number.isInteger(count) || count < 1)
-          ) {
-            throw new DataflowDefinitionError(
-              `Dataflow schedule reads ${count} messages from edge "${edgeId}" on node "${id}"; a message count must be a positive integer, "all" or "none"`,
-            );
-          }
-        }
+        this.#assertInputs(id, inputs);
       }
       slots += lane.length;
       turns = Math.max(turns, lane.length);
@@ -449,6 +505,30 @@ export class DataflowGraph<S, N, T, EH> {
       throw new DataflowDefinitionError(
         "Dataflow schedule returned no work while nodes are available",
       );
+    }
+    return turns;
+  }
+
+  /**
+   * @throws {DataflowDefinitionError} when `inputs` reads an edge that is not one of `id`'s inbound
+   *   edges, or a numeric count that is not a positive integer.
+   */
+  #assertInputs(id: NodeId, inputs: InputSchedule): void {
+    const inbound = this.#runtime.get(id)!.inbound;
+    for (const [edgeId, count] of inputs) {
+      if (!inbound.has(edgeId)) {
+        throw new DataflowDefinitionError(
+          `Dataflow schedule reads edge "${edgeId}" on node "${id}", which is not one of its inbound edges`,
+        );
+      }
+      if (
+        typeof count === "number" &&
+        (!Number.isInteger(count) || count < 1)
+      ) {
+        throw new DataflowDefinitionError(
+          `Dataflow schedule reads ${count} messages from edge "${edgeId}" on node "${id}"; a message count must be a positive integer, "all" or "none"`,
+        );
+      }
     }
   }
 
