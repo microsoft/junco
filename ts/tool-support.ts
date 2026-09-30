@@ -71,31 +71,6 @@ export function normalizeEditableText(text: string): string {
   return withoutBom.replace(/\r\n?/g, "\n");
 }
 
-export interface BoundedText {
-  text: string;
-  truncation?: TruncationResult;
-}
-
-/**
- * Bound an assembled tool result with Pi's head truncation and append its
- * standard limit notice, so oversized native output never silently vanishes.
- */
-export function boundToolText(
-  content: string,
-  options: { maxLines?: number; maxBytes?: number } = {},
-): BoundedText {
-  const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const truncation = truncateHead(content, { maxLines, maxBytes });
-  if (!truncation.truncated) return { text: truncation.content };
-  const notice =
-    truncation.truncatedBy === "lines"
-      ? `${maxLines} line limit reached`
-      : `${formatSize(maxBytes)} limit reached`;
-  const body = truncation.content === "" ? "" : `${truncation.content}\n\n`;
-  return { text: `${body}[${notice}]`, truncation };
-}
-
 export interface BoundedToolDetails<T> {
   result: T;
   truncation?: TruncationResult;
@@ -113,10 +88,17 @@ export function boundedToolResult<T>(
   content: [{ type: "text"; text: string }];
   details: BoundedToolDetails<T>;
 } {
-  const bounded = boundToolText(content);
+  const truncation = truncateHead(content);
+  let text = truncation.content;
+  if (truncation.truncated) {
+    const notice = truncation.truncatedBy === "lines"
+      ? `${DEFAULT_MAX_LINES} line limit reached`
+      : `${formatSize(DEFAULT_MAX_BYTES)} limit reached`;
+    text = `${text === "" ? "" : `${text}\n\n`}[${notice}]`;
+  }
   return {
-    content: [{ type: "text", text: bounded.text }],
-    details: bounded.truncation ? { result, truncation: bounded.truncation } : { result },
+    content: [{ type: "text", text }],
+    details: truncation.truncated ? { result, truncation } : { result },
   };
 }
 
@@ -161,4 +143,4 @@ export async function withNativeSignal<T>(
   }
 }
 
-export { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateLine };
+export { DEFAULT_MAX_BYTES, truncateHead, truncateLine };

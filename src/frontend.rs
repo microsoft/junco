@@ -37,32 +37,19 @@ impl OutputRoute {
 
     pub(crate) async fn failed(&self) -> String {
         let mut progress = self.progress.subscribe();
-        loop {
-            if let Some(error) = progress.borrow_and_update().failure.clone() {
-                return error;
-            }
-            // A receiver observes the current state before waiting, so cancellation and a new
-            // waiter cannot lose an error reported between subscribing and polling changed().
-            if progress.changed().await.is_err() {
-                return "ShellMux output route ended before reporting a failure".to_owned();
-            }
+        match progress.wait_for(|state| state.failure.is_some()).await {
+            Ok(state) => state.failure.clone().expect("failure predicate is satisfied"),
+            Err(_) => "ShellMux output route ended before reporting a failure".to_owned(),
         }
     }
 
     pub(crate) async fn drained(&self) -> Result<(), String> {
         let mut progress = self.progress.subscribe();
-        loop {
-            {
-                let state = progress.borrow_and_update();
-                if state.closed && state.pending == 0 {
-                    return state.failure.clone().map_or(Ok(()), Err);
-                }
-            }
-            progress
-                .changed()
-                .await
-                .map_err(|_| "ShellMux output route ended before frontend closure".to_owned())?;
-        }
+        let state = progress
+            .wait_for(|state| state.closed && state.pending == 0)
+            .await
+            .map_err(|_| "ShellMux output route ended before frontend closure".to_owned())?;
+        state.failure.clone().map_or(Ok(()), Err)
     }
 
     fn fail(&self, error: String) {
@@ -180,7 +167,6 @@ impl Drop for CallbackCompletion {
 
 pub(crate) struct Frontend {
     geometry: (u16, u16),
-    mux: Weak<ShellMux>,
     routes: HashMap<Principal, Arc<OutputRoute>>,
 }
 
@@ -204,7 +190,6 @@ impl ShellFrontend for Frontend {
     fn new(rows: u16, cols: u16) -> Self {
         Self {
             geometry: (rows, cols),
-            mux: Weak::new(),
             routes: HashMap::new(),
         }
     }
@@ -219,7 +204,6 @@ impl ShellFrontend for Frontend {
                 route.detach();
             }
         }
-        self.mux = mux;
     }
 
     fn update(&mut self, event: FrontendEvent<'_>) -> Option<oneshot::Receiver<()>> {

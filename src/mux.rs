@@ -21,8 +21,39 @@ use crate::frontend::{Frontend, OutputCallback, OutputRoute};
 use crate::tool::JuncoTool;
 use crate::{NativeRunOptions, NativeRunResult};
 
-type RunResult = Result<NativeRunResult, String>;
+type RunResult = Result<NativeRunResult, RoutedError>;
 type CloseResult = Result<(), String>;
+
+/// A routed call's or run's failure. `Denied` is exactly a Marsh policy denial of publication;
+/// every other failure is `Other`. Both carry the diagnostic JavaScript reports unchanged.
+#[derive(Clone)]
+pub(crate) enum RoutedError {
+    Denied(String),
+    Other(String),
+}
+
+impl From<String> for RoutedError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl RoutedError {
+    /// Appends a cleanup diagnostic, keeping the primary failure's classification.
+    fn with_cleanup(self, cleanup: String) -> Self {
+        let append = |message: String| {
+            if cleanup == message {
+                message
+            } else {
+                format!("{message}\nShellMux cleanup: {cleanup}")
+            }
+        };
+        match self {
+            Self::Denied(message) => Self::Denied(append(message)),
+            Self::Other(message) => Self::Other(append(message)),
+        }
+    }
+}
 
 /// A retained JavaScript run owns only its cancellation signal and eventual result.
 /// In particular, it cannot keep the seed lease or a JavaScript callback alive.
@@ -46,7 +77,9 @@ impl RunState {
             .clone();
         match published {
             Some(value) => value,
-            None => Err("ShellMux run task ended without a result".to_string()),
+            None => Err(RoutedError::Other(
+                "ShellMux run task ended without a result".to_string(),
+            )),
         }
     }
 
@@ -78,7 +111,6 @@ struct TrackedTask {
 
 struct SessionState {
     backend: Option<Backend>,
-    closing: bool,
     tasks: HashMap<Id, TrackedTask>,
     principals: HashMap<String, watch::Receiver<bool>>,
 }
@@ -118,7 +150,6 @@ impl Session {
                     frontend,
                     filesystem,
                 }),
-                closing: false,
                 tasks: HashMap::new(),
                 principals: HashMap::new(),
             }),
@@ -138,9 +169,6 @@ impl Session {
         // Admission and task registration share this lock with begin_close. The
         // worker may finish immediately, but cannot remove itself before insertion.
         let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if session.closing {
-            return Err("ShellMux session is closed".to_string());
-        }
         let backend = session
             .backend
             .as_ref()
@@ -184,7 +212,7 @@ impl Session {
                     drop(run);
                     // Dropping an unreleased sender poisons the remaining queue:
                     // a lost task is not proof that its job was reclaimed.
-                    Err(error)
+                    Err(error.into())
                 }
             };
             result_sender.send_replace(Some(result));
@@ -215,13 +243,10 @@ impl Session {
         cwd: String,
         tool: JuncoTool,
         operation: impl FnOnce(&BuiltinContext) -> R + Send + 'static,
-    ) -> Result<R, String> {
+    ) -> Result<R, RoutedError> {
         let receipt = {
             // Admission and task registration share this lock with begin_close, as runs do.
             let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if session.closing {
-                return Err("ShellMux session is closed".to_string());
-            }
             let backend = session
                 .backend
                 .as_ref()
@@ -242,8 +267,8 @@ impl Session {
                         .run_tool(&directory, tool, operation)
                         .await
                         .map_err(tool_error),
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(format!("Cannot resolve working directory: {error}")),
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(error) => Err(format!("Cannot resolve working directory: {error}").into()),
                 };
                 drop(backend);
                 let _ = sender.send(result);
@@ -269,12 +294,10 @@ impl Session {
     pub(crate) fn begin_close(self: &Arc<Self>) -> watch::Receiver<Option<CloseResult>> {
         let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let completion = self.closed.subscribe();
-        if session.closing {
+        let Some(backend) = session.backend.take() else {
             return completion;
-        }
-        session.closing = true;
+        };
         let tasks = std::mem::take(&mut session.tasks);
-        let backend = session.backend.take();
         session.principals.clear();
         for run in tasks.values().filter_map(|tracked| tracked.run.as_ref()) {
             run.abort();
@@ -293,16 +316,14 @@ impl Session {
                     );
                 }
             }
-            if let Some(backend) = backend {
-                if let Err(error) = backend.mux.shutdown().await {
-                    remember_error(&mut failure, error.to_string());
-                }
-                // shutdown detaches the frontend; dropping both remaining strong
-                // references releases its callbacks. The source-domain state shells opened
-                // through is marsh's, shared with any other live shell or mux over the same
-                // backend, and was never an exclusive resource this idle session retained.
-                drop(backend);
+            if let Err(error) = backend.mux.shutdown().await {
+                remember_error(&mut failure, error.to_string());
             }
+            // shutdown detaches the frontend; dropping both remaining strong
+            // references releases its callbacks. The source-domain state shells opened
+            // through is marsh's, shared with any other live shell or mux over the same
+            // backend, and was never an exclusive resource this idle session retained.
+            drop(backend);
             closed.send_replace(Some(failure.map_or(Ok(()), Err)));
         });
         completion
@@ -407,7 +428,7 @@ async fn predecessor_released(predecessor: Option<watch::Receiver<bool>>) -> Res
 enum StopCause {
     Cancelled,
     TimedOut,
-    Failed(String),
+    Failed(RoutedError),
 }
 
 enum RunEvent {
@@ -426,10 +447,16 @@ async fn run_job(
         return stop_and_settle(shell, None, route, StopCause::Cancelled).await;
     }
     if let Err(error) = shell.close_input().await {
-        return stop_and_settle(shell, None, route, StopCause::Failed(error.to_string())).await;
+        return stop_and_settle(
+            shell,
+            None,
+            route,
+            StopCause::Failed(error.to_string().into()),
+        )
+        .await;
     }
     if let Some(error) = route.failure() {
-        return stop_and_settle(shell, None, route, StopCause::Failed(error)).await;
+        return stop_and_settle(shell, None, route, StopCause::Failed(error.into())).await;
     }
     // Admission is the deadline boundary. Neither discovering the seed, waiting for this
     // principal, canonicalization nor shell construction consumes it.
@@ -442,7 +469,9 @@ async fn run_job(
                     None,
                     route,
                     StopCause::Failed(
-                        "Invalid native timeoutMs: duration is out of range".to_string(),
+                        "Invalid native timeoutMs: duration is out of range"
+                            .to_string()
+                            .into(),
                     ),
                 )
                 .await;
@@ -459,7 +488,7 @@ async fn run_job(
     let (accepted, receipt) = oneshot::channel();
     let event = tokio::select! {
         biased;
-        error = route.failed() => RunEvent::Stop(StopCause::Failed(error)),
+        error = route.failed() => RunEvent::Stop(StopCause::Failed(error.into())),
         _ = state.cancelled() => RunEvent::Stop(StopCause::Cancelled),
         result = completed_job(shell, route, text, accepted) => RunEvent::Completed(result),
         _ = deadline_elapsed(deadline) => RunEvent::Stop(StopCause::TimedOut),
@@ -502,7 +531,7 @@ async fn completed_job(
     // so neither it nor shutdown acknowledges a pending JavaScript callback. Only the route does.
     route.drained().await?;
     if let Some(error) = &end.error {
-        return Err(error.to_string());
+        return Err(error.to_string().into());
     }
     let exit_code = completion
         .exit_code()
@@ -557,12 +586,12 @@ async fn stop_and_settle(
     }
     match cause {
         StopCause::Failed(error) => Err(match failure {
-            Some(cleanup) if cleanup != error => format!("{error}\nShellMux cleanup: {cleanup}"),
-            _ => error,
+            Some(cleanup) => error.with_cleanup(cleanup),
+            None => error,
         }),
         StopCause::Cancelled | StopCause::TimedOut => {
             if let Some(error) = failure {
-                return Err(error);
+                return Err(error.into());
             }
             // The receipt's own code: JobEnd.completion can miss it when a concurrent stop
             // reclaimed the shell during finalization.
@@ -577,31 +606,31 @@ async fn stop_and_settle(
     }
 }
 
-/// Upstream already decided publication; this only keeps a denial's diagnostics actionable.
-fn run_error(error: RunError) -> String {
+/// Upstream already decided publication; only its `Denied` kind is classified as a denial.
+fn run_error(error: RunError) -> RoutedError {
     if let Some(completion) = error.completion()
         && let Err(cause) = completion.result.as_ref()
         && let Some(denial) = denial(cause)
     {
         return denial;
     }
-    error.to_string()
+    RoutedError::Other(error.to_string())
 }
 
-/// A routed tool call's failure, with a denial's diagnostics kept actionable like a run's.
-fn tool_error(error: MuxError) -> String {
+/// A routed tool call's failure, with a denial classified like a run's.
+fn tool_error(error: MuxError) -> RoutedError {
     if let MuxError::Marsh(cause) = &error
         && let Some(denial) = denial(cause)
     {
         return denial;
     }
-    error.to_string()
+    RoutedError::Other(error.to_string())
 }
 
-/// The message a policy denial of `cause` reports, or `None` for any other failure.
-fn denial(cause: &ShellError) -> Option<String> {
+/// The denial `cause` reports, or `None` for any other failure.
+fn denial(cause: &ShellError) -> Option<RoutedError> {
     matches!(cause.kind(), ShellErrorKind::Denied { .. })
-        .then(|| format!("Marsh policy denied publication: {cause}"))
+        .then(|| RoutedError::Denied(format!("Marsh policy denied publication: {cause}")))
 }
 
 fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> NativeRunResult {

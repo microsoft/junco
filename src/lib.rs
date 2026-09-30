@@ -10,6 +10,7 @@ mod grep;
 mod iofs;
 mod js;
 mod mux;
+mod routed_error;
 mod task;
 #[cfg(test)]
 mod testing;
@@ -74,9 +75,12 @@ pub struct NativeRun {
 
 #[napi]
 impl NativeRun {
-    #[napi]
-    pub async fn wait(&self) -> Result<NativeRunResult> {
-        self.state.wait().await.map_err(Error::from_reason)
+    #[napi(ts_return_type = "Promise<NativeRunResult>")]
+    pub fn wait<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, NativeRunResult>> {
+        let state = Arc::clone(&self.state);
+        env.spawn_future_with_callback(async move { Ok(state.wait().await) }, |env, outcome| {
+            routed_error::resolve(env, outcome)
+        })
     }
 
     #[napi]

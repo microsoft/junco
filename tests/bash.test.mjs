@@ -5,7 +5,9 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { NativeMux } from "../target/native-test/index.js";
-import { createBashTool, createShellMuxOperations, shutdownShellMux } from "../dist/index.js";
+import {
+  createBashTool, createShellMuxOperations, isMarshPolicyDenied, shutdownShellMux,
+} from "../dist/index.js";
 import {
   childCommand,
   closeFixture,
@@ -65,7 +67,7 @@ test("callback failure rejects without killing Node or disabling the session", {
         receivedOutput = true;
         throw new Error("output consumer failed");
       }
-    }), Error);
+    }), (error) => error instanceof Error && !isMarshPolicyDenied(error));
     assert.equal(receivedOutput, true);
     const result = await tool.execute("reuse-session", { command: "printf 'session survived\\n'" }, t.signal);
     assert.equal(text(result), "session survived\n");
@@ -86,10 +88,20 @@ test("a zero-exit policy denial leaves all seed contents unchanged", { timeout: 
     await owner.execute("claim-file", { command: "printf 'owned\\n' > src/file0.txt" }, t.signal);
     await assert.rejects(intruder.execute("denied-publication", {
       command: "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file0.txt; true",
-    }, t.signal), Error);
+    }, t.signal), isMarshPolicyDenied);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "owned\n");
     assert.equal(await readFile(join(instance.seed, "src/file1.txt"), "utf8"), "one\n");
     await assert.rejects(access(join(instance.seed, "src/new.txt")), (error) => error.code === "ENOENT");
+
+    // The raw native run rejects with the same typed denial, not only Pi's bash tool.
+    const run = instance.mux.start({
+      command: "printf 'stolen\\n' > src/file0.txt; true",
+      cwd: instance.seed,
+      principal: "native-intruder",
+      env: nativeEnv(instance.root),
+    }, collector().onData);
+    await assert.rejects(run.wait(), isMarshPolicyDenied);
+    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "owned\n");
   } finally {
     await closeFixture(instance);
   }
@@ -621,12 +633,12 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", { 
     // took the earlier stake grants no ownership of it, even against the same live mux.
     await assert.rejects(owner.execute("reclaim", {
       command: "printf 'reclaimed\\n' > src/file0.txt; printf ok",
-    }, undefined), /Marsh policy denied publication/);
+    }, undefined), isMarshPolicyDenied);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
 
     await assert.rejects(intruder.execute("denied-live", {
       command: "printf 'new\\n' > src/intruder.txt; printf 'stolen\\n' > src/file0.txt; true",
-    }, undefined), /Marsh policy denied publication/);
+    }, undefined), isMarshPolicyDenied);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
     await assert.rejects(access(join(instance.seed, "src/intruder.txt")), (error) => error.code === "ENOENT");
 
@@ -642,7 +654,7 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", { 
     });
     await assert.rejects(returning.execute("denied-after-reopen", {
       command: "printf 'stolen\\n' > src/file0.txt; true",
-    }, undefined), /Marsh policy denied publication/);
+    }, undefined), isMarshPolicyDenied);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
 
     // Recovering a stake must not invent one: an unclaimed path is still free after a reopen.
@@ -683,6 +695,7 @@ test("close fences admission, joins runs, and discards staged work", { timeout: 
     }, queued.onData);
 
     const closings = [mux.close(), mux.close()];
+    const lateRead = assert.rejects(mux.readFile(instance.seed, "src/file0.txt"), /closed/);
     assert.throws(() => mux.start({
       command: "printf late",
       cwd: instance.seed,
@@ -691,7 +704,7 @@ test("close fences admission, joins runs, and discards staged work", { timeout: 
     }, collector().onData), /closed/);
 
     const [activeResult, pendingResult] = await Promise.all([active.wait(), pending.wait()]);
-    await Promise.all(closings);
+    await Promise.all([...closings, lateRead]);
     assert.equal(activeResult.cancelled, true);
     assert.equal(pendingResult.cancelled, true);
     assert.equal(queued.output, "");

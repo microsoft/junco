@@ -64,24 +64,41 @@ export class ToolCollection {
     const native = options.native ?? (await import("../native/index.js"));
     // Rejects outside a seed: every file tool needs one.
     const mux = options.mux ?? (await native.NativeMux.open(root, { sandbox: options.sandbox }));
-    const store = new native.EditStore();
-    return new ToolCollection(
-      [
-        createReadTool(root, store, native, mux),
-        createBashTool(root, {
-          ...options.bash,
-          operations:
-            options.bash?.operations ?? createShellMuxOperations({ principal: options.principal, mux }),
-        }),
-        createEditTool(root, store, native, mux),
-        createGrepTool(root, store, native, mux),
-        createFindTool(root, native, mux),
-        createAstGrepTool(root, native, mux),
-        createAstEditTool(root, native, mux),
-        createDiffTool(native),
-      ],
-      options.mux ? undefined : mux,
-    );
+    const owned = options.mux ? undefined : mux;
+    try {
+      const store = new native.EditStore();
+      return new ToolCollection(
+        [
+          createReadTool(root, store, native, mux),
+          createBashTool(root, {
+            ...options.bash,
+            operations:
+              options.bash?.operations ?? createShellMuxOperations({ principal: options.principal, mux }),
+          }),
+          createEditTool(root, store, native, mux),
+          createGrepTool(root, store, native, mux),
+          createFindTool(root, native, mux),
+          createAstGrepTool(root, native, mux),
+          createAstEditTool(root, native, mux),
+          createDiffTool(native),
+        ],
+        owned,
+      );
+    } catch (error) {
+      // A mux this call opened has no other owner; a borrowed one stays its caller's.
+      if (owned) {
+        try {
+          await owned.close();
+        } catch (closeError) {
+          throw new AggregateError(
+            [error, closeError],
+            "ToolCollection: construction failed and closing its mux failed",
+            { cause: error },
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   /** Closes the mux this collection opened; a borrowed mux stays its caller's. Idempotent. */

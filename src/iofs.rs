@@ -35,16 +35,6 @@ pub struct GlobMatch {
 	pub size:      Option<f64>,
 }
 
-fn walker_error_to_napi<E: std::fmt::Display>(err: pi_walker::WalkError<E>) -> Error {
-	match err {
-		pi_walker::WalkError::Interrupted(err) => Error::from_reason(err.to_string()),
-		pi_walker::WalkError::InvalidData { path, message } => Error::from_reason(format!(
-			"Native directory scan failed for {}: {message}",
-			path.display()
-		)),
-	}
-}
-
 pub(crate) const fn from_walker_file_type(file_type: pi_walker::FileType) -> FileType {
 	match file_type {
 		pi_walker::FileType::File => FileType::File,
@@ -66,7 +56,13 @@ impl From<pi_walker::CollectedEntry> for GlobMatch {
 
 /// Converts a native walker error into an N-API error.
 pub(crate) fn map_walker_error<E: std::fmt::Display>(err: pi_walker::WalkError<E>) -> Error {
-	walker_error_to_napi(err)
+	match err {
+		pi_walker::WalkError::Interrupted(err) => Error::from_reason(err.to_string()),
+		pi_walker::WalkError::InvalidData { path, message } => Error::from_reason(format!(
+			"Native directory scan failed for {}: {message}",
+			path.display()
+		)),
+	}
 }
 
 /// Invalidate the walker scan cache.

@@ -228,9 +228,8 @@ export function createGrepTool(
           absolutePath,
           eligible: [],
         };
-        // Notebooks display as decoded cell text, never as their raw JSON
-        // lines, so a grep row cannot anchor an edit into one.
-        const tag = /\.ipynb$/i.test(absolutePath) ? null : (tags.get(nativePath) ?? null);
+        // Native omits notebooks from snapshots: raw JSON cannot anchor decoded cells.
+        const tag = tags.get(nativePath) ?? null;
         const snapshot = tag ? store.byHashText(absolutePath, tag) : null;
         let snapshotLines =
           snapshot !== null && !snapshot.includes("\0") ? snapshot.split("\n") : undefined;
