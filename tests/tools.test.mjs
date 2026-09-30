@@ -11,7 +11,10 @@ import {
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
 import { ToolCollection, createBashTool, createShellMuxOperations } from "../dist/index.js";
-import { cleanup, closeFixture, fixture, sdkResources, settleAgent, text } from "./helpers.mjs";
+import {
+  cleanup, closeFixture, collector, deferred, fixture, heldChild,
+  nativeEnv, release, sdkResources, settleAgent, text,
+} from "./helpers.mjs";
 import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs";
 
 const workspacePrefix = fileURLToPath(new URL("../target/tools-test-", import.meta.url));
@@ -339,6 +342,112 @@ test("missing paths propagate real failures", { timeout: 30_000 }, async () => {
     await ws.dispose();
   }
 });
+
+async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
+  const ws = await workspace({ "src/target.ts": "const value = seed;\n" }, { sandbox });
+  const gate = join(ws.root, "..", "read-gate");
+  const ready = deferred(t.signal, "held bash readiness");
+  const output = collector((value) => {
+    if (value.includes("READ_READY\n")) ready.resolve();
+  });
+  let run;
+  let completion;
+  let settled = false;
+  let deadline;
+  let checks;
+  try {
+    run = ws.mux.start({
+      command: "printf 'const value = staged;\\n' > src/target.ts; "
+        + heldChild({ gate, ready: "READ_READY", done: "READ_DONE" })
+        + "; printf 'const value = final;\\n' > src/target.ts",
+      cwd: ws.root,
+      principal: "read-overlap-writer",
+      env: nativeEnv(ws.root),
+    }, output.onData);
+    completion = run.wait();
+    completion.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.race([
+      ready.promise,
+      completion.then(() => { throw new Error("bash exited before readiness"); }),
+    ]);
+
+    const expected = sandbox === "shared" ? "staged" : "seed";
+    const expectedBytes = `const value = ${expected};\n`;
+    checks = (async () => {
+      await assert.rejects(access(gate), (error) => error.code === "ENOENT");
+      const read = text(await ws.call("read", { path: "src/target.ts" }));
+      assert.ok(read.split("\n").includes(`1:const value = ${expected};`), read);
+      tagOf(read);
+
+      const found = text(await ws.call("find", { pattern: "*.ts", path: "src" }));
+      assert.match(found, /target\.ts/);
+
+      const searched = text(await ws.call("grep", { pattern: expected, path: "src" }));
+      assert.ok(searched.split("\n").includes(`*1:const value = ${expected};`), searched);
+      tagOf(searched);
+      assert.doesNotMatch(searched, /\.marsh/);
+
+      const matches = (await ws.call("ast_grep", {
+        patterns: [expected], path: "src", lang: "typescript",
+      })).details.result.matches;
+      assert.equal(matches.length, 1);
+      assert.equal(matches[0].text, expected);
+      assert.match(matches[0].path, /target\.ts$/);
+      assert.doesNotMatch(matches[0].path, /\.marsh/);
+
+      for (const input of [
+        { rewrites: { [expected]: "preview" }, path: "src/target.ts" },
+        { rewrites: { [expected]: "preview" }, path: "src/target.ts", dryRun: true },
+      ]) {
+        const preview = await ws.call("ast_edit", input);
+        assert.equal(preview.details.result.totalReplacements, 1);
+        assert.equal(preview.details.result.applied, false);
+        assert.equal(await ws.file("src/target.ts"), expectedBytes);
+      }
+
+      assert.equal(
+        (await ws.mux.readFile(join(ws.root, "src"), "target.ts")).toString("utf8"),
+        expectedBytes,
+      );
+      assert.equal(await ws.mux.exists(ws.root, "src/missing.ts"), false);
+      await assert.rejects(
+        ws.call("read", { path: "src/missing.ts" }),
+        /missing\.ts|no such file|not found/i,
+      );
+      assert.equal(output.output.includes("READ_DONE\n"), false);
+      assert.equal(settled, false, "bash is still held while every read completes");
+    })();
+    try {
+      await Promise.race([
+        checks,
+        new Promise((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("read-only file tools waited for held bash")), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
+
+    await release(gate);
+    assert.deepEqual(await completion, { exitCode: 0, cancelled: false, timedOut: false });
+    assert.equal(await ws.file("src/target.ts"), "const value = final;\n");
+  } finally {
+    clearTimeout(deadline);
+    await cleanup(
+      () => { run?.abort(); },
+      () => release(gate),
+      async () => { await completion?.catch(() => {}); },
+      async () => { await checks?.catch(() => {}); },
+      () => ws.dispose(),
+    );
+  }
+}
+
+test("read-only file tools finish while bash is held (shared)", { timeout: 60_000 },
+  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "shared"));
+
+test("read-only file tools finish while bash is held (always)", { timeout: 60_000 },
+  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "always"));
 
 /** The SDK harness shared with `agent.test.mjs`, with the collection supplying every tool. */
 async function collectionSession(instance, principal) {
