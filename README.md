@@ -45,6 +45,10 @@ The launcher preserves explicit `CARGO_HOME`, `RUSTUP_HOME`, and SSH settings. N
 
 The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`. Oh My Pi builds on nightly, and `pi-edit`'s pinned transitive dependency `xutf 1.5.0` unconditionally enables `portable_simd`. The shim exports `RUSTC_BOOTSTRAP` **only** while compiling that one crate, so junco's own crate and every other dependency still compile as plain stable 1.95.0 rather than moving the toolchain off the stable channel.
 
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `main`, pull requests, and manual dispatch. Configure repository secrets `JUNCO_MARSH_SSH_KEY` and `JUNCO_POLICY_SSH_KEY` with read-only deploy keys for `junco-org/marsh` and `junco-org/junco-policy`; CI checks them out at `../marsh` and `../junco-policy`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then `npm ci`, `npm run build`, `npm run build:native:test`, and `npm test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
+
 ## Run with `pi -e`
 
 Production execution requires an **existing dedicated btrfs seed subvolume**, a writable parent directory, and the `user_subvol_rm_allowed` mount option. Start Pi in that seed or a directory beneath it. junco-tools discovers the enclosing seed; it does not create or migrate subvolumes.

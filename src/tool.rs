@@ -29,7 +29,7 @@ use crate::ast::{self, AstFindOptions, AstFindResult, AstReplaceOptions, AstRepl
 use crate::edit::{EditApplyOutcome, EditFileOutcome, EditPolicy, EditStore};
 use crate::glob::{self, GlobOptions, GlobResult};
 use crate::grep::{self, GrepOptions, GrepResult};
-use crate::mux::RoutedError;
+use crate::mux::{RoutedError, Session};
 use crate::routed_error::resolve;
 
 /// A routed call's own failure, reported to JavaScript as its message.
@@ -185,12 +185,17 @@ fn utf8(path: &Path) -> Outcome<&str> {
         .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
 }
 
-/// A routed call's value, or its routing or operation failure. Only routing classifies a denial;
-/// an operation's own failure is an ordinary one.
-fn routed<T>(
-    outcome: std::result::Result<Outcome<T>, RoutedError>,
-) -> std::result::Result<T, RoutedError> {
-    outcome.and_then(|value| value.map_err(RoutedError::Other))
+/// Route one call, preserving publication denials while classifying operation errors as ordinary.
+async fn routed<T: Send + 'static>(
+    session: Arc<Session>,
+    cwd: String,
+    tool: JuncoTool,
+    operation: impl FnOnce(&BuiltinContext) -> Outcome<T> + Send + 'static,
+) -> napi::Result<std::result::Result<T, RoutedError>> {
+    Ok(session
+        .run_tool(cwd, tool, operation)
+        .await
+        .and_then(|value| value.map_err(RoutedError::Other)))
 }
 
 /// A file's editable text, read as `pi_edit::EditStore::record_file` reads it: `None` when it is
@@ -244,18 +249,12 @@ impl NativeMux {
         };
         let session = Arc::clone(&self.session);
         env.spawn_future_with_callback(
-            async move {
-                Ok(routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let physical = ctx
-                                .physical_path(Path::new(&path))
-                                .map_err(|error| error.to_string())?;
-                            std::fs::read(physical).map_err(|error| format!("{error}: {path}"))
-                        })
-                        .await,
-                ))
-            },
+            routed(session, cwd, tool, move |ctx| {
+                let physical = ctx
+                    .physical_path(Path::new(&path))
+                    .map_err(|error| error.to_string())?;
+                std::fs::read(physical).map_err(|error| format!("{error}: {path}"))
+            }),
             |env, outcome| resolve(env, outcome).map(Buffer::from),
         )
     }
@@ -273,18 +272,12 @@ impl NativeMux {
         };
         let session = Arc::clone(&self.session);
         env.spawn_future_with_callback(
-            async move {
-                Ok(routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let physical = ctx
-                                .physical_path(Path::new(&path))
-                                .map_err(|error| error.to_string())?;
-                            Ok(physical.exists())
-                        })
-                        .await,
-                ))
-            },
+            routed(session, cwd, tool, move |ctx| {
+                let physical = ctx
+                    .physical_path(Path::new(&path))
+                    .map_err(|error| error.to_string())?;
+                Ok(physical.exists())
+            }),
             resolve,
         )
     }
@@ -302,25 +295,19 @@ impl NativeMux {
             root: PathBuf::from(spec.path()),
         };
         let session = Arc::clone(&self.session);
+        let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            async move {
-                let seed = session.seed().to_path_buf();
-                Ok(routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let view = View::new(ctx, &seed)?;
-                            let root = view.physical(Path::new(spec.path()))?;
-                            let mut result = spec
-                                .run(utf8(&root)?, ct)
-                                .map_err(|error| view.error(error))?;
-                            for entry in &mut result.matches {
-                                view.result_path(&mut entry.path);
-                            }
-                            Ok(result)
-                        })
-                        .await,
-                ))
-            },
+            routed(session, cwd, tool, move |ctx| {
+                let view = View::new(ctx, &seed)?;
+                let root = view.physical(Path::new(spec.path()))?;
+                let mut result = spec
+                    .run(utf8(&root)?, ct)
+                    .map_err(|error| view.error(error))?;
+                for entry in &mut result.matches {
+                    view.result_path(&mut entry.path);
+                }
+                Ok(result)
+            }),
             resolve,
         )
     }
@@ -341,42 +328,39 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         let snapshots = store.inner.clone();
         let keys = Arc::clone(&store.keys);
+        let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
             async move {
-                let seed = session.seed().to_path_buf();
-                let outcome = routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let view = View::new(ctx, &seed)?;
-                            let root = view.physical(&root)?;
-                            utf8(&root)?.clone_into(&mut config.path);
-                            let mut result = grep::grep_sync(config, None, ct)
-                                .map_err(|error| view.error(error))?;
-                            let mut read = HashSet::new();
-                            let mut files = Vec::new();
-                            for entry in &mut result.matches {
-                                let found = Path::new(&entry.path);
-                                let physical = if found.is_absolute() {
-                                    found.to_path_buf()
-                                } else {
-                                    root.join(found)
-                                };
-                                view.result_path(&mut entry.path);
-                                let notebook = physical.extension().is_some_and(|extension| {
-                                    extension.eq_ignore_ascii_case("ipynb")
-                                });
-                                if !notebook && read.insert(entry.path.clone()) {
-                                    files.push(GrepFile {
-                                        path: entry.path.clone(),
-                                        logical: view.logical(&physical),
-                                        text: snapshot_text(&physical),
-                                    });
-                                }
-                            }
-                            Ok((result, files))
-                        })
-                        .await,
-                );
+                let outcome = routed(session, cwd, tool, move |ctx| {
+                    let view = View::new(ctx, &seed)?;
+                    let root = view.physical(&root)?;
+                    utf8(&root)?.clone_into(&mut config.path);
+                    let mut result =
+                        grep::grep_sync(config, None, ct).map_err(|error| view.error(error))?;
+                    let mut read = HashSet::new();
+                    let mut files = Vec::new();
+                    for entry in &mut result.matches {
+                        let found = Path::new(&entry.path);
+                        let physical = if found.is_absolute() {
+                            found.to_path_buf()
+                        } else {
+                            root.join(found)
+                        };
+                        view.result_path(&mut entry.path);
+                        let notebook = physical
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"));
+                        if !notebook && read.insert(entry.path.clone()) {
+                            files.push(GrepFile {
+                                path: entry.path.clone(),
+                                logical: view.logical(&physical),
+                                text: snapshot_text(&physical),
+                            });
+                        }
+                    }
+                    Ok((result, files))
+                })
+                .await?;
                 // Recorded after the call, off its traced thread: the store is this process's own.
                 Ok(outcome.map(|(result, files)| {
                     let mut keys = keys.lock();
@@ -415,29 +399,22 @@ impl NativeMux {
         let root = PathBuf::from(spec.path.as_deref().unwrap_or(&cwd));
         let tool = JuncoTool::AstGrep { root: root.clone() };
         let session = Arc::clone(&self.session);
+        let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            async move {
-                let seed = session.seed().to_path_buf();
-                Ok(routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let view = View::new(ctx, &seed)?;
-                            spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
-                            let mut result =
-                                spec.run(ct).map_err(|error| view.error(error))?;
-                            for entry in &mut result.matches {
-                                view.result_path(&mut entry.path);
-                            }
-                            if let Some(errors) = &mut result.parse_errors {
-                                for error in errors {
-                                    *error = view.text(std::mem::take(error));
-                                }
-                            }
-                            Ok(result)
-                        })
-                        .await,
-                ))
-            },
+            routed(session, cwd, tool, move |ctx| {
+                let view = View::new(ctx, &seed)?;
+                spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
+                let mut result = spec.run(ct).map_err(|error| view.error(error))?;
+                for entry in &mut result.matches {
+                    view.result_path(&mut entry.path);
+                }
+                if let Some(errors) = &mut result.parse_errors {
+                    for error in errors {
+                        *error = view.text(std::mem::take(error));
+                    }
+                }
+                Ok(result)
+            }),
             resolve,
         )
     }
@@ -458,36 +435,29 @@ impl NativeMux {
             apply: spec.dry_run == Some(false),
         };
         let session = Arc::clone(&self.session);
+        let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            async move {
-                let seed = session.seed().to_path_buf();
-                Ok(routed(
-                    session
-                        .run_tool(cwd, tool, move |ctx| {
-                            let view = View::new(ctx, &seed)?;
-                            spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
-                            let mut persist = |path: &Path, output: &str| {
-                                replace_file(ctx, &view.logical(path), output)
-                            };
-                            let mut result = spec
-                                .run(ct, &mut persist)
-                                .map_err(|error| view.error(error))?;
-                            for change in &mut result.changes {
-                                view.result_path(&mut change.path);
-                            }
-                            for change in &mut result.file_changes {
-                                view.result_path(&mut change.path);
-                            }
-                            if let Some(errors) = &mut result.parse_errors {
-                                for error in errors {
-                                    *error = view.text(std::mem::take(error));
-                                }
-                            }
-                            Ok(result)
-                        })
-                        .await,
-                ))
-            },
+            routed(session, cwd, tool, move |ctx| {
+                let view = View::new(ctx, &seed)?;
+                spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
+                let mut persist =
+                    |path: &Path, output: &str| replace_file(ctx, &view.logical(path), output);
+                let mut result = spec
+                    .run(ct, &mut persist)
+                    .map_err(|error| view.error(error))?;
+                for change in &mut result.changes {
+                    view.result_path(&mut change.path);
+                }
+                for change in &mut result.file_changes {
+                    view.result_path(&mut change.path);
+                }
+                if let Some(errors) = &mut result.parse_errors {
+                    for error in errors {
+                        *error = view.text(std::mem::take(error));
+                    }
+                }
+                Ok(result)
+            }),
             resolve,
         )
     }
