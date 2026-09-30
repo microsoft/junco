@@ -6,7 +6,7 @@ import {
   type GrepToolDetails,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { EditStore, GrepMatch } from "../native/index.js";
+import type { EditStore, GrepMatch, NativeMux } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import {
   DEFAULT_MAX_BYTES,
@@ -147,14 +147,17 @@ function renderRow(row: CollectedRow, snapshotLines: string[] | undefined): Rend
  * Pi's grep tool backed by the native Rust engine.
  *
  * `GrepOperations` only swaps stat/context reads — Pi still spawns `rg` — so
- * `execute` is replaced outright. Displayed rows that provably match the
- * recorded snapshot carry hashline provenance; anything native shortened,
- * could not verify, or that did not survive the output cap does not.
+ * `execute` is replaced outright. The search is a routed marsh read through
+ * `mux`, which also records each matched file's snapshot from the bytes it
+ * searched. Displayed rows that provably match that snapshot carry hashline
+ * provenance; anything native shortened, could not verify, or that did not
+ * survive the output cap does not.
  */
 export function createGrepTool(
   cwd: string,
   store: EditStore,
   native: NativeModule,
+  mux: NativeMux,
 ): AgentTool<ReturnType<typeof createPiGrepToolDefinition>["parameters"], NativeGrepToolDetails> {
   const base = createPiGrepToolDefinition(cwd);
   const tool = {
@@ -171,22 +174,29 @@ export function createGrepTool(
         ? params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
         : params.pattern;
 
-      const result = await withNativeSignal(signal, (nativeSignal) =>
-        native.grep({
-          pattern,
-          path: root,
-          glob: params.glob,
-          ignoreCase: params.ignoreCase,
-          mode: native.GrepOutputMode.Content,
-          hidden: true,
-          gitignore: true,
-          maxColumns: NATIVE_MAX_COLUMNS,
-          maxCount: limit,
-          context,
-          signal: nativeSignal,
-        }),
+      const { result, snapshots } = await withNativeSignal(signal, (nativeSignal) =>
+        mux.grep(
+          cwd,
+          {
+            pattern,
+            path: root,
+            glob: params.glob,
+            ignoreCase: params.ignoreCase,
+            mode: native.GrepOutputMode.Content,
+            hidden: true,
+            gitignore: true,
+            maxColumns: NATIVE_MAX_COLUMNS,
+            maxCount: limit,
+            context,
+            signal: nativeSignal,
+          },
+          store,
+        ),
       );
       throwIfAborted(signal);
+      const tags = new Map<string, string | undefined>(
+        snapshots.map((snapshot) => [snapshot.path, snapshot.tag]),
+      );
 
       const details: NativeGrepToolDetails = {
         totalMatches: result.totalMatches,
@@ -220,9 +230,7 @@ export function createGrepTool(
         };
         // Notebooks display as decoded cell text, never as their raw JSON
         // lines, so a grep row cannot anchor an edit into one.
-        const tag = /\.ipynb$/i.test(absolutePath)
-          ? null
-          : store.recordSnapshotFile(absolutePath);
+        const tag = /\.ipynb$/i.test(absolutePath) ? null : (tags.get(nativePath) ?? null);
         const snapshot = tag ? store.byHashText(absolutePath, tag) : null;
         let snapshotLines =
           snapshot !== null && !snapshot.includes("\0") ? snapshot.split("\n") : undefined;

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use marsh_core::shellmux::{FrontendEvent, ShellFrontend, ShellMux, SnapshotUid};
+use marsh_core::shellmux::{FrontendEvent, ShellFrontend, ShellMux};
+use marsh_core::Principal;
 use napi::Status;
 use napi::bindgen_prelude::Buffer;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -180,18 +181,18 @@ impl Drop for CallbackCompletion {
 pub(crate) struct Frontend {
     geometry: (u16, u16),
     mux: Weak<ShellMux>,
-    routes: HashMap<SnapshotUid, Arc<OutputRoute>>,
+    routes: HashMap<Principal, Arc<OutputRoute>>,
 }
 
 impl Frontend {
-    pub(crate) fn register(&mut self, uid: SnapshotUid, route: Arc<OutputRoute>) {
+    pub(crate) fn register(&mut self, uid: Principal, route: Arc<OutputRoute>) {
         if let Some(previous) = self.routes.insert(uid, route) {
             previous.fail("ShellMux output route was replaced before removal".to_owned());
             previous.detach();
         }
     }
 
-    pub(crate) fn remove(&mut self, uid: &SnapshotUid) {
+    pub(crate) fn remove(&mut self, uid: &Principal) {
         if let Some(route) = self.routes.remove(uid) {
             // The runner removes a route only after its Closed event and callback fence.
             route.detach();

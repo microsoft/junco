@@ -11,7 +11,7 @@
 //!
 //! # Example
 //! ```ignore
-//! // JS: await native.glob({ pattern: "*.rs", path: "." })
+//! // JS: await mux.glob(cwd, { pattern: "*.rs", path: "." })
 //! ```
 
 use std::{cmp::Ordering, path::Path};
@@ -237,25 +237,75 @@ fn run_glob(
 	Ok(GlobResult { matches, total_matches })
 }
 
-/// Find filesystem entries matching a glob pattern.
-///
-/// Resolves the search root, scans entries, applies glob and optional file-type
-/// filters, and optionally streams each accepted match through `on_match`.
-///
-/// When `sortByMtime` is enabled, the walker ranks matches by mtime before the
-/// native layer applies final symlink-aware file-type filtering and callback
-/// emission.
-///
-/// # Errors
-/// Returns an error when the search path cannot be resolved, the path is not a
-/// directory, the glob pattern is invalid, or cancellation/timeout is
-/// triggered.
-#[napi]
-pub fn glob(
-	options: GlobOptions<'_>,
-	#[napi(ts_arg_type = "((error: Error | null, match: GlobMatch) => void) | undefined | null")]
-	on_match: Option<ThreadsafeFunction<GlobMatch>>,
-) -> task::Promise<GlobResult> {
+/// A `glob` request prepared on the JS thread. Its search root is resolved only once the routed
+/// call knows the view it runs in.
+pub(crate) struct GlobSpec {
+	pattern:              String,
+	path:                 String,
+	file_type:            Option<FileType>,
+	recursive:            Option<bool>,
+	hidden:               Option<bool>,
+	max_results:          Option<u32>,
+	gitignore:            Option<bool>,
+	sort_by_mtime:        Option<bool>,
+	cache:                Option<bool>,
+	include_node_modules: Option<bool>,
+}
+
+impl GlobSpec {
+	/// The directory to search, as the caller named it.
+	pub(crate) fn path(&self) -> &str {
+		&self.path
+	}
+
+	/// Find filesystem entries matching the pattern under `root`, the caller's
+	/// directory in the view the call runs in.
+	///
+	/// Resolves the search root, scans entries, and applies glob and optional
+	/// file-type filters. When `sortByMtime` is enabled, the walker ranks matches
+	/// by mtime before the native layer applies final symlink-aware file-type
+	/// filtering.
+	///
+	/// # Errors
+	/// Returns an error when the search path cannot be resolved, the path is not a
+	/// directory, the glob pattern is invalid, or cancellation/timeout is
+	/// triggered.
+	pub(crate) fn run(self, root: &str, ct: task::CancelToken) -> Result<GlobResult> {
+		let Self {
+			pattern,
+			path: _,
+			file_type,
+			recursive,
+			hidden,
+			max_results,
+			gitignore,
+			sort_by_mtime,
+			cache,
+			include_node_modules,
+		} = self;
+		run_glob(
+			GlobConfig {
+				root: pi_walker::resolve_search_path(root).map_err(iofs::map_walker_error)?,
+				include_hidden: hidden.unwrap_or(false),
+				file_type_filter: file_type,
+				recursive: recursive.unwrap_or(true),
+				max_results: max_results.map_or(usize::MAX, |value| value as usize),
+				use_gitignore: gitignore.unwrap_or(true),
+				mentions_node_modules: include_node_modules
+					.unwrap_or_else(|| pattern.contains("node_modules")),
+				sort_by_mtime: sort_by_mtime.unwrap_or(false),
+				cache: cache.unwrap_or(false),
+				pattern,
+			},
+			None,
+			ct,
+		)
+	}
+}
+
+/// Splits `options` into its request and a cancel token that consumes the abort
+/// signal on the JS thread.
+pub(crate) fn prepare(options: GlobOptions<'_>) -> (GlobSpec, task::CancelToken) {
 	let GlobOptions {
 		pattern,
 		path,
@@ -273,29 +323,22 @@ pub fn glob(
 
 	let pattern = pattern.trim();
 	let pattern = if pattern.is_empty() { "*" } else { pattern };
-	let pattern = pattern.to_string();
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
-
-	task::blocking("glob", ct, move |ct| {
-		run_glob(
-			GlobConfig {
-				root: pi_walker::resolve_search_path(&path).map_err(iofs::map_walker_error)?,
-				include_hidden: hidden.unwrap_or(false),
-				file_type_filter: file_type,
-				recursive: recursive.unwrap_or(true),
-				max_results: max_results.map_or(usize::MAX, |value| value as usize),
-				use_gitignore: gitignore.unwrap_or(true),
-				mentions_node_modules: include_node_modules
-					.unwrap_or_else(|| pattern.contains("node_modules")),
-				sort_by_mtime: sort_by_mtime.unwrap_or(false),
-				cache: cache.unwrap_or(false),
-				pattern,
-			},
-			on_match.as_ref(),
-			ct,
-		)
-	})
+	(
+		GlobSpec {
+			pattern: pattern.to_string(),
+			path,
+			file_type,
+			recursive,
+			hidden,
+			max_results,
+			gitignore,
+			sort_by_mtime,
+			cache,
+			include_node_modules,
+		},
+		task::CancelToken::new(timeout_ms, signal),
+	)
 }
 
 #[cfg(test)]

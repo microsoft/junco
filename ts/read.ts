@@ -1,15 +1,15 @@
 import { isUtf8 } from "node:buffer";
-import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createReadTool as createPiReadTool,
   createReadToolDefinition as createPiReadToolDefinition,
   type ExtensionContext,
+  type ReadOperations,
   type ReadToolDetails,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { EditStore } from "../native/index.js";
+import type { EditStore, NativeMux } from "../native/index.js";
+import { detectSupportedImageMimeType, IMAGE_TYPE_SNIFF_BYTES } from "./mime.js";
 import type { NativeModule } from "./native.js";
 import { displayToolPath, normalizeEditableText, throwIfAborted } from "./tool-support.js";
 
@@ -57,7 +57,8 @@ function visibleLineNumbers(body: string, native: NativeModule): number[] {
  * Eligible text is renumbered into `N:text` rows and tagged `[path#TAG]`, and
  * the exact editable view behind that tag is recorded in `store` so the
  * hashline edit tool can verify both content and provenance. Images, binary,
- * invalid UTF-8, and oversized files fall through to Pi's reader unchanged.
+ * invalid UTF-8, and oversized files fall through to Pi's reader over the same
+ * bytes. Every byte comes from `mux` as a routed marsh read of the seed.
  *
  * The runtime context is optional: Pi's SDK passes one (its model drives the
  * non-vision image notice), while a bare Agent calls with four arguments and
@@ -67,6 +68,7 @@ export function createReadTool(
   cwd: string,
   store: EditStore,
   native: NativeModule,
+  mux: NativeMux,
 ): AgentTool<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined> {
   const fallback = createPiReadToolDefinition(cwd);
   const tool = {
@@ -74,18 +76,29 @@ export function createReadTool(
     description: `${fallback.description} ${HASHLINE_NOTE}`,
     async execute(toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) {
       throwIfAborted(signal);
+      // Pi probes, sniffs, and reads the same path: one routed read serves them all.
+      const loads = new Map<string, Promise<Buffer>>();
+      const load = (absolutePath: string): Promise<Buffer> => {
+        let loading = loads.get(absolutePath);
+        if (!loading) {
+          loading = mux.readFile(cwd, absolutePath);
+          loads.set(absolutePath, loading);
+        }
+        return loading;
+      };
+      const access = async (absolutePath: string): Promise<void> => {
+        throwIfAborted(signal);
+        await load(absolutePath);
+      };
       let captured: { absolutePath: string; view: string } | undefined;
       // Built per call: the operations close over this call's signal and
       // capture slot, so concurrent reads never observe each other's state.
       const numbered = createPiReadTool(cwd, {
         operations: {
-          async access(absolutePath) {
-            throwIfAborted(signal);
-            await access(absolutePath, constants.R_OK);
-          },
+          access,
           async readFile(absolutePath) {
             throwIfAborted(signal);
-            const raw = await readFile(absolutePath);
+            const raw = await load(absolutePath);
             throwIfAborted(signal);
             if (raw.byteLength > SNAPSHOT_MAX_BYTES || raw.includes(0) || !isUtf8(raw)) {
               throw new Unsnapshottable();
@@ -101,7 +114,7 @@ export function createReadTool(
             return Buffer.from(native.hashlineFormatNumberedLines(display, 1), "utf-8");
           },
           // `detectImageMimeType` is intentionally absent: this branch only
-          // ever produces numbered text, and images go to `fallback`.
+          // ever produces numbered text, and images go to the fallback.
         },
       });
 
@@ -112,8 +125,23 @@ export function createReadTool(
         result = await numbered.execute(toolCallId, params, undefined, onUpdate);
       } catch (error) {
         if (error instanceof Unsnapshottable) {
-          if (ctx !== undefined) return fallback.execute(toolCallId, params, signal, onUpdate, ctx);
-          return createPiReadTool(cwd).execute(toolCallId, params, signal, onUpdate);
+          // Pi's unmodified reader, over the bytes this call already loaded.
+          const operations: ReadOperations = {
+            access,
+            readFile: load,
+            detectImageMimeType: async (absolutePath) =>
+              detectSupportedImageMimeType((await load(absolutePath)).subarray(0, IMAGE_TYPE_SNIFF_BYTES)),
+          };
+          if (ctx !== undefined) {
+            return createPiReadToolDefinition(cwd, { operations }).execute(
+              toolCallId,
+              params,
+              signal,
+              onUpdate,
+              ctx,
+            );
+          }
+          return createPiReadTool(cwd, { operations }).execute(toolCallId, params, signal, onUpdate);
         }
         throw error;
       }

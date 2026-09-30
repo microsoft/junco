@@ -1,12 +1,12 @@
 //! N-API surface for the Rust edit engine (`pi_edit`).
 //!
 //! # Overview
-//! One [`EditSession`] per edit tool call: the agent loop feeds raw streamed
-//! argument fragments through [`EditSession::push`], a background pump
-//! computes per-file diff previews off the JS thread and delivers them via
-//! the `onPreview` callback, and [`EditSession::apply`] stages the finished
-//! edit in memory and writes every file through the host-owned `writer`
-//! callback (LSP writethrough / ACP bridge stay in TypeScript).
+//! A hashline edit is applied by the routed `NativeMux.edit`, which stages it
+//! in memory and writes every file through the call's marsh context.
+//! [`EditSession`] keeps the streaming side: the agent loop feeds raw streamed
+//! argument fragments through [`EditSession::push`], and a background pump
+//! computes per-file diff previews off the JS thread and delivers them via the
+//! `onPreview` callback.
 //!
 //! [`EditStore`] holds the session-wide snapshot/clipboard/no-op state that
 //! read-side tools populate. The remaining exports are pure helpers used by
@@ -14,6 +14,7 @@
 //! formatting, notebook decoding).
 
 use std::{
+	collections::HashSet,
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
@@ -21,18 +22,17 @@ use std::{
 	},
 };
 
-use async_trait::async_trait;
 use napi::{
-	bindgen_prelude::{Promise, Result},
+	bindgen_prelude::Result,
 	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditError, EditMode, EditResult, PathPolicy, Session,
+	EditMode, PathPolicy, Session,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
 	path_policy::canonical_key,
-	session::{ApplyRequest, EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse},
+	session::{PreviewBatch, SessionConfig},
 	store,
 	stream_json::snapshot_from_text,
 	text::normalize_to_lf,
@@ -80,7 +80,7 @@ pub struct EditPolicy {
 }
 
 impl EditPolicy {
-	fn into_config(self) -> Result<SessionConfig> {
+	pub(crate) fn into_config(self) -> Result<SessionConfig> {
 		Ok(SessionConfig {
 			mode:               parse_mode(&self.mode)?,
 			policy:             PathPolicy {
@@ -150,39 +150,6 @@ impl From<PreviewBatch> for EditPreviewBatch {
 	}
 }
 
-/// Host write request; the host owns the bytes.
-#[napi(object)]
-pub struct EditWriteRequest {
-	/// Absolute path.
-	pub path:         String,
-	pub display_path: String,
-	/// `create` | `update` | `delete` | `move`.
-	pub op:           String,
-	/// Absolute destination for `move` (write `content` there, delete `path`).
-	pub move_to:      Option<String>,
-	/// Final bytes as text; null for `delete`.
-	pub content:      Option<String>,
-	/// Last write of this call and the LSP batch requested a flush.
-	pub flush_lsp:    bool,
-	pub lsp_batch_id: Option<String>,
-}
-
-/// Host write response.
-#[napi(object)]
-pub struct EditWriteResponse {
-	/// Text actually persisted (a bridge may reformat); empty for deletes.
-	pub written:          String,
-	/// `FileDiagnosticsResult` serialized by the host; opaque here.
-	pub diagnostics_json: Option<String>,
-}
-
-/// Apply-time knobs.
-#[napi(object)]
-pub struct EditApplyRequest {
-	pub lsp_batch_id: Option<String>,
-	pub lsp_flush:    bool,
-}
-
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
@@ -223,7 +190,10 @@ pub struct EditApplyOutcome {
 #[napi]
 #[derive(Default)]
 pub struct EditStore {
-	inner: pi_edit::EditStore,
+	pub(crate) inner: pi_edit::EditStore,
+	/// Canonical keys, as callers name them, that snapshots were ever recorded
+	/// under: a routed edit moves exactly these into its private view.
+	pub(crate) keys:  Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
 }
 
 #[napi]
@@ -244,22 +214,11 @@ impl EditStore {
 	) -> String {
 		let key = canonical_key(Path::new(&absolute_path));
 		let (_, body) = pi_edit::text::strip_bom(&text);
-		self
+		let tag = self
 			.inner
-			.record(&key, &normalize_to_lf(body), seen_lines.as_deref())
-	}
-
-	/// Read `absolutePath` from disk and record it; null when the file is
-	/// unreadable or larger than 4 MiB.
-	#[napi]
-	pub fn record_snapshot_file(
-		&self,
-		absolute_path: String,
-		seen_lines: Option<Vec<u32>>,
-	) -> Option<String> {
-		self
-			.inner
-			.record_file(Path::new(&absolute_path), seen_lines.as_deref())
+			.record(&key, &normalize_to_lf(body), seen_lines.as_deref());
+		self.keys.lock().insert(key);
+		tag
 	}
 
 	/// Merge displayed lines into the snapshot tagged `tag`.
@@ -321,21 +280,25 @@ impl EditStore {
 
 	#[napi]
 	pub fn invalidate(&self, absolute_path: String) {
-		self
-			.inner
-			.invalidate(&canonical_key(Path::new(&absolute_path)));
+		let key = canonical_key(Path::new(&absolute_path));
+		self.inner.invalidate(&key);
+		self.keys.lock().remove(&key);
 	}
 
 	#[napi]
 	pub fn relocate(&self, from: String, to: String) {
-		self
-			.inner
-			.relocate(&canonical_key(Path::new(&from)), &canonical_key(Path::new(&to)));
+		let from = canonical_key(Path::new(&from));
+		let to = canonical_key(Path::new(&to));
+		self.inner.relocate(&from, &to);
+		let mut keys = self.keys.lock();
+		keys.remove(&from);
+		keys.insert(to);
 	}
 
 	#[napi]
 	pub fn clear(&self) {
 		self.inner.clear();
+		self.keys.lock().clear();
 	}
 }
 
@@ -344,7 +307,6 @@ impl EditStore {
 // ═══════════════════════════════════════════════════════════════════════════
 
 type PreviewCallback = ThreadsafeFunction<EditPreviewBatch, UnknownReturnValue>;
-type WriterCallback = ThreadsafeFunction<EditWriteRequest, Promise<EditWriteResponse>>;
 
 /// Argument mutations queued on the JS thread and drained into the session
 /// under its lock, preserving arrival order without ever blocking JS.
@@ -377,45 +339,6 @@ impl Shared {
 				ArgOp::Finish => session.finish(),
 			}
 		}
-	}
-}
-
-/// Bridges the host writer callback into the engine's writer trait.
-struct TsfnWriter {
-	tsfn: WriterCallback,
-}
-
-#[async_trait]
-impl EditWriter for TsfnWriter {
-	async fn write(&self, request: WriteRequest) -> EditResult<WriteResponse> {
-		let op = if request.move_to.is_some() {
-			"move"
-		} else {
-			request.op.as_str()
-		};
-		let payload = EditWriteRequest {
-			path:         request.absolute.to_string_lossy().into_owned(),
-			display_path: request.display,
-			op:           op.to_owned(),
-			move_to:      request.move_to.map(|p| p.to_string_lossy().into_owned()),
-			content:      request.content,
-			flush_lsp:    request.flush_lsp,
-			lsp_batch_id: request.lsp_batch_id,
-		};
-		// napi 3.9.0's `Error` implements `Drop`, so its `reason` cannot be
-		// moved out of the value; clone the message instead.
-		let promise = self
-			.tsfn
-			.call_async(Ok(payload))
-			.await
-			.map_err(|err| EditError::Writer(err.reason.clone()))?;
-		let response = promise
-			.await
-			.map_err(|err| EditError::Writer(err.reason.clone()))?;
-		Ok(WriteResponse {
-			written:          response.written,
-			diagnostics_json: response.diagnostics_json,
-		})
 	}
 }
 
@@ -467,59 +390,6 @@ impl EditSession {
 	#[napi]
 	pub fn finish(&self) {
 		self.shared.enqueue(ArgOp::Finish);
-	}
-
-	/// Stage and apply the finished edit through `writer`. Never rejects for
-	/// engine failures: those come back as `isError` outcomes carrying the
-	/// model-facing message.
-	#[napi]
-	pub async fn apply(
-		&self,
-		request: EditApplyRequest,
-		#[napi(ts_arg_type = "(error: Error | null, request: EditWriteRequest) => \
-		                      Promise<EditWriteResponse>")]
-		writer: WriterCallback,
-	) -> Result<EditApplyOutcome> {
-		self.shared.closed.store(true, Ordering::Release);
-		let _ = self.shared.wake.try_send(());
-		let shared = Arc::clone(&self.shared);
-		let mut session = shared.session.lock().await;
-		shared.drain_into(&mut session);
-		let writer = TsfnWriter { tsfn: writer };
-		let outcome = session
-			.apply(
-				ApplyRequest { lsp_batch_id: request.lsp_batch_id, lsp_flush: request.lsp_flush },
-				&writer,
-			)
-			.await;
-		Ok(match outcome {
-			Ok(outcome) => EditApplyOutcome {
-				text:     outcome.text,
-				files:    outcome
-					.files
-					.into_iter()
-					.map(|file| EditFileOutcome {
-						path:               file.absolute.to_string_lossy().into_owned(),
-						display_path:       file.display,
-						op:                 file.op.as_str().to_owned(),
-						move_to:            file.move_to.map(|p| p.to_string_lossy().into_owned()),
-						diff:               file.diff,
-						first_changed_line: file.first_changed_line,
-						old_text:           file.old_text,
-						new_text:           file.new_text,
-						snapshots_pruned:   file.snapshots_pruned,
-						diagnostics_json:   file.diagnostics_json,
-						warnings:           file.warnings,
-						text:               file.text,
-						parse_regressed:    file.parse_regressed,
-					})
-					.collect(),
-				is_error: false,
-			},
-			Err(err) => {
-				EditApplyOutcome { text: err.to_string(), files: Vec::new(), is_error: true }
-			},
-		})
 	}
 
 	/// Stop the preview pump and release buffers.

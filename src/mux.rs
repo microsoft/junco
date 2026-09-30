@@ -6,18 +6,19 @@ use std::time::Duration;
 
 use brush_core::{ShellVariable, env::ShellEnvironment};
 use marsh_btrfs::{PersistenceLayer, Subvolumes};
-use marsh_core::Outcome;
-use marsh_core::policy::Principal;
+use marsh_core::builtins::BuiltinContext;
 use marsh_core::shellmux::{
     CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell, ShellFrontend,
-    ShellMux, SpawnOptions,
+    ShellId, ShellMux, SpawnOptions,
 };
+use marsh_core::{SandboxPolicy, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
 use crate::frontend::{Frontend, OutputCallback, OutputRoute};
+use crate::tool::JuncoTool;
 use crate::{NativeRunOptions, NativeRunResult};
 
 type RunResult = Result<NativeRunResult, String>;
@@ -68,15 +69,17 @@ struct Backend {
     filesystem: Arc<dyn Subvolumes>,
 }
 
-struct TrackedRun {
-    state: Arc<RunState>,
+/// A task close joins before the mux shuts down: a run, which close also cancels through its
+/// state, or a routed tool call, which finishes on its own within its cancel token's bounds.
+struct TrackedTask {
+    run: Option<Arc<RunState>>,
     task: JoinHandle<()>,
 }
 
 struct SessionState {
     backend: Option<Backend>,
     closing: bool,
-    runs: HashMap<Id, TrackedRun>,
+    tasks: HashMap<Id, TrackedTask>,
     principals: HashMap<String, watch::Receiver<bool>>,
 }
 
@@ -88,17 +91,23 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(seed: PathBuf, filesystem: Arc<dyn Subvolumes>) -> Result<Arc<Self>, String> {
+    pub(crate) fn new(
+        seed: PathBuf,
+        filesystem: Arc<dyn Subvolumes>,
+        policy: SandboxPolicy,
+        create_mux: impl FnOnce(MuxProfile, Arc<Mutex<Frontend>>) -> Result<Arc<ShellMux>, MuxError>,
+    ) -> Result<Arc<Self>, String> {
         let runtime = Handle::current();
         let frontend = Arc::new(Mutex::new(Frontend::new(24, 80)));
+        let profile = MuxProfile {
+            sandbox_policy: policy,
+            ..Default::default()
+        };
         // Leases nothing: the seed's exclusive lease, its log recovery and its one validator
-        // are opened by the first shell whose working directory names it.
-        let mux = ShellMux::new_with(
-            MuxProfile::default(),
-            Arc::clone(&frontend),
-            Arc::clone(&filesystem),
-        )
-        .map_err(|error| error.to_string())?;
+        // are opened by the first shell whose working directory names it. That source-domain
+        // state is marsh's, shared across every live shell drawing on the same backend (and,
+        // in a CopyTree build, a second mux over that backend), never retained here.
+        let mux = create_mux(profile, Arc::clone(&frontend)).map_err(|error| error.to_string())?;
         let (closed, _) = watch::channel(None);
         Ok(Arc::new(Self {
             seed,
@@ -110,7 +119,7 @@ impl Session {
                     filesystem,
                 }),
                 closing: false,
-                runs: HashMap::new(),
+                tasks: HashMap::new(),
                 principals: HashMap::new(),
             }),
             closed,
@@ -184,18 +193,77 @@ impl Session {
                     .state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .runs
+                    .tasks
                     .remove(&tokio::task::id());
             }
         });
-        session.runs.insert(
+        session.tasks.insert(
             task.id(),
-            TrackedRun {
-                state: Arc::clone(&state),
+            TrackedTask {
+                run: Some(Arc::clone(&state)),
                 task,
             },
         );
         Ok(state)
+    }
+
+    /// Runs `operation` as one call of `tool` in a transient shell at `cwd`, routed by the mux's
+    /// policy. A call already accepted when the session begins closing still completes: close
+    /// joins it before the mux shuts down.
+    pub(crate) async fn run_tool<R: Send + 'static>(
+        self: &Arc<Self>,
+        cwd: String,
+        tool: JuncoTool,
+        operation: impl FnOnce(&BuiltinContext) -> R + Send + 'static,
+    ) -> Result<R, String> {
+        let receipt = {
+            // Admission and task registration share this lock with begin_close, as runs do.
+            let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if session.closing {
+                return Err("ShellMux session is closed".to_string());
+            }
+            let backend = session
+                .backend
+                .as_ref()
+                .ok_or_else(|| "ShellMux session is closed".to_string())?
+                .clone();
+            let runtime = self.runtime.clone();
+            let seed = self.seed.clone();
+            let owner = Arc::downgrade(self);
+            let (sender, receipt) = oneshot::channel();
+            let task = self.runtime.spawn(async move {
+                let filesystem = Arc::clone(&backend.filesystem);
+                let result = match runtime
+                    .spawn_blocking(move || working_directory(&cwd, &seed, filesystem.as_ref()))
+                    .await
+                {
+                    Ok(Ok(directory)) => backend
+                        .mux
+                        .run_tool(&directory, tool, operation)
+                        .await
+                        .map_err(tool_error),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(format!("Cannot resolve working directory: {error}")),
+                };
+                drop(backend);
+                let _ = sender.send(result);
+                if let Some(owner) = owner.upgrade() {
+                    owner
+                        .state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .tasks
+                        .remove(&tokio::task::id());
+                }
+            });
+            session
+                .tasks
+                .insert(task.id(), TrackedTask { run: None, task });
+            receipt
+        };
+        receipt
+            .await
+            .map_err(|_| "ShellMux tool task ended without a result".to_string())?
     }
 
     pub(crate) fn begin_close(self: &Arc<Self>) -> watch::Receiver<Option<CloseResult>> {
@@ -205,20 +273,24 @@ impl Session {
             return completion;
         }
         session.closing = true;
-        let runs = std::mem::take(&mut session.runs);
+        let tasks = std::mem::take(&mut session.tasks);
         let backend = session.backend.take();
         session.principals.clear();
-        for run in runs.values() {
-            run.state.abort();
+        for run in tasks.values().filter_map(|tracked| tracked.run.as_ref()) {
+            run.abort();
         }
         let closed = self.closed.clone();
         // No caller owns this cleanup future, so cancelling a close promise cannot
         // cancel teardown or let another close return ahead of it.
         self.runtime.spawn(async move {
             let mut failure = None;
-            for run in runs.into_values() {
-                if let Err(error) = run.task.await {
-                    remember_error(&mut failure, format!("ShellMux run task failed: {error}"));
+            for tracked in tasks.into_values() {
+                let kind = if tracked.run.is_some() { "run" } else { "tool" };
+                if let Err(error) = tracked.task.await {
+                    remember_error(
+                        &mut failure,
+                        format!("ShellMux {kind} task failed: {error}"),
+                    );
                 }
             }
             if let Some(backend) = backend {
@@ -226,7 +298,9 @@ impl Session {
                     remember_error(&mut failure, error.to_string());
                 }
                 // shutdown detaches the frontend; dropping both remaining strong
-                // references releases its callbacks and the executor's seed lease.
+                // references releases its callbacks. The source-domain state shells opened
+                // through is marsh's, shared with any other live shell or mux over the same
+                // backend, and was never an exclusive resource this idle session retained.
                 drop(backend);
             }
             closed.send_replace(Some(failure.map_or(Ok(()), Err)));
@@ -294,7 +368,7 @@ impl RunTask {
             .mux
             .open_shell(
                 &directory,
-                Some(Principal::from(principal_name)),
+                Some(ShellId::from(principal_name)),
                 SpawnOptions {
                     io: JobIo::Pipes,
                     environment: Some(environment),
@@ -408,7 +482,7 @@ async fn completed_job(
     text: &str,
     accepted: oneshot::Sender<CommandHandle>,
 ) -> RunResult {
-    // Ok means Outcome::Published and nothing else; a nonzero exit code is a process status,
+    // Ok means a published result and nothing else; a nonzero exit code is a process status,
     // not a refusal, and is published like any other.
     let completion = shell
         .run_command(
@@ -431,7 +505,7 @@ async fn completed_job(
         return Err(error.to_string());
     }
     let exit_code = completion
-        .exit_code
+        .exit_code()
         .ok_or_else(|| "Marsh published a command without a process exit status".to_string())?;
     Ok(NativeRunResult {
         exit_code: Some(exit_code),
@@ -494,7 +568,7 @@ async fn stop_and_settle(
             // reclaimed the shell during finalization.
             let exit_code = completion
                 .as_ref()
-                .and_then(|completion| completion.exit_code);
+                .and_then(|completion| completion.exit_code());
             Ok(cancelled_result(
                 exit_code,
                 matches!(cause, StopCause::TimedOut),
@@ -505,18 +579,29 @@ async fn stop_and_settle(
 
 /// Upstream already decided publication; this only keeps a denial's diagnostics actionable.
 fn run_error(error: RunError) -> String {
-    let RunError::Policy(denied) = &error else {
-        // Display preserves the infrastructure cause for admission, unpublished and lost answers.
-        return error.to_string();
-    };
-    let mut message = format!("Marsh policy denied publication: {denied}");
-    if let Ok(Outcome::Denied { denials, .. }) = denied.completion().outcome.as_ref() {
-        for denial in denials {
-            message.push('\n');
-            message.push_str(&denial.to_string());
-        }
+    if let Some(completion) = error.completion()
+        && let Err(cause) = completion.result.as_ref()
+        && let Some(denial) = denial(cause)
+    {
+        return denial;
     }
-    message
+    error.to_string()
+}
+
+/// A routed tool call's failure, with a denial's diagnostics kept actionable like a run's.
+fn tool_error(error: MuxError) -> String {
+    if let MuxError::Marsh(cause) = &error
+        && let Some(denial) = denial(cause)
+    {
+        return denial;
+    }
+    error.to_string()
+}
+
+/// The message a policy denial of `cause` reports, or `None` for any other failure.
+fn denial(cause: &ShellError) -> Option<String> {
+    matches!(cause.kind(), ShellErrorKind::Denied { .. })
+        .then(|| format!("Marsh policy denied publication: {cause}"))
 }
 
 fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> NativeRunResult {

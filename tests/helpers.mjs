@@ -36,7 +36,12 @@ export async function settleAgent(agent) {
   await cleanup(() => agent.abort(), () => agent.waitForIdle());
 }
 
-export async function fixture() {
+/**
+ * A CopyTree seed with two files and a test-addon mux over it. `sandbox` defaults to
+ * "always", which keeps every shell command on the managed route the suites were written
+ * against; `native` is the addon that created `mux`.
+ */
+export async function fixture(options = {}) {
   const root = await mkdtemp(fixturePrefix);
   const seed = join(root, "seed");
   try {
@@ -46,9 +51,9 @@ export async function fixture() {
       writeFile(join(seed, "src/file1.txt"), "one\n"),
     ]);
     // Imported lazily so production-only suites never load the test-fs addon.
-    const { NativeMux } = await import("../target/native-test/index.js");
-    const mux = await NativeMux.openCopyTree(seed);
-    return { root, seed, mux };
+    const native = await import("../target/native-test/index.js");
+    const mux = await native.NativeMux.openCopyTree(seed, { sandbox: options.sandbox ?? "always" });
+    return { root, seed, mux, native };
   } catch (error) {
     await rm(root, { recursive: true, force: true });
     throw error;
@@ -95,9 +100,6 @@ export async function sdkResources(instance, systemPrompt) {
   return { agentDir, settingsManager, resourceLoader };
 }
 
-/** Self-deadline marker for held children. Any occurrence fails its test. */
-export const FIXTURE_DEADLINE = "FIXTURE_DEADLINE";
-
 /** The synchronous full-write stdout helper the CJS and ESM probe preludes share. */
 export const WRITE_ALL_BODY = [
   "const writeAll = (value) => {",
@@ -127,15 +129,9 @@ export function heldChild({ gate, ready, done, prelude = "" }) {
     "const poll = setInterval(() => {",
     "  if (!fs.existsSync(gate)) return;",
     "  clearInterval(poll);",
-    "  clearTimeout(deadline);",
     `  writeAll(${JSON.stringify(`${done}\n`)});`,
     "  process.exit(0);",
     "}, 10);",
-    "const deadline = setTimeout(() => {",
-    "  clearInterval(poll);",
-    `  writeAll(${JSON.stringify(`${FIXTURE_DEADLINE}\n`)});`,
-    "  process.exit(124);",
-    "}, 20000);",
   ].join("\n"));
 }
 

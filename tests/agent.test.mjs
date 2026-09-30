@@ -262,7 +262,7 @@ test("standalone AgentTools preserve shared hashline provenance", { timeout: 60_
   let agent;
   try {
     await writeFile(join(instance.seed, "src/file0.txt"), "alpha\nbravo\n");
-    const native = await import("../native/index.js");
+    const { native, mux } = instance;
     // Constructed independently, not through ToolCollection: only the explicitly
     // shared store connects what read/grep displayed to what edit accepts.
     const store = new native.EditStore();
@@ -272,9 +272,9 @@ test("standalone AgentTools preserve shared hashline provenance", { timeout: 60_
         model,
         systemPrompt: "Test the standalone file tools.",
         tools: [
-          createReadTool(instance.seed, store, native),
-          createGrepTool(instance.seed, store, native),
-          createEditTool(instance.seed, store, native),
+          createReadTool(instance.seed, store, native, mux),
+          createGrepTool(instance.seed, store, native, mux),
+          createEditTool(instance.seed, store, native, mux),
         ],
       },
       streamFn,
