@@ -10,7 +10,7 @@ Pi's native `AgentHarness` with a cooperative scheduling iterator, and the nativ
 | --- | --- | --- |
 | `src/` → `dist/` | `junco-agent` | `JuncoAgent`, the `Agentic` contract types and `createYieldTool`. |
 | `patches/` | — | The Bun patch adding per-run integration hooks to `@earendil-works/pi-agent-core@0.80.6`. |
-| `packages/model-auth/` | `model-auth` (`file:./packages/model-auth`) | Authentication and model resolution. |
+| `packages/model-auth/` | `model-auth` (`workspace:*`) | Authentication and model resolution. |
 | `test/` | — | Offline Bun suite over Pi's `fauxProvider`. |
 | `../junco-tools` | `junco-tools` (`file:../junco-tools`) | Sibling checkout with native-backed Pi tools and the typed `junco-tools/errors` denial check. |
 
