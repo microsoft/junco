@@ -72,6 +72,12 @@ The packaged extension:
 
 `bash` and the file tools are all marsh calls on that mux, routed by its sandbox policy. Read-only tools (`read`, `grep`, `find`, `ast_grep`, and a previewing `ast_edit`) always run directly against the seed. Shell commands, `edit`, and an applying `ast_edit` run in a private snapshot while another live shell in the process shares the seed — or always, when the mux is opened with `sandbox: "always"` — and there publish only what marsh's policy authorizes; alone, they act on the seed directly. Pi's separate interactive `user_bash`/`!` command path is **not** intercepted. The agent bash tool still takes `{ command: string, timeout?: number }`; timeout is in **seconds**, with no default deadline.
 
+These direct reads can complete while a different shell's `bash` command is still running in both
+sandbox modes; writes and recovery retain their exclusion. They observe the live seed, not bash's
+private snapshot: a held direct command in `shared` mode may have written visible bytes, while a
+held managed command in `always` mode has not published its private changes. Reads can also see a
+publication in progress and do not provide an atomic multi-file view.
+
 `read` and `grep` record snapshots in one collection-local store and emit `[path#TAG]` headers with numbered rows; the hashline `edit` tool resolves its anchors against that store, and refuses lines a read never displayed. Files that cannot be snapshotted — images, binary, invalid UTF-8, notebooks under `grep`, anything past pi-edit's 4 MiB cap — are returned untagged through Pi's unmodified behavior.
 
 ## Register through the TypeScript API
