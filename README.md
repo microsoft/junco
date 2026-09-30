@@ -78,7 +78,7 @@ private snapshot: a held direct command in `shared` mode may have written visibl
 held managed command in `always` mode has not published its private changes. Reads can also see a
 publication in progress and do not provide an atomic multi-file view.
 
-`read` and `grep` record snapshots in one collection-local store and emit `[path#TAG]` headers with numbered rows; the hashline `edit` tool resolves its anchors against that store, and refuses lines a read never displayed. Files that cannot be snapshotted — images, binary, invalid UTF-8, notebooks under `grep`, anything past pi-edit's 4 MiB cap — are returned untagged through Pi's unmodified behavior.
+`read` and `grep` record snapshots in one collection-local store and emit `[path#TAG]` headers with numbered rows; the hashline `edit` tool resolves its anchors against that store, and refuses lines a read never displayed. Files that cannot be snapshotted — images, binary, invalid UTF-8, notebooks under `grep`, anything past pi-edit's 4 MiB cap — are returned untagged through Pi's unmodified behavior. An oversized read notice has no tag or numbered source row and grants no line provenance; read a complete visible line before editing.
 
 ## Register through the TypeScript API
 
@@ -232,7 +232,8 @@ pi -e /absolute/path/to/my-junco-extension.ts
 | Export | Use |
 | --- | --- |
 | `ToolCollection.create(cwd, { bash?, principal?, sandbox?, mux?, native? }?)` | Every tool (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`) in `collection.tools`, sharing one `EditStore` and one mux over the seed containing `cwd`. |
-| `collection.close()` | Close the mux the collection opened; a borrowed `mux` stays its caller's. Idempotent. |
+| `collection.close()` | Close the mux the collection opened; a borrowed `mux` stays its caller's. Idempotent. If `create` itself fails after opening its own mux, it closes that mux before rejecting with the original error (an `AggregateError` of both when the close also fails); a borrowed mux is never closed. |
+| `isMarshPolicyDenied(error)`, `MARSH_POLICY_DENIED`, `MarshPolicyDeniedError` (also from the native-free `junco-tools/errors`) | Recognize a publication refused by marsh's policy. |
 | `createBashTool(cwd, options?)` | `bash` through ShellMux. |
 | `createReadTool(cwd, store, native, mux)`, `createGrepTool(cwd, store, native, mux)`, `createEditTool(cwd, store, native, mux)` | Hashline `read`, native `grep`, and hashline `edit` as routed calls on `mux`; pass them one shared `EditStore`. |
 | `createFindTool(cwd, native, mux)`, `createAstGrepTool(cwd, native, mux)`, `createAstEditTool(cwd, native, mux)`, `createDiffTool(native)` | Native `find`, `ast_grep`, previewing `ast_edit` as routed calls on `mux`, and in-memory `diff`. |
@@ -243,11 +244,12 @@ pi -e /absolute/path/to/my-junco-extension.ts
 Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata and renderers: pass it to a bare `Agent`, SDK `customTools`, or `pi.registerTool` without wrapping. `native` is the `junco-tools/native` module; `store` is `new native.EditStore()`; `mux` is a `NativeMux` that same module opened, which its caller closes. `BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
 
 - Without `mux`, each operations instance lazily opens **one** native mux on first execution. Later working directories must remain inside that mux's seed. Shutdown disposes the owner; create fresh operations for a later session.
-- Without `principal`, one `pi-`-prefixed UUID is generated per operations instance, not per command. The principal is a queue and display name, not a policy identity: each command gets a fresh shell whose marsh owner is opaque, so a later command, even under the same name, cannot overwrite what an earlier one published.
-- Source authority for a seed is marsh's and shared across live shells and muxes in the process; no mux holds an exclusive lease. Two default owners, or a default owner and a borrowed mux, run over one seed concurrently, and every command is still published through marsh's policy checks.
+- Without `principal`, one `pi-`-prefixed UUID is generated per operations instance, not per command. The principal is a queue and display name, not a policy identity: each command gets a fresh opaque shell owner. A later managed command under the same name cannot inherit an earlier shell's grants.
+- Marsh shares a seed's source authority across live shells and muxes; an idle mux holds no exclusive lease. A direct shell command excludes other non-read admissions over that seed until it settles, though read-only file tools can overlap. Managed shell commands can overlap. Direct writes change the seed without recording durable grants or consulting earlier grants; managed publications perform those checks.
 - An explicit mux is **borrowed**: its caller must await `mux.close()` after all users finish. `shutdownShellMux()` does not close borrowed muxes. It is process-wide teardown for default owners, not a per-agent close method.
 - Commands sharing a principal are serialized. Each call gets a fresh shell/snapshot: shell variables and functions do not persist between invocations, and no grant carries over from an earlier call or a reopened seed.
 - Commands are observed in-process: marsh's tracer threads seize each spawned command before it runs, and the interpreter reports its own file accesses. No companion executable is needed. Node children work: libuv's epoll-only `io_uring` ring is accepted, while rings that submit filesystem operations are refused.
+- A publication marsh's policy refuses rejects a routed file tool (`edit`, an applying `ast_edit`), `bash`, or a native `NativeRun.wait()` with a real `Error` whose own `code` is `"MARSH_POLICY_DENIED"`; its message is marsh's diagnostic. Test it with `isMarshPolicyDenied`, never the message text. Every other failure, including cancellation, timeouts, and read-only tool errors, stays a plain error without that code. A refused hashline `edit` also discards the anchors it recorded, so its unpublished result cannot back a later edit.
 
 ## Execution limits and development checks
 

@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -11,6 +11,8 @@ export const text = (result) => result.content
   .join("\n");
 
 export const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+
+export const hashlineTag = (output) => /#([0-9A-Fa-f]{4})\]/.exec(output)?.[1];
 
 /**
  * Attempt every release step, in order, even after one of them fails.
@@ -37,19 +39,24 @@ export async function settleAgent(agent) {
 }
 
 /**
- * A CopyTree seed with two files and a test-addon mux over it. `sandbox` defaults to
- * "always", which keeps every shell command on the managed route the suites were written
- * against; `native` is the addon that created `mux`.
+ * A CopyTree seed with optional seed-relative `files` (strings or Buffers), defaulting to
+ * `src/file0.txt` ("zero\n") and `src/file1.txt` ("one\n"), plus a test-addon mux over it.
+ * `sandbox` defaults to "always", which keeps every shell command on the managed route the
+ * suites were written against; `native` is the addon that created `mux`.
  */
 export async function fixture(options = {}) {
   const root = await mkdtemp(fixturePrefix);
   const seed = join(root, "seed");
   try {
-    await mkdir(join(seed, "src"), { recursive: true });
-    await Promise.all([
-      writeFile(join(seed, "src/file0.txt"), "zero\n"),
-      writeFile(join(seed, "src/file1.txt"), "one\n"),
-    ]);
+    await mkdir(seed, { recursive: true });
+    for (const [relative, content] of Object.entries(options.files ?? {
+      "src/file0.txt": "zero\n",
+      "src/file1.txt": "one\n",
+    })) {
+      const path = join(seed, relative);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, content);
+    }
     // Imported lazily so production-only suites never load the test-fs addon.
     const native = await import("../target/native-test/index.js");
     const mux = await native.NativeMux.openCopyTree(seed, { sandbox: options.sandbox ?? "always" });

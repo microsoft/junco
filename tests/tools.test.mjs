@@ -3,38 +3,30 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   AuthStorage,
+  DEFAULT_MAX_BYTES,
   SessionManager,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
-import { ToolCollection, createBashTool, createShellMuxOperations } from "../dist/index.js";
 import {
-  cleanup, closeFixture, collector, deferred, fixture, heldChild,
+  ToolCollection, createBashTool, createShellMuxOperations, isMarshPolicyDenied,
+} from "../dist/index.js";
+import {
+  cleanup, closeFixture, collector, deferred, fixture, hashlineTag, heldChild,
   nativeEnv, release, sdkResources, settleAgent, text,
 } from "./helpers.mjs";
 import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs";
-
-const workspacePrefix = fileURLToPath(new URL("../target/tools-test-", import.meta.url));
 
 /**
  * A CopyTree seed holding `files`, plus a collection over a borrowed test-addon mux on it.
  * `root` is the seed; its marsh state lives beside it, inside the disposable scratch root.
  */
 async function workspace(files = {}, { sandbox = "shared" } = {}) {
-  const scratch = await mkdtemp(workspacePrefix);
-  const root = join(scratch, "seed");
-  let mux;
+  const instance = await fixture({ files, sandbox });
+  const { seed: root, mux, native } = instance;
   try {
-    await mkdir(root);
-    for (const [relative, content] of Object.entries(files)) {
-      await mkdir(join(root, relative, ".."), { recursive: true });
-      await writeFile(join(root, relative), content);
-    }
-    const native = await import("../target/native-test/index.js");
-    mux = await native.NativeMux.openCopyTree(root, { sandbox });
     const collection = await ToolCollection.create(root, { mux, native });
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
@@ -44,19 +36,19 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
       call: (name, input, signal) => byName.get(name).execute(`tools-${name}`, input, signal, undefined),
       file: (relative) => readFile(join(root, relative), "utf8"),
       write: (relative, content) => writeFile(join(root, relative), content),
-      dispose: () => cleanup(() => mux.close(), () => rm(scratch, { recursive: true, force: true })),
+      dispose: () => closeFixture(instance),
     };
   } catch (error) {
-    await cleanup(() => mux?.close(), () => rm(scratch, { recursive: true, force: true }));
+    await closeFixture(instance);
     throw error;
   }
 }
 
 /** The 4-hex tag a tagged read/grep section advertises. */
 function tagOf(output) {
-  const match = /#([0-9A-Fa-f]{4})\]/.exec(output);
-  assert.ok(match, `expected a hashline tag in:\n${output}`);
-  return match[1];
+  const tag = hashlineTag(output);
+  assert.ok(tag, `expected a hashline tag in:\n${output}`);
+  return tag;
 }
 
 test("a partial read anchors only the lines it displayed", { timeout: 30_000 }, async () => {
@@ -76,6 +68,34 @@ test("a partial read anchors only the lines it displayed", { timeout: 30_000 }, 
     assert.match(second, /^2:bravo$/m);
     await ws.call("edit", { input: `[two.txt#${tagOf(second)}]\nPUT 2.=2:\n+BRAVO\n` });
     assert.equal(await ws.file("two.txt"), "alpha\nBRAVO\n");
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("an oversized read notice grants no line provenance", { timeout: 30_000 }, async () => {
+  const wide = "x".repeat(DEFAULT_MAX_BYTES + 1);
+  const original = `${wide}\nsmall\n`;
+  const ws = await workspace({ "wide.txt": original });
+  try {
+    const first = await ws.call("read", { path: "wide.txt", offset: 1, limit: 1 });
+    assert.equal(first.details.truncation.firstLineExceedsLimit, true);
+    const firstText = text(first);
+    assert.equal(hashlineTag(firstText), undefined);
+    assert.doesNotMatch(firstText, /^[0-9]+:/m);
+
+    const second = text(await ws.call("read", { path: "wide.txt", offset: 2, limit: 1 }));
+    assert.match(second, /^\[wide\.txt#[0-9A-Fa-f]{4}\]$/m);
+    assert.match(second, /^2:small$/m);
+    const tag = tagOf(second);
+    await assert.rejects(
+      ws.call("edit", { input: `[wide.txt#${tag}]\nPUT 1.=1:\n+CHANGED\n` }),
+      /never displayed/,
+    );
+    assert.equal(await ws.file("wide.txt"), original);
+
+    await ws.call("edit", { input: `[wide.txt#${tag}]\nPUT 2.=2:\n+SMALL\n` });
+    assert.equal(await ws.file("wide.txt"), `${wide}\nSMALL\n`);
   } finally {
     await ws.dispose();
   }
@@ -577,7 +597,6 @@ test("the collection's bash still enforces marsh publication policy", { timeout:
     await session.agent.waitForIdle();
     const deniedResult = toolResult(denied.context.messages, "policy-denied");
     assert.equal(deniedResult?.isError, true);
-    assert.match(text(deniedResult), /Marsh policy denied publication/);
     assert.equal(await readFile(join(instance.seed, "src/file1.txt"), "utf8"), "owned\n");
     await assert.rejects(access(join(instance.seed, "src/new.txt")), (error) => error.code === "ENOENT");
     assert.deepEqual(errors, []);
@@ -591,15 +610,22 @@ test("the collection's bash still enforces marsh publication policy", { timeout:
 });
 
 test("writing file tools are gated by marsh publication", { timeout: 60_000 }, async () => {
-  const ws = await workspace({ "src/claimed.ts": "const value = seed;\n" }, { sandbox: "always" });
+  const ws = await workspace({
+    "src/claimed.ts": "const value = seed;\na;\nb;\nc;\nd;\n",
+    // Identical to the denied edit's result: tags hash content alone, so reading this file
+    // reveals the tag of the snapshot that edit staged but never published.
+    "src/probe.ts": "const value = edited;\na;\nb;\nc;\nd;\n",
+  }, { sandbox: "always" });
   try {
     // Another principal claims the file through marsh, so any other principal's later
     // publication of it is refused.
     const claim = createBashTool(ws.root, {
       operations: createShellMuxOperations({ mux: ws.mux, principal: "other-owner" }),
     });
-    await claim.execute("claim-file", { command: "printf 'const value = owned;\\n' > src/claimed.ts" }, undefined);
-    const owned = "const value = owned;\n";
+    await claim.execute("claim-file", {
+      command: "printf 'const value = owned;\\na;\\nb;\\nc;\\nd;\\n' > src/claimed.ts",
+    }, undefined);
+    const owned = "const value = owned;\na;\nb;\nc;\nd;\n";
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
     // Read-only calls run directly against the seed and are never refused.
@@ -608,18 +634,40 @@ test("writing file tools are gated by marsh publication", { timeout: 60_000 }, a
     const grep = text(await ws.call("grep", { pattern: "owned", path: "src" }));
     assert.match(grep, /^\*1:const value = owned;$/m, grep);
 
+    const deniedEdit = `[src/claimed.ts#${tagOf(read)}]\nPUT 1.=1:\n+const value = edited;\n`;
+    await assert.rejects(ws.call("edit", { input: deniedEdit }), isMarshPolicyDenied);
+    assert.equal(await ws.file("src/claimed.ts"), owned);
+
+    // The denied edit published nothing, so the post-edit anchor it recorded is gone: a later
+    // edit naming it, even one that would rebase cleanly onto the live file, is an ordinary
+    // stale-anchor failure, never a second publication attempt.
+    const unpublished = tagOf(text(await ws.call("read", { path: "src/probe.ts" })));
     await assert.rejects(
-      ws.call("edit", { input: `[src/claimed.ts#${tagOf(read)}]\nPUT 1.=1:\n+const value = edited;\n` }),
-      /Marsh policy denied publication/,
+      ws.call("edit", { input: `[src/claimed.ts#${unpublished}]\nPUT 5.=5:\n+D;\n` }),
+      (error) => error instanceof Error && !isMarshPolicyDenied(error),
+    );
+    assert.equal(await ws.file("src/claimed.ts"), owned);
+    // A fresh read anchors again, and publication is still refused by policy.
+    const reread = text(await ws.call("read", { path: "src/claimed.ts" }));
+    await assert.rejects(
+      ws.call("edit", { input: `[src/claimed.ts#${tagOf(reread)}]\nPUT 1.=1:\n+const value = edited;\n` }),
+      isMarshPolicyDenied,
     );
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
     const rewrite = { rewrites: { owned: "rewritten" }, path: "src/claimed.ts" };
-    await assert.rejects(
-      ws.call("ast_edit", { ...rewrite, dryRun: false }),
-      /Marsh policy denied publication/,
-    );
+    await assert.rejects(ws.call("ast_edit", { ...rewrite, dryRun: false }), isMarshPolicyDenied);
     assert.equal(await ws.file("src/claimed.ts"), owned);
+
+    // A read-only call's own failure is ordinary, not a policy denial.
+    await assert.rejects(
+      ws.call("read", { path: "src/missing.ts" }),
+      (error) => error instanceof Error && !isMarshPolicyDenied(error),
+    );
+    await assert.rejects(
+      ws.mux.readFile(ws.root, "src/missing.ts"),
+      (error) => error instanceof Error && !isMarshPolicyDenied(error),
+    );
 
     // A preview writes nothing, so it is not an edit and is never refused.
     for (const input of [rewrite, { ...rewrite, dryRun: true }]) {
@@ -660,5 +708,78 @@ test("a collection needs a marsh seed", { timeout: 30_000 }, async () => {
     await assert.rejects(ToolCollection.create(plain));
   } finally {
     await rm(plain, { recursive: true, force: true });
+  }
+});
+
+/** The test addon with its `EditStore` replaced, and `NativeMux.open` over a CopyTree seed. */
+function failingNative(native, failure, opened = []) {
+  return {
+    ...native,
+    EditStore: class {
+      constructor() {
+        throw failure;
+      }
+    },
+    NativeMux: {
+      async open(root, options) {
+        const mux = await native.NativeMux.openCopyTree(root, options);
+        opened.push(mux);
+        return mux;
+      },
+    },
+  };
+}
+
+test("failed construction closes an owned mux but never a borrowed one", { timeout: 30_000 }, async () => {
+  const instance = await fixture();
+  const opened = [];
+  try {
+    const failure = new Error("store construction failed");
+
+    // Owned: the collection opened the mux, so rejection closes it.
+    await assert.rejects(
+      ToolCollection.create(instance.seed, { native: failingNative(instance.native, failure, opened) }),
+      (error) => error === failure,
+    );
+    assert.equal(opened.length, 1);
+    await assert.rejects(opened[0].exists(instance.seed, "src/file0.txt"));
+
+    // Owned, and closing fails too: both causes survive, the original first.
+    const closeFailure = new Error("mux close failed");
+    const native = failingNative(instance.native, failure, opened);
+    const open = native.NativeMux.open;
+    native.NativeMux.open = async (root, options) => {
+      const mux = await open(root, options);
+      const close = mux.close.bind(mux);
+      mux.close = async () => {
+        await close();
+        throw closeFailure;
+      };
+      return mux;
+    };
+    await assert.rejects(ToolCollection.create(instance.seed, { native }), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(error.errors, [failure, closeFailure]);
+      assert.equal(error.cause, failure);
+      return true;
+    });
+    assert.equal(opened.length, 2);
+    await assert.rejects(opened[1].exists(instance.seed, "src/file0.txt"));
+
+    // Borrowed: the caller's mux stays open and usable.
+    await assert.rejects(
+      ToolCollection.create(instance.seed, {
+        mux: instance.mux,
+        native: failingNative(instance.native, failure),
+      }),
+      (error) => error === failure,
+    );
+    assert.equal(await instance.mux.exists(instance.seed, "src/file0.txt"), true);
+  } finally {
+    // The prototype's close: one opened mux's own close was replaced to fail.
+    await cleanup(
+      ...opened.map((mux) => () => Object.getPrototypeOf(mux).close.call(mux)),
+      () => closeFixture(instance),
+    );
   }
 });

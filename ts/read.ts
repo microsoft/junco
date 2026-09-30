@@ -37,14 +37,13 @@ class Unsnapshottable extends Error {
  * Only complete `N:text` source rows grant provenance; Pi's continuation and
  * oversized-line notices must never be mistaken for seen content.
  */
-function visibleLineNumbers(body: string, native: NativeModule): number[] {
+function visibleLineNumbers(body: string): number[] {
   const lines: number[] = [];
   for (const row of body.split("\n")) {
     const separator = row.indexOf(":");
     if (separator <= 0) continue;
     const digits = row.slice(0, separator);
     if (!/^[0-9]+$/.test(digits)) continue;
-    if (native.hashlineIsReadTruncationNotice(row)) continue;
     const lineNumber = Number(digits);
     if (Number.isSafeInteger(lineNumber) && lineNumber > 0) lines.push(lineNumber);
   }
@@ -150,7 +149,7 @@ export function createReadTool(
 
       const body = result.content.find((part) => part.type === "text");
       if (!body) return result;
-      const seen = visibleLineNumbers(body.text, native);
+      const seen = visibleLineNumbers(body.text);
       // No complete source row means nothing was displayed to anchor against.
       if (seen.length === 0) return result;
 

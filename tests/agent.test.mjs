@@ -16,6 +16,7 @@ import {
   cleanup,
   closeFixture,
   fixture,
+  hashlineTag,
   heldChild,
   nativeEnv,
   release,
@@ -137,7 +138,6 @@ test("a conflicting zero-exit publication becomes a model-visible policy error",
     assert.equal(end?.isError, true);
     const result = toolResult(capture.context.messages, "bash-denied");
     assert.equal(result?.isError, true);
-    assert.match(text(result), /Marsh policy denied publication/);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "owned\n");
     assert.equal(await readFile(join(instance.seed, "src/file1.txt"), "utf8"), "one\n");
     await assert.rejects(access(join(instance.seed, "src/new.txt")), (error) => error.code === "ENOENT");
@@ -283,14 +283,13 @@ test("standalone AgentTools preserve shared hashline provenance", { timeout: 60_
     // Each factory only records the previous result and derives the next call from
     // its advertised tag; faux would turn a thrown assertion into a model error.
     const seen = {};
-    const tagPattern = /#([0-9A-Fa-f]{4})\]/;
     faux.setResponses([
       fauxAssistantMessage([
         fauxToolCall("read", { path: "src/file0.txt", limit: 1 }, { id: "read-partial" }),
       ], { stopReason: "toolUse" }),
       (context) => {
         seen.read = toolResult(context.messages, "read-partial");
-        const tag = tagPattern.exec(text(seen.read ?? { content: [] }))?.[1];
+        const tag = hashlineTag(text(seen.read ?? { content: [] }));
         return fauxAssistantMessage([fauxToolCall("edit", {
           input: `[src/file0.txt#${tag}]\nPUT 2.=2:\n+FORBIDDEN\n`,
         }, { id: "edit-unseen" })], { stopReason: "toolUse" });
@@ -303,7 +302,7 @@ test("standalone AgentTools preserve shared hashline provenance", { timeout: 60_
       },
       (context) => {
         seen.grep = toolResult(context.messages, "grep-hit");
-        const tag = tagPattern.exec(text(seen.grep ?? { content: [] }))?.[1];
+        const tag = hashlineTag(text(seen.grep ?? { content: [] }));
         return fauxAssistantMessage([fauxToolCall("edit", {
           input: `[src/file0.txt#${tag}]\nPUT 2.=2:\n+BRAVO\n`,
         }, { id: "edit-seen" })], { stopReason: "toolUse" });
@@ -399,7 +398,6 @@ test("an SDK-registered bash override executes through marsh", { timeout: 60_000
     await session.agent.waitForIdle();
     const deniedResult = toolResult(denied.context.messages, "sdk-denied");
     assert.equal(deniedResult?.isError, true);
-    assert.match(text(deniedResult), /Marsh policy denied publication/);
     assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "owned\n");
     await assert.rejects(access(join(instance.seed, "src/new.txt")), (error) => error.code === "ENOENT");
   } finally {

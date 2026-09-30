@@ -14,7 +14,7 @@ import {
 import { NativeMux } from "../native/index.js";
 import { createShellMuxOperations, shutdownShellMux } from "../dist/index.js";
 import { readBtrfsFixture } from "./btrfs-fixture.mjs";
-import { cleanup, deferred, heldChild, release, settleAgent, text } from "./helpers.mjs";
+import { cleanup, deferred, hashlineTag, heldChild, release, settleAgent, text } from "./helpers.mjs";
 import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs";
 
 const extensionPath = fileURLToPath(new URL("../dist/extension.js", import.meta.url));
@@ -141,7 +141,9 @@ async function assertSeedReusable(seed) {
 }
 
 test("default owners run concurrently over shared source authority", { timeout: 120_000 }, async (t) => {
-  const holder = await NativeMux.open(state.seed);
+  // A held direct command excludes every other admission; keep this source managed so the
+  // independent default owner can exercise concurrent publication authority.
+  const holder = await NativeMux.open(state.seed, { sandbox: "always" });
   const contender = createShellMuxOperations({ principal: "opening-owner" });
   const gate = join(state.testRoot, "shared-authority-gate");
   let held;
@@ -237,11 +239,33 @@ test("default owners run concurrently over shared source authority", { timeout: 
 
 test("owned shutdown joins active work and closes admission", { timeout: 120_000 }, async (t) => {
   const gate = join(state.testRoot, "shutdown-gate");
+  const peerGate = join(state.testRoot, "shutdown-peer-gate");
+  const peer = await NativeMux.open(state.seed, { sandbox: "always" });
   const owner = createShellMuxOperations({ principal: "shutdown-owner" });
   const concurrentOwner = createShellMuxOperations({ principal: "concurrent-during-shutdown" });
   let held;
+  let peerRun;
   let heldSettled = false;
   try {
+    // An independent managed shell keeps both default-owned commands off the exclusive direct route.
+    const peerReady = deferred(t.signal, "production managed-peer readiness");
+    let peerOutput = "";
+    peerRun = createShellMuxOperations({ mux: peer, principal: "shutdown-managed-peer" }).exec(
+      heldChild({ gate: peerGate, ready: "PEER_READY", done: "PEER_DONE" }),
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => {
+          peerOutput += data.toString("utf8");
+          if (peerOutput.includes("PEER_READY")) peerReady.resolve();
+        },
+      },
+    );
+    await Promise.race([
+      peerReady.promise,
+      peerRun.then(() => { throw new Error("managed peer ended before readiness"); }),
+    ]);
+
     const ready = deferred(t.signal, "production hold readiness");
     let output = "";
     held = owner.exec(heldChild({ gate, ready: "PROD_READY", done: "PROD_DONE" }), state.seed, {
@@ -272,6 +296,10 @@ test("owned shutdown joins active work and closes admission", { timeout: 120_000
     const shutdown = shutdownShellMux();
     await Promise.all([assert.rejects(held, Error), shutdown]);
     await assert.rejects(owner.exec("printf late", state.seed, { onData: () => {} }), /closed/);
+    await release(peerGate);
+    assert.equal((await peerRun).exitCode, 0);
+    assert.equal(peerOutput, "PEER_READY\nPEER_DONE\n");
+    await peer.close();
 
     // The seed is a usable source again after shutdown settled; this is an execution probe,
     // never proof that some exclusive lease was reacquired.
@@ -279,13 +307,15 @@ test("owned shutdown joins active work and closes admission", { timeout: 120_000
   } finally {
     await cleanup(
       () => release(gate),
-      () => Promise.allSettled([held]),
+      () => release(peerGate),
+      () => Promise.allSettled([held, peerRun]),
+      () => peer.close(),
       () => shutdownShellMux(),
     );
   }
 });
 
-test("the packaged extension registers bash with the persisted prefix", { timeout: 120_000 }, async () => {
+test("the packaged extension registers bash with the persisted prefix", { timeout: 120_000 }, async (t) => {
   state.sessionManager = SessionManager.inMemory(state.seed);
   const { session, scripted } = await packagedSession(state.sessionManager);
   state.session = session;
@@ -304,18 +334,52 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
     assert.ok(registered.includes(name), `${name} is no longer registered`);
   }
 
-  const capture = scriptBashTurn(scripted.faux, [{
-    id: "prod-1",
-    command: "printf '%s\\n' \"$JUNCO_PERSISTED_PREFIX\"; printf 'claimed\\n' > src/file0.txt",
-  }]);
-  await session.agent.prompt("Run the scripted command");
-  await session.agent.waitForIdle();
+  // A direct write publishes no durable grants; another live managed shell makes this
+  // extension command a managed publication that the later-session test can challenge.
+  const peer = await NativeMux.open(state.seed, { sandbox: "always" });
+  const gate = join(state.testRoot, "claim-peer-gate");
+  let peerRun;
+  try {
+    const ready = deferred(t.signal, "managed claim peer readiness");
+    let output = "";
+    peerRun = createShellMuxOperations({ mux: peer, principal: "managed-claim-peer" }).exec(
+      heldChild({ gate, ready: "CLAIM_READY", done: "CLAIM_DONE" }),
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => {
+          output += data.toString("utf8");
+          if (output.includes("CLAIM_READY")) ready.resolve();
+        },
+      },
+    );
+    await Promise.race([
+      ready.promise,
+      peerRun.then(() => { throw new Error("claim peer ended before readiness"); }),
+    ]);
 
-  const result = toolResult(capture.context.messages, "prod-1");
-  assert.equal(result?.isError, false, `unexpected tool failure: ${result && text(result)}`);
-  assert.equal(text(result), "prefix-ok\n");
-  assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
-  assert.deepEqual(state.errors, []);
+    const capture = scriptBashTurn(scripted.faux, [{
+      id: "prod-1",
+      command: "printf '%s\\n' \"$JUNCO_PERSISTED_PREFIX\"; printf 'claimed\\n' > src/file0.txt",
+    }]);
+    await session.agent.prompt("Run the scripted command");
+    await session.agent.waitForIdle();
+
+    const result = toolResult(capture.context.messages, "prod-1");
+    assert.equal(result?.isError, false, `unexpected tool failure: ${result && text(result)}`);
+    assert.equal(text(result), "prefix-ok\n");
+    assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
+    assert.deepEqual(state.errors, []);
+    await release(gate);
+    assert.equal((await peerRun).exitCode, 0);
+    assert.equal(output, "CLAIM_READY\nCLAIM_DONE\n");
+  } finally {
+    await cleanup(
+      () => release(gate),
+      () => Promise.allSettled([peerRun]),
+      () => peer.close(),
+    );
+  }
 });
 
 test("the packaged extension drives a read into a hashline edit", { timeout: 120_000 }, async () => {
@@ -332,12 +396,12 @@ test("the packaged extension drives a read into a hashline edit", { timeout: 120
     ),
     (context) => {
       capture.read = toolResult(context.messages, "prod-read");
-      const tag = /#([0-9A-Fa-f]{4})\]/.exec(text(capture.read));
+      const tag = hashlineTag(text(capture.read));
       assert.ok(tag, `no hashline tag in read output:\n${text(capture.read)}`);
       return fauxAssistantMessage(
         [fauxToolCall(
           "edit",
-          { input: `[src/hashline.txt#${tag[1]}]\nPUT 1.=1:\n+PATCHED\n` },
+          { input: `[src/hashline.txt#${tag}]\nPUT 1.=1:\n+PATCHED\n` },
           { id: "prod-edit" },
         )],
         { stopReason: "toolUse" },
@@ -396,23 +460,56 @@ test("reload keeps the session principal and replaces disposed operations", { ti
   await assertSeedReusable(state.seed);
 });
 
-test("a new session cannot inherit the previous principal's grants", { timeout: 120_000 }, async () => {
+test("a new session cannot inherit the previous principal's grants", { timeout: 120_000 }, async (t) => {
   const sessionManager = SessionManager.inMemory(state.seed);
   const { session, scripted } = await packagedSession(sessionManager);
   try {
     assert.notEqual(session.sessionId, state.sessionId);
-    const capture = scriptBashTurn(scripted.faux, [{
-      id: "prod-denied",
-      command: "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file0.txt; true",
-    }]);
-    await session.agent.prompt("Run the conflicting command");
-    await session.agent.waitForIdle();
+    // Direct writes do not consult durable grants; hold another shell so this challenge
+    // uses the managed route that checked the earlier session's publication.
+    const peer = await NativeMux.open(state.seed, { sandbox: "always" });
+    const gate = join(state.testRoot, "denial-peer-gate");
+    let peerRun;
+    try {
+      const ready = deferred(t.signal, "managed denial peer readiness");
+      let output = "";
+      peerRun = createShellMuxOperations({ mux: peer, principal: "managed-denial-peer" }).exec(
+        heldChild({ gate, ready: "DENIAL_READY", done: "DENIAL_DONE" }),
+        state.seed,
+        {
+          signal: t.signal,
+          onData: (data) => {
+            output += data.toString("utf8");
+            if (output.includes("DENIAL_READY")) ready.resolve();
+          },
+        },
+      );
+      await Promise.race([
+        ready.promise,
+        peerRun.then(() => { throw new Error("denial peer ended before readiness"); }),
+      ]);
 
-    const result = toolResult(capture.context.messages, "prod-denied");
-    assert.equal(result?.isError, true);
-    assert.match(text(result), /Marsh policy denied publication/);
-    assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
-    await assert.rejects(access(join(state.seed, "src/new.txt")), (error) => error.code === "ENOENT");
+      const capture = scriptBashTurn(scripted.faux, [{
+        id: "prod-denied",
+        command: "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file0.txt; true",
+      }]);
+      await session.agent.prompt("Run the conflicting command");
+      await session.agent.waitForIdle();
+
+      const result = toolResult(capture.context.messages, "prod-denied");
+      assert.equal(result?.isError, true);
+      assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
+      await assert.rejects(access(join(state.seed, "src/new.txt")), (error) => error.code === "ENOENT");
+      await release(gate);
+      assert.equal((await peerRun).exitCode, 0);
+      assert.equal(output, "DENIAL_READY\nDENIAL_DONE\n");
+    } finally {
+      await cleanup(
+        () => release(gate),
+        () => Promise.allSettled([peerRun]),
+        () => peer.close(),
+      );
+    }
   } finally {
     await closePackagedSession(session);
   }

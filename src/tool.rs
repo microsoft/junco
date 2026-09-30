@@ -29,6 +29,8 @@ use crate::ast::{self, AstFindOptions, AstFindResult, AstReplaceOptions, AstRepl
 use crate::edit::{EditApplyOutcome, EditFileOutcome, EditPolicy, EditStore};
 use crate::glob::{self, GlobOptions, GlobResult};
 use crate::grep::{self, GrepOptions, GrepResult};
+use crate::mux::RoutedError;
+use crate::routed_error::resolve;
 
 /// A routed call's own failure, reported to JavaScript as its message.
 type Outcome<T> = std::result::Result<T, String>;
@@ -153,24 +155,27 @@ impl<'a> View<'a> {
 
     /// A result path as callers name it. A relative one is relative to a root they named.
     fn result_path(&self, path: &mut String) {
-        if self.managed() && Path::new(path.as_str()).is_absolute() {
-            *path = self
-                .logical(Path::new(path.as_str()))
-                .to_string_lossy()
-                .into_owned();
+        if self.managed()
+            && let Ok(relative) = Path::new(path.as_str()).strip_prefix(&self.physical_seed)
+        {
+            *path = self.seed.join(relative).to_string_lossy().into_owned();
         }
     }
 
     /// `text` with the view's seed replaced by the seed callers name.
-    fn text(&self, text: &str) -> String {
+    fn text(&self, text: String) -> String {
         if self.managed() {
             text.replace(
                 &*self.physical_seed.to_string_lossy(),
                 &self.seed.to_string_lossy(),
             )
         } else {
-            text.to_owned()
+            text
         }
+    }
+
+    fn error(&self, mut error: Error) -> String {
+        self.text(std::mem::take(&mut error.reason))
     }
 }
 
@@ -180,9 +185,12 @@ fn utf8(path: &Path) -> Outcome<&str> {
         .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
 }
 
-/// A routed call's value, or its routing or operation failure as a JavaScript error.
-fn routed<T>(outcome: Outcome<Outcome<T>>) -> Result<T> {
-    outcome.and_then(|value| value).map_err(Error::from_reason)
+/// A routed call's value, or its routing or operation failure. Only routing classifies a denial;
+/// an operation's own failure is an ordinary one.
+fn routed<T>(
+    outcome: std::result::Result<Outcome<T>, RoutedError>,
+) -> std::result::Result<T, RoutedError> {
+    outcome.and_then(|value| value.map_err(RoutedError::Other))
 }
 
 /// A file's editable text, read as `pi_edit::EditStore::record_file` reads it: `None` when it is
@@ -237,7 +245,7 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         env.spawn_future_with_callback(
             async move {
-                routed(
+                Ok(routed(
                     session
                         .run_tool(cwd, tool, move |ctx| {
                             let physical = ctx
@@ -246,9 +254,9 @@ impl NativeMux {
                             std::fs::read(physical).map_err(|error| format!("{error}: {path}"))
                         })
                         .await,
-                )
+                ))
             },
-            |_, bytes| Ok(Buffer::from(bytes)),
+            |env, outcome| resolve(env, outcome).map(Buffer::from),
         )
     }
 
@@ -264,18 +272,21 @@ impl NativeMux {
             root: PathBuf::from(&path),
         };
         let session = Arc::clone(&self.session);
-        env.spawn_future(async move {
-            routed(
-                session
-                    .run_tool(cwd, tool, move |ctx| {
-                        let physical = ctx
-                            .physical_path(Path::new(&path))
-                            .map_err(|error| error.to_string())?;
-                        Ok(physical.exists())
-                    })
-                    .await,
-            )
-        })
+        env.spawn_future_with_callback(
+            async move {
+                Ok(routed(
+                    session
+                        .run_tool(cwd, tool, move |ctx| {
+                            let physical = ctx
+                                .physical_path(Path::new(&path))
+                                .map_err(|error| error.to_string())?;
+                            Ok(physical.exists())
+                        })
+                        .await,
+                ))
+            },
+            resolve,
+        )
     }
 
     /// A routed `find` walk of `options.path`.
@@ -291,24 +302,27 @@ impl NativeMux {
             root: PathBuf::from(spec.path()),
         };
         let session = Arc::clone(&self.session);
-        env.spawn_future(async move {
-            let seed = session.seed().to_path_buf();
-            routed(
-                session
-                    .run_tool(cwd, tool, move |ctx| {
-                        let view = View::new(ctx, &seed)?;
-                        let root = view.physical(Path::new(spec.path()))?;
-                        let mut result = spec
-                            .run(utf8(&root)?, ct)
-                            .map_err(|error| view.text(&error.reason))?;
-                        for entry in &mut result.matches {
-                            view.result_path(&mut entry.path);
-                        }
-                        Ok(result)
-                    })
-                    .await,
-            )
-        })
+        env.spawn_future_with_callback(
+            async move {
+                let seed = session.seed().to_path_buf();
+                Ok(routed(
+                    session
+                        .run_tool(cwd, tool, move |ctx| {
+                            let view = View::new(ctx, &seed)?;
+                            let root = view.physical(Path::new(spec.path()))?;
+                            let mut result = spec
+                                .run(utf8(&root)?, ct)
+                                .map_err(|error| view.error(error))?;
+                            for entry in &mut result.matches {
+                                view.result_path(&mut entry.path);
+                            }
+                            Ok(result)
+                        })
+                        .await,
+                ))
+            },
+            resolve,
+        )
     }
 
     /// A routed `grep` of `options.path`. Every matched file other than a notebook is recorded in
@@ -327,58 +341,66 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         let snapshots = store.inner.clone();
         let keys = Arc::clone(&store.keys);
-        env.spawn_future(async move {
-            let seed = session.seed().to_path_buf();
-            let (result, files) = routed(
-                session
-                    .run_tool(cwd, tool, move |ctx| {
-                        let view = View::new(ctx, &seed)?;
-                        let root = view.physical(&root)?;
-                        utf8(&root)?.clone_into(&mut config.path);
-                        let mut result = grep::grep_sync(config, None, ct)
-                            .map_err(|error| view.text(&error.reason))?;
-                        let mut read = HashSet::new();
-                        let mut files = Vec::new();
-                        for entry in &mut result.matches {
-                            let found = Path::new(&entry.path);
-                            let physical = if found.is_absolute() {
-                                found.to_path_buf()
-                            } else {
-                                root.join(found)
-                            };
-                            view.result_path(&mut entry.path);
-                            let notebook = physical
-                                .extension()
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"));
-                            if !notebook && read.insert(entry.path.clone()) {
-                                files.push(GrepFile {
-                                    path: entry.path.clone(),
-                                    logical: view.logical(&physical),
-                                    text: snapshot_text(&physical),
+        env.spawn_future_with_callback(
+            async move {
+                let seed = session.seed().to_path_buf();
+                let outcome = routed(
+                    session
+                        .run_tool(cwd, tool, move |ctx| {
+                            let view = View::new(ctx, &seed)?;
+                            let root = view.physical(&root)?;
+                            utf8(&root)?.clone_into(&mut config.path);
+                            let mut result = grep::grep_sync(config, None, ct)
+                                .map_err(|error| view.error(error))?;
+                            let mut read = HashSet::new();
+                            let mut files = Vec::new();
+                            for entry in &mut result.matches {
+                                let found = Path::new(&entry.path);
+                                let physical = if found.is_absolute() {
+                                    found.to_path_buf()
+                                } else {
+                                    root.join(found)
+                                };
+                                view.result_path(&mut entry.path);
+                                let notebook = physical.extension().is_some_and(|extension| {
+                                    extension.eq_ignore_ascii_case("ipynb")
                                 });
+                                if !notebook && read.insert(entry.path.clone()) {
+                                    files.push(GrepFile {
+                                        path: entry.path.clone(),
+                                        logical: view.logical(&physical),
+                                        text: snapshot_text(&physical),
+                                    });
+                                }
                             }
-                        }
-                        Ok((result, files))
-                    })
-                    .await,
-            )?;
-            // Recorded after the call, off its traced thread: the store is this process's own.
-            let mut keys = keys.lock();
-            let snapshots = files
-                .into_iter()
-                .map(|file| GrepSnapshot {
-                    tag: file.text.map(|text| {
-                        let key = canonical_key(&file.logical);
-                        let tag =
-                            snapshots.record(&key, &normalize_to_lf(strip_bom(&text).1), None);
-                        keys.insert(key);
-                        tag
-                    }),
-                    path: file.path,
-                })
-                .collect();
-            Ok(NativeGrepResult { result, snapshots })
-        })
+                            Ok((result, files))
+                        })
+                        .await,
+                );
+                // Recorded after the call, off its traced thread: the store is this process's own.
+                Ok(outcome.map(|(result, files)| {
+                    let mut keys = keys.lock();
+                    let snapshots = files
+                        .into_iter()
+                        .map(|file| GrepSnapshot {
+                            tag: file.text.map(|text| {
+                                let key = canonical_key(&file.logical);
+                                let tag = snapshots.record(
+                                    &key,
+                                    &normalize_to_lf(strip_bom(&text).1),
+                                    None,
+                                );
+                                keys.insert(key);
+                                tag
+                            }),
+                            path: file.path,
+                        })
+                        .collect();
+                    NativeGrepResult { result, snapshots }
+                }))
+            },
+            resolve,
+        )
     }
 
     /// A routed `ast_grep` scan of `options.path`, or of `cwd` when it is absent.
@@ -393,27 +415,31 @@ impl NativeMux {
         let root = PathBuf::from(spec.path.as_deref().unwrap_or(&cwd));
         let tool = JuncoTool::AstGrep { root: root.clone() };
         let session = Arc::clone(&self.session);
-        env.spawn_future(async move {
-            let seed = session.seed().to_path_buf();
-            routed(
-                session
-                    .run_tool(cwd, tool, move |ctx| {
-                        let view = View::new(ctx, &seed)?;
-                        spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
-                        let mut result = spec.run(ct).map_err(|error| view.text(&error.reason))?;
-                        for entry in &mut result.matches {
-                            view.result_path(&mut entry.path);
-                        }
-                        if let Some(errors) = &mut result.parse_errors {
-                            for error in errors {
-                                *error = view.text(error);
+        env.spawn_future_with_callback(
+            async move {
+                let seed = session.seed().to_path_buf();
+                Ok(routed(
+                    session
+                        .run_tool(cwd, tool, move |ctx| {
+                            let view = View::new(ctx, &seed)?;
+                            spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
+                            let mut result =
+                                spec.run(ct).map_err(|error| view.error(error))?;
+                            for entry in &mut result.matches {
+                                view.result_path(&mut entry.path);
                             }
-                        }
-                        Ok(result)
-                    })
-                    .await,
-            )
-        })
+                            if let Some(errors) = &mut result.parse_errors {
+                                for error in errors {
+                                    *error = view.text(std::mem::take(error));
+                                }
+                            }
+                            Ok(result)
+                        })
+                        .await,
+                ))
+            },
+            resolve,
+        )
     }
 
     /// A routed `ast_edit` of `options.path`, or of `cwd` when it is absent. Only an explicit
@@ -432,35 +458,38 @@ impl NativeMux {
             apply: spec.dry_run == Some(false),
         };
         let session = Arc::clone(&self.session);
-        env.spawn_future(async move {
-            let seed = session.seed().to_path_buf();
-            routed(
-                session
-                    .run_tool(cwd, tool, move |ctx| {
-                        let view = View::new(ctx, &seed)?;
-                        spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
-                        let mut persist = |path: &Path, output: &str| {
-                            replace_file(ctx, &view.logical(path), output)
-                        };
-                        let mut result = spec
-                            .run(ct, &mut persist)
-                            .map_err(|error| view.text(&error.reason))?;
-                        for change in &mut result.changes {
-                            view.result_path(&mut change.path);
-                        }
-                        for change in &mut result.file_changes {
-                            view.result_path(&mut change.path);
-                        }
-                        if let Some(errors) = &mut result.parse_errors {
-                            for error in errors {
-                                *error = view.text(error);
+        env.spawn_future_with_callback(
+            async move {
+                let seed = session.seed().to_path_buf();
+                Ok(routed(
+                    session
+                        .run_tool(cwd, tool, move |ctx| {
+                            let view = View::new(ctx, &seed)?;
+                            spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
+                            let mut persist = |path: &Path, output: &str| {
+                                replace_file(ctx, &view.logical(path), output)
+                            };
+                            let mut result = spec
+                                .run(ct, &mut persist)
+                                .map_err(|error| view.error(error))?;
+                            for change in &mut result.changes {
+                                view.result_path(&mut change.path);
                             }
-                        }
-                        Ok(result)
-                    })
-                    .await,
-            )
-        })
+                            for change in &mut result.file_changes {
+                                view.result_path(&mut change.path);
+                            }
+                            if let Some(errors) = &mut result.parse_errors {
+                                for error in errors {
+                                    *error = view.text(std::mem::take(error));
+                                }
+                            }
+                            Ok(result)
+                        })
+                        .await,
+                ))
+            },
+            resolve,
+        )
     }
 
     /// A routed hashline `edit`: `argsJson` staged against `store`'s anchors under `policy`, and
@@ -490,28 +519,31 @@ impl NativeMux {
         };
         let snapshots = store.inner.clone();
         let keys = Arc::clone(&store.keys);
-        env.spawn_future(async move {
-            let outcome = session
-                .run_tool(cwd, tool, move |ctx| edit.apply(ctx))
-                .await;
-            let touched =
-                std::mem::take(&mut *touched.lock().unwrap_or_else(PoisonError::into_inner));
-            // Attempted either way: a partially completed write or move must not leave a stale
-            // scan-cache entry looking fresh.
-            for path in &touched {
-                pi_walker::invalidate_path_string(&path.to_string_lossy());
-            }
-            outcome.map_err(|error| {
-                // Nothing was published, so no post-edit anchor may back a later edit.
-                let mut keys = keys.lock();
+        env.spawn_future_with_callback(
+            async move {
+                let outcome = session
+                    .run_tool(cwd, tool, move |ctx| edit.apply(ctx))
+                    .await;
+                let touched =
+                    std::mem::take(&mut *touched.lock().unwrap_or_else(PoisonError::into_inner));
+                // Attempted either way: a partially completed write or move must not leave a
+                // stale scan-cache entry looking fresh.
                 for path in &touched {
-                    let key = canonical_key(path);
-                    snapshots.invalidate(&key);
-                    keys.remove(&key);
+                    pi_walker::invalidate_path_string(&path.to_string_lossy());
                 }
-                Error::from_reason(error)
-            })
-        })
+                if outcome.is_err() {
+                    // Nothing was published, so no post-edit anchor may back a later edit.
+                    let mut keys = keys.lock();
+                    for path in &touched {
+                        let key = canonical_key(path);
+                        snapshots.invalidate(&key);
+                        keys.remove(&key);
+                    }
+                }
+                Ok(outcome)
+            },
+            resolve,
+        )
     }
 }
 
@@ -559,7 +591,7 @@ impl HashlineEdit {
             Err(error) => return failed(error),
         };
         if let Err(error) = map_policy(&view, &mut config.policy) {
-            return failed(view.text(&error));
+            return failed(view.text(error));
         }
         // pi-edit keys every anchor by the canonical path it edits, which on the managed route is
         // inside the snapshot: anchors move in for the call and back out after it.
@@ -633,35 +665,35 @@ impl HashlineEdit {
 
         match applied {
             Ok(outcome) => EditApplyOutcome {
-                text: view.text(&outcome.text),
+                text: view.text(outcome.text),
                 files: outcome
                     .files
                     .into_iter()
                     .map(|file| EditFileOutcome {
                         path: view.logical(&file.absolute).to_string_lossy().into_owned(),
-                        display_path: view.text(&file.display),
+                        display_path: view.text(file.display),
                         op: file.op.as_str().to_owned(),
                         move_to: file
                             .move_to
                             .map(|path| view.logical(&path).to_string_lossy().into_owned()),
-                        diff: view.text(&file.diff),
+                        diff: view.text(file.diff),
                         first_changed_line: file.first_changed_line,
                         old_text: file.old_text,
                         new_text: file.new_text,
                         snapshots_pruned: file.snapshots_pruned,
-                        diagnostics_json: file.diagnostics_json.map(|json| view.text(&json)),
+                        diagnostics_json: file.diagnostics_json.map(|json| view.text(json)),
                         warnings: file
                             .warnings
-                            .iter()
+                            .into_iter()
                             .map(|warning| view.text(warning))
                             .collect(),
-                        text: view.text(&file.text),
+                        text: view.text(file.text),
                         parse_regressed: file.parse_regressed,
                     })
                     .collect(),
                 is_error: false,
             },
-            Err(error) => failed(view.text(&error.to_string())),
+            Err(error) => failed(view.text(error.to_string())),
         }
     }
 }
