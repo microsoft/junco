@@ -1,0 +1,446 @@
+diff --git a/agentic-integration.d.ts b/agentic-integration.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..62349bd7c6d97c9c9131c9c40a4369f717951b2a
+--- /dev/null
++++ b/agentic-integration.d.ts
+@@ -0,0 +1,41 @@
++import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
++import type { AgentTool, AgentToolCall, AgentToolResult } from "./dist/types.ts";
++/**
++ * Revision of the per-run observer contract that the junco-agent integration patch adds to
++ * AgentHarness and the agent loop. Consumers compare it when they load so that an absent or
++ * mismatched patch fails immediately instead of running unobserved.
++ */
++export declare const AGENTIC_INTEGRATION_REVISION: "junco-agentic-integration/1";
++/** The native AgentHarness method that admitted an instrumented run. */
++export type AgentRunKind = "prompt" | "skill" | "promptFromTemplate";
++/** Settlement of one tool's actual `execute` promise: its result, or exactly the value it threw. */
++export type AgentToolOutcome = {
++    readonly ok: true;
++    readonly value: AgentToolResult<unknown>;
++} | {
++    readonly ok: false;
++    readonly error: unknown;
++};
++/**
++ * Observer for exactly one admitted native run, created by `AgentHarness.createRunIntegration`.
++ *
++ * Every callback except `afterTurn` is synchronous, internal and must not throw. Callbacks never
++ * replace tools, providers, messages, events or errors; they only observe them.
++ */
++export interface AgentRunIntegration {
++    /** The run's native AbortController is installed; `signal` is its original signal. */
++    controller(signal: AbortSignal): void;
++    /** A complete assistant message, after message_end delivery, is about to execute `toolCalls`. */
++    beforeTools(message: AssistantMessage, toolCalls: readonly AgentToolCall[]): void;
++    /** The original `tool.execute` promise settled with a result or a thrown value. */
++    toolOutcome(message: AssistantMessage, tool: AgentTool<any>, toolCall: AgentToolCall, args: unknown, outcome: AgentToolOutcome): void;
++    /** A started parallel tool worker or tool-update emission; registered, never awaited. */
++    track(work: Promise<unknown>): void;
++    /**
++     * A normal turn ended after every turn_end subscriber, session write and save point. A returned
++     * promise gates the next turn preparation and provider request.
++     */
++    afterTurn(message: AssistantMessage, toolResults: ToolResultMessage[]): Promise<void> | undefined;
++    /** The low-level run rejected; native failure reporting follows. */
++    abandoned(): void;
++}
+diff --git a/agentic-integration.js b/agentic-integration.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d52f8d8df8d3c990cbc3adc5f35632e3c8dee26e
+--- /dev/null
++++ b/agentic-integration.js
+@@ -0,0 +1,6 @@
++/**
++ * Revision of the per-run observer contract that the junco-agent integration patch adds to
++ * AgentHarness and the agent loop. Consumers compare it when they load so that an absent or
++ * mismatched patch fails immediately instead of running unobserved.
++ */
++export const AGENTIC_INTEGRATION_REVISION = "junco-agentic-integration/1";
+diff --git a/dist/agent-loop.d.ts b/dist/agent-loop.d.ts
+index 4c15b41e4084fb606fa6ff1de9e54ba0e9ca6a67..b56b9677e2ea241c5c93d1ffbebcff0c0ed0f77f 100644
+--- a/dist/agent-loop.d.ts
++++ b/dist/agent-loop.d.ts
+@@ -3,6 +3,7 @@
+  * Transforms to Message[] only at the LLM call boundary.
+  */
+ import { EventStream } from "@earendil-works/pi-ai/compat";
++import type { AgentRunIntegration } from "../agentic-integration.ts";
+ import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, StreamFn } from "./types.ts";
+ export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+ /**
+@@ -19,6 +20,9 @@ export declare function agentLoop(prompts: AgentMessage[], context: AgentContext
+  * This cannot be validated here since `convertToLlm` is only called once per turn.
+  */
+ export declare function agentLoopContinue(context: AgentContext, config: AgentLoopConfig, signal?: AbortSignal, streamFn?: StreamFn): EventStream<AgentEvent, AgentMessage[]>;
+-export declare function runAgentLoop(prompts: AgentMessage[], context: AgentContext, config: AgentLoopConfig, emit: AgentEventSink, signal?: AbortSignal, streamFn?: StreamFn): Promise<AgentMessage[]>;
++/**
++ * Run an agent loop to completion. `integration`, when supplied, observes this one run's tool
++ * batches, tool outcomes and turn boundaries; omitting it leaves the loop's control flow unchanged.
++ */
++export declare function runAgentLoop(prompts: AgentMessage[], context: AgentContext, config: AgentLoopConfig, emit: AgentEventSink, signal?: AbortSignal, streamFn?: StreamFn, integration?: AgentRunIntegration): Promise<AgentMessage[]>;
+ export declare function runAgentLoopContinue(context: AgentContext, config: AgentLoopConfig, emit: AgentEventSink, signal?: AbortSignal, streamFn?: StreamFn): Promise<AgentMessage[]>;
+-//# sourceMappingURL=agent-loop.d.ts.map
+\ No newline at end of file
+diff --git a/dist/agent-loop.d.ts.map b/dist/agent-loop.d.ts.map
+deleted file mode 100644
+index 2e1c587dc5f2423be2a6e4eeb05295e496c87d5c..0000000000000000000000000000000000000000
+diff --git a/dist/agent-loop.js b/dist/agent-loop.js
+index dcea976fc74a0ca3c8f53e17d3992f7e62df09de..68bd06aa5f7c165eb8310b076b24302c324c57f1 100644
+--- a/dist/agent-loop.js
++++ b/dist/agent-loop.js
+@@ -39,7 +39,7 @@ export function agentLoopContinue(context, config, signal, streamFn) {
+     });
+     return stream;
+ }
+-export async function runAgentLoop(prompts, context, config, emit, signal, streamFn) {
++export async function runAgentLoop(prompts, context, config, emit, signal, streamFn, integration) {
+     const newMessages = [...prompts];
+     const currentContext = {
+         ...context,
+@@ -51,7 +51,7 @@ export async function runAgentLoop(prompts, context, config, emit, signal, strea
+         await emit({ type: "message_start", message: prompt });
+         await emit({ type: "message_end", message: prompt });
+     }
+-    await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
++    await runLoop(currentContext, newMessages, config, signal, emit, streamFn, integration);
+     return newMessages;
+ }
+ export async function runAgentLoopContinue(context, config, emit, signal, streamFn) {
+@@ -74,7 +74,7 @@ function createAgentStream() {
+ /**
+  * Main loop logic shared by agentLoop and agentLoopContinue.
+  */
+-async function runLoop(initialContext, newMessages, initialConfig, signal, emit, streamFn) {
++async function runLoop(initialContext, newMessages, initialConfig, signal, emit, streamFn, integration) {
+     let currentContext = initialContext;
+     let config = initialConfig;
+     let firstTurn = true;
+@@ -119,7 +119,7 @@ async function runLoop(initialContext, newMessages, initialConfig, signal, emit,
+                 // them all instead of executing potentially borked calls.
+                 const executedToolBatch = message.stopReason === "length"
+                     ? await failToolCallsFromTruncatedMessage(toolCalls, emit)
+-                    : await executeToolCalls(currentContext, message, config, signal, emit);
++                    : await executeToolCalls(currentContext, message, config, signal, emit, integration);
+                 toolResults.push(...executedToolBatch.messages);
+                 hasMoreToolCalls = !executedToolBatch.terminate;
+                 for (const result of toolResults) {
+@@ -128,6 +128,12 @@ async function runLoop(initialContext, newMessages, initialConfig, signal, emit,
+                 }
+             }
+             await emit({ type: "turn_end", message, toolResults });
++            // Cooperative scheduling boundary: after every turn_end subscriber, session write and
++            // save point, before the next turn is prepared or requested.
++            const resumeGate = integration?.afterTurn(message, toolResults);
++            if (resumeGate !== undefined) {
++                await resumeGate;
++            }
+             const nextTurnContext = {
+                 message,
+                 toolResults,
+@@ -284,15 +290,16 @@ async function failToolCallsFromTruncatedMessage(toolCalls, emit) {
+ /**
+  * Execute tool calls from an assistant message.
+  */
+-async function executeToolCalls(currentContext, assistantMessage, config, signal, emit) {
++async function executeToolCalls(currentContext, assistantMessage, config, signal, emit, integration) {
+     const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
++    integration?.beforeTools(assistantMessage, toolCalls);
+     const hasSequentialToolCall = toolCalls.some((tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential");
+     if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+-        return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
++        return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit, integration);
+     }
+-    return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
++    return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit, integration);
+ }
+-async function executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit) {
++async function executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit, integration) {
+     const finalizedCalls = [];
+     const messages = [];
+     for (const toolCall of toolCalls) {
+@@ -312,7 +319,7 @@ async function executeToolCallsSequential(currentContext, assistantMessage, tool
+             };
+         }
+         else {
+-            const executed = await executePreparedToolCall(preparation, signal, emit);
++            const executed = await executePreparedToolCall(preparation, signal, emit, assistantMessage, integration);
+             finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+         }
+         await emitToolExecutionEnd(finalized, emit);
+@@ -329,7 +336,7 @@ async function executeToolCallsSequential(currentContext, assistantMessage, tool
+         terminate: shouldTerminateToolBatch(finalizedCalls),
+     };
+ }
+-async function executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit) {
++async function executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit, integration) {
+     const finalizedCalls = [];
+     for (const toolCall of toolCalls) {
+         await emit({
+@@ -353,7 +360,7 @@ async function executeToolCallsParallel(currentContext, assistantMessage, toolCa
+             continue;
+         }
+         finalizedCalls.push(async () => {
+-            const executed = await executePreparedToolCall(preparation, signal, emit);
++            const executed = await executePreparedToolCall(preparation, signal, emit, assistantMessage, integration);
+             const finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+             await emitToolExecutionEnd(finalized, emit);
+             return finalized;
+@@ -362,7 +369,14 @@ async function executeToolCallsParallel(currentContext, assistantMessage, toolCa
+             break;
+         }
+     }
+-    const orderedFinalizedCalls = await Promise.all(finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))));
++    const orderedFinalizedCalls = await Promise.all(finalizedCalls.map((entry) => {
++        if (typeof entry !== "function")
++            return Promise.resolve(entry);
++        const worker = entry();
++        // Registered, never awaited here: settlement stays Promise.all's fail-fast.
++        integration?.track(worker);
++        return worker;
++    }));
+     const messages = [];
+     for (const finalized of orderedFinalizedCalls) {
+         const toolResultMessage = createToolResultMessage(finalized);
+@@ -446,21 +460,32 @@ async function prepareToolCall(currentContext, assistantMessage, toolCall, confi
+         };
+     }
+ }
+-async function executePreparedToolCall(prepared, signal, emit) {
++async function executePreparedToolCall(prepared, signal, emit, assistantMessage, integration) {
+     const updateEvents = [];
+     let acceptingUpdates = true;
+     try {
+-        const result = await prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, (partialResult) => {
+-            if (!acceptingUpdates)
+-                return;
+-            updateEvents.push(Promise.resolve(emit({
+-                type: "tool_execution_update",
+-                toolCallId: prepared.toolCall.id,
+-                toolName: prepared.toolCall.name,
+-                args: prepared.toolCall.arguments,
+-                partialResult,
+-            })));
+-        });
++        let result;
++        try {
++            result = await prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, (partialResult) => {
++                if (!acceptingUpdates)
++                    return;
++                const updateEvent = Promise.resolve(emit({
++                    type: "tool_execution_update",
++                    toolCallId: prepared.toolCall.id,
++                    toolName: prepared.toolCall.name,
++                    args: prepared.toolCall.arguments,
++                    partialResult,
++                }));
++                integration?.track(updateEvent);
++                updateEvents.push(updateEvent);
++            });
++        }
++        catch (error) {
++            // Only the execute promise's own failure; the same value is rethrown unchanged.
++            integration?.toolOutcome(assistantMessage, prepared.tool, prepared.toolCall, prepared.args, { ok: false, error });
++            throw error;
++        }
++        integration?.toolOutcome(assistantMessage, prepared.tool, prepared.toolCall, prepared.args, { ok: true, value: result });
+         acceptingUpdates = false;
+         await Promise.all(updateEvents);
+         return { result, isError: false };
+@@ -542,4 +567,3 @@ async function emitToolResultMessage(toolResultMessage, emit) {
+     await emit({ type: "message_start", message: toolResultMessage });
+     await emit({ type: "message_end", message: toolResultMessage });
+ }
+-//# sourceMappingURL=agent-loop.js.map
+\ No newline at end of file
+diff --git a/dist/agent-loop.js.map b/dist/agent-loop.js.map
+deleted file mode 100644
+index 5c60371a156a74931e2d0bb91fb423b950005952..0000000000000000000000000000000000000000
+diff --git a/dist/harness/agent-harness.d.ts b/dist/harness/agent-harness.d.ts
+index d66aa0373acba3e64e898c6b68cd85da288f4152..6906ad3a27085ff3436648a58b275aa4a8f2a052 100644
+--- a/dist/harness/agent-harness.d.ts
++++ b/dist/harness/agent-harness.d.ts
+@@ -1,4 +1,5 @@
+ import type { AssistantMessage, ImageContent, Model, Models } from "@earendil-works/pi-ai";
++import type { AgentRunIntegration, AgentRunKind } from "../../agentic-integration.ts";
+ import type { AgentMessage, AgentTool, QueueMode, ThinkingLevel } from "../types.ts";
+ import type { AbortResult, AgentHarnessEvent, AgentHarnessEventResultMap, AgentHarnessOptions, AgentHarnessOwnEvent, AgentHarnessResources, AgentHarnessStreamOptions, ExecutionEnv, NavigateTreeResult, PromptTemplate, Skill } from "./types.ts";
+ export declare class AgentHarness<TSkill extends Skill = Skill, TPromptTemplate extends PromptTemplate = PromptTemplate, TTool extends AgentTool = AgentTool> {
+@@ -31,6 +32,18 @@ export declare class AgentHarness<TSkill extends Skill = Skill, TPromptTemplate
+     private emitBeforeProviderPayload;
+     private emitQueueUpdate;
+     private startRunPromise;
++    /**
++     * Per-admission observer for one native run. `prompt`, `skill` and `promptFromTemplate` call it
++     * exactly once after their busy guard and before their first await; the default returns
++     * `undefined`, which leaves the run's native control flow unchanged.
++     */
++    protected createRunIntegration(kind: AgentRunKind): AgentRunIntegration | undefined;
++    /**
++     * Abort requests for work owned outside this harness. `abort()` starts it right after notifying
++     * the current run, joins it after waiting for idle and before the abort event, and reports its
++     * failure through the normal abort error. The default owns no dependents.
++     */
++    protected abortDependents(): Promise<void> | undefined;
+     private createTurnState;
+     private createContext;
+     private createStreamFn;
+@@ -38,7 +51,8 @@ export declare class AgentHarness<TSkill extends Skill = Skill, TPromptTemplate
+     private createLoopConfig;
+     private validateUniqueNames;
+     private validateToolNames;
+-    private flushPendingSessionWrites;
++    /** Persist session writes queued while a run was active. */
++    protected flushPendingSessionWrites(): Promise<void>;
+     private handleAgentEvent;
+     private emitRunFailure;
+     private executeTurn;
+@@ -92,4 +106,3 @@ export declare class AgentHarness<TSkill extends Skill = Skill, TPromptTemplate
+         type: TType;
+     }>) => Promise<AgentHarnessEventResultMap[TType]> | AgentHarnessEventResultMap[TType]): () => void;
+ }
+-//# sourceMappingURL=agent-harness.d.ts.map
+\ No newline at end of file
+diff --git a/dist/harness/agent-harness.d.ts.map b/dist/harness/agent-harness.d.ts.map
+deleted file mode 100644
+index 25ddd9d9a9342e7fce698eaf89ca71704503447c..0000000000000000000000000000000000000000
+diff --git a/dist/harness/agent-harness.js b/dist/harness/agent-harness.js
+index f7e939213602d1d5fa72e0790955b3457d81bf26..7be0df3b660fc2f28f35fd9dbe0bf03d3a382192 100644
+--- a/dist/harness/agent-harness.js
++++ b/dist/harness/agent-harness.js
+@@ -252,6 +252,20 @@ export class AgentHarness {
+             finish();
+         };
+     }
++    /**
++     * Per-admission observer for one native run, called once by prompt/skill/promptFromTemplate after
++     * the busy guard and before their first await. The default leaves runs unobserved.
++     */
++    createRunIntegration(kind) {
++        return undefined;
++    }
++    /**
++     * Abort requests for work owned outside this harness, started by abort() right after the current
++     * run is notified and joined before the abort event. The default owns no dependents.
++     */
++    abortDependents() {
++        return undefined;
++    }
+     async createTurnState() {
+         const context = await this.session.buildContext();
+         const resources = this.getResources();
+@@ -459,7 +473,7 @@ export class AgentHarness {
+         await this.handleAgentEvent({ type: "agent_end", messages: [failureMessage] }, signal);
+         return [failureMessage];
+     }
+-    async executeTurn(turnState, text, options) {
++    async executeTurn(turnState, text, options, integration) {
+         let activeTurnState = turnState;
+         let messages = [createUserMessage(text, options?.images)];
+         if (this.nextTurnQueue.length > 0) {
+@@ -488,11 +502,13 @@ export class AgentHarness {
+             activeTurnState = nextTurnState;
+         };
+         this.runAbortController = abortController;
++        integration?.controller(abortController.signal);
+         const runResultPromise = (async () => {
+             try {
+-                return await runAgentLoop(messages, this.createContext(turnState, beforeResult?.systemPrompt), this.createLoopConfig(getTurnState, setTurnState), (event) => this.handleAgentEvent(event, abortController.signal), abortController.signal, this.createStreamFn(getTurnState));
++                return await runAgentLoop(messages, this.createContext(turnState, beforeResult?.systemPrompt), this.createLoopConfig(getTurnState, setTurnState), (event) => this.handleAgentEvent(event, abortController.signal), abortController.signal, this.createStreamFn(getTurnState), integration);
+             }
+             catch (error) {
++                integration?.abandoned();
+                 try {
+                     return await this.emitRunFailure(activeTurnState.model, error, abortController.signal.aborted, abortController.signal);
+                 }
+@@ -527,8 +543,9 @@ export class AgentHarness {
+         this.phase = "turn";
+         const finishRunPromise = this.startRunPromise();
+         try {
++            const integration = this.createRunIntegration("prompt");
+             const turnState = await this.createTurnState();
+-            return await this.executeTurn(turnState, text, options);
++            return await this.executeTurn(turnState, text, options, integration);
+         }
+         catch (error) {
+             this.phase = "idle";
+@@ -544,11 +561,12 @@ export class AgentHarness {
+         this.phase = "turn";
+         const finishRunPromise = this.startRunPromise();
+         try {
++            const integration = this.createRunIntegration("skill");
+             const turnState = await this.createTurnState();
+             const skill = (turnState.resources.skills ?? []).find((candidate) => candidate.name === name);
+             if (!skill)
+                 throw new AgentHarnessError("invalid_argument", `Unknown skill: ${name}`);
+-            return await this.executeTurn(turnState, formatSkillInvocation(skill, additionalInstructions));
++            return await this.executeTurn(turnState, formatSkillInvocation(skill, additionalInstructions), undefined, integration);
+         }
+         catch (error) {
+             this.phase = "idle";
+@@ -564,11 +582,12 @@ export class AgentHarness {
+         this.phase = "turn";
+         const finishRunPromise = this.startRunPromise();
+         try {
++            const integration = this.createRunIntegration("promptFromTemplate");
+             const turnState = await this.createTurnState();
+             const template = (turnState.resources.promptTemplates ?? []).find((candidate) => candidate.name === name);
+             if (!template)
+                 throw new AgentHarnessError("invalid_argument", `Unknown prompt template: ${name}`);
+-            return await this.executeTurn(turnState, formatPromptTemplateInvocation(template, args));
++            return await this.executeTurn(turnState, formatPromptTemplateInvocation(template, args), undefined, integration);
+         }
+         catch (error) {
+             this.phase = "idle";
+@@ -889,6 +908,15 @@ export class AgentHarness {
+         this.steerQueue = [];
+         this.followUpQueue = [];
+         this.runAbortController?.abort();
++        let dependents;
++        try {
++            dependents = this.abortDependents();
++        }
++        catch (error) {
++            dependents = Promise.reject(error);
++        }
++        // Handled immediately so a failure cannot surface as an unhandled rejection before the join.
++        const dependentFailure = dependents?.then(() => undefined, (error) => ({ error }));
+         const errors = [];
+         try {
+             await this.emitQueueUpdate();
+@@ -902,6 +930,11 @@ export class AgentHarness {
+         catch (error) {
+             errors.push(toError(error));
+         }
++        if (dependentFailure !== undefined) {
++            const failure = await dependentFailure;
++            if (failure !== undefined)
++                errors.push(toError(failure.error));
++        }
+         try {
+             await this.emitOwn({ type: "abort", clearedSteer, clearedFollowUp });
+         }
+@@ -936,4 +969,3 @@ export class AgentHarness {
+         return () => handlers.delete(handler);
+     }
+ }
+-//# sourceMappingURL=agent-harness.js.map
+\ No newline at end of file
+diff --git a/dist/harness/agent-harness.js.map b/dist/harness/agent-harness.js.map
+deleted file mode 100644
+index e59ba01feb0b90cbb88cfd3a89fe0b42ecc1c38c..0000000000000000000000000000000000000000
+diff --git a/package.json b/package.json
+index d0f9d5af3b84dfd300e5301a8ce0f5c930934c2c..618bbc08354bcfe81db00c3601284ba219d53c35 100644
+--- a/package.json
++++ b/package.json
+@@ -14,6 +14,10 @@
+ 			"types": "./dist/node.d.ts",
+ 			"import": "./dist/node.js"
+ 		},
++		"./agentic-integration": {
++			"types": "./agentic-integration.d.ts",
++			"import": "./agentic-integration.js"
++		},
+ 		"./package.json": "./package.json"
+ 	},
+ 	"files": [

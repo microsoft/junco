@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Checkout junco-agent
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: junco-agent
+          persist-credentials: false
+
+      - name: Checkout junco-tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/junco-tools
+          path: junco-tools
+          ssh-key: ${{ secrets.JUNCO_TOOLS_SSH_KEY }}
+          persist-credentials: false
+
+      - name: Checkout marsh
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/marsh
+          path: marsh
+          ssh-key: ${{ secrets.JUNCO_MARSH_SSH_KEY }}
+          persist-credentials: false
+
+      - name: Checkout junco-policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/junco-policy
+          path: junco-policy
+          ssh-key: ${{ secrets.JUNCO_POLICY_SSH_KEY }}
+          persist-credentials: false
+
+      - name: Install native build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config clang libclang-dev llvm-dev \
+            libbtrfsutil-dev zlib1g-dev ca-certificates curl git
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: Install Rust 1.95.0
+        env:
+          RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build junco-tools
+        working-directory: junco-tools
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Install junco-agent dependencies
+        working-directory: junco-agent
+        run: bun install --linker hoisted --frozen-lockfile
+
+      - name: Build junco-agent
+        working-directory: junco-agent
+        run: bun run build
+
+      - name: Typecheck junco-agent
+        working-directory: junco-agent
+        run: bun run typecheck
+
+      - name: Test junco-agent offline
+        working-directory: junco-agent
+        run: bun run test
