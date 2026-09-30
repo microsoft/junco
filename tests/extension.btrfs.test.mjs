@@ -124,7 +124,7 @@ async function packagedSession(sessionManager) {
   return { session, scripted };
 }
 
-/** An idle handle proves nothing about a lease; only an executed command reacquires one. */
+/** An idle handle proves nothing about usability; only an executed command confirms the seed still works. */
 async function assertSeedReusable(seed) {
   const mux = await NativeMux.open(seed);
   try {
@@ -140,55 +140,65 @@ async function assertSeedReusable(seed) {
   }
 }
 
-test("default owners lease lazily and retry a busy first command", { timeout: 120_000 }, async () => {
+test("default owners run concurrently over shared source authority", { timeout: 120_000 }, async (t) => {
   const holder = await NativeMux.open(state.seed);
   const contender = createShellMuxOperations({ principal: "opening-owner" });
+  const gate = join(state.testRoot, "shared-authority-gate");
+  let held;
+  let heldSettled = false;
   try {
-    // Discovery alone materializes no state directory, so it cannot have taken a lease either.
-    await assert.rejects(
-      access(join(state.seed, "..", ".marsh", "seed")),
-      (error) => error.code === "ENOENT",
-    );
     await assertSeedReusable(state.seed);
 
     const holding = createShellMuxOperations({ principal: "holding-owner", mux: holder });
-    const holderChunks = [];
-    const holderResult = await holding.exec("printf 'holder-ready\\n'", state.seed, {
-      onData: (data) => holderChunks.push(data),
+    const ready = deferred(t.signal, "shared-authority hold readiness");
+    let output = "";
+    held = holding.exec(heldChild({ gate, ready: "SHARE_READY", done: "SHARE_DONE" }), state.seed, {
+      signal: t.signal,
+      onData: (data) => {
+        output += data.toString("utf8");
+        if (output.includes("SHARE_READY")) ready.resolve();
+      },
     });
-    assert.equal(holderResult.exitCode, 0);
-    assert.equal(Buffer.concat(holderChunks).toString("utf8"), "holder-ready\n");
+    const settled = () => { heldSettled = true; };
+    held.then(settled, settled);
+    await Promise.race([
+      ready.promise,
+      held.then(() => { throw new Error("shared-authority hold ended before readiness"); }),
+    ]);
 
-    // An idle handle over a leased seed stays legal; only a command contends for the lease.
-    const idle = await NativeMux.open(state.seed);
-    await idle.close();
+    // Read-only: an unrelated file write here could turn a source-sharing test into a
+    // policy or stale-view test, copying tests/bash.test.mjs's independent-principal pattern.
+    const concurrentChunks = [];
+    const concurrentResult = await contender.exec("printf 'concurrent-ok\\n'", state.seed, {
+      signal: t.signal,
+      onData: (data) => concurrentChunks.push(data),
+    });
+    assert.equal(concurrentResult.exitCode, 0);
+    assert.equal(Buffer.concat(concurrentChunks).toString("utf8"), "concurrent-ok\n");
+    assert.equal(heldSettled, false);
 
-    const blocked = [];
-    await assert.rejects(
-      contender.exec(
-        "printf blocked; printf forbidden > src/lease-must-not-run.txt",
-        state.seed,
-        { onData: (data) => blocked.push(data) },
-      ),
-      Error,
-    );
-    assert.equal(Buffer.concat(blocked).length, 0);
-    await assert.rejects(
-      access(join(state.seed, "src/lease-must-not-run.txt")),
-      (error) => error.code === "ENOENT",
-    );
-  } finally {
+    await release(gate);
+    const heldResult = await held;
+    assert.equal(heldResult.exitCode, 0);
+    assert.equal(output, "SHARE_READY\nSHARE_DONE\n");
     await holder.close();
-  }
 
-  // The same retained native session recovers: a busy first command poisons nothing.
-  const chunks = [];
-  const result = await contender.exec("printf 'reopened\\n'", state.seed, {
-    onData: (data) => chunks.push(data),
-  });
-  assert.equal(result.exitCode, 0);
-  assert.equal(Buffer.concat(chunks).toString("utf8"), "reopened\n");
-  await shutdownShellMux();
+    // The same retained native session recovers: closing the borrowed mux disposed neither it
+    // nor the default owners' shared source authority.
+    const chunks = [];
+    const result = await contender.exec("printf 'reopened\\n'", state.seed, {
+      onData: (data) => chunks.push(data),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(Buffer.concat(chunks).toString("utf8"), "reopened\n");
+  } finally {
+    await cleanup(
+      () => release(gate),
+      () => holder.close(),
+      () => Promise.allSettled([held]),
+      () => shutdownShellMux(),
+    );
+  }
 
   const concurrent = createShellMuxOperations({ principal: "concurrent-owner" });
   try {
@@ -204,8 +214,8 @@ test("default owners lease lazily and retry a busy first command", { timeout: 12
     await shutdownShellMux();
   }
 
-  // Constructor rejection and retry, which the lazy lease did not replace: the filesystem root
-  // is not an admissible seed, and that failure is the opening promise's own.
+  // Constructor rejection and retry: the filesystem root is not an admissible seed, and that
+  // failure is the opening promise's own.
   const discovery = createShellMuxOperations({ principal: "discovery-owner" });
   try {
     const rejected = [];
@@ -228,28 +238,43 @@ test("default owners lease lazily and retry a busy first command", { timeout: 12
 test("owned shutdown joins active work and closes admission", { timeout: 120_000 }, async (t) => {
   const gate = join(state.testRoot, "shutdown-gate");
   const owner = createShellMuxOperations({ principal: "shutdown-owner" });
-  const blockedOwner = createShellMuxOperations({ principal: "failing-owner" });
+  const concurrentOwner = createShellMuxOperations({ principal: "concurrent-during-shutdown" });
   let held;
+  let heldSettled = false;
   try {
     const ready = deferred(t.signal, "production hold readiness");
     let output = "";
     held = owner.exec(heldChild({ gate, ready: "PROD_READY", done: "PROD_DONE" }), state.seed, {
+      signal: t.signal,
       onData: (data) => {
         output += data.toString("utf8");
         if (output.includes("PROD_READY")) ready.resolve();
       },
     });
-    held.catch(() => {});
-    await ready.promise;
+    const settled = () => { heldSettled = true; };
+    held.then(settled, settled);
+    await Promise.race([
+      ready.promise,
+      held.then(() => { throw new Error("production hold ended before readiness"); }),
+    ]);
 
-    // A second default owner whose first command cannot lease the seed while it is held.
-    await assert.rejects(blockedOwner.exec("printf blocked", state.seed, { onData: () => {} }), Error);
+    // A second default owner runs concurrently over the same shared source authority while
+    // the first command is still held; shutdown, not admission, must stop the active command.
+    const concurrentChunks = [];
+    const concurrentResult = await concurrentOwner.exec("printf 'not-blocked\\n'", state.seed, {
+      signal: t.signal,
+      onData: (data) => concurrentChunks.push(data),
+    });
+    assert.equal(concurrentResult.exitCode, 0);
+    assert.equal(Buffer.concat(concurrentChunks).toString("utf8"), "not-blocked\n");
+    assert.equal(heldSettled, false);
 
     const shutdown = shutdownShellMux();
     await Promise.all([assert.rejects(held, Error), shutdown]);
     await assert.rejects(owner.exec("printf late", state.seed, { onData: () => {} }), /closed/);
 
-    // The lease was released before shutdown settled, and is actually reacquirable.
+    // The seed is a usable source again after shutdown settled; this is an execution probe,
+    // never proof that some exclusive lease was reacquired.
     await assertSeedReusable(state.seed);
   } finally {
     await cleanup(

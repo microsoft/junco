@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AstFindResult, AstMatchStrictness, AstReplaceResult } from "../native/index.js";
+import type { AstFindResult, AstMatchStrictness, AstReplaceResult, NativeMux } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import {
   type BoundedToolDetails,
@@ -74,7 +74,8 @@ const astEditSchema = Type.Object({
 });
 
 /**
- * Structural search over files with ast-grep patterns.
+ * Structural search over files with ast-grep patterns, as a routed marsh read
+ * through `mux`, which `native` created.
  *
  * Match slices are spans, not full-line reads, so they intentionally grant no
  * hashline provenance: the model still needs `read` or `grep` for edit anchors.
@@ -82,6 +83,7 @@ const astEditSchema = Type.Object({
 export function createAstGrepTool(
   cwd: string,
   native: NativeModule,
+  mux: NativeMux,
 ): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
   const tool = {
     name: "ast_grep",
@@ -97,7 +99,7 @@ export function createAstGrepTool(
       if (params.offset !== undefined) requireU32("offset", params.offset, 0);
 
       const result = await withNativeSignal(signal, (nativeSignal) =>
-        native.astGrep({
+        mux.astGrep(cwd, {
           patterns,
           path: resolveToolPath(cwd, params.path ?? "."),
           glob: params.glob,
@@ -121,12 +123,15 @@ export function createAstGrepTool(
  * Structural rewrite of files with ast-grep patterns.
  *
  * Previews by default; only an explicit `dryRun: false` writes. There is no
- * proposal queue in this package, so an applying call mutates the filesystem
- * immediately and invalidates the walker's scan cache for the search root.
+ * proposal queue in this package, so an applying call is a routed marsh edit
+ * through `mux`: the mux's policy may run it in a private snapshot whose
+ * changes publish only when marsh authorizes them. Either way it invalidates
+ * the walker's scan cache for the search root.
  */
 export function createAstEditTool(
   cwd: string,
   native: NativeModule,
+  mux: NativeMux,
 ): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
   const tool = {
     name: "ast_edit",
@@ -152,7 +157,7 @@ export function createAstEditTool(
       let result: AstReplaceResult;
       try {
         result = await withNativeSignal(signal, (nativeSignal) =>
-          native.astEdit({
+          mux.astEdit(cwd, {
             rewrites,
             path: root,
             glob: params.glob,

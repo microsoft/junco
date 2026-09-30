@@ -12,7 +12,6 @@ import {
   collector,
   deferred,
   expectedLines,
-  FIXTURE_DEADLINE,
   fixture,
   heldChild,
   nativeEnv,
@@ -386,7 +385,6 @@ test("aborting a running command keeps its output and publishes nothing", { time
     assert.equal(readySeen, true);
     const persisted = await readFile(spill, "utf8");
     assert.equal(persisted, `${expectedLines(3000)}CANCEL_READY\n`);
-    assert.ok(!persisted.includes(FIXTURE_DEADLINE));
     await assert.rejects(access(join(instance.seed, "src/cancelled.txt")), (error) => error.code === "ENOENT");
     const recovered = await tool.execute("recovered", { command: "printf recovered" }, t.signal);
     assert.equal(text(recovered), "recovered");
@@ -432,7 +430,6 @@ test("a timeout keeps its output and publishes nothing", { timeout: 30_000 }, as
     assert.equal(readySeen, true);
     const persisted = await readFile(spill, "utf8");
     assert.equal(persisted, `${expectedLines(3000)}TIMEOUT_READY\n`);
-    assert.ok(!persisted.includes(FIXTURE_DEADLINE));
     await assert.rejects(access(join(instance.seed, "src/timed-out.txt")), (error) => error.code === "ENOENT");
     const recovered = await tool.execute("recovered", { command: "printf recovered" }, t.signal);
     assert.equal(text(recovered), "recovered");
@@ -599,7 +596,7 @@ test("independent principals overlap without cross-routing output", { timeout: 3
   }
 });
 
-test("a reopened seed keeps its stakes and a retained run holds no lease", { timeout: 30_000 }, async () => {
+test("fresh shells and reopened seeds do not inherit a reused name's grants", { timeout: 30_000 }, async () => {
   const instance = await fixture();
   let mux = instance.mux;
   try {
@@ -620,34 +617,33 @@ test("a reopened seed keeps its stakes and a retained run holds no lease", { tim
     const intruder = createBashTool(instance.seed, {
       operations: createShellMuxOperations({ mux, principal: "another-agent" }),
     });
-    // A live stake belongs to the principal that took it, so its own next line is not refused
-    // by it even though every call gets a fresh shell and a fresh snapshot.
-    const reclaimed = await owner.execute("reclaim", {
+    // A fresh shell gets an opaque owner unrelated to any principal name: reusing the name that
+    // took the earlier stake grants no ownership of it, even against the same live mux.
+    await assert.rejects(owner.execute("reclaim", {
       command: "printf 'reclaimed\\n' > src/file0.txt; printf ok",
-    }, undefined);
-    assert.equal(text(reclaimed), "ok");
-    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "reclaimed\n");
+    }, undefined), /Marsh policy denied publication/);
+    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
 
     await assert.rejects(intruder.execute("denied-live", {
       command: "printf 'new\\n' > src/intruder.txt; printf 'stolen\\n' > src/file0.txt; true",
     }, undefined), /Marsh policy denied publication/);
-    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "reclaimed\n");
+    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
     await assert.rejects(access(join(instance.seed, "src/intruder.txt")), (error) => error.code === "ENOENT");
 
     await mux.close();
     // The retained run reference stays alive across this reopen on purpose.
-    mux = await NativeMux.openCopyTree(instance.seed);
+    mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
     assert.deepEqual(await retained.wait(), claimed);
 
-    // Marsh records a recovered stake against the snapshot that published it, never against the
-    // job name, so a returning name inherits nothing an earlier session left unsettled.
+    // A fresh shell after reopen is exactly as unprivileged as a fresh shell before it: a
+    // returning name inherits nothing an earlier session left unsettled.
     const returning = createBashTool(instance.seed, {
       operations: createShellMuxOperations({ mux, principal: "file-owner" }),
     });
     await assert.rejects(returning.execute("denied-after-reopen", {
       command: "printf 'stolen\\n' > src/file0.txt; true",
     }, undefined), /Marsh policy denied publication/);
-    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "reclaimed\n");
+    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "claimed\n");
 
     // Recovering a stake must not invent one: an unclaimed path is still free after a reopen.
     const fresh = await returning.execute("fresh-after-reopen", {
@@ -704,7 +700,7 @@ test("close fences admission, joins runs, and discards staged work", { timeout: 
     await assert.rejects(access(join(instance.seed, "src/closed.txt")), (error) => error.code === "ENOENT");
     await assert.rejects(access(join(instance.seed, "src/queued.txt")), (error) => error.code === "ENOENT");
 
-    mux = await NativeMux.openCopyTree(instance.seed);
+    mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
     const reused = collector();
     const reopened = mux.start({
       command: "printf reopened",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,26 +16,35 @@ import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs"
 
 const workspacePrefix = fileURLToPath(new URL("../target/tools-test-", import.meta.url));
 
-/** An ordinary directory plus a collection over it; the file tools need no marsh seed. */
-async function workspace(files = {}) {
-  const root = await mkdtemp(workspacePrefix);
+/**
+ * A CopyTree seed holding `files`, plus a collection over a borrowed test-addon mux on it.
+ * `root` is the seed; its marsh state lives beside it, inside the disposable scratch root.
+ */
+async function workspace(files = {}, { sandbox = "shared" } = {}) {
+  const scratch = await mkdtemp(workspacePrefix);
+  const root = join(scratch, "seed");
+  let mux;
   try {
+    await mkdir(root);
     for (const [relative, content] of Object.entries(files)) {
       await mkdir(join(root, relative, ".."), { recursive: true });
       await writeFile(join(root, relative), content);
     }
-    const collection = await ToolCollection.create(root);
+    const native = await import("../target/native-test/index.js");
+    mux = await native.NativeMux.openCopyTree(root, { sandbox });
+    const collection = await ToolCollection.create(root, { mux, native });
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
       root,
+      mux,
       collection,
       call: (name, input, signal) => byName.get(name).execute(`tools-${name}`, input, signal, undefined),
       file: (relative) => readFile(join(root, relative), "utf8"),
       write: (relative, content) => writeFile(join(root, relative), content),
-      dispose: () => rm(root, { recursive: true, force: true }),
+      dispose: () => cleanup(() => mux.close(), () => rm(scratch, { recursive: true, force: true })),
     };
   } catch (error) {
-    await rm(root, { recursive: true, force: true });
+    await cleanup(() => mux?.close(), () => rm(scratch, { recursive: true, force: true }));
     throw error;
   }
 }
@@ -338,6 +348,8 @@ async function collectionSession(instance, principal) {
   );
   const { faux, model, streamFn } = scriptedModel();
   const collection = await ToolCollection.create(instance.seed, {
+    mux: instance.mux,
+    native: instance.native,
     bash: { operations: createShellMuxOperations({ mux: instance.mux, principal }) },
   });
   const errors = [];
@@ -466,5 +478,78 @@ test("the collection's bash still enforces marsh publication policy", { timeout:
       () => session?.dispose(),
       () => closeFixture(instance),
     );
+  }
+});
+
+test("writing file tools are gated by marsh publication", { timeout: 60_000 }, async () => {
+  const ws = await workspace({ "src/claimed.ts": "const value = seed;\n" }, { sandbox: "always" });
+  try {
+    // Another principal claims the file through marsh, so any other principal's later
+    // publication of it is refused.
+    const claim = createBashTool(ws.root, {
+      operations: createShellMuxOperations({ mux: ws.mux, principal: "other-owner" }),
+    });
+    await claim.execute("claim-file", { command: "printf 'const value = owned;\\n' > src/claimed.ts" }, undefined);
+    const owned = "const value = owned;\n";
+    assert.equal(await ws.file("src/claimed.ts"), owned);
+
+    // Read-only calls run directly against the seed and are never refused.
+    const read = text(await ws.call("read", { path: "src/claimed.ts" }));
+    assert.match(read, /^1:const value = owned;$/m);
+    const grep = text(await ws.call("grep", { pattern: "owned", path: "src" }));
+    assert.match(grep, /^\*1:const value = owned;$/m, grep);
+
+    await assert.rejects(
+      ws.call("edit", { input: `[src/claimed.ts#${tagOf(read)}]\nPUT 1.=1:\n+const value = edited;\n` }),
+      /Marsh policy denied publication/,
+    );
+    assert.equal(await ws.file("src/claimed.ts"), owned);
+
+    const rewrite = { rewrites: { owned: "rewritten" }, path: "src/claimed.ts" };
+    await assert.rejects(
+      ws.call("ast_edit", { ...rewrite, dryRun: false }),
+      /Marsh policy denied publication/,
+    );
+    assert.equal(await ws.file("src/claimed.ts"), owned);
+
+    // A preview writes nothing, so it is not an edit and is never refused.
+    for (const input of [rewrite, { ...rewrite, dryRun: true }]) {
+      const preview = await ws.call("ast_edit", input);
+      assert.equal(preview.details.result.totalReplacements, 1);
+      assert.equal(preview.details.result.applied, false);
+      assert.equal(await ws.file("src/claimed.ts"), owned);
+    }
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("a managed edit keeps hashline anchors and logical paths", { timeout: 60_000 }, async () => {
+  const ws = await workspace({ "src/plain.txt": "alpha\nbravo\n" }, { sandbox: "always" });
+  try {
+    const read = text(await ws.call("read", { path: "src/plain.txt" }));
+    const result = await ws.call("edit", {
+      input: `[src/plain.txt#${tagOf(read)}]\nPUT 2.=2:\n+BRAVO\n`,
+    });
+    assert.equal(await ws.file("src/plain.txt"), "alpha\nBRAVO\n");
+    assert.equal(result.details.files[0].path, join(ws.root, "src/plain.txt"));
+    assert.doesNotMatch(text(result), /\.marsh/);
+
+    const reread = text(await ws.call("read", { path: "src/plain.txt" }));
+    assert.match(reread, /^2:BRAVO$/m);
+    tagOf(reread);
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("a collection needs a marsh seed", { timeout: 30_000 }, async () => {
+  // The system temporary directory, not the checkout: a development checkout may itself sit in
+  // a btrfs subvolume, which is a seed.
+  const plain = await mkdtemp(join(tmpdir(), "junco-tools-plain-"));
+  try {
+    await assert.rejects(ToolCollection.create(plain));
+  } finally {
+    await rm(plain, { recursive: true, force: true });
   }
 });

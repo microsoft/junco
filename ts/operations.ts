@@ -35,9 +35,10 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 }
 
 /**
- * A principal is a durable, caller-controlled agent identity; reuse it only for that agent.
- * Legacy snapshot-owned grants are not reassigned. Share one explicit mux when several
- * operations instances intentionally share a seed; borrowed muxes remain caller-owned.
+ * A principal names and orders one agent's commands; it is not a policy identity. Every
+ * command runs in a fresh marsh shell with an opaque owner, so no grant carries over between
+ * commands. Share one explicit mux when several operations instances intentionally share a
+ * seed; borrowed muxes remain caller-owned.
  * ShellMux snapshots are not OS confinement. Cancellation waits for owned cleanup and
  * can be delayed by external commands racing the backend's stop scan.
  */

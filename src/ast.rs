@@ -632,10 +632,30 @@ fn compile_find_patterns(
 
 	Ok(compiled)
 }
-/// Search source files with ast-grep patterns; returns a promise resolved on a
-/// worker thread.
-#[napi]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
+/// An `astGrep` request prepared on the JS thread; `path` is the scan root the
+/// routed call maps into its view before running it.
+pub(crate) struct AstFindSpec {
+	pub(crate) path: Option<String>,
+	patterns:        Option<Vec<String>>,
+	lang:            Option<String>,
+	glob:            Option<String>,
+	selector:        Option<String>,
+	strictness:      Option<AstMatchStrictness>,
+	limit:           Option<u32>,
+	offset:          Option<u32>,
+	include_meta:    Option<bool>,
+}
+
+impl AstFindSpec {
+	/// Search source files with ast-grep patterns.
+	pub(crate) fn run(self, ct: task::CancelToken) -> Result<AstFindResult> {
+		ast_grep_blocking(ct, self)
+	}
+}
+
+/// Splits `options` into its request and a cancel token that consumes the abort
+/// signal on the JS thread.
+pub(crate) fn prepare_find(options: AstFindOptions<'_>) -> (AstFindSpec, task::CancelToken) {
 	let AstFindOptions {
 		patterns,
 		lang,
@@ -651,11 +671,29 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 		timeout_ms,
 	} = options;
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
+	(
+		AstFindSpec { path, patterns, lang, glob, selector, strictness, limit, offset, include_meta },
+		task::CancelToken::new(timeout_ms, signal),
+	)
+}
+
+fn ast_grep_blocking(ct: task::CancelToken, spec: AstFindSpec) -> Result<AstFindResult> {
+	let AstFindSpec {
+		path,
+		patterns,
+		lang,
+		glob,
+		selector,
+		strictness,
+		limit,
+		offset,
+		include_meta,
+	} = spec;
+
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
 
-	task::blocking("ast_grep", ct, move |ct| {
+	{
 		let patterns = normalize_pattern_list(patterns)?;
 		let strictness = resolve_strictness(strictness);
 		let include_meta = include_meta.unwrap_or(false);
@@ -787,13 +825,13 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 			limit_reached,
 			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
 		})
-	})
+	}
 }
 
 /// Match ast-grep patterns against an in-memory source string; returns a
 /// promise resolved on a worker thread.
 ///
-/// This is the file-free counterpart to [`ast_grep`]: callers that already hold
+/// This is the file-free counterpart to [`AstFindSpec::run`]: callers that already hold
 /// the source (streaming buffers, generated code, editor contents) avoid a
 /// temp-file round trip. `lang` is required since there is no path to infer it
 /// from.
@@ -900,10 +938,51 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 	})
 }
 
-/// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
-/// a promise.
-#[napi]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
+/// An `astEdit` request prepared on the JS thread; `path` is the scan root the
+/// routed call maps into its view before running it.
+pub(crate) struct AstReplaceSpec {
+	pub(crate) path:     Option<String>,
+	pub(crate) dry_run:  Option<bool>,
+	rewrites:            Option<HashMap<String, String>>,
+	lang:                Option<String>,
+	glob:                Option<String>,
+	selector:            Option<String>,
+	strictness:          Option<AstMatchStrictness>,
+	max_replacements:    Option<u32>,
+	max_files:           Option<u32>,
+	fail_on_parse_error: Option<bool>,
+}
+
+impl AstReplaceSpec {
+	/// Apply ast-grep rewrite rules to matching files; honors `dryRun`. Every
+	/// rewritten file goes to `persist` only after the whole pass succeeded.
+	pub(crate) fn run(
+		self,
+		ct: task::CancelToken,
+		persist: &mut dyn FnMut(&Path, &str) -> std::io::Result<()>,
+	) -> Result<AstReplaceResult> {
+		ast_edit_blocking(
+			ct,
+			self.rewrites,
+			self.lang,
+			self.path,
+			self.glob,
+			self.selector,
+			self.strictness,
+			self.dry_run,
+			self.max_replacements,
+			self.max_files,
+			self.fail_on_parse_error,
+			persist,
+		)
+	}
+}
+
+/// Splits `options` into its request and a cancel token that consumes the abort
+/// signal on the JS thread.
+pub(crate) fn prepare_replace(
+	options: AstReplaceOptions<'_>,
+) -> (AstReplaceSpec, task::CancelToken) {
 	let AstReplaceOptions {
 		rewrites,
 		lang,
@@ -919,27 +998,26 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 		timeout_ms,
 	} = options;
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("ast_edit", ct, move |ct| {
-		ast_edit_blocking(
-			ct,
+	(
+		AstReplaceSpec {
+			path,
+			dry_run,
 			rewrites,
 			lang,
-			path,
 			glob,
 			selector,
 			strictness,
-			dry_run,
 			max_replacements,
 			max_files,
 			fail_on_parse_error,
-		)
-	})
+		},
+		task::CancelToken::new(timeout_ms, signal),
+	)
 }
 
 #[allow(
 	clippy::too_many_arguments,
-	reason = "napi-exposed wrapper mirrors the JS-facing argument list"
+	reason = "mirrors the JS-facing argument list plus the host's writer"
 )]
 fn ast_edit_blocking(
 	ct: task::CancelToken,
@@ -953,6 +1031,7 @@ fn ast_edit_blocking(
 	max_replacements: Option<u32>,
 	max_files: Option<u32>,
 	fail_on_parse_error: Option<bool>,
+	persist: &mut dyn FnMut(&Path, &str) -> std::io::Result<()>,
 ) -> Result<AstReplaceResult> {
 	let rewrite_rules = normalize_rewrite_map(rewrites)?;
 	let strictness = resolve_strictness(strictness);
@@ -1183,7 +1262,7 @@ fn ast_edit_blocking(
 	if !dry_run {
 		for write in &pending_writes {
 			ct.heartbeat()?;
-			std::fs::write(&write.absolute_path, &write.output).map_err(|err| {
+			persist(&write.absolute_path, &write.output).map_err(|err| {
 				Error::from_reason(format!("Failed to write {}: {err}", write.absolute_path.display()))
 			})?;
 		}
@@ -1344,6 +1423,7 @@ mod tests {
 			None,
 			None,
 			None,
+			&mut |path, output| fs::write(path, output),
 		)
 		.expect("mixed-language tree should rewrite per file");
 
@@ -1441,6 +1521,7 @@ mod tests {
 			None,
 			None,
 			None,
+			&mut |path, output| fs::write(path, output),
 		)
 		.expect("identical duplicate matches should apply cleanly");
 
@@ -1493,6 +1574,7 @@ mod tests {
 			None,
 			None,
 			None,
+			&mut |path, output| fs::write(path, output),
 		);
 		assert!(result.is_err(), "expected ast_edit to error on overlapping edits");
 

@@ -4,7 +4,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Scope and compatibility
 
-- This is a private, local TypeScript package with a Rust napi-rs addon. It replaces **Pi's agent `bash`, `read`, `edit`, `grep`, and `find` tools** and adds `ast_grep`, `ast_edit`, and `diff`. `bash` runs on marsh ShellMux; the file tools run on Oh My Pi's `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` engines, imported unmodified from a pinned public Git revision. Pi's `write`, `ls`, and `user_bash` stay untouched.
+- This is a private, local TypeScript package with a Rust napi-rs addon. It replaces **Pi's agent `bash`, `read`, `edit`, `grep`, and `find` tools** and adds `ast_grep`, `ast_edit`, and `diff`. `bash` runs on marsh ShellMux; the file tools run on Oh My Pi's `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` engines, imported unmodified from a pinned public Git revision, each call routed through the same mux as a marsh tool call. Pi's `write`, `ls`, and `user_bash` stay untouched.
 - Target `@earendil-works/pi-coding-agent@0.80.6`, not Oh My Pi. Preserve Pi's public tool interface rather than introducing another schema or error-result convention.
 - Supported build target: Linux x86-64 GNU/glibc, Node.js >=22.19.0, Rust 1.95.0. Bun is not required by the package.
 - Keep changes scoped to the request. Preserve unrelated local work. Do not push, publish packages, change global Git settings, replace system Rust, or create/migrate filesystem subvolumes unless explicitly authorized.
@@ -13,17 +13,19 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 | Path | Responsibility |
 | --- | --- |
-| `src/lib.rs` | Exported napi classes/objects and production/test-only opening factories. |
-| `src/mux.rs` | Session ownership, principal admission, execution, cancellation, verdicts, and shutdown. |
+| `src/lib.rs` | Exported napi classes/objects, the `sandbox` mux option, and production/test-only opening factories. |
+| `src/mux.rs` | Session ownership, principal admission, execution, routed tool calls, cancellation, verdicts, and shutdown. |
+| `src/tool.rs` | Routed file tools: the `JuncoTool` classification, the mux's sandbox policy, and the `NativeMux` file-tool methods that run the engines inside marsh calls. |
 | `src/frontend.rs` | Snapshot-UID output routing, JS callback receipts, errors, and closure fences. |
 | `ts/operations.ts` | Pi `BashOperations` adapter, lazy mux ownership, timeout/abort handling, and teardown. |
-| `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted verbatim from the pinned revision (see `LICENSE.oh-my-pi`). `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
+| `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted from the pinned revision (see `LICENSE.oh-my-pi`), verbatim except for the routing seams: filesystem exports split into a JS-thread `prepare` and an engine run `src/tool.rs` calls, `ast_edit` writing through a host writer, and `EditStore`'s tracked keys. `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
 | `src/task.rs`, `src/testing.rs`, `src/utils.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
 | `ts/tool-support.ts` | Shared adapter primitives: path resolution/display, editable-text normalization, bounded output, u32 validation, and `withNativeSignal`. |
 | `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
-| `ts/edit.ts` | The hashline edit tool: one `EditSession` per call plus the Node filesystem writer. |
+| `ts/mime.ts` | Pi's image type sniffing, ported verbatim because Pi does not export it. |
+| `ts/edit.ts` | The hashline edit tool: one routed `mux.edit` call per edit. |
 | `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
-| `ts/collection.ts` | `ToolCollection`: one `EditStore` and the complete ordered tool list. |
+| `ts/collection.ts` | `ToolCollection`: one `EditStore`, one opened or borrowed mux, and the complete ordered tool list. |
 | `ts/bash.ts`, `ts/index.ts` | Thin upstream factory wrappers and public exports. |
 | `ts/extension.ts` | Pi session hooks and same-name collection registration. |
 | `scripts/with-junco-build-env.mjs` | Isolated Rust homes and authenticated process-local Cargo/Git environment. |
@@ -32,7 +34,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree fixtures, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
 | `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
 | `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, and SDK `customTools` registration, with scripted model responses. |
-| `tests/tools.test.mjs` | Collection file tools: hashline provenance, snapshot fidelity, staging, search boundaries, and SDK registration. |
+| `tests/tools.test.mjs` | Collection file tools over a CopyTree seed: hashline provenance, snapshot fidelity, staging, search boundaries, publication gating, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
 | `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
 | `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension and owned muxes on a real btrfs seed. |
@@ -74,7 +76,7 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 - The lockfile deliberately keeps `napi-derive-backend` at 5.0.4 for napi 3.9.0 compatibility. Review codegen compatibility before changing that resolution.
 - Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate resolving to `../marsh`, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
 - The Oh My Pi engines are pinned Git dependencies (`pi-ast`, `pi-diff`, `pi-walker`, `pi-edit` at `7ae76f8e4daca0c8f409f61bcd514260cd522365`). Import them unmodified from that one URL/revision so each package keeps a single crate identity. Do not vendor them, add a `path` dependency, follow a branch, or point any build step at a local Oh My Pi checkout.
-- `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, and keep the source/licence attribution.
+- `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, re-apply only the routing seams listed in the source map, and keep the source/licence attribution.
 - Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.95.0 or export `RUSTC_BOOTSTRAP` globally.
 
 ## Native execution invariants
@@ -88,7 +90,8 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 7. Route output by `SnapshotUid`, not reusable names, and retain only a weak mux reference in the frontend. Copy borrowed bytes once into an owned Buffer, dispatch nonblocking, and acknowledge a stream's receipt only after its JS callback returns successfully. Callback, enqueue, and I/O failures must reject the run, not disappear or become fatal Node exceptions.
 8. A command verdict is not an output fence. Wait for `run_command`, shell closure and every queued JS callback through the route's own drain. `run_command` resolving `Ok` already means `Outcome::Published`; never re-decide publication from the outcome, and still require an actual process status. Inspect a denial's outcome only for its diagnostics, and do not add `details.marsh`.
 9. Record user cancellation and timeout separately from publication outcomes. `abort()` records/notifies cancellation without synchronously re-entering the mux from a JS callback. Stop through the shell and await owned cleanup; a lost acceptance receipt is never permission to replay an effectful line, and an arbitrary discarded verdict is not proof of timeout.
-10. Close is idempotent: refuse new admissions synchronously on the JS call, cancel/join pending runs, await mux shutdown, release callbacks and strong mux ownership, and let concurrent close callers join the same completion. Retaining a completed `NativeRun` must not retain the seed lease.
+10. Close is idempotent: refuse new admissions synchronously on the JS call, cancel/join pending runs, join accepted tool calls, await mux shutdown, release callbacks and strong mux ownership, and let concurrent close callers join the same completion. Retaining a completed `NativeRun` must not retain the seed lease.
+11. Every file-tool call is one `JuncoTool` call through `ShellMux::run_tool`, classified by its `Action`: a read-only call never takes the managed route. Its operation writes only through the call's `BuiltinContext` I/O (`open`, `create_dir_all`, `remove_file`), never raw `std::fs` on a physical path, or managed publication refuses the change as unobserved. Returned paths and messages name the seed, never a snapshot.
 
 ## Pi adapter invariants
 
@@ -98,18 +101,18 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 - Timeouts are seconds, optional with no default deadline. Match Pi's validation and abort/timeout sentinels before opening/starting work. Keep the abort listener for the whole operation, including pending opens and principal admission.
 - Omit undefined environment values; never stringify them or mutate `process.env`. Forward Buffer chunks directly. Pi owns streaming UTF-8 decoding, truncation, and full-output persistence.
 - Each default operations owner has one lazy opening promise, assigned before awaiting. Clear failed openings for later explicit invocations. The owner set is for teardown, not a seed cache/pool.
-- An explicitly supplied mux is borrowed and must be closed by its caller. Default-owner shutdown must dispose owners, join pending opens, and close successfully opened muxes even if another owner fails. Do not rely on asynchronous GC finalizers.
-- Register the whole `ToolCollection` on `session_start`, using the Pi session ID as bash's stable principal and Pi's public settings API for the persisted prefix. Await shutdown on `session_shutdown`. Do not intercept `user_bash`, replace `write`/`ls`, or instruct users to disable built-in tools.
+- An explicitly supplied mux is borrowed and must be closed by its caller; a `ToolCollection` closes only a mux it opened. Default-owner shutdown must dispose owners, join pending opens, and close successfully opened muxes even if another owner fails. Do not rely on asynchronous GC finalizers.
+- Register the whole `ToolCollection` on `session_start`, using the Pi session ID as bash's stable principal and Pi's public settings API for the persisted prefix. Close the collection on `session_shutdown`. Do not intercept `user_bash`, replace `write`/`ls`, or instruct users to disable built-in tools.
 
 ## File-tool invariants
 
 - One collection, or one standalone caller, owns exactly one native `EditStore` shared by its `read`, `grep`, and `edit`. Never create a store per tool, use a process-global store, disable seen-line enforcement, or synthesize hash tags in TypeScript.
 - A `[path#TAG]` header may only be emitted for content the caller actually displayed, derived from the same buffer that produced the rows. Never re-read a file after display to mint its tag. Grep rows that native shortened, that disagree with the snapshot, or that fall past the output cap grant no provenance, and their section loses its tag.
 - The snapshot is pi-edit's editable view: one leading BOM stripped, CRLF/CR folded to LF, notebooks decoded to cell-marker text. Writes hand native-supplied text back verbatim, so BOM/CRLF/notebook serialization stays owned by pi-edit.
-- `edit` is Oh My Pi's hashline contract (`{ input: string }`), not Pi's replacement schema. Do not add `oldText`/`newText` aliases, a mode argument, automatic syntax repair, retries, or a second mutation engine. Build one `EditSession` per call and always `close()` it in `finally`.
+- `edit` is Oh My Pi's hashline contract (`{ input: string }`), not Pi's replacement schema. Do not add `oldText`/`newText` aliases, a mode argument, automatic syntax repair, retries, or a second mutation engine. Apply every edit as one routed `mux.edit` call.
 - Reject non-finite, fractional, or out-of-range numbers before they become NAPI `u32` fields; truncation there would silently change the requested search boundary.
 - Route every native worker call through `withNativeSignal`. The pinned napi runtime writes the supplied signal's `onabort`, so forward a fresh per-call controller instead of the caller's signal, and always await the worker to settlement rather than racing it.
-- Invalidate the walker scan cache in a `finally` around attempted mutations, covering both sides of a move, so a partially completed write cannot leave the cache looking fresh.
+- Invalidate the walker scan cache around attempted mutations, covering both sides of a move, so a partially completed write cannot leave the cache looking fresh: `mux.edit` does so for every path it touched, `ast_edit` in a `finally` for its root.
 
 ## Tests and operational boundaries
 

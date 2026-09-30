@@ -2,7 +2,8 @@
 //!
 //! Provides two layers:
 //! - `search()` for in-memory content search.
-//! - `grep()` for filesystem search with glob/type filtering.
+//! - [`grep_sync`] for filesystem search with glob/type filtering, run by the
+//!   routed `NativeMux.grep`.
 //!
 //! The filesystem search matches the previous JS wrapper behavior, including
 //! global offsets, optional match limits, and per-file match summaries.
@@ -46,7 +47,7 @@ static PCRE2_JIT_ENABLED: LazyLock<bool> = LazyLock::new(|| match std::env::var(
 	_ => !cfg!(target_os = "macos"),
 });
 
-/// Output mode for [`search`] and [`grep`] (string values match JS callers).
+/// Output mode for [`search`] and [`grep_sync`] (string values match JS callers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[napi(string_enum)]
 pub enum GrepOutputMode {
@@ -2092,20 +2093,9 @@ pub fn has_match(
 	Ok(matcher.is_match(content_slice).unwrap_or(false))
 }
 
-/// Search files for a regex pattern.
-///
-/// # Arguments
-/// - `options`: Pattern, path, filters, and output mode.
-/// - `on_match`: Optional callback invoked per match/result.
-///
-/// # Returns
-/// Aggregated results across matching files.
-#[napi]
-pub fn grep(
-	options: GrepOptions<'_>,
-	#[napi(ts_arg_type = "((error: Error | null, match: GrepMatch) => void) | undefined | null")]
-	on_match: Option<ThreadsafeFunction<GrepMatch>>,
-) -> task::Promise<GrepResult> {
+/// Splits `options` into its search configuration and a cancel token that
+/// consumes the abort signal on the JS thread.
+pub(crate) fn prepare(options: GrepOptions<'_>) -> (GrepConfig, task::CancelToken) {
 	let GrepOptions {
 		pattern,
 		path,
@@ -2145,8 +2135,7 @@ pub fn grep(
 		max_columns,
 		mode,
 	};
-	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("grep", ct, move |ct| grep_sync(config, on_match.as_ref(), ct))
+	(config, task::CancelToken::new(timeout_ms, signal))
 }
 
 #[cfg(test)]

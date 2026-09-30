@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-test-fs = ["marsh-btrfs/fake"]
+test-fs = ["marsh-core/testing"]
 
 [dependencies]
 napi = { version = "=3.9.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
@@ -53,3 +53,4 @@ napi-build = "=2.3.2"
 
 [patch.crates-io]
 brush-core = { path = "../marsh/crates/brush-core" }
+brush-interactive = { path = "../marsh/crates/brush-interactive" }

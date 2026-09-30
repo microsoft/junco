@@ -13,19 +13,42 @@ mod mux;
 mod task;
 #[cfg(test)]
 mod testing;
+mod tool;
 mod utils;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
+use marsh_core::shellmux::ShellMux;
 use napi::bindgen_prelude::{Buffer, PromiseRaw};
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
 use mux::{RunState, Session};
+use tool::SandboxMode;
+
+/// Options of a mux the caller opens.
+#[napi(object)]
+pub struct NativeMuxOptions {
+    /// How calls route: `"shared"` (the default) sandboxes a shell command or writing file tool
+    /// while another live shell shares the seed, `"always"` sandboxes every one. A read-only file
+    /// tool always runs directly.
+    pub sandbox: Option<String>,
+}
+
+/// The routing mode `options` select, refused before anything is discovered.
+fn sandbox_mode(options: Option<NativeMuxOptions>) -> Result<SandboxMode> {
+    match options.and_then(|options| options.sandbox).as_deref() {
+        None | Some("shared") => Ok(SandboxMode::Shared),
+        Some("always") => Ok(SandboxMode::Always),
+        Some(value) => Err(Error::from_reason(format!(
+            "Invalid sandbox option: {value}; expected \"shared\" or \"always\""
+        ))),
+    }
+}
 
 #[napi(object)]
 pub struct NativeRunOptions {
@@ -66,19 +89,11 @@ impl NativeRun {
 pub struct NativeMux {
     session: Arc<Session>,
 }
-
-impl NativeMux {
-    fn from_seed(seed: PathBuf, filesystem: Arc<dyn Subvolumes>) -> Result<Self> {
-        Ok(Self {
-            session: Session::new(seed, filesystem).map_err(Error::from_reason)?,
-        })
-    }
-}
-
 #[napi]
 impl NativeMux {
     #[napi(factory)]
-    pub async fn open(cwd: String) -> Result<Self> {
+    pub async fn open(cwd: String, options: Option<NativeMuxOptions>) -> Result<Self> {
+        let policy = tool::sandbox_policy(sandbox_mode(options)?);
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let filesystem: Arc<dyn Subvolumes> = Arc::new(LibBtrfs);
             // Discovery only. Materialization, the seed's exclusive lease, its log recovery
@@ -90,7 +105,10 @@ impl NativeMux {
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        Self::from_seed(seed, filesystem)
+        Ok(Self {
+            session: Session::new(seed, filesystem, policy, ShellMux::new)
+                .map_err(Error::from_reason)?,
+        })
     }
 
     #[napi(getter)]
@@ -140,7 +158,8 @@ impl NativeMux {
 #[napi]
 impl NativeMux {
     #[napi(factory)]
-    pub async fn open_copy_tree(seed: String) -> Result<Self> {
+    pub async fn open_copy_tree(seed: String, options: Option<NativeMuxOptions>) -> Result<Self> {
+        let policy = tool::sandbox_policy(sandbox_mode(options)?);
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let seed = Path::new(&seed)
                 .canonicalize()
@@ -165,6 +184,12 @@ impl NativeMux {
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        Self::from_seed(seed, filesystem)
+        let execution_filesystem = Arc::clone(&filesystem);
+        Ok(Self {
+            session: Session::new(seed, filesystem, policy, move |profile, frontend| {
+                marsh_core::test_support::mux(profile, frontend, execution_filesystem)
+            })
+            .map_err(Error::from_reason)?,
+        })
     }
 }
