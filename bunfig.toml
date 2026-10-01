@@ -1,5 +1,4 @@
 [install]
-# Sibling packages are file: dependencies. The isolated linker installs each as a snapshot inside
-# this root's store, so every package resolves one shared, patched pi-agent-core from here instead
-# of from a sibling checkout's own node_modules.
+# Sibling file: packages are snapshotted in this root's store. Build each upstream package
+# before installing here so its manifest, declarations and native artifacts are current.
 linker = "isolated"

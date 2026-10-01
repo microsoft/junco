@@ -1,6 +1,4 @@
-import { tmpdir } from "node:os";
-import { type AgentTool, InMemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   createModels,
@@ -37,8 +35,7 @@ export async function nativeOptions(responses: readonly FauxResponseStep[] = [])
   return {
     faux,
     options: {
-      env: new NodeExecutionEnv({ cwd: tmpdir() }),
-      session: await new InMemorySessionRepo().create(),
+      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
     },
@@ -53,7 +50,7 @@ export async function leaf(
   const { faux, options } = await nativeOptions(responses);
   return {
     faux,
-    agent: new JuncoAgent({
+    agent: await JuncoAgent.fromResolved({
       ...options,
       systemPrompt: "leaf",
       tools: [createYieldTool(), ...tools],
@@ -91,8 +88,12 @@ export function waitingTool(name: string, { endOnAbort = false }: { readonly end
 export function graphInfoOf(context: Context): GraphInfo {
   for (let index = context.messages.length - 1; index >= 0; index--) {
     const message = context.messages[index]!;
-    if (message.role === "user" && typeof message.content === "string" && message.content.startsWith("GraphInfo:\n")) {
-      return JSON.parse(message.content.slice("GraphInfo:\n".length)) as GraphInfo;
+    if (message.role !== "user") continue;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+    if (content.startsWith("GraphInfo:\n")) {
+      return JSON.parse(content.slice("GraphInfo:\n".length)) as GraphInfo;
     }
   }
   throw new Error("request carries no GraphInfo");
@@ -136,9 +137,8 @@ export async function newScheduler(
   { prompt, systemPrompt }: { readonly prompt?: string; readonly systemPrompt?: PiSchedulerOptions["systemPrompt"] } = {},
 ) {
   const { faux, models, model } = typeof script === "function" ? schedulerModel(script) : scripted(script);
-  const session = await new InMemorySessionRepo().create();
-  const scheduler = new PiScheduler({
-    env: new NodeExecutionEnv({ cwd: tmpdir() }),
+  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
+  const scheduler = await PiScheduler.make({
     session,
     models,
     model,

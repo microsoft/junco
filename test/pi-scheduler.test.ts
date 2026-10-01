@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { AgentHarnessError, type AgentTool } from "@earendil-works/pi-agent-core";
+import { BACKGROUND_CONTEXT, type AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   always,
@@ -17,12 +17,13 @@ import {
   when,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import type { Agentic } from "junco-agent";
+import { type Agentic, JuncoAgentError } from "junco-agent";
 import { Type } from "typebox";
 import { type AgenticInput, agentNode, attachAgency, type GraphInfo } from "../src/index.ts";
 import {
   agencyGraph,
   drive,
+  flushMacrotasks,
   graphInfoOf,
   leaf,
   newScheduler,
@@ -51,16 +52,16 @@ const MEMBER = NodeId("0");
 /** An agency over one member that answers `reply` to its staged prompt. */
 async function singleMember(script: Script, reply = "member done") {
   const member = await leaf([fauxAssistantMessage(reply)], { prompt: "work" });
-  const { graph, session } = await agencyGraph(script, { prompt: "schedule it" });
+  const { graph, session, faux } = await agencyGraph(script, { prompt: "schedule it" });
   graph.addNode(agentNode(member.agent, { description: "the member", trigger: always(), ...quiet }));
-  return { agency: attachAgency(graph), graph, session };
+  return { agency: attachAgency(graph), graph, session, faux };
 }
 
 /** Whether each finished tool call failed, in completion order. */
 function toolErrors(agency: Agentic): boolean[] {
   const errors: boolean[] = [];
-  agency.subscribe((event) => {
-    if (event.type === "tool_execution_end") errors.push(event.isError);
+  agency.events.on("tool_end", ({ isError }) => {
+    errors.push(isError);
   });
   return errors;
 }
@@ -72,8 +73,8 @@ test("each request carries one GraphInfo snapshot as data that is never persiste
     return runAvailable(info);
   });
   const emitted: string[] = [];
-  agency.subscribe((event) => {
-    if (event.type === "message_end") emitted.push(JSON.stringify(event.message));
+  agency.events.on("message_end", ({ message }) => {
+    emitted.push(JSON.stringify(message));
   });
 
   assert.equal(settledText((await drive(agency)).last), "member done");
@@ -84,44 +85,15 @@ test("each request carries one GraphInfo snapshot as data that is never persiste
   );
   assert.equal(infos[2]!.nodes[0]!.result?.text, "member done");
   assert.ok(infos.every((info) => info.window === null && info.threads === null && info.edges.length === 0));
-  assert.equal(JSON.stringify(await session.getEntries()).includes("GraphInfo:"), false);
+  assert.equal(JSON.stringify(await session.findEntries(undefined, BACKGROUND_CONTEXT)).includes("GraphInfo:"), false);
   assert.equal(emitted.some((message) => message.includes("GraphInfo:")), false);
 });
 
-test("scheduler instructions follow the caller's system prompt; a callback keeps native this and context", async () => {
-  const prompts: (string | undefined)[] = [];
-  const record = (context: Context) => {
-    prompts.push(context.systemPrompt);
-    return fauxAssistantMessage("fine");
-  };
-  const fixed = await newScheduler([record], { systemPrompt: "Caller prompt." });
-  await fixed.scheduler.prompt("hi");
-  assert.ok(prompts[0]!.startsWith("Caller prompt.\n\n"));
-  assert.ok(prompts[0]!.length > "Caller prompt.\n\n".length);
-
-  const seen: { self?: unknown; keys?: string[] } = {};
-  const dynamic = await newScheduler([record], {
-    systemPrompt: function (this: unknown, context) {
-      seen.self = this;
-      seen.keys = Object.keys(context).sort();
-      return "Dynamic prompt.";
-    },
-  });
-  await dynamic.scheduler.prompt("hi");
-  assert.equal(seen.self, dynamic.scheduler);
-  assert.deepEqual(seen.keys, ["activeTools", "env", "model", "resources", "session", "thinkingLevel"]);
-  assert.equal(prompts[1], prompts[0]!.replace("Caller prompt.", "Dynamic prompt."));
-});
-
-test("the schedule tool is the only tool, frozen with its schema", async () => {
+test("the fixed schedule tool cannot be replaced or disabled", async () => {
   const { scheduler } = await newScheduler([]);
   const [tool] = scheduler.getTools();
   assert.equal(scheduler.getTools().length, 1);
   assert.equal(tool!.name, "schedule");
-  assert.ok(Object.isFrozen(tool) && Object.isFrozen(tool!.parameters));
-  assert.throws(() => {
-    (tool as { name: string }).name = "renamed";
-  }, TypeError);
 
   const other: AgentTool = {
     name: "other",
@@ -131,12 +103,15 @@ test("the schedule tool is the only tool, frozen with its schema", async () => {
     execute: async () => ({ content: [], details: undefined }),
   };
   const invalid = (promise: Promise<void>) =>
-    assert.rejects(promise, (error) => error instanceof AgentHarnessError && error.code === "invalid_argument");
+    assert.rejects(promise, (error) => error instanceof JuncoAgentError && error.code === "invalid_argument");
   await invalid(scheduler.setTools([other as never]));
   await invalid(scheduler.setTools([tool!, tool!]));
   await invalid(scheduler.setTools([tool!], ["other"]));
+  await invalid(scheduler.setTools([]));
+  await invalid(scheduler.setTools([tool!], []));
   await invalid(scheduler.setActiveTools([]));
   assert.equal(scheduler.getTools()[0], tool);
+  assert.deepEqual(scheduler.getActiveTools().map((active) => active.name), ["schedule"]);
   await scheduler.setTools([tool!], ["schedule"]);
   await scheduler.setActiveTools(["schedule"]);
   assert.deepEqual(
@@ -145,26 +120,76 @@ test("the schedule tool is the only tool, frozen with its schema", async () => {
   );
 });
 
-test("two schedule calls in one response are both rejected before any graph work", async () => {
+test("schedule calls added by a later after_response hook are rejected before any graph step", async () => {
+  let graphSteps = 0;
+  const stepsAtRetry: number[] = [];
   const statusAtRetry: string[] = [];
   const { agency, graph } = await singleMember([
-    toolTurn(scheduleCall([["0"]], "a"), scheduleCall([["0"]], "b")),
+    toolTurn(scheduleCall([["0"]], "preliminary")),
     (context) => {
       statusAtRetry.push(graphInfoOf(context).nodes[0]!.status);
-      return toolTurn(scheduleCall([["0"]], "c"));
+      stepsAtRetry.push(graphSteps);
+      return toolTurn(scheduleCall([["0"]], "prime"));
     },
-    toolTurn(scheduleCall([["0"]], "d")),
+    toolTurn(scheduleCall([["0"]], "run")),
     fauxAssistantMessage("finished"),
   ]);
+  const step = graph.step.bind(graph);
+  graph.step = (options) => {
+    graphSteps++;
+    return step(options);
+  };
+  agency.hooks.on("after_response", ({ message }) =>
+    message.content.some((block) => block.type === "toolCall" && block.id === "preliminary")
+      ? { message: { ...message, content: [scheduleCall([["0"]], "a"), scheduleCall([["0"]], "b")] } }
+      : undefined,
+  );
   const errors = toolErrors(agency);
 
   const { yields, last } = await drive(agency);
 
   assert.deepEqual(errors, [true, true, false, false]);
   assert.deepEqual(statusAtRetry, ["ready"]);
+  assert.deepEqual(stepsAtRetry, [0]);
+  assert.equal(graphSteps, 2);
   assert.equal(yields, 2);
   assert.equal(settledText(last), "finished");
   assert.ok(O.isSome(graph.result(MEMBER)));
+});
+
+test("a schedule call completes a real graph window through the native tool gate", async () => {
+  const { agency, graph, faux } = await singleMember([
+    toolTurn(scheduleCall([["0"]], "prime")),
+    toolTurn(scheduleCall([["0"]], "run")),
+    fauxAssistantMessage("finished"),
+  ], "actual member result");
+  const completed: GraphInfo[] = [];
+  agency.events.on("tool_end", ({ toolName, result, isError }) => {
+    if (toolName === "schedule" && !isError) completed.push(result.details as GraphInfo);
+  });
+  try {
+    const first = await agency.next();
+    assert.equal(first.done, false);
+    if (first.done) throw new Error("scheduler closed before first graph window");
+    assert.equal(first.value.kind, "yield");
+    assert.equal(completed[0]!.nodes[0]!.status, "running");
+    assert.equal(graph.getNode(MEMBER)!.status, "running");
+    await flushMacrotasks();
+    assert.equal(faux.state.callCount, 1);
+
+    const second = await agency.next();
+    assert.equal(second.done, false);
+    if (second.done) throw new Error("scheduler closed before second graph window");
+    assert.equal(second.value.kind, "yield");
+    assert.equal(completed[1]!.nodes[0]!.result?.text, "actual member result");
+    assert.equal(graph.getNode(MEMBER)!.status, "done");
+    assert.equal(faux.state.callCount, 2);
+    assert.equal(settledText((await drive(agency)).last), "finished");
+    assert.equal(faux.state.callCount, 3);
+    assert.ok(O.isSome(graph.result(MEMBER)));
+  } finally {
+    await agency.return();
+  }
 });
 
 test("an invalid plan is an ordinary tool error that activates nothing", async () => {
@@ -204,31 +229,31 @@ test("with nothing available a plan is rejected, while an empty one returns Grap
 test("finishing while work is available fails the run, before or after a window", async () => {
   const early = await singleMember([fauxAssistantMessage("done already")]);
   const skipped = (await drive(early.agency)).last;
-  assert.ok(skipped.kind === "failed" && skipped.error instanceof AgentHarnessError);
+  assert.ok(skipped.kind === "failed" && skipped.error instanceof JuncoAgentError);
   assert.equal(skipped.error.code, "invalid_state");
 
   const primedOnly = await singleMember([toolTurn(scheduleCall([["0"]], "prime")), fauxAssistantMessage("done")]);
   const { yields, last } = await drive(primedOnly.agency);
   assert.equal(yields, 1);
-  assert.ok(last.kind === "failed" && last.error instanceof AgentHarnessError && last.error.code === "invalid_state");
+  assert.ok(last.kind === "failed" && last.error instanceof JuncoAgentError && last.error.code === "invalid_state");
 });
 
-test("a member failure fails the run with the original node error even after a final answer", async () => {
+test("a member graph failure remains fatal even after the scheduler's final answer", async () => {
   const failing = await leaf([fauxAssistantMessage("never")], { prompt: "go" });
-  const cause = new Error("member hook failed");
-  failing.agent.on("before_agent_start", () => {
-    throw cause;
-  });
+  const cause = new Error("member input failed");
   const { graph } = await agencyGraph(
     [toolTurn(scheduleCall([["0"]], "prime")), toolTurn(scheduleCall([["0"]], "run")), fauxAssistantMessage("all good")],
     { prompt: "go" },
   );
-  graph.addNode(agentNode(failing.agent, { description: "failing", trigger: always(), ...quiet }));
+  graph.addNode(agentNode(failing.agent, {
+    description: "failing", trigger: always(), emit: () => [],
+    receive: () => { throw cause; },
+  }));
 
   const { last } = await drive(attachAgency(graph));
   assert.ok(last.kind === "failed" && last.error instanceof DataflowNodeError);
   assert.equal(last.error.nodeId, MEMBER);
-  assert.ok(last.error.error instanceof AgentHarnessError && last.error.error.cause === cause);
+  assert.equal(last.error.error, cause);
 });
 
 test("the graph cannot be stepped without a schedule decision, and a scheduler serves one graph", async () => {

@@ -1,9 +1,8 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { AgentHarnessError } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { always, NodeId } from "dataflow-engine";
-import { type Agentic, JuncoAgent } from "junco-agent";
+import { type Agentic, type AgenticOptions, JuncoAgent, JuncoAgentError } from "junco-agent";
 import { agentNode, attachAgency } from "../src/index.ts";
 import {
   agencyGraph,
@@ -38,7 +37,7 @@ const plan =
   (info, request) =>
     request < lanes.length ? { lanes: lanes[request]! } : runAvailable(info);
 
-const invalidArgument = (error: unknown) => error instanceof AgentHarnessError && error.code === "invalid_argument";
+const invalidArgument = (error: unknown) => error instanceof JuncoAgentError && error.code === "invalid_argument";
 
 test("attachment validates the whole membership before claiming any of it", async () => {
   const shared = await leaf([fauxAssistantMessage("shared")], { prompt: "go" });
@@ -133,14 +132,14 @@ test("a graph changed after attachment is rejected before it is scheduled again"
   ]);
   graph.addNode(member(late.agent));
   const errors: boolean[] = [];
-  root.subscribe((event) => {
-    if (event.type === "tool_execution_end") errors.push(event.isError);
+  root.events.on("tool_end", (event) => {
+    errors.push(event.isError);
   });
 
   const { last } = await drive(root);
   assert.deepEqual(errors, [true]);
   assert.equal(graph.getNode(NodeId("0"))!.status, "ready");
-  assert.ok(last.kind === "failed" && last.error instanceof AgentHarnessError);
+  assert.ok(last.kind === "failed" && last.error instanceof JuncoAgentError && last.error.code === "invalid_state");
 });
 
 test(
@@ -189,6 +188,8 @@ test(
     });
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
     const { agency: root } = await agency([child.agency, sibling.agent], plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]));
+    let finalTurn: AssistantMessage | undefined;
+    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
 
     assert.equal((await root.next()).value?.kind, "yield"); // primes both members
     assert.equal((await root.next()).value?.kind, "yield"); // the child primes the grandchild
@@ -207,7 +208,8 @@ test(
     siblingTool.release();
     assert.deepEqual(await aborting, { clearedSteer: [], clearedFollowUp: [] });
     const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && settled.message.stopReason === "aborted");
+    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
+    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
@@ -217,17 +219,24 @@ test(
   async () => {
     const failure = new Error("member abort failed");
     class FailingAbort extends JuncoAgent {
+      static async make(options: AgenticOptions): Promise<FailingAbort> {
+        const agent = new FailingAbort(options);
+        await agent.initialize();
+        return agent;
+      }
       protected override abortDependents(): Promise<void> {
         return Promise.reject(failure);
       }
     }
-    const failing = new FailingAbort({ ...(await nativeOptions([])).options, prompt: "go" });
+    const failing = await FailingAbort.make({ ...(await nativeOptions([])).options, prompt: "go" });
     const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
     const sibling = await leaf([toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })), fauxAssistantMessage("unused")], {
       prompt: "go",
       tools: [siblingTool.tool],
     });
     const { agency: root } = await agency([failing, sibling.agent], plan([["0"], ["1"]], [["1"]]));
+    let finalTurn: AssistantMessage | undefined;
+    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
 
     assert.equal((await root.next()).value?.kind, "yield");
     const running = root.next();
@@ -235,12 +244,11 @@ test(
 
     const error = await root.abort().catch((thrown: unknown) => thrown);
     await siblingTool.aborted;
-    assert.ok(error instanceof AgentHarnessError);
-    const causes = (error.cause as AggregateError).errors;
-    assert.equal(causes.length, 1);
-    assert.equal((causes[0] as AgentHarnessError).cause, failure);
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [failure]);
     const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && settled.message.stopReason === "aborted");
+    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
+    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
@@ -250,6 +258,11 @@ test(
   async () => {
     const calls: string[] = [];
     class Counting extends JuncoAgent {
+      static async make(options: AgenticOptions): Promise<Counting> {
+        const agent = new Counting(options);
+        await agent.initialize();
+        return agent;
+      }
       override abort() {
         calls.push("abort");
         return super.abort();
@@ -259,7 +272,7 @@ test(
         return super.return(value);
       }
     }
-    const counted = new Counting({ ...(await nativeOptions([])).options });
+    const counted = await Counting.make({ ...(await nativeOptions([])).options });
     const grandchild = await leaf(
       [toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })), fauxAssistantMessage("unused")],
       { prompt: "go" },

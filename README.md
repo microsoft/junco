@@ -1,49 +1,60 @@
 # junco-agency
 
-Recursive Pi agencies. `attachAgency(graph)` returns the graph's original `PiScheduler` as an `Agentic`: a native Pi `AgentHarness` and cooperative scheduling iterator ([`junco-agent`](../junco-agent)). Its model runs a [`dataflow-engine`](../dataflow-engine) graph of `Agentic` members, `JuncoAgent` leaves or attached schedulers, through its only tool, `schedule`: one bounded graph window per call. Nesting needs neither flattening nor a forwarding object.
+Recursive Pi agencies. `attachAgency(graph)` returns the graph's original `PiScheduler` as an `Agentic`: a cooperative scheduling iterator backed by Pi's native `AgentHarness.create` ([`junco-agent`](../junco-agent)). Its model runs a [`dataflow-engine`](../dataflow-engine) graph of `Agentic` members, `JuncoAgent` leaves or attached schedulers, through its only tool, `schedule`: one bounded graph window per call. Nesting needs neither flattening nor a forwarding object.
 
 ## Setup
 
-Requirements: Linux x86-64 with glibc, Node.js `>=22.19.0`, and Bun `1.3.14`. Build the sibling checkouts first, as their READMEs describe:
+Requirements: Linux x86-64 with glibc, Node.js `>=22.19.0`, Bun `1.4.2`, and Rust `1.95.0` plus native build libraries for `junco-tools`. Keep the `marsh`, `junco-policy`, `junco-tools`, `dataflow-engine`, `dataflow-engine-opik`, and `junco-agent` checkouts alongside this repository. Build in dependency order (tools → engine → Opik tracer → agent → agency):
 
 ```sh
 (cd ../junco-tools && npm ci && npm run build && npm run build:native:test)
-(cd ../dataflow-engine && bun install && bun run build)
-(cd ../junco-agent && bun install --linker hoisted && bun run build)
+(cd ../dataflow-engine && bun install --frozen-lockfile && bun run build)
+(cd ../dataflow-engine-opik && bun install --frozen-lockfile && bun run build)
+(cd ../junco-agent && bun install --linker hoisted --frozen-lockfile && bun run build)
 ```
 
 Then, from this repository:
 
 ```sh
-bun install
+bun install --frozen-lockfile
 bun run typecheck
 bun run test
 bun run build
 bun run smoke
 ```
 
-- Install with Bun only. `package.json` registers `../junco-agent/patches/@earendil-works%2Fpi-agent-core@0.80.6.patch`, the one canonical patch `junco-agent` requires, and pins `pi-agent-core` to `0.80.6` through `overrides`.
-- `bunfig.toml` selects the isolated linker. It snapshots each `file:` sibling into this root's store, so every package resolves the same patched `pi-agent-core` from here rather than from a sibling's own `node_modules`. After rebuilding a sibling, reinstall (`rm -rf node_modules && bun install`) to refresh its snapshot.
-- Bun `1.3.14` limits: the snapshots are hardlinks, so this checkout must sit on the same filesystem — the same Btrfs subvolume — as the siblings, or they install empty; and a first install without `bun.lock` reports `failed to read patchfile` for a patch outside the root, which a second `bun install` resolves.
-- Because the snapshots are hardlinks, changing a file under `node_modules/.bun` — even its permissions — changes the sibling checkout's file too.
+- Keep the checked-in locks and Bun `file:` sibling links. The root's isolated linker snapshots built sibling artifacts at install time; build each upstream sibling before installing its downstream consumer, and reinstall a consumer after rebuilding an upstream sibling. The agent uses Pi `0.99.2`'s native `AgentHarness` adapter; no Pi patch or fork is installed.
+- Bun `1.4.2`'s `bun update` may fail to resolve nested linked development/workspace paths; this does not invalidate a successful frozen-lockfile install. Use the checked-in lockfiles for reproducible installs rather than editing consumers' dependencies to work around that update limitation.
 - `test/policy-yield.test.ts` loads `../junco-tools/target/native-test/index.js`, built by `npm run build:native:test`.
 
 ## CI
 
-GitHub Actions checks out the private `marsh`, `junco-policy`, `junco-tools`, `dataflow-engine`, and `junco-agent` siblings using read-only deploy-key repository secrets `JUNCO_MARSH_SSH_KEY`, `JUNCO_POLICY_SSH_KEY`, `JUNCO_TOOLS_SSH_KEY`, `JUNCO_DATAFLOW_SSH_KEY`, and `JUNCO_AGENT_SSH_KEY`. It builds each dependency in order, then runs every offline unit suite, this package's typecheck and build, and the recursive smoke. The native policy test uses the CopyTree addon; CI requires neither a Btrfs mount nor model credentials.
+GitHub Actions checks out the private `marsh`, `junco-policy`, `junco-tools`, `dataflow-engine`, `dataflow-engine-opik`, and `junco-agent` siblings using read-only deploy-key secrets `JUNCO_MARSH_SSH_KEY`, `JUNCO_POLICY_SSH_KEY`, `JUNCO_TOOLS_SSH_KEY`, `JUNCO_DATAFLOW_SSH_KEY`, `JUNCO_DATAFLOW_OPIK_SSH_KEY`, and `JUNCO_AGENT_SSH_KEY`. Provision the Opik-tracer key for that private checkout. CI builds tools → engine → Opik tracer → agent → agency, installing each Bun project with its frozen lockfile after its upstream `file:` dependencies are built. It runs offline unit suites, typechecks/builds, and the recursive smoke; no Btrfs mount, Opik service, or model credentials are required.
 
 ## Usage
 
 ```ts
+import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import { always, DataflowGraph, UNBOUNDED } from "dataflow-engine";
 import { createYieldTool, JuncoAgent } from "junco-agent";
 import { type AgencyGraph, agentNode, attachAgency, PiScheduler } from "junco-agency";
 
-// Native harness options (env, session, models, model) for each agent, resolved beforehand.
-const researcher = new JuncoAgent({ ...researcherOptions, tools: [createYieldTool()], prompt: "Find the facts." });
-const writer = new JuncoAgent({ ...writerOptions, prompt: "Draft the summary." });
-
-const scheduler = new PiScheduler({ ...schedulerOptions, systemPrompt: "Coordinate the team.", prompt: "Produce the report." });
+// Resolve models beforehand; each supplied session transfers to its agent and closes on return().
+const sessions = new MemorySessionRepo();
+const researcher = await JuncoAgent.fromResolved({
+  ...researcherOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
+  tools: [createYieldTool()], prompt: "Find the facts.",
+});
+const writer = await JuncoAgent.fromResolved({
+  ...writerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), prompt: "Draft the summary.",
+});
+const scheduler = await PiScheduler.make({
+  ...schedulerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
+  systemPrompt: "Coordinate the team.", prompt: "Produce the report.",
+});
+scheduler.events.on("run_end", ({ status }) => { if (status === "failed") console.error("Scheduler run failed"); });
+// scheduler.hooks.on("transform_context", handler) registers native request hooks.
+// Invalid local arguments/state and overlapping work reject with JuncoAgentError.
 const graph: AgencyGraph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
 for (const [agent, description] of [[researcher, "researches"], [writer, "writes"]] as const) {
   graph.addNode(agentNode(agent, { description, trigger: always(), receive: () => [], emit: () => [] }));
@@ -53,11 +64,30 @@ const agency = attachAgency(graph); // wire every member and edge before attachi
 for await (const step of agency) {
   if (step.kind === "yield") continue; // one graph window completed; the next iteration resumes
   console.log(step.kind === "settled" ? step.message : step.error);
-  break; // closes the agency and, with it, every member
+  break;
 }
+await agency.return(); // closes the scheduler and its member sessions
+await sessions.close(BACKGROUND_CONTEXT); // the caller owns the repo; agents owned its sessions
 ```
 
 [`examples/recursive-agency.ts`](examples/recursive-agency.ts) runs a root → child → grandchild agency around a leaf that pauses once, plus a root sibling, entirely offline on faux models.
+
+### OSS committee (live, traced)
+
+[`examples/oss-committee.ts`](examples/oss-committee.ts) is **not** a `PiScheduler` agency: three one-shot `JuncoAgent` specialists run on a direct `ReadyScheduler` graph. The Librarian (`claude-opus-5.5`, medium reasoning) is instructed to use `search_oss` with generic technical terms rather than the verbatim request; the Architect (`gpt-6-sol`, high) chooses boundaries from the complete sourced report; the Reducer (`claude-sonnet-5.5`, xhigh) combines both reports and produces the **only** titled Markdown plan. The graph's value edges gate Architect on a valid successful lookup and a complete normally stopped Librarian report, and Reducer on both complete normally stopped reports. Missing, empty, or truncated reports fail rather than becoming input to downstream members. No model aliases or silent reasoning-level downgrades are used.
+
+Before running the live example, start `pi`, use `/login`, and select GitHub Copilot. The committee shares Pi's `ModelRuntime` and uses the saved login in `~/.pi/agent/auth.json` (or `$PI_CODING_AGENT_DIR/auth.json`); Pi handles OAuth refresh. A missing or unusable login fails with instructions to run `/login`, without starting an interactive login or publishing a plan. Environment-only tokens and Copilot CLI credentials do not replace the saved Pi login.
+
+```sh
+OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency \
+  bun run examples/oss-committee.ts ./request.txt ./plan.md
+```
+
+The first argument is a nonblank UTF-8 request file; the optional output defaults to `plan.md` in the current working directory. Existing outputs are rejected before credentials are read, and publication uses exclusive creation (`wx`): a failed/aborted run or concurrent writer cannot overwrite a plan. The installed Copilot catalog must contain all three exact model IDs **and** their reasoning levels before the saved login is checked; per-account model access can still fail, with no plan published. The Librarian's bounded search returns at most five repository URLs and GitHub-reported metadata: `incomplete_results=true` means partial research, an empty result is reported as no matching library, and a missing/`NOASSERTION` SPDX identifier means unknown license. GitHub-reported SPDX identifiers do not verify full license terms; versions and API compatibility are likewise unverified. Never place secrets, private identifiers, or private endpoints in a GitHub query or the request/reports exported to Opik. All members close and the tracer flushes **before** the Reducer's completed titled plan is written. A successful `flush()` does not prove ingestion: inspect the three node results and activation spans in Opik's `junco-agency` project → Logs → Traces → `examples/oss-committee`.
+
+The tool restricts search to GitHub repositories but cannot detect secrets in a model-generated query. Submit only requests safe for public GitHub search and complete Opik export; prompt instructions alone do not enforce that boundary.
+
+For a scripted end-to-end run with real Opik export but no model credentials, start the local Opik service, then run `OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency bun run test/oss-committee.fixture.ts`. The fixture prints its new output path and complete plan. `bun test test/oss-committee.test.ts` exercises the same graph offline with `DummyTracer`; importing the fixture never constructs an Opik client.
 
 ## API
 
@@ -65,7 +95,8 @@ for await (const step of agency) {
 type AgenticInput =
   | { readonly kind: "prompt" | "steer" | "followUp" | "nextTurn"; readonly text: string; readonly images?: ImageContent[] }
   | { readonly kind: "appendMessage"; readonly message: AgentMessage };
-type AgencyGraph<S, P> = DataflowGraph<Agentic, AgenticInput, AssistantMessage, unknown, PiScheduler<S, P>>;
+type AgencyGraph<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate> =
+  DataflowGraph<Agentic, AgenticInput, AssistantMessage, unknown, PiScheduler<S, P>>;
 
 function agentNode(agent: Agentic, options: {
   readonly id?: NodeId;
@@ -75,10 +106,17 @@ function agentNode(agent: Agentic, options: {
   readonly emit: (step: Extract<AgenticStep, { kind: "yield" }>) => Message<AgenticInput>[];
 }): NodeSpec<Agentic, AgenticInput, AssistantMessage>;
 
-class PiScheduler<S, P> extends JuncoAgent<S, P, ScheduleTool> implements DataflowScheduler<AgenticInput, AssistantMessage> {
-  constructor(options: Omit<AgenticOptions<S, P, ScheduleTool>, "tools" | "activeToolNames">);
+class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>
+  extends JuncoAgent<S, P, ScheduleTool> implements DataflowScheduler<AgenticInput, AssistantMessage> {
+  static make<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
+    options: PiSchedulerOptions<S, P>,
+  ): Promise<PiScheduler<S, P>>;
+  protected constructor(options: PiSchedulerOptions<S, P>);
 }
-function attachAgency<S, P>(graph: AgencyGraph<S, P>): PiScheduler<S, P>;
+// JuncoAgent.fromResolved(options): Promise<JuncoAgent<...>>; its constructor is protected.
+// agent.events.on("tool_end", handler) and agent.hooks.on("before_request", handler)
+// use the native event/hook surfaces. Local invariant failures throw JuncoAgentError.
+function attachAgency<S extends Skill, P extends PromptTemplate>(graph: AgencyGraph<S, P>): PiScheduler<S, P>;
 ```
 
 ### Members: `agentNode`
@@ -103,4 +141,6 @@ function attachAgency<S, P>(graph: AgencyGraph<S, P>): PiScheduler<S, P>;
 
 ## Verification
 
-`bun run test` is offline except for `test/policy-yield.test.ts`, which uses junco-tools' CopyTree test addon with the sandbox always on: a real Marsh denial of `edit`, an applying `ast_edit` and `bash` pauses a `JuncoAgent` as `policy` steps in call order, publishes nothing, and makes no second model request until resumed. The suite covers the member adapter on the engine's own scheduler, the scheduler contract, attachment, 32 nested agencies, abort and close across 4096 idle nested agencies, abort reaching a live grandchild while its sibling runs, and closing a paused tree. `bun run smoke` runs the recursive example. The build loads under Node.js (`node --input-type=module -e 'await import("./dist/index.js")'`).
+`bun run test` exercises the member adapter, native `schedule` tool gating, attachment, nested agencies, abort/close, and policy boundaries. `test/policy-yield.test.ts` uses junco-tools' real Marsh policy through the CopyTree native test addon (`npm run build:native:test`): denied `edit`, applying `ast_edit`, and `bash` calls pause in source order without publishing edits or starting a second model request until resumed. Native tracing requires usable kernel BTF/kallsyms and BPF, performance and system-log capabilities; this WSL2 workstation needed a privileged run for the policy suite. A failed native test is not evidence of a passing policy boundary. `bun run smoke` runs the offline recursive example and prints `leaf-result + sibling-result`; the build can be loaded under Node.js with `node --input-type=module -e 'await import("./dist/index.js")'`.
+
+`bun test test/oss-committee.test.ts` runs six network-free committee tests with injected GitHub responses and a `DummyTracer`: researched value-edge order, sourced minimal plan and exclusive output, HTTP failure, truncated report, valid empty search, publication guards, and scoped/malformed search metadata. The scripted fixture can export to a running Opik service (`OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency bun run test/oss-committee.fixture.ts`); separately inspect actual trace ingestion in the Opik UI. Neither those offline tests nor `flush()` prove live GitHub access, Copilot entitlement, or Opik ingestion.

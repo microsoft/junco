@@ -1,4 +1,4 @@
-import { AgentHarnessError, type AgentMessage, type PromptTemplate, type Skill } from "@earendil-works/pi-agent-core";
+import { type AgentMessage, type PromptTemplate, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type {
   DataflowGraph,
@@ -12,7 +12,7 @@ import type {
   StepFn,
   TriggerRule,
 } from "dataflow-engine";
-import type { Agentic, AgenticStep, AgenticYieldReason } from "junco-agent";
+import { JuncoAgentError, type Agentic, type AgenticStep, type AgenticYieldReason } from "junco-agent";
 import type { PiScheduler } from "./pi-scheduler.js";
 
 /** One input for a graph member, dispatched through the native method of the same name. */
@@ -115,7 +115,7 @@ export function agentNode(
     switch (kind) {
       case "prompt":
         if (record.started || agent.status !== "idle") {
-          throw new AgentHarnessError("invalid_state", "Agentic node runs one prompt, and its agent must be idle");
+          throw new JuncoAgentError("invalid_state", "Agentic node runs one prompt, and its agent must be idle");
         }
         record.started = true;
         // Its settlement, success or failure, arrives through agent.next().
@@ -144,7 +144,7 @@ export function agentNode(
       }
       const result = await agent.next();
       if (result.done) {
-        throw new AgentHarnessError("invalid_state", "Agentic node closed before prompt settlement");
+        throw new JuncoAgentError("invalid_state", "Agentic node closed before prompt settlement");
       }
       const boundary = result.value;
       if (boundary.kind === "failed") throw boundary.error;

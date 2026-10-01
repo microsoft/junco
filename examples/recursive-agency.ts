@@ -3,9 +3,7 @@
 // answers. Run: bun run examples/recursive-agency.ts
 
 import assert from "node:assert/strict";
-import { tmpdir } from "node:os";
-import { type AgentTool, InMemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   createModels,
@@ -27,8 +25,7 @@ async function nativeOptions(responses: readonly FauxResponseStep[]) {
   const models = createModels();
   models.setProvider(faux.provider);
   const options = {
-    env: new NodeExecutionEnv({ cwd: tmpdir() }),
-    session: await new InMemorySessionRepo().create(),
+    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
     models,
     model: faux.getModel(),
   };
@@ -37,8 +34,13 @@ async function nativeOptions(responses: readonly FauxResponseStep[]) {
 
 function graphInfoOf(context: Context): GraphInfo {
   const last = context.messages.at(-1);
-  assert.ok(last?.role === "user" && typeof last.content === "string" && last.content.startsWith("GraphInfo:\n"));
-  return JSON.parse(last.content.slice("GraphInfo:\n".length)) as GraphInfo;
+  const text = last?.role === "user"
+    ? typeof last.content === "string"
+      ? last.content
+      : last.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("")
+    : "";
+  assert.ok(text.startsWith("GraphInfo:\n"));
+  return JSON.parse(text.slice("GraphInfo:\n".length)) as GraphInfo;
 }
 
 type Decision = { readonly lanes: string[][] } | { readonly text: string };
@@ -61,7 +63,7 @@ async function agency(name: string, members: readonly Agentic[], decide: (info: 
       : fauxAssistantMessage(decision.text);
   };
   const { faux, options } = await nativeOptions([respond]);
-  const scheduler = new PiScheduler({ ...options, systemPrompt: `You schedule ${name}.`, prompt: `Run ${name}.` });
+  const scheduler = await PiScheduler.make({ ...options, systemPrompt: `You schedule ${name}.`, prompt: `Run ${name}.` });
   const graph: AgencyGraph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   for (const [index, member] of members.entries()) {
     graph.addNode(
@@ -78,7 +80,7 @@ async function agency(name: string, members: readonly Agentic[], decide: (info: 
 
 async function leafAgent(responses: readonly FauxResponseStep[], tools: readonly AgentTool[] = []) {
   const { faux, options } = await nativeOptions(responses);
-  const agent = new JuncoAgent({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part." });
+  const agent = await JuncoAgent.fromResolved({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part." });
   return { faux, agent };
 }
 
@@ -93,14 +95,14 @@ const leaf = await leafAgent(
   [createYieldTool()],
 );
 const sibling = await leafAgent([fauxAssistantMessage("sibling-result")]);
-sibling.agent.subscribe((event) => {
-  if (event.type === "agent_end") log.push("sibling done");
+sibling.agent.events.on("run_end", (event) => {
+  if (event.status === "completed") log.push("sibling done");
 });
 
 const grandchild = await agency("grandchild", [leaf.agent], runAvailable);
 const child = await agency("child", [grandchild], runAvailable);
-child.subscribe((event) => {
-  if (event.type === "tool_execution_start") log.push("child window");
+child.events.on("tool_start", (event) => {
+  if (event.toolName === "schedule") log.push("child window");
 });
 // The root primes both members, runs one child window, then the sibling, then the rest.
 const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
@@ -108,8 +110,8 @@ const root = await agency("root", [child, sibling.agent], (info, request) =>
   request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable(info),
 );
 const publicTools: string[] = [];
-root.subscribe((event) => {
-  if (event.type === "tool_execution_start") publicTools.push(event.toolName);
+root.events.on("tool_start", (event) => {
+  if (event.toolName === "schedule") publicTools.push(event.toolName);
 });
 
 let windows = 0;

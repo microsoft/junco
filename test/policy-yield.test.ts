@@ -2,7 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -12,8 +12,7 @@ import { flushMacrotasks, nativeOptions } from "./support.ts";
 
 // Real Marsh policy through junco-tools' test addon: a CopyTree fixture filesystem with the sandbox
 // always on. Build it once in ../junco-tools with `npm run build:native:test`.
-const toolsRoot = dirname(dirname(fileURLToPath(import.meta.resolve("junco-tools"))));
-const native = await import(join(toolsRoot, "target/native-test/index.js"));
+const native = await import(fileURLToPath(new URL("../../junco-tools/target/native-test/index.js", import.meta.url)));
 
 const SOURCE = "src/claimed.ts";
 const OWNED = "const value = owned;\n";
@@ -67,10 +66,10 @@ test(
         ),
         fauxAssistantMessage("reported denial"),
       ]);
-      const agent = new JuncoAgent({ ...options, tools: observed, prompt: "take the file" });
+      const agent = await JuncoAgent.fromResolved({ ...options, tools: observed, prompt: "take the file" });
       const results = new Map<string, boolean>();
-      agent.subscribe((event) => {
-        if (event.type === "tool_execution_end") results.set(event.toolCallId, event.isError);
+      agent.events.on("tool_end", (event) => {
+        results.set(event.toolCallId, event.isError);
       });
 
       const paused = await agent.next();

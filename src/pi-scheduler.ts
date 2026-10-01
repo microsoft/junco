@@ -1,5 +1,4 @@
 import {
-  AgentHarnessError,
   type AgentTool,
   type AgentToolCall,
   type AgentToolResult,
@@ -19,7 +18,7 @@ import {
   type Schedule,
   triggerInputs,
 } from "dataflow-engine";
-import { type Agentic, type AgenticOptions, type AgenticRun, JuncoAgent } from "junco-agent";
+import { type Agentic, type AgenticOptions, type AgenticRun, JuncoAgent, JuncoAgentError } from "junco-agent";
 import { type Static, Type } from "typebox";
 import { type AgencyGraph, type AgenticInput, agentNodeRecord } from "./agent-node.js";
 import { type GraphInfo, graphInfo } from "./graph-info.js";
@@ -73,8 +72,6 @@ type RunState = {
   windows: number;
   /** The first genuine member failure. */
   fatal: DataflowNodeError<unknown> | undefined;
-  /** The run's native signal joined with the scheduler's terminal signal. */
-  graphSignal: AbortSignal | undefined;
 };
 
 type Attachment = {
@@ -89,8 +86,8 @@ const attachments = new WeakMap<PiScheduler, Attachment>();
 /** Every Agentic currently owned by an agency, as a member. */
 const owned = new WeakSet<Agentic>();
 
-const topologyChanged = (): AgentHarnessError =>
-  new AgentHarnessError("invalid_state", "Agency graph changed after attachment");
+const topologyChanged = (): JuncoAgentError =>
+  new JuncoAgentError("invalid_state", "Agency graph changed after attachment");
 
 /** Reject any node, body, member or edge identity that differs from attachment time. */
 function assertAttachedTopology({ graph, nodes, edges }: Attachment): void {
@@ -119,29 +116,29 @@ function assertAttachedTopology({ graph, nodes, edges }: Attachment): void {
 export function attachAgency<S extends Skill, P extends PromptTemplate>(graph: AgencyGraph<S, P>): PiScheduler<S, P> {
   const scheduler = graph.scheduler;
   if (!(scheduler instanceof PiScheduler)) {
-    throw new AgentHarnessError("invalid_argument", "An agency graph must be scheduled by a PiScheduler");
+    throw new JuncoAgentError("invalid_argument", "An agency graph must be scheduled by a PiScheduler");
   }
   if (attachments.has(scheduler)) {
-    throw new AgentHarnessError("invalid_argument", "PiScheduler already drives an agency");
+    throw new JuncoAgentError("invalid_argument", "PiScheduler already drives an agency");
   }
   const members: Agentic[] = [];
   const nodes = new Map<NodeIdType, { node: object; step: object; agent: Agentic }>();
   graph.forEachNode((id, node) => {
     const member = node.state;
     if (agentNodeRecord(node.step)?.agent !== member) {
-      throw new AgentHarnessError("invalid_argument", `Agency node "${id}" was not created by agentNode`);
+      throw new JuncoAgentError("invalid_argument", `Agency node "${id}" was not created by agentNode`);
     }
     if (member instanceof PiScheduler && (member === scheduler || !attachments.has(member))) {
-      throw new AgentHarnessError(
+      throw new JuncoAgentError(
         "invalid_argument",
         `Agency node "${id}" must use a different, attached PiScheduler`,
       );
     }
     if (members.includes(member) || owned.has(member)) {
-      throw new AgentHarnessError("invalid_argument", `Agency node "${id}" reuses an Agentic that is already owned`);
+      throw new JuncoAgentError("invalid_argument", `Agency node "${id}" reuses an Agentic that is already owned`);
     }
     if (member.status !== "ready" && member.status !== "idle") {
-      throw new AgentHarnessError(
+      throw new JuncoAgentError(
         "invalid_argument",
         `Agency node "${id}" is ${member.status}; members must be ready or idle`,
       );
@@ -200,7 +197,30 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
   #bounds: { readonly window: number; readonly threads: number } | undefined;
   #staged: readonly (readonly string[])[] | undefined;
 
-  constructor(options: PiSchedulerOptions<S, P>) {
+  static async make<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
+    options: PiSchedulerOptions<S, P>,
+  ): Promise<PiScheduler<S, P>> {
+    const scheduler = new PiScheduler(options);
+    await scheduler.initialize();
+    // A request-local context transform: GraphInfo is neither stored nor emitted as a session entry.
+    scheduler.hooks.on("transform_context", ({ messages }) => {
+      const attachment = attachments.get(scheduler);
+      if (attachment === undefined) return undefined;
+      return {
+        messages: [
+          ...messages,
+          {
+            role: "user",
+            content: `GraphInfo:\n${JSON.stringify(scheduler.#info(attachment))}`,
+            timestamp: Date.now(),
+          },
+        ],
+      };
+    });
+    return scheduler;
+  }
+
+  protected constructor(options: PiSchedulerOptions<S, P>) {
     const { tools: _tools, activeToolNames: _activeToolNames, systemPrompt, ...native } =
       options as AgenticOptions<S, P, ScheduleTool>;
     let scheduler: PiScheduler<S, P> | undefined;
@@ -221,27 +241,12 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
           ? SCHEDULER_INSTRUCTIONS
           : typeof systemPrompt === "string"
             ? `${systemPrompt}\n\n${SCHEDULER_INSTRUCTIONS}`
-            : async function (this: unknown, context) {
-                return `${await systemPrompt.call(this, context)}\n\n${SCHEDULER_INSTRUCTIONS}`;
+            : async function (this: unknown, toolContext, context) {
+                return `${await systemPrompt.call(this, toolContext, context)}\n\n${SCHEDULER_INSTRUCTIONS}`;
               },
     });
     scheduler = this;
     this.#tool = tool;
-    // Transient: shapes this request's context only, never the session or the event stream.
-    this.on("context", (event) => {
-      const attachment = attachments.get(this);
-      if (attachment === undefined) return undefined;
-      return {
-        messages: [
-          ...event.messages,
-          {
-            role: "user",
-            content: `GraphInfo:\n${JSON.stringify(this.#info(attachment))}`,
-            timestamp: Date.now(),
-          },
-        ],
-      };
-    });
   }
 
   // DataflowScheduler ------------------------------------------------------------------------------
@@ -289,7 +294,7 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
   #state(run: AgenticRun): RunState {
     let state = this.#runs.get(run);
     if (state === undefined) {
-      state = { invalid: new Set(), observedWork: false, windows: 0, fatal: undefined, graphSignal: undefined };
+      state = { invalid: new Set(), observedWork: false, windows: 0, fatal: undefined };
       this.#runs.set(run, state);
     }
     return state;
@@ -313,16 +318,17 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
   ): Promise<AgentToolResult<GraphInfo>> {
     const attachment = attachments.get(this);
     if (attachment === undefined) {
-      throw new AgentHarnessError("invalid_state", "PiScheduler is not attached to an agency graph");
+      throw new JuncoAgentError("invalid_state", "PiScheduler is not attached to an agency graph");
     }
-    if (signal === undefined) throw new AgentHarnessError("invalid_state", "schedule ran without its run signal");
-    const state = this.#state(this.runForSignal(signal));
+    if (signal === undefined) throw new JuncoAgentError("invalid_state", "schedule ran without its run signal");
+    const run = this.runForSignal(signal);
+    const state = this.#state(run);
+    if (run.signal === undefined) throw new JuncoAgentError("invalid_state", "schedule run has no admission signal");
     if (state.invalid.has(toolCallId)) {
-      throw new AgentHarnessError("invalid_argument", "PiScheduler accepts one schedule call per response");
+      throw new JuncoAgentError("invalid_argument", "PiScheduler accepts one schedule call per response");
     }
     assertAttachedTopology(attachment);
-    state.graphSignal ??= AbortSignal.any([signal, this.#terminal.signal]);
-    const graphSignal = state.graphSignal;
+    const graphSignal = AbortSignal.any([signal, run.signal, this.#terminal.signal]);
     graphSignal.throwIfAborted();
     const { graph } = attachment;
     const available = graph.available();
@@ -374,10 +380,10 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
     if (run.stopping || message.stopReason === "error" || message.stopReason === "aborted") return message;
     const attachment = attachments.get(this);
     if (attachment !== undefined && attachment.graph.available().size > 0) {
-      throw new AgentHarnessError("invalid_state", "PiScheduler finished while graph work is available");
+      throw new JuncoAgentError("invalid_state", "PiScheduler finished while graph work is available");
     }
     if (state?.observedWork === true && state.windows === 0) {
-      throw new AgentHarnessError("invalid_state", "PiScheduler finished without a successful schedule");
+      throw new JuncoAgentError("invalid_state", "PiScheduler finished without a successful schedule");
     }
     return message;
   }
@@ -390,7 +396,7 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
   }
 
   protected override closeDependents(): Promise<void> | undefined {
-    this.#terminal.abort(new AgentHarnessError("invalid_state", "PiScheduler is closed"));
+    this.#terminal.abort(new JuncoAgentError("invalid_state", "PiScheduler is closed"));
     const attachment = attachments.get(this);
     if (attachment === undefined || attachment.members.length === 0) return undefined;
     return settleAll(attachment.members, (member) => member.return(), "PiScheduler member close failed").finally(
@@ -407,13 +413,13 @@ export class PiScheduler<S extends Skill = Skill, P extends PromptTemplate = Pro
       tools.length === 1 &&
       tools[0] === this.#tool &&
       (activeToolNames === undefined || (activeToolNames.length === 1 && activeToolNames[0] === "schedule"));
-    if (!fixed) return Promise.reject(new AgentHarnessError("invalid_argument", "PiScheduler tools are fixed to schedule"));
+    if (!fixed) return Promise.reject(new JuncoAgentError("invalid_argument", "PiScheduler tools are fixed to schedule"));
     return super.setTools(tools, activeToolNames);
   }
 
   override setActiveTools(toolNames: string[]): Promise<void> {
     if (toolNames.length !== 1 || toolNames[0] !== "schedule") {
-      return Promise.reject(new AgentHarnessError("invalid_argument", "PiScheduler tools are fixed to schedule"));
+      return Promise.reject(new JuncoAgentError("invalid_argument", "PiScheduler tools are fixed to schedule"));
     }
     return super.setActiveTools(toolNames);
   }

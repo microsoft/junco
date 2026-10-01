@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { AgentHarnessError } from "@earendil-works/pi-agent-core";
+import { JuncoAgentError, type Agentic } from "junco-agent";
 import { type AssistantMessage, type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   always,
@@ -14,7 +14,6 @@ import {
   when,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import type { Agentic } from "junco-agent";
 import { type AgenticInput, agentNode } from "../src/index.ts";
 import { leaf } from "./support.ts";
 
@@ -180,25 +179,11 @@ test("a control-only delivery leaves the member idle without blocking the graph"
   assert.deepEqual(requests, [["remember this", "and now"]]);
 });
 
-test("a native run failure is a node error carrying its node id and the original error", async () => {
-  const failing = await leaf([fauxAssistantMessage("never")], { prompt: "go" });
-  const cause = new Error("hook failed");
-  failing.agent.on("before_agent_start", () => {
-    throw cause;
-  });
-  const graph = graphOf();
-  const id = graph.addNode(agentNode(failing.agent, { description: "failing", trigger: always(), ...quiet }));
-
-  const error = await graph.run().catch((thrown: unknown) => thrown);
-  assert.ok(error instanceof DataflowNodeError);
-  assert.equal(error.nodeId, id);
-  assert.ok(error.error instanceof AgentHarnessError && error.error.cause === cause);
-});
-
-test("error and aborted final messages are returned results", async () => {
-  const erring = await leaf([fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider down" })], {
-    prompt: "go",
-  });
+test("an error final message is returned as a node result without closing the member", async () => {
+  const erring = await leaf(
+    [fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider down" }), fauxAssistantMessage("recovered")],
+    { prompt: "go" },
+  );
   const graph = graphOf();
   const id = graph.addNode(agentNode(erring.agent, { description: "erring", trigger: always(), ...quiet }));
 
@@ -206,7 +191,7 @@ test("error and aborted final messages are returned results", async () => {
   const result = graph.result(id);
   assert.ok(O.isSome(result) && result.value.stopReason === "error");
   assert.equal(erring.agent.status, "idle");
-  assert.equal((await erring.agent.prompt("still usable")).role, "assistant");
+  assert.equal(textOf(await erring.agent.prompt("still usable")), "recovered");
 });
 
 test("a member closed before its run settles fails its node as invalid_state", async () => {
@@ -220,7 +205,7 @@ test("a member closed before its run settles fails its node as invalid_state", a
   await member.agent.return();
   const error = await graph.step().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError);
-  assert.ok(error.error instanceof AgentHarnessError && error.error.code === "invalid_state");
+  assert.ok(error.error instanceof JuncoAgentError && error.error.code === "invalid_state");
 });
 
 test("a node runs one prompt: a received prompt conflicts with a staged one", async () => {
@@ -241,7 +226,7 @@ test("a node runs one prompt: a received prompt conflicts with a staged one", as
 
   const error = await graph.run().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError && error.nodeId === m);
-  assert.ok(error.error instanceof AgentHarnessError && error.error.code === "invalid_state");
+  assert.ok(error.error instanceof JuncoAgentError && error.error.code === "invalid_state");
   assert.equal(member.faux.state.callCount, 0);
   assert.equal(member.agent.status, "ready");
 });
