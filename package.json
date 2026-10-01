@@ -4,7 +4,7 @@
   "description": "Opik execution tracing for dataflow-engine.",
   "license": "MIT",
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,26 +16,18 @@
   },
   "files": ["dist", "src", "LICENSE"],
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run --bun tsc -p tsconfig.json --emitDeclarationOnly",
-    "typecheck": "bun run --bun tsc -p tsconfig.typecheck.json"
-  },
-  "dependencies": {
-    "fp-ts": "^2.16.11"
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "bun run tsc -p tsconfig.typecheck.json"
   },
   "peerDependencies": {
     "dataflow-engine": "^0.1.0",
-    "opik": "^2.2.81"
-  },
-  "peerDependenciesMeta": {
-    "dataflow-engine": {
-      "optional": true
-    }
+    "opik": "^2.2.86"
   },
   "devDependencies": {
-    "@types/bun": "1.4.0",
-    "@types/node": "26.0.1",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
     "dataflow-engine": "file:../dataflow-engine",
-    "opik": "2.2.81",
-    "typescript": "6.0.3"
+    "opik": "2.2.86",
+    "typescript": "7.0.2"
   }
 }

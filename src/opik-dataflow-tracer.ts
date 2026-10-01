@@ -7,22 +7,11 @@ import type {
   NodeStatus,
   ParentView,
 } from "dataflow-engine";
-import * as E from "fp-ts/lib/Either.js";
+import { renderPretty } from "dataflow-engine";
 import type { Opik } from "opik";
 
 /** Opik's error record, with the message always present. */
 type ErrorInfo = { exceptionType: string; message: string; traceback: string };
-
-/** Characters Mermaid would read as markup, entities, comments/directives, math or label ends. */
-const MERMAID_SPECIAL = /[&#%$"<>\\`|\r\n]/g;
-
-/** Encode `value` for a quoted Mermaid label using decimal entity codes (`#34;` for `"`, …). */
-function escapeMermaidLabel(value: string): string {
-  return value.replace(
-    MERMAID_SPECIAL,
-    (character) => `#${character.codePointAt(0)};`,
-  );
-}
 
 /** Normalize any thrown value into an Opik error record. */
 function toErrorInfo(error: unknown): ErrorInfo {
@@ -70,32 +59,6 @@ function nodeStatuses<S, N, T, EH>(
   return nodes;
 }
 
-/**
- * The graph's current topology as a Mermaid flowchart, or `undefined` for an empty graph. Nodes get
- * synthetic ids `n0, n1, …` with the real id as a quoted label; every link is drawn, since edge ids
- * are only unique per node-side.
- */
-function mermaidOf<S, N, T, EH>(
-  graph: DataflowGraph<S, N, T, EH>,
-): string | undefined {
-  const synthetic = new Map<NodeIdType, string>();
-  const lines = ["graph TD;"];
-  graph.forEachNode((id) => {
-    const key = `n${synthetic.size}`;
-    synthetic.set(id, key);
-    lines.push(`${key}["${escapeMermaidLabel(id)}"];`);
-  });
-  if (synthetic.size === 0) return undefined;
-  graph.forEachLink((from, to, edge) => {
-    const transport = E.isLeft(edge.transport) ? "message" : "value";
-    const label = escapeMermaidLabel(`${edge.id} (${transport})`);
-    lines.push(
-      `${synthetic.get(from)} -->|"${label}"| ${synthetic.get(to)};`,
-    );
-  });
-  return lines.join("\n");
-}
-
 /** The delivered batch and resolved values of one activation; both empty for a prime. */
 function activationInput<N, T>(
   inputs: ParentView<N, T> | undefined,
@@ -131,8 +94,8 @@ export class OpikDataflowTracer implements DataflowTracer {
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     const metadata: Record<string, unknown> = { nodes: nodeStatuses(graph) };
-    const mermaid = mermaidOf(graph);
-    if (mermaid !== undefined)
+    const mermaid = renderPretty(graph);
+    if (mermaid !== "")
       metadata._opik_graph_definition = { format: "mermaid", data: mermaid };
     const trace = this.#client.trace({ name: this.#name, metadata });
     void this.flush();
