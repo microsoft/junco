@@ -54,7 +54,6 @@ export async function buildExamples(noTracing = false): Promise<{
     await spawnStep("Example typecheck", [
       "bun",
       "run",
-      "--bun",
       "tsc",
       "-p",
       "examples/tsconfig.json",

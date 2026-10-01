@@ -2,6 +2,8 @@ import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import type { Graph } from "ngraph.graph";
 import createGraph from "ngraph.graph";
+import type { IDoc } from "prettier-printer";
+import * as PP from "prettier-printer";
 import type {
   DataflowRunTrace,
   DataflowStepTrace,
@@ -12,6 +14,7 @@ import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
 import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
+import type { Pretty } from "./pretty.js";
 import type {
   DataflowScheduler,
   InputSchedule,
@@ -21,6 +24,17 @@ import type {
 } from "./scheduler.js";
 import { evaluateTrigger, satisfiedEdges } from "./trigger.js";
 import type { Width } from "./width.js";
+
+/** Characters Mermaid would read as markup, entities, comments/directives, math or label ends. */
+const MERMAID_SPECIAL = /[&#%$"<>\\`|\r\n]/g;
+
+/** Encode `value` for a quoted Mermaid label using decimal entity codes (`#34;` for `"`, …). */
+function escapeMermaidLabel(value: string): string {
+  return value.replace(
+    MERMAID_SPECIAL,
+    (character) => `#${character.codePointAt(0)};`,
+  );
+}
 
 /**
  * The per-node state the graph owns: allocated once by {@link DataflowGraph.addNode}, mutated in
@@ -141,7 +155,7 @@ export class DataflowGraph<
   T,
   EH,
   Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
-> {
+> implements Pretty {
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
   readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
@@ -273,6 +287,32 @@ export class DataflowGraph<
     this.#graph.forEachLink((link) => {
       callback(link.fromId as NodeId, link.toId as NodeId, link.data);
     });
+  }
+
+  /** Render the current graph topology as a Mermaid flowchart document. */
+  pretty(): IDoc {
+    const synthetic = new Map<NodeId, string>();
+    const document: IDoc[] = [];
+    this.forEachNode((id) => {
+      if (synthetic.size === 0) {
+        document.push("graph TD;");
+      }
+      const key = `n${synthetic.size}`;
+      synthetic.set(id, key);
+      document.push(PP.lineBreak, `${key}["${escapeMermaidLabel(id)}"];`);
+    });
+    if (synthetic.size === 0) {
+      return "";
+    }
+    this.forEachLink((from, to, edge) => {
+      const transport = E.isLeft(edge.transport) ? "message" : "value";
+      const label = escapeMermaidLabel(`${edge.id} (${transport})`);
+      document.push(
+        PP.lineBreak,
+        `${synthetic.get(from)} -->|"${label}"| ${synthetic.get(to)};`,
+      );
+    });
+    return document;
   }
 
   /**

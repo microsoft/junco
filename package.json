@@ -12,7 +12,7 @@
     "url": "https://github.com/junco-org/dataflow-engine/issues"
   },
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -29,8 +29,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run --bun tsc -p tsconfig.json --emitDeclarationOnly",
-    "typecheck": "bun run --bun tsc -p tsconfig.typecheck.json",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "bun run tsc -p tsconfig.typecheck.json",
     "test": "bun --conditions=dataflow-no-tracing test ./tests/*.test.ts ./tests/*.example.ts",
     "test:coverage": "bun --conditions=dataflow-no-tracing test --coverage ./tests/*.test.ts ./tests/*.example.ts",
     "example:fibonacci": "bun run examples/run.ts fibonacci",
@@ -48,13 +48,14 @@
   "dependencies": {
     "fp-ts": "^2.16.11",
     "ngraph.graph": "^20.1.2",
-    "type-fest": "^5.8.0"
+    "prettier-printer": "^1.1.4",
+    "type-fest": "^5.10.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
-    "@types/bun": "1.4.0",
-    "@types/node": "26.0.1",
-    "fast-check": "^4.8.0",
-    "typescript": "6.0.3"
+    "@biomejs/biome": "2.5.15",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
+    "fast-check": "^4.10.2",
+    "typescript": "7.0.2"
   }
 }

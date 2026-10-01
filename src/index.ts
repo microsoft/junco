@@ -24,6 +24,8 @@ export type {
   ParentView,
   StepFn,
 } from "./node.js";
+export type { Pretty } from "./pretty.js";
+export { renderPretty } from "./pretty.js";
 export { emptyQueue, Queue } from "./queue.js";
 export type {
   DataflowScheduler,

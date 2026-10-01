@@ -9,7 +9,8 @@
     }
   },
   "optionalDependencies": {
+    "dataflow-engine": "file:..",
     "dataflow-engine-opik": "file:../../dataflow-engine-opik",
-    "opik": "2.2.81"
+    "opik": "2.2.86"
   }
 }

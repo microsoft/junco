@@ -185,6 +185,10 @@ Both calls resolve to the cumulative map of finished nodes, and `available()` re
 
 `options.signal` (an `AbortSignal`) is checked before planning, before each turn and after each turn settles. When it is aborted, the call rejects with `signal.reason` and starts no further turn. Node activations that are already running are always awaited, never abandoned. Earlier turns are not rolled back.
 
+## Rendering graph topology
+
+`DataflowGraph` implements the exported structural `Pretty` contract. `renderPretty(graph)` renders the current topology as Mermaid without layout wrapping. Nodes receive synthetic `n0`, `n1`, … identifiers in iteration order and keep their escaped node IDs as labels; every parallel edge is retained and labeled with its escaped edge ID plus `message` or `value`. An empty graph renders as `""`, and each call reads the live topology so later `addNode` and `addEdge` changes appear immediately.
+
 ## Tracing
 
 Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `step()` or `run()` invocation and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures, and the end or failure of the invocation. For `step()`, `end` means that window finished, not that the graph is quiescent. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
@@ -197,7 +201,7 @@ Pass a `DataflowTracer` as the fourth constructor argument to observe execution;
 
 Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` typechecks and bundles all sixteen programs into `examples/dist/{opik,dummy}` before running any of them. The Opik build constructs the SDK client once as a preflight, so a missing optional dependency, a type error or an invalid Opik configuration fails the build before any example runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 
-The Opik build needs the private examples package's optional dependencies (`dataflow-engine-opik` from the sibling checkout, and `opik`): run `bun install` in `examples/`, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. `bun install --omit optional` gives a Dummy-only environment. A successful build does not prove that traces were ingested later.
+The Opik build needs the private examples package's optional dependencies (`dataflow-engine` from the parent checkout, `dataflow-engine-opik` from the sibling checkout, and `opik`): run `bun install` in `examples/`, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. `bun install --omit optional` gives a Dummy-only environment. A successful build does not prove that traces were ingested later.
 
 | Script | Purpose |
 |---|---|
@@ -226,7 +230,7 @@ git/
    cd ../dataflow-engine-opik && bun install && bun run build
    ```
 
-2. Install the examples' optional dependencies (`dataflow-engine-opik` and `opik`):
+2. Install the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`):
 
    ```sh
    cd ../dataflow-engine/examples && bun install
