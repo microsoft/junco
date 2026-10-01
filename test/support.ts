@@ -1,6 +1,4 @@
-import { tmpdir } from "node:os";
-import { type AgentTool, InMemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   createModels,
@@ -10,14 +8,19 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  type AssistantMessage,
 } from "@earendil-works/pi-ai";
-import { DataflowGraph, UNBOUNDED, type WidthType } from "dataflow-engine";
-import { type Agentic, type AgenticStep, createYieldTool, JuncoAgent } from "junco-agent";
+import { UNBOUNDED, type WidthType } from "dataflow-engine";
+import { type Agentic as JuncoAgentProtocol, type AgenticStep, createYieldTool, JuncoAgent } from "junco-agent";
 import { Type } from "typebox";
-import { type AgencyGraph, type GraphInfo, PiScheduler, type PiSchedulerOptions } from "../src/index.ts";
+import type { PiScheduler, PiSchedulerOptions, SchedulerInfo } from "junco-scheduler/agent";
+import { type AgenticInput, createAgencyScheduler, JuncoGraph } from "../src/index.ts";
+
+/** A graph driven by an agency `PiScheduler`, as every native-suite agency is. */
+export type PiGraph = JuncoGraph<AgenticInput, AssistantMessage, unknown, PiScheduler<AgenticInput, AssistantMessage>>;
 
 // Offline scaffolding: every agent gets its own faux provider in an explicit Models collection and
-// an in-memory session. Scheduler scripts read the GraphInfo of the request they answer.
+// an in-memory session. Scheduler scripts read the SchedulerInfo of the request they answer.
 
 let providers = 0;
 
@@ -37,8 +40,7 @@ export async function nativeOptions(responses: readonly FauxResponseStep[] = [])
   return {
     faux,
     options: {
-      env: new NodeExecutionEnv({ cwd: tmpdir() }),
-      session: await new InMemorySessionRepo().create(),
+      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
     },
@@ -53,7 +55,7 @@ export async function leaf(
   const { faux, options } = await nativeOptions(responses);
   return {
     faux,
-    agent: new JuncoAgent({
+    agent: await JuncoAgent.fromResolved({
       ...options,
       systemPrompt: "leaf",
       tools: [createYieldTool(), ...tools],
@@ -87,33 +89,34 @@ export function waitingTool(name: string, { endOnAbort = false }: { readonly end
   return { tool, started: started.promise, aborted: aborted.promise, release: () => released.resolve() };
 }
 
-/** The GraphInfo appended to the request that `context` belongs to. */
-export function graphInfoOf(context: Context): GraphInfo {
+/** The SchedulerInfo appended to the request that `context` belongs to. */
+export function schedulerInfoOf(context: Context): SchedulerInfo {
   for (let index = context.messages.length - 1; index >= 0; index--) {
     const message = context.messages[index]!;
-    if (message.role === "user" && typeof message.content === "string" && message.content.startsWith("GraphInfo:\n")) {
-      return JSON.parse(message.content.slice("GraphInfo:\n".length)) as GraphInfo;
+    if (message.role !== "user") continue;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+    if (content.startsWith("SchedulerInfo:\n")) {
+      return JSON.parse(content.slice("SchedulerInfo:\n".length)) as SchedulerInfo;
     }
   }
-  throw new Error("request carries no GraphInfo");
+  throw new Error("request carries no SchedulerInfo");
 }
 
 export type Decision = { readonly lanes: readonly (readonly string[])[] } | { readonly text: string };
 
-/** Schedule every available member in its own lane; once quiescent, report the results in order. */
-export const runAvailable = (info: GraphInfo): Decision => {
-  const available = info.nodes.filter((node) => node.available).map((node) => [node.id]);
-  if (available.length > 0) return { lanes: available };
-  return { text: info.nodes.map((node) => node.result?.text ?? `(${node.id} ${node.status})`).join(" + ") };
-};
+/** Schedule every candidate in its own lane; once quiescent, answer a fixed completion. */
+export const runAvailable = (info: SchedulerInfo): Decision =>
+  info.nodes.length > 0 ? { lanes: info.nodes.map((node) => [node.id]) } : { text: "graph quiescent" };
 
-/** A faux scheduler model answering every request with `decide(GraphInfo)`. */
-export function schedulerModel(decide: (info: GraphInfo, request: number) => Decision = runAvailable) {
+/** A faux scheduler model answering every request with `decide(SchedulerInfo)`. */
+export function schedulerModel(decide: (info: SchedulerInfo, request: number) => Decision = runAvailable) {
   const { faux, models, model } = scripted();
   const decisions: Decision[] = [];
   const respond: FauxResponseFactory = (context) => {
     faux.appendResponses([respond]);
-    const decision = decide(graphInfoOf(context), decisions.length);
+    const decision = decide(schedulerInfoOf(context), decisions.length);
     decisions.push(decision);
     return "lanes" in decision
       ? fauxAssistantMessage([scheduleCall(decision.lanes, `schedule-${decisions.length}`)], { stopReason: "toolUse" })
@@ -127,18 +130,18 @@ export function schedulerModel(decide: (info: GraphInfo, request: number) => Dec
 export const scheduleCall = (lanes: readonly (readonly string[])[], id: string) =>
   fauxToolCall("schedule", { lanes }, { id });
 
-/** A scheduler script: a GraphInfo-driven decision, or explicit faux responses. */
-export type Script = ((info: GraphInfo, request: number) => Decision) | readonly FauxResponseStep[];
+/** A scheduler script: a SchedulerInfo-driven decision, or explicit faux responses. */
+export type Script = ((info: SchedulerInfo, request: number) => Decision) | readonly FauxResponseStep[];
 
-/** A PiScheduler over `script`, staged with `prompt` when given. */
+/** An agency scheduler over `script` for the graph `getGraph()` returns, staged with `prompt` when given. */
 export async function newScheduler(
+  getGraph: () => JuncoGraph | undefined,
   script: Script = runAvailable,
   { prompt, systemPrompt }: { readonly prompt?: string; readonly systemPrompt?: PiSchedulerOptions["systemPrompt"] } = {},
 ) {
   const { faux, models, model } = typeof script === "function" ? schedulerModel(script) : scripted(script);
-  const session = await new InMemorySessionRepo().create();
-  const scheduler = new PiScheduler({
-    env: new NodeExecutionEnv({ cwd: tmpdir() }),
+  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
+  const scheduler = await createAgencyScheduler(getGraph, {
     session,
     models,
     model,
@@ -148,7 +151,7 @@ export async function newScheduler(
   return { scheduler, faux, session };
 }
 
-/** An agency graph over a fresh scheduler, for wiring before `attachAgency(graph)`. */
+/** An agency graph over a fresh scheduler, ready for wiring. */
 export async function agencyGraph(
   script?: Script,
   {
@@ -157,13 +160,17 @@ export async function agencyGraph(
     threads = UNBOUNDED,
   }: { readonly prompt?: string; readonly window?: WidthType; readonly threads?: WidthType } = {},
 ) {
-  const { scheduler, faux, session } = await newScheduler(script, { prompt });
-  const graph: AgencyGraph = new DataflowGraph(scheduler, window, threads);
+  let current: PiGraph | undefined;
+  const { scheduler, faux, session } = await newScheduler(() => current, script, { prompt });
+  const graph: PiGraph = new JuncoGraph(scheduler, window, threads);
+  current = graph;
   return { graph, scheduler, faux, session };
 }
 
 /** Resume through every pause until the current run settles or fails; returns that step. */
-export async function drive(agentic: Agentic): Promise<{ readonly yields: number; readonly last: AgenticStep }> {
+export async function drive(
+  agentic: JuncoAgentProtocol,
+): Promise<{ readonly yields: number; readonly last: AgenticStep }> {
   let yields = 0;
   while (true) {
     const result = await agentic.next();

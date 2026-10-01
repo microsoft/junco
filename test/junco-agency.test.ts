@@ -1,35 +1,47 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { AgentHarnessError } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { always, NodeId } from "dataflow-engine";
-import { type Agentic, JuncoAgent } from "junco-agent";
-import { agentNode, attachAgency } from "../src/index.ts";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { always, NodeId, UNBOUNDED } from "dataflow-engine";
+import * as O from "fp-ts/lib/Option.js";
+import { type AgenticOptions, JuncoAgent } from "junco-agent";
+import { PiScheduler } from "junco-scheduler/agent";
+import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph } from "../src/index.ts";
 import {
   agencyGraph,
   drive,
   flushMacrotasks,
   leaf,
   nativeOptions,
-  newScheduler,
+  type PiGraph,
   runAvailable,
   type Script,
-  scheduleCall,
   settledText,
   waitingTool,
 } from "./support.ts";
 
 const TIMEOUT_MS = 30_000;
-const quiet = { receive: () => [], emit: () => [] } as const;
-const toolTurn = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
-const member = (agent: Agentic, description = "member") =>
-  agentNode(agent, { description, trigger: always(), ...quiet });
+const MEMBER = NodeId("0");
+const toolTurn = (...calls: ToolCall[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
+/** A prompt agent, or a nested graph forwarding its member `0`'s result. */
+const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
+  agent instanceof JuncoGraph
+    ? graphNode(agent, { description, trigger: always() }, { result: MEMBER })
+    : agentNode(agent, { description, trigger: always() });
 
 /** An agency over `members`, planned by `script`, staged with a prompt unless `idle`. */
-async function agency(members: readonly Agentic[], script: Script = runAvailable, { idle = false } = {}) {
+async function agency(
+  members: readonly (JuncoAgent | JuncoGraph)[],
+  script: Script = runAvailable,
+  { idle = false } = {},
+) {
   const { graph, scheduler, faux } = await agencyGraph(script, idle ? {} : { prompt: "run the graph" });
   for (const [index, agent] of members.entries()) graph.addNode(member(agent, `member ${index}`));
-  return { agency: attachAgency(graph), graph, scheduler, faux };
+  return { graph, scheduler, faux };
 }
 
 /** Planned lanes for the first requests, then every available member. */
@@ -38,123 +50,110 @@ const plan =
   (info, request) =>
     request < lanes.length ? { lanes: lanes[request]! } : runAvailable(info);
 
-const invalidArgument = (error: unknown) => error instanceof AgentHarnessError && error.code === "invalid_argument";
+/** The text of member `id`'s result in `graph`. */
+function resultText(graph: JuncoGraph, id = "0"): string | undefined {
+  const result = graph.result(NodeId(id));
+  return O.isSome(result)
+    ? result.value.content.map((block) => (block.type === "text" ? block.text : "")).join("")
+    : undefined;
+}
 
-test("attachment validates the whole membership before claiming any of it", async () => {
-  const shared = await leaf([fauxAssistantMessage("shared")], { prompt: "go" });
-
-  const withRaw = await agencyGraph([]);
-  const raw = await newScheduler([]);
-  withRaw.graph.addNode(member(shared.agent));
-  withRaw.graph.addNode(member(raw.scheduler));
-  assert.throws(() => attachAgency(withRaw.graph), invalidArgument);
-
-  const withOwnScheduler = await agencyGraph([]);
-  withOwnScheduler.graph.addNode(member(withOwnScheduler.scheduler));
-  assert.throws(() => attachAgency(withOwnScheduler.graph), invalidArgument);
-
-  const duplicate = await agencyGraph([]);
-  duplicate.graph.addNode(member(shared.agent));
-  duplicate.graph.addNode(member(shared.agent));
-  assert.throws(() => attachAgency(duplicate.graph), invalidArgument);
-
-  const handWritten = await agencyGraph([]);
-  handWritten.graph.addNode({
-    state: shared.agent,
-    trigger: always(),
-    step: async function* () {
-      return fauxAssistantMessage("unused");
-    },
-  });
-  assert.throws(() => attachAgency(handWritten.graph), invalidArgument);
-
-  const pending = await leaf([fauxAssistantMessage("old")]);
-  await pending.agent.prompt("an unread old run");
-  assert.equal(pending.agent.status, "pending");
-  const withPending = await agencyGraph([]);
-  withPending.graph.addNode(member(pending.agent));
-  assert.throws(() => attachAgency(withPending.graph), invalidArgument);
-
-  // Every rejection above claimed nothing: the shared member still joins one agency, and only one.
-  const first = await agencyGraph([]);
-  first.graph.addNode(member(shared.agent));
-  attachAgency(first.graph);
-  assert.throws(() => attachAgency(first.graph), invalidArgument);
-  const second = await agencyGraph([]);
-  second.graph.addNode(member(shared.agent));
-  assert.throws(() => attachAgency(second.graph), invalidArgument);
-});
-
-test("an attached child cannot be adopted through its scheduler alias or claim a failed parent's other member", async () => {
-  const shared = await leaf([fauxAssistantMessage("shared child")], { prompt: "go" });
-  const free = await leaf([fauxAssistantMessage("free child")], { prompt: "go" });
-  const child = await agencyGraph(runAvailable, { prompt: "run child" });
-  const parentA = await agencyGraph(runAvailable, { prompt: "run parent A" });
-  const parentB = await agencyGraph([]);
-  const separate = await agencyGraph(runAvailable, { prompt: "run separate" });
-  try {
-    child.graph.addNode(member(shared.agent));
-    const childAgency = attachAgency(child.graph);
-    assert.equal(childAgency, child.graph.scheduler);
-    parentA.graph.addNode(member(childAgency));
-    const root = attachAgency(parentA.graph);
-    assert.equal(root, parentA.scheduler);
-
-    parentB.graph.addNode(member(free.agent));
-    parentB.graph.addNode(member(child.graph.scheduler));
-    assert.throws(() => attachAgency(parentB.graph), invalidArgument);
-    separate.graph.addNode(member(free.agent));
-    assert.equal(attachAgency(separate.graph), separate.scheduler);
-
-    assert.equal(settledText((await drive(root)).last), "shared child");
-    assert.equal(settledText((await drive(separate.scheduler)).last), "free child");
-    await root.return();
-    assert.equal(childAgency.status, "closed");
-    assert.equal(shared.agent.status, "closed");
-  } finally {
-    const failures: unknown[] = [];
-    for (const actor of [parentA.scheduler, parentB.scheduler, separate.scheduler, child.scheduler, shared.agent, free.agent]) {
-      try {
-        await actor.return();
-      } catch (error) {
-        failures.push(error);
-      }
+/** A JuncoAgent recording each public `abort()` and `return()` request into `calls`. */
+function counting(calls: string[], options: AgenticOptions): Promise<JuncoAgent> {
+  class Counting extends JuncoAgent {
+    static async make(): Promise<Counting> {
+      const agent = new Counting(options);
+      await agent.initialize();
+      return agent;
     }
-    if (failures.length > 0) throw new AggregateError(failures, "Failed to close attachment test actors");
+    override abort() {
+      calls.push("abort");
+      return super.abort();
+    }
+    override return(value?: void | PromiseLike<void>) {
+      calls.push("return");
+      return super.return(value);
+    }
+  }
+  return Counting.make();
+}
+
+test("an Opus agency scheduler from a saved Pi login owns its session and members, even if a caller passes an adapter", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-agency-login-"));
+  const repo = new MemorySessionRepo();
+  try {
+    const authPath = join(directory, "auth.json");
+    await writeFile(
+      authPath,
+      JSON.stringify({
+        "github-copilot": {
+          type: "oauth",
+          access: "pi-fixture-access",
+          refresh: "pi-fixture-refresh",
+          expires: Number.MAX_SAFE_INTEGER,
+        },
+      }),
+    );
+    const models = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const ready = await leaf([fauxAssistantMessage("never")], { prompt: "go" });
+    let replaced = 0;
+    // An untyped caller's adapter: the factory's own adapter must still own the members.
+    const callerOptions = {
+      models,
+      session,
+      adapter: {
+        abortDependents: () => {
+          replaced++;
+          return undefined;
+        },
+        closeDependents: () => {
+          replaced++;
+          return undefined;
+        },
+      },
+    };
+    let graph: PiGraph | undefined;
+    const scheduler = await createAgencyScheduler(() => graph, callerOptions);
+    const selected = await scheduler.getModel();
+    assert.equal(selected?.provider, "github-copilot");
+    assert.equal(selected?.id, "claude-opus-5.5");
+
+    const constructed = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED);
+    graph = constructed;
+    constructed.addNode(member(ready.agent));
+    await scheduler.return();
+
+    assert.equal(ready.agent.status, "closed");
+    assert.equal(replaced, 0);
+    assert.equal(ready.faux.state.callCount, 0);
+    await assert.rejects(session.beginMutation(BACKGROUND_CONTEXT));
+  } finally {
+    await repo.close(BACKGROUND_CONTEXT);
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("a graph changed after attachment is rejected before it is scheduled again", async () => {
-  const original = await leaf([fauxAssistantMessage("original")], { prompt: "go" });
-  const late = await leaf([fauxAssistantMessage("late")], { prompt: "go" });
-  const { agency: root, graph } = await agency([original.agent], [
-    toolTurn(scheduleCall([["0"]], "after-change")),
-    fauxAssistantMessage("stopped"),
-  ]);
-  graph.addNode(member(late.agent));
-  const errors: boolean[] = [];
-  root.subscribe((event) => {
-    if (event.type === "tool_execution_end") errors.push(event.isError);
-  });
-
-  const { last } = await drive(root);
-  assert.deepEqual(errors, [true]);
-  assert.equal(graph.getNode(NodeId("0"))!.status, "ready");
-  assert.ok(last.kind === "failed" && last.error instanceof AgentHarnessError);
-});
-
 test(
-  "thirty-two nested agencies deliver the innermost result",
+  "thirty-two nested agencies settle while every graph forwards the innermost result",
   async () => {
     const innermost = await leaf([fauxAssistantMessage("deep")], { prompt: "go" });
-    let current: Agentic = innermost.agent;
-    for (let depth = 0; depth < 32; depth++) current = (await agency([current])).agency;
+    const levels: { graph: PiGraph; scheduler: PiScheduler<AgenticInput, AssistantMessage> }[] = [];
+    let current: JuncoAgent | JuncoGraph = innermost.agent;
+    for (let depth = 0; depth < 32; depth++) {
+      const level = await agency([current]);
+      levels.push(level);
+      current = level.graph;
+    }
+    const root = levels.at(-1)!;
 
-    const { last } = await drive(current);
-    assert.equal(settledText(last), "deep");
+    const { last } = await drive(root.scheduler);
+    assert.equal(settledText(last), "graph quiescent");
+    assert.ok(levels.every(({ graph }) => resultText(graph) === "deep"));
     assert.equal(innermost.faux.state.callCount, 1);
-    await current.return();
+    await root.graph.close();
     assert.equal(innermost.agent.status, "closed");
+    assert.ok(levels.every(({ scheduler }) => scheduler.status === "closed"));
   },
   TIMEOUT_MS,
 );
@@ -163,19 +162,28 @@ test(
   "abort and close cascade through 4096 idle nested agencies without growing the stack",
   async () => {
     const innermost = await leaf([]);
-    let current: Agentic = innermost.agent;
-    for (let depth = 0; depth < 4096; depth++) current = (await agency([current], runAvailable, { idle: true })).agency;
+    let current: JuncoAgent | JuncoGraph = innermost.agent;
+    let root: PiGraph | undefined;
+    for (let depth = 0; depth < 4096; depth++) {
+      root = (await agency([current], runAvailable, { idle: true })).graph;
+      current = root;
+    }
+    assert.ok(root !== undefined);
 
-    assert.deepEqual(await current.abort(), { clearedSteer: [], clearedFollowUp: [] });
-    await current.return();
-    assert.equal(current.status, "closed");
+    const aborted = root.signal;
+    await root.abort();
+    assert.ok(aborted.aborted);
+    assert.equal(root.signal.aborted, false);
+    await root.close();
+    assert.ok(root.signal.aborted);
+    assert.equal(root.scheduler.status, "closed");
     assert.equal(innermost.agent.status, "closed");
   },
   TIMEOUT_MS * 4,
 );
 
 test(
-  "a root abort reaches a live grandchild while its sibling still runs",
+  "a direct root scheduler abort reaches a live grandchild while its sibling still runs",
   async () => {
     const grandchildTool = waitingTool("grandchild_work", { endOnAbort: true });
     const grandchild = await leaf([toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })), fauxAssistantMessage("unused")], {
@@ -188,7 +196,9 @@ test(
       tools: [siblingTool.tool],
     });
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    const { agency: root } = await agency([child.agency, sibling.agent], plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]));
+    const { scheduler: root } = await agency([child.graph, sibling.agent], plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]));
+    let finalTurn: AssistantMessage | undefined;
+    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
 
     assert.equal((await root.next()).value?.kind, "yield"); // primes both members
     assert.equal((await root.next()).value?.kind, "yield"); // the child primes the grandchild
@@ -207,7 +217,8 @@ test(
     siblingTool.release();
     assert.deepEqual(await aborting, { clearedSteer: [], clearedFollowUp: [] });
     const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && settled.message.stopReason === "aborted");
+    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
+    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
@@ -217,17 +228,24 @@ test(
   async () => {
     const failure = new Error("member abort failed");
     class FailingAbort extends JuncoAgent {
+      static async make(options: AgenticOptions): Promise<FailingAbort> {
+        const agent = new FailingAbort(options);
+        await agent.initialize();
+        return agent;
+      }
       protected override abortDependents(): Promise<void> {
         return Promise.reject(failure);
       }
     }
-    const failing = new FailingAbort({ ...(await nativeOptions([])).options, prompt: "go" });
+    const failing = await FailingAbort.make({ ...(await nativeOptions([])).options, prompt: "go" });
     const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
     const sibling = await leaf([toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })), fauxAssistantMessage("unused")], {
       prompt: "go",
       tools: [siblingTool.tool],
     });
-    const { agency: root } = await agency([failing, sibling.agent], plan([["0"], ["1"]], [["1"]]));
+    const { scheduler: root } = await agency([failing, sibling.agent], plan([["0"], ["1"]], [["1"]]));
+    let finalTurn: AssistantMessage | undefined;
+    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
 
     assert.equal((await root.next()).value?.kind, "yield");
     const running = root.next();
@@ -235,37 +253,26 @@ test(
 
     const error = await root.abort().catch((thrown: unknown) => thrown);
     await siblingTool.aborted;
-    assert.ok(error instanceof AgentHarnessError);
-    const causes = (error.cause as AggregateError).errors;
-    assert.equal(causes.length, 1);
-    assert.equal((causes[0] as AgentHarnessError).cause, failure);
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [failure]);
     const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && settled.message.stopReason === "aborted");
+    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
+    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
 
 test(
-  "closing a suspended root closes each member once, without aborting it, before the root is closed",
+  "closing a suspended root scheduler closes each member once, without aborting it, and its graph joins",
   async () => {
     const calls: string[] = [];
-    class Counting extends JuncoAgent {
-      override abort() {
-        calls.push("abort");
-        return super.abort();
-      }
-      override return(value?: void | PromiseLike<void>) {
-        calls.push("return");
-        return super.return(value);
-      }
-    }
-    const counted = new Counting({ ...(await nativeOptions([])).options });
+    const counted = await counting(calls, (await nativeOptions([])).options);
     const grandchild = await leaf(
       [toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })), fauxAssistantMessage("unused")],
       { prompt: "go" },
     );
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    const { agency: root } = await agency([child.agency, counted], plan([["0"]], [["0"]], [["0"]]));
+    const { graph, scheduler: root } = await agency([child.graph, counted], plan([["0"]], [["0"]], [["0"]]));
 
     assert.equal((await root.next()).value?.kind, "yield");
     assert.equal((await root.next()).value?.kind, "yield");
@@ -275,8 +282,62 @@ test(
 
     assert.deepEqual(await root.return(), { value: undefined, done: true });
     assert.deepEqual(calls, ["return"]);
-    for (const agentic of [root, child.agency, grandchild.agent, counted]) assert.equal(agentic.status, "closed");
+    for (const agentic of [root, child.scheduler, grandchild.agent, counted]) assert.equal(agentic.status, "closed");
     assert.deepEqual(await root.next(), { value: undefined, done: true });
+    await graph.close();
+    assert.deepEqual(calls, ["return"]);
+    assert.ok(graph.signal.aborted && child.graph.signal.aborted);
   },
   TIMEOUT_MS,
 );
+
+test("graph.close() after a failed direct scheduler return joins that close without duplicating its errors", async () => {
+  const failure = new Error("member close failed");
+  class FailingClose extends JuncoAgent {
+    static async make(options: AgenticOptions): Promise<FailingClose> {
+      const agent = new FailingClose(options);
+      await agent.initialize();
+      return agent;
+    }
+    override return(value?: void | PromiseLike<void>) {
+      return super.return(value).then(() => Promise.reject(failure));
+    }
+  }
+  const failing = await FailingClose.make((await nativeOptions([])).options);
+  const { graph, scheduler } = await agency([failing], runAvailable, { idle: true });
+
+  const direct = await scheduler.return().then(
+    () => assert.fail("the member close failure must surface"),
+    (error: unknown) => error,
+  );
+  assert.equal(scheduler.status, "closed");
+  const joined = await graph.close().then(
+    () => assert.fail("graph close must join the failed close"),
+    (error: unknown) => error,
+  );
+  assert.equal(joined, direct);
+  assert.equal(await graph.close().catch((error: unknown) => error), direct);
+});
+
+test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared and cyclic members once each", async () => {
+  const calls: string[] = [];
+  const counted = await counting(calls, (await nativeOptions([])).options);
+  const plain = await PiScheduler.make<AgenticInput, AssistantMessage>((await nativeOptions([])).options);
+  const root = new JuncoGraph(plain, UNBOUNDED, UNBOUNDED);
+  root.addNode(member(counted));
+  const child = await agency([counted, root], runAvailable, { idle: true });
+  root.addNode(member(child.graph));
+  root.addNode(member(child.graph));
+
+  await root.abort();
+  assert.deepEqual(calls, ["abort"]);
+  assert.equal(root.signal.aborted, false);
+  assert.equal(child.graph.signal.aborted, false);
+
+  await root.close();
+  assert.deepEqual(calls, ["abort", "return"]);
+  for (const actor of [plain, child.scheduler, counted]) assert.equal(actor.status, "closed");
+  assert.ok(root.signal.aborted && child.graph.signal.aborted);
+  await root[Symbol.asyncDispose]();
+  assert.deepEqual(calls, ["abort", "return"]);
+});
