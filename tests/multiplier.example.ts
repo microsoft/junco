@@ -1,61 +1,27 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
+import { createRoundRobinScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
-import type {
-  DataflowScheduler,
-  NodeAvailability,
-  NodeGenerator,
-  NodeIdType,
-  Schedule,
-} from "../src/index.ts";
+import type { NodeGenerator } from "../src/index.ts";
 import {
   always,
   DataflowGraph,
+  from,
   messageEdge,
   msg,
   stepNode,
-  triggerInputs,
   Width,
   when,
 } from "../src/index.ts";
-
-/**
- * The original's `(self) => { const ready = self.ready(); for (const id of priority) if
- * (ready.includes(id)) return [id]; return ready.slice(0, 1); }` — exactly one node per turn,
- * picked by a priority list the test fills in once the node ids exist.
- */
-class PriorityScheduler implements DataflowScheduler<number, string> {
-  readonly #priority: readonly NodeIdType[];
-
-  constructor(priority: readonly NodeIdType[]) {
-    this.#priority = priority;
-  }
-
-  create(_window: number, _threads: number): void {}
-
-  schedule(
-    available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
-  ): Schedule {
-    if (available.size === 0) return [];
-    const plan = (id: NodeIdType): Schedule => [
-      [{ id, inputs: triggerInputs(available.get(id)!) }],
-    ];
-    for (const id of this.#priority) {
-      if (available.has(id)) return plan(id);
-    }
-    return plan([...available.keys()][0]!);
-  }
-}
 
 test("cookbook: end-to-end three stage multiplier graph", async () => {
   const sourceToMultiplier = messageEdge<number, string>("sourceToMultiplier");
   const multiplierToSink = messageEdge<number, string>("multiplierToSink");
   const results: number[] = [];
-  const priority: NodeIdType[] = [];
   const tracer = createExampleTracer("cookbook/multiplier");
   const graph = new DataflowGraph<void, number, string, never>(
-    new PriorityScheduler(priority),
+    createRoundRobinScheduler<number, string>(),
     Width(1),
     Width(1),
     tracer,
@@ -78,22 +44,21 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   const multiplierId = graph.addNode({
     state: undefined,
     trigger: when(sourceToMultiplier),
-    step: stepNode<void, number, string>((_state, view) => {
-      const value = view.messages.get(sourceToMultiplier.id)![0]!;
-      return [msg(multiplierToSink, value * 2)];
-    }),
+    step: stepNode<void, number, string>((_state, view) =>
+      from(view, sourceToMultiplier).map((value) =>
+        msg(multiplierToSink, value * 2),
+      ),
+    ),
   });
 
   const sinkId = graph.addNode({
     state: undefined,
     trigger: when(multiplierToSink),
     step: stepNode<void, number, string>((_state, view) => {
-      results.push(view.messages.get(multiplierToSink.id)![0]!);
+      results.push(...from(view, multiplierToSink));
       return [];
     }),
   });
-
-  priority.push(sinkId, multiplierId, sourceId);
 
   graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
   graph.addEdge(multiplierId, sinkId, multiplierToSink);

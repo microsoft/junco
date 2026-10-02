@@ -64,24 +64,43 @@ export type NodeGenerator<N, T> = AsyncGenerator<
  */
 export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
 
-/** Readiness hook. The runtime passes a NON-destructive probe view aliasing the live queues. */
-export type AvailabilityFn<N, T> = (view: ParentView<N, T>) => boolean;
+/**
+ * Availability hook, consulted only for a node that is not `done`, after the runtime has evaluated
+ * its trigger. `view` is a NON-destructive probe aliasing the live queues; `triggered` says whether
+ * the node's {@link TriggerRule} fires right now. The default hook returns `triggered`.
+ *
+ * A custom hook may override the trigger in either direction: demand a deeper backlog than one
+ * message, or keep an already-started actor resumable after it consumed its triggering input.
+ */
+export type AvailabilityFn<N, T> = (
+  view: ParentView<N, T>,
+  triggered: boolean,
+) => boolean;
 
-/** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
-export type Node<S, N, T> = Identifiable<NodeId> & {
-  state: S;
-  status: NodeStatus;
-  readonly is_available: AvailabilityFn<N, T>;
+/**
+ * Registration options common to every node kind: identity, optional prose, firing rule and
+ * availability. Omit `id` to get an auto-assigned one; omit `description` when the node needs no
+ * prose. `is_available` defaults to the trigger result.
+ */
+export type NodeOptions<N, T> = {
+  readonly id?: NodeId;
+  readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
-  readonly step: StepFn<S, N, T>;
-  generator: NodeGenerator<N, T> | undefined;
+  readonly is_available?: AvailabilityFn<N, T>;
 };
 
-/** What a caller passes to `DataflowGraph.addNode`. Omit `id` to get an auto-assigned one. */
-export type NodeSpec<S, N, T> = {
-  readonly id?: NodeId;
+/** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
+export type Node<S, N, T> = Identifiable<NodeId> &
+  NodeOptions<N, T> & {
+    state: S;
+    status: NodeStatus;
+    readonly is_available: AvailabilityFn<N, T>;
+    readonly step: StepFn<S, N, T>;
+    generator: NodeGenerator<N, T> | undefined;
+  };
+
+/** What a caller passes to `DataflowGraph.addNode`: common options plus state and body. */
+export type NodeSpec<S, N, T> = NodeOptions<N, T> & {
   readonly state: S;
-  readonly trigger: TriggerRule<N, T>;
   readonly step: StepFn<S, N, T>;
-  readonly is_available?: AvailabilityFn<N, T>;
 };

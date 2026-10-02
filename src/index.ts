@@ -19,6 +19,7 @@ export type {
   Message,
   Node,
   NodeGenerator,
+  NodeOptions,
   NodeSpec,
   NodeStatus,
   ParentView,
@@ -35,11 +36,7 @@ export type {
   NodeSchedule,
   Schedule,
 } from "./scheduler.js";
-export {
-  ReadyScheduler,
-  RoundRobinScheduler,
-  triggerInputs,
-} from "./scheduler.js";
+export { triggerInputs } from "./scheduler.js";
 export type { TriggerKind, TriggerRule } from "./trigger.js";
 export {
   allOf,

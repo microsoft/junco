@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createParallelScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge } from "../src/index.ts";
 import {
@@ -11,7 +12,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -44,7 +44,7 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   const groups: GroupMsg[] = [];
   const tracer = createExampleTracer("cookbook/bigquery-side-input");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,

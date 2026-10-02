@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createParallelScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
@@ -11,7 +12,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -47,7 +47,7 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   const results: Row[] = [];
   const tracer = createExampleTracer("cookbook/filters-cold-days");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,

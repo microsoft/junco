@@ -1,12 +1,12 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createParallelScheduler } from "junco-scheduler";
 import {
   always,
   DataflowGraph,
   emitOnce,
   messageEdge,
   NodeId,
-  ReadyScheduler,
   renderPretty,
   UNBOUNDED,
   valueEdge,
@@ -15,7 +15,7 @@ import {
 
 test("renderPretty renders the current graph topology as Mermaid", () => {
   const graph = new DataflowGraph<void, number, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
   );
@@ -28,7 +28,7 @@ test("renderPretty renders the current graph topology as Mermaid", () => {
       trigger: always(),
       step: emitOnce(() => [], "done"),
     });
-  const first = add("A\"#\n");
+  const first = add('A"#\n');
   const second = add("B&|");
   graph.addEdge(first, second, messageEdge<number, string>("m%"));
   graph.addEdge(first, second, valueEdge<number, string>("v|"));

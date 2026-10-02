@@ -1,3 +1,4 @@
+import { createParallelScheduler } from "junco-scheduler";
 import type { NodeGenerator } from "../src/index.ts";
 import {
   always,
@@ -8,7 +9,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -23,7 +23,7 @@ const fibOut = messageEdge<number, string>("fibOut");
 const results: number[] = [];
 const tracer = createExampleTracer("examples/fibonacci");
 const graph = new DataflowGraph<void, number, string, never>(
-  new ReadyScheduler(),
+  createParallelScheduler(),
   Width(1),
   UNBOUNDED,
   tracer,

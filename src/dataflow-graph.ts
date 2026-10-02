@@ -22,7 +22,7 @@ import type {
   NodeSchedule,
   Schedule,
 } from "./scheduler.js";
-import { evaluateTrigger, satisfiedEdges } from "./trigger.js";
+import { satisfiedEdges } from "./trigger.js";
 import type { Width } from "./width.js";
 
 /** Characters Mermaid would read as markup, entities, comments/directives, math or label ends. */
@@ -35,6 +35,10 @@ function escapeMermaidLabel(value: string): string {
     (character) => `#${character.codePointAt(0)};`,
   );
 }
+
+/** The default availability hook: a node is available exactly when its trigger fires. */
+const whenTriggered = (_view: unknown, triggered: boolean): boolean =>
+  triggered;
 
 /**
  * The per-node state the graph owns: allocated once by {@link DataflowGraph.addNode}, mutated in
@@ -155,7 +159,8 @@ export class DataflowGraph<
   T,
   EH,
   Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
-> implements Pretty {
+> implements Pretty
+{
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
   readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
@@ -165,7 +170,8 @@ export class DataflowGraph<
   #inFlight = false;
 
   /**
-   * @param scheduler Plans each window; `create` is invoked here, exactly once.
+   * @param scheduler Plans each window; `create` is invoked here, exactly once, followed by its
+   *   optional `bind` with this graph's candidate view and window driver.
    * @param window Max turns one lane may hold per plan.
    * @param threads Max concurrent lanes per plan.
    * @param tracer Optional execution observer; omitted means untraced. Never flushed by the graph.
@@ -178,6 +184,12 @@ export class DataflowGraph<
   ) {
     this.#graph = createGraph<Node<S, N, T>, Edge<N, T>>({ multigraph: true });
     this.scheduler.create(window, threads);
+    this.scheduler.bind?.(
+      () => this.#available(),
+      async (signal) => {
+        await this.step({ signal });
+      },
+    );
   }
 
   /**
@@ -206,8 +218,6 @@ export class DataflowGraph<
     const inbound = new Map<EdgeId, Edge<N, T>>();
     this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
 
-    // The default hook closes over `node`; it only ever runs after this initializer completes, so
-    // there is no TDZ hazard, and `inbound` is read lazily so edges wired after `addNode` count.
     const node: Node<S, N, T> = {
       id,
       state: spec.state,
@@ -215,8 +225,10 @@ export class DataflowGraph<
       trigger: spec.trigger,
       step: spec.step,
       generator: undefined,
-      is_available:
-        spec.is_available ?? (() => evaluateTrigger(node.trigger, inbound, id)),
+      is_available: spec.is_available ?? whenTriggered,
+      ...(spec.description === undefined
+        ? {}
+        : { description: spec.description }),
     };
 
     this.#graph.addNode(id, node);
@@ -324,10 +336,14 @@ export class DataflowGraph<
   }
 
   /**
-   * Plan the next window's candidates. Non-destructive: the queues are untouched, so the scheduler
+   * Admit the next window's candidates. Non-destructive: the queues are untouched, so the scheduler
    * sees each node's inbound state live and decides for itself how much of it to read.
    *
-   * Iteration order is ngraph node-insertion order, which makes both shipped schedulers
+   * The graph is the sole admission boundary: a `done` node is skipped, every other node's trigger
+   * is evaluated once — validating every rule edge even when the hook will say no — and only then is
+   * its availability hook told whether that trigger fired. Only admitted nodes reach a scheduler.
+   *
+   * Iteration order is ngraph node-insertion order, which keeps deterministic schedulers
    * deterministic.
    */
   #available(): Map<NodeId, NodeAvailability<N, T>> {
@@ -336,11 +352,18 @@ export class DataflowGraph<
       const node = graphNode.data;
       if (node.status === "done") return;
       const runtime = this.#runtime.get(node.id)!;
-      if (!node.is_available(runtime.probe)) return;
+      const { trigger } = node;
+      const satisfied = satisfiedEdges(trigger, runtime.inbound, node.id);
+      const triggered =
+        trigger.kind === "all"
+          ? satisfied.length === trigger.rule.length
+          : satisfied.length > 0;
+      if (!node.is_available(runtime.probe, triggered)) return;
       available.set(node.id, {
         view: runtime.probe,
-        trigger: node.trigger,
-        satisfied: satisfiedEdges(node.trigger, runtime.inbound, node.id),
+        trigger,
+        satisfied,
+        status: node.status,
       });
     });
     return available;

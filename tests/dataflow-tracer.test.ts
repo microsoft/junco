@@ -1,9 +1,9 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
+import { createParallelScheduler, createScheduler } from "junco-scheduler";
 import type {
   DataflowRunTrace,
-  DataflowScheduler,
   DataflowTracer,
   EdgeIdType,
   MessageSchedule,
@@ -24,7 +24,6 @@ import {
   msg,
   never,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   valueEdge,
@@ -102,21 +101,19 @@ class RecordingTracer implements DataflowTracer {
 }
 
 /** One lane per available node, reading `count` off every edge that node's trigger names. */
-const fixedReader = (
-  count: MessageSchedule,
-): DataflowScheduler<number, string> => ({
-  create(_window: number, _threads: number): void {},
-  schedule(available) {
-    return [...available].map(([id, { trigger }]) => [
-      {
-        id,
-        inputs: new Map<EdgeIdType, MessageSchedule>(
-          trigger.rule.map((edgeId) => [edgeId, count]),
-        ),
-      },
-    ]);
-  },
-});
+const fixedReader = (count: MessageSchedule) =>
+  createScheduler<undefined, number, string>({
+    state: undefined,
+    schedule: (available) =>
+      [...available].map(([id, { trigger }]) => [
+        {
+          id,
+          inputs: new Map<EdgeIdType, MessageSchedule>(
+            trigger.rule.map((edgeId) => [edgeId, count]),
+          ),
+        },
+      ]),
+  });
 
 /** Run `body` with `console.warn` silenced, restoring it afterwards. */
 const quietly = async (body: () => Promise<void>): Promise<void> => {
@@ -206,7 +203,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
     };
 
     const ok = new DataflowGraph<void, number, number, Error>(
-      new ReadyScheduler(),
+      createParallelScheduler(),
       Width(1),
       UNBOUNDED,
       throwing,
@@ -223,7 +220,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
 
     const boom = new Error("boom");
     const bad = new DataflowGraph<void, number, number, Error>(
-      new ReadyScheduler(),
+      createParallelScheduler(),
       Width(1),
       UNBOUNDED,
       throwing,
@@ -248,7 +245,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
 test("a concurrent failure settles the root only after its column settles, keeping the sibling's result", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, string, Error>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,
@@ -306,7 +303,7 @@ test("a concurrent failure settles the root only after its column settles, keepi
 test("each run snapshots current topology and resumes from resolved values without restarting sources", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, number, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,
@@ -398,7 +395,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
     const feed = messageEdge<number, number>("feed");
     const v = valueEdge<number, number>("v");
     const graph = new DataflowGraph<void, number, number, never>(
-      new ReadyScheduler(),
+      createParallelScheduler(),
       Width(1),
       UNBOUNDED,
       tracer,
@@ -439,7 +436,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   cyclic.self = cyclic;
   const feed = messageEdge<Cyclic, string>("feed");
   const graph = new DataflowGraph<void, Cyclic, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     dummy,

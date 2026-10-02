@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import fc from "fast-check";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
+import { createParallelScheduler, createScheduler } from "junco-scheduler";
 import type {
   DataflowScheduler,
   Edge,
   EdgeIdType,
   MessageSchedule,
-  NodeAvailability,
   NodeGenerator,
   NodeIdType,
   Schedule,
@@ -25,8 +25,8 @@ import {
   messageEdge,
   msg,
   NodeId,
+  never,
   on,
-  ReadyScheduler,
   stepNode,
   triggerInputs,
   UNBOUNDED,
@@ -39,7 +39,7 @@ type Graph = DataflowGraph<void, number, string, never>;
 
 const newGraph = (): Graph =>
   new DataflowGraph<void, number, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
   );
@@ -49,23 +49,19 @@ const queued = (edge: Edge<number, string>): readonly number[] =>
   E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
 /** One lane per available node, reading `count` off every edge that node's trigger names. */
-const fixedReader = (
-  count: MessageSchedule,
-): DataflowScheduler<number, string> => ({
-  create(_window: number, _threads: number): void {},
-  schedule(
-    available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
-  ): Schedule {
-    return [...available].map(([id, { trigger }]) => [
-      {
-        id,
-        inputs: new Map<EdgeIdType, MessageSchedule>(
-          trigger.rule.map((edgeId) => [edgeId, count]),
-        ),
-      },
-    ]);
-  },
-});
+const fixedReader = (count: MessageSchedule) =>
+  createScheduler<undefined, number, string>({
+    state: undefined,
+    schedule: (available): Schedule =>
+      [...available].map(([id, { trigger }]) => [
+        {
+          id,
+          inputs: new Map<EdgeIdType, MessageSchedule>(
+            trigger.rule.map((edgeId) => [edgeId, count]),
+          ),
+        },
+      ]),
+  });
 
 test("value edge signals end-of-input: the squarer drains messages, then returns once the source's value lands", async () => {
   const e1 = messageEdge<number, string>("e1");
@@ -455,22 +451,106 @@ test("a depth threshold lives in `is_available`: the gate waits for three, then 
   assert.deepEqual(queued(feed), []);
 });
 
-/** A scripted scheduler; `planned` counts how often the graph consulted it. */
-type Scripted = DataflowScheduler<number, string> & { planned: number };
+test("the graph evaluates triggers before availability: unfired and finished nodes never reach the planner", async () => {
+  const empty = messageEdge<number, string>("empty");
+  const unfed = messageEdge<number, string>("unfed");
+  const planned: string[][] = [];
+  const graph = new DataflowGraph<void, number, string, never>(
+    createScheduler<undefined, number, string>({
+      state: undefined,
+      schedule: (available): Schedule => {
+        planned.push([...available.keys()]);
+        return [...available].map(([id, candidate]) => [
+          { id, inputs: triggerInputs(candidate) },
+        ]);
+      },
+    }),
+    UNBOUNDED,
+    UNBOUNDED,
+  );
+  const hooked: boolean[] = [];
+  const src = graph.addNode({
+    id: NodeId("src"),
+    state: undefined,
+    trigger: always(),
+    step: emitOnce(() => [], "src"),
+  });
+  const waiting = graph.addNode({
+    id: NodeId("waiting"),
+    state: undefined,
+    trigger: when(empty),
+    step: stepNode(() => []),
+  });
+  const idle = graph.addNode({
+    id: NodeId("never"),
+    state: undefined,
+    trigger: never(),
+    step: stepNode(() => []),
+  });
+  const observed = graph.addNode({
+    id: NodeId("observed"),
+    state: undefined,
+    trigger: when(unfed),
+    is_available: (_view, triggered) => {
+      hooked.push(triggered);
+      return false;
+    },
+    step: stepNode(() => []),
+  });
+  graph.addEdge(src, waiting, empty);
+  graph.addEdge(src, observed, unfed);
+
+  assert.deepEqual(
+    [...graph.available()].map(([id, { status }]) => [id, status]),
+    [[src, "ready"]],
+  );
+  await graph.step();
+  assert.deepEqual(
+    [...graph.available()].map(([id, { status }]) => [id, status]),
+    [[src, "running"]],
+  );
+  await graph.run();
+
+  // Priming and finishing `src` were the only plans; once it is done nothing remains to plan.
+  assert.deepEqual(planned, [["src"], ["src"]]);
+  assert.deepEqual(graph.result(src), O.some("src"));
+  assert.equal(graph.available().size, 0);
+  assert.ok(hooked.length > 0 && hooked.every((triggered) => !triggered));
+  for (const id of [waiting, idle, observed]) {
+    assert.equal(graph.getNode(id)!.status, "ready");
+  }
+});
+
+test("every trigger edge is validated even when the availability hook would refuse the node", () => {
+  const unwired = messageEdge<number, string>("unwired");
+  const graph = newGraph();
+  let consulted = 0;
+  graph.addNode({
+    state: undefined,
+    trigger: when(unwired),
+    is_available: () => {
+      consulted += 1;
+      return false;
+    },
+    step: stepNode(() => []),
+  });
+
+  assert.throws(() => graph.available(), DataflowDefinitionError);
+  assert.equal(consulted, 0);
+});
 
 /**
  * Plans window `k` from `windows[k]` (lanes of node ids), each entry reading its default trigger
- * inputs as planned.
+ * inputs as planned; `state.planned` counts how often the graph consulted it.
  */
 const scripted = (
   windows: readonly (readonly (readonly string[])[])[],
-  resolveInputs?: Scripted["resolveInputs"],
-): Scripted => {
-  const scheduler: Scripted = {
-    planned: 0,
-    create(_window: number, _threads: number): void {},
-    schedule(available): Schedule {
-      const lanes = windows[scheduler.planned++];
+  resolveInputs?: DataflowScheduler<number, string>["resolveInputs"],
+) =>
+  createScheduler<{ planned: number }, number, string>({
+    state: { planned: 0 },
+    schedule(available, state): Schedule {
+      const lanes = windows[state.planned++];
       assert.ok(lanes !== undefined, "unscripted window");
       return lanes.map((lane) =>
         lane.map((name) => {
@@ -486,15 +566,15 @@ const scripted = (
         }),
       );
     },
-    resolveInputs,
-  };
-  return scheduler;
-};
+    ...(resolveInputs === undefined ? {} : { resolveInputs }),
+  });
 
-const scriptedGraph = (
-  scheduler: Scripted,
-): DataflowGraph<void, number, string, never, Scripted> =>
-  new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
+const scriptedGraph = (scheduler: ReturnType<typeof scripted>) =>
+  new DataflowGraph<void, number, string, never, ReturnType<typeof scripted>>(
+    scheduler,
+    UNBOUNDED,
+    UNBOUNDED,
+  );
 
 /** An actor that records each delivered batch per edge and never finishes. */
 const recorder = (
@@ -555,7 +635,7 @@ test("a later occurrence of a node that went unavailable consumes nothing and do
   await graph.step();
   assert.deepEqual(seen, [{ feed: [7] }]);
   assert.deepEqual(queued(feed), []);
-  assert.equal(scheduler.planned, 2);
+  assert.equal(scheduler.state.planned, 2);
 });
 
 test("step() runs exactly one window; run() drives to quiescence; an idle step() never plans", async () => {
@@ -578,19 +658,19 @@ test("step() runs exactly one window; run() drives to quiescence; an idle step()
   graph.addEdge(p, c, feed);
 
   const afterStep = await graph.step();
-  assert.equal(scheduler.planned, 1);
+  assert.equal(scheduler.state.planned, 1);
   assert.equal(afterStep.size, 0);
   assert.deepEqual(queued(feed), [1]);
   assert.deepEqual([...graph.available().keys()], [p, c]);
 
   const completed = await graph.run();
-  assert.equal(scheduler.planned, 3);
+  assert.equal(scheduler.state.planned, 3);
   assert.deepEqual([...completed], [[p, "p"]]);
   assert.deepEqual(seen, [{ feed: [1] }]);
   assert.equal(graph.available().size, 0);
 
   assert.equal(await graph.step(), completed);
-  assert.equal(scheduler.planned, 3);
+  assert.equal(scheduler.state.planned, 3);
 });
 
 test("a column runs its lanes concurrently and the next column waits for all of them", async () => {
@@ -696,7 +776,7 @@ test("an aborted signal lets the running column drain, then rejects with its rea
     graph.run({ signal: controller.signal }),
     (error) => error === reason,
   );
-  assert.equal(scheduler.planned, 1);
+  assert.equal(scheduler.state.planned, 1);
 });
 
 test("resolveInputs keeps an `all` trigger atomic for a live actor: a lone replenished edge is not drained", async () => {
@@ -849,12 +929,11 @@ test("an invalid resolved read map rejects before any node of that column advanc
 
 test("without resolveInputs every occurrence keeps its planned partial read", async () => {
   const feed = messageEdge<number, string>("feed");
-  let window = 0;
-  const scheduler: DataflowScheduler<number, string> = {
-    create(_window: number, _threads: number): void {},
-    schedule(available) {
-      window += 1;
-      if (window === 1)
+  const scheduler = createScheduler<{ window: number }, number, string>({
+    state: { window: 0 },
+    schedule(available, state) {
+      state.window += 1;
+      if (state.window === 1)
         return [...available.keys()].map((id) => [{ id, inputs: new Map() }]);
       const one = new Map<EdgeIdType, MessageSchedule>([[feed.id, 1]]);
       return [
@@ -865,7 +944,7 @@ test("without resolveInputs every occurrence keeps its planned partial read", as
         ],
       ];
     },
-  };
+  });
   const graph = new DataflowGraph<void, number, string, never>(
     scheduler,
     Width(3),

@@ -8,6 +8,9 @@
       "default": "./tracing-opik.ts"
     }
   },
+  "dependencies": {
+    "junco-scheduler": "file:../../junco-scheduler"
+  },
   "optionalDependencies": {
     "dataflow-engine": "file:..",
     "dataflow-engine-opik": "file:../../dataflow-engine-opik",

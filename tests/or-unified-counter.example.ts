@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createParallelScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
 import type { Message } from "../src/index.ts";
 import {
@@ -10,7 +11,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -36,7 +36,7 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
 
   const tracer = createExampleTracer("cookbook/or-unified-counter");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,

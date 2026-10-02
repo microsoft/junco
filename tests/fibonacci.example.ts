@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
+import { createParallelScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
 import type { NodeGenerator } from "../src/index.ts";
 import {
@@ -12,7 +13,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -27,7 +27,7 @@ test("cookbook: fibonacci via self-loop", async () => {
   const results: number[] = [];
   const tracer = createExampleTracer("cookbook/fibonacci");
   const graph = new DataflowGraph<void, number, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,

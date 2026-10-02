@@ -4,6 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
+import { createParallelScheduler } from "junco-scheduler";
 import { createExampleTracer } from "../examples/tracing.ts";
 import type { Edge, Message } from "../src/index.ts";
 import {
@@ -16,7 +17,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -79,7 +79,7 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
 
   const tracer = createExampleTracer("cookbook/mergecontacts");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ReadyScheduler(),
+    createParallelScheduler(),
     Width(1),
     UNBOUNDED,
     tracer,

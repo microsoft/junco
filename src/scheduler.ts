@@ -23,19 +23,38 @@ export type NodeSchedule = {
  */
 export type Schedule = readonly (readonly NodeSchedule[])[];
 
-/** What the runtime knows about one available node when it asks for a plan. */
+/**
+ * What the runtime knows about one available node when it asks for a plan. Every entry is a node
+ * the runtime has already admitted: not `done`, trigger evaluated, availability hook passed.
+ * These are candidate-local input-planning facts; nothing here reaches any other node.
+ */
 export type NodeAvailability<N, T> = {
   /** LIVE, non-destructive view of the node's inbound edges: queues are unconsumed. */
   readonly view: ParentView<N, T>;
   readonly trigger: TriggerRule<N, T>;
   /** Rule edges carrying something right now, in rule insertion order. */
   readonly satisfied: readonly EdgeId[];
+  /** `"ready"` until its first occurrence primes the generator, then `"running"`. */
+  readonly status: "ready" | "running";
 };
 
 /** Pluggable planner deciding which available nodes run, in which lane, at which turn, reading how much. */
 export type DataflowScheduler<N, T> = {
   /** Configure the planner. Called exactly once, by the graph constructor. */
   create(window: number, threads: number): void;
+
+  /**
+   * Receive the constructing graph's candidate view and window driver. Called at most once, by the
+   * graph constructor, right after {@link create}; a scheduler that does not need them omits it.
+   *
+   * `available` returns a fresh snapshot of the admitted candidates, exactly what {@link schedule}
+   * would receive. `step` runs one window, like `graph.step({ signal })`, discarding its results.
+   * Neither exposes the graph, other nodes, edges or results.
+   */
+  bind?(
+    available: () => ReadonlyMap<NodeId, NodeAvailability<N, T>>,
+    step: (signal?: AbortSignal) => Promise<void>,
+  ): void;
 
   /**
    * Plan the next window from the currently-available nodes and what the runtime knows about each.
@@ -65,7 +84,7 @@ export type DataflowScheduler<N, T> = {
 
 /**
  * The default read plan for a node: every edge an `"all"` rule fires on, or only the first
- * satisfied edge of an `"any"` rule, each read WHOLE. Both shipped schedulers use it.
+ * satisfied edge of an `"any"` rule, each read WHOLE. The usual input plan for scheduler policies.
  *
  * A trigger says only WHICH edges must be carrying something, so this is the plainest plan that
  * honours it. A scheduler wanting fixed-size batches, or a partial drain, builds its own
@@ -88,60 +107,3 @@ export const triggerInputs = <N, T>({
   }
   return inputs;
 };
-
-/**
- * Runs every available node in one concurrent column, one lane each, one turn per window.
- *
- * Its lane count equals the number of available nodes, which can exceed any finite `threads`, so a
- * graph using it MUST be constructed with `threads: Number.POSITIVE_INFINITY`.
- */
-export class ReadyScheduler<N, T> implements DataflowScheduler<N, T> {
-  /** Ignores both knobs: this scheduler always plans exactly one turn over every available node. */
-  create(_window: number, _threads: number): void {}
-
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
-    return [...available].map(([id, availability]) => [
-      { id, inputs: triggerInputs(availability) },
-    ]);
-  }
-}
-
-/**
- * Fills `threads` lanes x `window` turns per plan, resuming from where the previous plan stopped.
- *
- * `capacity <= ids.length` guarantees the placed ids are distinct, so no column ever holds a
- * duplicate; the rotating cursor guarantees a starved node is eventually reached when
- * `threads * window < available.size`.
- */
-export class RoundRobinScheduler<N, T> implements DataflowScheduler<N, T> {
-  #window = 1;
-  #threads = 1;
-  #cursor = 0;
-
-  create(window: number, threads: number): void {
-    this.#window = window;
-    this.#threads = threads;
-  }
-
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
-    const ids = [...available.keys()];
-    if (ids.length === 0) return [];
-
-    const capacity = Math.min(ids.length, this.#threads * this.#window);
-    // `min(threads, capacity)` is the exact lane count: any further lane would stay empty. It also
-    // keeps the allocation finite when `threads` is `Number.POSITIVE_INFINITY`.
-    const lanes: NodeSchedule[][] = Array.from(
-      { length: Math.min(this.#threads, capacity) },
-      () => [],
-    );
-    for (let k = 0; k < capacity; k++) {
-      const id = ids[(this.#cursor + k) % ids.length]!;
-      lanes[k % this.#threads]!.push({
-        id,
-        inputs: triggerInputs(available.get(id)!),
-      });
-    }
-    this.#cursor = (this.#cursor + capacity) % ids.length;
-    return lanes.filter((lane) => lane.length > 0);
-  }
-}

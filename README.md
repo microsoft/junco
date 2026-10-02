@@ -12,7 +12,7 @@ flowchart TB
   subgraph Definition["new DataflowGraph#lt;S, N, T, EH, Q#gt;(scheduler: Q, window, threads: WidthType via Width() or UNBOUNDED, tracer?: DataflowTracer)"]
     N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*, stepNode, emitOnce)"]
     E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>messageEdge: Queue#lt;N#gt; FIFO<br/>valueEdge: write-once Option#lt;T#gt;"]
-    S["DataflowScheduler#lt;N, T#gt;<br/>ReadyScheduler, RoundRobinScheduler"]
+    S["DataflowScheduler#lt;N, T#gt;<br/>junco-scheduler: createParallelScheduler, createRoundRobinScheduler, createScheduler"]
   end
   subgraph Run["step(options?) / run(options?): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
     A["available: Map#lt;NodeIdType, NodeAvailability#gt;<br/>AvailabilityFn / evaluateTrigger / satisfiedEdges"] --> P["schedule(available): Schedule<br/>NodeSchedule lanes, InputSchedule reads<br/>triggerInputs default"]
@@ -52,8 +52,9 @@ Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import
 ## Quick start
 
 ```ts
+import { createParallelScheduler } from "junco-scheduler";
 import {
-  DataflowGraph, ReadyScheduler, UNBOUNDED, Width,
+  DataflowGraph, UNBOUNDED, Width,
   always, emitOnce, from, messageEdge, msg, stepNode, when,
 } from "dataflow-engine";
 import type { NodeGenerator } from "dataflow-engine";
@@ -61,7 +62,7 @@ import type { NodeGenerator } from "dataflow-engine";
 const numbers = messageEdge<number, string>("numbers");
 const squares = messageEdge<number, string>("squares");
 const graph = new DataflowGraph<void, number, string, never>(
-  new ReadyScheduler(), Width(1), UNBOUNDED,
+  createParallelScheduler(), Width(1), UNBOUNDED,
 );
 
 const source = graph.addNode({
@@ -150,13 +151,18 @@ A value edge is never consumed: once resolved, it satisfies its trigger on every
 | `allOf(on(a), on(b))` | every entry is satisfied; when only some are, nothing is read |
 | `anyOf(on(a), on(b))` | the first satisfied entry, in the order given |
 
-A node that must wait for a deeper backlog can supply an `is_available(view)` hook.
+The engine evaluates each node's trigger first, then consults its `is_available(view, triggered)` hook. The default hook returns `triggered`; a node may override it, e.g. to wait for a deeper backlog or to keep a started actor resumable.
+
+`NodeSpec<S, N, T>` is `NodeOptions<N, T>` plus `state` and `step`. `NodeOptions` holds the registration fields every node kind shares: optional `id`, optional `description` (free prose, kept on the registered `Node` when given and never used for scheduling), the required `trigger` and the optional `is_available` hook. Libraries building node specs reuse this type rather than declaring their own.
+
+Concrete schedulers live in the sibling package `junco-scheduler` (`import { ... } from "junco-scheduler"`); the engine ships only the contract.
 
 | Scheduler | Plan |
 |---|---|
-| `ReadyScheduler` | Runs every available node in one concurrent turn. Construct the graph with `threads = UNBOUNDED`. |
-| `RoundRobinScheduler` | Fills `threads` lanes x `window` turns, rotating so that no node starves. |
-| Custom | Implement `create(window, threads)` and `schedule(available)`, and optionally `resolveInputs(entry, live)`. |
+| `createParallelScheduler()` | Runs every available node in one concurrent turn, one lane each. Construct the graph with `threads = UNBOUNDED`. |
+| `createRoundRobinScheduler()` | Runs exactly one node per window, taking ids in increasing string order after the last one run, wrapping around. |
+| `createScheduler({ state, schedule, resolveInputs? })` | Builds a custom policy with mutable state kept across cycles. |
+| Custom | Implement `create(window, threads)` and `schedule(available)`, and optionally `resolveInputs(entry, live)` and `bind(available, step)` (receives callbacks to read candidates and drive one step). |
 
 ```ts
 class OneAtATime implements DataflowScheduler<number, string> {
@@ -197,7 +203,20 @@ Pass a `DataflowTracer` as the fourth constructor argument to observe execution;
 
 ## Examples and development
 
-`bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with a custom priority scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
+`bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with `junco-scheduler`'s round-robin scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
+
+Tests and examples take their schedulers from [`junco-scheduler`](https://github.com/junco-org/junco-scheduler), a `file:` development dependency at the sibling path `../junco-scheduler` (`file:../../junco-scheduler` in `examples/`; `src/` never imports it). Clone the public repository there, then build this engine, the scheduler's deterministic root against it, and refresh the installed copies:
+
+```sh
+git clone https://github.com/junco-org/junco-scheduler.git ../junco-scheduler
+bun install --frozen-lockfile && bun run build
+(cd ../junco-scheduler && bun install --frozen-lockfile && bun run build:core)
+bun install --force --frozen-lockfile
+```
+
+`build:core` builds only the scheduler's deterministic root, so the installed scheduler carries no agent-side dependencies; CI checks out and builds it the same way. The forced reinstall refreshes the installed scheduler with its build and the copy of this engine that it links against.
+
+The root uses Bun's isolated linker, so the installed scheduler resolves `dataflow-engine` to an installed copy of this engine rather than through the sibling checkout. Because `dataflow-engine` imported from this root self-references `./src`, classes such as `DataflowDefinitionError` thrown by the scheduler here come from that installed copy; downstream consumers that depend on `dataflow-engine` share one instance.
 
 Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` typechecks and bundles all sixteen programs into `examples/dist/{opik,dummy}` before running any of them. The Opik build constructs the SDK client once as a preflight, so a missing optional dependency, a type error or an invalid Opik configuration fails the build before any example runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 

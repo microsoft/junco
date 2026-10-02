@@ -1,3 +1,4 @@
+import { createParallelScheduler } from "junco-scheduler";
 import type { Message } from "../src/index.ts";
 import {
   always,
@@ -7,7 +8,6 @@ import {
   messageEdge,
   msg,
   on,
-  ReadyScheduler,
   stepNode,
   UNBOUNDED,
   Width,
@@ -32,7 +32,7 @@ const unifiedCounts = new Map<string, number>();
 
 const tracer = createExampleTracer("examples/word-count");
 const graph = new DataflowGraph<void, Msg, string, never>(
-  new ReadyScheduler(),
+  createParallelScheduler(),
   Width(1),
   UNBOUNDED,
   tracer,
