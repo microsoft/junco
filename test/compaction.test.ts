@@ -1,0 +1,368 @@
+import { describe, test } from "bun:test";
+import assert from "node:assert/strict";
+import { type AgentMessage, type AgentTool, estimateTokens, type PromptTemplate, type Skill } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { always, messageEdge, NodeId, type NodeIdType, when } from "dataflow-engine";
+import * as O from "fp-ts/lib/Option.js";
+import { JuncoAgentError } from "junco-agent";
+import {
+  type AgenticInput,
+  agentNode,
+  type CompactionPolicy,
+  compactGraph,
+  Deterministic,
+  deterministicNode,
+  graphNode,
+  type JuncoGraph,
+  MockAgent,
+  type MockMaintenance,
+  type MockTranscript,
+} from "../src/index.ts";
+import {
+  assistant,
+  plainGraph,
+  type PolicyScheduler,
+  run,
+  settle,
+  textOf,
+  user,
+  userTexts,
+  yieldsThen,
+} from "./deterministic-support.ts";
+
+// Graph compaction policies over real dataflow graphs of MockAgent members whose scripted
+// compaction replaces history with `user("x")` (one token). Every model has a 100-token window.
+
+const model = (contextWindow: number): Model<Api> => ({
+  id: "mock",
+  name: "mock",
+  api: "mock",
+  provider: "mock",
+  baseUrl: "",
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  reasoning: false,
+  contextWindow,
+  maxTokens: 10,
+});
+const COMPACTED: MockMaintenance = { method: "compact", args: [], result: { ok: true }, history: [user("x")] };
+
+/** History of exactly `tokens` estimated tokens: four characters per token. */
+const seeded = (tokens: number): AgentMessage[] => (tokens === 0 ? [] : [user("t".repeat(4 * tokens))]);
+
+/** A member measuring `tokens` against `window` (`null`: no model), whose single compaction succeeds. */
+function member(
+  tokens: number,
+  transcript: Partial<MockTranscript<Skill, PromptTemplate, AgentTool>> = {},
+  window: number | null = 100,
+): MockAgent {
+  return new MockAgent({
+    history: seeded(tokens),
+    maintenance: [COMPACTED],
+    runs: [],
+    ...(window === null ? {} : { models: [model(window)], model: { provider: "mock", modelId: "mock" } }),
+    ...transcript,
+  });
+}
+
+const node = (agent: MockAgent, id: string) =>
+  agentNode(agent, { id: NodeId(id), description: id, trigger: always() });
+
+const resultText = (graph: JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>, id: NodeIdType): string | undefined => {
+  const result = graph.result(id);
+  return O.isSome(result) ? textOf(result.value) : undefined;
+};
+
+const flushMacrotask = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * Available a=40, b=41, f=20; c=39 with an unsatisfied trigger; d=70 whose availability rejects;
+ * e=90 completed by the graph before the others were added.
+ */
+async function policyGraph() {
+  const graph = plainGraph("round-robin");
+  const finished = assistant("e done");
+  const e = member(90 - estimateTokens(user("e")) - estimateTokens(finished), {
+    prompt: "e",
+    runs: [run([settle(finished)])],
+  });
+  const eId = graph.addNode(node(e, "e"));
+  await graph.run();
+  assert.equal(resultText(graph, eId), "e done");
+  assert.equal(await e.context_size(), 90);
+
+  const staged = (tokens: number, name: string) =>
+    member(tokens, { prompt: name, runs: [run([settle(assistant(`${name} done`))])] });
+  const agents = { a: staged(40, "a"), b: staged(41, "b"), c: staged(39, "c"), d: staged(70, "d"), e, f: staged(20, "f") };
+  const ids = { a: graph.addNode(node(agents.a, "a")), b: graph.addNode(node(agents.b, "b")) } as Record<keyof typeof agents, NodeIdType>;
+  const never = messageEdge<AgenticInput, AssistantMessage>("d->c");
+  ids.c = graph.addNode(agentNode(agents.c, { id: NodeId("c"), description: "c", trigger: when(never) }));
+  ids.d = graph.addNode({ ...node(agents.d, "d"), is_available: () => false });
+  ids.e = eId;
+  ids.f = graph.addNode(node(agents.f, "f"));
+  graph.addEdge(ids.d, ids.c, never);
+  assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
+  return { graph, agents, ids };
+}
+
+const POLICIES: readonly (readonly [CompactionPolicy, readonly string[]])[] = [
+  ["all", ["a", "b", "c", "d", "e", "f"]],
+  ["more-than-forty", ["b", "d", "e"]],
+  ["all-available", ["a", "b", "f"]],
+  ["more-than-forty-available", ["b"]],
+];
+
+describe("policy selection", () => {
+  for (const [name, expected] of POLICIES) {
+    test(`${name} compacts exactly ${expected.join(",")} and leaves graph state to normal execution`, async () => {
+      const { graph, agents, ids } = await policyGraph();
+      const before = Object.fromEntries(
+        await Promise.all(Object.entries(agents).map(async ([key, agent]) => [key, await agent.context_size()] as const)),
+      );
+      assert.equal(await compactGraph(graph, name), undefined);
+
+      for (const [key, agent] of Object.entries(agents)) {
+        const changed = expected.includes(key);
+        assert.equal(await agent.context_size(), changed ? 1 : before[key], `context of ${key}`);
+        assert.equal(agent.calls.filter((call) => call.method === "compact").length, changed ? 1 : 0, `requests of ${key}`);
+        // No staged prompt was started and no message was sent.
+        assert.equal(agent.requests.length, key === "e" ? 1 : 0);
+      }
+      assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
+
+      await graph.run();
+      assert.equal(resultText(graph, ids.e), "e done");
+      for (const key of ["a", "b", "f"] as const) {
+        assert.equal(resultText(graph, ids[key]), `${key} done`);
+        assert.deepEqual(userTexts(agents[key].requests[0]!.messages)[0], expected.includes(key) ? "x" : "t".repeat(4 * before[key]!));
+      }
+      for (const key of ["c", "d"] as const) assert.equal(resultText(graph, ids[key]), undefined);
+    });
+  }
+});
+
+describe("policy boundaries", () => {
+  test("an empty graph or selection completes without requests", async () => {
+    for (const [policy] of POLICIES) assert.equal(await compactGraph(plainGraph("parallel"), policy), undefined);
+    const graph = plainGraph("parallel");
+    // No compaction record: a wrongly selected member would reject.
+    const quiet = member(40, { maintenance: [] });
+    graph.addNode(node(quiet, "quiet"));
+    assert.equal(await compactGraph(graph, "more-than-forty"), undefined);
+    assert.equal(await compactGraph(graph, "more-than-forty-available"), undefined);
+    assert.equal(await quiet.context_size(), 40);
+  });
+
+  test("an unknown policy rejects before inspecting the graph", async () => {
+    const graph = plainGraph("parallel");
+    const full = member(90);
+    graph.addNode(node(full, "full"));
+    // @ts-expect-error the runtime boundary rejects a selector outside CompactionPolicy
+    await assert.rejects(compactGraph(graph, "most"), (error: unknown) => {
+      assert.ok(error instanceof JuncoAgentError);
+      assert.equal(error.code, "invalid_argument");
+      assert.equal(error.message, "Unknown compaction policy");
+      return true;
+    });
+    assert.equal(await full.context_size(), 90);
+    assert.deepEqual(userTexts(full.history), ["t".repeat(360)]);
+    assert.deepEqual(full.calls, []);
+  });
+
+  test("an unknown context window rejects a threshold policy before any history changes", async () => {
+    for (const window of [null, 0, -1, Number.POSITIVE_INFINITY, Number.NaN]) {
+      const graph = plainGraph("parallel");
+      // Staged prompts make both members available.
+      const full = member(90, { prompt: "go" });
+      const unknown = member(90, { prompt: "go" }, window);
+      graph.addNode(node(full, "full"));
+      graph.addNode(node(unknown, "unknown"));
+      for (const policy of ["more-than-forty", "more-than-forty-available"] as const) {
+        await assert.rejects(compactGraph(graph, policy), (error: unknown) => {
+          assert.ok(error instanceof JuncoAgentError);
+          assert.equal(error.code, "invalid_state");
+          assert.equal(error.message, 'Cannot determine context fullness for node "unknown"');
+          return true;
+        });
+      }
+      assert.equal(await full.context_size(), 90);
+      assert.deepEqual(full.calls, []);
+    }
+  });
+
+  test("available-only policies never measure unavailable members", async () => {
+    class Measured extends MockAgent {
+      modelReads = 0;
+      override getModel() {
+        this.modelReads++;
+        return super.getModel();
+      }
+    }
+    const graph = plainGraph("parallel");
+    const available = member(90, { prompt: "go", runs: [yieldsThen(0, "done")] });
+    // Without a model it could not be measured at all.
+    const hidden = new Measured({ prompt: "go", history: seeded(90), runs: [] });
+    graph.addNode(node(available, "available"));
+    graph.addNode({ ...node(hidden, "hidden"), is_available: () => false });
+    assert.equal(await compactGraph(graph, "more-than-forty-available"), undefined);
+    assert.equal(hidden.modelReads, 0);
+    assert.equal(await available.context_size(), 1);
+    assert.equal(await hidden.context_size(), 90);
+  });
+
+  test("selection is the invocation snapshot, not readiness after measurement", async () => {
+    const gate = Promise.withResolvers<void>();
+    const measuring = Promise.withResolvers<void>();
+    class Gated extends MockAgent {
+      override async context_size() {
+        measuring.resolve();
+        await gate.promise;
+        return super.context_size();
+      }
+    }
+    const readiness = { early: true, late: false };
+    const early = new Gated({
+      prompt: "go",
+      history: seeded(90),
+      models: [model(100)],
+      model: { provider: "mock", modelId: "mock" },
+      maintenance: [COMPACTED],
+      runs: [],
+    });
+    const late = member(90, { prompt: "go" });
+    const graph = plainGraph("parallel");
+    graph.addNode({ ...node(early, "early"), is_available: () => readiness.early });
+    graph.addNode({ ...node(late, "late"), is_available: () => readiness.late });
+    const compaction = compactGraph(graph, "more-than-forty-available");
+    await measuring.promise;
+    readiness.early = false;
+    readiness.late = true;
+    gate.resolve();
+    assert.equal(await compaction, undefined);
+    assert.equal(await early.context_size(), 1);
+    assert.equal(await late.context_size(), 90);
+  });
+
+  test("a later idle member compacts while an earlier selected member is still yielded", async () => {
+    const graph = plainGraph("round-robin");
+    const held = member(50, { prompt: "hold", runs: [yieldsThen(1, "held done")] });
+    const idle = member(50);
+    const heldId = graph.addNode(node(held, "held"));
+    graph.addNode(node(idle, "idle"));
+    for (let windows = 0; held.status !== "suspended"; windows++) {
+      assert.ok(windows < 8, "member never yielded");
+      await graph.step();
+    }
+    const compaction = compactGraph(graph, "all");
+    void compaction.catch(() => undefined);
+    await flushMacrotask();
+    assert.equal(await idle.context_size(), 1);
+    assert.equal(held.status, "suspended");
+    assert.deepEqual(userTexts(held.history), ["t".repeat(200), "hold"]);
+
+    // Driving the graph lets the held run settle normally; its compaction follows.
+    await graph.run();
+    assert.equal(await compaction, undefined);
+    assert.equal(resultText(graph, heldId), "held done");
+    assert.deepEqual(userTexts(held.history), ["x"]);
+  });
+
+  test("every selected request finishes; failures aggregate in request order", async () => {
+    const first = new Error("first failed");
+    const second = new Error("second failed");
+    const failing = (error: Error) => member(90, { maintenance: [{ method: "compact", args: [], result: { ok: false, error } }] });
+    const graph = plainGraph("parallel");
+    const a = failing(first);
+    const b = member(90);
+    const c = failing(second);
+    graph.addNode(node(a, "a"));
+    graph.addNode(node(b, "b"));
+    graph.addNode(node(c, "c"));
+    await assert.rejects(compactGraph(graph, "all"), (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.message, "Graph compaction failed");
+      assert.deepEqual(error.errors, [first, second]);
+      return true;
+    });
+    assert.equal(await b.context_size(), 1);
+    assert.equal(await a.context_size(), 90);
+    assert.equal(await c.context_size(), 90);
+  });
+
+  test("heterogeneous graphs compact only direct prompt agents; nested graphs and coroutines are skipped", async () => {
+    class Measured extends MockAgent {
+      reads = 0;
+      override context_size() {
+        this.reads++;
+        return super.context_size();
+      }
+      override getModel() {
+        this.reads++;
+        return super.getModel();
+      }
+    }
+    /**
+     * Adds a nested graph whose full, available member would reject any compaction, and a
+     * coroutine, to `graph`.
+     */
+    const addSkipped = (graph: JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>) => {
+      const inner = new Measured({
+        prompt: "inner",
+        history: seeded(90),
+        models: [model(100)],
+        model: { provider: "mock", modelId: "mock" },
+        maintenance: [],
+        runs: [yieldsThen(0, "inner done")],
+      });
+      const child = plainGraph("parallel");
+      const innerId = child.addNode(node(inner, "inner"));
+      const coroutine = new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        started.add(coroutine);
+        yield [];
+        return assistant("coroutine done");
+      });
+      const childId = graph.addNode(graphNode(child, { id: NodeId("child"), trigger: always() }, { result: innerId }));
+      const coroutineId = graph.addNode(deterministicNode(coroutine, { id: NodeId("coroutine"), trigger: always() }));
+      return { inner, child, coroutine, childId, coroutineId };
+    };
+    const started = new Set<Deterministic<AgenticInput, AssistantMessage>>();
+
+    for (const [name, expected] of POLICIES) {
+      // Without a compactable direct state, nothing is measured or requested.
+      const bare = plainGraph("parallel");
+      const alone = addSkipped(bare);
+      assert.equal(bare.available().size, 2, name);
+      assert.equal(await compactGraph(bare, name), undefined, name);
+      assert.equal(alone.inner.reads, 0, name);
+      assert.deepEqual(alone.inner.calls, [], name);
+
+      const graph = plainGraph("parallel");
+      const nested = addSkipped(graph);
+      const { childId, coroutineId } = nested;
+      const full = member(90, { prompt: "full", runs: [yieldsThen(0, "full done")] });
+      const small = member(20, { prompt: "small", runs: [yieldsThen(0, "small done")] });
+      const fullId = graph.addNode(node(full, "full"));
+      const smallId = graph.addNode(node(small, "small"));
+      assert.equal(graph.available().size, 4, name);
+      assert.equal(await compactGraph(graph, name), undefined, name);
+
+      // POLICIES' fixture compacts b (41 tokens) under every policy and f (20) only without a threshold.
+      assert.equal(await full.context_size(), 1, name);
+      assert.equal(await small.context_size(), expected.includes("f") ? 1 : 20, name);
+      assert.equal(nested.inner.reads, 0, name);
+      assert.deepEqual(nested.inner.calls, [], name);
+      assert.ok(!started.has(alone.coroutine) && !started.has(nested.coroutine), name);
+      assert.equal(graph.getNode(childId)!.state, nested.child);
+      assert.equal(graph.getNode(coroutineId)!.state, nested.coroutine);
+
+      // The skipped states then execute normally, the nested member with its uncompacted history.
+      await graph.run();
+      assert.deepEqual(
+        [childId, coroutineId, fullId, smallId].map((id) => resultText(graph, id)),
+        ["inner done", "coroutine done", "full done", "small done"],
+        name,
+      );
+      assert.deepEqual(userTexts(nested.inner.requests[0]!.messages), ["t".repeat(360), "inner"], name);
+    }
+  });
+});

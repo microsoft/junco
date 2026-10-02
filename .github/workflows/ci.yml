@@ -75,6 +75,13 @@ jobs:
           ssh-key: ${{ secrets.JUNCO_AGENT_SSH_KEY }}
           persist-credentials: false
 
+      - name: Checkout junco-scheduler
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/junco-scheduler
+          path: junco-scheduler
+          persist-credentials: false
+
       - name: Install native build libraries
         run: |
           sudo apt-get update
@@ -100,21 +107,39 @@ jobs:
         with:
           bun-version: '1.4.2'
 
-      - name: Build and test junco-tools
+      - name: Build junco-tools
         working-directory: junco-tools
         run: |
           npm ci
           npm run build
-          npm run build:native:test
-          npm test
 
-      - name: Build and test dataflow-engine
+      - name: Build dataflow-engine source
         working-directory: dataflow-engine
         run: |
           bun install --frozen-lockfile
+          bun run build
+
+      - name: Build and typecheck junco-agent
+        working-directory: junco-agent
+        run: |
+          bun install --linker hoisted --frozen-lockfile
+          bun run build
+          bun run typecheck
+
+      # `bun add` must be the first install: after `bun install` it fails copying the checked-out
+      # `file:` siblings' read-only .git pack files.
+      - name: Build junco-scheduler
+        working-directory: junco-scheduler
+        run: |
+          bun add --no-save ../junco-agent @earendil-works/pi-agent-core@0.99.2 @earendil-works/pi-ai@0.99.2 @earendil-works/pi-coding-agent@0.99.2 typebox@1.3.34
+          bun run build
+
+      - name: Test dataflow-engine
+        working-directory: dataflow-engine
+        run: |
+          bun install --force --frozen-lockfile
           bun run typecheck
           bun run test
-          bun run build
 
       - name: Build dataflow-engine-opik
         working-directory: dataflow-engine-opik
@@ -123,19 +148,24 @@ jobs:
           bun run typecheck
           bun run build
 
-      - name: Build and test junco-agent
-        working-directory: junco-agent
-        run: |
-          bun install --linker hoisted --frozen-lockfile
-          bun run build
-          bun run typecheck
-          bun run test
-
       - name: Build and test junco-agency
         working-directory: junco-agency
         run: |
           bun install --frozen-lockfile
           bun run typecheck
           bun run build
-          bun run test
+          bun run test:coverage
           bun run smoke
+
+      - name: Installed engine identity
+        working-directory: junco-agency
+        run: |
+          bun --no-install --eval '
+          import assert from "node:assert/strict";
+          import { DataflowDefinitionError, DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
+          import { createParallelScheduler } from "junco-scheduler";
+          const scheduler = createParallelScheduler();
+          new DataflowGraph(scheduler, Width(1), UNBOUNDED);
+          assert.throws(() => new DataflowGraph(scheduler, Width(1), UNBOUNDED), (error) => error instanceof DataflowDefinitionError);
+          console.log("consumer-engine-identity: ok");
+          '

@@ -1,169 +1,137 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fauxAssistantMessage, type AssistantMessage } from "@earendil-works/pi-ai";
-import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
+import { type AssistantMessage, contentText, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { DataflowNodeError, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { createOssSearchTool, publishPlan, runCommittee, type MemberId } from "../examples/oss-committee.ts";
-import { scriptedCommitteeFixture } from "./oss-committee.fixture.ts";
+import { approvedPlan, convene, createOssSearchTool, reviewRound } from "../examples/oss-committee.ts";
+import { request, type ScriptedReview, scriptedCommittee } from "./oss-committee.fixture.ts";
 
-const request = "Design a C# TUI for committee decision history.";
-const members = ["Librarian", "Architect", "Reducer"] as const satisfies readonly MemberId[];
 const repositoryUrl = "https://github.com/tui-cs/Terminal.Gui";
+const textOf = (message: AssistantMessage) => contentText(message.content).trim();
+const rateLimited = () => new Response("rate limited", { status: 403 });
+const emptySearch = () => Response.json({ incomplete_results: false, items: [] });
+const revise = (feedback: string): ScriptedReview => ({ approved: false, feedback });
+const approved: ScriptedReview = { approved: true, feedback: "Minimal, clean, and backed by well-trusted OSS." };
+const normalRound = ["Librarian", "Librarian", "Architect", "Reducer", "Reducer"] as const;
 
-async function tempOutput() {
-  const directory = await mkdtemp(join(tmpdir(), "oss-committee-test-"));
-  return { directory, outputPath: join(directory, "plan.md") };
-}
+test("a round gates each member on the previous member's complete report", async () => {
+  await using committee = await scriptedCommittee();
+  const { graph } = reviewRound(request, committee.members, committee.search);
+  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  await graph.step(); // prime the Librarian without starting its prompt
+  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  await graph.step(); // the Librarian searches and finishes; both outgoing value edges resolve
+  const librarian = graph.result(NodeId("Librarian"));
+  assert.ok(O.isSome(librarian));
+  const librarianReport = textOf(librarian.value);
+  assert.ok(librarianReport.includes(repositoryUrl));
+  assert.ok(librarianReport.includes("GitHub-reported stars: 10000"));
+  assert.deepEqual([...graph.available().keys()], ["Architect"]);
+  assert.equal(committee.searchQueries.length, 1);
+  assert.ok(!committee.searchQueries[0]!.includes(request));
+  assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
 
-function textOf(message: AssistantMessage): string {
-  return message.content.map((block) => block.type === "text" ? block.text : "").join("").trim();
-}
+  await graph.step(); // prime the Architect
+  await graph.step(); // deliver the complete Librarian report
+  assert.equal(committee.memberInputs.Architect.length, 1);
+  assert.ok(committee.memberInputs.Architect[0]!.includes(librarianReport));
+  assert.deepEqual([...graph.available().keys()], ["Reducer"]);
 
-async function assertNoOutput(outputPath: string): Promise<void> {
-  await assert.rejects(lstat(outputPath), { code: "ENOENT" });
-}
+  await graph.run();
+  const architect = graph.result(NodeId("Architect"));
+  assert.ok(O.isSome(architect));
+  assert.equal(committee.memberInputs.Reducer.length, 1);
+  assert.ok(committee.memberInputs.Reducer[0]!.includes(librarianReport));
+  assert.ok(committee.memberInputs.Reducer[0]!.includes(textOf(architect.value)));
+  assert.deepEqual(committee.review.takeVerdict(), approved);
+}, 5_000);
 
-function assertClosed(committee: Awaited<ReturnType<typeof scriptedCommitteeFixture>>): void {
-  for (const id of members) assert.equal(committee.members[id].status, "closed", `${id} must close`);
-}
+test("a failed lookup yields to the Architect before the Librarian resumes", async () => {
+  await using committee = await scriptedCommittee({ lookups: [[rateLimited()]] });
+  const { graph } = reviewRound(request, committee.members, committee.search);
+  await graph.step(); // prime the Librarian
+  await graph.step(); // failed lookup, followed by the real yield tool
+  assert.equal(committee.search.searches(), 0);
+  assert.equal(committee.search.failures(), 1);
+  assert.equal(committee.members.Librarian.status, "suspended");
+  assert.ok(O.isNone(graph.result(NodeId("Librarian"))));
+  assert.deepEqual([...graph.available().keys()], ["Architect"]);
+  assert.deepEqual(committee.modelRequests, ["Librarian", "Librarian"]);
 
-test("researched results gate the three members and produce one sourced minimal plan", async () => {
-  const committee = await scriptedCommitteeFixture(new DummyTracer());
-  const { directory, outputPath } = await tempOutput();
-  try {
-    const { graph } = committee;
-    assert.deepEqual([...graph.available().keys()], ["Librarian"]);
-    await graph.step(); // prime Librarian without activating its staged prompt
-    assert.deepEqual([...graph.available().keys()], ["Librarian"]);
-    assert.equal(committee.memberInputs.Architect.length, 0);
-    await graph.step(); // Librarian searches and finishes; both outgoing value edges resolve
-    const librarian = graph.result(NodeId("Librarian"));
-    assert.ok(O.isSome(librarian));
-    const librarianReport = textOf(librarian.value);
-    assert.ok(librarianReport.includes(repositoryUrl), "the report must cite the searched repository");
-    assert.deepEqual([...graph.available().keys()], ["Architect"]);
-    assert.equal(committee.memberInputs.Architect.length, 0);
-    assert.equal(committee.memberInputs.Reducer.length, 0);
-    assert.equal(committee.searchQueries.length, 1);
-    assert.ok(!committee.searchQueries[0]!.includes(request), "search must not send the original request");
-    assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
+  await graph.step(); // prime the Architect without resuming the Librarian
+  await graph.step(); // the Architect receives the yielded snapshot and returns
+  assert.equal(committee.members.Librarian.status, "suspended");
+  assert.ok(O.isSome(graph.result(NodeId("Architect"))));
+  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
-    await graph.step(); // prime Architect
-    assert.equal(committee.memberInputs.Architect.length, 0);
-    await graph.step(); // deliver the complete Librarian return
-    assert.deepEqual(committee.memberInputs.Architect, [
-      `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}`,
-    ]);
-    const architect = graph.result(NodeId("Architect"));
-    assert.ok(O.isSome(architect));
-    const architectReport = textOf(architect.value);
-    assert.ok(architectReport.includes(repositoryUrl), "the Architect must use the delivered research");
-    assert.deepEqual([...graph.available().keys()], ["Reducer"]);
-    assert.equal(committee.memberInputs.Reducer.length, 0);
+  await graph.run();
+  assert.deepEqual(committee.modelRequests, ["Librarian", "Librarian", "Architect", "Librarian", "Reducer", "Reducer"]);
+  assert.ok(committee.memberInputs.Reducer[0]?.includes("HTTP 403"));
+}, 5_000);
 
-    await runCommittee(committee, outputPath);
-    assert.deepEqual(committee.memberInputs.Reducer, [
-      `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}\n\nArchitect report:\n${architectReport}`,
-    ]);
-    const plan = await readFile(outputPath, "utf8");
-    assert.match(plan, /^# Committee plan\n/);
-    assert.ok(plan.includes(request));
-    assert.ok(plan.includes(repositoryUrl));
-    assert.ok(plan.includes("RunStore/UI"));
-    assert.match(plan, /reduce custom rendering glue/i);
-    assert.ok(plan.includes("80x24"));
-    assert.ok(plan.includes("## Committee conclusions"));
-    for (const id of members) assert.ok(plan.includes(`- ${id}:`), `missing ${id} conclusion`);
-    assertClosed(committee);
-    const reducer = graph.result(committee.resultId);
-    assert.ok(O.isSome(reducer));
-    await assert.rejects(publishPlan(outputPath, reducer.value), { code: "EEXIST" });
-    assert.equal(await readFile(outputPath, "utf8"), plan);
-  } finally {
-    await Promise.allSettled(Object.values(committee.members).map((member) => member.return()));
-    await rm(directory, { recursive: true, force: true });
+test("a later failed lookup yields even after an earlier search succeeded", async () => {
+  await using committee = await scriptedCommittee({ lookups: [[emptySearch(), rateLimited()]] });
+  const plan = await convene(request, committee.members, committee.search, committee.review);
+  assert.equal(committee.search.searches(), 1);
+  assert.equal(committee.search.failures(), 1);
+  assert.deepEqual(
+    committee.modelRequests,
+    ["Librarian", "Librarian", "Librarian", "Architect", "Librarian", "Reducer", "Reducer"],
+  );
+  assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
+  assert.ok(plan.includes("HTTP 403"));
+}, 5_000);
+
+test("a truncated closing report after a handoff never reaches the Reducer", async () => {
+  await using committee = await scriptedCommittee({ lookups: [[rateLimited()]], librarianStopReason: "length" });
+  const { graph } = reviewRound(request, committee.members, committee.search);
+  const error = await graph.run().catch((thrown: unknown) => thrown);
+  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
+  const librarian = graph.result(NodeId("Librarian"));
+  assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
+  assert.ok(O.isSome(graph.result(NodeId("Architect"))));
+  assert.deepEqual(committee.memberInputs.Reducer, []);
+  // Pi treats a "length" stop as a context overflow and retries once before failing the run.
+  assert.deepEqual(committee.modelRequests, ["Librarian", "Librarian", "Architect", "Librarian", "Librarian"]);
+}, 5_000);
+
+test("a truncated research report never reaches the Architect", async () => {
+  await using committee = await scriptedCommittee({ librarianStopReason: "length" });
+  const { graph } = reviewRound(request, committee.members, committee.search);
+  const error = await graph.run().catch((thrown: unknown) => thrown);
+  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
+  const librarian = graph.result(NodeId("Librarian"));
+  assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
+  assert.deepEqual(committee.memberInputs.Architect, []);
+  assert.deepEqual(committee.memberInputs.Reducer, []);
+}, 5_000);
+
+test("a valid empty search is reported without inventing a candidate", async () => {
+  await using committee = await scriptedCommittee({ lookups: [[emptySearch()]] });
+  const plan = await convene(request, committee.members, committee.search, committee.review);
+  assert.ok(committee.memberInputs.Architect[0]?.includes("No matching OSS libraries found"));
+  assert.ok(plan.includes("No matching OSS libraries found"));
+  assert.doesNotMatch(plan, /Terminal\.Gui|github\.com\/tui-cs/);
+  assert.match(plan, /OSS[^\n]*unverified/i);
+  assert.match(plan, /license[^\n]*unverified/i);
+}, 5_000);
+
+test("only a complete titled plan can be approved", () => {
+  for (const message of [
+    undefined,
+    fauxAssistantMessage("# Truncated", { stopReason: "length" }),
+    fauxAssistantMessage(" \n "),
+    fauxAssistantMessage("No heading"),
+  ]) {
+    assert.throws(() => approvedPlan(message));
   }
-});
-
-test("a failed GitHub lookup cannot become remembered research", async () => {
-  const committee = await scriptedCommitteeFixture(new DummyTracer(), new Response("rate limited", { status: 403 }));
-  const { directory, outputPath } = await tempOutput();
-  try {
-    await assert.rejects(runCommittee(committee, outputPath), (error: unknown) =>
-      error instanceof DataflowNodeError && error.nodeId === "Architect" &&
-      error.error instanceof Error && /did not complete a valid GitHub OSS search/.test(error.error.message),
-    );
-    assert.equal(committee.searchQueries.length, 1);
-    assert.deepEqual(committee.memberInputs.Architect, []);
-    assert.deepEqual(committee.memberInputs.Reducer, []);
-    assertClosed(committee);
-    await assertNoOutput(outputPath);
-  } finally {
-    await Promise.allSettled(Object.values(committee.members).map((member) => member.return()));
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("a length-stopped Librarian never supplies a partial report", async () => {
-  const committee = await scriptedCommitteeFixture(new DummyTracer(), undefined, "length");
-  const { directory, outputPath } = await tempOutput();
-  try {
-    await assert.rejects(runCommittee(committee, outputPath), (error: unknown) =>
-      error instanceof DataflowNodeError && error.nodeId === "Architect" &&
-      error.error instanceof Error && /Librarian stopped with /.test(error.error.message),
-    );
-    assert.equal(committee.searchQueries.length, 1);
-    assert.deepEqual(committee.memberInputs.Architect, []);
-    assert.deepEqual(committee.memberInputs.Reducer, []);
-    assertClosed(committee);
-    await assertNoOutput(outputPath);
-  } finally {
-    await Promise.allSettled(Object.values(committee.members).map((member) => member.return()));
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("valid empty search is researched, but never invents an OSS candidate or license", async () => {
-  const response = Response.json({ incomplete_results: false, items: [] });
-  const committee = await scriptedCommitteeFixture(new DummyTracer(), response);
-  const { directory, outputPath } = await tempOutput();
-  try {
-    await runCommittee(committee, outputPath);
-    const report = committee.memberInputs.Architect[0];
-    assert.ok(report?.includes("No matching OSS libraries found"));
-    assert.ok(committee.memberInputs.Reducer[0]?.includes("No matching OSS libraries found"));
-    const plan = await readFile(outputPath, "utf8");
-    assert.ok(plan.includes("No matching OSS libraries found"));
-    assert.doesNotMatch(plan, /Terminal\.Gui|github\.com\/tui-cs/);
-    assert.match(plan, /OSS[^\n]*unverified/i);
-    assert.match(plan, /license[^\n]*unverified/i);
-    assertClosed(committee);
-  } finally {
-    await Promise.allSettled(Object.values(committee.members).map((member) => member.return()));
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("publication rejects absent, incomplete and untitled final answers without creating a file", async () => {
-  const { directory, outputPath } = await tempOutput();
-  try {
-    await assert.rejects(publishPlan(outputPath, undefined), /Reducer produced no final plan/);
-    await assert.rejects(publishPlan(outputPath, fauxAssistantMessage("# Truncated", { stopReason: "length" })),
-      /Reducer stopped with length/);
-    await assert.rejects(publishPlan(outputPath, fauxAssistantMessage(" \n ")), /Markdown title/);
-    await assert.rejects(publishPlan(outputPath, fauxAssistantMessage("No heading")), /Markdown title/);
-    await assertNoOutput(outputPath);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  assert.equal(approvedPlan(fauxAssistantMessage("# Plan\nBody")), "# Plan\nBody");
 });
 
 test("repository search sends only the scoped GitHub request and rejects invalid metadata", async () => {
   const controller = new AbortController();
-  const { tool, wasSearched } = createOssSearchTool(Object.assign(async (
+  const { tool, searches } = createOssSearchTool(Object.assign(async (
     input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1],
   ) => {
     assert.equal(input, "https://api.github.com/search/repositories?q=terminal.gui%20library&per_page=5");
@@ -173,18 +141,100 @@ test("repository search sends only the scoped GitHub request and rejects invalid
     assert.equal(init?.signal, controller.signal);
     return Response.json({ incomplete_results: false, items: [] });
   }, { preconnect: fetch.preconnect }));
-  assert.equal(wasSearched(), false);
+  assert.equal(searches(), 0);
   const search = await tool.execute("lookup", { query: "  terminal.gui library  " }, controller.signal);
   assert.deepEqual(JSON.parse(search.content[0]!.type === "text" ? search.content[0].text : ""),
     { incomplete_results: false, repositories: [] });
-  assert.equal(wasSearched(), true);
+  assert.equal(searches(), 1);
 
   const invalid = createOssSearchTool(Object.assign(async () => Response.json({
     incomplete_results: false,
     items: [{ full_name: "spoof/repo", html_url: "https://github.com.evil.test/spoof/repo",
-      description: null, language: "C#", archived: false, license: null }],
+      description: null, language: "C#", archived: false, license: null,
+      stargazers_count: 10_000, pushed_at: "2026-09-15T00:00:00Z" }],
   }), { preconnect: fetch.preconnect }));
-  await assert.rejects(invalid.tool.execute("lookup", { query: "terminal tui" }, controller.signal),
-    /Invalid GitHub OSS search response/);
-  assert.equal(invalid.wasSearched(), false);
+  await assert.rejects(invalid.tool.execute("lookup", { query: "terminal tui" }, controller.signal));
+  assert.equal(invalid.searches(), 0);
+  assert.equal(invalid.failures(), 1);
 });
+
+test("repository search reports GitHub trust signals and rejects results without them", async () => {
+  const item = {
+    full_name: "tui-cs/Terminal.Gui",
+    html_url: repositoryUrl,
+    description: "Cross Platform Terminal UI toolkit for .NET",
+    language: "C#",
+    archived: false,
+    license: { spdx_id: "MIT" },
+    stargazers_count: 10_000,
+    pushed_at: "2026-09-15T00:00:00Z",
+  };
+  const trusted = createOssSearchTool(Object.assign(
+    async () => Response.json({ incomplete_results: false, items: [item] }),
+    { preconnect: fetch.preconnect },
+  ));
+  const result = await trusted.tool.execute("lookup", { query: "terminal ui" });
+  assert.deepEqual(JSON.parse(result.content[0]!.type === "text" ? result.content[0].text : ""), {
+    incomplete_results: false,
+    repositories: [{
+      name: "tui-cs/Terminal.Gui",
+      url: repositoryUrl,
+      description: "Cross Platform Terminal UI toolkit for .NET",
+      language: "C#",
+      archived: false,
+      stars: 10_000,
+      pushedAt: "2026-09-15T00:00:00Z",
+      reportedLicense: "MIT",
+    }],
+  });
+
+  const { pushed_at: _pushedAt, ...withoutPush } = item;
+  const untrusted = createOssSearchTool(Object.assign(
+    async () => Response.json({ incomplete_results: false, items: [withoutPush] }),
+    { preconnect: fetch.preconnect },
+  ));
+  await assert.rejects(untrusted.tool.execute("lookup", { query: "terminal ui" }));
+  assert.equal(untrusted.searches(), 0);
+  assert.equal(untrusted.failures(), 1);
+});
+
+test("the Reducer sends the Librarian and Architect back until it approves", async () => {
+  const markdownFeedback = "Research a maintained Markdown renderer instead of custom rendering.";
+  const cacheFeedback = "Drop the custom paging cache; use the library's own scrolling.";
+  await using committee = await scriptedCommittee({
+    reviews: [revise(markdownFeedback), revise(cacheFeedback), approved],
+  });
+  const plan = await convene(request, committee.members, committee.search, committee.review);
+  assert.ok(plan.includes("Review round: 3"));
+  assert.ok(!plan.includes("Review round: 1"));
+  assert.deepEqual(committee.modelRequests, [...normalRound, ...normalRound, ...normalRound]);
+  assert.equal(committee.searchQueries.length, 3);
+  const { Librarian, Architect, Reducer } = committee.memberInputs;
+  assert.ok(!Librarian[0]!.includes("Review feedback:"));
+  assert.ok(Librarian[1]!.includes(markdownFeedback));
+  assert.ok(Librarian[2]!.includes(cacheFeedback));
+  assert.ok(Architect[1]!.includes(markdownFeedback));
+  assert.ok(Architect[2]!.includes(cacheFeedback));
+  assert.equal(Reducer.length, 3);
+}, 5_000);
+
+test("a round without a review verdict publishes nothing", async () => {
+  await using committee = await scriptedCommittee({ reviews: ["skip"] });
+  await assert.rejects(convene(request, committee.members, committee.search, committee.review));
+  assert.deepEqual(committee.modelRequests, ["Librarian", "Librarian", "Architect", "Reducer"]);
+}, 5_000);
+
+test("a failed lookup in one round does not block a later normal round", async () => {
+  await using committee = await scriptedCommittee({
+    lookups: [[rateLimited()]],
+    reviews: [revise("Retry the terminal UI research."), approved],
+  });
+  const plan = await convene(request, committee.members, committee.search, committee.review);
+  assert.ok(plan.includes("Review round: 2"));
+  assert.ok(plan.includes(repositoryUrl));
+  assert.equal(committee.search.failures(), 1);
+  assert.deepEqual(
+    committee.modelRequests,
+    ["Librarian", "Librarian", "Architect", "Librarian", "Reducer", "Reducer", ...normalRound],
+  );
+}, 5_000);

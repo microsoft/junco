@@ -12,6 +12,7 @@
         "dataflow-engine-opik": "file:../dataflow-engine-opik",
         "fp-ts": "^2.16.11",
         "junco-agent": "file:../junco-agent",
+        "junco-scheduler": "file:../junco-scheduler",
         "opik": "2.2.86",
         "typebox": "1.3.34",
       },
@@ -642,6 +643,8 @@
 
     "junco-agent": ["junco-agent@file:../junco-agent", { "dependencies": { "@earendil-works/pi-agent-core": "0.99.2", "@earendil-works/pi-ai": "0.99.2", "@earendil-works/pi-coding-agent": "0.99.2", "typebox": "1.3.34" }, "devDependencies": { "@types/node": "26.6.3", "typescript": "7.0.2" } }],
 
+    "junco-scheduler": ["junco-scheduler@file:../junco-scheduler", { "devDependencies": { "@types/bun": "1.4.2", "@types/node": "26.6.3", "dataflow-engine": "file:../dataflow-engine", "typescript": "7.0.2" }, "peerDependencies": { "@earendil-works/pi-agent-core": "0.99.2", "@earendil-works/pi-ai": "0.99.2", "@earendil-works/pi-coding-agent": "0.99.2", "dataflow-engine": "^0.1.0", "junco-agent": "^0.1.0", "typebox": "1.3.34" }, "optionalPeers": ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "dataflow-engine", "junco-agent", "typebox"] }],
+
     "junco-tools": ["junco-tools@file:../junco-tools", { "dependencies": { "typebox": "1.3.34" }, "devDependencies": { "@earendil-works/pi-agent-core": "0.99.2", "@earendil-works/pi-ai": "0.99.2", "@earendil-works/pi-coding-agent": "0.99.2", "@napi-rs/cli": "3.10.5", "@types/node": "26.6.3", "typescript": "7.0.2" }, "peerDependencies": { "@earendil-works/pi-agent-core": "0.99.2", "@earendil-works/pi-coding-agent": "0.99.2" } }],
 
     "jwa": ["jwa@2.0.1", "", { "dependencies": { "buffer-equal-constant-time": "^1.0.1", "ecdsa-sig-formatter": "1.0.11", "safe-buffer": "^5.0.1" } }, "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg=="],
@@ -831,6 +834,8 @@
     "gcp-metadata/google-logging-utils": ["google-logging-utils@1.2.0", "", {}, "sha512-WE9av4wKDZgRjBwgVUabocx8T6/7o3Ca1Fat46FXDhXVAFibzNadedcOXrdgd1Kzmk8tsk/9ZH89Wyf/SqeZ3A=="],
 
     "jest-diff/chalk": ["chalk@4.1.2", "", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
+
+    "junco-scheduler/dataflow-engine": ["dataflow-engine@file:../dataflow-engine", { "dependencies": { "fp-ts": "^2.16.11", "ngraph.graph": "^20.1.2", "prettier-printer": "^1.1.4", "type-fest": "^5.10.0" }, "devDependencies": { "@biomejs/biome": "2.5.15", "@types/bun": "1.4.2", "@types/node": "26.6.3", "fast-check": "^4.10.2", "typescript": "7.0.2" } }],
 
     "log-symbols/chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
