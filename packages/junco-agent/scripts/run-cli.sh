@@ -9,7 +9,13 @@ fi
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 seed=$1
 shift
+pi_cli=$(cd -- "$root" && node --input-type=module -e '
+import { fileURLToPath } from "node:url";
+console.log(fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent"))));
+')
+extension=$(cd -- "$root" && node --input-type=module -e '
+import { fileURLToPath } from "node:url";
+console.log(fileURLToPath(import.meta.resolve("junco-tools/extension")));
+')
 cd -- "$seed"
-
-exec node "$root/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" \
-  --extension "$root/node_modules/junco-tools/dist/extension.js" "$@"
+exec node "$pi_cli" --extension "$extension" "$@"

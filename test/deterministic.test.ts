@@ -21,6 +21,7 @@ import {
   createParallelAgentGraph,
   Deterministic,
   deterministicNode,
+  graph as graphApi,
   graphNode,
   MockAgent,
 } from "../src/index.ts";
@@ -32,7 +33,10 @@ import {
 function untilAborted(signal: AbortSignal): Promise<void> {
   const { promise, reject } = Promise.withResolvers<void>();
   if (signal.aborted) reject(signal.reason);
-  else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  else
+    signal.addEventListener("abort", () => reject(signal.reason), {
+      once: true,
+    });
   return promise;
 }
 
@@ -62,9 +66,11 @@ const failureOf = (drive: Promise<unknown>): Promise<unknown> =>
 
 /** A drive cancelled with `reason`: the reason itself, or the node error it caused. */
 const cancelledBy = (error: unknown, reason: unknown): boolean =>
-  error === reason || (error instanceof DataflowNodeError && error.cause === reason);
+  error === reason ||
+  (error instanceof DataflowNodeError && error.cause === reason);
 
-const unresolved = <N, T>(edge: Edge<N, T>): boolean => E.isRight(edge.transport) && O.isNone(edge.transport.right);
+const unresolved = <N, T>(edge: Edge<N, T>): boolean =>
+  E.isRight(edge.transport) && O.isNone(edge.transport.right);
 
 /** A coroutine consumer recording whether the engine ever primed it. */
 function consumer<T>(result: T) {
@@ -103,8 +109,12 @@ describe("abort", () => {
       return "never";
     });
     const downstream = consumer("downstream");
-    const waitingId = graph.addNode(deterministicNode(waiting, { trigger: always() }));
-    const downstreamId = graph.addNode(deterministicNode(downstream.coroutine, { trigger: when(result) }));
+    const waitingId = graph.addNode(
+      deterministicNode(waiting, { trigger: always() }),
+    );
+    const downstreamId = graph.addNode(
+      deterministicNode(downstream.coroutine, { trigger: when(result) }),
+    );
     graph.addEdge(waitingId, downstreamId, result);
 
     const drive = failureOf(graph.run());
@@ -156,7 +166,11 @@ describe("abort", () => {
     assert.ok(aborted instanceof AggregateError);
     assert.deepEqual(aborted.errors, [unrelated]);
     const failure = await drive;
-    assert.ok(failure instanceof DataflowNodeError && failure.nodeId === id && failure.cause === unrelated);
+    assert.ok(
+      failure instanceof DataflowNodeError &&
+        failure.nodeId === id &&
+        failure.cause === unrelated,
+    );
 
     await graph.close();
     await failing.close();
@@ -177,9 +191,17 @@ describe("abort", () => {
     const id = graph.addNode(deterministicNode(failing, { trigger: always() }));
 
     const failure = await failureOf(graph.run());
-    assert.ok(failure instanceof DataflowNodeError && failure.nodeId === id && failure.cause === broken);
+    assert.ok(
+      failure instanceof DataflowNodeError &&
+        failure.nodeId === id &&
+        failure.cause === broken,
+    );
     // Failed, not closed: a further direct advance is refused instead of reporting a fresh result.
-    await assert.rejects(failing.next(), (error) => error instanceof JuncoAgentError && error.code === "invalid_state");
+    await assert.rejects(
+      failing.next(),
+      (error) =>
+        error instanceof JuncoAgentError && error.code === "invalid_state",
+    );
     await graph.close();
     assert.equal(cleaned, 1);
   });
@@ -221,10 +243,16 @@ describe("close", () => {
       return "waiting result";
     });
     const downstream = consumer("downstream");
-    const suspendedId = graph.addNode(deterministicNode(suspended, { trigger: when(input) }));
-    const waitingId = graph.addNode(deterministicNode(waiting, { trigger: always() }));
+    const suspendedId = graph.addNode(
+      deterministicNode(suspended, { trigger: when(input) }),
+    );
+    const waitingId = graph.addNode(
+      deterministicNode(waiting, { trigger: always() }),
+    );
     const downstreamId = graph.addNode(
-      deterministicNode(downstream.coroutine, { trigger: anyOf(on(suspendedCleanup), on(waitingCleanup)) }),
+      deterministicNode(downstream.coroutine, {
+        trigger: anyOf(on(suspendedCleanup), on(waitingCleanup)),
+      }),
     );
     // The trigger edge must be inbound; the coroutine never emits on it.
     graph.addEdge(suspendedId, suspendedId, input);
@@ -261,23 +289,31 @@ describe("close", () => {
     await graph[Symbol.asyncDispose]();
     await waiting.close();
     assert.deepEqual(cleaned, { suspended: 1, waiting: 1 });
-    await assert.rejects(waiting.next(), (error) => error instanceof JuncoAgentError && error.code === "closed");
+    await assert.rejects(
+      waiting.next(),
+      (error) => error instanceof JuncoAgentError && error.code === "closed",
+    );
     await assert.rejects(graph.run(), (error) => error === graph.signal.reason);
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
     const graph = createParallelAgentGraph();
     const failure = new Error("finally failed");
-    const coroutine = new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-      try {
-        yield [];
-      } finally {
-        throw failure;
-      }
-    });
+    const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
+      async function* () {
+        try {
+          yield [];
+        } finally {
+          // biome-ignore lint/correctness/noUnsafeFinally: the case under test is a throwing finally block.
+          throw failure;
+        }
+      },
+    );
     const sibling = new MockAgent({ runs: [] });
     graph.addNode(deterministicNode(coroutine, { trigger: always() }));
-    graph.addNode(agentNode(sibling, { trigger: always(), is_available: () => false }));
+    graph.addNode(
+      agentNode(sibling, { trigger: always(), is_available: () => false }),
+    );
     await graph.step();
 
     const closing = graph.close();
@@ -291,7 +327,10 @@ describe("close", () => {
     );
 
     assert.equal(graph.close(), closing);
-    await assert.rejects(graph[Symbol.asyncDispose](), (error) => error === closed);
+    await assert.rejects(
+      graph[Symbol.asyncDispose](),
+      (error) => error === closed,
+    );
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
@@ -335,7 +374,10 @@ describe("close", () => {
     assert.ok(graph.signal.aborted);
     assert.notEqual(graph.signal.reason, reason);
     await assert.rejects(graph.run(), (error) => error === graph.signal.reason);
-    await assert.rejects(graph.abort(), (error) => error instanceof JuncoAgentError && error.code === "closed");
+    await assert.rejects(
+      graph.abort(),
+      (error) => error instanceof JuncoAgentError && error.code === "closed",
+    );
   });
 
   test("graph close joins a shared coroutine's async disposal hook", async () => {
@@ -358,10 +400,23 @@ describe("close", () => {
       return "never published";
     });
     const child = createParallelAgentGraph<string, string>();
-    const result = child.addNode(deterministicNode(coroutine, { trigger: always() }));
+    const result = child.addNode(
+      deterministicNode(coroutine, { trigger: always() }),
+    );
     const parent = createParallelAgentGraph<string, string>();
-    parent.addNode(deterministicNode(coroutine, { trigger: always(), is_available: () => false }));
-    parent.addNode(graphNode(child, { trigger: always(), is_available: () => false }, { result }));
+    parent.addNode(
+      deterministicNode(coroutine, {
+        trigger: always(),
+        is_available: () => false,
+      }),
+    );
+    parent.addNode(
+      graphNode(
+        child,
+        { trigger: always(), is_available: () => false },
+        { result },
+      ),
+    );
     await child.step();
 
     try {
@@ -379,7 +434,13 @@ describe("close", () => {
       assert.ok(O.isNone(child.result(result)));
       assert.ok(parent.signal.aborted && child.signal.aborted);
 
-      await Promise.all([parent.close(), parent[Symbol.asyncDispose](), child.close(), child[Symbol.asyncDispose](), coroutine.close()]);
+      await Promise.all([
+        parent.close(),
+        parent[Symbol.asyncDispose](),
+        child.close(),
+        child[Symbol.asyncDispose](),
+        coroutine.close(),
+      ]);
       assert.deepEqual(counts, { disposals: 1, cleanup: 1, external: 1 });
     } finally {
       external.resolve();
@@ -390,18 +451,25 @@ describe("close", () => {
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
     const first = createParallelAgentGraph<string, string>();
+    // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
       return "first";
     });
-    const firstId = first.addNode(deterministicNode(shared, { trigger: always() }));
+    const firstId = first.addNode(
+      deterministicNode(shared, { trigger: always() }),
+    );
     await first.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
     const second = createParallelAgentGraph<string, string>();
     const value = valueEdge<string, string>("shared-result");
     const downstream = consumer("downstream");
-    const againId = second.addNode(deterministicNode(shared, { trigger: always() }));
-    const downstreamId = second.addNode(deterministicNode(downstream.coroutine, { trigger: when(value) }));
+    const againId = second.addNode(
+      deterministicNode(shared, { trigger: always() }),
+    );
+    const downstreamId = second.addNode(
+      deterministicNode(downstream.coroutine, { trigger: when(value) }),
+    );
     second.addEdge(againId, downstreamId, value);
 
     await assert.rejects(
@@ -425,13 +493,18 @@ describe("single consumer", () => {
     const graph = createParallelAgentGraph<string, string>();
     const value = valueEdge<string, string>("closed-result");
     let bodyRan = false;
+    // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const closed = new Deterministic<string, string>(async function* () {
       bodyRan = true;
       return "never";
     });
     const downstream = consumer("downstream");
-    const closedId = graph.addNode(deterministicNode(closed, { trigger: always() }));
-    const downstreamId = graph.addNode(deterministicNode(downstream.coroutine, { trigger: when(value) }));
+    const closedId = graph.addNode(
+      deterministicNode(closed, { trigger: always() }),
+    );
+    const downstreamId = graph.addNode(
+      deterministicNode(downstream.coroutine, { trigger: when(value) }),
+    );
     graph.addEdge(closedId, downstreamId, value);
     await closed.close();
 
@@ -454,17 +527,31 @@ describe("single consumer", () => {
   test("a body genuinely returning undefined resolves its value edge", async () => {
     const graph = createParallelAgentGraph<string, string | undefined>();
     const value = valueEdge<string, string | undefined>("undefined-result");
-    const source = new Deterministic<string, string | undefined>(async function* () {
-      return undefined;
-    });
-    let observed: { readonly has: boolean; readonly value: string | undefined } | undefined;
-    const dependent = new Deterministic<string, string | undefined>(async function* () {
-      const view = yield [];
-      observed = { has: view.values.has(value.id), value: view.values.get(value.id) };
-      return "consumed";
-    });
-    const sourceId = graph.addNode(deterministicNode(source, { trigger: always() }));
-    const dependentId = graph.addNode(deterministicNode(dependent, { trigger: when(value) }));
+    const source = new Deterministic<string, string | undefined>(
+      // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
+      async function* () {
+        return undefined;
+      },
+    );
+    let observed:
+      | { readonly has: boolean; readonly value: string | undefined }
+      | undefined;
+    const dependent = new Deterministic<string, string | undefined>(
+      async function* () {
+        const view = yield [];
+        observed = {
+          has: view.values.has(value.id),
+          value: view.values.get(value.id),
+        };
+        return "consumed";
+      },
+    );
+    const sourceId = graph.addNode(
+      deterministicNode(source, { trigger: always() }),
+    );
+    const dependentId = graph.addNode(
+      deterministicNode(dependent, { trigger: when(value) }),
+    );
     graph.addEdge(sourceId, dependentId, value);
 
     await graph.run();
@@ -472,8 +559,91 @@ describe("single consumer", () => {
     assert.deepEqual(observed, { has: true, value: undefined });
     assert.deepEqual(graph.result(dependentId), O.some("consumed"));
     // Finished, not closed: a further direct advance is refused rather than reporting a new result.
-    await assert.rejects(source.next(), (error) => error instanceof JuncoAgentError && error.code === "invalid_state");
+    await assert.rejects(
+      source.next(),
+      (error) =>
+        error instanceof JuncoAgentError && error.code === "invalid_state",
+    );
 
     await graph.close();
+  });
+});
+
+describe("direct protocol", () => {
+  test("return completes with the forced value, cleans up once and refuses later advances", async () => {
+    let cleaned = 0;
+    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+      async function* () {
+        try {
+          yield [];
+          return "natural";
+        } finally {
+          cleaned += 1;
+        }
+      },
+    );
+    assert.deepEqual(await coroutine.next(), { done: false, value: [] });
+    assert.deepEqual(await coroutine.return("forced"), {
+      done: true,
+      value: "forced",
+    });
+    assert.equal(cleaned, 1);
+    await assert.rejects(
+      coroutine.next(),
+      (error) =>
+        error instanceof JuncoAgentError && error.code === "invalid_state",
+    );
+    await coroutine.close();
+    assert.equal(cleaned, 1);
+  });
+
+  test("throw delivers the same error into the body, which may recover", async () => {
+    const sentinel = new Error("injected");
+    let caught: unknown;
+    let cleaned = 0;
+    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+      async function* () {
+        try {
+          yield [];
+          return "unreached";
+        } catch (error) {
+          caught = error;
+          return "recovered";
+        } finally {
+          cleaned += 1;
+        }
+      },
+    );
+    await coroutine.next();
+    assert.deepEqual(await coroutine.throw(sentinel), {
+      done: true,
+      value: "recovered",
+    });
+    assert.equal(caught, sentinel);
+    assert.equal(cleaned, 1);
+    await coroutine.close();
+    assert.equal(cleaned, 1);
+  });
+
+  test("for await consumes every emitted batch and completes cleanup", async () => {
+    const edge = messageEdge<number, string>("numbers");
+    let cleaned = 0;
+    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+      async function* () {
+        try {
+          yield [msg(edge, 1)];
+          yield [msg(edge, 2)];
+          return "done";
+        } finally {
+          cleaned += 1;
+        }
+      },
+    );
+    const payloads: number[] = [];
+    for await (const batch of coroutine)
+      payloads.push(...batch.map((message) => message.payload));
+    assert.deepEqual(payloads, [1, 2]);
+    assert.equal(cleaned, 1);
+    await coroutine.close();
   });
 });

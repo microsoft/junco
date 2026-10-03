@@ -67,16 +67,25 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
   const selected = (): T => {
     const retained = graph.result(result);
     if (O.isSome(retained)) return retained.value;
-    throw new JuncoAgentError("invalid_state", "Nested graph stopped before producing its selected result");
+    throw new JuncoAgentError(
+      "invalid_state",
+      "Nested graph stopped before producing its selected result",
+    );
   };
 
-  const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<N, T> {
+  const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<
+    N,
+    T
+  > {
     let view = yield [];
     started = true;
     while (true) {
       const signal = graph.signal;
       signal.throwIfAborted();
-      await receive?.({ messages: view.messages, values: unseenValues(view.values, seenValues) });
+      await receive?.({
+        messages: view.messages,
+        values: unseenValues(view.values, seenValues),
+      });
       signal.throwIfAborted();
 
       const scheduler: unknown = graph.scheduler;
@@ -84,8 +93,12 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
       if (scheduler instanceof PiScheduler) {
         if (scheduler.status === "idle") {
           const retained = graph.result(result);
-          if (graph.available().size === 0 && O.isSome(retained)) return retained.value;
-          throw new JuncoAgentError("invalid_state", "Nested graph scheduler requires a staged prompt");
+          if (graph.available().size === 0 && O.isSome(retained))
+            return retained.value;
+          throw new JuncoAgentError(
+            "invalid_state",
+            "Nested graph scheduler requires a staged prompt",
+          );
         }
         let advanced: IteratorResult<AgenticStep, void>;
         try {
@@ -95,13 +108,20 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
         }
         signal.throwIfAborted();
         if (advanced.done === true) {
-          throw new JuncoAgentError("closed", "Nested graph scheduler closed before settlement");
+          throw new JuncoAgentError(
+            "closed",
+            "Nested graph scheduler closed before settlement",
+          );
         }
         const boundary = advanced.value;
-        if (boundary.kind === "failed") throw cancellation(signal, boundary.error);
+        if (boundary.kind === "failed")
+          throw cancellation(signal, boundary.error);
         if (boundary.kind === "settled") {
           if (boundary.message.stopReason !== "stop") {
-            throw new JuncoAgentError("invalid_state", "Nested graph scheduler did not finish normally");
+            throw new JuncoAgentError(
+              "invalid_state",
+              "Nested graph scheduler did not finish normally",
+            );
           }
           settled = true;
         }
@@ -122,7 +142,10 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
       if (settled) {
         const quiescent = graph.available().size === 0;
         if (scheduler instanceof PiScheduler && !quiescent) {
-          throw new JuncoAgentError("invalid_state", "PiScheduler finished while graph work is available");
+          throw new JuncoAgentError(
+            "invalid_state",
+            "PiScheduler finished while graph work is available",
+          );
         }
         if (quiescent) return selected();
       }
@@ -135,6 +158,7 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
     ...options,
     state: graph,
     step,
-    is_available: options.is_available ?? ((_view, triggered) => started || triggered),
+    is_available:
+      options.is_available ?? ((_view, triggered) => started || triggered),
   };
 }

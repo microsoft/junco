@@ -168,7 +168,9 @@ export function createScheduler<State, N = unknown, T = unknown>(
     state: options.state,
     create(configuredWindow, configuredThreads) {
       if (window !== undefined || threads !== undefined) {
-        throw new DataflowDefinitionError("Scheduler already configures a graph");
+        throw new DataflowDefinitionError(
+          "Scheduler already configures a graph",
+        );
       }
       window = configuredWindow;
       threads = configuredThreads;
@@ -181,7 +183,8 @@ export function createScheduler<State, N = unknown, T = unknown>(
     },
   };
   if (resolveInputs !== undefined) {
-    scheduler.resolveInputs = (entry, live) => resolveInputs(entry, live, scheduler.state);
+    scheduler.resolveInputs = (entry, live) =>
+      resolveInputs(entry, live, scheduler.state);
   }
   return scheduler;
 }

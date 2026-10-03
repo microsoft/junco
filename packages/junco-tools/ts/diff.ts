@@ -33,12 +33,14 @@ export function createDiffTool(
   const tool = {
     name: "diff",
     label: "Diff",
-    description: "Compute a unified diff between oldText and newText without changing files.",
+    description:
+      "Compute a unified diff between oldText and newText without changing files.",
     promptSnippet: "Diff two texts without touching the filesystem",
     parameters: diffSchema,
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
-      if (params.context !== undefined) requireU32("context", params.context, 0);
+      if (params.context !== undefined)
+        requireU32("context", params.context, 0);
 
       const stream = new native.DiffStream();
       stream.push(native.DiffSide.Old, params.oldText);
@@ -51,7 +53,10 @@ export function createDiffTool(
       throwIfAborted(signal);
 
       if (result.hunks.length === 0) {
-        return { content: [{ type: "text", text: "No differences." }], details: { result } };
+        return {
+          content: [{ type: "text", text: "No differences." }],
+          details: { result },
+        };
       }
       const lines = ["--- before", "+++ after"];
       for (const hunk of result.hunks) {
@@ -62,6 +67,9 @@ export function createDiffTool(
       }
       return boundedToolResult(lines.join("\n"), result);
     },
-  } satisfies ToolDefinition<typeof diffSchema, BoundedToolDetails<DiffStreamResult>>;
+  } satisfies ToolDefinition<
+    typeof diffSchema,
+    BoundedToolDetails<DiffStreamResult>
+  >;
   return tool;
 }

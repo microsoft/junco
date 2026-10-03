@@ -2,7 +2,11 @@ import type { PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { NodeIdType } from "dataflow-engine";
 import { JuncoAgentError } from "junco-agent";
-import { PiScheduler, type PiSchedulerAdapter, type PiSchedulerOptions } from "junco-scheduler/agent";
+import {
+  PiScheduler,
+  type PiSchedulerAdapter,
+  type PiSchedulerOptions,
+} from "junco-scheduler/agent";
 import type { AgenticInput } from "./agentic.js";
 import { cascadeMembers, type JuncoGraph } from "./junco-graph.js";
 import { nodeInputs, nodePolicies } from "./node-policy.js";
@@ -44,26 +48,40 @@ export async function createAgencyScheduler<
     const graph = getGraph();
     if (graph === undefined) return undefined;
     if (graph.scheduler !== scheduler) {
-      throw new JuncoAgentError("invalid_state", "Agency scheduler is bound to a different graph");
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Agency scheduler is bound to a different graph",
+      );
     }
     return graph;
   };
   const adapter: PiSchedulerAdapter<N, T> = {
     beforeSchedule: () => {
-      if (bound() === undefined) throw new JuncoAgentError("invalid_state", "Agency graph is not constructed");
+      if (bound() === undefined)
+        throw new JuncoAgentError(
+          "invalid_state",
+          "Agency graph is not constructed",
+        );
     },
     describeNode: (id: NodeIdType) => {
       const node = getGraph()?.getNode(id);
       if (node === undefined) return undefined;
       const policy = nodePolicies.get(node.step);
       const details = {
-        ...(node.description === undefined ? {} : { description: node.description }),
-        ...(policy?.agent === undefined ? {} : { agentStatus: policy.agent.status }),
-        ...(policy?.lastYield === undefined ? {} : { lastYield: policy.lastYield }),
+        ...(node.description === undefined
+          ? {}
+          : { description: node.description }),
+        ...(policy?.agent === undefined
+          ? {}
+          : { agentStatus: policy.agent.status }),
+        ...(policy?.lastYield === undefined
+          ? {}
+          : { lastYield: policy.lastYield }),
       };
       return Object.keys(details).length === 0 ? undefined : details;
     },
-    readInputs: (id, candidate) => nodeInputs(getGraph()?.getNode(id)?.step, candidate),
+    readInputs: (id, candidate) =>
+      nodeInputs(getGraph()?.getNode(id)?.step, candidate),
     abortDependents: () => bound()?.[cascadeMembers]("abort"),
     closeDependents: () => bound()?.[cascadeMembers]("close"),
   };

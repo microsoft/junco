@@ -7,7 +7,11 @@ import type {
   ParentView,
   StepFn,
 } from "dataflow-engine";
-import { type AgenticStep, type JuncoAgent, JuncoAgentError } from "junco-agent";
+import {
+  type AgenticStep,
+  type JuncoAgent,
+  JuncoAgentError,
+} from "junco-agent";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 import { type NodePolicy, nodePolicies, unseenValues } from "./node-policy.js";
@@ -24,9 +28,13 @@ export type AgentNodeBinding = {
    * `values` holds only parent results not delivered before, each presented once. Omitted,
    * deliveries dispatch nothing.
    */
-  readonly receive?: (view: ParentView<AgenticInput, AssistantMessage>) => readonly AgenticInput[];
+  readonly receive?: (
+    view: ParentView<AgenticInput, AssistantMessage>,
+  ) => readonly AgenticInput[];
   /** Messages to route when the agent pauses at a `yield` step; omitted, it routes nothing. */
-  readonly emit?: (step: Extract<AgenticStep, { kind: "yield" }>) => Message<AgenticInput>[];
+  readonly emit?: (
+    step: Extract<AgenticStep, { kind: "yield" }>,
+  ) => Message<AgenticInput>[];
 };
 
 /**
@@ -56,11 +64,15 @@ export function agentNode(
   const dispatch = async (input: AgenticInput): Promise<void> => {
     const kind = input.kind;
     if (kind === "appendMessage") return agent.appendMessage(input.message);
-    const native = input.images === undefined ? undefined : { images: input.images };
+    const native =
+      input.images === undefined ? undefined : { images: input.images };
     switch (kind) {
       case "prompt":
         if (started || agent.status !== "idle") {
-          throw new JuncoAgentError("invalid_state", "Agentic node runs one prompt, and its agent must be idle");
+          throw new JuncoAgentError(
+            "invalid_state",
+            "Agentic node runs one prompt, and its agent must be idle",
+          );
         }
         started = true;
         // Its settlement, success or failure, arrives through agent.next().
@@ -73,44 +85,51 @@ export function agentNode(
     }
   };
 
-  const step: StepFn<Agentic, AgenticInput, AssistantMessage> = async function* (): NodeGenerator<
-    AgenticInput,
-    AssistantMessage
-  > {
-    let view = yield [];
-    let pendingPrompt = prompt;
-    while (true) {
-      for (const input of receive({ messages: view.messages, values: unseenValues(view.values, seenValues) })) {
-        await dispatch(input);
-      }
-      if (pendingPrompt !== undefined) {
-        const text = pendingPrompt;
-        pendingPrompt = undefined;
-        await dispatch({ kind: "prompt", text });
-      }
-      if (!started) {
-        // A control-only delivery to an idle agent has nothing to await.
-        if (agent.status !== "ready") {
-          view = yield [];
-          continue;
+  const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
+    async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+      let view = yield [];
+      let pendingPrompt = prompt;
+      while (true) {
+        for (const input of receive({
+          messages: view.messages,
+          values: unseenValues(view.values, seenValues),
+        })) {
+          await dispatch(input);
         }
-        started = true;
+        if (pendingPrompt !== undefined) {
+          const text = pendingPrompt;
+          pendingPrompt = undefined;
+          await dispatch({ kind: "prompt", text });
+        }
+        if (!started) {
+          // A control-only delivery to an idle agent has nothing to await.
+          if (agent.status !== "ready") {
+            view = yield [];
+            continue;
+          }
+          started = true;
+        }
+        const result = await agent.next();
+        if (result.done === true) {
+          throw new JuncoAgentError(
+            "closed",
+            "Agentic node closed before prompt settlement",
+          );
+        }
+        const boundary = result.value;
+        if (boundary.kind === "failed") throw boundary.error;
+        if (boundary.kind === "settled") return boundary.message;
+        policy.lastYield = boundary.reasons;
+        view = yield emit(boundary);
       }
-      const result = await agent.next();
-      if (result.done === true) {
-        throw new JuncoAgentError("closed", "Agentic node closed before prompt settlement");
-      }
-      const boundary = result.value;
-      if (boundary.kind === "failed") throw boundary.error;
-      if (boundary.kind === "settled") return boundary.message;
-      policy.lastYield = boundary.reasons;
-      view = yield emit(boundary);
-    }
-  };
+    };
   nodePolicies.set(step, policy);
 
-  const hasFreshInput = (view: ParentView<AgenticInput, AssistantMessage>): boolean => {
-    for (const id of view.messages.keys()) if ((view.messages.get(id)?.length ?? 0) > 0) return true;
+  const hasFreshInput = (
+    view: ParentView<AgenticInput, AssistantMessage>,
+  ): boolean => {
+    for (const id of view.messages.keys())
+      if ((view.messages.get(id)?.length ?? 0) > 0) return true;
     for (const id of view.values.keys()) if (!seenValues.has(id)) return true;
     return false;
   };
@@ -123,6 +142,9 @@ export function agentNode(
       options.is_available ??
       ((view, triggered) =>
         started ||
-        (triggered && (agent.status === "ready" || (prompt !== undefined && agent.status === "idle") || hasFreshInput(view)))),
+        (triggered &&
+          (agent.status === "ready" ||
+            (prompt !== undefined && agent.status === "idle") ||
+            hasFreshInput(view)))),
   };
 }

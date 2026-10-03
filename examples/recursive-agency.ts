@@ -17,8 +17,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { always, NodeId, type NodeOptions, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { createYieldTool, JuncoAgent } from "junco-agent";
+import { JuncoAgent } from "junco-agent";
 import type { SchedulerInfo } from "junco-scheduler/agent";
+import { createYieldTool } from "junco-tools";
 import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph } from "../src/index.ts";
 
 let providers = 0;

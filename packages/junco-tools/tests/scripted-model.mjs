@@ -1,4 +1,9 @@
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 
 /** A fresh instance-scoped faux provider and stream function; no credentials or network. */
 export function scriptedModel() {
@@ -9,7 +14,11 @@ export function scriptedModel() {
   });
   const models = createModels();
   models.setProvider(faux.provider);
-  return { faux, model: faux.getModel(), streamFn: models.streamSimple.bind(models) };
+  return {
+    faux,
+    model: faux.getModel(),
+    streamFn: models.streamSimple.bind(models),
+  };
 }
 
 /**
@@ -22,7 +31,12 @@ export function scriptBashTurn(faux, calls) {
   faux.setResponses([
     fauxAssistantMessage(
       calls.map(({ id, command, timeout }) =>
-        fauxToolCall("bash", { command, ...(timeout === undefined ? {} : { timeout }) }, { id })),
+        fauxToolCall(
+          "bash",
+          { command, ...(timeout === undefined ? {} : { timeout }) },
+          { id },
+        ),
+      ),
       { stopReason: "toolUse" },
     ),
     (context) => {
@@ -34,9 +48,13 @@ export function scriptBashTurn(faux, calls) {
 }
 
 export const toolResult = (messages, toolCallId) =>
-  messages.findLast((message) => message.role === "toolResult" && message.toolCallId === toolCallId);
+  messages.findLast(
+    (message) =>
+      message.role === "toolResult" && message.toolCallId === toolCallId,
+  );
 
-export const assistantText = (message) => message.content
-  .filter((part) => part.type === "text")
-  .map((part) => part.text)
-  .join("");
+export const assistantText = (message) =>
+  message.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");

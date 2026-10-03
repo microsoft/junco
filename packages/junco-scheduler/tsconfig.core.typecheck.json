@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.core.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": ".",
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun"]
+  },
+  "include": [
+    "src/index.ts",
+    "src/scheduler.ts",
+    "src/parallel.ts",
+    "src/round-robin.ts",
+    "test/scheduler.test.ts",
+    "test/scheduler.types.ts"
+  ]
+}

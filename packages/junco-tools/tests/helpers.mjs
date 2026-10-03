@@ -1,14 +1,20 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
+import {
+  DefaultResourceLoader,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 
-const fixturePrefix = fileURLToPath(new URL("../target/bash-test-", import.meta.url));
+const fixturePrefix = fileURLToPath(
+  new URL("../target/bash-test-", import.meta.url),
+);
 
-export const text = (result) => result.content
-  .filter((part) => part.type === "text")
-  .map((part) => part.text)
-  .join("\n");
+export const text = (result) =>
+  result.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 
 export const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -30,12 +36,16 @@ export async function cleanup(...steps) {
       failures.push(error);
     }
   }
-  if (failures.length) throw new AggregateError(failures, "Test cleanup failed");
+  if (failures.length)
+    throw new AggregateError(failures, "Test cleanup failed");
 }
 
 /** Stop an agent and wait for it to go idle, attempting the wait even when abort throws. */
 export async function settleAgent(agent) {
-  await cleanup(() => agent.abort(), () => agent.waitForIdle());
+  await cleanup(
+    () => agent.abort(),
+    () => agent.waitForIdle(),
+  );
 }
 
 /**
@@ -49,17 +59,21 @@ export async function fixture(options = {}) {
   const seed = join(root, "seed");
   try {
     await mkdir(seed, { recursive: true });
-    for (const [relative, content] of Object.entries(options.files ?? {
-      "src/file0.txt": "zero\n",
-      "src/file1.txt": "one\n",
-    })) {
+    for (const [relative, content] of Object.entries(
+      options.files ?? {
+        "src/file0.txt": "zero\n",
+        "src/file1.txt": "one\n",
+      },
+    )) {
       const path = join(seed, relative);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, content);
     }
     // Imported lazily so production-only suites never load the test-fs addon.
     const native = await import("../target/native-test/index.js");
-    const mux = await native.NativeMux.openCopyTree(seed, { sandbox: options.sandbox ?? "always" });
+    const mux = await native.NativeMux.openCopyTree(seed, {
+      sandbox: options.sandbox ?? "always",
+    });
     return { root, seed, mux, native };
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -116,7 +130,9 @@ export const WRITE_ALL_BODY = [
   "};",
 ].join("\n");
 
-const CHILD_PRELUDE = ['const fs = require("node:fs");', WRITE_ALL_BODY].join("\n");
+const CHILD_PRELUDE = ['const fs = require("node:fs");', WRITE_ALL_BODY].join(
+  "\n",
+);
 
 /** A real external Node process, invoked through the shell under test. */
 export function childCommand(body) {
@@ -129,17 +145,19 @@ export function childCommand(body) {
  * comes from observed output, never from a preparatory builtin or an arbitrary sleep.
  */
 export function heldChild({ gate, ready, done, prelude = "" }) {
-  return childCommand([
-    prelude,
-    `writeAll(${JSON.stringify(`${ready}\n`)});`,
-    `const gate = ${JSON.stringify(gate)};`,
-    "const poll = setInterval(() => {",
-    "  if (!fs.existsSync(gate)) return;",
-    "  clearInterval(poll);",
-    `  writeAll(${JSON.stringify(`${done}\n`)});`,
-    "  process.exit(0);",
-    "}, 10);",
-  ].join("\n"));
+  return childCommand(
+    [
+      prelude,
+      `writeAll(${JSON.stringify(`${ready}\n`)});`,
+      `const gate = ${JSON.stringify(gate)};`,
+      "const poll = setInterval(() => {",
+      "  if (!fs.existsSync(gate)) return;",
+      "  clearInterval(poll);",
+      `  writeAll(${JSON.stringify(`${done}\n`)});`,
+      "  process.exit(0);",
+      "}, 10);",
+    ].join("\n"),
+  );
 }
 
 /** Child body emitting `line-0001\n` … `line-<count>\n`, numbered from 1. */
@@ -164,7 +182,11 @@ export function expectedLines(count) {
 
 /** Environment for direct native calls, which have no Pi shell-env defaulting. */
 export function nativeEnv(root) {
-  return { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, LANG: "C.UTF-8" };
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: root,
+    LANG: "C.UTF-8",
+  };
 }
 
 /** Collect native `(error, data)` receipts; a non-null error must reject its run. */
@@ -195,10 +217,15 @@ export function deferred(signal, label = "fixture wait") {
     reject = rejectFn;
   });
   promise.catch(() => {});
-  const onAbort = () => reject(new Error(`${label} aborted before it was satisfied`));
+  const onAbort = () =>
+    reject(new Error(`${label} aborted before it was satisfied`));
   if (signal?.aborted) onAbort();
   else signal?.addEventListener("abort", onAbort, { once: true });
-  return { promise, resolve: (value) => resolve(value), reject: (error) => reject(error) };
+  return {
+    promise,
+    resolve: (value) => resolve(value),
+    reject: (error) => reject(error),
+  };
 }
 
 /** Create the gate file that releases a `heldChild`. */

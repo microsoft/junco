@@ -4,10 +4,10 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Scope and compatibility
 
-- This is a private ESM TypeScript library. `JuncoAgent` extends Pi's `AgentHarness` unchanged as the conversation/control plane and adds a cooperative lifetime iterator over scheduling boundaries. It has no dataflow graph, persistence layer, capability checking, standalone agent CLI, native code, or Cargo manifest; `bun run cli <seed>` only launches Pi's CLI with the `junco-tools` extension. Graphs of agents live in [`../junco-agency`](../junco-agency). Never import from or depend on `../junco-runtime`.
-- Pins: Bun `1.3.14` for package management and tests, TypeScript `6.0.3`, and every `@earendil-works/*` package at exactly `0.80.6` (also forced through `overrides` for `pi-agent-core`). That is the Pi version `junco-tools` declares as its peer and the version the patch targets. Supported runtime: Linux x86-64 with glibc and Node.js `>=22.19.0`.
-- Runtime dependencies are exactly `junco-tools` (`file:../junco-tools`), `pi-agent-core`, `pi-ai`, `pi-coding-agent` (Pi's login-backed `ModelRuntime`, also a `junco-tools` peer) and `typebox` (the `yield` schema). Never substitute a registry package or the old monorepo's tools package.
-- Keep changes scoped to the request and preserve unrelated local work. Unless explicitly authorized, do not push, publish, edit the sibling `../junco-tools` working tree, or create or mount Btrfs volumes.
+- This is a private ESM TypeScript library. `JuncoAgent` extends Pi's `AgentHarness` unchanged as the conversation/control plane and adds a cooperative lifetime iterator over scheduling boundaries. It has no dataflow graph, persistence layer, capability checking, standalone agent CLI, native code, or Cargo manifest; `bun run cli <seed>` only launches Pi's CLI with the `junco-tools` extension. Graphs of agents live in the workspace root package [`junco-agency`](../..). Never import from or depend on `../junco-runtime`.
+- Pins: Bun `1.3.14` for package management and tests, TypeScript `6.0.3`, and every `@earendil-works/*` package at exactly `0.80.6` (`pi-agent-core` also forced through the workspace root's `overrides`). That is the Pi version `junco-tools` declares as its peer and the version the patch targets. Supported runtime: Linux x86-64 with glibc and Node.js `>=22.19.0`.
+- Runtime dependencies are exactly `junco-tools` (`workspace:*`, the workspace package at `../junco-tools`), `pi-agent-core`, `pi-ai`, `pi-coding-agent` (Pi's login-backed `ModelRuntime`, also a `junco-tools` peer) and `typebox` (the `yield` schema). Never substitute a registry package or the old monorepo's tools package.
+- Keep changes scoped to the request and preserve unrelated local work. Unless explicitly authorized, do not push, publish, edit `../junco-tools` from here, or create or mount Btrfs volumes.
 
 ## Source map
 
@@ -15,28 +15,27 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | --- | --- |
 | `src/agentic.ts` | The `Agentic` contract: `AgentHarnessApi`, `AgenticStatus`, `AgenticYieldReason`, `AgenticStep`, `AgenticOptions`, `AgenticConstructor`. Types only. |
 | `src/junco-agent.ts` | `JuncoAgent`: run admission through the patch's per-run integration, pause recording and gating, the demand queue, status, abort, terminal close, the protected subclass hooks, and the `create` factory with its owned resources. |
-| `src/yield-tool.ts` | `createYieldTool()` and the module-private registry that makes only its tools scheduling primitives. |
-| `src/index.ts` | Public exports: the contract types, `JuncoAgent`, `AgenticRun`, `JuncoAgentCreateOptions`, `createYieldTool` and its types. Nothing else. |
+| `src/index.ts` | Public exports: the contract types, `JuncoAgent`, `AgenticRun`, `JuncoAgentCreateOptions`. Nothing else; `createYieldTool`, `isYieldTool` and the yield types are owned and exported by `junco-tools`. |
 | `patches/@earendil-works%2Fpi-agent-core@0.80.6.patch` | The one canonical Pi patch, registered here and by consumers (`../junco-agency`) from their own roots. |
 | `scripts/run-cli.sh` | Bun script launcher: enter the caller's dedicated Btrfs seed, exec pinned Pi `cli.js` with the installed `junco-tools` extension, and forward Pi arguments. |
 | `test/harness.ts` | Offline scaffolding: `scripted`/`nativeOptions` (faux model, in-memory session, no tools), `newAgent`, `gatedTool`, `countingTool`. |
 | `test/junco-agent.test.ts` | Native fidelity against a raw harness, iterator ordering, pauses, abort, terminal close, the native limits, `create` ownership, and saved Pi login/error behavior. |
 
-`dist/`, `node_modules/`, `*.tsbuildinfo`, and `graphify-out/` are generated and ignored. Keep `bun.lock` and `patches/` tracked.
+`dist/`, `node_modules/`, `*.tsbuildinfo`, and `graphify-out/` are generated and ignored. Dependencies are locked by the workspace root's `bun.lock`.
 
 ## Build and verification commands
 
-Run from the repository root:
+Install once at the junco-agency workspace root, then run from `packages/junco-agent`:
 
 ```sh
-bun install --linker hoisted
+bun install --frozen-lockfile    # at the workspace root
 bun run build
 bun run typecheck
 bun run test
 ```
 
-- Install `junco-tools` first. If its `dist/` or `native/junco_tools.linux-x64-gnu.node` is missing, run `npm ci` and then `npm run build` in `../junco-tools`, following its README. Do not change its Cargo configuration or backend from here.
-- The hoisted linker installs `file:../junco-tools` as per-file symlinks, so its compiled output and native addon are read from the sibling checkout.
+- Build `junco-tools` first. If its `dist/` or `native/junco_tools.linux-x64-gnu.node` is missing, run `bun run build` in `../junco-tools`, following its README. Do not change its Cargo configuration or backend from here.
+- The workspace links `junco-tools` to `../junco-tools`, so its compiled output and native addon are read from there.
 - `build` and `typecheck` invoke TypeScript directly. `tsconfig.json` includes only `src/**/*.ts`, so the tests are not type-checked. `verbatimModuleSyntax` is on.
 
 ## The Pi patch
@@ -51,11 +50,11 @@ bun run test
 
 1. `JuncoAgent` overrides only the three run-starting methods (to scope admission and reject while a prompt is staged or after close), the mutating operations (to reject after close and track them), `abort()`, and the protected hooks. It never proxies, re-emits, wraps tools or providers, or replaces native arguments, results, errors or event order. Native getters and `systemPrompt` keep native identity and `this`.
 2. Admission uses a stack of synchronous invocation scopes filled by `createRunIntegration`; a call Pi rejects as busy fills none and publishes nothing, while every admitted run publishes exactly one `settled` or `failed` boundary — including a `before_agent_start` hook that throws a busy-coded error, and missing skills or templates.
-3. Pause reasons belong to their run and assistant message, keyed by tool call id, and are ordered by the batch's tool results at `afterTurn`. Only tools created by `createYieldTool()` and errors satisfying `isMarshPolicyDenied` (a code check, never message text) record reasons. An abandoned run discards its reasons; late sibling outcomes stay tracked for close but cannot publish a pause.
+3. Pause reasons belong to their run and assistant message, keyed by tool call id, and are ordered by the batch's tool results at `afterTurn`. Only tools created by `junco-tools`' `createYieldTool()` (checked with its `isYieldTool`, never by name) and errors satisfying `isMarshPolicyDenied` (a code check, never message text) record reasons. An abandoned run discards its reasons; late sibling outcomes stay tracked for close but cannot publish a pause.
 4. Demands are served strictly in order. A demand takes the oldest unread boundary; only with none does it resume the oldest consumed pause or start the staged prompt. Without a demand every gate stays shut.
 5. `abort()` marks the currently admitted runs stopping, calls `super.abort()` exactly once, then releases their gates and drops their unread pauses. It returns the native promise unchanged and never closes resources.
 6. Terminal close is one shared operation: it rejects native run-starting and mutating calls from its first instant, starts native abort and `closeDependents()` without awaiting them, releases every gate, joins all admitted operations and tracked work, then the abort and dependents, flushes session writes, and releases factory-owned resources exactly once. Failures aggregate in that order; task failures stay on their own promises and steps.
-7. `create` keeps `import("junco-tools")` dynamic so explicit tools never load the native addon, and takes ownership only of what it creates. Provider/model ID strings resolve through Pi's `ModelRuntime`, optionally shared via `models`; require the selected provider's saved Pi credential and resolve/refresh it before allocating default sessions/tools. Never start an interactive login or fall back to Copilot CLI credentials: missing/unusable credentials must tell the user to run `/login` in Pi. `fromResolved` remains caller-authenticated.
+7. `create` loads the native addon only through `ToolCollection.create` when `tools` is omitted: the `junco-tools` root import itself loads no addon, so explicit tools never do. It takes ownership only of what it creates. Provider/model ID strings resolve through Pi's `ModelRuntime`, optionally shared via `models`; require the selected provider's saved Pi credential and resolve/refresh it before allocating default sessions/tools. Never start an interactive login or fall back to Copilot CLI credentials: missing/unusable credentials must tell the user to run `/login` in Pi. `fromResolved` remains caller-authenticated.
 
 ## Tests and operational boundaries
 

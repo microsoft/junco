@@ -19,8 +19,8 @@ test-fs = ["marsh-core/testing"]
 [dependencies]
 napi = { version = "=3.13.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
 napi-derive = "=3.6.9"
-marsh-core = { path = "../marsh/crates/marsh-core" }
-marsh-btrfs = { path = "../marsh/crates/marsh-btrfs" }
+marsh-core = { path = "../../../marsh/crates/marsh-core" }
+marsh-btrfs = { path = "../../../marsh/crates/marsh-btrfs" }
 brush-core = "=0.5.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 
@@ -51,5 +51,5 @@ libc = "0.2"
 napi-build = "=2.5.0"
 
 [patch.crates-io]
-brush-core = { path = "../marsh/crates/brush-core" }
-brush-interactive = { path = "../marsh/crates/brush-interactive" }
+brush-core = { path = "../../../marsh/crates/brush-core" }
+brush-interactive = { path = "../../../marsh/crates/brush-interactive" }

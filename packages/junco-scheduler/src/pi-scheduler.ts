@@ -23,7 +23,12 @@ import {
   type Schedule,
   triggerInputs,
 } from "dataflow-engine";
-import { type AgenticOptions, type AgenticRun, JuncoAgent, JuncoAgentError } from "junco-agent";
+import {
+  type AgenticOptions,
+  type AgenticRun,
+  JuncoAgent,
+  JuncoAgentError,
+} from "junco-agent";
 import { type Static, Type } from "typebox";
 
 const scheduleParameters = Type.Object(
@@ -67,12 +72,18 @@ export type ScheduleTool = AgentTool<typeof scheduleParameters, SchedulerInfo>;
  */
 export type PiSchedulerAdapter<N, T> = {
   /** JSON-serializable details of one available node, shown to the model as `details`. */
-  readonly describeNode?: (id: NodeIdType, node: NodeAvailability<N, T>) => unknown;
+  readonly describeNode?: (
+    id: NodeIdType,
+    node: NodeAvailability<N, T>,
+  ) => unknown;
   /**
    * The reads of one occurrence, used both when planning a window and when re-reading a running
    * node's live inputs. Synchronous and pure. Defaults to `triggerInputs(node)`.
    */
-  readonly readInputs?: (id: NodeIdType, node: NodeAvailability<N, T>) => InputSchedule;
+  readonly readInputs?: (
+    id: NodeIdType,
+    node: NodeAvailability<N, T>,
+  ) => InputSchedule;
   /**
    * A pure synchronous guard run before every run admission, snapshot and graph window, possibly
    * several times per cycle. Throwing fails a run at admission, before any provider call, and turns
@@ -126,13 +137,16 @@ const SCHEDULER_INSTRUCTIONS = [
 function freeze<T extends object>(value: T): T {
   for (const key of Reflect.ownKeys(value)) {
     const field = (value as Record<PropertyKey, unknown>)[key];
-    if (typeof field === "object" && field !== null && !Object.isFrozen(field)) freeze(field);
+    if (typeof field === "object" && field !== null && !Object.isFrozen(field))
+      freeze(field);
   }
   return Object.freeze(value);
 }
 
 /** Whether a model collection can list Pi's saved logins; a bare native collection cannot. */
-function listsCredentials(models: object): models is Pick<ModelRuntime, "listCredentials"> {
+function listsCredentials(
+  models: object,
+): models is Pick<ModelRuntime, "listCredentials"> {
   return "listCredentials" in models;
 }
 
@@ -193,7 +207,9 @@ export class PiScheduler<
   readonly #terminal = new AbortController();
   readonly #runs = new WeakMap<AgenticRun, RunState>();
   #bounds: { readonly window: number; readonly threads: number } | undefined;
-  #available: (() => ReadonlyMap<NodeIdType, NodeAvailability<N, T>>) | undefined;
+  #available:
+    | (() => ReadonlyMap<NodeIdType, NodeAvailability<N, T>>)
+    | undefined;
   #step: ((signal?: AbortSignal) => Promise<void>) | undefined;
   #staged: readonly (readonly string[])[] | undefined;
   /** The native lane with guarded run admission, once the harness exists. */
@@ -204,9 +220,12 @@ export class PiScheduler<
    *
    * @throws {JuncoAgentError} `invalid_argument` when `model`, `models` or `session` is missing.
    */
-  static async make<N = unknown, T = unknown, S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
-    options: PiSchedulerOptions<N, T, S, P>,
-  ): Promise<PiScheduler<N, T, S, P>> {
+  static async make<
+    N = unknown,
+    T = unknown,
+    S extends Skill = Skill,
+    P extends PromptTemplate = PromptTemplate,
+  >(options: PiSchedulerOptions<N, T, S, P>): Promise<PiScheduler<N, T, S, P>> {
     const scheduler = new PiScheduler<N, T, S, P>(options);
     await scheduler.initialize();
     return scheduler;
@@ -240,28 +259,48 @@ export class PiScheduler<
    * }
    * ```
    */
-  static async opus<N = unknown, T = unknown, S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
+  static async opus<
+    N = unknown,
+    T = unknown,
+    S extends Skill = Skill,
+    P extends PromptTemplate = PromptTemplate,
+  >(
     options: PiSchedulerOptions<N, T, S, P> = {},
   ): Promise<PiScheduler<N, T, S, P>> {
-    const { models: suppliedModels, session: suppliedSession, ...native } = options;
+    const {
+      models: suppliedModels,
+      session: suppliedSession,
+      ...native
+    } = options;
     let session = suppliedSession;
     let repo: MemorySessionRepo | undefined;
     let scheduler: PiScheduler<N, T, S, P> | undefined;
     try {
-      const models = suppliedModels ?? (await (await import("@earendil-works/pi-coding-agent")).ModelRuntime.create());
+      const models =
+        suppliedModels ??
+        (await (
+          await import("@earendil-works/pi-coding-agent")
+        ).ModelRuntime.create());
       const model = models.getModel(OPUS_PROVIDER, OPUS_MODEL);
       if (model === undefined) {
-        throw new JuncoAgentError("invalid_argument", `Model not found: ${OPUS_PROVIDER}/${OPUS_MODEL}`);
+        throw new JuncoAgentError(
+          "invalid_argument",
+          `Model not found: ${OPUS_PROVIDER}/${OPUS_MODEL}`,
+        );
       }
       try {
         const hasSavedLogin =
           listsCredentials(models) &&
-          (await models.listCredentials()).some(({ providerId }) => providerId === OPUS_PROVIDER);
+          (await models.listCredentials()).some(
+            ({ providerId }) => providerId === OPUS_PROVIDER,
+          );
         if (!hasSavedLogin) {
           throw new Error(`No saved Pi credentials for ${OPUS_PROVIDER}`);
         }
         if ((await models.getAuth(model)) === undefined) {
-          throw new Error(`Pi could not resolve credentials for ${OPUS_PROVIDER}`);
+          throw new Error(
+            `Pi could not resolve credentials for ${OPUS_PROVIDER}`,
+          );
         }
       } catch (cause) {
         throw new JuncoAgentError(
@@ -274,7 +313,10 @@ export class PiScheduler<
         repo = new MemorySessionRepo();
         session = await repo.create({}, BACKGROUND_CONTEXT);
       }
-      scheduler = new PiScheduler<N, T, S, P>({ ...native, session, models, model }, repo === undefined ? {} : { repo });
+      scheduler = new PiScheduler<N, T, S, P>(
+        { ...native, session, models, model },
+        repo === undefined ? {} : { repo },
+      );
       await scheduler.initialize();
       return scheduler;
     } catch (error) {
@@ -290,7 +332,11 @@ export class PiScheduler<
         }
       }
       if (failures.length > 0) {
-        throw new AggregateError([error, ...failures], "PiScheduler.opus cleanup failed", { cause: error });
+        throw new AggregateError(
+          [error, ...failures],
+          "PiScheduler.opus cleanup failed",
+          { cause: error },
+        );
       }
       throw error;
     }
@@ -309,18 +355,25 @@ export class PiScheduler<
       models,
       session,
       ...native
-    } = options as PiSchedulerOptions<N, T, S, P> & Pick<AgenticOptions<S, P, ScheduleTool>, "tools" | "activeToolNames">;
+    } = options as PiSchedulerOptions<N, T, S, P> &
+      Pick<AgenticOptions<S, P, ScheduleTool>, "tools" | "activeToolNames">;
     if (model === undefined || models === undefined || session === undefined) {
-      throw new JuncoAgentError("invalid_argument", "PiScheduler.make requires model, models, and session");
+      throw new JuncoAgentError(
+        "invalid_argument",
+        "PiScheduler.make requires model, models, and session",
+      );
     }
-    let scheduler: PiScheduler<N, T, S, P> | undefined;
     const tool: ScheduleTool = freeze({
       name: "schedule",
       label: "schedule",
-      description: "Run one bounded window of the graph with the given lanes, then return the resulting SchedulerInfo.",
+      description:
+        "Run one bounded window of the graph with the given lanes, then return the resulting SchedulerInfo.",
       parameters: scheduleParameters,
-      execute: (toolCallId: string, params: Static<typeof scheduleParameters>, signal?: AbortSignal) =>
-        scheduler!.#schedule(toolCallId, params, signal),
+      execute: (
+        toolCallId: string,
+        params: Static<typeof scheduleParameters>,
+        signal?: AbortSignal,
+      ) => this!.#schedule(toolCallId, params, signal),
     });
     super(
       {
@@ -340,7 +393,6 @@ export class PiScheduler<
       },
       owned,
     );
-    scheduler = this;
     this.#tool = tool;
     this.#adapter = adapter;
   }
@@ -368,7 +420,11 @@ export class PiScheduler<
     this.hooks.on("transform_context", ({ messages }) => ({
       messages: [
         ...messages,
-        { role: "user", content: `SchedulerInfo:\n${JSON.stringify(this.#info())}`, timestamp: Date.now() },
+        {
+          role: "user",
+          content: `SchedulerInfo:\n${JSON.stringify(this.#info())}`,
+          timestamp: Date.now(),
+        },
       ],
     }));
   }
@@ -381,7 +437,10 @@ export class PiScheduler<
 
   /** Record the engine's bounds. A scheduler serves exactly one graph. */
   create(window: number, threads: number): void {
-    if (this.#bounds !== undefined) throw new DataflowDefinitionError("PiScheduler already configures a graph");
+    if (this.#bounds !== undefined)
+      throw new DataflowDefinitionError(
+        "PiScheduler already configures a graph",
+      );
     this.#bounds = { window, threads };
   }
 
@@ -390,34 +449,50 @@ export class PiScheduler<
     available: () => ReadonlyMap<NodeIdType, NodeAvailability<N, T>>,
     step: (signal?: AbortSignal) => Promise<void>,
   ): void {
-    if (this.#bounds === undefined) throw new DataflowDefinitionError("PiScheduler is not configured");
-    if (this.#available !== undefined) throw new DataflowDefinitionError("PiScheduler already binds a graph");
+    if (this.#bounds === undefined)
+      throw new DataflowDefinitionError("PiScheduler is not configured");
+    if (this.#available !== undefined)
+      throw new DataflowDefinitionError("PiScheduler already binds a graph");
     this.#available = available;
     this.#step = step;
   }
 
   /** Consume the staged `schedule` decision once; never asks the model. */
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<N, T>>): Schedule {
+  schedule(
+    available: ReadonlyMap<NodeIdType, NodeAvailability<N, T>>,
+  ): Schedule {
     const lanes = this.#staged;
     this.#staged = undefined;
-    if (lanes === undefined) throw new DataflowDefinitionError("PiScheduler requires a schedule-tool decision");
+    if (lanes === undefined)
+      throw new DataflowDefinitionError(
+        "PiScheduler requires a schedule-tool decision",
+      );
     return lanes.map((lane) =>
       lane.map((raw): NodeSchedule => {
         const id = NodeId(raw);
         const candidate = available.get(id);
         // An unknown id stays in the plan for the engine to reject.
-        return { id, inputs: candidate === undefined ? new Map() : this.#reads(id, candidate) };
+        return {
+          id,
+          inputs:
+            candidate === undefined ? new Map() : this.#reads(id, candidate),
+        };
       }),
     );
   }
 
   /** Re-derive a running node's reads from the live column snapshot with the planning rule. */
-  resolveInputs(entry: NodeSchedule, live: NodeAvailability<N, T>): InputSchedule {
+  resolveInputs(
+    entry: NodeSchedule,
+    live: NodeAvailability<N, T>,
+  ): InputSchedule {
     return this.#reads(entry.id, live);
   }
 
   #reads(id: NodeIdType, candidate: NodeAvailability<N, T>): InputSchedule {
-    return this.#adapter.readInputs === undefined ? triggerInputs(candidate) : this.#adapter.readInputs(id, candidate);
+    return this.#adapter.readInputs === undefined
+      ? triggerInputs(candidate)
+      : this.#adapter.readInputs(id, candidate);
   }
 
   // Schedule tool ----------------------------------------------------------------------------------
@@ -425,7 +500,12 @@ export class PiScheduler<
   #state(run: AgenticRun): RunState {
     let state = this.#runs.get(run);
     if (state === undefined) {
-      state = { invalid: new Set(), observedWork: false, windows: 0, fatal: undefined };
+      state = {
+        invalid: new Set(),
+        observedWork: false,
+        windows: 0,
+        fatal: undefined,
+      };
       this.#runs.set(run, state);
     }
     return state;
@@ -450,18 +530,35 @@ export class PiScheduler<
     const available = this.#guard();
     // Bound together with the candidate view.
     const step = this.#step!;
-    if (signal === undefined) throw new JuncoAgentError("invalid_state", "schedule ran without its run signal");
+    if (signal === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        "schedule ran without its run signal",
+      );
     const run = this.runForSignal(signal);
     const state = this.#state(run);
-    if (run.signal === undefined) throw new JuncoAgentError("invalid_state", "schedule run has no admission signal");
+    if (run.signal === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        "schedule run has no admission signal",
+      );
     if (state.invalid.has(toolCallId)) {
-      throw new JuncoAgentError("invalid_argument", "PiScheduler accepts one schedule call per response");
+      throw new JuncoAgentError(
+        "invalid_argument",
+        "PiScheduler accepts one schedule call per response",
+      );
     }
-    const graphSignal = AbortSignal.any([signal, run.signal, this.#terminal.signal]);
+    const graphSignal = AbortSignal.any([
+      signal,
+      run.signal,
+      this.#terminal.signal,
+    ]);
     graphSignal.throwIfAborted();
     if (available().size === 0) {
       if (lanes.some((lane) => lane.length > 0)) {
-        throw new DataflowDefinitionError("PiScheduler cannot schedule unavailable work");
+        throw new DataflowDefinitionError(
+          "PiScheduler cannot schedule unavailable work",
+        );
       }
       return this.#result();
     }
@@ -471,14 +568,20 @@ export class PiScheduler<
       await step(graphSignal);
     } catch (error) {
       // A node failure is fatal to this run; cancellation is not a node failure.
-      if (!graphSignal.aborted && error instanceof DataflowNodeError) state.fatal ??= error;
+      if (!graphSignal.aborted && error instanceof DataflowNodeError)
+        state.fatal ??= error;
       throw error;
     } finally {
       this.#staged = undefined;
     }
     state.windows++;
     this.requestYield(
-      { kind: "tool", toolCallId, toolName: "schedule", reason: "Scheduled graph window completed" },
+      {
+        kind: "tool",
+        toolCallId,
+        toolName: "schedule",
+        reason: "Scheduled graph window completed",
+      },
       signal,
     );
     return this.#result();
@@ -488,7 +591,10 @@ export class PiScheduler<
   #guard(): () => ReadonlyMap<NodeIdType, NodeAvailability<N, T>> {
     const available = this.#available;
     if (available === undefined) {
-      throw new JuncoAgentError("invalid_state", "PiScheduler is not bound to a graph");
+      throw new JuncoAgentError(
+        "invalid_state",
+        "PiScheduler is not bound to a graph",
+      );
     }
     this.#adapter.beforeSchedule?.();
     return available;
@@ -502,7 +608,11 @@ export class PiScheduler<
     const nodes: SchedulerInfo["nodes"][number][] = [];
     for (const [id, candidate] of available()) {
       const details = this.#adapter.describeNode?.(id, candidate);
-      nodes.push(details === undefined ? { id, status: candidate.status } : { id, status: candidate.status, details });
+      nodes.push(
+        details === undefined
+          ? { id, status: candidate.status }
+          : { id, status: candidate.status, details },
+      );
     }
     return {
       window: Number.isFinite(bounds.window) ? bounds.window : null,
@@ -514,7 +624,10 @@ export class PiScheduler<
 
   #result(): AgentToolResult<SchedulerInfo> {
     const info = this.#info();
-    return { content: [{ type: "text", text: JSON.stringify(info) }], details: info };
+    return {
+      content: [{ type: "text", text: JSON.stringify(info) }],
+      details: info,
+    };
   }
 
   // Lifetime ---------------------------------------------------------------------------------------
@@ -524,15 +637,29 @@ export class PiScheduler<
    * scheduled; a node failure rejects with its original error. Error, aborted and stopping
    * settlements pass through unchanged.
    */
-  protected override validateSettlement(run: AgenticRun, message: AssistantMessage): AssistantMessage {
+  protected override validateSettlement(
+    run: AgenticRun,
+    message: AssistantMessage,
+  ): AssistantMessage {
     const state = this.#runs.get(run);
     if (state?.fatal !== undefined) throw state.fatal;
-    if (run.stopping || message.stopReason === "error" || message.stopReason === "aborted") return message;
+    if (
+      run.stopping ||
+      message.stopReason === "error" ||
+      message.stopReason === "aborted"
+    )
+      return message;
     if (this.#available !== undefined && this.#available().size > 0) {
-      throw new JuncoAgentError("invalid_state", "PiScheduler finished while graph work is available");
+      throw new JuncoAgentError(
+        "invalid_state",
+        "PiScheduler finished while graph work is available",
+      );
     }
     if (state?.observedWork === true && state.windows === 0) {
-      throw new JuncoAgentError("invalid_state", "PiScheduler finished without a successful schedule");
+      throw new JuncoAgentError(
+        "invalid_state",
+        "PiScheduler finished without a successful schedule",
+      );
     }
     return message;
   }
@@ -544,24 +671,41 @@ export class PiScheduler<
   }
 
   protected override closeDependents(): Promise<void> | undefined {
-    this.#terminal.abort(new JuncoAgentError("invalid_state", "PiScheduler is closed"));
+    this.#terminal.abort(
+      new JuncoAgentError("invalid_state", "PiScheduler is closed"),
+    );
     return this.#adapter.closeDependents?.();
   }
 
   // Fixed tool set ---------------------------------------------------------------------------------
 
-  override setTools(tools: ScheduleTool[], activeToolNames?: string[]): Promise<void> {
+  override setTools(
+    tools: ScheduleTool[],
+    activeToolNames?: string[],
+  ): Promise<void> {
     const fixed =
       tools.length === 1 &&
       tools[0] === this.#tool &&
-      (activeToolNames === undefined || (activeToolNames.length === 1 && activeToolNames[0] === "schedule"));
-    if (!fixed) return Promise.reject(new JuncoAgentError("invalid_argument", "PiScheduler tools are fixed to schedule"));
+      (activeToolNames === undefined ||
+        (activeToolNames.length === 1 && activeToolNames[0] === "schedule"));
+    if (!fixed)
+      return Promise.reject(
+        new JuncoAgentError(
+          "invalid_argument",
+          "PiScheduler tools are fixed to schedule",
+        ),
+      );
     return super.setTools(tools, activeToolNames);
   }
 
   override setActiveTools(toolNames: string[]): Promise<void> {
     if (toolNames.length !== 1 || toolNames[0] !== "schedule") {
-      return Promise.reject(new JuncoAgentError("invalid_argument", "PiScheduler tools are fixed to schedule"));
+      return Promise.reject(
+        new JuncoAgentError(
+          "invalid_argument",
+          "PiScheduler tools are fixed to schedule",
+        ),
+      );
     }
     return super.setActiveTools(toolNames);
   }

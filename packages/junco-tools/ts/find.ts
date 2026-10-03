@@ -8,7 +8,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { NativeMux } from "../native/index.js";
 import type { NativeModule } from "./native.js";
-import { requireU32, throwIfAborted, withNativeSignal } from "./tool-support.js";
+import {
+  requireU32,
+  throwIfAborted,
+  withNativeSignal,
+} from "./tool-support.js";
 
 /**
  * Pi's find tool backed by the native walker.
@@ -24,7 +28,10 @@ export function createFindTool(
   cwd: string,
   native: NativeModule,
   mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiFindTool>["parameters"], FindToolDetails | undefined> {
+): AgentTool<
+  ReturnType<typeof createPiFindTool>["parameters"],
+  FindToolDetails | undefined
+> {
   const base = createPiFindToolDefinition(cwd);
   const tool = {
     ...base,
@@ -55,7 +62,9 @@ export function createFindTool(
             );
             // Pi's adapter relativizes against the search root, so hand it
             // absolute paths rather than the walker's root-relative ones.
-            return result.matches.map((match) => resolveNodePath(root, match.path));
+            return result.matches.map((match) =>
+              resolveNodePath(root, match.path),
+            );
           },
         },
       });
@@ -63,6 +72,9 @@ export function createFindTool(
       // otherwise settle the call while a native worker is still draining.
       return scoped.execute(toolCallId, params, undefined, onUpdate);
     },
-  } satisfies ToolDefinition<ReturnType<typeof createPiFindTool>["parameters"], FindToolDetails | undefined>;
+  } satisfies ToolDefinition<
+    ReturnType<typeof createPiFindTool>["parameters"],
+    FindToolDetails | undefined
+  >;
   return tool;
 }

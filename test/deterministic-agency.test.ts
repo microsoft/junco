@@ -10,9 +10,9 @@ import {
   DataflowNodeError,
   type Edge,
   from,
+  type Message,
   messageEdge,
   msg,
-  type Message,
   NodeId,
   type NodeOptions,
   type NodeSchedule,
@@ -20,8 +20,8 @@ import {
   triggerInputs,
   UNBOUNDED,
   valueEdge,
-  when,
   Width,
+  when,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
@@ -32,6 +32,7 @@ import {
   agentNode,
   Deterministic,
   deterministicNode,
+  graph as graphApi,
   graphNode,
   JuncoGraph,
   MockAgent,
@@ -40,14 +41,14 @@ import {
 } from "../src/index.ts";
 import {
   assistant,
-  pause,
   type PolicyScheduler,
+  pause,
   policyGraph,
   reason,
   requestTexts,
   run,
-  settle,
   STRATEGIES,
+  settle,
   textOf,
   userTexts,
   yieldsThen,
@@ -56,20 +57,34 @@ import {
 // JuncoGraphs of mock members, coroutines and nested graphs on the real round-robin and parallel
 // policies. Graphs, schedulers, recursive lifecycle and cancellation are real.
 
-type PolicyGraph = JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>;
+type PolicyGraph = JuncoGraph<
+  AgenticInput,
+  AssistantMessage,
+  unknown,
+  PolicyScheduler
+>;
 
 const TIMEOUT_MS = 30_000;
-const invalidState = (error: unknown) => error instanceof JuncoAgentError && error.code === "invalid_state";
-const closedGraph = (error: unknown) => error instanceof JuncoAgentError && error.code === "closed";
+const invalidState = (error: unknown) =>
+  error instanceof JuncoAgentError && error.code === "invalid_state";
+const closedGraph = (error: unknown) =>
+  error instanceof JuncoAgentError && error.code === "closed";
 
 /** A scripted `before_drive` hook whose registered handler must return nothing. */
-const DRIVE: MockHook = { name: "before_drive", event: { operation: "run", lane: "main", runId: "run" }, results: [undefined] };
+const DRIVE: MockHook = {
+  name: "before_drive",
+  event: { operation: "run", lane: "main", runId: "run" },
+  results: [undefined],
+};
 
 /** A run whose first frame waits in its `before_drive` hook, then settles `text`. */
 const gatedRun = (text: string, yields = 0): MockRun =>
   run([
     ...Array.from({ length: yields }, (_, index) =>
-      pause([reason(`pause ${index + 1}`, `g${index + 1}`)], index === 0 ? { hooks: [DRIVE] } : {}),
+      pause(
+        [reason(`pause ${index + 1}`, `g${index + 1}`)],
+        index === 0 ? { hooks: [DRIVE] } : {},
+      ),
     ),
     settle(assistant(text), yields === 0 ? { hooks: [DRIVE] } : {}),
   ]);
@@ -86,17 +101,29 @@ type Barrier = {
   readonly finished: boolean;
 };
 
-function barrier({ endOnAbort = false }: { readonly endOnAbort?: boolean } = {}): Barrier {
+function barrier({
+  endOnAbort = false,
+}: {
+  readonly endOnAbort?: boolean;
+} = {}): Barrier {
   const started = Promise.withResolvers<void>();
   const aborted = Promise.withResolvers<void>();
   const released = Promise.withResolvers<void>();
   const state = { finished: false };
-  const handler = async (_event: unknown, context: Context): Promise<undefined> => {
+  const handler = async (
+    _event: unknown,
+    context: Context,
+  ): Promise<undefined> => {
     started.resolve();
     const signal = context.abortSignal;
     if (signal?.aborted) aborted.resolve();
-    else signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
-    await (endOnAbort ? Promise.race([released.promise, aborted.promise]) : released.promise);
+    else
+      signal?.addEventListener("abort", () => aborted.resolve(), {
+        once: true,
+      });
+    await (endOnAbort
+      ? Promise.race([released.promise, aborted.promise])
+      : released.promise);
     state.finished = true;
     return undefined;
   };
@@ -139,17 +166,28 @@ const failingAbort = (failure: Error): MockAgent =>
   })({ runs: [] });
 
 const member = (agent: MockAgent, description = "member", id?: string) =>
-  agentNode(agent, { ...(id === undefined ? {} : { id: NodeId(id) }), description, trigger: always() });
+  agentNode(agent, {
+    ...(id === undefined ? {} : { id: NodeId(id) }),
+    description,
+    trigger: always(),
+  });
 
 /** A nested-graph node its parent never runs: the test drives `child` itself. */
 const detached = (child: PolicyGraph, result: NodeId, description = "nested") =>
-  graphNode(child, { description, trigger: always(), is_available: () => false }, { result });
+  graphNode(
+    child,
+    { description, trigger: always(), is_available: () => false },
+    { result },
+  );
 
 /** The messages currently queued on message edge `edge`. */
 const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
   E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
-const resultText = (graph: Pick<PolicyGraph, "result">, id: NodeId): string | undefined => {
+const resultText = (
+  graph: Pick<PolicyGraph, "result">,
+  id: NodeId,
+): string | undefined => {
   const result = graph.result(id);
   return O.isSome(result) ? textOf(result.value) : undefined;
 };
@@ -161,10 +199,17 @@ const stopReason = (graph: Pick<PolicyGraph, "result">, id: NodeId) => {
 };
 
 /** The rejection of `drive`, or `undefined` once it fulfils; observed immediately. */
-const outcome = (drive: Promise<unknown>): Promise<unknown> => drive.then(() => undefined, (error: unknown) => error);
+const outcome = (drive: Promise<unknown>): Promise<unknown> =>
+  drive.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
 
 /** Step the graph until `done` holds; a bounded loop, so a regression fails instead of spinning. */
-async function stepUntil(graph: Pick<PolicyGraph, "step">, done: () => boolean): Promise<void> {
+async function stepUntil(
+  graph: Pick<PolicyGraph, "step">,
+  done: () => boolean,
+): Promise<void> {
   for (let windows = 0; windows < 64; windows++) {
     if (done()) return;
     await graph.step();
@@ -173,18 +218,34 @@ async function stepUntil(graph: Pick<PolicyGraph, "step">, done: () => boolean):
 }
 
 /** Let every queued microtask run; shows only that nothing progressed, never waits for progress. */
-const flushMacrotask = () => new Promise<void>((resolve) => setImmediate(resolve));
+const flushMacrotask = () =>
+  new Promise<void>((resolve) => setImmediate(resolve));
 
 for (const strategy of STRATEGIES) {
   describe(strategy, () => {
     test("a suspended member stays schedulable with its policy reasons until it settles", async () => {
-      const sender = new MockAgent({ prompt: "send", runs: [yieldsThen(1, "sent")] });
+      const sender = new MockAgent({
+        prompt: "send",
+        runs: [yieldsThen(1, "sent")],
+      });
       const first = [reason("first pause", "y1")];
-      const second = [reason("bash denied by policy", "p1", "policy"), reason("after denial", "y2")];
-      const worker = new MockAgent({ runs: [run([pause(first), pause(second), settle(assistant("worker done"))])] });
-      const child = new MockAgent({ prompt: "child", runs: [yieldsThen(0, "child done")] });
+      const second = [
+        reason("bash denied by policy", "p1", "policy"),
+        reason("after denial", "y2"),
+      ];
+      const worker = new MockAgent({
+        runs: [
+          run([pause(first), pause(second), settle(assistant("worker done"))]),
+        ],
+      });
+      const child = new MockAgent({
+        prompt: "child",
+        runs: [yieldsThen(0, "child done")],
+      });
       const graph = policyGraph(strategy);
-      const work = messageEdge<AgenticInput, AssistantMessage>("sender->worker");
+      const work = messageEdge<AgenticInput, AssistantMessage>(
+        "sender->worker",
+      );
       const result = valueEdge<AgenticInput, AssistantMessage>("worker->child");
       const s = graph.addNode(
         agentNode(
@@ -200,7 +261,9 @@ for (const strategy of STRATEGIES) {
           { receive: (view) => view.messages.get(work.id) ?? [] },
         ),
       );
-      const c = graph.addNode(agentNode(child, { description: "child", trigger: when(result) }));
+      const c = graph.addNode(
+        agentNode(child, { description: "child", trigger: when(result) }),
+      );
       graph.addEdge(s, w, work).addEdge(w, c, result);
 
       await stepUntil(graph, () => worker.requests.length === 1);
@@ -219,14 +282,23 @@ for (const strategy of STRATEGIES) {
       await graph.run();
       assert.equal(resultText(graph, w), "worker done");
       assert.equal(resultText(graph, c), "child done");
-      assert.deepEqual(requestTexts(worker.requests), [["work"], ["work"], ["work"]]);
+      assert.deepEqual(requestTexts(worker.requests), [
+        ["work"],
+        ["work"],
+        ["work"],
+      ]);
       await graph.close();
       assert.equal(worker.status, "closed");
     });
 
     test("an any trigger reads a newer message although a delivered result stays satisfied", async () => {
-      const source = new MockAgent({ prompt: "value", runs: [yieldsThen(0, "the value")] });
-      const messenger = new MockAgent({ runs: [yieldsThen(1, "messenger done")] });
+      const source = new MockAgent({
+        prompt: "value",
+        runs: [yieldsThen(0, "the value")],
+      });
+      const messenger = new MockAgent({
+        runs: [yieldsThen(1, "messenger done")],
+      });
       const drainFollowUp = { drain: ["followUp"] } as const;
       const reader = new MockAgent({
         prompt: "read",
@@ -258,16 +330,25 @@ for (const strategy of STRATEGIES) {
       const c = graph.addNode(
         agentNode(
           reader,
-          { id: NodeId("c"), description: "reader", trigger: anyOf(on(value), on(more)) },
+          {
+            id: NodeId("c"),
+            description: "reader",
+            trigger: anyOf(on(value), on(more)),
+          },
           {
             receive: (view) => [
               ...[...view.values.keys()].map(
-                (id): AgenticInput => ({ kind: "nextTurn", text: `got ${textOf(view.values.get(id)!)}` }),
+                (id): AgenticInput => ({
+                  kind: "nextTurn",
+                  text: `got ${textOf(view.values.get(id)!)}`,
+                }),
               ),
               ...(view.messages.get(more.id) ?? []),
             ],
             emit: (step) =>
-              step.reasons[0]?.reason === "ask for more" ? [msg(ask, { kind: "prompt", text: "help" })] : [],
+              step.reasons[0]?.reason === "ask for more"
+                ? [msg(ask, { kind: "prompt", text: "help" })]
+                : [],
           },
         ),
       );
@@ -279,7 +360,11 @@ for (const strategy of STRATEGIES) {
         [a, b, c].map((id) => resultText(graph, id)),
         ["the value", "messenger done", "reader after more"],
       );
-      assert.deepEqual(userTexts(reader.history), ["got the value", "read", "more"]);
+      assert.deepEqual(userTexts(reader.history), [
+        "got the value",
+        "read",
+        "more",
+      ]);
       assert.deepEqual(
         reader.calls.map(({ method, args }) => [method, args[0]]),
         [
@@ -293,13 +378,18 @@ for (const strategy of STRATEGIES) {
 
     test("an all trigger reads both message edges together or neither", async () => {
       const outbox: Message<AgenticInput>[] = [];
-      const sender = new MockAgent({ prompt: "send", runs: [yieldsThen(12, "sent")] });
+      const sender = new MockAgent({
+        prompt: "send",
+        runs: [yieldsThen(12, "sent")],
+      });
       const gatedMember = new MockAgent({
         prompt: "start",
         followUpMode: "all",
         runs: [
           run([
-            ...Array.from({ length: 8 }, (_, index) => pause([reason("wait", `m${index}`)], { drain: ["followUp"] })),
+            ...Array.from({ length: 8 }, (_, index) =>
+              pause([reason("wait", `m${index}`)], { drain: ["followUp"] }),
+            ),
             settle(assistant("member done"), { drain: ["followUp"] }),
           ]),
         ],
@@ -308,18 +398,37 @@ for (const strategy of STRATEGIES) {
       const left = messageEdge<AgenticInput, AssistantMessage>("left");
       const right = messageEdge<AgenticInput, AssistantMessage>("right");
       const s = graph.addNode(
-        agentNode(sender, { id: NodeId("s"), description: "sender", trigger: always() }, { emit: () => outbox.splice(0) }),
+        agentNode(
+          sender,
+          { id: NodeId("s"), description: "sender", trigger: always() },
+          { emit: () => outbox.splice(0) },
+        ),
       );
       const m = graph.addNode(
         agentNode(
           gatedMember,
-          { id: NodeId("m"), description: "gated", trigger: allOf(on(left), on(right)) },
-          { receive: (view) => [...(view.messages.get(left.id) ?? []), ...(view.messages.get(right.id) ?? [])] },
+          {
+            id: NodeId("m"),
+            description: "gated",
+            trigger: allOf(on(left), on(right)),
+          },
+          {
+            receive: (view) => [
+              ...(view.messages.get(left.id) ?? []),
+              ...(view.messages.get(right.id) ?? []),
+            ],
+          },
         ),
       );
       graph.addEdge(s, m, left).addEdge(s, m, right);
-      const followUp = (text: string): AgenticInput => ({ kind: "followUp", text });
-      const containing = (text: string) => requestTexts(gatedMember.requests).findIndex((texts) => texts.includes(text));
+      const followUp = (text: string): AgenticInput => ({
+        kind: "followUp",
+        text,
+      });
+      const containing = (text: string) =>
+        requestTexts(gatedMember.requests).findIndex((texts) =>
+          texts.includes(text),
+        );
 
       outbox.push(msg(left, followUp("x1")));
       await stepUntil(graph, () => queued(left).length === 1);
@@ -330,7 +439,9 @@ for (const strategy of STRATEGIES) {
       outbox.push(msg(right, followUp("y1")));
       await stepUntil(graph, () => gatedMember.requests.length === 1);
       assert.deepEqual([queued(left), queued(right)], [[], []]);
-      assert.deepEqual(requestTexts(gatedMember.requests), [["start", "x1", "y1"]]);
+      assert.deepEqual(requestTexts(gatedMember.requests), [
+        ["start", "x1", "y1"],
+      ]);
 
       outbox.push(msg(left, followUp("x2")));
       await stepUntil(graph, () => queued(left).length === 1);
@@ -340,37 +451,75 @@ for (const strategy of STRATEGIES) {
       assert.equal(containing("x2"), -1);
 
       outbox.push(msg(right, followUp("y2")));
-      await stepUntil(graph, () => queued(left).length === 0 && queued(right).length === 0);
+      await stepUntil(
+        graph,
+        () => queued(left).length === 0 && queued(right).length === 0,
+      );
       const index = containing("x2");
       assert.ok(index > 0);
-      assert.deepEqual(requestTexts(gatedMember.requests)[index], ["start", "x1", "y1", "x2", "y2"]);
+      assert.deepEqual(requestTexts(gatedMember.requests)[index], [
+        "start",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+      ]);
       assert.equal(containing("y2"), index);
 
       await graph.run();
       assert.equal(resultText(graph, m), "member done");
-      assert.deepEqual(userTexts(gatedMember.history), ["start", "x1", "y1", "x2", "y2"]);
+      assert.deepEqual(userTexts(gatedMember.history), [
+        "start",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+      ]);
       await graph.close();
     });
 
     test("a nested graph triggered by one message finishes and hands its selected result on", async () => {
-      const source = new MockAgent({ prompt: "send", runs: [yieldsThen(1, "sent")] });
-      const inner = new MockAgent({ prompt: "inner", runs: [yieldsThen(2, "inner done")] });
+      const source = new MockAgent({
+        prompt: "send",
+        runs: [yieldsThen(1, "sent")],
+      });
+      const inner = new MockAgent({
+        prompt: "inner",
+        runs: [yieldsThen(2, "inner done")],
+      });
       const consumer = new MockAgent({ runs: [yieldsThen(0, "reviewed")] });
       const child = policyGraph(strategy);
       const innerId = child.addNode(member(inner, "inner"));
       const graph = policyGraph(strategy);
       const go = messageEdge<AgenticInput, AssistantMessage>("source->nested");
-      const selected = valueEdge<AgenticInput, AssistantMessage>("nested=>consumer");
-      const s = graph.addNode(
-        agentNode(source, { trigger: always() }, { emit: () => [msg(go, { kind: "prompt", text: "go" })] }),
+      const selected = valueEdge<AgenticInput, AssistantMessage>(
+        "nested=>consumer",
       );
-      const n = graph.addNode(graphNode(child, { id: NodeId("nested"), trigger: when(go) }, { result: innerId }));
+      const s = graph.addNode(
+        agentNode(
+          source,
+          { trigger: always() },
+          { emit: () => [msg(go, { kind: "prompt", text: "go" })] },
+        ),
+      );
+      const n = graph.addNode(
+        graphNode(
+          child,
+          { id: NodeId("nested"), trigger: when(go) },
+          { result: innerId },
+        ),
+      );
       const c = graph.addNode(
         agentNode(
           consumer,
           { trigger: when(selected) },
           {
-            receive: (view) => [{ kind: "prompt", text: `review ${textOf(view.values.get(selected.id)!)}` }],
+            receive: (view) => [
+              {
+                kind: "prompt",
+                text: `review ${textOf(view.values.get(selected.id)!)}`,
+              },
+            ],
           },
         ),
       );
@@ -387,61 +536,92 @@ for (const strategy of STRATEGIES) {
       assert.equal(resultText(child, innerId), "inner done");
       assert.equal(resultText(graph, n), "inner done");
       assert.equal(resultText(graph, c), "reviewed");
-      assert.deepEqual(requestTexts(consumer.requests), [["review inner done"]]);
+      assert.deepEqual(requestTexts(consumer.requests), [
+        ["review inner done"],
+      ]);
       assert.equal(graph.getNode(n)?.state, child);
       await graph.close();
-      assert.ok([source, inner, consumer].every((agent) => agent.status === "closed"));
+      assert.ok(
+        [source, inner, consumer].every((agent) => agent.status === "closed"),
+      );
       assert.ok(child.signal.aborted);
     });
 
     test("nested graph routes final messages", async () => {
       const inputText = (input: AgenticInput): string =>
-        input.kind === "prompt" ? input.text : assert.fail("expected a prompt input");
+        input.kind === "prompt"
+          ? input.text
+          : assert.fail("expected a prompt input");
       for (const kind of ["all", "any"] as const) {
         const parent = policyGraph(strategy);
-        const left = messageEdge<AgenticInput, AssistantMessage>("left->nested");
-        const right = messageEdge<AgenticInput, AssistantMessage>("right->nested");
+        const left = messageEdge<AgenticInput, AssistantMessage>(
+          "left->nested",
+        );
+        const right = messageEdge<AgenticInput, AssistantMessage>(
+          "right->nested",
+        );
         const toN3 = messageEdge<AgenticInput, AssistantMessage>("nested->n3");
         const toN4 = messageEdge<AgenticInput, AssistantMessage>("nested->n4");
-        const prompt = (text: string): AgenticInput => ({ kind: "prompt", text });
+        const prompt = (text: string): AgenticInput => ({
+          kind: "prompt",
+          text,
+        });
 
-        const childScheduler = createScheduler<{ readonly texts: string[] }, AgenticInput, AssistantMessage>({
+        const childScheduler = createScheduler<
+          { readonly texts: string[] },
+          AgenticInput,
+          AssistantMessage
+        >({
           state: { texts: [] },
           schedule: (available) => {
             const lanes: NodeSchedule[][] = [];
-            for (const [id, candidate] of available) lanes.push([{ id, inputs: triggerInputs(candidate) }]);
+            for (const [id, candidate] of available)
+              lanes.push([{ id, inputs: triggerInputs(candidate) }]);
             return lanes;
           },
         });
         const child = new JuncoGraph(childScheduler, Width(1), UNBOUNDED);
         const innerId = child.addNode(
           deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-              yield [];
-              while (childScheduler.state.texts.length < 2) yield [];
-              return assistant(childScheduler.state.texts.join("+"));
-            }),
+            new Deterministic<AgenticInput, AssistantMessage>(
+              async function* () {
+                yield [];
+                while (childScheduler.state.texts.length < 2) yield [];
+                return assistant(childScheduler.state.texts.join("+"));
+              },
+            ),
             { id: NodeId("inner"), trigger: always() },
           ),
         );
 
-        const source = (edge: Edge<AgenticInput, AssistantMessage>, text: string, delay: number) =>
+        const source = (
+          edge: Edge<AgenticInput, AssistantMessage>,
+          text: string,
+          delay: number,
+        ) =>
           deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-              for (let index = 0; index < delay; index++) yield [];
-              yield [msg(edge, prompt(text))];
-              return assistant(`${text} sent`);
-            }),
+            new Deterministic<AgenticInput, AssistantMessage>(
+              async function* () {
+                for (let index = 0; index < delay; index++) yield [];
+                yield [msg(edge, prompt(text))];
+                return assistant(`${text} sent`);
+              },
+            ),
             { id: NodeId(text), trigger: always() },
           );
         const observed = { n3: [] as string[][], n4: [] as string[][] };
-        const consumer = (edge: Edge<AgenticInput, AssistantMessage>, name: "n3" | "n4") =>
+        const consumer = (
+          edge: Edge<AgenticInput, AssistantMessage>,
+          name: "n3" | "n4",
+        ) =>
           deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-              const view = yield [];
-              observed[name].push(from(view, edge).map(inputText));
-              return assistant(`${name} done`);
-            }),
+            new Deterministic<AgenticInput, AssistantMessage>(
+              async function* () {
+                const view = yield [];
+                observed[name].push(from(view, edge).map(inputText));
+                return assistant(`${name} done`);
+              },
+            ),
             { id: NodeId(name), trigger: when(edge) },
           );
 
@@ -449,13 +629,21 @@ for (const strategy of STRATEGIES) {
         const l = parent.addNode(source(left, "left", 0));
         const r = parent.addNode(source(right, "right", 1));
         const n: NodeId = parent.addNode(
-          graphNode(
+          graphApi.nodes.graphNode(
             child,
-            { id: NodeId("nested"), trigger: kind === "all" ? allOf(on(left), on(right)) : anyOf(on(left), on(right)) },
+            {
+              id: NodeId("nested"),
+              trigger:
+                kind === "all"
+                  ? allOf(on(left), on(right))
+                  : anyOf(on(left), on(right)),
+            },
             {
               result: innerId,
               receive: (view) => {
-                const batch = [...from(view, left), ...from(view, right)].map(inputText);
+                const batch = [...from(view, left), ...from(view, right)].map(
+                  inputText,
+                );
                 if (batch.length === 0) return;
                 deliveries.push(batch);
                 childScheduler.state.texts.push(...batch);
@@ -472,15 +660,25 @@ for (const strategy of STRATEGIES) {
         );
         const n3 = parent.addNode(consumer(toN3, "n3"));
         const n4 = parent.addNode(consumer(toN4, "n4"));
-        parent.addEdge(l, n, left).addEdge(r, n, right).addEdge(n, n3, toN3).addEdge(n, n4, toN4);
+        parent
+          .addEdge(l, n, left)
+          .addEdge(r, n, right)
+          .addEdge(n, n3, toN3)
+          .addEdge(n, n4, toN4);
 
         await stepUntil(parent, () => queued(left).length === 1);
         assert.deepEqual(queued(right), []);
         if (kind === "all") {
           await stepUntil(parent, () => queued(right).length === 1);
-          await stepUntil(parent, () => parent.getNode(n)!.status === "running");
+          await stepUntil(
+            parent,
+            () => parent.getNode(n)!.status === "running",
+          );
           // The conjunction held and the node primed, yet neither queue was read.
-          assert.deepEqual([queued(left), queued(right)], [[prompt("left")], [prompt("right")]]);
+          assert.deepEqual(
+            [queued(left), queued(right)],
+            [[prompt("left")], [prompt("right")]],
+          );
           assert.deepEqual(deliveries, []);
           await stepUntil(parent, () => deliveries.length === 1);
           assert.deepEqual(deliveries, [["left", "right"]]);
@@ -491,20 +689,35 @@ for (const strategy of STRATEGIES) {
         assert.deepEqual([queued(left), queued(right)], [[], []]);
 
         for (let windows = 0; O.isNone(parent.result(n)); windows++) {
-          assert.ok(windows < 64, "nested node did not complete within 64 graph windows");
-          assert.deepEqual([queued(toN3), queued(toN4), observed.n3, observed.n4], [[], [], [], []]);
+          assert.ok(
+            windows < 64,
+            "nested node did not complete within 64 graph windows",
+          );
+          assert.deepEqual(
+            [queued(toN3), queued(toN4), observed.n3, observed.n4],
+            [[], [], [], []],
+          );
           await parent.step();
         }
         // The completing activation both emitted and published its result: no extra step.
         assert.equal(resultText(parent, n), "left+right");
-        assert.deepEqual([queued(toN3), queued(toN4)], [[prompt("n3: left+right")], [prompt("n4: left+right")]]);
+        assert.deepEqual(
+          [queued(toN3), queued(toN4)],
+          [[prompt("n3: left+right")], [prompt("n4: left+right")]],
+        );
         assert.deepEqual(observed, { n3: [], n4: [] });
 
         await parent.run();
-        assert.deepEqual(observed, { n3: [["n3: left+right"]], n4: [["n4: left+right"]] });
+        assert.deepEqual(observed, {
+          n3: [["n3: left+right"]],
+          n4: [["n4: left+right"]],
+        });
         assert.deepEqual([queued(toN3), queued(toN4)], [[], []]);
         await parent.run();
-        assert.deepEqual(observed, { n3: [["n3: left+right"]], n4: [["n4: left+right"]] });
+        assert.deepEqual(observed, {
+          n3: [["n3: left+right"]],
+          n4: [["n4: left+right"]],
+        });
         assert.equal(parent.getNode(n)?.state, child);
         await parent.close();
       }
@@ -515,9 +728,13 @@ for (const strategy of STRATEGIES) {
       const child = policyGraph(strategy);
       const idleId = child.addNode(member(idle, "idle"));
       const graph = policyGraph(strategy);
-      const selected = valueEdge<AgenticInput, AssistantMessage>("nested=>dependent");
+      const selected = valueEdge<AgenticInput, AssistantMessage>(
+        "nested=>dependent",
+      );
       let ran = false;
-      const n = graph.addNode(graphNode(child, { trigger: always() }, { result: idleId }));
+      const n = graph.addNode(
+        graphNode(child, { trigger: always() }, { result: idleId }),
+      );
       const d = graph.addNode(
         deterministicNode(
           new Deterministic<AgenticInput, AssistantMessage>(async function* () {
@@ -531,7 +748,9 @@ for (const strategy of STRATEGIES) {
       graph.addEdge(n, d, selected);
 
       const error = await outcome(graph.run());
-      assert.ok(error instanceof DataflowNodeError && invalidState(error.cause));
+      assert.ok(
+        error instanceof DataflowNodeError && invalidState(error.cause),
+      );
       assert.equal(ran, false);
       assert.ok(O.isNone(graph.result(n)) && O.isNone(graph.result(d)));
       assert.deepEqual(idle.requests, []);
@@ -542,7 +761,12 @@ for (const strategy of STRATEGIES) {
       const empty = policyGraph(strategy);
       assert.equal((await empty.run()).size, 0);
       assert.throws(
-        () => graphNode(empty, { trigger: always() }, { result: NodeId("missing") }),
+        () =>
+          graphNode(
+            empty,
+            { trigger: always() },
+            { result: NodeId("missing") },
+          ),
         (error) => error instanceof DataflowDefinitionError,
       );
       await empty.close();
@@ -554,18 +778,36 @@ for (const strategy of STRATEGIES) {
         trigger: always(),
         is_available: (_view, triggered) => admitted && triggered,
       };
-      const agent = new MockAgent({ prompt: "go", runs: [yieldsThen(1, "agent done")] });
-      const coroutine = new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-        yield [];
-        return assistant("coroutine done");
+      const agent = new MockAgent({
+        prompt: "go",
+        runs: [yieldsThen(1, "agent done")],
       });
-      const inner = new MockAgent({ prompt: "inner", runs: [yieldsThen(0, "inner done")] });
+      const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
+        async function* () {
+          yield [];
+          return assistant("coroutine done");
+        },
+      );
+      const inner = new MockAgent({
+        prompt: "inner",
+        runs: [yieldsThen(0, "inner done")],
+      });
       const child = policyGraph(strategy);
       const innerId = child.addNode(member(inner, "inner"));
       const graph = policyGraph(strategy);
-      const a = graph.addNode(agentNode(agent, { ...shared, id: NodeId("agent") }));
-      const d = graph.addNode(deterministicNode(coroutine, { ...shared, id: NodeId("coroutine") }));
-      const n = graph.addNode(graphNode(child, { ...shared, id: NodeId("nested") }, { result: innerId }));
+      const a = graph.addNode(
+        agentNode(agent, { ...shared, id: NodeId("agent") }),
+      );
+      const d = graph.addNode(
+        deterministicNode(coroutine, { ...shared, id: NodeId("coroutine") }),
+      );
+      const n = graph.addNode(
+        graphNode(
+          child,
+          { ...shared, id: NodeId("nested") },
+          { result: innerId },
+        ),
+      );
 
       assert.equal((await graph.run()).size, 0);
       assert.equal(graph.available().size, 0);
@@ -587,9 +829,15 @@ for (const strategy of STRATEGIES) {
 
     test("an abort reaches every nested graph and joins a cooperative sibling", async () => {
       const grandchildGate = barrier({ endOnAbort: true });
-      const grandchild = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), grandchildGate);
+      const grandchild = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        grandchildGate,
+      );
       const siblingGate = barrier();
-      const sibling = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), siblingGate);
+      const sibling = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        siblingGate,
+      );
       const child = policyGraph(strategy);
       const g = child.addNode(member(grandchild, "grandchild"));
       const root = policyGraph(strategy);
@@ -622,7 +870,8 @@ for (const strategy of STRATEGIES) {
       // Abort leaves both graphs reusable; close then reaches every level.
       assert.ok(!root.signal.aborted && !child.signal.aborted);
       await root.close();
-      for (const agent of [grandchild, sibling]) assert.equal(agent.status, "closed");
+      for (const agent of [grandchild, sibling])
+        assert.equal(agent.status, "closed");
       assert.ok(child.signal.aborted);
     });
 
@@ -630,10 +879,15 @@ for (const strategy of STRATEGIES) {
       const first = new Error("first abort failed");
       const nested = new Error("nested abort failed");
       const siblingGate = barrier({ endOnAbort: true });
-      const sibling = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), siblingGate);
+      const sibling = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        siblingGate,
+      );
       const child = policyGraph(strategy);
       // Idle, so never scheduled: only the abort cascade reaches them.
-      const nestedId = child.addNode(member(failingAbort(nested), "nested failing"));
+      const nestedId = child.addNode(
+        member(failingAbort(nested), "nested failing"),
+      );
       const root = policyGraph(strategy);
       root.addNode(member(failingAbort(first), "failing"));
       const sb = root.addNode(member(sibling, "sibling"));
@@ -655,7 +909,10 @@ for (const strategy of STRATEGIES) {
 
     test("a caller signal cancels only its own drive after the active column drains", async () => {
       const gate = barrier();
-      const worker = gated(new MockAgent({ prompt: "go", runs: [gatedRun("resumed", 1)] }), gate);
+      const worker = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("resumed", 1)] }),
+        gate,
+      );
       const graph = policyGraph(strategy);
       const id = graph.addNode(member(worker, "worker"));
       const controller = new AbortController();
@@ -686,7 +943,10 @@ for (const strategy of STRATEGIES) {
 
     test("a plain drive observes graph abort, and later work runs under a fresh signal", async () => {
       const gate = barrier({ endOnAbort: true });
-      const worker = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), gate);
+      const worker = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        gate,
+      );
       const graph = policyGraph(strategy);
       const id = graph.addNode(member(worker, "worker"));
       const signal = graph.signal;
@@ -701,7 +961,10 @@ for (const strategy of STRATEGIES) {
       assert.notEqual(graph.signal, signal);
       assert.equal(graph.signal.aborted, false);
 
-      const fresh = new MockAgent({ prompt: "again", runs: [yieldsThen(0, "fresh")] });
+      const fresh = new MockAgent({
+        prompt: "again",
+        runs: [yieldsThen(0, "fresh")],
+      });
       const f = graph.addNode(member(fresh, "fresh"));
       await graph.run();
       assert.equal(resultText(graph, f), "fresh");
@@ -709,12 +972,18 @@ for (const strategy of STRATEGIES) {
     });
 
     test("a plain drive observes graph close; results stay readable and new drives reject", async () => {
-      const first = new MockAgent({ prompt: "first", runs: [yieldsThen(0, "first")] });
+      const first = new MockAgent({
+        prompt: "first",
+        runs: [yieldsThen(0, "first")],
+      });
       const graph = policyGraph(strategy);
       const f = graph.addNode(member(first, "first"));
       await graph.run();
       const gate = barrier({ endOnAbort: true });
-      const worker = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), gate);
+      const worker = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        gate,
+      );
       graph.addNode(member(worker, "worker"));
       const signal = graph.signal;
       const running = outcome(graph.run());
@@ -729,14 +998,23 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.close(), closing);
       await graph[Symbol.asyncDispose]();
       assert.equal(resultText(graph, f), "first");
-      await assert.rejects(graph.run(), (thrown) => thrown === graph.signal.reason);
-      await assert.rejects(graph.step(), (thrown) => thrown === graph.signal.reason);
+      await assert.rejects(
+        graph.run(),
+        (thrown) => thrown === graph.signal.reason,
+      );
+      await assert.rejects(
+        graph.step(),
+        (thrown) => thrown === graph.signal.reason,
+      );
       await assert.rejects(graph.abort(), closedGraph);
     });
 
     test("closing a suspended graph closes each member once, without aborting it", async () => {
       const counted = new Counted({ runs: [] });
-      const grandchild = new Counted({ prompt: "go", runs: [yieldsThen(1, "unused")] });
+      const grandchild = new Counted({
+        prompt: "go",
+        runs: [yieldsThen(1, "unused")],
+      });
       const child = policyGraph(strategy);
       const g = child.addNode(member(grandchild, "grandchild"));
       const root = policyGraph(strategy);
@@ -747,13 +1025,20 @@ for (const strategy of STRATEGIES) {
       assert.equal(grandchild.status, "suspended");
 
       await root.close();
-      assert.deepEqual([counted.lifecycle, grandchild.lifecycle], [["return"], ["return"]]);
-      for (const agent of [grandchild, counted]) assert.equal(agent.status, "closed");
+      assert.deepEqual(
+        [counted.lifecycle, grandchild.lifecycle],
+        [["return"], ["return"]],
+      );
+      for (const agent of [grandchild, counted])
+        assert.equal(agent.status, "closed");
       assert.ok(root.signal.aborted && child.signal.aborted);
       await root.close();
       await root[Symbol.asyncDispose]();
       await child.close();
-      assert.deepEqual([counted.lifecycle, grandchild.lifecycle], [["return"], ["return"]]);
+      assert.deepEqual(
+        [counted.lifecycle, grandchild.lifecycle],
+        [["return"], ["return"]],
+      );
     });
 
     test("cyclic and shared nested graphs are visited once per cascade", async () => {
@@ -801,7 +1086,9 @@ for (const strategy of STRATEGIES) {
         let selected = graph.addNode(member(innermost, "innermost"));
         for (let depth = 0; depth < 4096; depth++) {
           const parent = policyGraph(strategy);
-          selected = parent.addNode(detached(graph, selected, `level ${depth}`));
+          selected = parent.addNode(
+            detached(graph, selected, `level ${depth}`),
+          );
           graph = parent;
         }
         const signal = bottom.signal;
@@ -819,7 +1106,10 @@ for (const strategy of STRATEGIES) {
 
     test("a direct nested close during an enclosing abort closes its members before the abort settles", async () => {
       const siblingGate = barrier();
-      const sibling = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), siblingGate);
+      const sibling = gated(
+        new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
+        siblingGate,
+      );
       const inner = new Counted({ runs: [] });
       const child = policyGraph(strategy);
       const ii = child.addNode(member(inner, "inner"));
@@ -857,7 +1147,10 @@ for (const strategy of STRATEGIES) {
       // The completed abort left the parent nonterminal, with a fresh signal for new work.
       assert.notEqual(parent.signal, parentSignal);
       assert.equal(parent.signal.aborted, false);
-      const fresh = new MockAgent({ prompt: "again", runs: [yieldsThen(0, "fresh")] });
+      const fresh = new MockAgent({
+        prompt: "again",
+        runs: [yieldsThen(0, "fresh")],
+      });
       const f = parent.addNode(member(fresh, "fresh"));
       await parent.run();
       assert.equal(resultText(parent, f), "fresh");
@@ -874,7 +1167,10 @@ for (const strategy of STRATEGIES) {
           return Promise.reject(failure);
         }
       }
-      const stubborn = new FailingCloseOnce({ prompt: "go", runs: [yieldsThen(0, "later")] });
+      const stubborn = new FailingCloseOnce({
+        prompt: "go",
+        runs: [yieldsThen(0, "later")],
+      });
       const first = policyGraph(strategy);
       first.addNode(member(stubborn, "stubborn"));
       const error = await outcome(first.close());
@@ -883,7 +1179,10 @@ for (const strategy of STRATEGIES) {
       assert.equal(stubborn.status, "ready");
       // Repeated close and disposal join the same failed close.
       await assert.rejects(first.close(), (thrown) => thrown === error);
-      await assert.rejects(first[Symbol.asyncDispose](), (thrown) => thrown === error);
+      await assert.rejects(
+        first[Symbol.asyncDispose](),
+        (thrown) => thrown === error,
+      );
       assert.equal(attempts, 1);
 
       const second = policyGraph(strategy);
@@ -899,24 +1198,40 @@ for (const strategy of STRATEGIES) {
 describe("nested graphs", () => {
   test("a selected undefined result is a present parent value", async () => {
     type Maybe = AssistantMessage | undefined;
-    const child = new JuncoGraph<AgenticInput, Maybe>(createParallelScheduler(), Width(1), UNBOUNDED);
+    const child = new JuncoGraph<AgenticInput, Maybe>(
+      createParallelScheduler(),
+      Width(1),
+      UNBOUNDED,
+    );
     const empty = child.addNode(
       deterministicNode(
+        // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
         new Deterministic<AgenticInput, Maybe>(async function* () {
           return undefined;
         }),
         { trigger: always() },
       ),
     );
-    const parent = new JuncoGraph<AgenticInput, Maybe>(createParallelScheduler(), Width(1), UNBOUNDED);
+    const parent = new JuncoGraph<AgenticInput, Maybe>(
+      createParallelScheduler(),
+      Width(1),
+      UNBOUNDED,
+    );
     const selected = valueEdge<AgenticInput, Maybe>("nested=>reader");
-    let observed: { readonly delivered: boolean; readonly value: Maybe } | undefined;
-    const n = parent.addNode(graphNode(child, { trigger: always() }, { result: empty }));
+    let observed:
+      | { readonly delivered: boolean; readonly value: Maybe }
+      | undefined;
+    const n = parent.addNode(
+      graphNode(child, { trigger: always() }, { result: empty }),
+    );
     const r = parent.addNode(
       deterministicNode(
         new Deterministic<AgenticInput, Maybe>(async function* () {
           const view = yield [];
-          observed = { delivered: view.values.has(selected.id), value: view.values.get(selected.id) };
+          observed = {
+            delivered: view.values.has(selected.id),
+            value: view.values.get(selected.id),
+          };
           return assistant("read");
         }),
         { trigger: when(selected) },
@@ -931,16 +1246,25 @@ describe("nested graphs", () => {
   });
 
   test("cancellation uses the activation's captured child signal after abort resets it", async () => {
-    const child = new JuncoGraph<AgenticInput, AssistantMessage>(createParallelScheduler(), Width(1), UNBOUNDED);
+    const child = new JuncoGraph<AgenticInput, AssistantMessage>(
+      createParallelScheduler(),
+      Width(1),
+      UNBOUNDED,
+    );
     const source = child.addNode(
       deterministicNode(
+        // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           return assistant("child-result");
         }),
         { trigger: always() },
       ),
     );
-    const parent = new JuncoGraph<AgenticInput, AssistantMessage>(createParallelScheduler(), Width(1), UNBOUNDED);
+    const parent = new JuncoGraph<AgenticInput, AssistantMessage>(
+      createParallelScheduler(),
+      Width(1),
+      UNBOUNDED,
+    );
     const cancelled = new Error("child cancelled");
     let captured: AbortSignal | undefined;
     const nested = parent.addNode(
@@ -962,7 +1286,11 @@ describe("nested graphs", () => {
       () => assert.fail("the cancelled nested graph published its result"),
       (error: unknown) => error,
     );
-    assert.ok(failure instanceof DataflowNodeError && failure.nodeId === nested && failure.cause === cancelled);
+    assert.ok(
+      failure instanceof DataflowNodeError &&
+        failure.nodeId === nested &&
+        failure.cause === cancelled,
+    );
     assert.equal(captured?.reason, cancelled);
     assert.equal(child.signal.aborted, false);
     assert.ok(O.isNone(parent.result(nested)));
@@ -976,10 +1304,21 @@ describe("round-robin", () => {
   test("advances one id per window in string order and keeps its cursor", async () => {
     const graph = policyGraph("round-robin");
     const agents = new Map(
-      ["2", "1", "10"].map((id) => [id, new MockAgent({ prompt: `go ${id}`, runs: [yieldsThen(1, `done ${id}`)] })]),
+      ["2", "1", "10"].map((id) => [
+        id,
+        new MockAgent({
+          prompt: `go ${id}`,
+          runs: [yieldsThen(1, `done ${id}`)],
+        }),
+      ]),
     );
     for (const [id, agent] of agents) graph.addNode(member(agent, id, id));
-    const statuses = () => [...agents].map(([id, agent]) => [id, agent.status, graph.getNode(NodeId(id))!.status]);
+    const statuses = () =>
+      [...agents].map(([id, agent]) => [
+        id,
+        agent.status,
+        graph.getNode(NodeId(id))!.status,
+      ]);
 
     for (let window = 0; window < 4; window++) await graph.step();
 
@@ -995,7 +1334,8 @@ describe("round-robin", () => {
     );
 
     await graph.run();
-    for (const id of agents.keys()) assert.equal(resultText(graph, NodeId(id)), `done ${id}`);
+    for (const id of agents.keys())
+      assert.equal(resultText(graph, NodeId(id)), `done ${id}`);
     assert.deepEqual(
       [...agents.values()].map((agent) => agent.requests.length),
       [2, 2, 2],
@@ -1011,7 +1351,10 @@ describe("parallel", () => {
     const agents = [0, 1, 2].map((index) => {
       const entered = Promise.withResolvers<void>();
       started.push(entered.promise);
-      const agent = new MockAgent({ prompt: `go ${index}`, runs: [gatedRun(`done ${index}`)] });
+      const agent = new MockAgent({
+        prompt: `go ${index}`,
+        runs: [gatedRun(`done ${index}`)],
+      });
       agent.hooks.on("before_drive", async () => {
         entered.resolve();
         await gate.promise;
@@ -1020,7 +1363,9 @@ describe("parallel", () => {
       return agent;
     });
     const graph = policyGraph("parallel");
-    const ids = agents.map((agent, index) => graph.addNode(member(agent, `member ${index}`)));
+    const ids = agents.map((agent, index) =>
+      graph.addNode(member(agent, `member ${index}`)),
+    );
 
     await graph.step();
     assert.deepEqual(
@@ -1045,16 +1390,31 @@ describe("parallel", () => {
   });
 
   test("rejects a plan wider than its finite threads before any member starts", async () => {
-    const agents = [0, 1, 2].map((index) => new MockAgent({ prompt: `go ${index}`, runs: [yieldsThen(0, `done ${index}`)] }));
+    const agents = [0, 1, 2].map(
+      (index) =>
+        new MockAgent({
+          prompt: `go ${index}`,
+          runs: [yieldsThen(0, `done ${index}`)],
+        }),
+    );
     const graph = policyGraph("parallel", { threads: Width(2) });
-    const ids = agents.map((agent, index) => graph.addNode(member(agent, `member ${index}`)));
+    const ids = agents.map((agent, index) =>
+      graph.addNode(member(agent, `member ${index}`)),
+    );
 
-    await assert.rejects(graph.step(), (error) => error instanceof DataflowDefinitionError);
+    await assert.rejects(
+      graph.step(),
+      (error) => error instanceof DataflowDefinitionError,
+    );
     assert.deepEqual(
       ids.map((id) => graph.getNode(id)!.status),
       ["ready", "ready", "ready"],
     );
-    assert.ok(agents.every((agent) => agent.status === "ready" && agent.requests.length === 0));
+    assert.ok(
+      agents.every(
+        (agent) => agent.status === "ready" && agent.requests.length === 0,
+      ),
+    );
     await graph.close();
   });
 });

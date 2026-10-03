@@ -1,29 +1,52 @@
-import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { type Context, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { createYieldTool, JuncoAgent } from "junco-agent";
-import { convene, createOssSearchTool, createReviewTool, type MemberId, type Members } from "../examples/oss-committee.ts";
+import {
+  BACKGROUND_CONTEXT,
+  MemorySessionRepo,
+} from "@earendil-works/pi-agent-core";
+import {
+  type Context,
+  type FauxResponseFactory,
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import { JuncoAgent } from "junco-agent";
+import { createYieldTool } from "junco-tools";
+import {
+  convene,
+  createOssSearchTool,
+  createReviewTool,
+  type MemberId,
+  type Members,
+} from "../examples/oss-committee.ts";
 import { scripted } from "./support.ts";
 
 export const request = "Design a C# TUI for committee decision history.";
 
 /** One round's scripted Reducer verdict; `"skip"` ends the round without calling `review`. */
-export type ScriptedReview = { readonly approved: boolean; readonly feedback: string } | "skip";
+export type ScriptedReview =
+  | { readonly approved: boolean; readonly feedback: string }
+  | "skip";
 
-const approve: ScriptedReview = { approved: true, feedback: "Minimal, clean, and backed by well-trusted OSS." };
+const approve: ScriptedReview = {
+  approved: true,
+  feedback: "Minimal, clean, and backed by well-trusted OSS.",
+};
 
-const defaultSearchResponse = () => Response.json({
-  incomplete_results: false,
-  items: [{
-    full_name: "tui-cs/Terminal.Gui",
-    html_url: "https://github.com/tui-cs/Terminal.Gui",
-    description: "Cross Platform Terminal UI toolkit for .NET",
-    language: "C#",
-    archived: false,
-    license: { spdx_id: "MIT" },
-    stargazers_count: 10_000,
-    pushed_at: "2026-09-15T00:00:00Z",
-  }],
-});
+const defaultSearchResponse = () =>
+  Response.json({
+    incomplete_results: false,
+    items: [
+      {
+        full_name: "tui-cs/Terminal.Gui",
+        html_url: "https://github.com/tui-cs/Terminal.Gui",
+        description: "Cross Platform Terminal UI toolkit for .NET",
+        language: "C#",
+        archived: false,
+        license: { spdx_id: "MIT" },
+        stargazers_count: 10_000,
+        pushed_at: "2026-09-15T00:00:00Z",
+      },
+    ],
+  });
 
 /** The most recent user-facing message of a model request, including array-form Pi content. */
 function latestUserText(context: Context): string {
@@ -32,7 +55,9 @@ function latestUserText(context: Context): string {
     if (message.role !== "user") continue;
     return typeof message.content === "string"
       ? message.content
-      : message.content.map((block) => block.type === "text" ? block.text : "").join("");
+      : message.content
+          .map((block) => (block.type === "text" ? block.text : ""))
+          .join("");
   }
   throw new Error("Scripted actor request has no user message");
 }
@@ -43,7 +68,8 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
   let remaining = text;
   for (const label of labels) {
     const prefix = `${label}:\n`;
-    if (!remaining.startsWith(prefix)) throw new Error(`Missing ${label} in committee prompt`);
+    if (!remaining.startsWith(prefix))
+      throw new Error(`Missing ${label} in committee prompt`);
     remaining = remaining.slice(prefix.length);
     const nextLabel = labels[parts.length + 1];
     if (nextLabel === undefined) {
@@ -51,7 +77,8 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
     } else {
       const separator = `\n\n${nextLabel}:\n`;
       const boundary = remaining.indexOf(separator);
-      if (boundary < 0) throw new Error(`Missing ${nextLabel} in committee prompt`);
+      if (boundary < 0)
+        throw new Error(`Missing ${nextLabel} in committee prompt`);
       parts.push(remaining.slice(0, boundary));
       remaining = remaining.slice(boundary + 2);
     }
@@ -64,24 +91,42 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
  * (default: one Terminal.Gui result) and ends with `reviews[r]`; `"skip"` omits the review call.
  * Dispose it to close every member.
  */
-export async function scriptedCommittee(script: {
-  readonly lookups?: readonly (readonly Response[])[];
-  readonly reviews?: readonly ScriptedReview[];
-  readonly librarianStopReason?: "stop" | "length";
-} = {}) {
+export async function scriptedCommittee(
+  script: {
+    readonly lookups?: readonly (readonly Response[])[];
+    readonly reviews?: readonly ScriptedReview[];
+    readonly librarianStopReason?: "stop" | "length";
+  } = {},
+) {
   const reviews = script.reviews ?? [approve];
-  const lookups = reviews.map((_review, round) => script.lookups?.[round] ?? [defaultSearchResponse()]);
+  const lookups = reviews.map(
+    (_review, round) => script.lookups?.[round] ?? [defaultSearchResponse()],
+  );
   const responses = lookups.flat();
   const librarianStopReason = script.librarianStopReason ?? "stop";
   const searchQueries: string[] = [];
-  const search = createOssSearchTool(Object.assign(async (url: Parameters<typeof fetch>[0]) => {
-    const response = responses[searchQueries.length];
-    searchQueries.push(new URL(url instanceof Request ? url.url : url).searchParams.get("q") ?? "");
-    if (response === undefined) throw new Error("No scripted GitHub response remains");
-    return response.clone();
-  }, { preconnect: fetch.preconnect }));
+  const search = createOssSearchTool(
+    Object.assign(
+      async (url: Parameters<typeof fetch>[0]) => {
+        const response = responses[searchQueries.length];
+        searchQueries.push(
+          new URL(url instanceof Request ? url.url : url).searchParams.get(
+            "q",
+          ) ?? "",
+        );
+        if (response === undefined)
+          throw new Error("No scripted GitHub response remains");
+        return response.clone();
+      },
+      { preconnect: fetch.preconnect },
+    ),
+  );
   const review = createReviewTool();
-  const memberInputs: Record<MemberId, string[]> = { Librarian: [], Architect: [], Reducer: [] };
+  const memberInputs: Record<MemberId, string[]> = {
+    Librarian: [],
+    Architect: [],
+    Reducer: [],
+  };
   const modelRequests: MemberId[] = [];
 
   let librarianRound = -1;
@@ -91,7 +136,9 @@ export async function scriptedCommittee(script: {
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);
     if (last?.role === "toolResult" && last.toolName === "yield") {
-      return fauxAssistantMessage(librarianReport, { stopReason: librarianStopReason });
+      return fauxAssistantMessage(librarianReport, {
+        stopReason: librarianStopReason,
+      });
     }
     if (last?.role === "user") {
       librarianRound++;
@@ -99,12 +146,25 @@ export async function scriptedCommittee(script: {
       memberInputs.Librarian.push(latestUserText(context));
     }
     const round = lookups[librarianRound];
-    if (round === undefined) throw new Error("No scripted Librarian round remains");
+    if (round === undefined)
+      throw new Error("No scripted Librarian round remains");
     if (librarianLookups < round.length) {
       const index = librarianLookups++;
-      return fauxAssistantMessage([fauxToolCall("search_oss", {
-        query: index === 0 ? "C# terminal UI toolkit library" : "C# markdown terminal library",
-      }, { id: `librarian-search-${librarianRound + 1}-${index + 1}` })], { stopReason: "toolUse" });
+      return fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "search_oss",
+            {
+              query:
+                index === 0
+                  ? "C# terminal UI toolkit library"
+                  : "C# markdown terminal library",
+            },
+            { id: `librarian-search-${librarianRound + 1}-${index + 1}` },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      );
     }
     let roundStart = 0;
     for (let index = context.messages.length - 1; index >= 0; index--) {
@@ -116,37 +176,60 @@ export async function scriptedCommittee(script: {
     const reports: string[] = [];
     let failed = false;
     for (const message of context.messages.slice(roundStart + 1)) {
-      if (message.role !== "toolResult" || message.toolName !== "search_oss") continue;
-      const text = message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
+      if (message.role !== "toolResult" || message.toolName !== "search_oss")
+        continue;
+      const text = message.content
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("");
       if (message.isError) {
         failed = true;
-        reports.push(`GitHub OSS lookup failed: ${text}. This lookup supplied no verified candidates.`);
+        reports.push(
+          `GitHub OSS lookup failed: ${text}. This lookup supplied no verified candidates.`,
+        );
         continue;
       }
       const body = JSON.parse(text) as {
         incomplete_results: boolean;
-        repositories: { name: string; url: string; reportedLicense: string | null; stars: number; pushedAt: string }[];
+        repositories: {
+          name: string;
+          url: string;
+          reportedLicense: string | null;
+          stars: number;
+          pushedAt: string;
+        }[];
       };
       const candidate = body.repositories[0];
-      const report = candidate === undefined
-        ? "No matching OSS libraries found. OSS status, versions, licenses and compatibility remain unverified."
-        : [
-            `Repository: ${candidate.name}`,
-            `Repository URL: ${candidate.url}`,
-            `GitHub reported SPDX identifier: ${candidate.reportedLicense ?? "unknown"}.`,
-            `GitHub-reported stars: ${candidate.stars}; last push: ${candidate.pushedAt}.`,
-            "Repository metadata does not verify full license terms, versions, APIs or compatibility.",
-          ].join("\n");
-      reports.push(body.incomplete_results ? `${report}\nResults are partial.` : report);
+      const report =
+        candidate === undefined
+          ? "No matching OSS libraries found. OSS status, versions, licenses and compatibility remain unverified."
+          : [
+              `Repository: ${candidate.name}`,
+              `Repository URL: ${candidate.url}`,
+              `GitHub reported SPDX identifier: ${candidate.reportedLicense ?? "unknown"}.`,
+              `GitHub-reported stars: ${candidate.stars}; last push: ${candidate.pushedAt}.`,
+              "Repository metadata does not verify full license terms, versions, APIs or compatibility.",
+            ].join("\n");
+      reports.push(
+        body.incomplete_results ? `${report}\nResults are partial.` : report,
+      );
     }
-    if (reports.length === 0) throw new Error("Librarian did not receive its search result");
+    if (reports.length === 0)
+      throw new Error("Librarian did not receive its search result");
     librarianReport = reports.join("\n\n");
     return failed
       ? fauxAssistantMessage(
-          [fauxToolCall("yield", { reason: librarianReport }, { id: `librarian-yield-${librarianRound + 1}` })],
+          [
+            fauxToolCall(
+              "yield",
+              { reason: librarianReport },
+              { id: `librarian-yield-${librarianRound + 1}` },
+            ),
+          ],
           { stopReason: "toolUse" },
         )
-      : fauxAssistantMessage(librarianReport, { stopReason: librarianStopReason });
+      : fauxAssistantMessage(librarianReport, {
+          stopReason: librarianStopReason,
+        });
   };
 
   const architect: FauxResponseFactory = (context) => {
@@ -159,24 +242,36 @@ export async function scriptedCommittee(script: {
     const parts = reportsFromPrompt(input, labels);
     const original = parts[0];
     const research = parts.at(-1)!;
-    const url = research.match(/^Repository URL: (https:\/\/github\.com\/\S+)/m)?.[1];
+    const url = research.match(
+      /^Repository URL: (https:\/\/github\.com\/\S+)/m,
+    )?.[1];
     const choice = url
       ? `Consider ${url} as a UI dependency, subject to license/API/compatibility checks.`
       : "No verified OSS candidate is available; keep the UI dependency undecided.";
-    return fauxAssistantMessage([
-      `Design for: ${original}`,
-      `Librarian evidence: ${research}`,
-      choice,
-      "RunStore/UI boundary: persist typed decision-history events independently of rendering and keyboard navigation.",
-      "Acceptance: at 80x24, arrows select a history row, Enter opens its detail, and Escape returns to the list.",
-    ].join("\n"));
+    return fauxAssistantMessage(
+      [
+        `Design for: ${original}`,
+        `Librarian evidence: ${research}`,
+        choice,
+        "RunStore/UI boundary: persist typed decision-history events independently of rendering and keyboard navigation.",
+        "Acceptance: at 80x24, arrows select a history row, Enter opens its detail, and Escape returns to the list.",
+      ].join("\n"),
+    );
   };
 
   const committeePlan = (input: string, round: number) => {
-    const [original, research, design] = reportsFromPrompt(input, ["Original request", "Librarian report", "Architect report"]);
-    const url = research!.match(/^Repository URL: (https:\/\/github\.com\/\S+)/m)?.[1];
-    const noCandidate = search.searches() > 0
-      ? "No matching OSS libraries found" : "GitHub lookups failed; no researched candidate is available";
+    const [original, research, design] = reportsFromPrompt(input, [
+      "Original request",
+      "Librarian report",
+      "Architect report",
+    ]);
+    const url = research!.match(
+      /^Repository URL: (https:\/\/github\.com\/\S+)/m,
+    )?.[1];
+    const noCandidate =
+      search.searches() > 0
+        ? "No matching OSS libraries found"
+        : "GitHub lookups failed; no researched candidate is available";
     const option = url
       ? `Investigate ${url}; GitHub's reported SPDX identifier is metadata only, not verified license terms.`
       : `${noCandidate}; OSS status and licenses remain unverified.`;
@@ -226,7 +321,13 @@ export async function scriptedCommittee(script: {
       if (verdict === undefined) throw new Error("No scripted review remains");
       if (verdict !== "skip") {
         return fauxAssistantMessage(
-          [fauxToolCall("review", { ...verdict }, { id: `reducer-review-${reducerRound + 1}` })],
+          [
+            fauxToolCall(
+              "review",
+              { ...verdict },
+              { id: `reducer-review-${reducerRound + 1}` },
+            ),
+          ],
           { stopReason: "toolUse" },
         );
       }
@@ -235,7 +336,11 @@ export async function scriptedCommittee(script: {
   };
 
   const created: JuncoAgent[] = [];
-  const member = async (id: MemberId, turn: FauxResponseFactory, tools: Parameters<typeof JuncoAgent.fromResolved>[0]["tools"]) => {
+  const member = async (
+    id: MemberId,
+    turn: FauxResponseFactory,
+    tools: Parameters<typeof JuncoAgent.fromResolved>[0]["tools"],
+  ) => {
     const { models, model } = scripted(Array.from({ length: 32 }, () => turn));
     const agent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
@@ -250,7 +355,10 @@ export async function scriptedCommittee(script: {
   let members: Members;
   try {
     members = {
-      Librarian: await member("Librarian", librarian, [search.tool, createYieldTool()]),
+      Librarian: await member("Librarian", librarian, [
+        search.tool,
+        createYieldTool(),
+      ]),
       Architect: await member("Architect", architect, []),
       Reducer: await member("Reducer", reducer, [review.tool]),
     };
@@ -267,12 +375,21 @@ export async function scriptedCommittee(script: {
     searchQueries,
     modelRequests,
     async [Symbol.asyncDispose]() {
-      await Promise.all(Object.values(members).map((member) => member.return()));
+      await Promise.all(
+        Object.values(members).map((member) => member.return()),
+      );
     },
   };
 }
 
 if (import.meta.main) {
   await using committee = await scriptedCommittee();
-  console.log(await convene(request, committee.members, committee.search, committee.review));
+  console.log(
+    await convene(
+      request,
+      committee.members,
+      committee.search,
+      committee.review,
+    ),
+  );
 }

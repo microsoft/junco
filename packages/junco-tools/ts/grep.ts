@@ -27,7 +27,8 @@ const NATIVE_MAX_COLUMNS = 500;
 /** Native grep emits `str::trim_end`ed lines, which trims Unicode White_Space. */
 const TRAILING_WHITESPACE = /\p{White_Space}+$/u;
 
-const SNAPSHOT_MISMATCH = "Search output does not match the current snapshot; read before editing.";
+const SNAPSHOT_MISMATCH =
+  "Search output does not match the current snapshot; read before editing.";
 
 const DESCRIPTION =
   "Search file contents using Rust regex with PCRE2 fallback. Complete displayed lines include " +
@@ -99,7 +100,9 @@ function collectRows(matches: GrepMatch[]): CollectedRow[] {
       });
     }
   }
-  return [...rows.values()].sort((left, right) => left.lineNumber - right.lineNumber);
+  return [...rows.values()].sort(
+    (left, right) => left.lineNumber - right.lineNumber,
+  );
 }
 
 interface RenderedRow {
@@ -114,10 +117,17 @@ interface RenderedRow {
  * Returns `undefined` when a row the snapshot says is complete disagrees with
  * what native emitted, which invalidates the whole file's anchor.
  */
-function renderRow(row: CollectedRow, snapshotLines: string[] | undefined): RenderedRow | undefined {
+function renderRow(
+  row: CollectedRow,
+  snapshotLines: string[] | undefined,
+): RenderedRow | undefined {
   const prefix = row.isMatch ? "*" : " ";
-  const shortenedNative = { text: `${prefix}${row.lineNumber}:${row.nativeLine}`, eligible: false };
-  if (!snapshotLines) return { ...shortenedNative, shortened: row.nativeTruncated };
+  const shortenedNative = {
+    text: `${prefix}${row.lineNumber}:${row.nativeLine}`,
+    eligible: false,
+  };
+  if (!snapshotLines)
+    return { ...shortenedNative, shortened: row.nativeTruncated };
 
   const source = snapshotLines[row.lineNumber - 1];
   if (source === undefined) return undefined;
@@ -158,7 +168,10 @@ export function createGrepTool(
   store: EditStore,
   native: NativeModule,
   mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiGrepToolDefinition>["parameters"], NativeGrepToolDetails> {
+): AgentTool<
+  ReturnType<typeof createPiGrepToolDefinition>["parameters"],
+  NativeGrepToolDetails
+> {
   const base = createPiGrepToolDefinition(cwd);
   const tool = {
     ...base,
@@ -166,32 +179,38 @@ export function createGrepTool(
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
       const limit =
-        params.limit === undefined ? DEFAULT_LIMIT : requireU32("limit", params.limit, 1);
+        params.limit === undefined
+          ? DEFAULT_LIMIT
+          : requireU32("limit", params.limit, 1);
       const context =
-        params.context === undefined ? undefined : requireU32("context", params.context, 0);
+        params.context === undefined
+          ? undefined
+          : requireU32("context", params.context, 0);
       const root = resolveToolPath(cwd, params.path ?? ".");
       const pattern = params.literal
         ? params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
         : params.pattern;
 
-      const { result, snapshots } = await withNativeSignal(signal, (nativeSignal) =>
-        mux.grep(
-          cwd,
-          {
-            pattern,
-            path: root,
-            glob: params.glob,
-            ignoreCase: params.ignoreCase,
-            mode: native.GrepOutputMode.Content,
-            hidden: true,
-            gitignore: true,
-            maxColumns: NATIVE_MAX_COLUMNS,
-            maxCount: limit,
-            context,
-            signal: nativeSignal,
-          },
-          store,
-        ),
+      const { result, snapshots } = await withNativeSignal(
+        signal,
+        (nativeSignal) =>
+          mux.grep(
+            cwd,
+            {
+              pattern,
+              path: root,
+              glob: params.glob,
+              ignoreCase: params.ignoreCase,
+              mode: native.GrepOutputMode.Content,
+              hidden: true,
+              gitignore: true,
+              maxColumns: NATIVE_MAX_COLUMNS,
+              maxCount: limit,
+              context,
+              signal: nativeSignal,
+            },
+            store,
+          ),
       );
       throwIfAborted(signal);
       const tags = new Map<string, string | undefined>(
@@ -203,10 +222,14 @@ export function createGrepTool(
         filesWithMatches: result.filesWithMatches,
         filesSearched: result.filesSearched,
       };
-      if (result.skippedOversized != null) details.skippedOversized = result.skippedOversized;
+      if (result.skippedOversized != null)
+        details.skippedOversized = result.skippedOversized;
       if (result.limitReached) details.matchLimitReached = limit;
       if (result.matches.length === 0) {
-        return { content: [{ type: "text", text: "No matches found" }], details };
+        return {
+          content: [{ type: "text", text: "No matches found" }],
+          details,
+        };
       }
 
       const byPath = new Map<string, GrepMatch[]>();
@@ -232,7 +255,9 @@ export function createGrepTool(
         const tag = tags.get(nativePath) ?? null;
         const snapshot = tag ? store.byHashText(absolutePath, tag) : null;
         let snapshotLines =
-          snapshot !== null && !snapshot.includes("\0") ? snapshot.split("\n") : undefined;
+          snapshot !== null && !snapshot.includes("\0")
+            ? snapshot.split("\n")
+            : undefined;
         if (snapshotLines) section.tag = tag ?? undefined;
 
         const rows = collectRows(matches);
@@ -246,8 +271,13 @@ export function createGrepTool(
         }
 
         if (entries.length > 0) entries.push({ kind: "blank", text: "" });
-        entries.push({ kind: "header", text: headerText(section, native), section });
-        if (!snapshotLines && tag) entries.push({ kind: "notice", text: SNAPSHOT_MISMATCH });
+        entries.push({
+          kind: "header",
+          text: headerText(section, native),
+          section,
+        });
+        if (!snapshotLines && tag)
+          entries.push({ kind: "notice", text: SNAPSHOT_MISMATCH });
         let previousLine: number | undefined;
         rows.forEach((row, index) => {
           const view = rendered[index];
@@ -267,10 +297,13 @@ export function createGrepTool(
         sections.push(section);
       }
 
-      const truncation = truncateHead(entries.map((entry) => entry.text).join("\n"), {
-        maxLines: Number.MAX_SAFE_INTEGER,
-        maxBytes: DEFAULT_MAX_BYTES,
-      });
+      const truncation = truncateHead(
+        entries.map((entry) => entry.text).join("\n"),
+        {
+          maxLines: Number.MAX_SAFE_INTEGER,
+          maxBytes: DEFAULT_MAX_BYTES,
+        },
+      );
       // One entry is exactly one output line: native rows are line-based and
       // snapshot lines never contain a newline.
       const survivors = entries.slice(0, truncation.outputLines);
@@ -284,12 +317,20 @@ export function createGrepTool(
       for (const section of sections) {
         if (section.eligible.length === 0) section.tag = undefined;
         else if (section.tag) {
-          store.recordSeenLines(section.absolutePath, section.tag, section.eligible);
+          store.recordSeenLines(
+            section.absolutePath,
+            section.tag,
+            section.eligible,
+          );
         }
       }
 
       let text = survivors
-        .map((entry) => (entry.kind === "header" ? headerText(entry.section, native) : entry.text))
+        .map((entry) =>
+          entry.kind === "header"
+            ? headerText(entry.section, native)
+            : entry.text,
+        )
         .join("\n");
       const notices: string[] = [];
       if (result.limitReached) notices.push(`${limit} match limit reached`);

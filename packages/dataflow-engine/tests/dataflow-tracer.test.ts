@@ -22,6 +22,7 @@ import {
   from,
   messageEdge,
   msg,
+  NodeId,
   never,
   on,
   stepNode,
@@ -467,4 +468,112 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
       [sink, "received"],
     ]),
   );
+});
+
+/** A one-node graph whose node returns 42, observed by `tracer`. */
+const answerGraph = (tracer: DataflowTracer) => {
+  const graph = new DataflowGraph<void, number, number, never>(
+    createParallelScheduler(),
+    Width(1),
+    UNBOUNDED,
+    tracer,
+  );
+  const answer = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must return on its first activation.
+    step: async function* (): NodeGenerator<number, number> {
+      return 42;
+    },
+  });
+  return { graph, answer };
+};
+
+test("a failing startRun or startNode observer leaves the node's result intact", async () => {
+  await quietly(async () => {
+    const failingRun = new (class extends RecordingTracer {
+      override startRun<S, N, T, EH>(): DataflowRunTrace<N, T> {
+        throw new Error("startRun observer");
+      }
+    })();
+    const failingNode = new (class extends RecordingTracer {
+      override startRun<S, N, T, EH>(
+        graph: DataflowGraph<S, N, T, EH>,
+      ): DataflowRunTrace<N, T> {
+        const run = super.startRun(graph);
+        return {
+          startNode() {
+            throw new Error("startNode observer");
+          },
+          end: (results) => run.end(results),
+          fail: (error) => run.fail(error),
+        };
+      }
+    })();
+    for (const tracer of [failingRun, failingNode]) {
+      const { graph, answer } = answerGraph(tracer);
+      const results = await graph.run();
+      assert.equal(results.get(answer), 42);
+      assert.deepEqual(graph.result(answer), O.some(42));
+    }
+    assert.equal(failingNode.runs[0]!.results!.get(NodeId("0")), 42);
+  });
+});
+
+test("a throwing node fails identically with no tracer and with DummyTracer", async () => {
+  const sentinel = new Error("sentinel");
+  const execute = async (tracer: DataflowTracer | undefined) => {
+    const graph = new DataflowGraph<void, number, number, Error>(
+      createParallelScheduler(),
+      Width(1),
+      UNBOUNDED,
+      tracer,
+    );
+    const failing = graph.addNode({
+      state: undefined,
+      trigger: always(),
+      step: async function* (): NodeGenerator<number, number> {
+        yield [];
+        throw sentinel;
+      },
+    });
+    const error = await graph.run().then(
+      () => assert.fail("run() must reject"),
+      (thrown: unknown) => thrown,
+    );
+    assert.ok(error instanceof DataflowNodeError);
+    return {
+      nodeId: error.nodeId,
+      cause: error.cause,
+      error: error.error,
+      status: graph.getNode(failing)!.status,
+      result: graph.result(failing),
+    };
+  };
+  const dummy = new DummyTracer();
+  const untraced = await execute(undefined);
+  const traced = await execute(dummy);
+  await dummy.flush();
+  assert.deepEqual(traced, untraced);
+  assert.equal(untraced.cause, sentinel);
+  assert.equal(untraced.error, sentinel);
+  assert.equal(untraced.nodeId, NodeId("0"));
+  assert.equal(untraced.status, "done");
+  assert.ok(O.isNone(untraced.result));
+});
+
+test("run() never flushes the tracer; the caller's explicit flush delivers buffered results", async () => {
+  const tracer = new (class extends RecordingTracer {
+    readonly delivered: ReadonlyMap<NodeIdType, unknown>[] = [];
+    override flush(): Promise<void> {
+      for (const run of this.runs.splice(0))
+        if (run.results !== undefined) this.delivered.push(run.results);
+      return Promise.resolve();
+    }
+  })();
+  const { graph, answer } = answerGraph(tracer);
+  await graph.run();
+  assert.deepEqual(tracer.delivered, []);
+  await tracer.flush();
+  assert.deepEqual(tracer.delivered, [new Map([[answer, 42]])]);
 });

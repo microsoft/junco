@@ -1,9 +1,3 @@
-[install]
-# The hoisted linker symlinks `file:` folder dependencies to their checkouts, so junco-scheduler's
-# `dataflow-engine` import would resolve from the sibling checkout instead of this engine. The
-# isolated linker copies the folder and links its peer to this package.
-linker = "isolated"
-
 [test]
 coverageReporter = ["text", "lcov"]
 coverageDir = "coverage"

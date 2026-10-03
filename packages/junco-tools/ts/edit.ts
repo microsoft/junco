@@ -8,7 +8,8 @@ import { throwIfAborted } from "./tool-support.js";
 
 const editSchema = Type.Object({
   input: Type.String({
-    description: "Hashline patch: [path#TAG] sections followed by PUT/CUT/REM/MV operations.",
+    description:
+      "Hashline patch: [path#TAG] sections followed by PUT/CUT/REM/MV operations.",
   }),
 });
 
@@ -45,7 +46,9 @@ export function createEditTool(
     label: "Edit",
     description: native.editDescription("hashline"),
     promptSnippet: "Edit files with snapshot-anchored hashline patches",
-    promptGuidelines: ["Obtain [path#TAG] and numbered lines from read or grep before editing."],
+    promptGuidelines: [
+      "Obtain [path#TAG] and numbered lines from read or grep before editing.",
+    ],
     parameters: editSchema,
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {

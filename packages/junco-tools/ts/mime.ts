@@ -8,7 +8,9 @@
 export const IMAGE_TYPE_SNIFF_BYTES = 4100;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-export function detectSupportedImageMimeType(buffer: Uint8Array): string | null {
+export function detectSupportedImageMimeType(
+  buffer: Uint8Array,
+): string | null {
   if (startsWith(buffer, [0xff, 0xd8, 0xff])) {
     return buffer[3] === 0xf7 ? null : "image/jpeg";
   }
@@ -18,7 +20,10 @@ export function detectSupportedImageMimeType(buffer: Uint8Array): string | null 
   if (startsWithAscii(buffer, 0, "GIF")) {
     return "image/gif";
   }
-  if (startsWithAscii(buffer, 0, "RIFF") && startsWithAscii(buffer, 8, "WEBP")) {
+  if (
+    startsWithAscii(buffer, 0, "RIFF") &&
+    startsWithAscii(buffer, 8, "WEBP")
+  ) {
     return "image/webp";
   }
   if (startsWithAscii(buffer, 0, "BM") && isBmp(buffer)) {
@@ -56,7 +61,8 @@ function isBmp(buffer: Uint8Array): boolean {
   const dibHeaderSize = readUint32LE(buffer, 14);
   if (declaredFileSize !== 0 && declaredFileSize < 26) return false;
   if (pixelDataOffset < 14 + dibHeaderSize) return false;
-  if (declaredFileSize !== 0 && pixelDataOffset >= declaredFileSize) return false;
+  if (declaredFileSize !== 0 && pixelDataOffset >= declaredFileSize)
+    return false;
   let colorPlanes: number;
   let bitsPerPixel: number;
   if (dibHeaderSize === 12) {
@@ -99,7 +105,11 @@ function startsWith(buffer: Uint8Array, bytes: number[]): boolean {
   return bytes.every((byte, index) => buffer[index] === byte);
 }
 
-function startsWithAscii(buffer: Uint8Array, offset: number, text: string): boolean {
+function startsWithAscii(
+  buffer: Uint8Array,
+  offset: number,
+  text: string,
+): boolean {
   if (buffer.length < offset + text.length) return false;
   for (let index = 0; index < text.length; index++) {
     if (buffer[offset + index] !== text.charCodeAt(index)) return false;

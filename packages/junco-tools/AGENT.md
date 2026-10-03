@@ -26,6 +26,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/edit.ts` | The hashline edit tool: one routed `mux.edit` call per edit. |
 | `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
 | `ts/collection.ts` | `ToolCollection`: one `EditStore`, one opened or borrowed mux, and the complete ordered tool list. |
+| `ts/yield.ts` | The native-free `yield` tool and the module-private registry behind `isYieldTool`: only its own tool objects are scheduling primitives for `junco-agent`. Keep factory and registry in this one module. |
 | `ts/bash.ts`, `ts/index.ts` | Thin upstream factory wrappers and public exports. |
 | `ts/extension.ts` | Pi session hooks and same-name collection registration. |
 | `scripts/with-junco-build-env.mjs` | Isolated Rust homes and authenticated process-local Cargo/Git environment. |
@@ -33,29 +34,28 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane. |
 | `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree fixtures, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
 | `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
-| `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, and SDK `customTools` registration, with scripted model responses. |
+| `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, the native-free `yield` tool in a bare Agent, and SDK `customTools` registration, with scripted model responses. |
 | `tests/tools.test.mjs` | Collection file tools over a CopyTree seed: hashline provenance, snapshot fidelity, staging, search boundaries, publication gating, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
 | `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
 | `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension and owned muxes on a real btrfs seed. |
 
-`dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep both `Cargo.lock` and `package-lock.json` tracked.
+`dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco-agency workspace root's `bun.lock`.
 
 ## Build and verification commands
 
-Run from the repository root after installing the prerequisites in README, with the sibling `marsh` checkout present at `../marsh`:
+Install once with `bun install --frozen-lockfile` at the junco-agency workspace root, then run from `packages/junco-tools` after installing the prerequisites in README, with the external `marsh` checkout present beside the workspace (`../../../marsh`):
 
 ```sh
-npm ci
-npm run build
-npm run build:native:test
-npm test
-npm run test:btrfs
+bun run build
+bun run build:native:test
+bun run test
+bun run test:btrfs
 ```
 
-The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon. `npm test` needs the test addon; `npm run test:btrfs` needs the production addon and a `target/` on a writable btrfs mount carrying `user_subvol_rm_allowed`. It takes no arguments and no configuration: every run allocates its own `target/btrfs-test-*` root with a fresh empty seed subvolume, hands it to the child suites as their working directory, and deletes exactly that root afterwards. Without a suitable mount it fails with its filesystem prerequisite; never sudo, mount an image, or substitute the checkout or home subvolume.
+The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon. `bun run test` needs the test addon; `bun run test:btrfs` needs the production addon and a `target/` on a writable btrfs mount carrying `user_subvol_rm_allowed`. It takes no arguments and no configuration: every run allocates its own `target/btrfs-test-*` root with a fresh empty seed subvolume, hands it to the child suites as their working directory, and deletes exactly that root afterwards. Without a suitable mount it fails with its filesystem prerequisite; never sudo, mount an image, or substitute the checkout or home subvolume.
 
-For focused Rust checks and formatting, use the same launcher as the npm native build scripts:
+For focused Rust checks and formatting, use the same launcher as the package's native build scripts:
 
 ```sh
 node scripts/with-junco-build-env.mjs cargo check --locked
@@ -70,11 +70,11 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 
 ### Dependency changes
 
-- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved sources. The marsh crates are deliberately sibling `path` dependencies on `../marsh`; everything else stays on its pinned Git revision or registry version. Do not silently switch anything else to a branch tip or a local path to make a build pass.
-- Keep the consumer-root `[patch.crates-io]` for `brush-core`, now pointing at `../marsh/crates/brush-core`. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
-- Keep every direct and transitive marsh sibling crate resolving to that one checkout with a single crate identity each. Do not add the root `marsh` application or the rmux packages to this package, and never commit, publish or edit the sibling working tree from here.
+- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved sources. The marsh crates are deliberately `path` dependencies on the external checkout at `../../../marsh` (beside the junco-agency workspace); everything else stays on its pinned Git revision or registry version. Do not silently switch anything else to a branch tip or a local path to make a build pass.
+- Keep the consumer-root `[patch.crates-io]` for `brush-core`, now pointing at `../../../marsh/crates/brush-core`. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
+- Keep every direct and transitive marsh crate resolving to that one checkout with a single crate identity each. Do not add the root `marsh` application or the rmux packages to this package, and never commit, publish or edit the marsh working tree from here.
 - The lockfile deliberately keeps `napi-derive-backend` at 5.0.4 for napi 3.9.0 compatibility. Review codegen compatibility before changing that resolution.
-- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate resolving to `../marsh`, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
+- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate resolving to `../../../marsh`, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
 - The Oh My Pi engines are pinned Git dependencies (`pi-ast`, `pi-diff`, `pi-walker`, `pi-edit` at `7ae76f8e4daca0c8f409f61bcd514260cd522365`). Import them unmodified from that one URL/revision so each package keeps a single crate identity. Do not vendor them, add a `path` dependency, follow a branch, or point any build step at a local Oh My Pi checkout.
 - `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, re-apply only the routing seams listed in the source map, and keep the source/licence attribution.
 - Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.95.0 or export `RUSTC_BOOTSTRAP` globally.
@@ -117,7 +117,7 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 ## Tests and operational boundaries
 
 - Verify execution changes with the **real Node addon, ShellMux, and Pi factory/registered tool**, not interface-shaped mocks or import-only checks. No provider request or LLM credentials are needed to invoke a registered tool directly.
-- `npm test` covers Pi tool semantics (publication, streams, exit status, non-PTY stdin EOF, cwd/prefix/hook/env, seed containment, fresh shell over a durable filesystem), Pi's line/byte truncation and complete spills, abort/timeout retention, timeout validation, native admission/queue/close/borrowed-ownership boundaries, the real Agent loop, and SDK `customTools` registration. Keep cases isolated, bounded, and explicit about native close in `finally`. New tests should protect observable behavior, not source text, wiring, or incidental wording.
+- `bun run test` covers Pi tool semantics (publication, streams, exit status, non-PTY stdin EOF, cwd/prefix/hook/env, seed containment, fresh shell over a durable filesystem), Pi's line/byte truncation and complete spills, abort/timeout retention, timeout validation, native admission/queue/close/borrowed-ownership boundaries, the real Agent loop, and SDK `customTools` registration. Keep cases isolated, bounded, and explicit about native close in `finally`. New tests should protect observable behavior, not source text, wiring, or incidental wording.
 - Use the shared `tests/helpers.mjs` fixture and held-child gate protocol for readiness: a held child prints a marker and polls a host-created gate file **outside** the snapshot. Never use a sleep, a preparatory builtin, or a gate inside the seed. Release test-owned resources through `cleanup(...)` so every step is attempted in order and every failure is reported; it is for releases, not for command execution or for unconditional deletion after a drain that was never proved.
 - `NativeMux.openCopyTree` is available only in the `test-fs` addon and requires an explicit existing fixture directory. Ordinary `NativeMux.open` still selects real btrfs, even in that addon. There is no environment-variable fake-filesystem fallback.
 - CopyTree verifies adapter/interpreter/policy/WAL behavior on ext4; it does not establish btrfs ioctl or storage-atomicity correctness. Report real-btrfs checks as untested when no suitable seed is available.

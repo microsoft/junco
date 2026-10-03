@@ -9,11 +9,11 @@
     }
   },
   "dependencies": {
-    "junco-scheduler": "file:../../junco-scheduler"
+    "junco-scheduler": "workspace:*"
   },
   "optionalDependencies": {
-    "dataflow-engine": "file:..",
-    "dataflow-engine-opik": "file:../../dataflow-engine-opik",
+    "dataflow-engine": "workspace:*",
+    "dataflow-engine-opik": "workspace:*",
     "opik": "2.2.86"
   }
 }

@@ -7,6 +7,12 @@ export interface MarshPolicyDeniedError extends Error {
 }
 
 /** Whether `error` is a Marsh policy denial, by its exact code, never its message text. */
-export function isMarshPolicyDenied(error: unknown): error is MarshPolicyDeniedError {
-  return error instanceof Error && "code" in error && error.code === MARSH_POLICY_DENIED;
+export function isMarshPolicyDenied(
+  error: unknown,
+): error is MarshPolicyDeniedError {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    error.code === MARSH_POLICY_DENIED
+  );
 }

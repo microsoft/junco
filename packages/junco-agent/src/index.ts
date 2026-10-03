@@ -5,5 +5,9 @@ export type {
   AgenticStep,
   AgenticYieldReason,
 } from "./agentic.js";
-export { JuncoAgent, JuncoAgentError, type AgenticRun, type JuncoAgentCreateOptions } from "./junco-agent.js";
-export { createYieldTool, type YieldTool, type YieldToolDetails } from "./yield-tool.js";
+export {
+  type AgenticRun,
+  JuncoAgent,
+  type JuncoAgentCreateOptions,
+  JuncoAgentError,
+} from "./junco-agent.js";

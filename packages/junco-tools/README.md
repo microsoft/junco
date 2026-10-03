@@ -10,9 +10,9 @@ The native crate keeps `ast-grep-core` on 0.39.9: pinned `pi-ast` shares its `Pa
 
 Requirements:
 
-- Linux x86-64 with glibc; Node.js **22.19.0 or newer** and npm.
+- Linux x86-64 with glibc; Node.js **22.19.0 or newer** and Bun **1.4.2**.
 - Rust **1.95.0**, selected by `rust-toolchain.toml`.
-- A sibling `marsh` checkout at `../marsh` relative to this one: `marsh-core`, `marsh-btrfs` and the patched `brush-core` are consumed as local path dependencies, not from Git. SSH read access to `junco-org/junco-tools` and `junco-org/junco-policy`, with trusted GitHub SSH host keys, plus HTTPS access to the public `can1357/oh-my-pi` repository for the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision (or that revision already in the Cargo cache).
+- This package lives in the junco-agency Bun workspace at `packages/junco-tools`. A `marsh` checkout beside the workspace (`../../../marsh` from this package), with `junco-policy` beside it for marsh's own path dependency: `marsh-core`, `marsh-btrfs` and the patched `brush-core` are consumed as local path dependencies, not from Git. SSH read access to `junco-org/marsh` and `junco-org/junco-policy`, with trusted GitHub SSH host keys, plus HTTPS access to the public `can1357/oh-my-pi` repository for the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision (or that revision already in the Cargo cache).
 - Native build libraries. On Ubuntu 24.04:
 
 ```sh
@@ -31,17 +31,19 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
   sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
 ```
 
-Then build the checkout:
+Then build the package:
 
 ```sh
 git clone git@github.com:junco-org/marsh.git "$HOME/git/marsh"
-git clone git@github.com:junco-org/junco-tools.git "$HOME/git/junco-tools"
-cd "$HOME/git/junco-tools"
-npm ci
-npm run build
+git clone git@github.com:junco-org/junco-policy.git "$HOME/git/junco-policy"
+git clone git@github.com:junco-org/junco-agency.git "$HOME/git/junco-agency"
+cd "$HOME/git/junco-agency"
+bun install --frozen-lockfile
+cd packages/junco-tools
+bun run build
 ```
 
-`npm run build` generates the production addon in `native/`, then compiles TypeScript into `dist/`. Both are needed at runtime. The private package's `files` list ships only runtime artifacts and documentation to `file:` consumers, not the test addon under `target/native-test/`; build and load that from this checkout for policy tests.
+`bun run build` generates the production addon in `native/`, then compiles TypeScript into `dist/`. Both are needed at runtime. The workspace links this directory into its consumers; the private package's `files` list ships only runtime artifacts and documentation in a packed tarball, not the test addon under `target/native-test/`; build and load that from this package for policy tests.
 
 The launcher preserves explicit `CARGO_HOME`, `RUSTUP_HOME`, and SSH settings. Native build scripts use the committed Cargo lockfile and a process-local HTTPS-to-SSH rewrite for private junco dependencies; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
 
@@ -49,7 +51,7 @@ The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes to `main`, pull requests, and manual dispatch. Configure repository secrets `JUNCO_MARSH_SSH_KEY` and `JUNCO_POLICY_SSH_KEY` with read-only deploy keys for `junco-org/marsh` and `junco-org/junco-policy`; CI checks them out at `../marsh` and `../junco-policy`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then `npm ci`, `npm run build`, `npm run build:native:test`, and `npm test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
+The junco-agency workspace's `.github/workflows/ci.yml` `test` job covers this package. Configure the workspace repository secrets `JUNCO_MARSH_SSH_KEY` and `JUNCO_POLICY_SSH_KEY` with read-only deploy keys for `junco-org/marsh` and `junco-org/junco-policy`; CI checks them out beside the workspace and sets `CARGO_TARGET_DIR` to this package's `target/cargo`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then the root `bun install --frozen-lockfile`, `bun run build`, `bun run build:native:test`, and `bun run test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
 
 ## Run with `pi -e`
 
@@ -57,14 +59,14 @@ Production execution requires an **existing dedicated btrfs seed subvolume**, a 
 
 ```sh
 cd /path/to/your/btrfs-seed
-pi -e "$HOME/git/junco-tools/dist/extension.js"
+pi -e "$HOME/git/junco-agency/packages/junco-tools/dist/extension.js"
 ```
 
-For the checkout at `/home/eioannidis/git/junco-tools`, the extension argument is `/home/eioannidis/git/junco-tools/dist/extension.js`. If `pi` is not on your PATH, or is a different version, use the pinned CLI installed by `npm ci`:
+For the workspace at `/home/eioannidis/git/junco-agency`, the extension argument is `/home/eioannidis/git/junco-agency/packages/junco-tools/dist/extension.js`. If `pi` is not on your PATH, or is a different version, use the pinned CLI installed by the workspace's `bun install`:
 
 ```sh
-"$HOME/git/junco-tools/node_modules/.bin/pi" \
-  -e "$HOME/git/junco-tools/dist/extension.js"
+"$HOME/git/junco-agency/node_modules/.bin/pi" \
+  -e "$HOME/git/junco-agency/packages/junco-tools/dist/extension.js"
 ```
 
 Run that command from the btrfs working directory, not necessarily from the package checkout. Configure Pi's model/provider credentials as usual; junco-tools does not configure an LLM.
@@ -91,12 +93,12 @@ publication in progress and do not provide an atomic multi-file view.
 In another ESM TypeScript project, install the built checkout and the compatible Pi version:
 
 ```sh
-npm install "$HOME/git/junco-tools" @earendil-works/pi-coding-agent@0.99.2 @earendil-works/pi-agent-core@0.99.2
+npm install "$HOME/git/junco-agency/packages/junco-tools" @earendil-works/pi-coding-agent@0.99.2 @earendil-works/pi-agent-core@0.99.2
 ```
 
 Use the package-root imports shown below. The package ships compiled ESM and declarations; it does not require Bun. A NodeNext TypeScript configuration matches this repository.
 
-This package pins `typebox` 1.3.34 with an override so Pi's older metadata pin does not create a second schema type. A consumer sharing schemas should use the same override.
+The junco-agency workspace root pins `typebox` 1.3.34 with an override so Pi's older metadata pin does not create a second schema type. A consumer sharing schemas should use the same override.
 
 ### Pi SDK: the whole collection
 
@@ -249,6 +251,9 @@ pi -e /absolute/path/to/my-junco-extension.ts
 | `createFindTool(cwd, native, mux)`, `createAstGrepTool(cwd, native, mux)`, `createAstEditTool(cwd, native, mux)`, `createDiffTool(native)` | Native `find`, `ast_grep`, previewing `ast_edit` as routed calls on `mux`, and in-memory `diff`. |
 | `createShellMuxOperations({ principal?, mux? }?)` | Pi-compatible `BashOperations` backed by ShellMux. |
 | `shutdownShellMux()` | Dispose and close all default-owned operations sessions, including pending opens. |
+| `LspTool.create(cwd, { readOnly? }?)`, `LspTool.shutdown()` | Oh My Pi's `lsp` tool, from the pinned npm `@oh-my-pi/pi-coding-agent@18.2.11`, as a Pi `AgentTool` for any `tools` array (also re-exported by `junco-agency`). **Bun >=1.3.14 only**: `create` rejects under Node, though importing the package stays safe. Caller-installed language servers are discovered by upstream configuration; navigation uses a one-based `line` plus `symbol`; `timeout` is in seconds (default 20, 5–300); `readOnly` rejects upstream's write-tier actions. Semantic failures reject with upstream's text and the original result as `Error.cause`. It runs with host filesystem/process access, **not** through marsh's sandbox or hashline provenance, and is not part of `ToolCollection` or the Pi extension. `shutdown()` is process-wide teardown of upstream's client registry, called once all LSP users drain. |
+| `createYieldTool()`, `isYieldTool(tool)`, `YieldTool`, `YieldToolDetails` | The native-free voluntary-suspension `yield` tool: executing it returns its non-empty `reason` as text and `details.reason`, and nothing else. `JuncoAgent` (`junco-agent`) treats a successful call as a pause after the tool batch; a bare Pi `Agent` continues. `isYieldTool` is true only for an object `createYieldTool()` returned, never for a same-named tool or a spread copy. It is not part of `ToolCollection`. |
+| `NativeModule`, `NativeMux`, `EditStore` (types only) | The `native`, `mux` and `store` parameter contracts of the factories above. The root exports them as types only so importing tools never loads the addon; the runtime module and constructors come from `junco-tools/native`. |
 | `NativeMux` from `junco-tools/native` | Explicit native session ownership: `await NativeMux.open(cwd, { sandbox? }?)`, `mux.seed`, and `await mux.close()`. `sandbox` is `"shared"` (the default: sandbox a shell command or writing file tool while another live shell shares the seed) or `"always"`. |
 
 Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata and renderers: pass it to a bare `Agent`, SDK `customTools`, or `pi.registerTool` without wrapping. `native` is the `junco-tools/native` module; `store` is `new native.EditStore()`; `mux` is a `NativeMux` that same module opened, which its caller closes. `BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
@@ -272,9 +277,9 @@ The file tools are marsh calls too, each in a transient shell of the mux. Read-o
 An ordinary ext4 directory is not a production seed. The production addon never falls back to a fake filesystem. Development tests explicitly build a separate CopyTree-enabled addon and exercise the same binding, Pi factories, Agent loop, and SDK registration:
 
 ```sh
-# Run from the junco-tools checkout, after npm run build.
-npm run build:native:test
-npm test
+# Run from packages/junco-tools, after bun run build.
+bun run build:native:test
+bun run test
 ```
 
 `NativeMux.openCopyTree(seed, { sandbox? }?)` exists only in `target/native-test/index.js`. Its ordinary `NativeMux.open` still requires btrfs. CopyTree tests do not exercise real-btrfs ioctls or storage atomicity.
@@ -284,7 +289,7 @@ The native tracer also needs readable kernel BTF/kallsyms and effective BPF/perf
 The packaged extension and default-owned muxes are covered by a separate opt-in lane that uses the **production** addon:
 
 ```sh
-npm run test:btrfs
+bun run test:btrfs
 ```
 
 It takes no arguments and no configuration. Each run allocates its own `target/btrfs-test-<random>` root, creates a fresh empty btrfs seed subvolume inside it, hands that root to the child suites as their working directory, and afterwards deletes exactly that root — nested subvolumes, leftover marsh snapshots and all. It requires `target/` on a writable btrfs mount carrying `user_subvol_rm_allowed`, and fails with that filesystem prerequisite rather than falling back to the checkout, the home subvolume, or a fake filesystem. Earlier fixture roots are never swept, and only a `SIGKILL` of the runner itself can leave one behind.

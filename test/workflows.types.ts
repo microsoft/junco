@@ -2,9 +2,18 @@
 // whose result is an AssistantMessage, and accepts concrete schedulers and specialized agents
 // without widening the caller's variables. Covered by tsconfig.typecheck.json; never executed.
 
-import type { AgentTool, PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
+import type {
+  AgentTool,
+  PromptTemplate,
+  Skill,
+} from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type Edge, messageEdge, NodeId, type NodeIdType } from "dataflow-engine";
+import {
+  type Edge,
+  messageEdge,
+  NodeId,
+  type NodeIdType,
+} from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import type { JuncoAgent } from "junco-agent";
 import type { PiScheduler } from "junco-scheduler/agent";
@@ -22,7 +31,13 @@ export function ralphKeepsTypes(
 ) {
   const input = messageEdge<AgenticInput, AssistantMessage>("in");
   const output = messageEdge<AgenticInput, AssistantMessage>("out");
-  const options: RalphOptions = { id: NodeId("Ralph"), description: "two rounds", input, output, rounds: 2 };
+  const options: RalphOptions = {
+    id: NodeId("Ralph"),
+    description: "two rounds",
+    input,
+    output,
+    rounds: 2,
+  };
   const id: NodeIdType = ralph(parent, agent, options);
   const anonymous: NodeIdType = ralph(parent, agent, { input, output });
   const result: O.Option<AssistantMessage> = parent.result(id);

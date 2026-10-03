@@ -1,5 +1,5 @@
 import { isUtf8 } from "node:buffer";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   createReadTool as createPiReadTool,
   createReadToolDefinition as createPiReadToolDefinition,
@@ -9,9 +9,16 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { EditStore, NativeMux } from "../native/index.js";
-import { detectSupportedImageMimeType, IMAGE_TYPE_SNIFF_BYTES } from "./mime.js";
+import {
+  detectSupportedImageMimeType,
+  IMAGE_TYPE_SNIFF_BYTES,
+} from "./mime.js";
 import type { NativeModule } from "./native.js";
-import { displayToolPath, normalizeEditableText, throwIfAborted } from "./tool-support.js";
+import {
+  displayToolPath,
+  normalizeEditableText,
+  throwIfAborted,
+} from "./tool-support.js";
 
 /** pi-edit refuses to snapshot anything larger; do not number what it will not anchor. */
 const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
@@ -45,7 +52,8 @@ function visibleLineNumbers(body: string): number[] {
     const digits = row.slice(0, separator);
     if (!/^[0-9]+$/.test(digits)) continue;
     const lineNumber = Number(digits);
-    if (Number.isSafeInteger(lineNumber) && lineNumber > 0) lines.push(lineNumber);
+    if (Number.isSafeInteger(lineNumber) && lineNumber > 0)
+      lines.push(lineNumber);
   }
   return lines;
 }
@@ -68,12 +76,21 @@ export function createReadTool(
   store: EditStore,
   native: NativeModule,
   mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined> {
+): AgentTool<
+  ReturnType<typeof createPiReadTool>["parameters"],
+  ReadToolDetails | undefined
+> {
   const fallback = createPiReadToolDefinition(cwd);
   const tool = {
     ...fallback,
     description: `${fallback.description} ${HASHLINE_NOTE}`,
-    async execute(toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) {
+    async execute(
+      toolCallId,
+      params,
+      signal,
+      onUpdate,
+      ctx?: ExtensionToolContext,
+    ) {
       throwIfAborted(signal);
       // Pi probes, sniffs, and reads the same path: one routed read serves them all.
       const loads = new Map<string, Promise<Buffer>>();
@@ -99,29 +116,44 @@ export function createReadTool(
             throwIfAborted(signal);
             const raw = await load(absolutePath);
             throwIfAborted(signal);
-            if (raw.byteLength > SNAPSHOT_MAX_BYTES || raw.includes(0) || !isUtf8(raw)) {
+            if (
+              raw.byteLength > SNAPSHOT_MAX_BYTES ||
+              raw.includes(0) ||
+              !isUtf8(raw)
+            ) {
               throw new Unsnapshottable();
             }
             const text = raw.toString("utf-8");
             const view = /\.ipynb$/i.test(absolutePath)
-              ? native.notebookToEditableText(text, displayToolPath(cwd, absolutePath))
+              ? native.notebookToEditableText(
+                  text,
+                  displayToolPath(cwd, absolutePath),
+                )
               : normalizeEditableText(text);
             captured = { absolutePath, view };
             // A terminal LF closes the last line; numbering it would invent an
             // addressable empty line the editable view does not have.
             const display = view.endsWith("\n") ? view.slice(0, -1) : view;
-            return Buffer.from(native.hashlineFormatNumberedLines(display, 1), "utf-8");
+            return Buffer.from(
+              native.hashlineFormatNumberedLines(display, 1),
+              "utf-8",
+            );
           },
           // `detectImageMimeType` is intentionally absent: this branch only
           // ever produces numbered text, and images go to the fallback.
         },
       });
 
-      let result;
+      let result: AgentToolResult<ReadToolDetails | undefined>;
       try {
         // The inner factory gets no signal: its immediate-abort wrapper could
         // otherwise settle while this read is still capturing a snapshot.
-        result = await numbered.execute(toolCallId, params, undefined, onUpdate);
+        result = await numbered.execute(
+          toolCallId,
+          params,
+          undefined,
+          onUpdate,
+        );
       } catch (error) {
         if (error instanceof Unsnapshottable) {
           // Pi's unmodified reader, over the bytes this call already loaded.
@@ -129,7 +161,9 @@ export function createReadTool(
             access,
             readFile: load,
             detectImageMimeType: async (absolutePath) =>
-              detectSupportedImageMimeType((await load(absolutePath)).subarray(0, IMAGE_TYPE_SNIFF_BYTES)),
+              detectSupportedImageMimeType(
+                (await load(absolutePath)).subarray(0, IMAGE_TYPE_SNIFF_BYTES),
+              ),
           };
           if (ctx !== undefined) {
             return createPiReadToolDefinition(cwd, { operations }).execute(
@@ -140,7 +174,12 @@ export function createReadTool(
               ctx,
             );
           }
-          return createPiReadTool(cwd, { operations }).execute(toolCallId, params, signal, onUpdate);
+          return createPiReadTool(cwd, { operations }).execute(
+            toolCallId,
+            params,
+            signal,
+            onUpdate,
+          );
         }
         throw error;
       }
@@ -153,7 +192,11 @@ export function createReadTool(
       // No complete source row means nothing was displayed to anchor against.
       if (seen.length === 0) return result;
 
-      const tag = store.recordSnapshot(captured.absolutePath, captured.view, seen);
+      const tag = store.recordSnapshot(
+        captured.absolutePath,
+        captured.view,
+        seen,
+      );
       const header = native.hashlineFormatHeader(
         displayToolPath(cwd, captured.absolutePath),
         tag,
@@ -165,6 +208,9 @@ export function createReadTool(
         ),
       };
     },
-  } satisfies ToolDefinition<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined>;
+  } satisfies ToolDefinition<
+    ReturnType<typeof createPiReadTool>["parameters"],
+    ReadToolDetails | undefined
+  >;
   return tool;
 }

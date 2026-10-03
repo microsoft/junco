@@ -1,23 +1,48 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
-import { InMemoryCredentialStore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
+  fauxAssistantMessage,
+  fauxToolCall,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
+import {
+  createAgentSession,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
   SettingsManager,
-  createAgentSession,
 } from "@earendil-works/pi-coding-agent";
-import { NativeMux } from "../native/index.js";
 import { createShellMuxOperations, shutdownShellMux } from "../dist/index.js";
+import { NativeMux } from "../native/index.js";
 import { readBtrfsFixture } from "./btrfs-fixture.mjs";
-import { cleanup, deferred, hashlineTag, heldChild, release, settleAgent, text } from "./helpers.mjs";
-import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs";
+import {
+  cleanup,
+  deferred,
+  hashlineTag,
+  heldChild,
+  release,
+  settleAgent,
+  text,
+} from "./helpers.mjs";
+import {
+  scriptBashTurn,
+  scriptedModel,
+  toolResult,
+} from "./scripted-model.mjs";
 
-const extensionPath = fileURLToPath(new URL("../dist/extension.js", import.meta.url));
+const extensionPath = fileURLToPath(
+  new URL("../dist/extension.js", import.meta.url),
+);
 
 const state = {};
 
@@ -38,12 +63,19 @@ before(async () => {
   state.testRoot = await mkdtemp(join(tmpdir, "junco-btrfs-"));
   state.agentDir = join(state.testRoot, "agent");
   await mkdir(state.agentDir, { recursive: true });
-  await writeFile(join(state.agentDir, "settings.json"), `${JSON.stringify({
-    shellCommandPrefix: "export JUNCO_PERSISTED_PREFIX=prefix-ok",
-    packages: [],
-    compaction: { enabled: false },
-    retry: { enabled: false },
-  }, null, 2)}\n`);
+  await writeFile(
+    join(state.agentDir, "settings.json"),
+    `${JSON.stringify(
+      {
+        shellCommandPrefix: "export JUNCO_PERSISTED_PREFIX=prefix-ok",
+        packages: [],
+        compaction: { enabled: false },
+        retry: { enabled: false },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   process.env.PI_CODING_AGENT_DIR = state.agentDir;
   state.errors = [];
 });
@@ -57,10 +89,14 @@ after(async () => {
     // than be hidden by the per-case reopen probes, which deliberately run earlier.
     () => shutdownShellMux(),
     () => {
-      if (state.previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      if (state.previousAgentDir === undefined)
+        delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = state.previousAgentDir;
     },
-    () => (state.testRoot ? rm(state.testRoot, { recursive: true, force: true }) : undefined),
+    () =>
+      state.testRoot
+        ? rm(state.testRoot, { recursive: true, force: true })
+        : undefined,
   );
 });
 
@@ -74,7 +110,11 @@ after(async () => {
 async function closePackagedSession(session) {
   await cleanup(
     () => settleAgent(session.agent),
-    () => session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }),
+    () =>
+      session.extensionRunner.emit({
+        type: "session_shutdown",
+        reason: "quit",
+      }),
     () => assert.deepEqual(state.errors, []),
     () => session.dispose(),
   );
@@ -113,7 +153,9 @@ async function packagedSession(sessionManager) {
     model: scripted.model,
   });
   try {
-    await session.bindExtensions({ onError: (error) => state.errors.push(error) });
+    await session.bindExtensions({
+      onError: (error) => state.errors.push(error),
+    });
     assert.deepEqual(state.errors, []);
     session.agent.streamFunction = scripted.streamFn;
   } catch (setupError) {
@@ -121,7 +163,10 @@ async function packagedSession(sessionManager) {
     try {
       await closePackagedSession(session);
     } catch (cleanupError) {
-      throw new AggregateError([setupError, cleanupError], "Test session setup failed");
+      throw new AggregateError(
+        [setupError, cleanupError],
+        "Test session setup failed",
+      );
     }
     throw setupError;
   }
@@ -132,7 +177,10 @@ async function packagedSession(sessionManager) {
 async function assertSeedReusable(seed) {
   const mux = await NativeMux.open(seed);
   try {
-    const probe = createShellMuxOperations({ principal: "lease-reopen-probe", mux });
+    const probe = createShellMuxOperations({
+      principal: "lease-reopen-probe",
+      mux,
+    });
     const chunks = [];
     const result = await probe.exec("printf 'lease-reacquired\\n'", seed, {
       onData: (data) => chunks.push(data),
@@ -144,7 +192,9 @@ async function assertSeedReusable(seed) {
   }
 }
 
-test("default owners run concurrently over shared source authority", { timeout: 120_000 }, async (t) => {
+test("default owners run concurrently over shared source authority", {
+  timeout: 120_000,
+}, async (t) => {
   // A held direct command excludes every other admission; keep this source managed so the
   // independent default owner can exercise concurrent publication authority.
   const holder = await NativeMux.open(state.seed, { sandbox: "always" });
@@ -155,32 +205,50 @@ test("default owners run concurrently over shared source authority", { timeout: 
   try {
     await assertSeedReusable(state.seed);
 
-    const holding = createShellMuxOperations({ principal: "holding-owner", mux: holder });
+    const holding = createShellMuxOperations({
+      principal: "holding-owner",
+      mux: holder,
+    });
     const ready = deferred(t.signal, "shared-authority hold readiness");
     let output = "";
-    held = holding.exec(heldChild({ gate, ready: "SHARE_READY", done: "SHARE_DONE" }), state.seed, {
-      signal: t.signal,
-      onData: (data) => {
-        output += data.toString("utf8");
-        if (output.includes("SHARE_READY")) ready.resolve();
+    held = holding.exec(
+      heldChild({ gate, ready: "SHARE_READY", done: "SHARE_DONE" }),
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => {
+          output += data.toString("utf8");
+          if (output.includes("SHARE_READY")) ready.resolve();
+        },
       },
-    });
-    const settled = () => { heldSettled = true; };
+    );
+    const settled = () => {
+      heldSettled = true;
+    };
     held.then(settled, settled);
     await Promise.race([
       ready.promise,
-      held.then(() => { throw new Error("shared-authority hold ended before readiness"); }),
+      held.then(() => {
+        throw new Error("shared-authority hold ended before readiness");
+      }),
     ]);
 
     // Read-only: an unrelated file write here could turn a source-sharing test into a
     // policy or stale-view test, copying tests/bash.test.mjs's independent-principal pattern.
     const concurrentChunks = [];
-    const concurrentResult = await contender.exec("printf 'concurrent-ok\\n'", state.seed, {
-      signal: t.signal,
-      onData: (data) => concurrentChunks.push(data),
-    });
+    const concurrentResult = await contender.exec(
+      "printf 'concurrent-ok\\n'",
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => concurrentChunks.push(data),
+      },
+    );
     assert.equal(concurrentResult.exitCode, 0);
-    assert.equal(Buffer.concat(concurrentChunks).toString("utf8"), "concurrent-ok\n");
+    assert.equal(
+      Buffer.concat(concurrentChunks).toString("utf8"),
+      "concurrent-ok\n",
+    );
     assert.equal(heldSettled, false);
 
     await release(gate);
@@ -206,14 +274,23 @@ test("default owners run concurrently over shared source authority", { timeout: 
     );
   }
 
-  const concurrent = createShellMuxOperations({ principal: "concurrent-owner" });
+  const concurrent = createShellMuxOperations({
+    principal: "concurrent-owner",
+  });
   try {
     const collected = [[], []];
     const results = await Promise.all([
-      concurrent.exec("printf first", state.seed, { onData: (data) => collected[0].push(data) }),
-      concurrent.exec("printf second", state.seed, { onData: (data) => collected[1].push(data) }),
+      concurrent.exec("printf first", state.seed, {
+        onData: (data) => collected[0].push(data),
+      }),
+      concurrent.exec("printf second", state.seed, {
+        onData: (data) => collected[1].push(data),
+      }),
     ]);
-    assert.deepEqual(results.map((entry) => entry.exitCode), [0, 0]);
+    assert.deepEqual(
+      results.map((entry) => entry.exitCode),
+      [0, 0],
+    );
     assert.equal(Buffer.concat(collected[0]).toString("utf8"), "first");
     assert.equal(Buffer.concat(collected[1]).toString("utf8"), "second");
   } finally {
@@ -226,27 +303,40 @@ test("default owners run concurrently over shared source authority", { timeout: 
   try {
     const rejected = [];
     await assert.rejects(
-      discovery.exec("printf must-not-run", "/", { onData: (data) => rejected.push(data) }),
+      discovery.exec("printf must-not-run", "/", {
+        onData: (data) => rejected.push(data),
+      }),
       Error,
     );
     assert.equal(Buffer.concat(rejected).length, 0);
     const retried = [];
-    const retriedResult = await discovery.exec("printf 'discovery-retried\\n'", state.seed, {
-      onData: (data) => retried.push(data),
-    });
+    const retriedResult = await discovery.exec(
+      "printf 'discovery-retried\\n'",
+      state.seed,
+      {
+        onData: (data) => retried.push(data),
+      },
+    );
     assert.equal(retriedResult.exitCode, 0);
-    assert.equal(Buffer.concat(retried).toString("utf8"), "discovery-retried\n");
+    assert.equal(
+      Buffer.concat(retried).toString("utf8"),
+      "discovery-retried\n",
+    );
   } finally {
     await shutdownShellMux();
   }
 });
 
-test("owned shutdown joins active work and closes admission", { timeout: 120_000 }, async (t) => {
+test("owned shutdown joins active work and closes admission", {
+  timeout: 120_000,
+}, async (t) => {
   const gate = join(state.testRoot, "shutdown-gate");
   const peerGate = join(state.testRoot, "shutdown-peer-gate");
   const peer = await NativeMux.open(state.seed, { sandbox: "always" });
   const owner = createShellMuxOperations({ principal: "shutdown-owner" });
-  const concurrentOwner = createShellMuxOperations({ principal: "concurrent-during-shutdown" });
+  const concurrentOwner = createShellMuxOperations({
+    principal: "concurrent-during-shutdown",
+  });
   let held;
   let peerRun;
   let heldSettled = false;
@@ -254,7 +344,10 @@ test("owned shutdown joins active work and closes admission", { timeout: 120_000
     // An independent managed shell keeps both default-owned commands off the exclusive direct route.
     const peerReady = deferred(t.signal, "production managed-peer readiness");
     let peerOutput = "";
-    peerRun = createShellMuxOperations({ mux: peer, principal: "shutdown-managed-peer" }).exec(
+    peerRun = createShellMuxOperations({
+      mux: peer,
+      principal: "shutdown-managed-peer",
+    }).exec(
       heldChild({ gate: peerGate, ready: "PEER_READY", done: "PEER_DONE" }),
       state.seed,
       {
@@ -267,39 +360,59 @@ test("owned shutdown joins active work and closes admission", { timeout: 120_000
     );
     await Promise.race([
       peerReady.promise,
-      peerRun.then(() => { throw new Error("managed peer ended before readiness"); }),
+      peerRun.then(() => {
+        throw new Error("managed peer ended before readiness");
+      }),
     ]);
 
     const ready = deferred(t.signal, "production hold readiness");
     let output = "";
-    held = owner.exec(heldChild({ gate, ready: "PROD_READY", done: "PROD_DONE" }), state.seed, {
-      signal: t.signal,
-      onData: (data) => {
-        output += data.toString("utf8");
-        if (output.includes("PROD_READY")) ready.resolve();
+    held = owner.exec(
+      heldChild({ gate, ready: "PROD_READY", done: "PROD_DONE" }),
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => {
+          output += data.toString("utf8");
+          if (output.includes("PROD_READY")) ready.resolve();
+        },
       },
-    });
-    const settled = () => { heldSettled = true; };
+    );
+    const settled = () => {
+      heldSettled = true;
+    };
     held.then(settled, settled);
     await Promise.race([
       ready.promise,
-      held.then(() => { throw new Error("production hold ended before readiness"); }),
+      held.then(() => {
+        throw new Error("production hold ended before readiness");
+      }),
     ]);
 
     // A second default owner runs concurrently over the same shared source authority while
     // the first command is still held; shutdown, not admission, must stop the active command.
     const concurrentChunks = [];
-    const concurrentResult = await concurrentOwner.exec("printf 'not-blocked\\n'", state.seed, {
-      signal: t.signal,
-      onData: (data) => concurrentChunks.push(data),
-    });
+    const concurrentResult = await concurrentOwner.exec(
+      "printf 'not-blocked\\n'",
+      state.seed,
+      {
+        signal: t.signal,
+        onData: (data) => concurrentChunks.push(data),
+      },
+    );
     assert.equal(concurrentResult.exitCode, 0);
-    assert.equal(Buffer.concat(concurrentChunks).toString("utf8"), "not-blocked\n");
+    assert.equal(
+      Buffer.concat(concurrentChunks).toString("utf8"),
+      "not-blocked\n",
+    );
     assert.equal(heldSettled, false);
 
     const shutdown = shutdownShellMux();
     await Promise.all([assert.rejects(held, Error), shutdown]);
-    await assert.rejects(owner.exec("printf late", state.seed, { onData: () => {} }), /closed/);
+    await assert.rejects(
+      owner.exec("printf late", state.seed, { onData: () => {} }),
+      /closed/,
+    );
     await release(peerGate);
     assert.equal((await peerRun).exitCode, 0);
     assert.equal(peerOutput, "PEER_READY\nPEER_DONE\n");
@@ -319,7 +432,9 @@ test("owned shutdown joins active work and closes admission", { timeout: 120_000
   }
 });
 
-test("the packaged extension registers bash with the persisted prefix", { timeout: 120_000 }, async (t) => {
+test("the packaged extension registers bash with the persisted prefix", {
+  timeout: 120_000,
+}, async (t) => {
   state.sessionManager = SessionManager.inMemory(state.seed);
   const { session, scripted } = await packagedSession(state.sessionManager);
   state.session = session;
@@ -329,12 +444,31 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
   // names are not built-ins, so the collection's same-name grep and find replacements are
   // registered but inactive until a caller selects them.
   const active = session.getActiveToolNames();
-  assert.deepEqual(active.filter((name) => name === "bash"), ["bash"]);
-  for (const name of ["read", "edit", "write", "ast_grep", "ast_edit", "diff"]) {
+  assert.deepEqual(
+    active.filter((name) => name === "bash"),
+    ["bash"],
+  );
+  for (const name of [
+    "read",
+    "edit",
+    "write",
+    "ast_grep",
+    "ast_edit",
+    "diff",
+  ]) {
     assert.ok(active.includes(name), `${name} is no longer available`);
   }
   const registered = session.getAllTools().map((tool) => tool.name);
-  for (const name of ["read", "bash", "edit", "grep", "find", "ast_grep", "ast_edit", "diff"]) {
+  for (const name of [
+    "read",
+    "bash",
+    "edit",
+    "grep",
+    "find",
+    "ast_grep",
+    "ast_edit",
+    "diff",
+  ]) {
     assert.ok(registered.includes(name), `${name} is no longer registered`);
   }
 
@@ -346,7 +480,10 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
   try {
     const ready = deferred(t.signal, "managed claim peer readiness");
     let output = "";
-    peerRun = createShellMuxOperations({ mux: peer, principal: "managed-claim-peer" }).exec(
+    peerRun = createShellMuxOperations({
+      mux: peer,
+      principal: "managed-claim-peer",
+    }).exec(
       heldChild({ gate, ready: "CLAIM_READY", done: "CLAIM_DONE" }),
       state.seed,
       {
@@ -359,20 +496,32 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
     );
     await Promise.race([
       ready.promise,
-      peerRun.then(() => { throw new Error("claim peer ended before readiness"); }),
+      peerRun.then(() => {
+        throw new Error("claim peer ended before readiness");
+      }),
     ]);
 
-    const capture = scriptBashTurn(scripted.faux, [{
-      id: "prod-1",
-      command: "printf '%s\\n' \"$JUNCO_PERSISTED_PREFIX\"; printf 'claimed\\n' > src/file0.txt",
-    }]);
+    const capture = scriptBashTurn(scripted.faux, [
+      {
+        id: "prod-1",
+        command:
+          "printf '%s\\n' \"$JUNCO_PERSISTED_PREFIX\"; printf 'claimed\\n' > src/file0.txt",
+      },
+    ]);
     await session.agent.prompt("Run the scripted command");
     await session.agent.waitForIdle();
 
     const result = toolResult(capture.context.messages, "prod-1");
-    assert.equal(result?.isError, false, `unexpected tool failure: ${result && text(result)}`);
+    assert.equal(
+      result?.isError,
+      false,
+      `unexpected tool failure: ${result && text(result)}`,
+    );
     assert.equal(text(result), "prefix-ok\n");
-    assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
+    assert.equal(
+      await readFile(join(state.seed, "src/file0.txt"), "utf8"),
+      "claimed\n",
+    );
     assert.deepEqual(state.errors, []);
     await release(gate);
     assert.equal((await peerRun).exitCode, 0);
@@ -386,9 +535,14 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
   }
 });
 
-test("the packaged extension drives a read into a hashline edit", { timeout: 120_000 }, async () => {
+test("the packaged extension drives a read into a hashline edit", {
+  timeout: 120_000,
+}, async () => {
   const session = state.session;
-  assert.ok(session, "the packaged registration scenario did not produce a session");
+  assert.ok(
+    session,
+    "the packaged registration scenario did not produce a session",
+  );
   const scripted = scriptedModel();
   session.agent.streamFunction = scripted.streamFn;
 
@@ -403,11 +557,13 @@ test("the packaged extension drives a read into a hashline edit", { timeout: 120
       const tag = hashlineTag(text(capture.read));
       assert.ok(tag, `no hashline tag in read output:\n${text(capture.read)}`);
       return fauxAssistantMessage(
-        [fauxToolCall(
-          "edit",
-          { input: `[src/hashline.txt#${tag}]\nPUT 1.=1:\n+PATCHED\n` },
-          { id: "prod-edit" },
-        )],
+        [
+          fauxToolCall(
+            "edit",
+            { input: `[src/hashline.txt#${tag}]\nPUT 1.=1:\n+PATCHED\n` },
+            { id: "prod-edit" },
+          ),
+        ],
         { stopReason: "toolUse" },
       );
     },
@@ -426,13 +582,21 @@ test("the packaged extension drives a read into a hashline edit", { timeout: 120
     false,
     `unexpected edit failure: ${capture.edit && text(capture.edit)}`,
   );
-  assert.equal(await readFile(join(state.seed, "src/hashline.txt"), "utf8"), "PATCHED\n");
+  assert.equal(
+    await readFile(join(state.seed, "src/hashline.txt"), "utf8"),
+    "PATCHED\n",
+  );
   assert.deepEqual(state.errors, []);
 });
 
-test("reload keeps the session principal and replaces disposed operations", { timeout: 120_000 }, async () => {
+test("reload keeps the session principal and replaces disposed operations", {
+  timeout: 120_000,
+}, async () => {
   const session = state.session;
-  assert.ok(session, "the packaged registration scenario did not produce a session");
+  assert.ok(
+    session,
+    "the packaged registration scenario did not produce a session",
+  );
   // Bindings must survive reload so extension ownership is transferred to the fresh operations.
   await session.reload();
   assert.equal(session.sessionId, state.sessionId);
@@ -442,17 +606,26 @@ test("reload keeps the session principal and replaces disposed operations", { ti
   // A path no earlier session staked: reload disposes the old owner, so the next command
   // reopens the seed, and a recovered stake belongs to the snapshot that published it rather
   // than to a returning job name.
-  const capture = scriptBashTurn(scripted.faux, [{
-    id: "prod-reload",
-    command: "printf 'reloaded\\n' > src/reloaded.txt; cat src/reloaded.txt",
-  }]);
+  const capture = scriptBashTurn(scripted.faux, [
+    {
+      id: "prod-reload",
+      command: "printf 'reloaded\\n' > src/reloaded.txt; cat src/reloaded.txt",
+    },
+  ]);
   try {
     await session.agent.prompt("Run the reloaded command");
     await session.agent.waitForIdle();
     const result = toolResult(capture.context.messages, "prod-reload");
-    assert.equal(result?.isError, false, `unexpected tool failure: ${result && text(result)}`);
+    assert.equal(
+      result?.isError,
+      false,
+      `unexpected tool failure: ${result && text(result)}`,
+    );
     assert.equal(text(result), "reloaded\n");
-    assert.equal(await readFile(join(state.seed, "src/reloaded.txt"), "utf8"), "reloaded\n");
+    assert.equal(
+      await readFile(join(state.seed, "src/reloaded.txt"), "utf8"),
+      "reloaded\n",
+    );
   } finally {
     // dispose() neither emits nor awaits session_shutdown, so it cannot replace it. Cleared
     // whatever the outcome: a failed assertion must not leave this session for the suite's
@@ -464,7 +637,9 @@ test("reload keeps the session principal and replaces disposed operations", { ti
   await assertSeedReusable(state.seed);
 });
 
-test("a new session cannot inherit the previous principal's grants", { timeout: 120_000 }, async (t) => {
+test("a new session cannot inherit the previous principal's grants", {
+  timeout: 120_000,
+}, async (t) => {
   const sessionManager = SessionManager.inMemory(state.seed);
   const { session, scripted } = await packagedSession(sessionManager);
   try {
@@ -477,7 +652,10 @@ test("a new session cannot inherit the previous principal's grants", { timeout: 
     try {
       const ready = deferred(t.signal, "managed denial peer readiness");
       let output = "";
-      peerRun = createShellMuxOperations({ mux: peer, principal: "managed-denial-peer" }).exec(
+      peerRun = createShellMuxOperations({
+        mux: peer,
+        principal: "managed-denial-peer",
+      }).exec(
         heldChild({ gate, ready: "DENIAL_READY", done: "DENIAL_DONE" }),
         state.seed,
         {
@@ -490,20 +668,31 @@ test("a new session cannot inherit the previous principal's grants", { timeout: 
       );
       await Promise.race([
         ready.promise,
-        peerRun.then(() => { throw new Error("denial peer ended before readiness"); }),
+        peerRun.then(() => {
+          throw new Error("denial peer ended before readiness");
+        }),
       ]);
 
-      const capture = scriptBashTurn(scripted.faux, [{
-        id: "prod-denied",
-        command: "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file0.txt; true",
-      }]);
+      const capture = scriptBashTurn(scripted.faux, [
+        {
+          id: "prod-denied",
+          command:
+            "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file0.txt; true",
+        },
+      ]);
       await session.agent.prompt("Run the conflicting command");
       await session.agent.waitForIdle();
 
       const result = toolResult(capture.context.messages, "prod-denied");
       assert.equal(result?.isError, true);
-      assert.equal(await readFile(join(state.seed, "src/file0.txt"), "utf8"), "claimed\n");
-      await assert.rejects(access(join(state.seed, "src/new.txt")), (error) => error.code === "ENOENT");
+      assert.equal(
+        await readFile(join(state.seed, "src/file0.txt"), "utf8"),
+        "claimed\n",
+      );
+      await assert.rejects(
+        access(join(state.seed, "src/new.txt")),
+        (error) => error.code === "ENOENT",
+      );
       await release(gate);
       assert.equal((await peerRun).exitCode, 0);
       assert.equal(output, "DENIAL_READY\nDENIAL_DONE\n");

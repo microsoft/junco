@@ -6,6 +6,7 @@ import {
   type AgentTool,
   BACKGROUND_CONTEXT,
   type Context,
+  estimateTokens,
   formatPromptTemplateInvocation,
   formatSkillInvocation,
   type HarnessEvent,
@@ -13,20 +14,24 @@ import {
   type HookMap,
   type HookName,
   type ModelIdentity,
+  type NavigationResult,
   type PromptTemplate,
   type QueueMode,
   type Skill,
   type ThinkingLevel,
-  estimateTokens,
-  type NavigationResult,
   withCancel,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  ImageContent,
+  Model,
+} from "@earendil-works/pi-ai";
 import {
-  type Agentic as JuncoAgentProtocol,
   type AgenticStatus,
   type AgenticStep,
   JuncoAgentError,
+  type Agentic as JuncoAgentProtocol,
 } from "junco-agent";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
@@ -68,7 +73,9 @@ export type MockMaintenance =
   | {
       readonly method: "compact";
       readonly args: Parameters<JuncoAgentProtocol["compact"]>;
-      readonly result: { readonly ok: true } | { readonly ok: false; readonly error: unknown };
+      readonly result:
+        | { readonly ok: true }
+        | { readonly ok: false; readonly error: unknown };
       readonly history?: readonly AgentMessage[];
       readonly tipId?: string | null;
     }
@@ -81,7 +88,11 @@ export type MockMaintenance =
     };
 
 /** Everything a {@link MockAgent} will do, fixed at construction. */
-export type MockTranscript<S extends Skill, P extends PromptTemplate, T extends AgentTool> = {
+export type MockTranscript<
+  S extends Skill,
+  P extends PromptTemplate,
+  T extends AgentTool,
+> = {
   readonly prompt?: string;
   readonly images?: ImageContent[];
   readonly history?: readonly AgentMessage[];
@@ -108,12 +119,21 @@ export type MockRequest<T extends AgentTool> = {
 };
 
 /** One command, as called. */
-export type MockCall = { readonly method: string; readonly args: readonly unknown[] };
+export type MockCall = {
+  readonly method: string;
+  readonly args: readonly unknown[];
+};
 
 /** The results the registered handlers returned for one scripted hook. */
-export type MockHookResult = { readonly name: HookName; readonly results: readonly unknown[] };
+export type MockHookResult = {
+  readonly name: HookName;
+  readonly results: readonly unknown[];
+};
 
-type StoredListener = (event: HarnessEvent, context: Context) => void | Promise<void>;
+type StoredListener = (
+  event: HarnessEvent,
+  context: Context,
+) => void | Promise<void>;
 type StoredHook = {
   readonly id?: string;
   readonly handler: (event: MockHook["event"], context: Context) => unknown;
@@ -137,29 +157,52 @@ type Resolvers<R> = {
   readonly resolve: (value: R) => void;
   readonly reject: (reason?: unknown) => void;
 };
-type Boundary = { readonly step: AgenticStep; readonly run?: RunRecord; readonly gate?: Resolvers<void> };
+type Boundary = {
+  readonly step: AgenticStep;
+  readonly run?: RunRecord;
+  readonly gate?: Resolvers<void>;
+};
 type Demand = Resolvers<IteratorResult<AgenticStep, void>> & { acted: boolean };
 
 const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
-const invalidTranscript = () => new JuncoAgentError("invalid_argument", "Invalid MockAgent transcript");
+const invalidTranscript = () =>
+  new JuncoAgentError("invalid_argument", "Invalid MockAgent transcript");
 
-function track<R>(pending: Set<Promise<unknown>>, promise: Promise<R>): Promise<R> {
+function track<R>(
+  pending: Set<Promise<unknown>>,
+  promise: Promise<R>,
+): Promise<R> {
   pending.add(promise);
   const settled = () => pending.delete(promise);
   promise.then(settled, settled);
   return promise;
 }
 
-function validateActiveTools(tools: readonly AgentTool[], names: readonly string[]): void {
+function validateActiveTools(
+  tools: readonly AgentTool[],
+  names: readonly string[],
+): void {
   const available = new Set<string>();
   for (const tool of tools) {
-    if (available.has(tool.name)) throw new JuncoAgentError("invalid_argument", `Duplicate tool name: ${tool.name}`);
+    if (available.has(tool.name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate tool name: ${tool.name}`,
+      );
     available.add(tool.name);
   }
   const active = new Set<string>();
   for (const name of names) {
-    if (active.has(name)) throw new JuncoAgentError("invalid_argument", `Duplicate active tool: ${name}`);
-    if (!available.has(name)) throw new JuncoAgentError("invalid_argument", `Unknown active tool: ${name}`);
+    if (active.has(name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate active tool: ${name}`,
+      );
+    if (!available.has(name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Unknown active tool: ${name}`,
+      );
     active.add(name);
   }
 }
@@ -168,9 +211,11 @@ function validateRun(run: MockRun): void {
   const { frames } = run;
   // Checked at runtime too: a transcript may come from untyped data.
   const { kind } = run.interrupted.step;
-  if (frames.length === 0 || (kind !== "settled" && kind !== "failed")) throw invalidTranscript();
+  if (frames.length === 0 || (kind !== "settled" && kind !== "failed"))
+    throw invalidTranscript();
   frames.forEach((frame, index) => {
-    if ((frame.step.kind === "yield") !== (index < frames.length - 1)) throw invalidTranscript();
+    if ((frame.step.kind === "yield") !== index < frames.length - 1)
+      throw invalidTranscript();
   });
 }
 
@@ -209,7 +254,9 @@ export class MockAgent<
   readonly #listeners = new Map<string, Set<StoredListener>>();
   readonly #hooks = new Map<HookName, StoredHook[]>();
 
-  #staged: { readonly text: string; readonly images?: ImageContent[] } | undefined;
+  #staged:
+    | { readonly text: string; readonly images?: ImageContent[] }
+    | undefined;
   #run: RunRecord | undefined;
   readonly #drives = new Set<Promise<unknown>>();
   readonly #operations = new Set<Promise<unknown>>();
@@ -229,7 +276,9 @@ export class MockAgent<
     this.#transcript = transcript;
     this.#history = [...(transcript.history ?? [])];
     this.#tools = [...(transcript.tools ?? [])];
-    this.#activeNames = [...(transcript.activeToolNames ?? this.#tools.map((tool) => tool.name))];
+    this.#activeNames = [
+      ...(transcript.activeToolNames ?? this.#tools.map((tool) => tool.name)),
+    ];
     validateActiveTools(this.#tools, this.#activeNames);
     this.#resources = transcript.resources ?? {};
     this.#model = transcript.model;
@@ -240,7 +289,9 @@ export class MockAgent<
     if (transcript.prompt !== undefined) {
       this.#staged = {
         text: transcript.prompt,
-        ...(transcript.images === undefined ? {} : { images: transcript.images }),
+        ...(transcript.images === undefined
+          ? {}
+          : { images: transcript.images }),
       };
     }
   }
@@ -291,7 +342,8 @@ export class MockAgent<
         this.#listeners.set(type, listeners);
       }
       const set = listeners;
-      const wrapped: StoredListener = (event, context) => stored(event, context);
+      const wrapped: StoredListener = (event, context) =>
+        stored(event, context);
       set.add(wrapped);
       return () => {
         set.delete(wrapped);
@@ -324,38 +376,76 @@ export class MockAgent<
 
   // Run admission ----------------------------------------------------------------------------------
 
-  prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage> {
+  prompt(
+    text: string,
+    options?: { images?: ImageContent[] },
+  ): Promise<AssistantMessage> {
     this.#record("prompt", options === undefined ? [text] : [text, options]);
     return this.#explicitRun(() => this.#user(text, options?.images));
   }
 
-  skill(name: string, additionalInstructions?: string): Promise<AssistantMessage> {
-    this.#record("skill", additionalInstructions === undefined ? [name] : [name, additionalInstructions]);
+  skill(
+    name: string,
+    additionalInstructions?: string,
+  ): Promise<AssistantMessage> {
+    this.#record(
+      "skill",
+      additionalInstructions === undefined
+        ? [name]
+        : [name, additionalInstructions],
+    );
     return this.#explicitRun(() => {
-      const skill = this.#resources.skills?.find((candidate) => candidate.name === name);
-      return skill === undefined ? undefined : this.#user(formatSkillInvocation(skill, additionalInstructions));
+      const skill = this.#resources.skills?.find(
+        (candidate) => candidate.name === name,
+      );
+      return skill === undefined
+        ? undefined
+        : this.#user(formatSkillInvocation(skill, additionalInstructions));
     });
   }
 
   promptFromTemplate(name: string, args?: string[]): Promise<AssistantMessage> {
-    this.#record("promptFromTemplate", args === undefined ? [name] : [name, args]);
+    this.#record(
+      "promptFromTemplate",
+      args === undefined ? [name] : [name, args],
+    );
     return this.#explicitRun(() => {
-      const template = this.#resources.promptTemplates?.find((candidate) => candidate.name === name);
-      return template === undefined ? undefined : this.#user(formatPromptTemplateInvocation(template, args));
+      const template = this.#resources.promptTemplates?.find(
+        (candidate) => candidate.name === name,
+      );
+      return template === undefined
+        ? undefined
+        : this.#user(formatPromptTemplateInvocation(template, args));
     });
   }
 
-  #explicitRun(resolve: () => AgentMessage | undefined): Promise<AssistantMessage> {
+  #explicitRun(
+    resolve: () => AgentMessage | undefined,
+  ): Promise<AssistantMessage> {
     if (this.#closing) return Promise.reject(closedError());
     if (this.#pendingCompactions > 0) {
-      return Promise.reject(new JuncoAgentError("busy", "MockAgent compaction is pending"));
+      return Promise.reject(
+        new JuncoAgentError("busy", "MockAgent compaction is pending"),
+      );
     }
-    if (this.#staged !== undefined || this.#aborting || this.#run !== undefined) {
-      return Promise.reject(new JuncoAgentError("busy", "MockAgent already has a pending prompt or run"));
+    if (
+      this.#staged !== undefined ||
+      this.#aborting ||
+      this.#run !== undefined
+    ) {
+      return Promise.reject(
+        new JuncoAgentError(
+          "busy",
+          "MockAgent already has a pending prompt or run",
+        ),
+      );
     }
     const prompt = resolve();
     if (prompt === undefined) {
-      const error = new JuncoAgentError("invalid_argument", "Unknown MockAgent resource");
+      const error = new JuncoAgentError(
+        "invalid_argument",
+        "Unknown MockAgent resource",
+      );
       this.#publish({ step: { kind: "failed", error } });
       return Promise.reject(error);
     }
@@ -369,7 +459,10 @@ export class MockAgent<
     this.#history.push(...this.#nextTurn.splice(0), prompt);
     const run = new RunRecord();
     this.#run = run;
-    const settlement = track(this.#operations, track(this.#drives, this.#drive(run, script)));
+    const settlement = track(
+      this.#operations,
+      track(this.#drives, this.#drive(run, script)),
+    );
     settlement.then(
       (message) => this.#settle(run, { kind: "settled", message }),
       (error: unknown) => this.#settle(run, { kind: "failed", error }),
@@ -377,8 +470,15 @@ export class MockAgent<
     return settlement;
   }
 
-  async #drive(run: RunRecord, script: MockRun | undefined): Promise<AssistantMessage> {
-    if (script === undefined) throw new JuncoAgentError("invalid_state", "MockAgent transcript exhausted");
+  async #drive(
+    run: RunRecord,
+    script: MockRun | undefined,
+  ): Promise<AssistantMessage> {
+    if (script === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        "MockAgent transcript exhausted",
+      );
     // Frame work never runs inside the admitting call.
     await undefined;
     for (const frame of script.frames) {
@@ -402,7 +502,11 @@ export class MockAgent<
       if (run.stopping) return this.#interrupt(run, script);
       if (step.kind === "settled") return step.message;
       if (step.kind === "failed") throw step.error;
-      const boundary: Boundary = { step, run, gate: Promise.withResolvers<void>() };
+      const boundary: Boundary = {
+        step,
+        run,
+        gate: Promise.withResolvers<void>(),
+      };
       run.held = boundary;
       this.#publish(boundary);
       await boundary.gate!.promise;
@@ -439,11 +543,17 @@ export class MockAgent<
     }
     this.#hookResults.push({ name: hook.name, results });
     if (!isDeepStrictEqual(results, hook.results)) {
-      throw new JuncoAgentError("invalid_state", `MockAgent ${hook.name} hook results differ from its transcript`);
+      throw new JuncoAgentError(
+        "invalid_state",
+        `MockAgent ${hook.name} hook results differ from its transcript`,
+      );
     }
   }
 
-  async #deliver(run: RunRecord, events: readonly HarnessEvent[] | undefined): Promise<void> {
+  async #deliver(
+    run: RunRecord,
+    events: readonly HarnessEvent[] | undefined,
+  ): Promise<void> {
     for (const event of events ?? []) {
       for (const listener of [...(this.#listeners.get(event.type) ?? [])]) {
         try {
@@ -469,12 +579,17 @@ export class MockAgent<
     const identity = this.#model;
     if (identity === undefined) return undefined;
     return this.#transcript.models?.find(
-      (model) => model.provider === identity.provider && model.id === identity.modelId,
+      (model) =>
+        model.provider === identity.provider && model.id === identity.modelId,
     );
   }
 
   #user(text: string, images?: ImageContent[]): AgentMessage {
-    return { role: "user", content: [{ type: "text", text }, ...(images ?? [])], timestamp: ++this.#clock };
+    return {
+      role: "user",
+      content: [{ type: "text", text }, ...(images ?? [])],
+      timestamp: ++this.#clock,
+    };
   }
 
   #record(method: string, args: readonly unknown[]): void {
@@ -527,7 +642,9 @@ export class MockAgent<
   }
 
   getActiveTools(): T[] {
-    return this.#activeNames.map((name) => this.#tools.find((tool) => tool.name === name)!);
+    return this.#activeNames.map(
+      (name) => this.#tools.find((tool) => tool.name === name)!,
+    );
   }
 
   getResources(): AgentHarnessResources<S, P> {
@@ -549,9 +666,15 @@ export class MockAgent<
   }
 
   setTools(tools: T[], activeToolNames?: string[]): Promise<void> {
-    this.#record("setTools", activeToolNames === undefined ? [tools] : [tools, activeToolNames]);
+    this.#record(
+      "setTools",
+      activeToolNames === undefined ? [tools] : [tools, activeToolNames],
+    );
     const nextTools = [...tools];
-    const names = activeToolNames === undefined ? nextTools.map((tool) => tool.name) : [...activeToolNames];
+    const names =
+      activeToolNames === undefined
+        ? nextTools.map((tool) => tool.name)
+        : [...activeToolNames];
     return this.#mutateTools(() => {
       validateActiveTools(nextTools, names);
       this.#tools = nextTools;
@@ -621,10 +744,20 @@ export class MockAgent<
   // Maintenance ------------------------------------------------------------------------------------
 
   /** Consume the next maintenance record when it is `method` with exactly `args`. */
-  #maintain(method: MockMaintenance["method"], args: readonly unknown[]): MockMaintenance {
+  #maintain(
+    method: MockMaintenance["method"],
+    args: readonly unknown[],
+  ): MockMaintenance {
     const record = this.#transcript.maintenance?.[this.#maintenanceCursor];
-    if (record === undefined || record.method !== method || !isDeepStrictEqual(record.args, args)) {
-      throw new JuncoAgentError("invalid_state", `MockAgent ${method} differs from its transcript`);
+    if (
+      record === undefined ||
+      record.method !== method ||
+      !isDeepStrictEqual(record.args, args)
+    ) {
+      throw new JuncoAgentError(
+        "invalid_state",
+        `MockAgent ${method} differs from its transcript`,
+      );
     }
     this.#maintenanceCursor++;
     if (record.result.ok) {
@@ -639,8 +772,11 @@ export class MockAgent<
     return this.#operation(async () => {
       let tokens = 0;
       for (const message of this.#history) {
-        const unsuccessful = message.role === "assistant" &&
-          (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "deferred");
+        const unsuccessful =
+          message.role === "assistant" &&
+          (message.stopReason === "error" ||
+            message.stopReason === "aborted" ||
+            message.stopReason === "deferred");
         if (!unsuccessful) tokens += estimateTokens(message);
       }
       return tokens;
@@ -653,10 +789,12 @@ export class MockAgent<
     const captured = args.map((options) => options && { ...options });
     return this.#operation(() => {
       this.#pendingCompactions++;
-      const job = this.#compactionTail.then(() => this.#compactWhenIdle(captured)).finally(() => {
-        this.#pendingCompactions--;
-        this.#pump();
-      });
+      const job = this.#compactionTail
+        .then(() => this.#compactWhenIdle(captured))
+        .finally(() => {
+          this.#pendingCompactions--;
+          this.#pump();
+        });
       this.#compactionTail = job.then(
         () => undefined,
         () => undefined,
@@ -675,10 +813,13 @@ export class MockAgent<
     if (!record.result.ok) throw record.result.error;
   }
 
-  navigateTree(...args: Parameters<JuncoAgentProtocol["navigateTree"]>): Promise<NavigationResult> {
+  navigateTree(
+    ...args: Parameters<JuncoAgentProtocol["navigateTree"]>
+  ): Promise<NavigationResult> {
     this.#record("navigateTree", args);
     return this.#operation(async () => {
-      if (this.#pendingCompactions > 0) throw new JuncoAgentError("busy", "MockAgent compaction is pending");
+      if (this.#pendingCompactions > 0)
+        throw new JuncoAgentError("busy", "MockAgent compaction is pending");
       const record = this.#maintain("navigateTree", args);
       if (record.method !== "navigateTree") throw invalidTranscript();
       return record.result;
@@ -700,7 +841,9 @@ export class MockAgent<
   #startDependents(kind: "abort" | "close"): Promise<void> {
     let started: Promise<void>;
     try {
-      started = Promise.resolve(kind === "abort" ? this.abortDependents() : this.closeDependents());
+      started = Promise.resolve(
+        kind === "abort" ? this.abortDependents() : this.closeDependents(),
+      );
     } catch (error) {
       started = Promise.reject(error);
     }
@@ -728,14 +871,22 @@ export class MockAgent<
     return run;
   }
 
-  abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }> {
+  abort(): Promise<{
+    readonly clearedSteer: AgentMessage[];
+    readonly clearedFollowUp: AgentMessage[];
+  }> {
     this.#record("abort", []);
     if (this.#closing) return Promise.reject(closedError());
-    if (this.#aborting) return Promise.reject(new JuncoAgentError("busy", "MockAgent abort is pending"));
+    if (this.#aborting)
+      return Promise.reject(
+        new JuncoAgentError("busy", "MockAgent abort is pending"),
+      );
     this.#aborting = true;
     const stopping = this.#markStopping();
     const dependents = this.#startDependents("abort");
-    stopping?.cancel(new JuncoAgentError("invalid_state", "MockAgent run was aborted"));
+    stopping?.cancel(
+      new JuncoAgentError("invalid_state", "MockAgent run was aborted"),
+    );
     const clearedSteer = this.#steer.splice(0);
     const clearedFollowUp = this.#followUp.splice(0);
     this.#pump();
@@ -767,7 +918,10 @@ export class MockAgent<
 
   next(): Promise<IteratorResult<AgenticStep, void>> {
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-    const demand: Demand = { ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(), acted: false };
+    const demand: Demand = {
+      ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(),
+      acted: false,
+    };
     this.#demands.push(demand);
     this.#pump();
     return demand.promise;
@@ -792,7 +946,12 @@ export class MockAgent<
       }
       if (this.#aborting || demand.acted) return;
       // A staged prompt waits for queued compaction; a held yield still resumes.
-      if (this.#held.length === 0 && this.#staged !== undefined && this.#pendingCompactions > 0) return;
+      if (
+        this.#held.length === 0 &&
+        this.#staged !== undefined &&
+        this.#pendingCompactions > 0
+      )
+        return;
       demand.acted = true;
       const held = this.#held.shift();
       if (held !== undefined) {
@@ -802,7 +961,12 @@ export class MockAgent<
         const { text, images } = this.#staged;
         this.#staged = undefined;
         if (this.#run !== undefined) {
-          this.#publish({ step: { kind: "failed", error: new JuncoAgentError("busy", "MockAgent already has a run") } });
+          this.#publish({
+            step: {
+              kind: "failed",
+              error: new JuncoAgentError("busy", "MockAgent already has a run"),
+            },
+          });
         } else {
           void this.#admit(this.#user(text, images)).catch(() => {});
         }
@@ -811,8 +975,13 @@ export class MockAgent<
     }
   }
 
-  return(value?: void | PromiseLike<void>): Promise<IteratorResult<AgenticStep, void>> {
-    return this.#beginClose().then(async () => ({ value: await value, done: true }));
+  return(
+    value?: void | PromiseLike<void>,
+  ): Promise<IteratorResult<AgenticStep, void>> {
+    return this.#beginClose().then(async () => ({
+      value: await value,
+      done: true,
+    }));
   }
 
   throw(error: unknown): Promise<IteratorResult<AgenticStep, void>> {
@@ -821,8 +990,13 @@ export class MockAgent<
         throw error;
       },
       (failure: unknown) => {
-        const causes = failure instanceof AggregateError ? failure.errors : [failure];
-        throw new AggregateError([error, ...causes], "MockAgent closed with errors", { cause: error });
+        const causes =
+          failure instanceof AggregateError ? failure.errors : [failure];
+        throw new AggregateError(
+          [error, ...causes],
+          "MockAgent closed with errors",
+          { cause: error },
+        );
       },
     );
   }
@@ -859,12 +1033,22 @@ export class MockAgent<
     } catch (error) {
       failures.push(error);
     }
-    while (this.#operations.size > 0) await Promise.allSettled([...this.#operations]);
+    while (this.#operations.size > 0)
+      await Promise.allSettled([...this.#operations]);
     this.#closed = true;
-    const failure = failures.length > 0 ? new AggregateError(failures, "MockAgent close failed") : undefined;
+    const failure =
+      failures.length > 0
+        ? new AggregateError(failures, "MockAgent close failed")
+        : undefined;
     for (const demand of this.#demands.splice(0)) {
-      const index = this.#boundaries.findIndex((boundary) => boundary.gate === undefined);
-      if (index !== -1) demand.resolve({ value: this.#boundaries.splice(index, 1)[0]!.step, done: false });
+      const index = this.#boundaries.findIndex(
+        (boundary) => boundary.gate === undefined,
+      );
+      if (index !== -1)
+        demand.resolve({
+          value: this.#boundaries.splice(index, 1)[0]!.step,
+          done: false,
+        });
       else if (failure !== undefined) demand.reject(failure);
       else demand.resolve({ value: undefined, done: true });
     }

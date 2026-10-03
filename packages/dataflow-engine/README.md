@@ -40,11 +40,12 @@ flowchart TB
 
 ## Install
 
-The package isn't published to npm. Build it and install the tarball:
+The package isn't published to npm. It lives in the [junco-agency](https://github.com/junco-org/junco-agency) Bun workspace at `packages/dataflow-engine`. Build it and install the tarball:
 
 ```sh
-bun install && bun run build && bun pm pack     # writes dataflow-engine-0.1.0.tgz
-cd ../your-app && bun add ../dataflow-engine/dataflow-engine-0.1.0.tgz
+bun install                                                  # once, at the workspace root
+(cd packages/dataflow-engine && bun run build && bun pm pack)   # writes dataflow-engine-0.1.0.tgz
+cd <your-app> && bun add <junco-agency>/packages/dataflow-engine/dataflow-engine-0.1.0.tgz
 ```
 
 Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import` condition serves the Bun-built `dist/index.js`, and types come from `dist/index.d.ts`.
@@ -142,6 +143,21 @@ graph.addEdge(source, report, done);
 
 A value edge is never consumed: once resolved, it satisfies its trigger on every later turn. A node triggered only by value edges must therefore return, or `run()` never settles.
 
+### Constant fan-out and fan-in
+
+`ConstFanout` and `ConstFanin` return complete specs for `graph.addNode`; wire their edges with `graph.addEdge` as usual. `ConstFanout(payload, outputs, { state, ret })` sends the same `payload` (by reference) once on every output message edge, then returns `ret`. `ConstFanin(inputs, output, { state, ret })` waits until every input message edge has delivered, across any number of activations or `run()` calls, then sends one list on `output` in `inputs` order (not arrival order) and returns `ret`; later input never produces another list, and no inputs send one `[]`. Inputs are `Edge<C, T>` and the output is `Edge<C[], T>`, so the graph's message type must admit both. Call `ConstFanin` once per collector node. Both throw `DataflowDefinitionError` for a value edge or a repeated edge id.
+
+```ts
+const a = messageEdge<number, string>("a");
+const b = messageEdge<number, string>("b");
+const list = messageEdge<number[], string>("list");
+const graph = new DataflowGraph<void, number | number[], string, never>(createParallelScheduler(), Width(1), UNBOUNDED);
+const one = graph.addNode(ConstFanout(1, [a], { state: undefined, ret: "one" }));
+const two = graph.addNode(ConstFanout(2, [b], { state: undefined, ret: "two" }));
+const join = graph.addNode(ConstFanin([b, a], list, { state: undefined, ret: "join" }));
+graph.addEdge(one, join, a).addEdge(two, join, b).addEdge(join, sink, list); // sink receives [2, 1]
+```
+
 ## Triggers and schedulers
 
 | Trigger | Fires when |
@@ -211,22 +227,20 @@ Pass a `DataflowTracer` as the fourth constructor argument to observe execution;
 
 `bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with `junco-scheduler`'s round-robin scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
 
-Tests and examples take their schedulers from [`junco-scheduler`](https://github.com/junco-org/junco-scheduler), a `file:` development dependency at the sibling path `../junco-scheduler` (`file:../../junco-scheduler` in `examples/`; `src/` never imports it). Clone the public repository there, then build this engine, the scheduler's deterministic root against it, and refresh the installed copies:
+Tests and examples take their schedulers from the workspace's [`junco-scheduler`](../junco-scheduler), a `workspace:*` development dependency (also of `examples/`; `src/` never imports it). After one `bun install --frozen-lockfile` at the workspace root, build this engine, then the scheduler's deterministic root against it:
 
 ```sh
-git clone https://github.com/junco-org/junco-scheduler.git ../junco-scheduler
-bun install --frozen-lockfile && bun run build
-(cd ../junco-scheduler && bun install --frozen-lockfile && bun run build:core)
-bun install --force --frozen-lockfile
+bun run build
+(cd ../junco-scheduler && bun run build:core)
 ```
 
-`build:core` builds only the scheduler's deterministic root, so the installed scheduler carries no agent-side dependencies; CI checks out and builds it the same way. The forced reinstall refreshes the installed scheduler with its build and the copy of this engine that it links against.
+`build:core` builds only the scheduler's deterministic root, against this engine's emitted declarations, so it needs no agent-side dependencies; CI's `core` job builds it the same way.
 
-The root uses Bun's isolated linker, so the installed scheduler resolves `dataflow-engine` to an installed copy of this engine rather than through the sibling checkout. Because `dataflow-engine` imported from this root self-references `./src`, classes such as `DataflowDefinitionError` thrown by the scheduler here come from that installed copy; downstream consumers that depend on `dataflow-engine` share one instance.
+The workspace links `dataflow-engine` to this package for every consumer, the scheduler included, so classes such as `DataflowDefinitionError` thrown by the scheduler here are this engine's own; downstream consumers that depend on `dataflow-engine` share one instance.
 
 Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` typechecks and bundles all sixteen programs into `examples/dist/{opik,dummy}` before running any of them. The Opik build constructs the SDK client once as a preflight, so a missing optional dependency, a type error or an invalid Opik configuration fails the build before any example runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 
-The Opik build needs the private examples package's optional dependencies (`dataflow-engine` from the parent checkout, `dataflow-engine-opik` from the sibling checkout, and `opik`): run `bun install` in `examples/`, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. `bun install --omit optional` gives a Dummy-only environment. A successful build does not prove that traces were ingested later.
+The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; build the engine and `../dataflow-engine-opik` first, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
 
 | Script | Purpose |
 |---|---|
@@ -240,46 +254,35 @@ The Opik build needs the private examples package's optional dependencies (`data
 
 ### Running Fibonacci with Opik
 
-Prerequisites: Bun, Docker with Compose, and this repository checked out next to [`dataflow-engine-opik`](../dataflow-engine-opik):
+Prerequisites: Bun, Docker with Compose, and the junco-agency workspace, which holds this package beside [`dataflow-engine-opik`](../dataflow-engine-opik). Run the commands from the workspace root:
 
-```text
-git/
-├── dataflow-engine/
-└── dataflow-engine-opik/
-```
-
-1. Build the engine, then the Opik integration, which consumes the engine's build output:
+1. Install the workspace, which includes the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), then build the engine and the Opik integration, which consumes the engine's build output:
 
    ```sh
-   cd dataflow-engine && bun install && bun run build
-   cd ../dataflow-engine-opik && bun install && bun run build
+   bun install
+   (cd packages/dataflow-engine && bun run build)
+   (cd packages/dataflow-engine-opik && bun run build)
    ```
 
-2. Install the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`):
+2. Start a local Opik with its UI and API on port 8888:
 
    ```sh
-   cd ../dataflow-engine/examples && bun install
+   git clone https://github.com/comet-ml/opik.git ../opik
+   (cd ../opik && NGINX_PORT=8888 ./opik.sh)
    ```
 
-3. Start a local Opik with its UI and API on port 8888:
+3. Run the example:
 
    ```sh
-   git clone https://github.com/comet-ml/opik.git ../../opik
-   cd ../../opik && NGINX_PORT=8888 ./opik.sh
-   ```
-
-4. Run the example from this repository:
-
-   ```sh
-   cd ../dataflow-engine
+   cd packages/dataflow-engine
    OPIK_PROJECT_NAME=dataflow-engine bun run example:fibonacci
    ```
 
    It prints `[0,1,1,2,3,5,8,13,21,34]`. Without `OPIK_PROJECT_NAME` the trace goes to Opik's "Default Project".
 
-5. Open <http://localhost:8888>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
+4. Open <http://localhost:8888>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
 
-6. Stop Opik when finished: `cd ../opik && ./opik.sh --stop`.
+5. Stop Opik when finished: `(cd <junco-agency>/../opik && ./opik.sh --stop)`.
 
 ## License
 
