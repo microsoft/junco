@@ -1,0 +1,36 @@
+{
+  "name": "junco-agent",
+  "version": "0.1.0",
+  "description": "Pi AgentHarness with a cooperative scheduling iterator and junco-tools.",
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test ./test/*.test.ts",
+    "cli": "bash ./scripts/run-cli.sh"
+  },
+  "dependencies": {
+    "junco-tools": "file:../junco-tools",
+    "@earendil-works/pi-agent-core": "0.99.2",
+    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "typebox": "1.3.34"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "@earendil-works/pi-agent-core": "0.99.2",
+    "typebox": "1.3.34"
+  }
+}
