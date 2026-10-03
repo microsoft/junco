@@ -10,10 +10,11 @@
 //    approves.
 // 5. The command line owns everything it creates and writes only an approved plan.
 //
-// Run it after `pi` → `/login` → GitHub Copilot (each review round becomes one Opik trace):
+// Run it after `pi` → `/login` → GitHub Copilot. With `--feature=opik` (or `--feature=langflow`),
+// JuncoGraph traces each review round automatically:
 //
 //   OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency \
-//     bun run examples/oss-committee.ts ./request.txt ./plan.md
+//     bun run --feature=opik examples/oss-committee.ts ./request.txt ./plan.md
 //
 // The exports exist for the offline tests in test/oss-committee.test.ts.
 
@@ -23,9 +24,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { allOf, always, anyOf, type DataflowTracer, messageEdge, msg, NodeId, on, valueEdge } from "dataflow-engine";
-import { OpikDataflowTracer } from "dataflow-engine-opik";
 import { createYieldTool, JuncoAgent } from "junco-agent";
-import { Opik } from "opik";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { type AgenticInput, agentNode, createParallelAgentGraph } from "../src/index.ts";
@@ -108,8 +107,15 @@ const reviewParameters = Type.Object(
 
 export type ReviewVerdict = { readonly approved: boolean; readonly feedback: string };
 
+/** The Reducer's `review` tool and the reader of its recorded verdict. */
+export interface ReviewTool {
+  readonly tool: AgentTool<typeof reviewParameters, undefined>;
+  /** Read this round's verdict and clear it for the next round. */
+  readonly takeVerdict: () => ReviewVerdict | undefined;
+}
+
 /** The Reducer's verdict for the current round; a later call in the same round replaces it. */
-export function createReviewTool() {
+export function createReviewTool(): ReviewTool {
   let verdict: ReviewVerdict | undefined;
   const tool: AgentTool<typeof reviewParameters, undefined> = {
     name: "review",
@@ -124,7 +130,6 @@ export function createReviewTool() {
       return { content: [{ type: "text", text: `${recorded} Finish with the complete titled Markdown plan.` }], details: undefined };
     },
   };
-  /** Read this round's verdict and clear it for the next round. */
   const takeVerdict = () => {
     const taken = verdict;
     verdict = undefined;
@@ -197,14 +202,8 @@ function finalText(message: AssistantMessage | undefined, member: MemberId): str
   return text;
 }
 
-export function reviewRound(
-  request: string,
-  members: Members,
-  search: SearchCounts,
-  feedback?: string,
-  tracer?: DataflowTracer,
-) {
-  const graph = createParallelAgentGraph(tracer);
+export function reviewRound(request: string, members: Members, search: SearchCounts, feedback?: string) {
+  const graph = createParallelAgentGraph();
   const research = valueEdge<AgenticInput, AssistantMessage>("Librarian->Architect");
   const partialResearch = messageEdge<AgenticInput, AssistantMessage>("Librarian~>Architect");
   const researchForReducer = valueEdge<AgenticInput, AssistantMessage>("Librarian->Reducer");
@@ -286,24 +285,30 @@ export async function convene(
   request: string,
   members: Members,
   search: SearchCounts,
-  review: Pick<ReturnType<typeof createReviewTool>, "takeVerdict">,
-  tracer?: DataflowTracer,
+  review: Pick<ReviewTool, "takeVerdict">,
 ): Promise<string> {
   let feedback: string | undefined;
-  for (;;) {
-    const { graph, reducerId } = reviewRound(request, members, search, feedback, tracer);
-    const plan = (await graph.run()).get(reducerId);
-    const verdict = review.takeVerdict();
-    if (verdict === undefined) throw new Error("Reducer did not record a review verdict");
-    if (verdict.approved) return approvedPlan(plan);
-    feedback = verdict.feedback;
+  // Rounds share JuncoGraph's automatic tracer, if any: flush it once, however the committee ends.
+  let tracer: DataflowTracer | undefined;
+  try {
+    for (;;) {
+      const { graph, reducerId } = reviewRound(request, members, search, feedback);
+      tracer = graph.tracer;
+      const plan = (await graph.run()).get(reducerId);
+      const verdict = review.takeVerdict();
+      if (verdict === undefined) throw new Error("Reducer did not record a review verdict");
+      if (verdict.approved) return approvedPlan(plan);
+      feedback = verdict.feedback;
+    }
+  } finally {
+    await tracer?.flush();
   }
 }
 
 // ## 5. Command line
 //
-// `await using` closes every member when its block ends, even after a failure. The tracer is flushed
-// first, and only an approved plan is written, never over an existing file.
+// `await using` closes every member when its block ends, even after a failure. Only an approved plan
+// is written, never over an existing file.
 
 const usage = "Usage: bun run examples/oss-committee.ts <request-file> [output-file]";
 
@@ -342,12 +347,7 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[]): Pr
     await using Librarian = await member("Librarian", [search.tool, createYieldTool()]);
     await using Architect = await member("Architect", []);
     await using Reducer = await member("Reducer", [review.tool]);
-    const tracer = new OpikDataflowTracer(new Opik(), "examples/oss-committee");
-    try {
-      plan = await convene(request, { Librarian, Architect, Reducer }, search, review, tracer);
-    } finally {
-      await tracer.flush();
-    }
+    plan = await convene(request, { Librarian, Architect, Reducer }, search, review);
   }
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });
   console.log(outputPath);

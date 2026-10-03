@@ -9,12 +9,15 @@ import {
   DataflowDefinitionError,
   DataflowNodeError,
   type Edge,
+  from,
   messageEdge,
   msg,
   type Message,
   NodeId,
   type NodeOptions,
+  type NodeSchedule,
   on,
+  triggerInputs,
   UNBOUNDED,
   valueEdge,
   when,
@@ -23,7 +26,7 @@ import {
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
-import { createParallelScheduler } from "junco-scheduler";
+import { createParallelScheduler, createScheduler } from "junco-scheduler";
 import {
   type AgenticInput,
   agentNode,
@@ -389,6 +392,122 @@ for (const strategy of STRATEGIES) {
       await graph.close();
       assert.ok([source, inner, consumer].every((agent) => agent.status === "closed"));
       assert.ok(child.signal.aborted);
+    });
+
+    test("nested graph routes final messages", async () => {
+      const inputText = (input: AgenticInput): string =>
+        input.kind === "prompt" ? input.text : assert.fail("expected a prompt input");
+      for (const kind of ["all", "any"] as const) {
+        const parent = policyGraph(strategy);
+        const left = messageEdge<AgenticInput, AssistantMessage>("left->nested");
+        const right = messageEdge<AgenticInput, AssistantMessage>("right->nested");
+        const toN3 = messageEdge<AgenticInput, AssistantMessage>("nested->n3");
+        const toN4 = messageEdge<AgenticInput, AssistantMessage>("nested->n4");
+        const prompt = (text: string): AgenticInput => ({ kind: "prompt", text });
+
+        const childScheduler = createScheduler<{ readonly texts: string[] }, AgenticInput, AssistantMessage>({
+          state: { texts: [] },
+          schedule: (available) => {
+            const lanes: NodeSchedule[][] = [];
+            for (const [id, candidate] of available) lanes.push([{ id, inputs: triggerInputs(candidate) }]);
+            return lanes;
+          },
+        });
+        const child = new JuncoGraph(childScheduler, Width(1), UNBOUNDED);
+        const innerId = child.addNode(
+          deterministicNode(
+            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+              yield [];
+              while (childScheduler.state.texts.length < 2) yield [];
+              return assistant(childScheduler.state.texts.join("+"));
+            }),
+            { id: NodeId("inner"), trigger: always() },
+          ),
+        );
+
+        const source = (edge: Edge<AgenticInput, AssistantMessage>, text: string, delay: number) =>
+          deterministicNode(
+            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+              for (let index = 0; index < delay; index++) yield [];
+              yield [msg(edge, prompt(text))];
+              return assistant(`${text} sent`);
+            }),
+            { id: NodeId(text), trigger: always() },
+          );
+        const observed = { n3: [] as string[][], n4: [] as string[][] };
+        const consumer = (edge: Edge<AgenticInput, AssistantMessage>, name: "n3" | "n4") =>
+          deterministicNode(
+            new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+              const view = yield [];
+              observed[name].push(from(view, edge).map(inputText));
+              return assistant(`${name} done`);
+            }),
+            { id: NodeId(name), trigger: when(edge) },
+          );
+
+        const deliveries: string[][] = [];
+        const l = parent.addNode(source(left, "left", 0));
+        const r = parent.addNode(source(right, "right", 1));
+        const n: NodeId = parent.addNode(
+          graphNode(
+            child,
+            { id: NodeId("nested"), trigger: kind === "all" ? allOf(on(left), on(right)) : anyOf(on(left), on(right)) },
+            {
+              result: innerId,
+              receive: (view) => {
+                const batch = [...from(view, left), ...from(view, right)].map(inputText);
+                if (batch.length === 0) return;
+                deliveries.push(batch);
+                childScheduler.state.texts.push(...batch);
+              },
+              afterStep: () => {
+                const retained = child.result(innerId);
+                if (O.isNone(retained)) return;
+                const answer = textOf(retained.value);
+                parent.emit(n, msg(toN3, prompt(`n3: ${answer}`)));
+                parent.emit(n, msg(toN4, prompt(`n4: ${answer}`)));
+              },
+            },
+          ),
+        );
+        const n3 = parent.addNode(consumer(toN3, "n3"));
+        const n4 = parent.addNode(consumer(toN4, "n4"));
+        parent.addEdge(l, n, left).addEdge(r, n, right).addEdge(n, n3, toN3).addEdge(n, n4, toN4);
+
+        await stepUntil(parent, () => queued(left).length === 1);
+        assert.deepEqual(queued(right), []);
+        if (kind === "all") {
+          await stepUntil(parent, () => queued(right).length === 1);
+          await stepUntil(parent, () => parent.getNode(n)!.status === "running");
+          // The conjunction held and the node primed, yet neither queue was read.
+          assert.deepEqual([queued(left), queued(right)], [[prompt("left")], [prompt("right")]]);
+          assert.deepEqual(deliveries, []);
+          await stepUntil(parent, () => deliveries.length === 1);
+          assert.deepEqual(deliveries, [["left", "right"]]);
+        } else {
+          await stepUntil(parent, () => deliveries.length === 2);
+          assert.deepEqual(deliveries, [["left"], ["right"]]);
+        }
+        assert.deepEqual([queued(left), queued(right)], [[], []]);
+
+        for (let windows = 0; O.isNone(parent.result(n)); windows++) {
+          assert.ok(windows < 64, "nested node did not complete within 64 graph windows");
+          assert.deepEqual([queued(toN3), queued(toN4), observed.n3, observed.n4], [[], [], [], []]);
+          await parent.step();
+        }
+        // The completing activation both emitted and published its result: no extra step.
+        assert.equal(resultText(parent, n), "left+right");
+        assert.deepEqual([queued(toN3), queued(toN4)], [[prompt("n3: left+right")], [prompt("n4: left+right")]]);
+        assert.deepEqual(observed, { n3: [], n4: [] });
+
+        await parent.run();
+        assert.deepEqual(observed, { n3: [["n3: left+right"]], n4: [["n4: left+right"]] });
+        assert.deepEqual([queued(toN3), queued(toN4)], [[], []]);
+        await parent.run();
+        assert.deepEqual(observed, { n3: [["n3: left+right"]], n4: [["n4: left+right"]] });
+        assert.equal(parent.getNode(n)?.state, child);
+        await parent.close();
+      }
     });
 
     test("a nested graph quiescent without its selected result fails before its dependent runs", async () => {
