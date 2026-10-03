@@ -1,0 +1,51 @@
+import type { DataflowGraph } from "./dataflow-graph.js";
+import type { NodeId } from "./identity.js";
+import type { Message, ParentView } from "./node.js";
+
+/**
+ * Pluggable execution observer. {@link DataflowGraph.run} and {@link DataflowGraph.step} call
+ * `startRun` once per invocation and report every actual generator activation through the returned
+ * handle.
+ *
+ * CONTRACT: every run/step callback is a SYNCHRONOUS observer. It MUST NOT mutate the graph, the
+ * views, the messages or the results it receives; anything retained past the callback must be
+ * snapshotted before it returns. A throwing callback is reported with `console.warn` and otherwise
+ * ignored, so an observer can never alter the computation or mask its failure. `flush` is the only
+ * asynchronous operation and is caller-owned: the graph never awaits it.
+ */
+export interface DataflowTracer {
+  /** Begin observing one `run()`/`step()` invocation, after its re-entry check and before execution. */
+  startRun<S, N, T, EH>(
+    graph: DataflowGraph<S, N, T, EH>,
+  ): DataflowRunTrace<N, T>;
+  /** Deliver whatever the tracer has buffered. Never called by the graph. */
+  flush(): Promise<void>;
+}
+
+/** Observer for one `run()`/`step()` invocation. */
+export type DataflowRunTrace<N, T> = {
+  /**
+   * One generator activation is about to advance. `"prime"` activations receive no view;
+   * `"resume"` activations receive exactly the view delivered to `next(view)`.
+   */
+  startNode(
+    id: NodeId,
+    phase: "prime" | "resume",
+    inputs: ParentView<N, T> | undefined,
+  ): DataflowStepTrace<N, T>;
+  /**
+   * The invocation finished: `run()` quiesced, or `step()` completed its (at most one) window.
+   * `results` is the graph's cumulative completed-node map.
+   */
+  end(results: ReadonlyMap<NodeId, T>): void;
+  /** The invocation rejects with exactly `error`. */
+  fail(error: unknown): void;
+};
+
+/** Observer for one generator activation. */
+export type DataflowStepTrace<N, T> = {
+  /** The activation yielded (after routing) or returned (after value-edge propagation). */
+  end(step: IteratorResult<readonly Message<N>[], T>): void;
+  /** The generator threw, or its yield could not be routed; `error` is the raw cause. */
+  fail(error: unknown): void;
+};

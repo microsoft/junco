@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.typecheck.json",
+  "compilerOptions": {
+    "customConditions": []
+  },
+  "include": ["./*.ts", "../tests/*.example.ts"],
+  "exclude": ["./tracing-opik.ts", "**/node_modules/**", "**/dist/**"]
+}
