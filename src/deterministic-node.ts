@@ -7,6 +7,9 @@ import type { Deterministic } from "./deterministic.js";
  * hands the coroutine to the engine once, so registering it a second time fails on activation.
  * Availability is the engine's unless `options.is_available` supplies it.
  */
-export function deterministicNode<N, T>(state: Deterministic<N, T>, options: NodeOptions<N, T>): AgenticNode<N, T> {
+export function deterministicNode<N, T>(
+  state: Deterministic<N, T>,
+  options: NodeOptions<N, T>,
+): AgenticNode<N, T> {
   return { ...options, state, step: state.step };
 }

@@ -195,12 +195,13 @@ test("a partially satisfied `all` rule consumes nothing", async () => {
 
 test("a node body's throw surfaces as DataflowNodeError and terminates that node", async () => {
   const graph = newGraph();
+  const sentinel = new Error("sentinel");
   const failingId = graph.addNode({
     state: undefined,
     trigger: always(),
     // biome-ignore lint/correctness/useYield: the body must throw before its first yield.
     step: async function* (): NodeGenerator<number, string> {
-      throw new Error("boom");
+      throw sentinel;
     },
   });
 
@@ -209,9 +210,141 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
     (thrown: unknown) =>
       thrown instanceof DataflowNodeError &&
       thrown.nodeId === failingId &&
-      (thrown.error as Error).message === "boom",
+      thrown.error === sentinel &&
+      thrown.cause === sentinel,
   );
   assert.equal(graph.getNode(failingId)!.status, "done");
+});
+
+test("omitted node ids continue after explicit ones without disturbing earlier nodes", async () => {
+  const graph = newGraph();
+  for (const id of ["0", "1"])
+    graph.addNode({
+      state: undefined,
+      id: NodeId(id),
+      trigger: always(),
+      step: emitOnce(() => [], `r${id}`),
+    });
+  await graph.run();
+  const added = [0, 1].map(() =>
+    graph.addNode({
+      state: undefined,
+      trigger: never(),
+      step: stepNode(() => []),
+    }),
+  );
+  assert.deepEqual(added, [NodeId("2"), NodeId("3")]);
+  assert.deepEqual(graph.result(NodeId("0")), O.some("r0"));
+  assert.deepEqual(graph.result(NodeId("1")), O.some("r1"));
+  assert.equal(graph.getNode(NodeId("0"))!.status, "done");
+  assert.equal(graph.getNode(NodeId("missing")), undefined);
+});
+
+test("definition error: a missing source or an outbound duplicate edge id is rejected; per-side ids may repeat", () => {
+  const graph = newGraph();
+  const [a, b, c, d] = ["a", "b", "c", "d"].map((id) =>
+    graph.addNode({
+      state: undefined,
+      id: NodeId(id),
+      trigger: always(),
+      step: stepNode(() => []),
+    }),
+  ) as [NodeIdType, NodeIdType, NodeIdType, NodeIdType];
+  graph.addEdge(a, b, messageEdge<number, string>("shared"));
+  graph.addEdge(c, d, messageEdge<number, string>("shared"));
+  assert.throws(
+    () => graph.addEdge(NodeId("ghost"), b, messageEdge<number, string>("e")),
+    DataflowDefinitionError,
+  );
+  assert.throws(
+    () => graph.addEdge(a, d, messageEdge<number, string>("shared")),
+    DataflowDefinitionError,
+  );
+  const links: [string, string, string][] = [];
+  graph.forEachLink((from, to, edge) => links.push([from, to, edge.id]));
+  assert.deepEqual(links.sort(), [
+    ["a", "b", "shared"],
+    ["c", "d", "shared"],
+  ]);
+});
+
+test("definition error: an invalid plan rejects before any node advances or consumes, and a valid plan then advances", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const other = messageEdge<number, string>("other");
+  let plan: Schedule = [];
+  const scheduler: DataflowScheduler<number, string> = {
+    create(): void {},
+    schedule: () => plan,
+  };
+  const graph = new DataflowGraph<void, number, string, never>(
+    scheduler,
+    Width(1),
+    UNBOUNDED,
+  );
+  const advances: Record<string, number> = { S: 0, C: 0, D: 0 };
+  const counted = (name: string) =>
+    async function* (): NodeGenerator<number, string> {
+      while (true) {
+        advances[name]! += 1;
+        yield [];
+      }
+    };
+  const s = graph.addNode({
+    id: NodeId("S"),
+    state: undefined,
+    trigger: always(),
+    step: counted("S"),
+  });
+  const c = graph.addNode({
+    id: NodeId("C"),
+    state: undefined,
+    trigger: when(feed),
+    step: counted("C"),
+  });
+  const d = graph.addNode({
+    id: NodeId("D"),
+    state: undefined,
+    trigger: when(other),
+    step: counted("D"),
+  });
+  graph.addEdge(s, c, feed).addEdge(s, d, other);
+  graph.emit(s, msg(feed, 1));
+  graph.emit(s, msg(feed, 2));
+  graph.emit(s, msg(other, 5));
+
+  const reads = (id: NodeIdType, edge: EdgeIdType, count: MessageSchedule) => ({
+    id,
+    inputs: new Map<EdgeIdType, MessageSchedule>([[edge, count]]),
+  });
+  const none = new Map<EdgeIdType, MessageSchedule>();
+  const invalid: Schedule[] = [
+    [
+      [
+        { id: s, inputs: none },
+        { id: s, inputs: none },
+      ],
+    ],
+    [[{ id: NodeId("missing"), inputs: none }]],
+    [[{ id: s, inputs: none }], [{ id: s, inputs: none }]],
+    [[reads(c, other.id, "all")]],
+    [[reads(c, feed.id, 0)]],
+    [[reads(c, feed.id, -1)]],
+    [[reads(c, feed.id, 1.5)]],
+  ];
+  for (const candidate of invalid) {
+    plan = candidate;
+    await assert.rejects(graph.step(), DataflowDefinitionError);
+    assert.deepEqual(advances, { S: 0, C: 0, D: 0 });
+    assert.deepEqual(queued(feed), [1, 2]);
+    assert.deepEqual(queued(other), [5]);
+    for (const id of [s, c, d])
+      assert.equal(graph.getNode(id)!.status, "ready");
+  }
+
+  plan = [[{ id: s, inputs: none }], [reads(c, feed.id, 1)]];
+  await graph.step();
+  assert.deepEqual(advances, { S: 1, C: 1, D: 0 });
+  assert.deepEqual(queued(feed), [1, 2]);
 });
 
 test("definition error: an explicitly duplicated node id is rejected", () => {
@@ -984,6 +1117,91 @@ test("an invalid resolved read map rejects before any node of that column advanc
   assert.deepEqual(queued(ey), [2]);
   assert.equal(graph.getNode(x)!.status, "running");
   assert.equal(graph.getNode(y)!.status, "running");
+});
+
+test("a throwing resolveInputs escapes unchanged before any node of that column advances or consumes", async () => {
+  const ex = messageEdge<number, string>("ex");
+  const ey = messageEdge<number, string>("ey");
+  const sentinel = new Error("sentinel");
+  const scheduler = scripted([[["P"]], [["X"], ["Y"]], [["X"], ["Y"]]], () => {
+    throw sentinel;
+  });
+  const graph = scriptedGraph(scheduler);
+  const seen: Record<string, number[]>[] = [];
+  const p = graph.addNode({
+    id: NodeId("P"),
+    state: undefined,
+    trigger: always(),
+    step: emitOnce(() => [msg(ex, 1), msg(ey, 2)], "p"),
+  });
+  const x = graph.addNode({
+    id: NodeId("X"),
+    state: undefined,
+    trigger: when(ex),
+    step: recorder([ex], seen),
+  });
+  const y = graph.addNode({
+    id: NodeId("Y"),
+    state: undefined,
+    trigger: when(ey),
+    step: recorder([ey], seen),
+  });
+  graph.addEdge(p, x, ex);
+  graph.addEdge(p, y, ey);
+
+  await graph.step();
+  await graph.step();
+  await assert.rejects(graph.step(), (error) => error === sentinel);
+  assert.deepEqual(seen, []);
+  assert.deepEqual(queued(ex), [1]);
+  assert.deepEqual(queued(ey), [2]);
+  assert.equal(graph.getNode(x)!.status, "running");
+  assert.equal(graph.getNode(y)!.status, "running");
+});
+
+test("a throwing schedule callback rejects the invocation without node work; the next invocation succeeds", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const sentinel = new Error("sentinel");
+  let failing = true;
+  const scheduler = createScheduler<undefined, number, string>({
+    state: undefined,
+    schedule(available): Schedule {
+      if (failing) throw sentinel;
+      return [...available].map(([id, availability]) => [
+        { id, inputs: triggerInputs(availability) },
+      ]);
+    },
+  });
+  const graph = new DataflowGraph<void, number, string, never>(
+    scheduler,
+    Width(1),
+    UNBOUNDED,
+  );
+  const seen: Record<string, number[]>[] = [];
+  const source = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: emitOnce(() => [], "source"),
+  });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: when(feed),
+    step: recorder([feed], seen),
+  });
+  graph.addEdge(source, sink, feed);
+  graph.emit(source, msg(feed, 1));
+
+  await assert.rejects(graph.run(), (error) => error === sentinel);
+  assert.deepEqual(seen, []);
+  assert.deepEqual(queued(feed), [1]);
+  assert.equal(graph.getNode(source)!.status, "ready");
+  assert.equal(graph.getNode(sink)!.status, "ready");
+
+  failing = false;
+  const results = await graph.run();
+  assert.equal(results.get(source), "source");
+  assert.deepEqual(seen, [{ feed: [1] }]);
+  assert.deepEqual(queued(feed), []);
 });
 
 test("without resolveInputs every occurrence keeps its planned partial read", async () => {

@@ -12,7 +12,12 @@ import type {
   Skill,
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  ImageContent,
+  Model,
+} from "@earendil-works/pi-ai";
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -25,7 +30,13 @@ import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works
  * - `ready`: only a staged initial prompt waits for the first `next()`.
  * - `idle`: none of the above.
  */
-export type AgenticStatus = "ready" | "pending" | "running" | "suspended" | "idle" | "closed";
+export type AgenticStatus =
+  | "ready"
+  | "pending"
+  | "running"
+  | "suspended"
+  | "idle"
+  | "closed";
 
 /** Why a run paused: its explicit `yield` tool, or a typed Marsh policy denial of one tool call. */
 export type AgenticYieldReason = {
@@ -59,14 +70,23 @@ export interface Agentic<
   readonly events: AgentHarness<undefined>["events"];
   readonly hooks: AgentHarness<undefined>["hooks"];
 
-  prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage>;
-  skill(name: string, additionalInstructions?: string): Promise<AssistantMessage>;
+  prompt(
+    text: string,
+    options?: { images?: ImageContent[] },
+  ): Promise<AssistantMessage>;
+  skill(
+    name: string,
+    additionalInstructions?: string,
+  ): Promise<AssistantMessage>;
   promptFromTemplate(name: string, args?: string[]): Promise<AssistantMessage>;
   steer(text: string, options?: { images?: ImageContent[] }): Promise<void>;
   followUp(text: string, options?: { images?: ImageContent[] }): Promise<void>;
   nextTurn(text: string, options?: { images?: ImageContent[] }): Promise<void>;
   appendMessage(message: AgentMessage): Promise<void>;
-  abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>;
+  abort(): Promise<{
+    readonly clearedSteer: AgentMessage[];
+    readonly clearedFollowUp: AgentMessage[];
+  }>;
 
   getTools(): T[];
   getActiveTools(): T[];
@@ -99,7 +119,11 @@ export interface Agentic<
    */
   navigateTree(
     targetId: string,
-    options?: { summarize?: boolean; label?: string; customInstructions?: string },
+    options?: {
+      summarize?: boolean;
+      label?: string;
+      customInstructions?: string;
+    },
   ): Promise<NavigationResult>;
 }
 
@@ -108,7 +132,10 @@ export type AgenticOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> = Omit<AgentHarnessOptions<undefined>, "tools" | "resources" | "toolExecution"> & {
+> = Omit<
+  AgentHarnessOptions<undefined>,
+  "tools" | "resources" | "toolExecution"
+> & {
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string;

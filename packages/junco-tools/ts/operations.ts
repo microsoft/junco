@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { NativeMux, NativeRun } from "../native/index.js";
@@ -13,7 +14,9 @@ const owners = new Set<Owner>();
 
 function openOwnedMux(owner: Owner, cwd: string): Promise<NativeMux> {
   if (!owner.opening) {
-    const opening = import("../native/index.js").then(({ NativeMux }) => NativeMux.open(cwd));
+    const opening = import("../native/index.js").then(({ NativeMux }) =>
+      NativeMux.open(cwd),
+    );
     owner.opening = opening;
     void opening.catch(() => {
       if (owner.opening === opening) owner.opening = undefined;
@@ -48,7 +51,9 @@ export function createShellMuxOperations(options?: {
 }): BashOperations {
   const principal = options?.principal ?? `pi-${randomUUID()}`;
   const borrowedMux = options?.mux;
-  const owner: Owner | undefined = borrowedMux ? undefined : { disposed: false };
+  const owner: Owner | undefined = borrowedMux
+    ? undefined
+    : { disposed: false };
   if (owner) owners.add(owner);
 
   return {
@@ -60,43 +65,64 @@ export function createShellMuxOperations(options?: {
       let run: NativeRun | undefined;
       let notifyAbort: (() => void) | undefined;
       const cancellation = signal
-        ? new Promise<void>((resolve) => { notifyAbort = resolve; })
+        ? new Promise<void>((resolve) => {
+            notifyAbort = resolve;
+          })
         : undefined;
       const onAbort = () => {
         notifyAbort?.();
         run?.abort();
       };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const beforeStart = <T>(promise: Promise<T>): Promise<T> => cancellation
-        ? Promise.race([promise, cancellation.then(() => { throw new Error("aborted"); })])
-        : promise;
+      const beforeStart = <T>(promise: Promise<T>): Promise<T> =>
+        cancellation
+          ? Promise.race([
+              promise,
+              cancellation.then(() => {
+                throw new Error("aborted");
+              }),
+            ])
+          : promise;
 
       try {
-        let directory;
+        let directory: Stats;
         try {
           directory = await beforeStart(stat(cwd));
         } catch (error) {
-          if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-            throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "ENOENT"
+          ) {
+            throw new Error(
+              `Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
+            );
           }
           throw error;
         }
-        if (!directory.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
+        if (!directory.isDirectory())
+          throw new Error(`Working directory is not a directory: ${cwd}`);
         if (signal?.aborted) throw new Error("aborted");
         if (owner?.disposed) throw new Error("ShellMux session is closed");
 
         // Assign the owner's opening promise before awaiting it, so an aborted caller leaves
         // the eventual native session owned by shutdown instead of orphaning it.
-        const mux = borrowedMux ?? await beforeStart(openOwnedMux(owner!, cwd));
+        const mux =
+          borrowedMux ?? (await beforeStart(openOwnedMux(owner!, cwd)));
         if (signal?.aborted) throw new Error("aborted");
         if (owner?.disposed) throw new Error("ShellMux session is closed");
         const environment = Object.fromEntries(
-          Object.entries(env ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+          Object.entries(env ?? process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
         );
-        run = mux.start({ command, cwd, principal, env: environment, timeoutMs }, (error, data) => {
-          if (error) throw error;
-          onData(data);
-        });
+        run = mux.start(
+          { command, cwd, principal, env: environment, timeoutMs },
+          (error, data) => {
+            if (error) throw error;
+            onData(data);
+          },
+        );
         // Do not race wait() against abort: the native result is the cleanup/output fence.
         const result = await run.wait();
         if (signal?.aborted || result.cancelled) throw new Error("aborted");
@@ -116,21 +142,26 @@ export function createShellMuxOperations(options?: {
 export async function shutdownShellMux(): Promise<void> {
   const closing = [...owners];
   for (const owner of closing) owner.disposed = true;
-  const results = await Promise.allSettled(closing.map(async (owner) => {
-    try {
-      if (!owner.opening) return;
-      let mux: NativeMux;
+  const results = await Promise.allSettled(
+    closing.map(async (owner) => {
       try {
-        mux = await owner.opening;
-      } catch {
-        // Failed opens hold no lease; their original exec caller receives that error.
-        return;
+        if (!owner.opening) return;
+        let mux: NativeMux;
+        try {
+          mux = await owner.opening;
+        } catch {
+          // Failed opens hold no lease; their original exec caller receives that error.
+          return;
+        }
+        await mux.close();
+      } finally {
+        owners.delete(owner);
       }
-      await mux.close();
-    } finally {
-      owners.delete(owner);
-    }
-  }));
-  const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-  if (failures.length) throw new AggregateError(failures, "ShellMux shutdown failed");
+    }),
+  );
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failures.length)
+    throw new AggregateError(failures, "ShellMux shutdown failed");
 }

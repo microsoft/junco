@@ -13,8 +13,8 @@ import {
   type ParentView,
   triggerInputs,
   UNBOUNDED,
-  when,
   Width,
+  when,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type JuncoAgent, JuncoAgentError } from "junco-agent";
@@ -36,12 +36,15 @@ export type RalphOptions = Pick<
   readonly rounds?: number;
 };
 
-const assignmentError = () => new Error("Ralph requires exactly one prompt assignment");
+const assignmentError = () =>
+  new Error("Ralph requires exactly one prompt assignment");
 
 /** A round's answer counts only when its run finished normally with text. */
 function finalText(message: AssistantMessage | undefined): string {
   if (message?.stopReason !== "stop") {
-    throw new Error(`Ralph did not finish normally: ${message?.stopReason ?? "no final message"}`);
+    throw new Error(
+      `Ralph did not finish normally: ${message?.stopReason ?? "no final message"}`,
+    );
   }
   const text = contentText(message.content).trim();
   if (!text) throw new Error("Ralph produced an empty report");
@@ -97,7 +100,10 @@ class RalphState {
  *
  * @throws {RangeError} before registering anything when `rounds` is not a positive safe integer.
  */
-export function ralph<EH, Q extends DataflowScheduler<AgenticInput, AssistantMessage>>(
+export function ralph<
+  EH,
+  Q extends DataflowScheduler<AgenticInput, AssistantMessage>,
+>(
   parent: JuncoGraph<AgenticInput, AssistantMessage, EH, Q>,
   agent: JuncoAgent,
   options: RalphOptions,
@@ -108,27 +114,38 @@ export function ralph<EH, Q extends DataflowScheduler<AgenticInput, AssistantMes
     throw new RangeError("Ralph rounds must be a positive safe integer");
   }
 
-  const scheduler = createScheduler<RalphState, AgenticInput, AssistantMessage>({
-    state: new RalphState(input, rounds),
-    schedule: (available) => {
-      const lanes: NodeSchedule[][] = [];
-      for (const [id, candidate] of available) lanes.push([{ id, inputs: triggerInputs(candidate) }]);
-      return lanes;
+  const scheduler = createScheduler<RalphState, AgenticInput, AssistantMessage>(
+    {
+      state: new RalphState(input, rounds),
+      schedule: (available) => {
+        const lanes: NodeSchedule[][] = [];
+        for (const [id, candidate] of available)
+          lanes.push([{ id, inputs: triggerInputs(candidate) }]);
+        return lanes;
+      },
     },
-  });
+  );
   const child = new JuncoGraph(scheduler, Width(1), UNBOUNDED);
 
   /** One full native run of `text`, resuming through native yields, and its settled final message. */
   const runOnce = async (text: string): Promise<AssistantMessage> => {
     const signal = child.signal;
     signal.throwIfAborted();
-    if (agent.status !== "idle") throw new JuncoAgentError("invalid_state", "Ralph requires an idle agent");
+    if (agent.status !== "idle")
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Ralph requires an idle agent",
+      );
     // Its settlement, success or failure, arrives through agent.next().
     agent.prompt(text).catch(() => undefined);
     while (true) {
       const result = await agent.next();
       signal.throwIfAborted();
-      if (result.done === true) throw new JuncoAgentError("closed", "Ralph closed before prompt settlement");
+      if (result.done === true)
+        throw new JuncoAgentError(
+          "closed",
+          "Ralph closed before prompt settlement",
+        );
       const boundary = result.value;
       if (boundary.kind === "failed") throw boundary.error;
       if (boundary.kind === "settled") return boundary.message;
@@ -156,18 +173,27 @@ export function ralph<EH, Q extends DataflowScheduler<AgenticInput, AssistantMes
     is_available: () => scheduler.state.assignment !== undefined,
   });
 
-  const nodeId: NodeIdType = parent.addNode(graphNode(child, {
-    id: options.id,
-    description: options.description,
-    trigger: when(input),
-  }, {
-    result: workerId,
-    receive: (view) => scheduler.state.receive(view),
-    afterStep: () => {
-      const retained = child.result(workerId);
-      if (O.isNone(retained)) return;
-      parent.emit(nodeId, msg(output, { kind: "prompt", text: finalText(retained.value) }));
-    },
-  }));
+  const nodeId: NodeIdType = parent.addNode(
+    graphNode(
+      child,
+      {
+        id: options.id,
+        description: options.description,
+        trigger: when(input),
+      },
+      {
+        result: workerId,
+        receive: (view) => scheduler.state.receive(view),
+        afterStep: () => {
+          const retained = child.result(workerId);
+          if (O.isNone(retained)) return;
+          parent.emit(
+            nodeId,
+            msg(output, { kind: "prompt", text: finalText(retained.value) }),
+          );
+        },
+      },
+    ),
+  );
   return nodeId;
 }

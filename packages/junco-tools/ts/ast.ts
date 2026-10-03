@@ -1,7 +1,12 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AstFindResult, AstMatchStrictness, AstReplaceResult, NativeMux } from "../native/index.js";
+import type {
+  AstFindResult,
+  AstMatchStrictness,
+  AstReplaceResult,
+  NativeMux,
+} from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import {
   type BoundedToolDetails,
@@ -13,7 +18,14 @@ import {
   withNativeSignal,
 } from "./tool-support.js";
 
-const STRICTNESS_VALUES = ["cst", "smart", "ast", "relaxed", "signature", "template"] as const;
+const STRICTNESS_VALUES = [
+  "cst",
+  "smart",
+  "ast",
+  "relaxed",
+  "signature",
+  "template",
+] as const;
 
 const strictnessSchema = Type.Optional(
   Type.Union(
@@ -24,16 +36,24 @@ const strictnessSchema = Type.Optional(
 
 const scopeSchema = {
   path: Type.Optional(
-    Type.String({ description: "File or directory to scan (default: current directory)" }),
+    Type.String({
+      description: "File or directory to scan (default: current directory)",
+    }),
   ),
   glob: Type.Optional(
-    Type.String({ description: "Glob filter relative to the search root, e.g. '**/*.ts'" }),
+    Type.String({
+      description: "Glob filter relative to the search root, e.g. '**/*.ts'",
+    }),
   ),
   lang: Type.Optional(
-    Type.String({ description: "Language override; otherwise inferred per file extension" }),
+    Type.String({
+      description: "Language override; otherwise inferred per file extension",
+    }),
   ),
   selector: Type.Optional(
-    Type.String({ description: "Rule selector for multi-rule ast-grep configurations" }),
+    Type.String({
+      description: "Rule selector for multi-rule ast-grep configurations",
+    }),
   ),
   strictness: strictnessSchema,
 };
@@ -44,32 +64,53 @@ const astGrepSchema = Type.Object({
   }),
   ...scopeSchema,
   limit: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: NATIVE_U32_MAX, description: "Maximum matches (default: 50)" }),
+    Type.Integer({
+      minimum: 1,
+      maximum: NATIVE_U32_MAX,
+      description: "Maximum matches (default: 50)",
+    }),
   ),
   offset: Type.Optional(
-    Type.Integer({ minimum: 0, maximum: NATIVE_U32_MAX, description: "Matches to skip (default: 0)" }),
+    Type.Integer({
+      minimum: 0,
+      maximum: NATIVE_U32_MAX,
+      description: "Matches to skip (default: 0)",
+    }),
   ),
   includeMeta: Type.Optional(
-    Type.Boolean({ description: "Include meta-variable bindings per match (default: false)" }),
+    Type.Boolean({
+      description: "Include meta-variable bindings per match (default: false)",
+    }),
   ),
 });
 
 const astEditSchema = Type.Object({
   rewrites: Type.Record(Type.String(), Type.String(), {
-    description: "Map of ast-grep pattern to replacement template; an empty template deletes",
+    description:
+      "Map of ast-grep pattern to replacement template; an empty template deletes",
   }),
   ...scopeSchema,
   dryRun: Type.Optional(
     Type.Boolean({ description: "Preview without writing (default: true)" }),
   ),
   maxReplacements: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: NATIVE_U32_MAX, description: "Cap on applied replacements" }),
+    Type.Integer({
+      minimum: 1,
+      maximum: NATIVE_U32_MAX,
+      description: "Cap on applied replacements",
+    }),
   ),
   maxFiles: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: NATIVE_U32_MAX, description: "Cap on modified files" }),
+    Type.Integer({
+      minimum: 1,
+      maximum: NATIVE_U32_MAX,
+      description: "Cap on modified files",
+    }),
   ),
   failOnParseError: Type.Optional(
-    Type.Boolean({ description: "Fail the run when a file cannot be parsed (default: false)" }),
+    Type.Boolean({
+      description: "Fail the run when a file cannot be parsed (default: false)",
+    }),
   ),
 });
 
@@ -88,13 +129,17 @@ export function createAstGrepTool(
   const tool = {
     name: "ast_grep",
     label: "AST Grep",
-    description: "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
+    description:
+      "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
     promptSnippet: "Search code by AST structure instead of text",
     parameters: astGrepSchema,
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
-      const patterns = params.patterns.filter((pattern) => pattern.trim() !== "");
-      if (patterns.length === 0) throw new Error("patterns must contain at least one pattern");
+      const patterns = params.patterns.filter(
+        (pattern) => pattern.trim() !== "",
+      );
+      if (patterns.length === 0)
+        throw new Error("patterns must contain at least one pattern");
       if (params.limit !== undefined) requireU32("limit", params.limit, 1);
       if (params.offset !== undefined) requireU32("offset", params.offset, 0);
 
@@ -115,7 +160,10 @@ export function createAstGrepTool(
       throwIfAborted(signal);
       return boundedToolResult(JSON.stringify(result, null, 2), result);
     },
-  } satisfies ToolDefinition<typeof astGrepSchema, BoundedToolDetails<AstFindResult>>;
+  } satisfies ToolDefinition<
+    typeof astGrepSchema,
+    BoundedToolDetails<AstFindResult>
+  >;
   return tool;
 }
 
@@ -136,7 +184,8 @@ export function createAstEditTool(
   const tool = {
     name: "ast_edit",
     label: "AST Edit",
-    description: "Preview structural rewrites by default; set dryRun to false to apply them.",
+    description:
+      "Preview structural rewrites by default; set dryRun to false to apply them.",
     promptSnippet: "Rewrite code by AST structure",
     parameters: astEditSchema,
     executionMode: "sequential",
@@ -149,8 +198,10 @@ export function createAstEditTool(
       if (Object.keys(rewrites).length === 0) {
         throw new Error("rewrites must contain at least one pattern");
       }
-      if (params.maxReplacements !== undefined) requireU32("maxReplacements", params.maxReplacements, 1);
-      if (params.maxFiles !== undefined) requireU32("maxFiles", params.maxFiles, 1);
+      if (params.maxReplacements !== undefined)
+        requireU32("maxReplacements", params.maxReplacements, 1);
+      if (params.maxFiles !== undefined)
+        requireU32("maxFiles", params.maxFiles, 1);
 
       const root = resolveToolPath(cwd, params.path ?? ".");
       const applying = params.dryRun === false;
@@ -179,6 +230,9 @@ export function createAstEditTool(
       throwIfAborted(signal);
       return boundedToolResult(JSON.stringify(result, null, 2), result);
     },
-  } satisfies ToolDefinition<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>>;
+  } satisfies ToolDefinition<
+    typeof astEditSchema,
+    BoundedToolDetails<AstReplaceResult>
+  >;
   return tool;
 }

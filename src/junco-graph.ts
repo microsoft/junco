@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { feature } from "bun:bundle";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowGraph,
   type DataflowRunOptions,
@@ -8,10 +8,10 @@ import {
   type NodeIdType,
   type Width,
 } from "dataflow-engine";
-import { JuncoAgentError, type JuncoAgent } from "junco-agent";
+import { type JuncoAgent, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
-import type { Agentic, AgenticInput } from "./agentic.js";
 import { settleAll } from "./agent-operations.js";
+import type { Agentic, AgenticInput } from "./agentic.js";
 import { Deterministic } from "./deterministic.js";
 import type { MockAgent } from "./mock-agent.js";
 
@@ -20,7 +20,9 @@ import type { MockAgent } from "./mock-agent.js";
  * graph's members, except its already-aborting or -closing scheduler. Not exported from the package
  * root.
  */
-export const cascadeMembers: unique symbol = Symbol("JuncoGraph.cascadeMembers");
+export const cascadeMembers: unique symbol = Symbol(
+  "JuncoGraph.cascadeMembers",
+);
 
 /** One recursive abort or close operation, recorded on every graph it visited. */
 type Cascade = {
@@ -34,14 +36,8 @@ type Resource<N, T> = JuncoAgent | MockAgent | Deterministic<N, T>;
 
 type Kind = "abort" | "close";
 
-const closedGraph = (): JuncoAgentError => new JuncoAgentError("closed", "Graph is closed");
-
-/** A required Langflow tracing variable, read when the automatic Langflow tracer is first built. */
-function requiredLangflowEnv(name: "LANGFLOW_URL" | "LANGFLOW_API_KEY" | "LANGFLOW_FLOW_ID"): string {
-  const value = process.env[name];
-  if (!value?.trim()) throw new Error(`Missing ${name}; configure the Langflow URL, API key and existing owned Flow.`);
-  return value;
-}
+const closedGraph = (): JuncoAgentError =>
+  new JuncoAgentError("closed", "Graph is closed");
 
 /**
  * A dataflow graph of {@link Agentic} node states that owns its members' lifecycle.
@@ -58,8 +54,11 @@ export class JuncoGraph<
   Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
 > extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
   /** Graphs inside the synchronous dispatch of an abort or close cascade: their scheduler callbacks no-op. */
-  static readonly #dispatch: Record<Kind, ReadonlySet<object> | undefined> = { abort: undefined, close: undefined };
-  /** The tracer shared by every automatically traced graph, built on first use under one feature. */
+  static readonly #dispatch: Record<Kind, ReadonlySet<object> | undefined> = {
+    abort: undefined,
+    close: undefined,
+  };
+  /** The tracer shared by every automatically traced graph, built on first use under `opik`. */
   static #automaticTracer: DataflowTracer | undefined;
 
   #controller = new AbortController();
@@ -72,35 +71,27 @@ export class JuncoGraph<
   #rootClose: Promise<void> | undefined;
 
   /**
-   * The `opik` or `langflow` Bun feature selects an automatic tracer, shared by every graph that
-   * omits `tracer`; neither leaves such graphs untraced. A supplied `tracer` always wins.
+   * The `opik` Bun feature selects an automatic Opik tracer, shared by every graph that omits
+   * `tracer`; without it such graphs are untraced. A supplied `tracer` always wins.
    *
-   * @throws {Error} when both features are enabled, or the selected provider cannot be loaded or
-   *   configured.
+   * @throws {Error} when the `opik` feature is enabled and Opik cannot be loaded or configured.
    */
-  constructor(scheduler: Q, window: Width, threads: Width, tracer?: DataflowTracer) {
+  constructor(
+    scheduler: Q,
+    window: Width,
+    threads: Width,
+    tracer?: DataflowTracer,
+  ) {
     let selected = tracer;
     if (feature("opik")) {
-      if (feature("langflow")) throw new Error('JuncoGraph features "opik" and "langflow" are mutually exclusive');
       if (selected === undefined) {
         if (JuncoGraph.#automaticTracer === undefined) {
           const { OpikDataflowTracer } = require("dataflow-engine-opik");
           const { Opik } = require("opik");
-          const automatic: DataflowTracer = new OpikDataflowTracer(new Opik(), "JuncoGraph.run");
-          JuncoGraph.#automaticTracer = automatic;
-        }
-        selected = JuncoGraph.#automaticTracer;
-      }
-    } else if (feature("langflow")) {
-      if (selected === undefined) {
-        if (JuncoGraph.#automaticTracer === undefined) {
-          const { LangflowDataflowTracer, LangflowTraceClient } = require("dataflow-engine-langflow");
-          const client = new LangflowTraceClient({
-            baseUrl: requiredLangflowEnv("LANGFLOW_URL"),
-            apiKey: requiredLangflowEnv("LANGFLOW_API_KEY"),
-            flowId: requiredLangflowEnv("LANGFLOW_FLOW_ID"),
-          });
-          const automatic: DataflowTracer = new LangflowDataflowTracer(client, "JuncoGraph.run");
+          const automatic: DataflowTracer = new OpikDataflowTracer(
+            new Opik(),
+            "JuncoGraph.run",
+          );
           JuncoGraph.#automaticTracer = automatic;
         }
         selected = JuncoGraph.#automaticTracer;
@@ -118,12 +109,16 @@ export class JuncoGraph<
    * One window, observing {@link signal} and any caller `signal`. Caller cancellation affects only
    * this invocation.
    */
-  override step(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeIdType, T>> {
+  override step(
+    options?: DataflowRunOptions,
+  ): Promise<ReadonlyMap<NodeIdType, T>> {
     return super.step(this.#runOptions(options));
   }
 
   /** Windows until quiescent, observing {@link signal} and any caller `signal`. */
-  override run(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeIdType, T>> {
+  override run(
+    options?: DataflowRunOptions,
+  ): Promise<ReadonlyMap<NodeIdType, T>> {
     return super.run(this.#runOptions(options));
   }
 
@@ -134,7 +129,9 @@ export class JuncoGraph<
    *
    * @throws {JuncoAgentError} `closed` once {@link close} has started.
    */
-  abort(reason: unknown = new DOMException("Graph aborted", "AbortError")): Promise<void> {
+  abort(
+    reason: unknown = new DOMException("Graph aborted", "AbortError"),
+  ): Promise<void> {
     if (this.#close !== undefined) return Promise.reject(closedGraph());
     return this.#abortJoin() ?? this.#cascade("abort", reason, undefined);
   }
@@ -155,11 +152,19 @@ export class JuncoGraph<
   /** Abort or close members except this graph's scheduler, which is already aborting or closing. */
   [cascadeMembers](kind: Kind): Promise<void> | undefined {
     if (JuncoGraph.#dispatch[kind]?.has(this) === true) return undefined;
-    if (kind === "close") return this.#close?.promise ?? this.#cascade("close", undefined, this.#piScheduler());
+    if (kind === "close")
+      return (
+        this.#close?.promise ??
+        this.#cascade("close", undefined, this.#piScheduler())
+      );
     if (this.#close !== undefined) return Promise.reject(closedGraph());
     return (
       this.#abort?.promise ??
-      this.#cascade("abort", new DOMException("Graph aborted", "AbortError"), this.#piScheduler())
+      this.#cascade(
+        "abort",
+        new DOMException("Graph aborted", "AbortError"),
+        this.#piScheduler(),
+      )
     );
   }
 
@@ -189,7 +194,11 @@ export class JuncoGraph<
     const excluded = current.excluded;
     if (excluded === undefined) return current.promise;
     // A callback-origin abort: join its members and request the scheduler too.
-    return settleAll<() => unknown>([() => current.promise, () => excluded.abort()], (request) => request(), "Graph abort failed");
+    return settleAll<() => unknown>(
+      [() => current.promise, () => excluded.abort()],
+      (request) => request(),
+      "Graph abort failed",
+    );
   }
 
   /** How a caller joins this graph's close, if one has started. */
@@ -199,7 +208,9 @@ export class JuncoGraph<
     const excluded = current.excluded;
     if (excluded === undefined) return current.promise;
     // One microtask later: a callback-origin close starts before the scheduler caches its own close.
-    this.#rootClose ??= Promise.resolve().then(() => excluded[Symbol.asyncDispose]());
+    this.#rootClose ??= Promise.resolve().then(() =>
+      excluded[Symbol.asyncDispose](),
+    );
     return this.#rootClose;
   }
 
@@ -208,11 +219,17 @@ export class JuncoGraph<
    * operation synchronously (each Pi ancestor before its descendants), then signal the visited
    * graphs. `excluded` is the scheduler whose callback started this cascade.
    */
-  #cascade(kind: Kind, reason: unknown, excluded: PiScheduler<never, never> | undefined): Promise<void> {
+  #cascade(
+    kind: Kind,
+    reason: unknown,
+    excluded: PiScheduler<never, never> | undefined,
+  ): Promise<void> {
     const graphs: JuncoGraph<N, T, unknown, DataflowScheduler<N, T>>[] = [];
     const requests: (() => unknown)[] = [];
     const seenGraphs = new Set<object>();
-    const seenResources = new Set<object>(excluded === undefined ? [] : [excluded]);
+    const seenResources = new Set<object>(
+      excluded === undefined ? [] : [excluded],
+    );
     const joined = new Set<Promise<void>>();
     const resource = (member: Resource<N, T>): void => {
       if (seenResources.has(member)) return;
@@ -250,7 +267,8 @@ export class JuncoGraph<
         if (state instanceof JuncoGraph) children.push(state);
         else resource(state);
       });
-      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
+      for (let index = children.length - 1; index >= 0; index--)
+        stack.push(children[index]!);
     }
 
     const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -264,13 +282,18 @@ export class JuncoGraph<
     JuncoGraph.#dispatch[kind] = new Set(graphs);
     let settled: Promise<void>;
     try {
-      settled = settleAll(requests, (request) => request(), kind === "abort" ? "Graph abort failed" : "Graph close failed");
+      settled = settleAll(
+        requests,
+        (request) => request(),
+        kind === "abort" ? "Graph abort failed" : "Graph close failed",
+      );
       if (kind === "abort") {
         for (const graph of graphs) graph.#controller.abort(reason);
       } else {
         const closed = new DOMException("Graph closed", "AbortError");
         for (const graph of graphs) {
-          if (graph.#controller.signal.aborted) graph.#replaceController(closed);
+          if (graph.#controller.signal.aborted)
+            graph.#replaceController(closed);
           else graph.#controller.abort(closed);
         }
       }

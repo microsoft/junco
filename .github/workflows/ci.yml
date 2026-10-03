@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -10,12 +9,192 @@ permissions:
   contents: read
 
 jobs:
+  # Engine, scheduler root and Opik adapter: no private native inputs or secrets.
+  core:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: junco-agency
+    steps:
+      - name: Checkout junco-agency
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: junco-agency
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install workspace
+        run: bun install --frozen-lockfile
+
+      # One Biome policy over the agency, engine, scheduler, agent and tools sources and tests.
+      - name: Biome
+        run: bun run check:ci
+
+      - name: Build dataflow-engine
+        working-directory: junco-agency/packages/dataflow-engine
+        run: bun run build
+
+      # Only the deterministic root, against the engine declarations just built: no agent peers.
+      - name: Build, typecheck and test junco-scheduler core
+        working-directory: junco-agency/packages/junco-scheduler
+        run: |
+          bun run build:core
+          bun run typecheck:core
+          bun test ./test/scheduler.test.ts
+
+      - name: Build and typecheck dataflow-engine-opik
+        working-directory: junco-agency/packages/dataflow-engine-opik
+        run: |
+          bun run build
+          bun run typecheck
+
+      - name: dataflow-engine typecheck
+        working-directory: junco-agency/packages/dataflow-engine
+        run: bun run typecheck
+
+      - name: dataflow-engine tests with coverage
+        working-directory: junco-agency/packages/dataflow-engine
+        run: bun run test:coverage
+
+      - name: dataflow-engine examples
+        working-directory: junco-agency/packages/dataflow-engine
+        run: |
+          bun --no-install --eval '
+          import assert from "node:assert/strict";
+          const child = Bun.spawn(["bun", "run", "examples", "--no-tracing"], { stdout: "pipe", stderr: "inherit" });
+          const stdout = await new Response(child.stdout).text();
+          assert.equal(await child.exited, 0);
+          assert.deepEqual(stdout.trim().split(/\r?\n/u).map((line) => JSON.parse(line)), [
+            [0, 1, 1, 2, 3, 5, 8, 13, 21, 34],
+            [2, 4, 6],
+            { counts: [["A", 2], ["fantastic", 1], ["new", 2], ["of", 1], ["point", 1], ["view", 1], ["whole", 1], ["world", 1]], totalCharacters: 46 },
+            { sums: [["a", 6], ["b", 30], ["c", 100]], products: [["a", 6], ["b", 200], ["c", 100]] },
+          ]);
+          console.log("deterministic-examples: ok");
+          '
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: junco-agency/packages/dataflow-engine/coverage/lcov.info
+          if-no-files-found: error
+
+      # The packed engine and scheduler root in an isolated consumer with no agent or Pi peers,
+      # under Bun (source exports) and Node (compiled exports).
+      - name: Packed core-only consumer smoke
+        run: |
+          consumer="$RUNNER_TEMP/core-consumer"
+          mkdir -p "$consumer"
+          (cd packages/dataflow-engine && bun pm pack --ignore-scripts --destination "$consumer")
+          (cd packages/junco-scheduler && bun pm pack --ignore-scripts --destination "$consumer")
+          cd "$consumer"
+          cat > package.json <<'EOF'
+          {
+            "name": "core-consumer",
+            "private": true,
+            "type": "module",
+            "dependencies": {
+              "dataflow-engine": "file:./dataflow-engine-0.1.0.tgz",
+              "junco-scheduler": "file:./junco-scheduler-0.1.0.tgz"
+            }
+          }
+          EOF
+          bun install --ignore-scripts --omit=dev --omit=peer
+          cat > smoke.mjs <<'EOF'
+          import assert from "node:assert/strict";
+          import { DataflowDefinitionError, DataflowGraph, NodeId, Width, always } from "dataflow-engine";
+          import { createRoundRobinScheduler } from "junco-scheduler";
+          for (const peer of ["junco-agent", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
+            assert.throws(() => import.meta.resolve(peer), `${peer} unexpectedly installed`);
+          }
+          const scheduler = createRoundRobinScheduler();
+          const graph = new DataflowGraph(scheduler, Width(4), Width(4));
+          assert.throws(() => new DataflowGraph(scheduler, Width(1), Width(1)), (error) => error instanceof DataflowDefinitionError);
+          const ran = [];
+          for (const id of ["2", "1", "10"]) graph.addNode({
+            id: NodeId(id), state: undefined, trigger: always(),
+            step: async function* () { while (true) { ran.push(id); yield []; } },
+          });
+          for (let i = 0; i < 4; i++) await graph.step();
+          assert.deepEqual(ran, ["1", "10", "2", "1"]);
+          assert.equal(scheduler.state, "1");
+          console.log(`core-only: ok ${JSON.stringify(ran)}`);
+          EOF
+          bun --no-install smoke.mjs
+          node smoke.mjs
+
+      # The real engine, scheduler and Opik tracer over an in-memory Opik transport: no server or
+      # credentials, so this proves local package integration, not live ingestion.
+      - name: Offline Opik graph smoke
+        run: |
+          smoke='
+          import assert from "node:assert/strict";
+          import { DataflowGraph, NodeId, Width, always } from "dataflow-engine";
+          import { OpikDataflowTracer } from "dataflow-engine-opik";
+          import { createParallelScheduler } from "junco-scheduler";
+          const traces = [];
+          const client = {
+            trace(options) {
+              const record = { options, spans: [], updates: [] };
+              traces.push(record);
+              return {
+                span(options) {
+                  const span = { options, updates: [] };
+                  record.spans.push(span);
+                  return { update(value) { span.updates.push(value); } };
+                },
+                update(value) { record.updates.push(value); },
+              };
+            },
+            async flush() {},
+          };
+          const tracer = new OpikDataflowTracer(client, "monorepo-smoke");
+          const graph = new DataflowGraph(createParallelScheduler(), Width(1), Width(1), tracer);
+          graph.addNode({ id: NodeId("only"), state: undefined, trigger: always(), step: async function* () { return 42; } });
+          const results = await graph.run();
+          await tracer.flush();
+          assert.deepEqual([...results], [["only", 42]]);
+          assert.equal(traces.length, 1);
+          const [run] = traces;
+          assert.equal(run.options.name, "monorepo-smoke");
+          assert.equal(run.options.metadata._opik_graph_definition.format, "mermaid");
+          assert.equal(run.spans.length, 1);
+          const [span] = run.spans;
+          assert.equal(span.options.name, "only #1");
+          assert.deepEqual(span.options.input, { messages: [], values: [] });
+          assert.equal(span.updates.length, 1);
+          assert.deepEqual(span.updates[0].output, { value: 42 });
+          assert.deepEqual(span.updates[0].metadata, { outcome: "return", nodeStatus: "done" });
+          assert.equal(run.updates.length, 1);
+          assert.deepEqual(run.updates[0].output, { results: [{ id: "only", value: 42 }] });
+          assert.deepEqual(run.updates[0].metadata, { nodes: [{ id: "only", status: "done" }] });
+          console.log("monorepo-opik: ok");
+          '
+          bun --no-install --eval "$smoke"
+          node --input-type=module --eval "$smoke"
+
+  # Native tools, agent, full scheduler and agency integration against the private marsh/policy inputs.
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: junco-agency
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo
       RUSTUP_HOME: ${{ github.workspace }}/.rustup
+      CARGO_TARGET_DIR: ${{ github.workspace }}/junco-agency/packages/junco-tools/target/cargo
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -43,37 +222,6 @@ jobs:
           ssh-key: ${{ secrets.JUNCO_POLICY_SSH_KEY }}
           persist-credentials: false
 
-      - name: Checkout junco-tools
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/junco-tools
-          path: junco-tools
-          ssh-key: ${{ secrets.JUNCO_TOOLS_SSH_KEY }}
-          persist-credentials: false
-
-      - name: Checkout dataflow-engine
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/dataflow-engine
-          path: dataflow-engine
-          ssh-key: ${{ secrets.JUNCO_DATAFLOW_SSH_KEY }}
-          persist-credentials: false
-
-      - name: Checkout junco-agent
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/junco-agent
-          path: junco-agent
-          ssh-key: ${{ secrets.JUNCO_AGENT_SSH_KEY }}
-          persist-credentials: false
-
-      - name: Checkout junco-scheduler
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/junco-scheduler
-          path: junco-scheduler
-          persist-credentials: false
-
       - name: Install native build libraries
         run: |
           sudo apt-get update
@@ -92,6 +240,7 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
+          "$CARGO_HOME/bin/rustup" component add rustfmt clippy
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Set up Bun
@@ -99,60 +248,95 @@ jobs:
         with:
           bun-version: '1.4.2'
 
-      - name: Build junco-tools
-        working-directory: junco-tools
-        run: |
-          npm ci
-          npm run build
+      - name: Install workspace
+        run: bun install --frozen-lockfile
 
-      - name: Build dataflow-engine source
-        working-directory: dataflow-engine
+      - name: junco-tools routed bridge formatting
+        # Older native modules and the marsh path dependency use different existing layouts.
+        working-directory: junco-agency/packages/junco-tools
+        run: node scripts/with-junco-build-env.mjs rustfmt --edition 2024 --check src/tool.rs
+
+      - name: junco-tools Clippy (library and tests)
+        # napi exports look unused to Rust; two legacy grep helpers exceed Clippy's argument threshold.
+        working-directory: junco-agency/packages/junco-tools
+        run: node scripts/with-junco-build-env.mjs cargo clippy --locked --features test-fs --lib --tests -- -D warnings -A dead_code -A clippy::too_many_arguments
+
+      - name: junco-tools Rust unit tests (CopyTree)
+        working-directory: junco-agency/packages/junco-tools
+        run: node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
+
+      - name: Build and test junco-tools
+        working-directory: junco-agency/packages/junco-tools
         run: |
-          bun install --frozen-lockfile
           bun run build
+          bun run build:native:test
+          bun run test
 
-      - name: Build and typecheck junco-agent
-        working-directory: junco-agent
+      - name: Build dataflow-engine
+        working-directory: junco-agency/packages/dataflow-engine
+        run: bun run build
+
+      - name: Build, typecheck and test junco-agent
+        working-directory: junco-agency/packages/junco-agent
         run: |
-          bun install --linker hoisted --frozen-lockfile
           bun run build
-          bun run typecheck
-
-      # `bun add` must be the first install: after `bun install` it fails copying the checked-out
-      # `file:` siblings' read-only .git pack files.
-      - name: Build junco-scheduler
-        working-directory: junco-scheduler
-        run: |
-          bun add --no-save ../junco-agent @earendil-works/pi-agent-core@0.99.2 @earendil-works/pi-ai@0.99.2 @earendil-works/pi-coding-agent@0.99.2 typebox@1.3.34
-          bun run build
-
-      - name: Test dataflow-engine
-        working-directory: dataflow-engine
-        run: |
-          bun install --force --frozen-lockfile
           bun run typecheck
           bun run test
 
-      - name: Build and test junco-agency
-        working-directory: junco-agency
+      - name: Build, typecheck and test junco-scheduler
+        working-directory: junco-agency/packages/junco-scheduler
         run: |
-          bun install --frozen-lockfile
+          bun run build
+          bun run typecheck
+          bun run test
+
+      - name: Build dataflow-engine-opik
+        working-directory: junco-agency/packages/dataflow-engine-opik
+        run: bun run build
+
+      - name: Build and test junco-agency
+        run: |
           bun run build
           bun run typecheck
           bun run test:coverage
           bun run smoke
           bun run test:integration
+          bun run test:native
+          bun run smoke:workflows:bun
           bun run smoke:workflows
 
-      - name: Installed engine identity
-        working-directory: junco-agency
+      - name: Upload agency coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agency-coverage
+          path: junco-agency/coverage/lcov.info
+          if-no-files-found: error
+
+      - name: Workspace engine identity
         run: |
-          bun --no-install --eval '
+          smoke='
           import assert from "node:assert/strict";
           import { DataflowDefinitionError, DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
           import { createParallelScheduler } from "junco-scheduler";
           const scheduler = createParallelScheduler();
           new DataflowGraph(scheduler, Width(1), UNBOUNDED);
           assert.throws(() => new DataflowGraph(scheduler, Width(1), UNBOUNDED), (error) => error instanceof DataflowDefinitionError);
-          console.log("consumer-engine-identity: ok");
+          console.log(`consumer-engine-identity-${RUNTIME}: ok`);
           '
+          bun --no-install --eval "const RUNTIME = \"bun\";$smoke"
+          node --input-type=module --eval "const RUNTIME = \"node\";$smoke"
+
+      # The relocated launcher resolves Pi's CLI and the tools extension from the hoisted workspace.
+      - name: junco-agent CLI smoke
+        working-directory: junco-agency/packages/junco-agent
+        run: |
+          status=0
+          usage=$(bun run cli 2>&1) || status=$?
+          test "$status" -eq 2
+          grep -F 'Usage: bun run cli <dedicated-btrfs-seed> [Pi options or prompt]' <<<"$usage"
+          seed=$(mktemp -d)
+          home=$(mktemp -d)
+          version=$(env -i PATH="$PATH" HOME="$home" PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 bun run cli "$seed" --version)
+          echo "$version"
+          grep -Fx '0.99.2' <<<"$version"

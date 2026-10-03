@@ -16,9 +16,10 @@ export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
 const yieldTools = new WeakSet<object>();
 
 /**
- * A fresh `yield` tool for an explicitly assembled toolset. A successful call records its reason
- * as a cooperative scheduling boundary: the run pauses after the turn's tool batch completes and
- * before its next model request, until the agent's iterator is resumed.
+ * A fresh `yield` tool for an explicitly assembled toolset. Executing it only returns the reason;
+ * a `JuncoAgent` treats a successful call as a cooperative scheduling boundary, pausing after the
+ * turn's tool batch completes and before its next model request until its iterator is resumed.
+ * A plain Pi agent simply continues.
  */
 export function createYieldTool(): YieldTool {
   const tool: YieldTool = {

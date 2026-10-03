@@ -26,4 +26,8 @@ export type Agentic<N = AgenticInput, T = AssistantMessage> =
   | Deterministic<N, T>;
 
 /** A native node spec whose state is {@link Agentic}. */
-export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<Agentic<N, T>, N, T>;
+export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<
+  Agentic<N, T>,
+  N,
+  T
+>;

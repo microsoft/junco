@@ -1,4 +1,8 @@
-import { type DataflowScheduler, type NodeIdType as NodeId, triggerInputs } from "dataflow-engine";
+import {
+  type DataflowScheduler,
+  type NodeIdType as NodeId,
+  triggerInputs,
+} from "dataflow-engine";
 import { createScheduler } from "./scheduler.js";
 
 /**
@@ -23,27 +27,34 @@ import { createScheduler } from "./scheduler.js";
  * // ...after some graph.step() calls, scheduler.state is the last id that ran.
  * ```
  */
-export function createRoundRobinScheduler<N = unknown, T = unknown>(): DataflowScheduler<N, T> & {
+export function createRoundRobinScheduler<
+  N = unknown,
+  T = unknown,
+>(): DataflowScheduler<N, T> & {
   state: NodeId | undefined;
 } {
-  const scheduler: DataflowScheduler<N, T> & { state: NodeId | undefined } = createScheduler<
-    NodeId | undefined,
-    N,
-    T
-  >({
-    state: undefined,
-    schedule: (available, last) => {
-      let first: NodeId | undefined;
-      let next: NodeId | undefined;
-      for (const id of available.keys()) {
-        if (first === undefined || id < first) first = id;
-        if (last !== undefined && id > last && (next === undefined || id < next)) next = id;
-      }
-      const chosen = next ?? first;
-      if (chosen === undefined) return [];
-      scheduler.state = chosen;
-      return [[{ id: chosen, inputs: triggerInputs(available.get(chosen)!) }]];
-    },
-  });
+  const scheduler: DataflowScheduler<N, T> & { state: NodeId | undefined } =
+    createScheduler<NodeId | undefined, N, T>({
+      state: undefined,
+      schedule: (available, last) => {
+        let first: NodeId | undefined;
+        let next: NodeId | undefined;
+        for (const id of available.keys()) {
+          if (first === undefined || id < first) first = id;
+          if (
+            last !== undefined &&
+            id > last &&
+            (next === undefined || id < next)
+          )
+            next = id;
+        }
+        const chosen = next ?? first;
+        if (chosen === undefined) return [];
+        scheduler.state = chosen;
+        return [
+          [{ id: chosen, inputs: triggerInputs(available.get(chosen)!) }],
+        ];
+      },
+    });
   return scheduler;
 }

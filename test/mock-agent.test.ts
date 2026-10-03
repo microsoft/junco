@@ -13,10 +13,21 @@ import {
   type Skill,
   UnknownTarget,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  ImageContent,
+  Model,
+} from "@earendil-works/pi-ai";
 import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import { Type } from "typebox";
-import { MockAgent, type MockHook, type MockMaintenance, type MockRun, type MockTranscript } from "../src/index.ts";
+import {
+  MockAgent,
+  type MockHook,
+  type MockMaintenance,
+  type MockRun,
+  type MockTranscript,
+} from "../src/index.ts";
 import {
   ABORTED,
   assistant,
@@ -38,7 +49,8 @@ import {
 type Transcript = MockTranscript<Skill, PromptTemplate, AgentTool>;
 type Code = JuncoAgentError["code"];
 
-const hasCode = (code: Code) => (error: unknown) => error instanceof JuncoAgentError && error.code === code;
+const hasCode = (code: Code) => (error: unknown) =>
+  error instanceof JuncoAgentError && error.code === code;
 
 /** The rejection of `promise`, which must reject. */
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
@@ -58,29 +70,53 @@ async function stepOf(agent: MockAgent): Promise<AgenticStep> {
 }
 
 function settledMessage(step: AgenticStep): AssistantMessage {
-  if (step.kind !== "settled") return assert.fail(`expected settled, got ${step.kind}`);
+  if (step.kind !== "settled")
+    return assert.fail(`expected settled, got ${step.kind}`);
   return step.message;
 }
 
 function failedError(step: AgenticStep): unknown {
-  if (step.kind !== "failed") return assert.fail(`expected failed, got ${step.kind}`);
+  if (step.kind !== "failed")
+    return assert.fail(`expected failed, got ${step.kind}`);
   return step.error;
 }
 
 const ABORTED_MESSAGE = settledMessage(ABORTED.step);
-const image = (data: string): ImageContent => ({ type: "image", data, mimeType: "image/png" });
-const runStart: HarnessEvent = { type: "run_start", runId: "r1", startedAt: 0, lane: "main" };
-const runResume: HarnessEvent = { type: "run_resume", runId: "r1", lane: "main" };
-const driveHook: MockHook = { name: "before_drive", event: { operation: "run", lane: "main", runId: "r1" }, results: [undefined] };
+const image = (data: string): ImageContent => ({
+  type: "image",
+  data,
+  mimeType: "image/png",
+});
+const runStart: HarnessEvent = {
+  type: "run_start",
+  runId: "r1",
+  startedAt: 0,
+  lane: "main",
+};
+const runResume: HarnessEvent = {
+  type: "run_resume",
+  runId: "r1",
+  lane: "main",
+};
+const driveHook: MockHook = {
+  name: "before_drive",
+  event: { operation: "run", lane: "main", runId: "r1" },
+  results: [undefined],
+};
 
 /** The images carried by `message`, in order. */
 const imagesOf = (message: AgentMessage | undefined): unknown[] =>
-  message !== undefined && message.role === "user" && typeof message.content !== "string"
+  message !== undefined &&
+  message.role === "user" &&
+  typeof message.content !== "string"
     ? message.content.filter((block) => block.type === "image")
     : [];
 
 /** The history entry whose user text is `text`. */
-const userMessage = (agent: MockAgent, text: string): AgentMessage | undefined =>
+const userMessage = (
+  agent: MockAgent,
+  text: string,
+): AgentMessage | undefined =>
   agent.history.find((message) => userTexts([message])[0] === text);
 
 /**
@@ -90,7 +126,10 @@ const userMessage = (agent: MockAgent, text: string): AgentMessage | undefined =
 function barrier() {
   const entered = Promise.withResolvers<Context>();
   const state = { exited: false };
-  const handler = async (_event: unknown, context: Context): Promise<undefined> => {
+  const handler = async (
+    _event: unknown,
+    context: Context,
+  ): Promise<undefined> => {
     entered.resolve(context);
     try {
       await awaitWithContext(new Promise<never>(() => {}), context);
@@ -121,7 +160,10 @@ class Owner extends MockAgent {
     {
       onAbort = () => undefined,
       onClose = () => undefined,
-    }: { onAbort?: () => Promise<void> | undefined; onClose?: () => Promise<void> | undefined } = {},
+    }: {
+      onAbort?: () => Promise<void> | undefined;
+      onClose?: () => Promise<void> | undefined;
+    } = {},
   ) {
     super(transcript);
     this.#onAbort = onAbort;
@@ -144,7 +186,10 @@ describe("transcript runs and the scheduling iterator", () => {
   const SECOND = assistant("second");
   const SHARED: Transcript = {
     prompt: "staged",
-    runs: [run([pause([reason("hold", "y1")]), settle(FIRST)]), run([settle(SECOND)])],
+    runs: [
+      run([pause([reason("hold", "y1")]), settle(FIRST)]),
+      run([settle(SECOND)]),
+    ],
   };
 
   test("two agents share one transcript with independent cursors through every status", async () => {
@@ -154,14 +199,21 @@ describe("transcript runs and the scheduling iterator", () => {
     assert.deepEqual(a.requests, []);
 
     // The staged prompt holds the admission gate without running.
-    for (const admit of [() => a.prompt("early"), () => a.skill("any"), () => a.promptFromTemplate("any")]) {
+    for (const admit of [
+      () => a.prompt("early"),
+      () => a.skill("any"),
+      () => a.promptFromTemplate("any"),
+    ]) {
       assert.ok(hasCode("busy")(await rejection(admit())));
     }
     assert.deepEqual(a.requests, []);
 
     const first = a.next();
     assert.equal(a.status, "running");
-    assert.deepEqual(await first, { value: { kind: "yield", reasons: [reason("hold", "y1")] }, done: false });
+    assert.deepEqual(await first, {
+      value: { kind: "yield", reasons: [reason("hold", "y1")] },
+      done: false,
+    });
     assert.equal(a.status, "suspended");
     assert.ok(hasCode("busy")(await rejection(a.prompt("while held"))));
 
@@ -187,7 +239,11 @@ describe("transcript runs and the scheduling iterator", () => {
     assert.equal(failedError(await stepOf(a)), exhausted);
     assert.equal(a.status, "idle");
     assert.deepEqual(userTexts(a.history), ["staged", "explicit", "third"]);
-    assert.deepEqual(requestTexts(a.requests), [["staged"], ["staged"], ["staged", "explicit"]]);
+    assert.deepEqual(requestTexts(a.requests), [
+      ["staged"],
+      ["staged"],
+      ["staged", "explicit"],
+    ]);
     assert.deepEqual(
       a.history.filter((message) => message.role === "assistant"),
       [FIRST, SECOND],
@@ -202,7 +258,9 @@ describe("transcript runs and the scheduling iterator", () => {
 
   test("a scripted event finishes before its boundary becomes visible", async () => {
     const DONE = assistant("done");
-    const agent = new MockAgent({ runs: [run([settle(DONE, { events: [runStart] })])] });
+    const agent = new MockAgent({
+      runs: [run([settle(DONE, { events: [runStart] })])],
+    });
     const entered = Promise.withResolvers<void>();
     const gate = Promise.withResolvers<void>();
     const observed: string[] = [];
@@ -231,12 +289,16 @@ describe("transcript runs and the scheduling iterator", () => {
 
   test("queued demands receive boundaries in order and an idle demand waits for later work", async () => {
     const LATER = assistant("later");
-    const agent = new MockAgent({ prompt: "go", runs: [yieldsThen(1, "staged done"), run([settle(LATER)])] });
+    const agent = new MockAgent({
+      prompt: "go",
+      runs: [yieldsThen(1, "staged done"), run([settle(LATER)])],
+    });
     const order: string[] = [];
-    const record = (name: string) => (result: IteratorResult<AgenticStep, void>) => {
-      order.push(`${name}:${result.done ? "done" : result.value.kind}`);
-      return result;
-    };
+    const record =
+      (name: string) => (result: IteratorResult<AgenticStep, void>) => {
+        order.push(`${name}:${result.done ? "done" : result.value.kind}`);
+        return result;
+      };
     const d1 = agent.next().then(record("d1"));
     const d2 = agent.next().then(record("d2"));
     const d3 = agent.next().then(record("d3"));
@@ -256,7 +318,9 @@ describe("transcript runs and the scheduling iterator", () => {
   test("an active run rejects admission without consuming the script; an unread terminal does not", async () => {
     const ONE = assistant("one");
     const TWO = assistant("two");
-    const agent = new MockAgent({ runs: [yieldsThen(1, "x"), run([settle(ONE)]), run([settle(TWO)])] });
+    const agent = new MockAgent({
+      runs: [yieldsThen(1, "x"), run([settle(ONE)]), run([settle(TWO)])],
+    });
     const held = agent.prompt("hold");
     assert.ok(hasCode("busy")(await rejection(agent.prompt("overlap"))));
     assert.equal((await stepOf(agent)).kind, "yield");
@@ -273,7 +337,9 @@ describe("transcript runs and the scheduling iterator", () => {
 
   test("a scripted failure is the identical error on the run promise and the iterator", async () => {
     const error = new Error("scripted");
-    const agent = new MockAgent({ runs: [run([pause([reason("first", "y1")]), { step: failed(error) }])] });
+    const agent = new MockAgent({
+      runs: [run([pause([reason("first", "y1")]), { step: failed(error) }])],
+    });
     const outcome = rejection(agent.prompt("go"));
     assert.equal((await stepOf(agent)).kind, "yield");
     assert.equal(failedError(await stepOf(agent)), error);
@@ -302,8 +368,16 @@ describe("tools, resources and configuration", () => {
     contextWindow: 1000,
     maxTokens: 100,
   });
-  const skill = (content: string): Skill => ({ name: "review", description: "review", content, filePath: "/skills/review/SKILL.md" });
-  const template = (content: string): PromptTemplate => ({ name: "greet", content });
+  const skill = (content: string): Skill => ({
+    name: "review",
+    description: "review",
+    content,
+    filePath: "/skills/review/SKILL.md",
+  });
+  const template = (content: string): PromptTemplate => ({
+    name: "greet",
+    content,
+  });
 
   test("configuration mutated during a held run reaches the next request and later resource runs", async () => {
     const READ = tool("read");
@@ -315,10 +389,17 @@ describe("tools, resources and configuration", () => {
     const TEMPLATE_DONE = assistant("template done");
     const agent = new MockAgent({
       tools: [READ, WRITE],
-      resources: { skills: [skill("v1 skill")], promptTemplates: [template("v1 $1")] },
+      resources: {
+        skills: [skill("v1 skill")],
+        promptTemplates: [template("v1 $1")],
+      },
       models: [MOCK_A, MOCK_B],
       model: { provider: "mock", modelId: "mock-a" },
-      runs: [yieldsThen(1, "configured"), run([settle(SKILL_DONE)]), run([settle(TEMPLATE_DONE)])],
+      runs: [
+        yieldsThen(1, "configured"),
+        run([settle(SKILL_DONE)]),
+        run([settle(TEMPLATE_DONE)]),
+      ],
     });
     assert.deepEqual(
       agent.getActiveTools().map((t) => t.name),
@@ -354,7 +435,10 @@ describe("tools, resources and configuration", () => {
     await agent.setThinkingLevel("high");
     const streamOptions = { maxRetries: 2, headers: { "x-mock": "1" } };
     await agent.setStreamOptions(streamOptions);
-    const resources = { skills: [skill("v2 skill")], promptTemplates: [template("v2 hello $1")] };
+    const resources = {
+      skills: [skill("v2 skill")],
+      promptTemplates: [template("v2 hello $1")],
+    };
     await agent.setResources(resources);
     assert.equal(agent.status, "suspended");
     assert.deepEqual(agent.getActiveTools(), [SEARCH, READ]);
@@ -376,7 +460,10 @@ describe("tools, resources and configuration", () => {
 
     // Unknown resources fail through a boundary, consuming neither a run nor queued next-turn input.
     await agent.nextTurn("context first");
-    for (const unknown of [() => agent.skill("missing"), () => agent.promptFromTemplate("missing", ["x"])]) {
+    for (const unknown of [
+      () => agent.skill("missing"),
+      () => agent.promptFromTemplate("missing", ["x"]),
+    ]) {
       const error = await rejection(unknown());
       assert.ok(hasCode("invalid_argument")(error));
       assert.equal(failedError(await stepOf(agent)), error);
@@ -385,11 +472,20 @@ describe("tools, resources and configuration", () => {
 
     assert.equal(await agent.skill("review", "focus"), SKILL_DONE);
     const skillPrompt = formatSkillInvocation(resources.skills[0]!, "focus");
-    assert.deepEqual(requestTexts(agent.requests).at(-1)?.slice(-2), ["context first", skillPrompt]);
+    assert.deepEqual(requestTexts(agent.requests).at(-1)?.slice(-2), [
+      "context first",
+      skillPrompt,
+    ]);
     assert.ok(skillPrompt.includes("v2 skill"));
 
-    assert.equal(await agent.promptFromTemplate("greet", ["Ada"]), TEMPLATE_DONE);
-    const templatePrompt = formatPromptTemplateInvocation(resources.promptTemplates[0]!, ["Ada"]);
+    assert.equal(
+      await agent.promptFromTemplate("greet", ["Ada"]),
+      TEMPLATE_DONE,
+    );
+    const templatePrompt = formatPromptTemplateInvocation(
+      resources.promptTemplates[0]!,
+      ["Ada"],
+    );
     assert.equal(templatePrompt, "v2 hello Ada");
     assert.equal(requestTexts(agent.requests).at(-1)?.at(-1), templatePrompt);
     await agent.return();
@@ -425,16 +521,36 @@ describe("queues and conversation controls", () => {
 
     const first = agent.prompt("work", { images: [promptImage] });
     assert.equal((await stepOf(agent)).kind, "yield");
-    assert.deepEqual(requestTexts(agent.requests), [["note", "n1", "work", "s1", "f1"]]);
+    assert.deepEqual(requestTexts(agent.requests), [
+      ["note", "n1", "work", "s1", "f1"],
+    ]);
 
     await agent.setSteeringMode("all");
     await agent.setFollowUpMode("all");
     assert.equal(settledMessage(await stepOf(agent)), await first);
-    assert.deepEqual(requestTexts(agent.requests)[1], ["note", "n1", "work", "s1", "f1", "s2", "f2"]);
+    assert.deepEqual(requestTexts(agent.requests)[1], [
+      "note",
+      "n1",
+      "work",
+      "s1",
+      "f1",
+      "s2",
+      "f2",
+    ]);
 
     await agent.nextTurn("n2");
     assert.equal(await agent.prompt("again"), AGAIN);
-    assert.deepEqual(userTexts(agent.history), ["note", "n1", "work", "s1", "f1", "s2", "f2", "n2", "again"]);
+    assert.deepEqual(userTexts(agent.history), [
+      "note",
+      "n1",
+      "work",
+      "s1",
+      "f1",
+      "s2",
+      "f2",
+      "n2",
+      "again",
+    ]);
     assert.equal(agent.history[0], note);
     assert.deepEqual(imagesOf(userMessage(agent, "s1")), [steerImage]);
     assert.equal(imagesOf(userMessage(agent, "s1"))[0], steerImage);
@@ -474,8 +590,14 @@ describe("subscriptions, hooks and cancellation", () => {
       event: { runId: "r1", messages: [], lane: "main" },
       results: [{ followUp: "more" }, undefined],
     };
-    const agent = new MockAgent({ runs: [run([settle(DONE, { hooks: [endHook] })])] });
-    const seen: { readonly name: string; readonly event: unknown; readonly context: Context }[] = [];
+    const agent = new MockAgent({
+      runs: [run([settle(DONE, { hooks: [endHook] })])],
+    });
+    const seen: {
+      readonly name: string;
+      readonly event: unknown;
+      readonly context: Context;
+    }[] = [];
     agent.hooks.on(
       "before_run_end",
       (event, context) => {
@@ -484,7 +606,11 @@ describe("subscriptions, hooks and cancellation", () => {
       },
       { id: "same" },
     );
-    const remove = agent.hooks.on("before_run_end", () => ({ followUp: "stale" }), { id: "removed" });
+    const remove = agent.hooks.on(
+      "before_run_end",
+      () => ({ followUp: "stale" }),
+      { id: "removed" },
+    );
     agent.hooks.on(
       "before_run_end",
       (event, context) => {
@@ -501,9 +627,16 @@ describe("subscriptions, hooks and cancellation", () => {
       seen.map((entry) => entry.name),
       ["first", "second"],
     );
-    assert.ok(seen.every((entry) => entry.event === endHook.event && entry.context === seen[0]!.context));
+    assert.ok(
+      seen.every(
+        (entry) =>
+          entry.event === endHook.event && entry.context === seen[0]!.context,
+      ),
+    );
     assert.equal(seen[0]!.context.abortSignal?.aborted, false);
-    assert.deepEqual(agent.hookResults, [{ name: "before_run_end", results: [{ followUp: "more" }, undefined] }]);
+    assert.deepEqual(agent.hookResults, [
+      { name: "before_run_end", results: [{ followUp: "more" }, undefined] },
+    ]);
   });
 
   test("an unexpected hook result or a hook rejection fails the run", async () => {
@@ -513,13 +646,20 @@ describe("subscriptions, hooks and cancellation", () => {
       results: [{ followUp: "more" }],
     };
     const agent = new MockAgent({
-      runs: [run([settle(assistant("unreached"), { hooks: [expecting] })]), run([settle(assistant("x"), { hooks: [expecting] })])],
+      runs: [
+        run([settle(assistant("unreached"), { hooks: [expecting] })]),
+        run([settle(assistant("x"), { hooks: [expecting] })]),
+      ],
     });
-    const remove = agent.hooks.on("before_run_end", () => ({ followUp: "other" }));
+    const remove = agent.hooks.on("before_run_end", () => ({
+      followUp: "other",
+    }));
     const mismatch = await rejection(agent.prompt("go"));
     assert.ok(hasCode("invalid_state")(mismatch));
     assert.equal(failedError(await stepOf(agent)), mismatch);
-    assert.deepEqual(agent.hookResults, [{ name: "before_run_end", results: [{ followUp: "other" }] }]);
+    assert.deepEqual(agent.hookResults, [
+      { name: "before_run_end", results: [{ followUp: "other" }] },
+    ]);
     assert.deepEqual(agent.requests, []);
 
     remove();
@@ -533,7 +673,9 @@ describe("subscriptions, hooks and cancellation", () => {
 
   test("a failing passive listener is recorded without suppressing later listeners or the terminal", async () => {
     const DONE = assistant("done");
-    const agent = new MockAgent({ runs: [run([settle(DONE, { events: [runStart, runResume] })])] });
+    const agent = new MockAgent({
+      runs: [run([settle(DONE, { events: [runStart, runResume] })])],
+    });
     const boom = new Error("listener failed");
     const log: string[] = [];
     let listenerContext: Context | undefined;
@@ -581,14 +723,64 @@ describe("subscriptions, hooks and cancellation", () => {
     assert.equal(agent.status, "idle");
     assert.deepEqual(agent.requests, []);
     assert.deepEqual(userTexts(agent.history), ["go", "cancelled note"]);
-    assert.equal(agent.history.filter((message) => message === INTERRUPTED).length, 1);
+    assert.equal(
+      agent.history.filter((message) => message === INTERRUPTED).length,
+      1,
+    );
 
     removeHook();
     assert.equal(await agent.prompt("again"), AFTER);
   });
 
+  test("abort with a failed interrupted terminal rejects the prompt with its error and appends no assistant", async () => {
+    const sentinel = new Error("interrupted failure");
+    const AFTER = assistant("after");
+    const hook = barrier();
+    const agent = new MockAgent({
+      runs: [
+        run([settle(assistant("unreached"), { hooks: [driveHook] })], {
+          step: failed(sentinel),
+        }),
+        run([settle(AFTER)]),
+      ],
+    });
+    const removeHook = agent.hooks.on("before_drive", hook.handler);
+    const interrupted = rejection(agent.prompt("go"));
+    await hook.entered;
+
+    await agent.abort();
+    assert.ok(hook.exited());
+    assert.equal(await interrupted, sentinel);
+    assert.deepEqual(await stepOf(agent), { kind: "failed", error: sentinel });
+    assert.ok(!agent.history.some((message) => message.role === "assistant"));
+    assert.deepEqual(userTexts(agent.history), ["go"]);
+
+    removeHook();
+    assert.equal(await agent.prompt("again"), AFTER);
+  });
+
+  test("a staged prompt keeps its images in history and the captured request", async () => {
+    const staged = image("c3RhZ2Vk");
+    const DONE = assistant("staged done");
+    const agent = new MockAgent({
+      prompt: "staged",
+      images: [staged],
+      runs: [run([settle(DONE)])],
+    });
+    assert.equal(settledMessage(await stepOf(agent)), DONE);
+    assert.deepEqual(imagesOf(userMessage(agent, "staged")), [staged]);
+    assert.equal(agent.requests.length, 1);
+    const requested = agent.requests[0]?.messages.find(
+      (message) => userTexts([message])[0] === "staged",
+    );
+    assert.deepEqual(imagesOf(requested), [staged]);
+  });
+
   test("abort of a held yield skips the remaining frames", async () => {
-    const agent = new MockAgent({ prompt: "go", runs: [yieldsThen(2, "unreached")] });
+    const agent = new MockAgent({
+      prompt: "go",
+      runs: [yieldsThen(2, "unreached")],
+    });
     assert.equal((await stepOf(agent)).kind, "yield");
     await agent.abort();
     assert.equal(settledMessage(await stepOf(agent)), ABORTED_MESSAGE);
@@ -601,7 +793,10 @@ describe("subscriptions, hooks and cancellation", () => {
     const dependentFailure = new Error("dependent abort failed");
     let onAbort = (): Promise<void> | undefined => release.promise;
     const hook = barrier();
-    const agent = new Owner({ runs: [barrierRun()] }, { onAbort: () => onAbort() });
+    const agent = new Owner(
+      { runs: [barrierRun()] },
+      { onAbort: () => onAbort() },
+    );
     agent.hooks.on("before_drive", hook.handler);
 
     const first = agent.abort();
@@ -663,7 +858,13 @@ describe("subscriptions, hooks and cancellation", () => {
       execute: () => Promise.reject(new Error("never")),
     };
     const resources = { skills: [] };
-    const agent = new MockAgent({ prompt: "never", tools: [READ], resources, history: [user("kept")], runs: [] });
+    const agent = new MockAgent({
+      prompt: "never",
+      tools: [READ],
+      resources,
+      history: [user("kept")],
+      runs: [],
+    });
     await agent.return();
     assert.equal(agent.status, "closed");
     const commands: (() => Promise<unknown>)[] = [
@@ -689,9 +890,16 @@ describe("subscriptions, hooks and cancellation", () => {
       () => agent.compact(),
       () => agent.navigateTree("x"),
     ];
-    for (const command of commands) assert.ok(hasCode("closed")(await rejection(command())));
-    assert.throws(() => agent.events.on("run_start", () => {}), hasCode("closed"));
-    assert.throws(() => agent.hooks.on("before_drive", () => undefined), hasCode("closed"));
+    for (const command of commands)
+      assert.ok(hasCode("closed")(await rejection(command())));
+    assert.throws(
+      () => agent.events.on("run_start", () => {}),
+      hasCode("closed"),
+    );
+    assert.throws(
+      () => agent.hooks.on("before_drive", () => undefined),
+      hasCode("closed"),
+    );
     assert.deepEqual(agent.getTools(), [READ]);
     assert.deepEqual(agent.getActiveTools(), [READ]);
     assert.equal(agent.getResources(), resources);
@@ -701,7 +909,10 @@ describe("subscriptions, hooks and cancellation", () => {
   });
 
   test("for-await early exit closes the agent and interrupts its held run", async () => {
-    const agent = new MockAgent({ prompt: "go", runs: [yieldsThen(2, "unreached")] });
+    const agent = new MockAgent({
+      prompt: "go",
+      runs: [yieldsThen(2, "unreached")],
+    });
     const kinds: string[] = [];
     for await (const step of agent) {
       kinds.push(step.kind);
@@ -722,7 +933,10 @@ describe("subscriptions, hooks and cancellation", () => {
     assert.deepEqual(await plain.next(), { value: undefined, done: true });
 
     const closeFailure = new Error("close failed");
-    const failing = new Owner({ runs: [] }, { onClose: () => Promise.reject(closeFailure) });
+    const failing = new Owner(
+      { runs: [] },
+      { onClose: () => Promise.reject(closeFailure) },
+    );
     const aggregate = await rejection(failing.throw(original));
     assert.ok(aggregate instanceof AggregateError);
     assert.equal(aggregate.errors[0], original);
@@ -744,7 +958,10 @@ describe("subscriptions, hooks and cancellation", () => {
   test("a close failure rejects waiting demands only after queued terminals are delivered", async () => {
     const closeFailure = new Error("close failed");
     const hook = barrier();
-    const agent = new Owner({ runs: [barrierRun()] }, { onClose: () => Promise.reject(closeFailure) });
+    const agent = new Owner(
+      { runs: [barrierRun()] },
+      { onClose: () => Promise.reject(closeFailure) },
+    );
     agent.hooks.on("before_drive", hook.handler);
     const order: string[] = [];
     const first = agent.next().then((result) => {
@@ -774,8 +991,15 @@ describe("subscriptions, hooks and cancellation", () => {
 describe("maintenance and transcript validation", () => {
   test("compaction and navigation replay scripted outcomes, replacing history only on success", async () => {
     const summaryFailed = new Error("summary failed");
-    const missing = new UnknownTarget({ targetId: "missing", message: "unknown target" });
-    const compactFailure: MockMaintenance = { method: "compact", args: [], result: { ok: false, error: summaryFailed } };
+    const missing = new UnknownTarget({
+      targetId: "missing",
+      message: "unknown target",
+    });
+    const compactFailure: MockMaintenance = {
+      method: "compact",
+      args: [],
+      result: { ok: false, error: summaryFailed },
+    };
     const compactSuccess: MockMaintenance = {
       method: "compact",
       args: [{ customInstructions: "focus" }],
@@ -808,17 +1032,36 @@ describe("maintenance and transcript validation", () => {
       history: [user("branch start")],
       tipId: "branch-1",
     };
-    const nothingToCompact: MockMaintenance = { method: "compact", args: [], result: { ok: true } };
+    const nothingToCompact: MockMaintenance = {
+      method: "compact",
+      args: [],
+      result: { ok: true },
+    };
     const agent = new MockAgent({
       history: [user("discarded".repeat(4))],
-      maintenance: [compactFailure, compactSuccess, navigateFailure, navigateSuccess, nothingToCompact],
-      runs: [run([settle(assistant("after compact"))]), run([settle(assistant("after navigation"))])],
+      maintenance: [
+        compactFailure,
+        compactSuccess,
+        navigateFailure,
+        navigateSuccess,
+        nothingToCompact,
+      ],
+      runs: [
+        run([settle(assistant("after compact"))]),
+        run([settle(assistant("after navigation"))]),
+      ],
     });
     assert.equal(await agent.context_size(), 9);
 
     // Mismatches consume nothing.
-    assert.ok(hasCode("invalid_state")(await rejection(agent.navigateTree("branch-1"))));
-    assert.ok(hasCode("invalid_state")(await rejection(agent.compact({ customInstructions: "focus" }))));
+    assert.ok(
+      hasCode("invalid_state")(await rejection(agent.navigateTree("branch-1"))),
+    );
+    assert.ok(
+      hasCode("invalid_state")(
+        await rejection(agent.compact({ customInstructions: "focus" })),
+      ),
+    );
 
     assert.equal(await rejection(agent.compact()), summaryFailed);
     assert.deepEqual(userTexts(agent.history), ["discarded".repeat(4)]);
@@ -843,12 +1086,19 @@ describe("maintenance and transcript validation", () => {
 
     // Navigation is structural only: next-turn input waits for the next explicit prompt.
     await agent.nextTurn("queued");
-    assert.equal(await agent.navigateTree("branch-1", { summarize: false }), navigateSuccess.result);
+    assert.equal(
+      await agent.navigateTree("branch-1", { summarize: false }),
+      navigateSuccess.result,
+    );
     assert.equal(agent.tipId, "branch-1");
     assert.equal(agent.requests.length, 1);
     assert.deepEqual(userTexts(agent.history), ["branch start"]);
     await agent.prompt("continue");
-    assert.deepEqual(requestTexts(agent.requests)[1], ["branch start", "queued", "continue"]);
+    assert.deepEqual(requestTexts(agent.requests)[1], [
+      "branch start",
+      "queued",
+      "continue",
+    ]);
 
     const before = agent.history;
     assert.equal(await agent.compact(), undefined);
@@ -856,8 +1106,32 @@ describe("maintenance and transcript validation", () => {
     assert.ok(hasCode("invalid_state")(await rejection(agent.compact())));
   });
 
+  test("context size counts only user and successful assistant messages", async () => {
+    const prompt = user("ordinary question");
+    const answer = assistant("successful answer");
+    const agent = new MockAgent({
+      history: [
+        prompt,
+        answer,
+        assistant("errored", "error"),
+        assistant("cancelled", "aborted"),
+        assistant("postponed", "deferred" as AssistantMessage["stopReason"]),
+      ],
+      runs: [],
+    });
+    assert.equal(
+      await agent.context_size(),
+      estimateTokens(prompt) + estimateTokens(answer),
+    );
+  });
+
   test("compaction waits for the admitted run and delays a staged prompt; new runs are busy", async () => {
-    const compacted: MockMaintenance = { method: "compact", args: [], result: { ok: true }, history: [user("x")] };
+    const compacted: MockMaintenance = {
+      method: "compact",
+      args: [],
+      result: { ok: true },
+      history: [user("x")],
+    };
     const agent = new MockAgent({
       prompt: "go",
       history: [user("old history")],
@@ -888,7 +1162,11 @@ describe("maintenance and transcript validation", () => {
     assert.equal(textOf(settledMessage(await demand)), "staged done");
     assert.deepEqual(requestTexts(staged.requests), [["x", "staged"]]);
 
-    const closing = new MockAgent({ prompt: "go", maintenance: [compacted], runs: [yieldsThen(1, "unreached")] });
+    const closing = new MockAgent({
+      prompt: "go",
+      maintenance: [compacted],
+      runs: [yieldsThen(1, "unreached")],
+    });
     assert.equal((await stepOf(closing)).kind, "yield");
     const rejected = closing.compact();
     await closing.return();
@@ -904,12 +1182,21 @@ describe("maintenance and transcript validation", () => {
       run([yielding]),
       run([done, yielding]),
       run([done, done]),
-      run([done], { step: { kind: "yield", reasons: [] } } as unknown as MockRun["interrupted"]),
+      run([done], {
+        step: { kind: "yield", reasons: [] },
+      } as unknown as MockRun["interrupted"]),
     ];
     for (const script of malformed) {
-      assert.throws(() => new MockAgent({ runs: [script] }), hasCode("invalid_argument"));
+      assert.throws(
+        () => new MockAgent({ runs: [script] }),
+        hasCode("invalid_argument"),
+      );
     }
-    assert.throws(() => new MockAgent({ tools: [], activeToolNames: ["missing"], runs: [] }), hasCode("invalid_argument"));
+    assert.throws(
+      () =>
+        new MockAgent({ tools: [], activeToolNames: ["missing"], runs: [] }),
+      hasCode("invalid_argument"),
+    );
     assert.equal(new MockAgent({ runs: [] }).status, "idle");
   });
 });

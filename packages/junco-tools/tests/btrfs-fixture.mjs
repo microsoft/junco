@@ -1,7 +1,15 @@
 import { execFile, spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
-import { constants as osConstants, homedir } from "node:os";
+import {
+  access,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+} from "node:fs/promises";
+import { homedir, constants as osConstants } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -9,7 +17,10 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /** The repository checkout and its `target/`, derived from this module, never from a caller. */
-const checkout = fileURLToPath(new URL("../", import.meta.url)).replace(/\/$/, "");
+const checkout = fileURLToPath(new URL("../", import.meta.url)).replace(
+  /\/$/,
+  "",
+);
 const targetDir = fileURLToPath(new URL("../target", import.meta.url));
 
 /** Every automatically allocated fixture root is `target/btrfs-test-<random>`. */
@@ -25,7 +36,10 @@ const OWNED_CWD =
   "Run npm run test:btrfs; this suite requires its automatically created fixture working directory.";
 
 const isAncestor = (candidate, descendant) =>
-  descendant === candidate || descendant.startsWith(candidate.endsWith(sep) ? candidate : `${candidate}${sep}`);
+  descendant === candidate ||
+  descendant.startsWith(
+    candidate.endsWith(sep) ? candidate : `${candidate}${sep}`,
+  );
 
 /** Run a utility through argument arrays; never a shell string. Failures name the command. */
 async function utility(command, args) {
@@ -33,7 +47,9 @@ async function utility(command, args) {
     return await execFileAsync(command, args, { encoding: "utf8" });
   } catch (error) {
     const detail = `${error.stderr ?? ""}`.trim() || error.message;
-    throw new Error(`${command} ${args.join(" ")} failed: ${detail}`, { cause: error });
+    throw new Error(`${command} ${args.join(" ")} failed: ${detail}`, {
+      cause: error,
+    });
   }
 }
 
@@ -51,11 +67,19 @@ async function mountOf(path) {
   try {
     parsed = JSON.parse(stdout);
   } catch (cause) {
-    throw new Error(`findmnt produced invalid JSON for ${path}: ${stdout}`, { cause });
+    throw new Error(`findmnt produced invalid JSON for ${path}: ${stdout}`, {
+      cause,
+    });
   }
   const entry = parsed?.filesystems?.[0];
-  if (!entry || typeof entry.fstype !== "string" || typeof entry.options !== "string") {
-    throw new Error(`findmnt reported no usable filesystem for ${path}: ${stdout}`);
+  if (
+    !entry ||
+    typeof entry.fstype !== "string" ||
+    typeof entry.options !== "string"
+  ) {
+    throw new Error(
+      `findmnt reported no usable filesystem for ${path}: ${stdout}`,
+    );
   }
   return entry;
 }
@@ -65,16 +89,24 @@ const describeMount = (path, mount) =>
 
 /** The btrfs root id owning `path`. Unprivileged, and a hard failure anywhere but btrfs. */
 async function subvolumeId(path) {
-  const { stdout } = await utility("btrfs", ["inspect-internal", "rootid", path]);
+  const { stdout } = await utility("btrfs", [
+    "inspect-internal",
+    "rootid",
+    path,
+  ]);
   const id = Number.parseInt(stdout.trim(), 10);
-  if (!Number.isSafeInteger(id)) throw new Error(`btrfs reported no root id for ${path}: ${stdout}`);
+  if (!Number.isSafeInteger(id))
+    throw new Error(`btrfs reported no root id for ${path}: ${stdout}`);
   return id;
 }
 
 /** A btrfs mount that permits unprivileged subvolume removal, or a hard prerequisite failure. */
 async function requireDisposableMount(path) {
   const mount = await mountOf(path);
-  if (mount.fstype !== "btrfs" || !mount.options.split(",").includes("user_subvol_rm_allowed")) {
+  if (
+    mount.fstype !== "btrfs" ||
+    !mount.options.split(",").includes("user_subvol_rm_allowed")
+  ) {
     throw new Error(`${PREREQUISITE} ${describeMount(path, mount)}`);
   }
   return mount;
@@ -91,7 +123,10 @@ async function resolveTarget(create) {
   try {
     await access(canonical, constants.W_OK | constants.X_OK);
   } catch (cause) {
-    throw new Error(`${PREREQUISITE} ${canonical} is not writable and searchable.`, { cause });
+    throw new Error(
+      `${PREREQUISITE} ${canonical} is not writable and searchable.`,
+      { cause },
+    );
   }
   return canonical;
 }
@@ -103,32 +138,49 @@ async function resolveTarget(create) {
  */
 async function assertOwnedFixture({ root, seed, tmpdir }, target) {
   if (dirname(root) !== target || !basename(root).startsWith(FIXTURE_PREFIX)) {
-    throw new Error(`${root} is not an automatically allocated ${join(target, `${FIXTURE_PREFIX}*`)} fixture`);
+    throw new Error(
+      `${root} is not an automatically allocated ${join(target, `${FIXTURE_PREFIX}*`)} fixture`,
+    );
   }
-  if ((await realpath(root)) !== root) throw new Error(`fixture root is not canonical: ${root}`);
+  if ((await realpath(root)) !== root)
+    throw new Error(`fixture root is not canonical: ${root}`);
   const rootStats = await lstat(root, { bigint: true });
   if (!rootStats.isDirectory() || rootStats.ino === SUBVOLUME_INO) {
     throw new Error(`fixture root is not an ordinary directory: ${root}`);
   }
-  if (seed !== join(root, "seed")) throw new Error(`seed must be ${join(root, "seed")}, not ${seed}`);
-  if (tmpdir !== join(root, "tmp")) throw new Error(`tmpdir must be ${join(root, "tmp")}, not ${tmpdir}`);
+  if (seed !== join(root, "seed"))
+    throw new Error(`seed must be ${join(root, "seed")}, not ${seed}`);
+  if (tmpdir !== join(root, "tmp"))
+    throw new Error(`tmpdir must be ${join(root, "tmp")}, not ${tmpdir}`);
 
-  if ((await realpath(seed)) !== seed) throw new Error(`seed is not canonical: ${seed}`);
+  if ((await realpath(seed)) !== seed)
+    throw new Error(`seed is not canonical: ${seed}`);
   const seedStats = await lstat(seed, { bigint: true });
-  if (!seedStats.isDirectory()) throw new Error(`seed is not a directory: ${seed}`);
-  if (seedStats.ino !== SUBVOLUME_INO) throw new Error(`seed is not a subvolume root: ${seed}`);
+  if (!seedStats.isDirectory())
+    throw new Error(`seed is not a directory: ${seed}`);
+  if (seedStats.ino !== SUBVOLUME_INO)
+    throw new Error(`seed is not a subvolume root: ${seed}`);
   // `btrfs subvolume show` needs CAP_SYS_ADMIN for its B-tree search, and this lane never sudos.
   // `inspect-internal rootid` is the unprivileged equivalent: it fails outright off btrfs, and a
   // root id distinct from the parent's — with the subvolume's own anonymous device — proves the
   // seed is a genuine separate subvolume rather than a directory that merely holds object id 256.
-  const [seedRoot, parentRoot] = await Promise.all([subvolumeId(seed), subvolumeId(root)]);
+  const [seedRoot, parentRoot] = await Promise.all([
+    subvolumeId(seed),
+    subvolumeId(root),
+  ]);
   if (seedRoot === parentRoot || seedStats.dev === rootStats.dev) {
-    throw new Error(`seed is not a distinct subvolume: ${seed} shares root id ${seedRoot} with ${root}`);
+    throw new Error(
+      `seed is not a distinct subvolume: ${seed} shares root id ${seedRoot} with ${root}`,
+    );
   }
   const mount = await requireDisposableMount(seed);
-  if (mount.target === seed) throw new Error(`seed must be a subvolume, not a mount root: ${seed}`);
+  if (mount.target === seed)
+    throw new Error(`seed must be a subvolume, not a mount root: ${seed}`);
   const entries = await readdir(seed);
-  if (entries.length) throw new Error(`seed must start empty: ${seed} holds ${entries.join(", ")}`);
+  if (entries.length)
+    throw new Error(
+      `seed must start empty: ${seed} holds ${entries.join(", ")}`,
+    );
 
   const tmpStats = await lstat(tmpdir, { bigint: true });
   if (!tmpStats.isDirectory() || tmpStats.ino === SUBVOLUME_INO) {
@@ -138,14 +190,26 @@ async function assertOwnedFixture({ root, seed, tmpdir }, target) {
   try {
     await access(root, constants.W_OK | constants.X_OK);
   } catch (cause) {
-    throw new Error(`the seed's parent is not writable and searchable: ${root}`, { cause });
+    throw new Error(
+      `the seed's parent is not writable and searchable: ${root}`,
+      { cause },
+    );
   }
 
   const home = await realpath(homedir());
-  for (const [label, path] of [["the filesystem root", sep], ["the home directory", home], ["the checkout", checkout]]) {
-    for (const [name, owned] of [["root", root], ["seed", seed]]) {
+  for (const [label, path] of [
+    ["the filesystem root", sep],
+    ["the home directory", home],
+    ["the checkout", checkout],
+  ]) {
+    for (const [name, owned] of [
+      ["root", root],
+      ["seed", seed],
+    ]) {
       if (owned === path || isAncestor(owned, path)) {
-        throw new Error(`fixture ${name} must not be or contain ${label}: ${owned}`);
+        throw new Error(
+          `fixture ${name} must not be or contain ${label}: ${owned}`,
+        );
       }
     }
   }
@@ -191,8 +255,14 @@ async function collectSubvolumes(dir, found = []) {
 async function teardown(root, identity) {
   const current = await lstatOrNull(root);
   if (current === null) return;
-  if (!current.isDirectory() || current.dev !== identity.dev || current.ino !== identity.ino) {
-    throw new Error(`Refusing to remove ${root}: it is no longer the directory this fixture allocated`);
+  if (
+    !current.isDirectory() ||
+    current.dev !== identity.dev ||
+    current.ino !== identity.ino
+  ) {
+    throw new Error(
+      `Refusing to remove ${root}: it is no longer the directory this fixture allocated`,
+    );
   }
   // Collected whole before anything is deleted: a traversal failure must never fall through to
   // a broad recursive removal of a tree this module has not finished inspecting.
@@ -202,7 +272,10 @@ async function teardown(root, identity) {
       await utility("btrfs", ["subvolume", "delete", path]);
     } catch (error) {
       if ((await lstatOrNull(path)) === null) continue;
-      throw new Error(`Retained btrfs fixture ${root}: subvolume ${path} could not be deleted`, { cause: error });
+      throw new Error(
+        `Retained btrfs fixture ${root}: subvolume ${path} could not be deleted`,
+        { cause: error },
+      );
     }
   }
   await rm(root, { recursive: true, force: true });
@@ -222,7 +295,10 @@ export async function createBtrfsFixture() {
   try {
     identity = await lstat(root, { bigint: true });
   } catch (cause) {
-    throw new Error(`Btrfs fixture identity check failed for ${root}; cleanup refused`, { cause });
+    throw new Error(
+      `Btrfs fixture identity check failed for ${root}; cleanup refused`,
+      { cause },
+    );
   }
   const seed = join(root, "seed");
   const tmpdir = join(root, "tmp");
@@ -238,7 +314,10 @@ export async function createBtrfsFixture() {
     try {
       await close();
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], `Failed to create and reclaim the btrfs fixture at ${root}`);
+      throw new AggregateError(
+        [error, cleanupError],
+        `Failed to create and reclaim the btrfs fixture at ${root}`,
+      );
     }
     throw error;
   }
@@ -284,7 +363,10 @@ function signalGroup(group, signal) {
     return true;
   } catch (error) {
     if (error.code === "ESRCH") return false;
-    throw new Error(`Failed to send ${signal} to btrfs fixture process group ${group}`, { cause: error });
+    throw new Error(
+      `Failed to send ${signal} to btrfs fixture process group ${group}`,
+      { cause: error },
+    );
   }
 }
 
@@ -309,7 +391,9 @@ async function drainGroup(group) {
   if (await waitForGroupExit(group)) return;
   signalGroup(group, "SIGKILL");
   if (await waitForGroupExit(group)) return;
-  throw new Error(`btrfs fixture process group ${group} did not exit within ${GRACE_MS}ms`);
+  throw new Error(
+    `btrfs fixture process group ${group} did not exit within ${GRACE_MS}ms`,
+  );
 }
 
 /**
@@ -317,7 +401,12 @@ async function drainGroup(group) {
  * only as its working directory: the environment is passed through untouched.
  */
 export async function runBtrfsFixtureCommand(executable, args) {
-  const owner = { interrupted: null, group: null, escalation: null, failures: [] };
+  const owner = {
+    interrupted: null,
+    group: null,
+    escalation: null,
+    failures: [],
+  };
 
   const forward = (group, signal) => {
     try {
@@ -338,7 +427,12 @@ export async function runBtrfsFixtureCommand(executable, args) {
     owner.escalation ??= setTimeout(() => forward(group, "SIGKILL"), GRACE_MS);
   };
 
-  const handlers = new Map(Object.keys(SIGNAL_STATUS).map((signal) => [signal, () => onSignal(signal)]));
+  const handlers = new Map(
+    Object.keys(SIGNAL_STATUS).map((signal) => [
+      signal,
+      () => onSignal(signal),
+    ]),
+  );
   for (const [signal, handler] of handlers) process.on(signal, handler);
 
   let fixture = null;
@@ -370,7 +464,9 @@ export async function runBtrfsFixtureCommand(executable, args) {
           child.once("error", (error) => {
             failure = error;
           });
-          child.once("close", (code, signal) => resolve({ code, signal, failure }));
+          child.once("close", (code, signal) =>
+            resolve({ code, signal, failure }),
+          );
         });
         if (outcome.failure) setupError = outcome.failure;
       } catch (error) {
@@ -405,7 +501,8 @@ export async function runBtrfsFixtureCommand(executable, args) {
       }
     }
   } finally {
-    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    for (const [signal, handler] of handlers)
+      process.removeListener(signal, handler);
     if (owner.escalation !== null) {
       clearTimeout(owner.escalation);
       owner.escalation = null;
@@ -415,7 +512,8 @@ export async function runBtrfsFixtureCommand(executable, args) {
   let status;
   if (owner.interrupted) status = SIGNAL_STATUS[owner.interrupted];
   else if (setupError) status = 1;
-  else if (outcome?.signal) status = 128 + (osConstants.signals[outcome.signal] ?? 0);
+  else if (outcome?.signal)
+    status = 128 + (osConstants.signals[outcome.signal] ?? 0);
   else status = outcome?.code ?? 1;
 
   if (setupError) {
@@ -424,8 +522,10 @@ export async function runBtrfsFixtureCommand(executable, args) {
     const where = fixture ? ` in ${fixture.root}` : "";
     console.error(`btrfs fixture command failed${where}:`, setupError);
   }
-  for (const failure of owner.failures) console.error("btrfs fixture signalling failed:", failure);
-  if (teardownError) console.error("btrfs fixture cleanup failed:", teardownError);
+  for (const failure of owner.failures)
+    console.error("btrfs fixture signalling failed:", failure);
+  if (teardownError)
+    console.error("btrfs fixture cleanup failed:", teardownError);
   if (status === 0 && (teardownError || owner.failures.length)) status = 1;
   return status;
 }

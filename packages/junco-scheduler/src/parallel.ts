@@ -1,4 +1,8 @@
-import { type DataflowScheduler, type NodeSchedule, triggerInputs } from "dataflow-engine";
+import {
+  type DataflowScheduler,
+  type NodeSchedule,
+  triggerInputs,
+} from "dataflow-engine";
 import { createScheduler } from "./scheduler.js";
 
 /**
@@ -22,12 +26,16 @@ import { createScheduler } from "./scheduler.js";
  * );
  * ```
  */
-export function createParallelScheduler<N = unknown, T = unknown>(): DataflowScheduler<N, T> {
+export function createParallelScheduler<
+  N = unknown,
+  T = unknown,
+>(): DataflowScheduler<N, T> {
   return createScheduler<undefined, N, T>({
     state: undefined,
     schedule: (available) => {
       const lanes: NodeSchedule[][] = [];
-      for (const [id, candidate] of available) lanes.push([{ id, inputs: triggerInputs(candidate) }]);
+      for (const [id, candidate] of available)
+        lanes.push([{ id, inputs: triggerInputs(candidate) }]);
       return lanes;
     },
   });

@@ -1,4 +1,21 @@
 [install]
-# Sibling file: packages are snapshotted in this root's store. Build each upstream package
-# before installing here so its manifest, declarations and native artifacts are current.
-linker = "isolated"
+# Bun workspace: every internal package (packages/*) links to its workspace directory, so the
+# engine, scheduler, agent, tools and Pi peers each have a single hoisted identity.
+linker = "hoisted"
+
+[test]
+# `bun run test:coverage` reports agency source coverage only; each package proves its own
+# implementation through its own suite.
+coverageReporter = ["text", "lcov"]
+coverageDir = "coverage"
+coverageSkipTestFiles = true
+coveragePathIgnorePatterns = [
+  "**/test/**",
+  "**/tests/**",
+  "**/examples/**",
+  "**/dist/**",
+  "**/node_modules/**",
+  "**/target/**",
+  "**/native/**",
+  "**/packages/**",
+]

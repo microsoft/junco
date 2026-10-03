@@ -1,4 +1,7 @@
-import { SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionAPI,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { ToolCollection } from "./collection.js";
 
 export default function extension(pi: ExtensionAPI): void {
@@ -6,7 +9,9 @@ export default function extension(pi: ExtensionAPI): void {
   let collection: ToolCollection | undefined;
   pi.on("session_start", async (_event, ctx) => {
     await collection?.close();
-    const commandPrefix = SettingsManager.create(ctx.cwd).getShellCommandPrefix();
+    const commandPrefix = SettingsManager.create(
+      ctx.cwd,
+    ).getShellCommandPrefix();
     // Same-name definitions (read, bash, edit, grep, find) replace the
     // built-ins; write, ls, and user_bash stay untouched.
     collection = await ToolCollection.create(ctx.cwd, {

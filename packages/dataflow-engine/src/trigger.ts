@@ -18,16 +18,28 @@ export type TriggerKind = "all" | "any";
  * `rule` is in call order — an `"any"` rule fires on the FIRST satisfied entry — and holds no
  * duplicate, so `rule.length` is the number of distinct edges `"all"` must see satisfied.
  *
- * `N`/`T` are phantom: they tie a rule to its graph's payload types without constraining the
- * structure, so `allOf(on(a), on(b))` needs no explicit type arguments at a call site.
+ * `N`/`T` are carried by each entry's type-only brand (see `TriggerEntry`): a rule built from
+ * `on(edge)` entries admits only edges whose message and result payloads fit the rule. The brand is
+ * covariant, so a rule over narrow payloads serves a graph over a wider payload union.
  */
 export type TriggerRule<N, T> = {
   readonly kind: TriggerKind;
-  readonly rule: readonly EdgeId[];
+  readonly rule: readonly TriggerEntry<N, T>[];
+};
+
+declare const triggerEntry: unique symbol;
+
+/**
+ * One rule entry: an inbound edge id branded, at the type level only, with that edge's message and
+ * result payload types. At runtime it is exactly the edge id string.
+ */
+export type TriggerEntry<N, T> = EdgeId & {
+  readonly [triggerEntry]: readonly [message: N, result: T];
 };
 
 /** One rule entry: the inbound edge to watch. */
-export const on = <N, T>(edge: Edge<N, T>): EdgeId => edge.id;
+export const on = <N, T>(edge: Edge<N, T>): TriggerEntry<N, T> =>
+  edge.id as TriggerEntry<N, T>;
 
 /**
  * Validate the variadic entries and adopt them as the rule, rejecting a duplicate edge id (which
@@ -36,10 +48,10 @@ export const on = <N, T>(edge: Edge<N, T>): EdgeId => edge.id;
  * The rest-parameter array is freshly allocated per call and reachable from nowhere else, so it is
  * kept rather than copied. `indexOf` over a handful of entries beats allocating a `Set` to dedupe.
  */
-const buildRule = (
+const buildRule = <Entry extends EdgeId>(
   who: string,
-  entries: readonly EdgeId[],
-): readonly EdgeId[] => {
+  entries: readonly Entry[],
+): readonly Entry[] => {
   for (let i = 0; i < entries.length; i++) {
     const edgeId = entries[i]!;
     if (entries.indexOf(edgeId) !== i) {
@@ -52,20 +64,40 @@ const buildRule = (
 };
 
 /** Conjunction: fires iff EVERY entry has something to offer. */
-export const allOf = <N, T>(
-  ...entries: readonly EdgeId[]
-): TriggerRule<N, T> => ({
-  kind: "all",
-  rule: buildRule("allOf", entries),
-});
+export function allOf<
+  const Entries extends readonly TriggerEntry<unknown, unknown>[],
+>(
+  ...entries: Entries
+): TriggerRule<
+  Entries[number][typeof triggerEntry][0],
+  Entries[number][typeof triggerEntry][1]
+>;
+export function allOf<N = never, T = never>(
+  ...entries: readonly TriggerEntry<N, T>[]
+): TriggerRule<N, T>;
+export function allOf(
+  ...entries: readonly TriggerEntry<unknown, unknown>[]
+): TriggerRule<unknown, unknown> {
+  return { kind: "all", rule: buildRule("allOf", entries) };
+}
 
 /** Ordered disjunction: fires on the FIRST satisfied entry. */
-export const anyOf = <N, T>(
-  ...entries: readonly EdgeId[]
-): TriggerRule<N, T> => ({
-  kind: "any",
-  rule: buildRule("anyOf", entries),
-});
+export function anyOf<
+  const Entries extends readonly TriggerEntry<unknown, unknown>[],
+>(
+  ...entries: Entries
+): TriggerRule<
+  Entries[number][typeof triggerEntry][0],
+  Entries[number][typeof triggerEntry][1]
+>;
+export function anyOf<N = never, T = never>(
+  ...entries: readonly TriggerEntry<N, T>[]
+): TriggerRule<N, T>;
+export function anyOf(
+  ...entries: readonly TriggerEntry<unknown, unknown>[]
+): TriggerRule<unknown, unknown> {
+  return { kind: "any", rule: buildRule("anyOf", entries) };
+}
 
 /**
  * The single-edge conjunction: `when(e)` is `allOf(on(e))`. Named because a one-entry `allOf` is by
@@ -75,10 +107,12 @@ export const when = <N, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
   allOf<N, T>(on(edge));
 
 /** Fires every turn and names no edge — the source trigger. Identical to `allOf()`. */
-export const always = <N, T>(): TriggerRule<N, T> => allOf<N, T>();
+export const always = <N = never, T = never>(): TriggerRule<N, T> =>
+  allOf<N, T>();
 
 /** Never fires. Identical to `anyOf()`. */
-export const never = <N, T>(): TriggerRule<N, T> => anyOf<N, T>();
+export const never = <N = never, T = never>(): TriggerRule<N, T> =>
+  anyOf<N, T>();
 
 /**
  * Whether one rule entry has something to offer right now: at least one queued message, or a

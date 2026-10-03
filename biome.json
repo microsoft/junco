@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "root": true,
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "root": "."
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "src/**",
+      "test/**",
+      "package.json",
+      "tsconfig*.json",
+      "biome.json",
+      "packages/dataflow-engine/**",
+      "packages/junco-agent/src/**",
+      "packages/junco-agent/test/**",
+      "packages/junco-agent/package.json",
+      "packages/junco-agent/tsconfig*.json",
+      "packages/junco-scheduler/src/**",
+      "packages/junco-scheduler/test/**",
+      "packages/junco-scheduler/package.json",
+      "packages/junco-scheduler/tsconfig*.json",
+      "packages/junco-tools/ts/**",
+      "packages/junco-tools/tests/**",
+      "packages/junco-tools/package.json",
+      "packages/junco-tools/tsconfig*.json",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/target",
+      "!**/native",
+      "!**/coverage",
+      "!graft"
+    ]
+  },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
+  "javascript": { "formatter": { "quoteStyle": "double" } },
+  "linter": { "enabled": true, "rules": { "recommended": true } }
+}

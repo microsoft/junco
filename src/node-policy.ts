@@ -24,7 +24,10 @@ export type NodePolicy = {
 export const nodePolicies = new WeakMap<object, NodePolicy>();
 
 /** Only the resolved parent results `seen` has not recorded, recording them now. */
-export function unseenValues<T>(values: Lookup<EdgeId, T>, seen: Set<EdgeId>): Lookup<EdgeId, T> {
+export function unseenValues<T>(
+  values: Lookup<EdgeId, T>,
+  seen: Set<EdgeId>,
+): Lookup<EdgeId, T> {
   const fresh = new Set<EdgeId>();
   for (const id of values.keys()) if (!seen.has(id)) fresh.add(id);
   for (const id of fresh) seen.add(id);
@@ -41,9 +44,13 @@ export function unseenValues<T>(values: Lookup<EdgeId, T>, seen: Set<EdgeId>): L
  * trigger reads its first satisfied edge that is not an already delivered result, so a permanent
  * result never starves a newer message.
  */
-export function nodeInputs<N, T>(step: object | undefined, candidate: NodeAvailability<N, T>): InputSchedule {
+export function nodeInputs<N, T>(
+  step: object | undefined,
+  candidate: NodeAvailability<N, T>,
+): InputSchedule {
   if (candidate.trigger.kind === "all") return triggerInputs(candidate);
-  const seen = step === undefined ? undefined : nodePolicies.get(step)?.seenValues;
+  const seen =
+    step === undefined ? undefined : nodePolicies.get(step)?.seenValues;
   const first = candidate.satisfied.find((edgeId) => !seen?.has(edgeId));
   return first === undefined ? new Map() : new Map([[first, "all"]]);
 }

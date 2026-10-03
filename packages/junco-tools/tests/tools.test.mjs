@@ -1,23 +1,53 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { InMemoryCredentialStore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
+  fauxAssistantMessage,
+  fauxToolCall,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
+import {
+  createAgentSession,
   DEFAULT_MAX_BYTES,
   ModelRuntime,
   SessionManager,
-  createAgentSession,
 } from "@earendil-works/pi-coding-agent";
 import {
-  ToolCollection, createBashTool, createShellMuxOperations, isMarshPolicyDenied,
+  createBashTool,
+  createShellMuxOperations,
+  isMarshPolicyDenied,
+  LspTool,
+  MARSH_POLICY_DENIED,
+  ToolCollection,
 } from "../dist/index.js";
 import {
-  cleanup, closeFixture, collector, deferred, fixture, hashlineTag, heldChild,
-  nativeEnv, release, sdkResources, settleAgent, text,
+  cleanup,
+  closeFixture,
+  collector,
+  deferred,
+  fixture,
+  hashlineTag,
+  heldChild,
+  nativeEnv,
+  release,
+  sdkResources,
+  settleAgent,
+  text,
 } from "./helpers.mjs";
-import { scriptBashTurn, scriptedModel, toolResult } from "./scripted-model.mjs";
+import {
+  scriptBashTurn,
+  scriptedModel,
+  toolResult,
+} from "./scripted-model.mjs";
 
 /**
  * A CopyTree seed holding `files`, plus a collection over a borrowed test-addon mux on it.
@@ -33,7 +63,8 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
       root,
       mux,
       collection,
-      call: (name, input, signal) => byName.get(name).execute(`tools-${name}`, input, signal, undefined),
+      call: (name, input, signal) =>
+        byName.get(name).execute(`tools-${name}`, input, signal, undefined),
       file: (relative) => readFile(join(root, relative), "utf8"),
       write: (relative, content) => writeFile(join(root, relative), content),
       dispose: () => closeFixture(instance),
@@ -51,7 +82,9 @@ function tagOf(output) {
   return tag;
 }
 
-test("a partial read anchors only the lines it displayed", { timeout: 30_000 }, async () => {
+test("a partial read anchors only the lines it displayed", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({ "two.txt": "alpha\nbravo\n" });
   try {
     const first = text(await ws.call("read", { path: "two.txt", limit: 1 }));
@@ -59,32 +92,44 @@ test("a partial read anchors only the lines it displayed", { timeout: 30_000 }, 
     assert.doesNotMatch(first, /^2:/m);
 
     await assert.rejects(
-      ws.call("edit", { input: `[two.txt#${tagOf(first)}]\nPUT 2.=2:\n+BRAVO\n` }),
+      ws.call("edit", {
+        input: `[two.txt#${tagOf(first)}]\nPUT 2.=2:\n+BRAVO\n`,
+      }),
       /never displayed/,
     );
     assert.equal(await ws.file("two.txt"), "alpha\nbravo\n");
 
     const second = text(await ws.call("read", { path: "two.txt", offset: 2 }));
     assert.match(second, /^2:bravo$/m);
-    await ws.call("edit", { input: `[two.txt#${tagOf(second)}]\nPUT 2.=2:\n+BRAVO\n` });
+    await ws.call("edit", {
+      input: `[two.txt#${tagOf(second)}]\nPUT 2.=2:\n+BRAVO\n`,
+    });
     assert.equal(await ws.file("two.txt"), "alpha\nBRAVO\n");
   } finally {
     await ws.dispose();
   }
 });
 
-test("an oversized read notice grants no line provenance", { timeout: 30_000 }, async () => {
+test("an oversized read notice grants no line provenance", {
+  timeout: 30_000,
+}, async () => {
   const wide = "x".repeat(DEFAULT_MAX_BYTES + 1);
   const original = `${wide}\nsmall\n`;
   const ws = await workspace({ "wide.txt": original });
   try {
-    const first = await ws.call("read", { path: "wide.txt", offset: 1, limit: 1 });
+    const first = await ws.call("read", {
+      path: "wide.txt",
+      offset: 1,
+      limit: 1,
+    });
     assert.equal(first.details.truncation.firstLineExceedsLimit, true);
     const firstText = text(first);
     assert.equal(hashlineTag(firstText), undefined);
     assert.doesNotMatch(firstText, /^[0-9]+:/m);
 
-    const second = text(await ws.call("read", { path: "wide.txt", offset: 2, limit: 1 }));
+    const second = text(
+      await ws.call("read", { path: "wide.txt", offset: 2, limit: 1 }),
+    );
     assert.match(second, /^\[wide\.txt#[0-9A-Fa-f]{4}\]$/m);
     assert.match(second, /^2:small$/m);
     const tag = tagOf(second);
@@ -101,13 +146,17 @@ test("an oversized read notice grants no line provenance", { timeout: 30_000 }, 
   }
 });
 
-test("a natively shortened grep row carries no tag", { timeout: 30_000 }, async () => {
+test("a natively shortened grep row carries no tag", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({
     "long.txt": `${"x".repeat(600)}needle\n`,
     "short.txt": "needle\n",
   });
   try {
-    const output = text(await ws.call("grep", { pattern: "needle", path: "." }));
+    const output = text(
+      await ws.call("grep", { pattern: "needle", path: "." }),
+    );
     assert.match(output, /^\[long\.txt\]$/m, output);
     assert.doesNotMatch(output, /\[long\.txt#/);
     // A neighbouring complete row still anchors normally.
@@ -117,7 +166,9 @@ test("a natively shortened grep row carries no tag", { timeout: 30_000 }, async 
   }
 });
 
-test("tagged views fold BOM and CRLF while writes preserve them", { timeout: 30_000 }, async () => {
+test("tagged views fold BOM and CRLF while writes preserve them", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({ "bom.txt": "\ufefffirst\r\nsecond  \r\n" });
   try {
     const read = text(await ws.call("read", { path: "bom.txt" }));
@@ -125,36 +176,53 @@ test("tagged views fold BOM and CRLF while writes preserve them", { timeout: 30_
     // Trailing whitespace belongs to the editable view and must survive display.
     assert.match(read, /^2:second {2}$/m);
 
-    const grep = text(await ws.call("grep", { pattern: "second", path: "bom.txt" }));
+    const grep = text(
+      await ws.call("grep", { pattern: "second", path: "bom.txt" }),
+    );
     assert.match(grep, /^\*2:second {2}$/m, grep);
 
-    await ws.call("edit", { input: `[bom.txt#${tagOf(read)}]\nPUT 1.=1:\n+FIRST\n` });
+    await ws.call("edit", {
+      input: `[bom.txt#${tagOf(read)}]\nPUT 1.=1:\n+FIRST\n`,
+    });
     assert.equal(await ws.file("bom.txt"), "\ufeffFIRST\r\nsecond  \r\n");
   } finally {
     await ws.dispose();
   }
 });
 
-test("a notebook edits through its decoded cells", { timeout: 30_000 }, async () => {
-  const source = JSON.stringify({
-    cells: [{
-      cell_type: "code",
-      execution_count: null,
-      metadata: { tags: ["keep"] },
-      outputs: [],
-      source: ["print('hi')\n"],
-    }],
-    metadata: { kernelspec: { name: "python3", display_name: "Python 3" }, custom: "untouched" },
-    nbformat: 4,
-    nbformat_minor: 5,
-  }, null, 1);
+test("a notebook edits through its decoded cells", {
+  timeout: 30_000,
+}, async () => {
+  const source = JSON.stringify(
+    {
+      cells: [
+        {
+          cell_type: "code",
+          execution_count: null,
+          metadata: { tags: ["keep"] },
+          outputs: [],
+          source: ["print('hi')\n"],
+        },
+      ],
+      metadata: {
+        kernelspec: { name: "python3", display_name: "Python 3" },
+        custom: "untouched",
+      },
+      nbformat: 4,
+      nbformat_minor: 5,
+    },
+    null,
+    1,
+  );
   const ws = await workspace({ "nb.ipynb": source });
   try {
     const read = text(await ws.call("read", { path: "nb.ipynb" }));
     assert.match(read, /^2:print\('hi'\)$/m, read);
     assert.doesNotMatch(read, /nbformat/);
 
-    await ws.call("edit", { input: `[nb.ipynb#${tagOf(read)}]\nPUT 2.=2:\n+print('bye')\n` });
+    await ws.call("edit", {
+      input: `[nb.ipynb#${tagOf(read)}]\nPUT 2.=2:\n+print('bye')\n`,
+    });
     const persisted = JSON.parse(await ws.file("nb.ipynb"));
     assert.deepEqual(persisted.cells[0].source, ["print('bye')\n"]);
     assert.deepEqual(persisted.cells[0].metadata, { tags: ["keep"] });
@@ -165,14 +233,18 @@ test("a notebook edits through its decoded cells", { timeout: 30_000 }, async ()
     assert.equal(persisted.nbformat, 4);
 
     // A notebook's raw JSON lines are never what grep displays, so no anchor.
-    const grep = text(await ws.call("grep", { pattern: "nbformat", path: "nb.ipynb" }));
+    const grep = text(
+      await ws.call("grep", { pattern: "nbformat", path: "nb.ipynb" }),
+    );
     assert.match(grep, /^\[nb\.ipynb\]$/m, grep);
   } finally {
     await ws.dispose();
   }
 });
 
-test("unsnapshottable reads fall through without an anchor", { timeout: 60_000 }, async () => {
+test("unsnapshottable reads fall through without an anchor", {
+  timeout: 60_000,
+}, async () => {
   const ws = await workspace({ "empty.txt": "" });
   try {
     const png = Buffer.from(
@@ -181,7 +253,10 @@ test("unsnapshottable reads fall through without an anchor", { timeout: 60_000 }
     );
     await writeFile(join(ws.root, "dot.png"), png);
     const image = await ws.call("read", { path: "dot.png" });
-    assert.deepEqual(image.content.map((part) => part.type), ["text", "image"]);
+    assert.deepEqual(
+      image.content.map((part) => part.type),
+      ["text", "image"],
+    );
     assert.doesNotMatch(text(image), /#[0-9A-Fa-f]{4}\]/);
 
     // Past pi-edit's 4 MiB snapshot cap: ordinary Pi read output, no tag.
@@ -199,7 +274,9 @@ test("unsnapshottable reads fall through without an anchor", { timeout: 60_000 }
   }
 });
 
-test("a stale tag rejects an ambiguous anchor and recovers a stable one", { timeout: 30_000 }, async () => {
+test("a stale tag rejects an ambiguous anchor and recovers a stable one", {
+  timeout: 30_000,
+}, async () => {
   const drifted = await workspace({ "drift.txt": "one\ntwo\nthree\n" });
   try {
     const tag = tagOf(text(await drifted.call("read", { path: "drift.txt" })));
@@ -217,7 +294,9 @@ test("a stale tag rejects an ambiguous anchor and recovers a stable one", { time
   try {
     const tag = tagOf(text(await stable.call("read", { path: "drift.txt" })));
     await stable.write("drift.txt", "one\ntwo\nthree\nfour\n");
-    const result = await stable.call("edit", { input: `[drift.txt#${tag}]\nPUT 1.=1:\n+ONE\n` });
+    const result = await stable.call("edit", {
+      input: `[drift.txt#${tag}]\nPUT 1.=1:\n+ONE\n`,
+    });
     assert.match(text(result), /Recovered from a stale file hash/);
     assert.equal(await stable.file("drift.txt"), "ONE\ntwo\nthree\nfour\n");
   } finally {
@@ -225,7 +304,9 @@ test("a stale tag rejects an ambiguous anchor and recovers a stable one", { time
   }
 });
 
-test("one invalid section stages nothing across files", { timeout: 30_000 }, async () => {
+test("one invalid section stages nothing across files", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({ "a.txt": "a1\n", "b.txt": "b1\n" });
   try {
     const tag = tagOf(text(await ws.call("read", { path: "a.txt" })));
@@ -243,7 +324,9 @@ test("one invalid section stages nothing across files", { timeout: 30_000 }, asy
   }
 });
 
-test("named registers live in the collection that cut them", { timeout: 30_000 }, async () => {
+test("named registers live in the collection that cut them", {
+  timeout: 30_000,
+}, async () => {
   const owner = await workspace({ "a.txt": "a1\n", "b.txt": "b1\n" });
   const other = await workspace({ "b.txt": "b1\n" });
   try {
@@ -271,19 +354,29 @@ test("MV moves and REM deletes real files", { timeout: 30_000 }, async () => {
   const ws = await workspace({ "a.txt": "a1\n", "b.txt": "b1\n" });
   try {
     const moveTag = tagOf(text(await ws.call("read", { path: "a.txt" })));
-    await ws.call("edit", { input: `[a.txt#${moveTag}]\nMV nested/moved.txt\n` });
+    await ws.call("edit", {
+      input: `[a.txt#${moveTag}]\nMV nested/moved.txt\n`,
+    });
     assert.equal(await ws.file("nested/moved.txt"), "a1\n");
-    await assert.rejects(access(join(ws.root, "a.txt")), (error) => error.code === "ENOENT");
+    await assert.rejects(
+      access(join(ws.root, "a.txt")),
+      (error) => error.code === "ENOENT",
+    );
 
     const removeTag = tagOf(text(await ws.call("read", { path: "b.txt" })));
     await ws.call("edit", { input: `[b.txt#${removeTag}]\nREM\n` });
-    await assert.rejects(access(join(ws.root, "b.txt")), (error) => error.code === "ENOENT");
+    await assert.rejects(
+      access(join(ws.root, "b.txt")),
+      (error) => error.code === "ENOENT",
+    );
   } finally {
     await ws.dispose();
   }
 });
 
-test("native search honours PCRE2, .gitignore, and literal patterns", { timeout: 30_000 }, async () => {
+test("native search honours PCRE2, .gitignore, and literal patterns", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({
     ".gitignore": "ignored.txt\n",
     "ignored.txt": "needle\n",
@@ -295,25 +388,43 @@ test("native search honours PCRE2, .gitignore, and literal patterns", { timeout:
     await mkdir(join(ws.root, ".git"), { recursive: true });
     await writeFile(join(ws.root, ".git/HEAD"), "ref: refs/heads/main\n");
 
-    const lookahead = text(await ws.call("grep", { pattern: "foo(?=bar)", path: "look.txt" }));
+    const lookahead = text(
+      await ws.call("grep", { pattern: "foo(?=bar)", path: "look.txt" }),
+    );
     assert.match(lookahead, /^\*1:foobar$/m);
     assert.doesNotMatch(lookahead, /foobaz/);
 
-    const ignored = text(await ws.call("grep", { pattern: "needle", path: "." }));
+    const ignored = text(
+      await ws.call("grep", { pattern: "needle", path: "." }),
+    );
     assert.match(ignored, /kept\.txt/);
     assert.doesNotMatch(ignored, /ignored\.txt/);
-    assert.doesNotMatch(text(await ws.call("find", { pattern: "*.txt" })), /ignored\.txt/);
+    assert.doesNotMatch(
+      text(await ws.call("find", { pattern: "*.txt" })),
+      /ignored\.txt/,
+    );
 
-    const literal = text(await ws.call("grep", { pattern: "a.c", literal: true, path: "meta.txt" }));
+    const literal = text(
+      await ws.call("grep", {
+        pattern: "a.c",
+        literal: true,
+        path: "meta.txt",
+      }),
+    );
     assert.match(literal, /^\*1:a\.c$/m);
     assert.doesNotMatch(literal, /^\*2:abc$/m);
-    assert.match(text(await ws.call("grep", { pattern: "a.c", path: "meta.txt" })), /^\*2:abc$/m);
+    assert.match(
+      text(await ws.call("grep", { pattern: "a.c", path: "meta.txt" })),
+      /^\*2:abc$/m,
+    );
   } finally {
     await ws.dispose();
   }
 });
 
-test("pre-aborted calls reject without mutating or clobbering the signal", { timeout: 30_000 }, async () => {
+test("pre-aborted calls reject without mutating or clobbering the signal", {
+  timeout: 30_000,
+}, async () => {
   const ws = await workspace({ "a.txt": "a1\n" });
   try {
     const tag = tagOf(text(await ws.call("read", { path: "a.txt" })));
@@ -327,7 +438,11 @@ test("pre-aborted calls reject without mutating or clobbering the signal", { tim
       ["edit", { input: `[a.txt#${tag}]\nPUT 1.=1:\n+A2\n` }],
       ["diff", { oldText: "a\n", newText: "b\n" }],
     ]) {
-      await assert.rejects(ws.call(name, input, aborted), /Operation aborted/, name);
+      await assert.rejects(
+        ws.call(name, input, aborted),
+        /Operation aborted/,
+        name,
+      );
     }
     assert.equal(await ws.file("a.txt"), "a1\n");
 
@@ -356,7 +471,11 @@ test("missing paths propagate real failures", { timeout: 30_000 }, async () => {
       ["find", { pattern: "*", path: "nope" }],
       ["ast_grep", { patterns: ["$X"], path: "nope" }],
     ]) {
-      await assert.rejects(ws.call(name, input), /nope|no such file|not found/i, name);
+      await assert.rejects(
+        ws.call(name, input),
+        /nope|no such file|not found/i,
+        name,
+      );
     }
   } finally {
     await ws.dispose();
@@ -364,7 +483,10 @@ test("missing paths propagate real failures", { timeout: 30_000 }, async () => {
 });
 
 async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
-  const ws = await workspace({ "src/target.ts": "const value = seed;\n" }, { sandbox });
+  const ws = await workspace(
+    { "src/target.ts": "const value = seed;\n" },
+    { sandbox },
+  );
   const gate = join(ws.root, "..", "read-gate");
   const ready = deferred(t.signal, "held bash readiness");
   const output = collector((value) => {
@@ -376,19 +498,32 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
   let deadline;
   let checks;
   try {
-    run = ws.mux.start({
-      command: "printf 'const value = staged;\\n' > src/target.ts; "
-        + heldChild({ gate, ready: "READ_READY", done: "READ_DONE" })
-        + "; printf 'const value = final;\\n' > src/target.ts",
-      cwd: ws.root,
-      principal: "read-overlap-writer",
-      env: nativeEnv(ws.root),
-    }, output.onData);
+    run = ws.mux.start(
+      {
+        command:
+          "printf 'const value = staged;\\n' > src/target.ts; " +
+          heldChild({ gate, ready: "READ_READY", done: "READ_DONE" }) +
+          "; printf 'const value = final;\\n' > src/target.ts",
+        cwd: ws.root,
+        principal: "read-overlap-writer",
+        env: nativeEnv(ws.root),
+      },
+      output.onData,
+    );
     completion = run.wait();
-    completion.then(() => { settled = true; }, () => { settled = true; });
+    completion.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     await Promise.race([
       ready.promise,
-      completion.then(() => { throw new Error("bash exited before readiness"); }),
+      completion.then(() => {
+        throw new Error("bash exited before readiness");
+      }),
     ]);
 
     const expected = sandbox === "shared" ? "staged" : "seed";
@@ -396,20 +531,34 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
     checks = (async () => {
       await assert.rejects(access(gate), (error) => error.code === "ENOENT");
       const read = text(await ws.call("read", { path: "src/target.ts" }));
-      assert.ok(read.split("\n").includes(`1:const value = ${expected};`), read);
+      assert.ok(
+        read.split("\n").includes(`1:const value = ${expected};`),
+        read,
+      );
       tagOf(read);
 
-      const found = text(await ws.call("find", { pattern: "*.ts", path: "src" }));
+      const found = text(
+        await ws.call("find", { pattern: "*.ts", path: "src" }),
+      );
       assert.match(found, /target\.ts/);
 
-      const searched = text(await ws.call("grep", { pattern: expected, path: "src" }));
-      assert.ok(searched.split("\n").includes(`*1:const value = ${expected};`), searched);
+      const searched = text(
+        await ws.call("grep", { pattern: expected, path: "src" }),
+      );
+      assert.ok(
+        searched.split("\n").includes(`*1:const value = ${expected};`),
+        searched,
+      );
       tagOf(searched);
       assert.doesNotMatch(searched, /\.marsh/);
 
-      const matches = (await ws.call("ast_grep", {
-        patterns: [expected], path: "src", lang: "typescript",
-      })).details.result.matches;
+      const matches = (
+        await ws.call("ast_grep", {
+          patterns: [expected],
+          path: "src",
+          lang: "typescript",
+        })
+      ).details.result.matches;
       assert.equal(matches.length, 1);
       assert.equal(matches[0].text, expected);
       assert.match(matches[0].path, /target\.ts$/);
@@ -417,7 +566,11 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
 
       for (const input of [
         { rewrites: { [expected]: "preview" }, path: "src/target.ts" },
-        { rewrites: { [expected]: "preview" }, path: "src/target.ts", dryRun: true },
+        {
+          rewrites: { [expected]: "preview" },
+          path: "src/target.ts",
+          dryRun: true,
+        },
       ]) {
         const preview = await ws.call("ast_edit", input);
         assert.equal(preview.details.result.totalReplacements, 1);
@@ -426,7 +579,9 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
       }
 
       assert.equal(
-        (await ws.mux.readFile(join(ws.root, "src"), "target.ts")).toString("utf8"),
+        (await ws.mux.readFile(join(ws.root, "src"), "target.ts")).toString(
+          "utf8",
+        ),
         expectedBytes,
       );
       assert.equal(await ws.mux.exists(ws.root, "src/missing.ts"), false);
@@ -435,13 +590,21 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
         /missing\.ts|no such file|not found/i,
       );
       assert.equal(output.output.includes("READ_DONE\n"), false);
-      assert.equal(settled, false, "bash is still held while every read completes");
+      assert.equal(
+        settled,
+        false,
+        "bash is still held while every read completes",
+      );
     })();
     try {
       await Promise.race([
         checks,
         new Promise((_, reject) => {
-          deadline = setTimeout(() => reject(new Error("read-only file tools waited for held bash")), 10_000);
+          deadline = setTimeout(
+            () =>
+              reject(new Error("read-only file tools waited for held bash")),
+            10_000,
+          );
         }),
       ]);
     } finally {
@@ -449,25 +612,41 @@ async function readOnlyFileToolsFinishWhileBashHeld(t, sandbox) {
     }
 
     await release(gate);
-    assert.deepEqual(await completion, { exitCode: 0, cancelled: false, timedOut: false });
+    assert.deepEqual(await completion, {
+      exitCode: 0,
+      cancelled: false,
+      timedOut: false,
+    });
     assert.equal(await ws.file("src/target.ts"), "const value = final;\n");
   } finally {
     clearTimeout(deadline);
     await cleanup(
-      () => { run?.abort(); },
+      () => {
+        run?.abort();
+      },
       () => release(gate),
-      async () => { await completion?.catch(() => {}); },
-      async () => { await checks?.catch(() => {}); },
+      async () => {
+        await completion?.catch(() => {});
+      },
+      async () => {
+        await checks?.catch(() => {});
+      },
       () => ws.dispose(),
     );
   }
 }
 
-test("read-only file tools finish while bash is held (shared)", { timeout: 60_000 },
-  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "shared"));
+test(
+  "read-only file tools finish while bash is held (shared)",
+  { timeout: 60_000 },
+  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "shared"),
+);
 
-test("read-only file tools finish while bash is held (always)", { timeout: 60_000 },
-  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "always"));
+test(
+  "read-only file tools finish while bash is held (always)",
+  { timeout: 60_000 },
+  (t) => readOnlyFileToolsFinishWhileBashHeld(t, "always"),
+);
 
 /** The SDK harness shared with `agent.test.mjs`, with the collection supplying every tool. */
 async function collectionSession(instance, principal) {
@@ -479,7 +658,9 @@ async function collectionSession(instance, principal) {
   const collection = await ToolCollection.create(instance.seed, {
     mux: instance.mux,
     native: instance.native,
-    bash: { operations: createShellMuxOperations({ mux: instance.mux, principal }) },
+    bash: {
+      operations: createShellMuxOperations({ mux: instance.mux, principal }),
+    },
   });
   const errors = [];
   const { session } = await createAgentSession({
@@ -503,30 +684,53 @@ async function collectionSession(instance, principal) {
     // The caller never received this session, so nothing else can dispose it. The borrowed
     // mux stays the caller's, and is deliberately not closed here.
     try {
-      await cleanup(() => settleAgent(session.agent), () => session.dispose());
+      await cleanup(
+        () => settleAgent(session.agent),
+        () => session.dispose(),
+      );
     } catch (cleanupError) {
-      throw new AggregateError([setupError, cleanupError], "Test session setup failed");
+      throw new AggregateError(
+        [setupError, cleanupError],
+        "Test session setup failed",
+      );
     }
     throw setupError;
   }
   return { session, faux, errors };
 }
 
-test("the SDK drives a read into a hashline edit", { timeout: 60_000 }, async () => {
+test("the SDK drives a read into a hashline edit", {
+  timeout: 60_000,
+}, async () => {
   const instance = await fixture();
   let session;
   try {
     let errors;
     let faux;
-    ({ session, faux, errors } = await collectionSession(instance, "sdk-collection"));
+    ({ session, faux, errors } = await collectionSession(
+      instance,
+      "sdk-collection",
+    ));
     assert.deepEqual(errors, []);
 
     const active = session.getActiveToolNames();
-    for (const name of ["read", "bash", "edit", "grep", "find", "ast_grep", "ast_edit", "diff"]) {
+    for (const name of [
+      "read",
+      "bash",
+      "edit",
+      "grep",
+      "find",
+      "ast_grep",
+      "ast_edit",
+      "diff",
+    ]) {
       assert.ok(active.includes(name), `${name} is not active`);
     }
     // Pi's own write tool is untouched by the collection.
-    assert.ok(active.includes("write"), "built-in write is no longer available");
+    assert.ok(
+      active.includes("write"),
+      "built-in write is no longer available",
+    );
 
     const capture = {};
     faux.setResponses([
@@ -539,11 +743,13 @@ test("the SDK drives a read into a hashline edit", { timeout: 60_000 }, async ()
         capture.read = read;
         const tag = tagOf(text(read));
         return fauxAssistantMessage(
-          [fauxToolCall(
-            "edit",
-            { input: `[src/file0.txt#${tag}]\nPUT 1.=1:\n+PATCHED\n` },
-            { id: "edit-1" },
-          )],
+          [
+            fauxToolCall(
+              "edit",
+              { input: `[src/file0.txt#${tag}]\nPUT 1.=1:\n+PATCHED\n` },
+              { id: "edit-1" },
+            ),
+          ],
           { stopReason: "toolUse" },
         );
       },
@@ -558,7 +764,10 @@ test("the SDK drives a read into a hashline edit", { timeout: 60_000 }, async ()
     assert.equal(capture.read?.isError, false);
     assert.match(text(capture.read), /^1:zero$/m);
     assert.equal(capture.edit?.isError, false);
-    assert.equal(await readFile(join(instance.seed, "src/file0.txt"), "utf8"), "PATCHED\n");
+    assert.equal(
+      await readFile(join(instance.seed, "src/file0.txt"), "utf8"),
+      "PATCHED\n",
+    );
     assert.deepEqual(errors, []);
   } finally {
     await cleanup(
@@ -569,40 +778,69 @@ test("the SDK drives a read into a hashline edit", { timeout: 60_000 }, async ()
   }
 });
 
-test("the collection's bash still enforces marsh publication policy", { timeout: 60_000 }, async () => {
+test("the collection's bash still enforces marsh publication policy", {
+  timeout: 60_000,
+}, async () => {
   const instance = await fixture();
   let session;
   try {
     let errors;
     let faux;
-    ({ session, faux, errors } = await collectionSession(instance, "sdk-policy"));
+    ({ session, faux, errors } = await collectionSession(
+      instance,
+      "sdk-policy",
+    ));
     assert.deepEqual(errors, []);
 
-    const ok = scriptBashTurn(faux, [{
-      id: "policy-ok",
-      command: "printf 'agent-ok\\n' > src/agent.txt; cat src/agent.txt",
-    }]);
+    const ok = scriptBashTurn(faux, [
+      {
+        id: "policy-ok",
+        command: "printf 'agent-ok\\n' > src/agent.txt; cat src/agent.txt",
+      },
+    ]);
     await session.agent.prompt("Run the scripted command");
     await session.agent.waitForIdle();
-    assert.equal(text(toolResult(ok.context.messages, "policy-ok")), "agent-ok\n");
-    assert.equal(await readFile(join(instance.seed, "src/agent.txt"), "utf8"), "agent-ok\n");
+    assert.equal(
+      text(toolResult(ok.context.messages, "policy-ok")),
+      "agent-ok\n",
+    );
+    assert.equal(
+      await readFile(join(instance.seed, "src/agent.txt"), "utf8"),
+      "agent-ok\n",
+    );
 
     // Another principal claims the file, so the session's publication conflicts.
     const claim = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({ mux: instance.mux, principal: "other-owner" }),
+      operations: createShellMuxOperations({
+        mux: instance.mux,
+        principal: "other-owner",
+      }),
     });
-    await claim.execute("claim-file", { command: "printf 'owned\\n' > src/file1.txt" }, undefined);
+    await claim.execute(
+      "claim-file",
+      { command: "printf 'owned\\n' > src/file1.txt" },
+      undefined,
+    );
 
-    const denied = scriptBashTurn(faux, [{
-      id: "policy-denied",
-      command: "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file1.txt; true",
-    }]);
+    const denied = scriptBashTurn(faux, [
+      {
+        id: "policy-denied",
+        command:
+          "printf 'new\\n' > src/new.txt; printf 'stolen\\n' > src/file1.txt; true",
+      },
+    ]);
     await session.agent.prompt("Run the conflicting command");
     await session.agent.waitForIdle();
     const deniedResult = toolResult(denied.context.messages, "policy-denied");
     assert.equal(deniedResult?.isError, true);
-    assert.equal(await readFile(join(instance.seed, "src/file1.txt"), "utf8"), "owned\n");
-    await assert.rejects(access(join(instance.seed, "src/new.txt")), (error) => error.code === "ENOENT");
+    assert.equal(
+      await readFile(join(instance.seed, "src/file1.txt"), "utf8"),
+      "owned\n",
+    );
+    await assert.rejects(
+      access(join(instance.seed, "src/new.txt")),
+      (error) => error.code === "ENOENT",
+    );
     assert.deepEqual(errors, []);
   } finally {
     await cleanup(
@@ -613,22 +851,35 @@ test("the collection's bash still enforces marsh publication policy", { timeout:
   }
 });
 
-test("writing file tools are gated by marsh publication", { timeout: 60_000 }, async () => {
-  const ws = await workspace({
-    "src/claimed.ts": "const value = seed;\na;\nb;\nc;\nd;\n",
-    // Identical to the denied edit's result: tags hash content alone, so reading this file
-    // reveals the tag of the snapshot that edit staged but never published.
-    "src/probe.ts": "const value = edited;\na;\nb;\nc;\nd;\n",
-  }, { sandbox: "always" });
+test("writing file tools are gated by marsh publication", {
+  timeout: 60_000,
+}, async () => {
+  const ws = await workspace(
+    {
+      "src/claimed.ts": "const value = seed;\na;\nb;\nc;\nd;\n",
+      // Identical to the denied edit's result: tags hash content alone, so reading this file
+      // reveals the tag of the snapshot that edit staged but never published.
+      "src/probe.ts": "const value = edited;\na;\nb;\nc;\nd;\n",
+    },
+    { sandbox: "always" },
+  );
   try {
     // Another principal claims the file through marsh, so any other principal's later
     // publication of it is refused.
     const claim = createBashTool(ws.root, {
-      operations: createShellMuxOperations({ mux: ws.mux, principal: "other-owner" }),
+      operations: createShellMuxOperations({
+        mux: ws.mux,
+        principal: "other-owner",
+      }),
     });
-    await claim.execute("claim-file", {
-      command: "printf 'const value = owned;\\na;\\nb;\\nc;\\nd;\\n' > src/claimed.ts",
-    }, undefined);
+    await claim.execute(
+      "claim-file",
+      {
+        command:
+          "printf 'const value = owned;\\na;\\nb;\\nc;\\nd;\\n' > src/claimed.ts",
+      },
+      undefined,
+    );
     const owned = "const value = owned;\na;\nb;\nc;\nd;\n";
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
@@ -639,28 +890,43 @@ test("writing file tools are gated by marsh publication", { timeout: 60_000 }, a
     assert.match(grep, /^\*1:const value = owned;$/m, grep);
 
     const deniedEdit = `[src/claimed.ts#${tagOf(read)}]\nPUT 1.=1:\n+const value = edited;\n`;
-    await assert.rejects(ws.call("edit", { input: deniedEdit }), isMarshPolicyDenied);
+    await assert.rejects(
+      ws.call("edit", { input: deniedEdit }),
+      isMarshPolicyDenied,
+    );
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
     // The denied edit published nothing, so the post-edit anchor it recorded is gone: a later
     // edit naming it, even one that would rebase cleanly onto the live file, is an ordinary
     // stale-anchor failure, never a second publication attempt.
-    const unpublished = tagOf(text(await ws.call("read", { path: "src/probe.ts" })));
+    const unpublished = tagOf(
+      text(await ws.call("read", { path: "src/probe.ts" })),
+    );
     await assert.rejects(
-      ws.call("edit", { input: `[src/claimed.ts#${unpublished}]\nPUT 5.=5:\n+D;\n` }),
+      ws.call("edit", {
+        input: `[src/claimed.ts#${unpublished}]\nPUT 5.=5:\n+D;\n`,
+      }),
       (error) => error instanceof Error && !isMarshPolicyDenied(error),
     );
     assert.equal(await ws.file("src/claimed.ts"), owned);
     // A fresh read anchors again, and publication is still refused by policy.
     const reread = text(await ws.call("read", { path: "src/claimed.ts" }));
     await assert.rejects(
-      ws.call("edit", { input: `[src/claimed.ts#${tagOf(reread)}]\nPUT 1.=1:\n+const value = edited;\n` }),
+      ws.call("edit", {
+        input: `[src/claimed.ts#${tagOf(reread)}]\nPUT 1.=1:\n+const value = edited;\n`,
+      }),
       isMarshPolicyDenied,
     );
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
-    const rewrite = { rewrites: { owned: "rewritten" }, path: "src/claimed.ts" };
-    await assert.rejects(ws.call("ast_edit", { ...rewrite, dryRun: false }), isMarshPolicyDenied);
+    const rewrite = {
+      rewrites: { owned: "rewritten" },
+      path: "src/claimed.ts",
+    };
+    await assert.rejects(
+      ws.call("ast_edit", { ...rewrite, dryRun: false }),
+      isMarshPolicyDenied,
+    );
     assert.equal(await ws.file("src/claimed.ts"), owned);
 
     // A read-only call's own failure is ordinary, not a policy denial.
@@ -685,8 +951,13 @@ test("writing file tools are gated by marsh publication", { timeout: 60_000 }, a
   }
 });
 
-test("a managed edit keeps hashline anchors and logical paths", { timeout: 60_000 }, async () => {
-  const ws = await workspace({ "src/plain.txt": "alpha\nbravo\n" }, { sandbox: "always" });
+test("a managed edit keeps hashline anchors and logical paths", {
+  timeout: 60_000,
+}, async () => {
+  const ws = await workspace(
+    { "src/plain.txt": "alpha\nbravo\n" },
+    { sandbox: "always" },
+  );
   try {
     const read = text(await ws.call("read", { path: "src/plain.txt" }));
     const result = await ws.call("edit", {
@@ -715,15 +986,10 @@ test("a collection needs a marsh seed", { timeout: 30_000 }, async () => {
   }
 });
 
-/** The test addon with its `EditStore` replaced, and `NativeMux.open` over a CopyTree seed. */
-function failingNative(native, failure, opened = []) {
+/** The test addon with `NativeMux.open` over a CopyTree seed, recording every mux it opens. */
+function copyTreeNative(native, opened = []) {
   return {
     ...native,
-    EditStore: class {
-      constructor() {
-        throw failure;
-      }
-    },
     NativeMux: {
       async open(root, options) {
         const mux = await native.NativeMux.openCopyTree(root, options);
@@ -734,7 +1000,21 @@ function failingNative(native, failure, opened = []) {
   };
 }
 
-test("failed construction closes an owned mux but never a borrowed one", { timeout: 30_000 }, async () => {
+/** The test addon with its `EditStore` replaced, and `NativeMux.open` over a CopyTree seed. */
+function failingNative(native, failure, opened = []) {
+  return {
+    ...copyTreeNative(native, opened),
+    EditStore: class {
+      constructor() {
+        throw failure;
+      }
+    },
+  };
+}
+
+test("failed construction closes an owned mux but never a borrowed one", {
+  timeout: 30_000,
+}, async () => {
   const instance = await fixture();
   const opened = [];
   try {
@@ -742,7 +1022,9 @@ test("failed construction closes an owned mux but never a borrowed one", { timeo
 
     // Owned: the collection opened the mux, so rejection closes it.
     await assert.rejects(
-      ToolCollection.create(instance.seed, { native: failingNative(instance.native, failure, opened) }),
+      ToolCollection.create(instance.seed, {
+        native: failingNative(instance.native, failure, opened),
+      }),
       (error) => error === failure,
     );
     assert.equal(opened.length, 1);
@@ -761,12 +1043,15 @@ test("failed construction closes an owned mux but never a borrowed one", { timeo
       };
       return mux;
     };
-    await assert.rejects(ToolCollection.create(instance.seed, { native }), (error) => {
-      assert.ok(error instanceof AggregateError);
-      assert.deepEqual(error.errors, [failure, closeFailure]);
-      assert.equal(error.cause, failure);
-      return true;
-    });
+    await assert.rejects(
+      ToolCollection.create(instance.seed, { native }),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, [failure, closeFailure]);
+        assert.equal(error.cause, failure);
+        return true;
+      },
+    );
     assert.equal(opened.length, 2);
     await assert.rejects(opened[1].exists(instance.seed, "src/file0.txt"));
 
@@ -778,12 +1063,360 @@ test("failed construction closes an owned mux but never a borrowed one", { timeo
       }),
       (error) => error === failure,
     );
-    assert.equal(await instance.mux.exists(instance.seed, "src/file0.txt"), true);
+    assert.equal(
+      await instance.mux.exists(instance.seed, "src/file0.txt"),
+      true,
+    );
   } finally {
     // The prototype's close: one opened mux's own close was replaced to fail.
     await cleanup(
       ...opened.map((mux) => () => Object.getPrototypeOf(mux).close.call(mux)),
       () => closeFixture(instance),
     );
+  }
+});
+
+test("a collection closes only the mux it opened and rejects borrowed-mux misuse", {
+  timeout: 30_000,
+}, async () => {
+  const instance = await fixture();
+  const opened = [];
+  let owned;
+  let borrowed;
+  try {
+    const env = nativeEnv(instance.root);
+    const borrowedWorks = async (label) => {
+      assert.equal(
+        (await instance.mux.readFile(instance.seed, "src/file0.txt")).toString(
+          "utf8",
+        ),
+        "zero\n",
+        label,
+      );
+      const output = collector();
+      const run = instance.mux.start(
+        {
+          command: "printf borrowed",
+          cwd: instance.seed,
+          principal: "borrowed-collection",
+          env,
+        },
+        output.onData,
+      );
+      assert.deepEqual(
+        await run.wait(),
+        { exitCode: 0, cancelled: false, timedOut: false },
+        label,
+      );
+      assert.equal(output.output, "borrowed", label);
+    };
+
+    // Owned: the collection opens its own mux, reads through it, and closes it exactly once.
+    owned = await ToolCollection.create(instance.seed, {
+      native: copyTreeNative(instance.native, opened),
+    });
+    assert.equal(opened.length, 1);
+    const read = owned.tools.find((tool) => tool.name === "read");
+    assert.match(
+      text(await read.execute("owned-read", { path: "src/file0.txt" })),
+      /^1:zero$/m,
+    );
+    await Promise.all([owned.close(), owned.close()]);
+    await owned.close();
+    await assert.rejects(opened[0].exists(instance.seed, "src/file0.txt"));
+    await assert.rejects(opened[0].readFile(instance.seed, "src/file0.txt"));
+
+    // Borrowed: closing the collection leaves the caller's mux reading and executing.
+    borrowed = await ToolCollection.create(instance.seed, {
+      mux: instance.mux,
+      native: instance.native,
+    });
+    await Promise.all([borrowed.close(), borrowed.close()]);
+    await borrowedWorks("after borrowed close");
+
+    // Invalid borrowed-mux options reject without touching that mux.
+    await assert.rejects(
+      ToolCollection.create(instance.seed, { mux: instance.mux }),
+      Error,
+    );
+    await assert.rejects(
+      ToolCollection.create(instance.seed, {
+        mux: instance.mux,
+        native: instance.native,
+        sandbox: "shared",
+      }),
+      Error,
+    );
+    assert.equal(opened.length, 1);
+    await borrowedWorks("after rejected options");
+  } finally {
+    await cleanup(
+      () => owned?.close(),
+      () => borrowed?.close(),
+      () => closeFixture(instance),
+    );
+  }
+});
+
+test("diff reports structured hunks for the requested context", {
+  timeout: 30_000,
+}, async () => {
+  const ws = await workspace({});
+  try {
+    const same = await ws.call("diff", {
+      oldText: "top\nsame\n",
+      newText: "top\nsame\n",
+    });
+    assert.deepEqual(same.details.result.hunks, []);
+
+    const oldText = "top\nold\nbottom\n";
+    const newText = "top\nnew\nbottom\n";
+    const tight = await ws.call("diff", { oldText, newText, context: 0 });
+    assert.deepEqual(tight.details.result.hunks, [
+      {
+        oldStart: 2,
+        oldLines: 1,
+        newStart: 2,
+        newLines: 1,
+        lines: ["-old", "+new"],
+      },
+    ]);
+    assert.equal(
+      text(tight),
+      "--- before\n+++ after\n@@ -2,1 +2,1 @@\n-old\n+new",
+    );
+
+    const wide = await ws.call("diff", { oldText, newText, context: 1 });
+    assert.deepEqual(wide.details.result.hunks, [
+      {
+        oldStart: 1,
+        oldLines: 3,
+        newStart: 1,
+        newLines: 3,
+        lines: [" top", "-old", "+new", " bottom"],
+      },
+    ]);
+    assert.equal(
+      text(wide),
+      "--- before\n+++ after\n@@ -1,3 +1,3 @@\n top\n-old\n+new\n bottom",
+    );
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("manual integer bounds and empty structural inputs reject without mutation", {
+  timeout: 60_000,
+}, async () => {
+  const original = "const value = seed;\n";
+  const ws = await workspace({ "src/target.ts": original });
+  const ast = { path: "src/target.ts", lang: "typescript" };
+  try {
+    const fields = [
+      ["find", "limit", 1, { pattern: "*.ts" }],
+      ["grep", "limit", 1, { pattern: "seed", path: "src/target.ts" }],
+      ["grep", "context", 0, { pattern: "seed", path: "src/target.ts" }],
+      ["ast_grep", "limit", 1, { patterns: ["seed"], ...ast }],
+      ["ast_grep", "offset", 0, { patterns: ["seed"], ...ast }],
+      [
+        "ast_edit",
+        "maxReplacements",
+        1,
+        { rewrites: { seed: "changed" }, ...ast, dryRun: false },
+      ],
+      [
+        "ast_edit",
+        "maxFiles",
+        1,
+        { rewrites: { seed: "changed" }, ...ast, dryRun: false },
+      ],
+      ["diff", "context", 0, { oldText: "a\n", newText: "b\n" }],
+    ];
+    for (const [name, field, minimum, input] of fields) {
+      for (const value of [
+        minimum - 1,
+        1.5,
+        4_294_967_296,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await assert.rejects(
+          ws.call(name, { ...input, [field]: value }),
+          Error,
+          `${name}.${field}=${value}`,
+        );
+        assert.equal(
+          await ws.file("src/target.ts"),
+          original,
+          `${name}.${field}=${value}`,
+        );
+      }
+    }
+
+    for (const patterns of [[], ["", "  "]]) {
+      await assert.rejects(ws.call("ast_grep", { patterns, ...ast }), Error);
+    }
+    for (const rewrites of [{}, { "": "changed" }, { "  ": "changed" }]) {
+      await assert.rejects(
+        ws.call("ast_edit", { rewrites, ...ast, dryRun: false }),
+        Error,
+      );
+      assert.equal(await ws.file("src/target.ts"), original);
+    }
+
+    // Minimum-value controls.
+    const found = await ws.call("find", { pattern: "*.ts", limit: 1 });
+    assert.equal(text(found).split("\n")[0], "src/target.ts");
+    assert.equal(found.details.resultLimitReached, 1);
+
+    const limited = await ws.call("grep", {
+      pattern: "seed",
+      path: "src/target.ts",
+      limit: 1,
+    });
+    assert.equal(limited.details.totalMatches, 1);
+    assert.equal(limited.details.matchLimitReached, 1);
+    assert.match(text(limited), /^\*1:const value = seed;$/m);
+
+    const bare = await ws.call("grep", {
+      pattern: "seed",
+      path: "src/target.ts",
+      context: 0,
+    });
+    assert.equal(bare.details.totalMatches, 1);
+    assert.deepEqual(
+      text(bare)
+        .split("\n")
+        .filter((line) => /^[* ]\d+:/.test(line)),
+      ["*1:const value = seed;"],
+    );
+
+    for (const bounds of [{ limit: 1 }, { offset: 0 }]) {
+      const { result } = (
+        await ws.call("ast_grep", { patterns: ["seed"], ...ast, ...bounds })
+      ).details;
+      assert.deepEqual(
+        result.matches.map((match) => [
+          match.text,
+          match.startLine,
+          match.startColumn,
+        ]),
+        [["seed", 1, 15]],
+      );
+      assert.equal(result.totalMatches, 1);
+    }
+
+    for (const bounds of [{ maxReplacements: 1 }, { maxFiles: 1 }]) {
+      const { result } = (
+        await ws.call("ast_edit", {
+          rewrites: { seed: "previewed" },
+          ...ast,
+          ...bounds,
+        })
+      ).details;
+      assert.equal(result.applied, false);
+      assert.equal(result.totalReplacements, 1);
+      assert.deepEqual(
+        result.changes.map((change) => [change.before, change.after]),
+        [["seed", "previewed"]],
+      );
+    }
+    assert.equal(await ws.file("src/target.ts"), original);
+
+    const diff = await ws.call("diff", {
+      oldText: "a\n",
+      newText: "b\n",
+      context: 0,
+    });
+    assert.deepEqual(
+      diff.details.result.hunks.map((hunk) => hunk.lines),
+      [["-a", "+b"]],
+    );
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("an applied AST rewrite is visible to later grep and AST searches", {
+  timeout: 30_000,
+}, async () => {
+  const ws = await workspace({ "src/target.ts": "const value = seed;\n" });
+  const astTokens = async (pattern) =>
+    (
+      await ws.call("ast_grep", {
+        patterns: [pattern],
+        path: "src",
+        lang: "typescript",
+      })
+    ).details.result.matches.map((match) => match.text);
+  const grepRows = async () =>
+    text(await ws.call("grep", { pattern: "seed|published", path: "src" }))
+      .split("\n")
+      .filter((line) => /^\*\d+:/.test(line));
+  try {
+    // Warm both search paths over the pre-edit bytes.
+    assert.deepEqual(await grepRows(), ["*1:const value = seed;"]);
+    assert.deepEqual(await astTokens("seed"), ["seed"]);
+
+    const { result } = (
+      await ws.call("ast_edit", {
+        rewrites: { seed: "published" },
+        path: "src/target.ts",
+        lang: "typescript",
+        dryRun: false,
+      })
+    ).details;
+    assert.equal(result.applied, true);
+    assert.equal(result.totalReplacements, 1);
+    assert.equal(await ws.file("src/target.ts"), "const value = published;\n");
+
+    assert.deepEqual(await grepRows(), ["*1:const value = published;"]);
+    assert.deepEqual(await astTokens("published"), ["published"]);
+    assert.deepEqual(await astTokens("seed"), []);
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("a grep without matches reports zero counts and no limit", {
+  timeout: 30_000,
+}, async () => {
+  const ws = await workspace({ "a.txt": "alpha\n" });
+  try {
+    const result = await ws.call("grep", { pattern: "absent", path: "a.txt" });
+    assert.equal(result.details.totalMatches, 0);
+    assert.equal(result.details.filesWithMatches, 0);
+    assert.equal(result.details.matchLimitReached, undefined);
+    assert.equal(result.details.truncation, undefined);
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("policy denial is classified by its exact code", () => {
+  assert.equal(
+    isMarshPolicyDenied(
+      Object.assign(new Error("denied"), { code: MARSH_POLICY_DENIED }),
+    ),
+    true,
+  );
+  assert.equal(isMarshPolicyDenied(new Error(MARSH_POLICY_DENIED)), false);
+  assert.equal(
+    isMarshPolicyDenied(Object.assign(new Error("denied"), { code: "EACCES" })),
+    false,
+  );
+  assert.equal(
+    isMarshPolicyDenied({ code: MARSH_POLICY_DENIED, message: "denied" }),
+    false,
+  );
+  assert.equal(isMarshPolicyDenied(null), false);
+});
+
+test("LspTool.create rejects under Node", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-tools-lsp-"));
+  try {
+    await assert.rejects(LspTool.create(directory), Error);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

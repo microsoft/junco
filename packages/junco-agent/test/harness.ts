@@ -1,6 +1,6 @@
 import {
-  BACKGROUND_CONTEXT,
   type AgentTool,
+  BACKGROUND_CONTEXT,
   MemorySessionRepo,
   type PromptTemplate,
   type Skill,
@@ -19,7 +19,11 @@ import { type AgenticOptions, JuncoAgent } from "../src/index.ts";
 
 /** A faux model whose provider serves `responses` (messages or context-inspecting factories) in order. */
 export function scripted(responses: readonly FauxResponseStep[]) {
-  const faux = fauxProvider({ api: "faux", provider: "faux", tokenSize: { min: 4, max: 4 } });
+  const faux = fauxProvider({
+    api: "faux",
+    provider: "faux",
+    tokenSize: { min: 4, max: 4 },
+  });
   faux.setResponses([...responses]);
   const models = createModels();
   models.setProvider(faux.provider);
@@ -51,9 +55,15 @@ export async function newAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
->(responses: readonly FauxResponseStep[], options: Partial<AgenticOptions<S, P, T>> = {}) {
+>(
+  responses: readonly FauxResponseStep[],
+  options: Partial<AgenticOptions<S, P, T>> = {},
+) {
   const { faux, ...native } = await nativeOptions<S, P, T>(responses);
-  return { faux, agent: await JuncoAgent.fromResolved<S, P, T>({ ...native, ...options }) };
+  return {
+    faux,
+    agent: await JuncoAgent.fromResolved<S, P, T>({ ...native, ...options }),
+  };
 }
 
 /** A caller-owned tool counting its executions. */

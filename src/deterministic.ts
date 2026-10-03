@@ -18,7 +18,9 @@ type Advance<N, T> = IteratorResult<Message<N>[], T>;
  * the generator through `return()`, discarding any cleanup batches, and rejects every later advance.
  * Neither can preempt a body that ignores its signal.
  */
-export class Deterministic<N = AgenticInput, T = AssistantMessage> implements NodeGenerator<N, T> {
+export class Deterministic<N = AgenticInput, T = AssistantMessage>
+  implements NodeGenerator<N, T>
+{
   readonly #controller = new AbortController();
   readonly #generator: NodeGenerator<N, T>;
   /** Handed to its consumer by {@link step}, or advanced directly. */
@@ -43,7 +45,10 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
    */
   readonly step = (): NodeGenerator<N, T> => {
     if (this.#claimed) {
-      throw new JuncoAgentError("invalid_state", "Deterministic coroutine already has a consumer");
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Deterministic coroutine already has a consumer",
+      );
     }
     this.#claimed = true;
     return this;
@@ -74,7 +79,9 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
    * `signal.reason` is cancellation, not failure; any other error is preserved. After close has
    * started, joins that close instead.
    */
-  abort(reason: unknown = new DOMException("Deterministic aborted", "AbortError")): Promise<void> {
+  abort(
+    reason: unknown = new DOMException("Deterministic aborted", "AbortError"),
+  ): Promise<void> {
     if (this.#close !== undefined) return this.#close;
     this.#controller.abort(reason);
     return this.#joinPending();
@@ -94,12 +101,22 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
     return this.#close;
   }
 
-  #advance(guardFinished: boolean, request: () => Promise<Advance<N, T>>): Promise<Advance<N, T>> {
+  #advance(
+    guardFinished: boolean,
+    request: () => Promise<Advance<N, T>>,
+  ): Promise<Advance<N, T>> {
     if (this.#close !== undefined) {
-      return Promise.reject(new JuncoAgentError("closed", "Deterministic is closed"));
+      return Promise.reject(
+        new JuncoAgentError("closed", "Deterministic is closed"),
+      );
     }
     if (guardFinished && this.#finished) {
-      return Promise.reject(new JuncoAgentError("invalid_state", "Deterministic coroutine has finished"));
+      return Promise.reject(
+        new JuncoAgentError(
+          "invalid_state",
+          "Deterministic coroutine has finished",
+        ),
+      );
     }
     this.#claimed = true;
     let underlying: Promise<Advance<N, T>>;
@@ -142,7 +159,10 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
 
   async #finishClose(): Promise<void> {
     const errors: unknown[] = [];
-    if (!this.signal.aborted) this.#controller.abort(new DOMException("Deterministic closed", "AbortError"));
+    if (!this.signal.aborted)
+      this.#controller.abort(
+        new DOMException("Deterministic closed", "AbortError"),
+      );
     const pending = this.#pending;
     if (pending !== undefined) {
       try {
@@ -160,6 +180,7 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
     }
     this.#finished = true;
     if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError(errors, "Deterministic close failed");
+    if (errors.length > 1)
+      throw new AggregateError(errors, "Deterministic close failed");
   }
 }

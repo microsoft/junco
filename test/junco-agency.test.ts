@@ -3,14 +3,31 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
+import {
+  BACKGROUND_CONTEXT,
+  MemorySessionRepo,
+} from "@earendil-works/pi-agent-core";
+import {
+  type AssistantMessage,
+  fauxAssistantMessage,
+  fauxToolCall,
+  type ToolCall,
+  type ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { always, NodeId, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
-import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph } from "../src/index.ts";
+import {
+  type AgenticInput,
+  agentNode,
+  createAgencyScheduler,
+  graphNode,
+  JuncoGraph,
+  LspTool,
+  tools,
+} from "../src/index.ts";
 import {
   agencyGraph,
   drive,
@@ -26,7 +43,8 @@ import {
 
 const TIMEOUT_MS = 30_000;
 const MEMBER = NodeId("0");
-const toolTurn = (...calls: ToolCall[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
+const toolTurn = (...calls: ToolCall[]) =>
+  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 /** A prompt agent, or a nested graph forwarding its member `0`'s result. */
 const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
   agent instanceof JuncoGraph
@@ -39,8 +57,12 @@ async function agency(
   script: Script = runAvailable,
   { idle = false } = {},
 ) {
-  const { graph, scheduler, faux } = await agencyGraph(script, idle ? {} : { prompt: "run the graph" });
-  for (const [index, agent] of members.entries()) graph.addNode(member(agent, `member ${index}`));
+  const { graph, scheduler, faux } = await agencyGraph(
+    script,
+    idle ? {} : { prompt: "run the graph" },
+  );
+  for (const [index, agent] of members.entries())
+    graph.addNode(member(agent, `member ${index}`));
   return { graph, scheduler, faux };
 }
 
@@ -54,12 +76,17 @@ const plan =
 function resultText(graph: JuncoGraph, id = "0"): string | undefined {
   const result = graph.result(NodeId(id));
   return O.isSome(result)
-    ? result.value.content.map((block) => (block.type === "text" ? block.text : "")).join("")
+    ? result.value.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("")
     : undefined;
 }
 
 /** A JuncoAgent recording each public `abort()` and `return()` request into `calls`. */
-function counting(calls: string[], options: AgenticOptions): Promise<JuncoAgent> {
+function counting(
+  calls: string[],
+  options: AgenticOptions,
+): Promise<JuncoAgent> {
   class Counting extends JuncoAgent {
     static async make(): Promise<Counting> {
       const agent = new Counting(options);
@@ -94,7 +121,11 @@ test("an Opus agency scheduler from a saved Pi login owns its session and member
         },
       }),
     );
-    const models = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
+    const models = await ModelRuntime.create({
+      authPath,
+      modelsPath: null,
+      refreshOnCreate: false,
+    });
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     const ready = await leaf([fauxAssistantMessage("never")], { prompt: "go" });
     let replaced = 0;
@@ -137,8 +168,13 @@ test("an Opus agency scheduler from a saved Pi login owns its session and member
 test(
   "thirty-two nested agencies settle while every graph forwards the innermost result",
   async () => {
-    const innermost = await leaf([fauxAssistantMessage("deep")], { prompt: "go" });
-    const levels: { graph: PiGraph; scheduler: PiScheduler<AgenticInput, AssistantMessage> }[] = [];
+    const innermost = await leaf([fauxAssistantMessage("deep")], {
+      prompt: "go",
+    });
+    const levels: {
+      graph: PiGraph;
+      scheduler: PiScheduler<AgenticInput, AssistantMessage>;
+    }[] = [];
     let current: JuncoAgent | JuncoGraph = innermost.agent;
     for (let depth = 0; depth < 32; depth++) {
       const level = await agency([current]);
@@ -186,19 +222,36 @@ test(
   "a direct root scheduler abort reaches a live grandchild while its sibling still runs",
   async () => {
     const grandchildTool = waitingTool("grandchild_work", { endOnAbort: true });
-    const grandchild = await leaf([toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })), fauxAssistantMessage("unused")], {
-      prompt: "go",
-      tools: [grandchildTool.tool],
-    });
+    const grandchild = await leaf(
+      [
+        toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })),
+        fauxAssistantMessage("unused"),
+      ],
+      {
+        prompt: "go",
+        tools: [grandchildTool.tool],
+      },
+    );
     const siblingTool = waitingTool("sibling_work");
-    const sibling = await leaf([toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })), fauxAssistantMessage("unused")], {
-      prompt: "go",
-      tools: [siblingTool.tool],
-    });
+    const sibling = await leaf(
+      [
+        toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
+        fauxAssistantMessage("unused"),
+      ],
+      {
+        prompt: "go",
+        tools: [siblingTool.tool],
+      },
+    );
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    const { scheduler: root } = await agency([child.graph, sibling.agent], plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]));
+    const { scheduler: root } = await agency(
+      [child.graph, sibling.agent],
+      plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]),
+    );
     let finalTurn: AssistantMessage | undefined;
-    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
+    root.events.on("turn_end", ({ message }) => {
+      finalTurn = message;
+    });
 
     assert.equal((await root.next()).value?.kind, "yield"); // primes both members
     assert.equal((await root.next()).value?.kind, "yield"); // the child primes the grandchild
@@ -218,7 +271,8 @@ test(
     assert.deepEqual(await aborting, { clearedSteer: [], clearedFollowUp: [] });
     const settled = (await running).value;
     assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
-    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
+    if (settled?.kind === "settled")
+      assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
@@ -237,15 +291,29 @@ test(
         return Promise.reject(failure);
       }
     }
-    const failing = await FailingAbort.make({ ...(await nativeOptions([])).options, prompt: "go" });
-    const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
-    const sibling = await leaf([toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })), fauxAssistantMessage("unused")], {
+    const failing = await FailingAbort.make({
+      ...(await nativeOptions([])).options,
       prompt: "go",
-      tools: [siblingTool.tool],
     });
-    const { scheduler: root } = await agency([failing, sibling.agent], plan([["0"], ["1"]], [["1"]]));
+    const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
+    const sibling = await leaf(
+      [
+        toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
+        fauxAssistantMessage("unused"),
+      ],
+      {
+        prompt: "go",
+        tools: [siblingTool.tool],
+      },
+    );
+    const { scheduler: root } = await agency(
+      [failing, sibling.agent],
+      plan([["0"], ["1"]], [["1"]]),
+    );
     let finalTurn: AssistantMessage | undefined;
-    root.events.on("turn_end", ({ message }) => { finalTurn = message; });
+    root.events.on("turn_end", ({ message }) => {
+      finalTurn = message;
+    });
 
     assert.equal((await root.next()).value?.kind, "yield");
     const running = root.next();
@@ -257,7 +325,8 @@ test(
     assert.deepEqual(error.errors, [failure]);
     const settled = (await running).value;
     assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
-    if (settled?.kind === "settled") assert.deepEqual(settled.message, finalTurn);
+    if (settled?.kind === "settled")
+      assert.deepEqual(settled.message, finalTurn);
   },
   TIMEOUT_MS,
 );
@@ -268,11 +337,17 @@ test(
     const calls: string[] = [];
     const counted = await counting(calls, (await nativeOptions([])).options);
     const grandchild = await leaf(
-      [toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })), fauxAssistantMessage("unused")],
+      [
+        toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })),
+        fauxAssistantMessage("unused"),
+      ],
       { prompt: "go" },
     );
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    const { graph, scheduler: root } = await agency([child.graph, counted], plan([["0"]], [["0"]], [["0"]]));
+    const { graph, scheduler: root } = await agency(
+      [child.graph, counted],
+      plan([["0"]], [["0"]], [["0"]]),
+    );
 
     assert.equal((await root.next()).value?.kind, "yield");
     assert.equal((await root.next()).value?.kind, "yield");
@@ -282,7 +357,8 @@ test(
 
     assert.deepEqual(await root.return(), { value: undefined, done: true });
     assert.deepEqual(calls, ["return"]);
-    for (const agentic of [root, child.scheduler, grandchild.agent, counted]) assert.equal(agentic.status, "closed");
+    for (const agentic of [root, child.scheduler, grandchild.agent, counted])
+      assert.equal(agentic.status, "closed");
     assert.deepEqual(await root.next(), { value: undefined, done: true });
     await graph.close();
     assert.deepEqual(calls, ["return"]);
@@ -304,7 +380,9 @@ test("graph.close() after a failed direct scheduler return joins that close with
     }
   }
   const failing = await FailingClose.make((await nativeOptions([])).options);
-  const { graph, scheduler } = await agency([failing], runAvailable, { idle: true });
+  const { graph, scheduler } = await agency([failing], runAvailable, {
+    idle: true,
+  });
 
   const direct = await scheduler.return().then(
     () => assert.fail("the member close failure must surface"),
@@ -322,7 +400,9 @@ test("graph.close() after a failed direct scheduler return joins that close with
 test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared and cyclic members once each", async () => {
   const calls: string[] = [];
   const counted = await counting(calls, (await nativeOptions([])).options);
-  const plain = await PiScheduler.make<AgenticInput, AssistantMessage>((await nativeOptions([])).options);
+  const plain = await PiScheduler.make<AgenticInput, AssistantMessage>(
+    (await nativeOptions([])).options,
+  );
   const root = new JuncoGraph(plain, UNBOUNDED, UNBOUNDED);
   root.addNode(member(counted));
   const child = await agency([counted, root], runAvailable, { idle: true });
@@ -336,8 +416,128 @@ test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared a
 
   await root.close();
   assert.deepEqual(calls, ["abort", "return"]);
-  for (const actor of [plain, child.scheduler, counted]) assert.equal(actor.status, "closed");
+  for (const actor of [plain, child.scheduler, counted])
+    assert.equal(actor.status, "closed");
   assert.ok(root.signal.aborted && child.graph.signal.aborted);
   await root[Symbol.asyncDispose]();
   assert.deepEqual(calls, ["abort", "return"]);
 });
+
+test(
+  "LspTool delivers successful status and semantic errors through JuncoAgent",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "junco-agency-lsp-"));
+    try {
+      const lsp = await LspTool.create(directory, { readOnly: true });
+      try {
+        let status: ToolResultMessage | undefined;
+        let failure: ToolResultMessage | undefined;
+        const { agent } = await leaf(
+          [
+            toolTurn(
+              fauxToolCall("lsp", { action: "status" }, { id: "lsp-status" }),
+            ),
+            (context) => {
+              status = context.messages.find(
+                (message): message is ToolResultMessage =>
+                  message.role === "toolResult" &&
+                  message.toolCallId === "lsp-status",
+              );
+              // Schema-valid, but upstream's dispatcher rejects diagnostics without a file.
+              return toolTurn(
+                fauxToolCall(
+                  "lsp",
+                  { action: "diagnostics" },
+                  { id: "lsp-failure" },
+                ),
+              );
+            },
+            (context) => {
+              failure = context.messages.find(
+                (message): message is ToolResultMessage =>
+                  message.role === "toolResult" &&
+                  message.toolCallId === "lsp-failure",
+              );
+              return fauxAssistantMessage("lsp checked");
+            },
+          ],
+          {
+            tools: [lsp],
+            prompt:
+              "Check LSP status, then request diagnostics without a file.",
+          },
+        );
+        try {
+          const { last } = await drive(agent);
+
+          assert.ok(status && failure);
+          assert.equal(status.toolName, "lsp");
+          assert.equal(status.isError, false);
+          assert.ok(
+            status.details &&
+              typeof status.details === "object" &&
+              "action" in status.details,
+          );
+          assert.equal(status.details.action, "status");
+          assert.equal(status.details.success, true);
+          assert.equal(failure.toolName, "lsp");
+          assert.equal(failure.isError, true);
+          assert.equal(settledText(last), "lsp checked");
+        } finally {
+          await agent.return();
+        }
+
+        const { execute } = await tools.LspTool.create(directory, {
+          readOnly: true,
+        });
+        const direct = await execute("direct-status", { action: "status" });
+        assert.equal(direct.isError, false);
+        assert.equal(direct.details?.action, "status");
+        assert.equal(direct.details?.success, true);
+
+        const diagnostics = await execute("direct-diagnostics", {
+          action: "diagnostics",
+        }).then(
+          () => assert.fail("diagnostics without a file must reject"),
+          (error: unknown) => error,
+        );
+        assert.ok(diagnostics instanceof Error);
+        const cause = diagnostics.cause as {
+          details?: { action?: string; success?: boolean };
+        };
+        assert.equal(cause.details?.action, "diagnostics");
+        assert.equal(cause.details?.success, false);
+
+        for (const action of [
+          "code_actions",
+          "reload",
+          "rename",
+          "rename_file",
+          "request",
+        ] as const) {
+          const error = await execute(`write-${action}`, {
+            action,
+          } as Parameters<typeof execute>[1]).then(
+            () => assert.fail(`${action} must reject under readOnly`),
+            (rejection: unknown) => rejection,
+          );
+          assert.ok(error instanceof Error, action);
+          assert.equal(error.name, "ToolError", action);
+        }
+
+        await LspTool.shutdown();
+        await LspTool.shutdown();
+        const again = await tools.LspTool.create(directory, { readOnly: true });
+        const restarted = await again.execute("restarted-status", {
+          action: "status",
+        });
+        assert.equal(restarted.details?.success, true);
+      } finally {
+        await LspTool.shutdown();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT_MS,
+);

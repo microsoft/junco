@@ -10,7 +10,7 @@
 //    approves.
 // 5. The command line owns everything it creates and writes only an approved plan.
 //
-// Run it after `pi` → `/login` → GitHub Copilot. With `--feature=opik` (or `--feature=langflow`),
+// Run it after `pi` → `/login` → GitHub Copilot. With `--feature=opik`,
 // JuncoGraph traces each review round automatically:
 //
 //   OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency \
@@ -24,7 +24,8 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { allOf, always, anyOf, type DataflowTracer, messageEdge, msg, NodeId, on, valueEdge } from "dataflow-engine";
-import { createYieldTool, JuncoAgent } from "junco-agent";
+import { JuncoAgent } from "junco-agent";
+import { createYieldTool } from "junco-tools";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { type AgenticInput, agentNode, createParallelAgentGraph } from "../src/index.ts";

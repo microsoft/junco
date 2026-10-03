@@ -37,7 +37,8 @@ export type {
   Schedule,
 } from "./scheduler.js";
 export { triggerInputs } from "./scheduler.js";
-export type { TriggerKind, TriggerRule } from "./trigger.js";
+export { ConstFanin, ConstFanout } from "./stdlib.js";
+export type { TriggerEntry, TriggerKind, TriggerRule } from "./trigger.js";
 export {
   allOf,
   always,

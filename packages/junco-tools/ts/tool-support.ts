@@ -1,13 +1,19 @@
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve as resolveNodePath, sep } from "node:path";
+import {
+  isAbsolute,
+  join,
+  relative,
+  resolve as resolveNodePath,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
+  type TruncationResult,
   truncateHead,
   truncateLine,
-  type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
 
 /** Mirrors Pi's `UNICODE_SPACES` set from `utils/paths.js`. */
@@ -33,8 +39,10 @@ interface NormalizeOptions {
  */
 function normalizePath(input: string, options: NormalizeOptions = {}): string {
   let normalized = input;
-  if (options.normalizeUnicodeSpaces) normalized = normalized.replace(UNICODE_SPACES, " ");
-  if (options.stripAtPrefix && normalized.startsWith("@")) normalized = normalized.slice(1);
+  if (options.normalizeUnicodeSpaces)
+    normalized = normalized.replace(UNICODE_SPACES, " ");
+  if (options.stripAtPrefix && normalized.startsWith("@"))
+    normalized = normalized.slice(1);
   const home = homedir();
   if (normalized === "~") return home;
   if (normalized.startsWith("~/")) return join(home, normalized.slice(2));
@@ -44,7 +52,10 @@ function normalizePath(input: string, options: NormalizeOptions = {}): string {
 
 /** Pure port of Pi's `resolveToCwd`, with the argument order flipped to (cwd, input). */
 export function resolveToolPath(cwd: string, input: string): string {
-  const normalized = normalizePath(input, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+  const normalized = normalizePath(input, {
+    normalizeUnicodeSpaces: true,
+    stripAtPrefix: true,
+  });
   return isAbsolute(normalized)
     ? resolveNodePath(normalized)
     : resolveNodePath(normalizePath(cwd), normalized);
@@ -57,7 +68,9 @@ export function displayToolPath(cwd: string, absolutePath: string): string {
   const relativePath = relative(resolvedCwd, resolvedPath);
   const insideCwd =
     relativePath === "" ||
-    (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath));
   return (insideCwd ? relativePath || "." : resolvedPath).split(sep).join("/");
 }
 
@@ -91,9 +104,10 @@ export function boundedToolResult<T>(
   const truncation = truncateHead(content);
   let text = truncation.content;
   if (truncation.truncated) {
-    const notice = truncation.truncatedBy === "lines"
-      ? `${DEFAULT_MAX_LINES} line limit reached`
-      : `${formatSize(DEFAULT_MAX_BYTES)} limit reached`;
+    const notice =
+      truncation.truncatedBy === "lines"
+        ? `${DEFAULT_MAX_LINES} line limit reached`
+        : `${formatSize(DEFAULT_MAX_BYTES)} limit reached`;
     text = `${text === "" ? "" : `${text}\n\n`}[${notice}]`;
   }
   return {
@@ -110,7 +124,9 @@ export function boundedToolResult<T>(
  */
 export function requireU32(field: string, value: number, min: number): number {
   if (!Number.isInteger(value) || value < min || value > NATIVE_U32_MAX) {
-    throw new Error(`${field} must be an integer between ${min} and ${NATIVE_U32_MAX}`);
+    throw new Error(
+      `${field} must be an integer between ${min} and ${NATIVE_U32_MAX}`,
+    );
   }
   return value;
 }

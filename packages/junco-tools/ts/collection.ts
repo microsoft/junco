@@ -49,12 +49,19 @@ export class ToolCollection {
     this.#owned = owned;
   }
 
-  static async create(cwd: string, options: ToolCollectionOptions = {}): Promise<ToolCollection> {
+  static async create(
+    cwd: string,
+    options: ToolCollectionOptions = {},
+  ): Promise<ToolCollection> {
     if (options.mux && !options.native) {
-      throw new Error("ToolCollection: a borrowed mux requires the native module that created it");
+      throw new Error(
+        "ToolCollection: a borrowed mux requires the native module that created it",
+      );
     }
     if (options.mux && options.sandbox !== undefined) {
-      throw new Error("ToolCollection: sandbox applies only to a mux the collection opens");
+      throw new Error(
+        "ToolCollection: sandbox applies only to a mux the collection opens",
+      );
     }
     const root = resolveToolPath(process.cwd(), cwd);
     // Dynamic by design: a static import would load the addon at module
@@ -63,7 +70,9 @@ export class ToolCollection {
     // the same way. A load failure rejects here; there is no second backend.
     const native = options.native ?? (await import("../native/index.js"));
     // Rejects outside a seed: every file tool needs one.
-    const mux = options.mux ?? (await native.NativeMux.open(root, { sandbox: options.sandbox }));
+    const mux =
+      options.mux ??
+      (await native.NativeMux.open(root, { sandbox: options.sandbox }));
     const owned = options.mux ? undefined : mux;
     try {
       const store = new native.EditStore();
@@ -73,7 +82,8 @@ export class ToolCollection {
           createBashTool(root, {
             ...options.bash,
             operations:
-              options.bash?.operations ?? createShellMuxOperations({ principal: options.principal, mux }),
+              options.bash?.operations ??
+              createShellMuxOperations({ principal: options.principal, mux }),
           }),
           createEditTool(root, store, native, mux),
           createGrepTool(root, store, native, mux),
