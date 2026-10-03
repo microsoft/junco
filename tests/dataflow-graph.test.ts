@@ -275,11 +275,15 @@ test("definition error: the same edge id twice in one node's inbound set is reje
 test("definition error: emitting on an unwired edge id is rejected", async () => {
   const ghost = messageEdge<number, string>("ghost");
   const graph = newGraph();
-  graph.addNode({
+  const source = graph.addNode({
     state: undefined,
     trigger: always(),
     step: stepNode(() => [msg(ghost, 1)]),
   });
+  assert.throws(
+    () => graph.emit(source, msg(ghost, 1)),
+    DataflowDefinitionError,
+  );
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
 });
 
@@ -297,7 +301,62 @@ test("definition error: emitting a message on a value edge is rejected", async (
     step: stepNode(() => []),
   });
   graph.addEdge(src, dst, v);
+  assert.throws(() => graph.emit(src, msg(v, 1)), DataflowDefinitionError);
+  assert.ok(E.isRight(v.transport) && O.isNone(v.transport.right));
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
+});
+
+test("public emit enqueues FIFO without driving, consuming, or completing any node", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const done = valueEdge<number, string>("done");
+  const graph = new DataflowGraph<void, number, string, never>(
+    fixedReader(2),
+    Width(1),
+    UNBOUNDED,
+  );
+  const batches: number[][] = [];
+  const source = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: emitOnce(() => [], "source"),
+  });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: when(feed),
+    step: stepNode((_state, view) => {
+      batches.push([...from(view, feed)]);
+      return [];
+    }),
+  });
+  graph.addEdge(source, sink, feed);
+  graph.addEdge(source, sink, done);
+
+  graph.emit(source, msg(feed, 1));
+  graph.emit(source, msg(feed, 2));
+  graph.emit(source, msg(feed, 3));
+  assert.throws(() => graph.emit(sink, msg(feed, 99)), DataflowDefinitionError);
+  assert.deepEqual(queued(feed), [1, 2, 3]);
+  assert.deepEqual(batches, []);
+  assert.equal(graph.getNode(source)!.status, "ready");
+  assert.equal(graph.getNode(sink)!.status, "ready");
+  assert.ok(O.isNone(graph.result(source)));
+  assert.ok(E.isRight(done.transport) && O.isNone(done.transport.right));
+
+  await graph.step();
+  assert.deepEqual(queued(feed), [1, 2, 3]);
+  assert.deepEqual(batches, []);
+
+  const results = await graph.run();
+  assert.deepEqual(batches, [[1, 2], [3]]);
+  assert.deepEqual(queued(feed), []);
+  assert.equal(results.get(source), "source");
+  assert.deepEqual(done.transport, E.right(O.some("source")));
+  assert.equal(results.has(sink), false);
+
+  graph.emit(source, msg(feed, 4));
+  await graph.run();
+  assert.deepEqual(batches, [[1, 2], [3], [4]]);
+  assert.deepEqual(graph.result(source), O.some("source"));
 });
 
 test("definition error: step() and run() reject re-entry from either method while one is in flight", async () => {

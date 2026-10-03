@@ -191,9 +191,15 @@ Both calls resolve to the cumulative map of finished nodes, and `available()` re
 
 `options.signal` (an `AbortSignal`) is checked before planning, before each turn and after each turn settles. When it is aborted, the call rejects with `signal.reason` and starts no further turn. Node activations that are already running are always awaited, never abandoned. Earlier turns are not rolled back.
 
+### Emitting from outside a node body
+
+`graph.emit(fromId, msg(edge, payload))` synchronously appends one payload to the message edge wired out of `fromId` in this graph, exactly as a yielded message is routed. It only enqueues: it does not drive the graph, consume inputs, complete or start `fromId`, or resolve a value edge; the next availability and read decision observes the message. Calls and yields append in invocation order, and an enqueued message is never rolled back. An edge not wired out of `fromId` (including an incoming-only edge) and a value edge both throw `DataflowDefinitionError`. Call it on the graph that owns the outgoing edge: a nested graph's own `emit` addresses only its internal edges.
+
 ## Rendering graph topology
 
 `DataflowGraph` implements the exported structural `Pretty` contract. `renderPretty(graph)` renders the current topology as Mermaid without layout wrapping. Nodes receive synthetic `n0`, `n1`, … identifiers in iteration order and keep their escaped node IDs as labels; every parallel edge is retained and labeled with its escaped edge ID plus `message` or `value`. An empty graph renders as `""`, and each call reads the live topology so later `addNode` and `addEdge` changes appear immediately.
+
+A node whose state is itself a `DataflowGraph` renders as a `subgraph` titled with its node ID, holding that child graph's nodes and edges (recursively, with identifiers unique across the whole document); the containing graph's edges attach to the subgraph boundary. Every occurrence of a shared child graph expands separately. A child graph with no nodes holds one `(empty graph)` marker, and a child graph already on the current containment path holds one `(recursive reference)` marker instead of expanding again; markers are presentation-only and have no edges.
 
 ## Tracing
 

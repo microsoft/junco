@@ -58,7 +58,7 @@ type NodeRuntime<N, T> = {
 
 /**
  * A node's readiness view over its inbound edges. Every access reaches through to the live `Edge`,
- * so a queue mutated in place by `#route` and a value cell replaced by `#recordReturn` are both
+ * so a queue mutated in place by `emit` and a value cell replaced by `#recordReturn` are both
  * visible immediately, with nothing to keep in sync.
  *
  * `messages` exposes an inbound message edge's live queue; `values` exposes only RESOLVED value
@@ -301,30 +301,58 @@ export class DataflowGraph<
     });
   }
 
-  /** Render the current graph topology as a Mermaid flowchart document. */
+  /**
+   * Render the current graph topology as a Mermaid flowchart document. A node whose state is itself
+   * a {@link DataflowGraph} renders as a `subgraph` holding that graph's current topology, and the
+   * containing graph's edges attach to the subgraph boundary. An empty child graph, or one already
+   * on the containment path, holds a single presentation-only marker so the group stays visible.
+   */
   pretty(): IDoc {
-    const synthetic = new Map<NodeId, string>();
-    const document: IDoc[] = [];
-    this.forEachNode((id) => {
-      if (synthetic.size === 0) {
-        document.push("graph TD;");
-      }
-      const key = `n${synthetic.size}`;
-      synthetic.set(id, key);
-      document.push(PP.lineBreak, `${key}["${escapeMermaidLabel(id)}"];`);
-    });
-    if (synthetic.size === 0) {
-      return "";
+    const document: IDoc[] = ["graph TD;"];
+    const ancestry = new Set<object>([this]);
+    let next = 0;
+    const line = (depth: number, statement: string): void => {
+      document.push(PP.lineBreak, `${"  ".repeat(depth)}${statement}`);
+    };
+
+    function appendGraph<GS, GN, GT, GEH>(
+      graph: DataflowGraph<GS, GN, GT, GEH>,
+      depth: number,
+    ): boolean {
+      const synthetic = new Map<NodeId, string>();
+      graph.forEachNode((id, node) => {
+        const key = `n${next++}`;
+        synthetic.set(id, key);
+        const label = escapeMermaidLabel(id);
+        const child = node.state;
+        if (!(child instanceof DataflowGraph)) {
+          line(depth, `${key}["${label}"];`);
+          return;
+        }
+        line(depth, `subgraph ${key}["${label}"]`);
+        let marker: string | undefined = "(recursive reference)";
+        if (!ancestry.has(child)) {
+          ancestry.add(child);
+          marker = appendGraph(child, depth + 1) ? undefined : "(empty graph)";
+          ancestry.delete(child);
+        }
+        if (marker !== undefined) {
+          line(depth + 1, `n${next++}["${escapeMermaidLabel(marker)}"];`);
+        }
+        line(depth, "end;");
+      });
+      graph.forEachLink((from, to, edge) => {
+        const transport = E.isLeft(edge.transport) ? "message" : "value";
+        const label = escapeMermaidLabel(`${edge.id} (${transport})`);
+        line(
+          depth,
+          `${synthetic.get(from)} -->|"${label}"| ${synthetic.get(to)};`,
+        );
+      });
+      return synthetic.size > 0;
     }
-    this.forEachLink((from, to, edge) => {
-      const transport = E.isLeft(edge.transport) ? "message" : "value";
-      const label = escapeMermaidLabel(`${edge.id} (${transport})`);
-      document.push(
-        PP.lineBreak,
-        `${synthetic.get(from)} -->|"${label}"| ${synthetic.get(to)};`,
-      );
-    });
-    return document;
+
+    return appendGraph(this, 0) ? document : "";
   }
 
   /**
@@ -640,7 +668,7 @@ export class DataflowGraph<
         node.status = "done";
         this.#recordReturn(id, step.value);
       } else {
-        for (const message of step.value) this.#route(id, message);
+        for (const message of step.value) this.emit(id, message);
       }
       const finished = activation;
       if (finished !== undefined) this.#observe(() => finished.end(step));
@@ -657,9 +685,12 @@ export class DataflowGraph<
   /**
    * Push `message.payload` onto the outbound message edge of `fromId` carrying `message.id`.
    *
+   * Only enqueues: it does not drive the graph, consume inputs, complete `fromId`, or resolve a
+   * value edge. The next availability/read decision observes the queued payload.
+   *
    * @throws {DataflowDefinitionError} when no such edge is wired, or when it is a value edge.
    */
-  #route(fromId: NodeId, message: Message<N>): void {
+  emit(fromId: NodeId, message: Message<N>): void {
     for (const link of this.#graph.getLinks(fromId) ?? []) {
       if (link.fromId !== fromId || link.data.id !== message.id) continue;
       const transport = link.data.transport;
