@@ -1,0 +1,62 @@
+{
+  "name": "dataflow-engine",
+  "version": "0.1.0",
+  "description": "Async-generator dataflow engine for TypeScript with pluggable schedulers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junco-org/dataflow-engine.git"
+  },
+  "homepage": "https://github.com/junco-org/dataflow-engine#readme",
+  "bugs": {
+    "url": "https://github.com/junco-org/dataflow-engine/issues"
+  },
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "bun run tsc -p tsconfig.typecheck.json",
+    "test": "bun --conditions=dataflow-no-tracing test ./tests/*.test.ts ./tests/*.example.ts",
+    "test:coverage": "bun --conditions=dataflow-no-tracing test --coverage ./tests/*.test.ts ./tests/*.example.ts",
+    "example:fibonacci": "bun run examples/run.ts fibonacci",
+    "example:multiplier": "bun run examples/run.ts multiplier",
+    "example:word-count": "bun run examples/run.ts word-count",
+    "example:combine-per-key": "bun run examples/run.ts combine-per-key",
+    "examples": "bun run examples/run.ts",
+    "examples:cookbook": "bun run examples/run.ts --cookbook",
+    "examples:build": "bun run examples/build.ts",
+    "lint": "bun run --bun biome lint .",
+    "format": "bun run --bun biome format --write .",
+    "check": "bun run --bun biome check .",
+    "check:ci": "bun run --bun biome ci ."
+  },
+  "dependencies": {
+    "fp-ts": "^2.16.11",
+    "ngraph.graph": "^20.1.2",
+    "prettier-printer": "^1.1.4",
+    "type-fest": "^5.10.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
+    "fast-check": "^4.10.2",
+    "junco-scheduler": "file:../junco-scheduler",
+    "typescript": "7.0.2"
+  }
+}

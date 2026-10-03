@@ -1,0 +1,19 @@
+{
+  "name": "dataflow-engine-examples",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#example-tracer": {
+      "dataflow-no-tracing": "./tracing-dummy.ts",
+      "default": "./tracing-opik.ts"
+    }
+  },
+  "dependencies": {
+    "junco-scheduler": "file:../../junco-scheduler"
+  },
+  "optionalDependencies": {
+    "dataflow-engine": "file:..",
+    "dataflow-engine-opik": "file:../../dataflow-engine-opik",
+    "opik": "2.2.86"
+  }
+}
