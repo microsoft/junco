@@ -75,7 +75,8 @@ export const messageUnionAnyRule: TriggerRule<number | number[], string> =
 export const messageUnionNarrowed: TriggerRule<number, string> =
   messageUnionAll;
 // @ts-expect-error anyOf retains the second entry's number[] messages
-export const messageUnionAnyNarrowed: TriggerRule<number, string> = messageUnionAny;
+export const messageUnionAnyNarrowed: TriggerRule<number, string> =
+  messageUnionAny;
 
 const resultUnionAll = allOf(on(numberEdge), on(numberResultEdge));
 const resultUnionAny = anyOf(on(numberEdge), on(numberResultEdge));
@@ -86,7 +87,8 @@ export const resultUnionAnyRule: TriggerRule<number, string | number> =
 // @ts-expect-error the second entry's number results survive inference
 export const resultUnionNarrowed: TriggerRule<number, string> = resultUnionAny;
 // @ts-expect-error allOf retains the second entry's number results
-export const resultUnionAllNarrowed: TriggerRule<number, string> = resultUnionAll;
+export const resultUnionAllNarrowed: TriggerRule<number, string> =
+  resultUnionAll;
 
 // --- 4. empty rules fit every graph; literals are checked per entry ------------------------------
 
