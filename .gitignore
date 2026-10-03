@@ -7,3 +7,6 @@ coverage/
 
 # Local code-exploration index (live SQLite database) — regenerable, not committed.
 /.explore/
+
+# Local omp project config (skills are installed there as links to skills/).
+/.omp/
