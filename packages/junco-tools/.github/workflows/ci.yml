@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: junco-tools
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.junco-cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.junco-rustup
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Checkout junco-tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: junco-tools
+          persist-credentials: false
+      - name: Checkout marsh
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/marsh
+          path: marsh
+          ssh-key: ${{ secrets.JUNCO_MARSH_SSH_KEY }}
+          persist-credentials: false
+      - name: Checkout junco-policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: junco-org/junco-policy
+          path: junco-policy
+          ssh-key: ${{ secrets.JUNCO_POLICY_SSH_KEY }}
+          persist-credentials: false
+      - name: Install native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config clang libclang-dev llvm-dev \
+            libbtrfsutil-dev zlib1g-dev ca-certificates curl git
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - name: Install Rust 1.95.0
+        env:
+          RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
+          "$CARGO_HOME/bin/rustup" component add rustfmt clippy
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - name: Check routed bridge formatting
+        # Older native modules and the marsh path dependency use different existing layouts.
+        run: node scripts/with-junco-build-env.mjs rustfmt --edition 2024 --check src/tool.rs
+      - name: Clippy (library and tests)
+        # napi exports look unused to Rust; two legacy grep helpers exceed Clippy's argument threshold.
+        run: node scripts/with-junco-build-env.mjs cargo clippy --locked --features test-fs --lib --tests -- -D warnings -A dead_code -A clippy::too_many_arguments
+      - name: Rust unit tests (CopyTree)
+        run: node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Build production addon and TypeScript
+        run: npm run build
+      - name: Build CopyTree test addon
+        run: npm run build:native:test
+      - name: JavaScript unit tests
+        run: npm test
