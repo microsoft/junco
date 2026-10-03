@@ -1,12 +1,10 @@
-import { tmpdir } from "node:os";
 import {
-  type AgentHarnessOptions,
+  BACKGROUND_CONTEXT,
   type AgentTool,
-  InMemorySessionRepo,
+  MemorySessionRepo,
   type PromptTemplate,
   type Skill,
 } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import {
   createModels,
   type FauxProviderHandle,
@@ -28,19 +26,18 @@ export function scripted(responses: readonly FauxResponseStep[]) {
   return { faux, models, model: faux.getModel() };
 }
 
-/** Native harness options over `responses` with a fresh in-memory session and no tools. */
+/** Resolved options over `responses` with a fresh in-memory session and no native addon. */
 export async function nativeOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
 >(
   responses: readonly FauxResponseStep[],
-  overrides: Partial<AgentHarnessOptions<S, P, T>> = {},
-): Promise<AgentHarnessOptions<S, P, T> & { readonly faux: FauxProviderHandle }> {
+  overrides: Partial<AgenticOptions<S, P, T>> = {},
+): Promise<AgenticOptions<S, P, T> & { readonly faux: FauxProviderHandle }> {
   const { faux, models, model } = scripted(responses);
   return {
-    env: new NodeExecutionEnv({ cwd: tmpdir() }),
-    session: await new InMemorySessionRepo().create(),
+    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
     models,
     model,
     systemPrompt: "sys",
@@ -56,29 +53,7 @@ export async function newAgent<
   T extends AgentTool = AgentTool,
 >(responses: readonly FauxResponseStep[], options: Partial<AgenticOptions<S, P, T>> = {}) {
   const { faux, ...native } = await nativeOptions<S, P, T>(responses);
-  return { faux, agent: new JuncoAgent<S, P, T>({ ...native, ...options }) };
-}
-
-/** A tool whose every execution waits for the returned `release`, counting executions. */
-export function gatedTool(name: string) {
-  const gates: PromiseWithResolvers<void>[] = [];
-  const started: PromiseWithResolvers<void> = Promise.withResolvers<void>();
-  const state = { executions: 0, started: started.promise };
-  const tool: AgentTool = {
-    name,
-    label: name,
-    description: `${name} waits for the test`,
-    parameters: Type.Object({}),
-    execute: async () => {
-      state.executions += 1;
-      const gate = Promise.withResolvers<void>();
-      gates.push(gate);
-      started.resolve();
-      await gate.promise;
-      return { content: [{ type: "text", text: `${name} done` }], details: undefined };
-    },
-  };
-  return { tool, state, release: () => gates.shift()?.resolve() };
+  return { faux, agent: await JuncoAgent.fromResolved<S, P, T>({ ...native, ...options }) };
 }
 
 /** A caller-owned tool counting its executions. */

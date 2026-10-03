@@ -1,21 +1,18 @@
 import type {
   AgentHarness,
   AgentHarnessOptions,
+  AgentHarnessResources,
+  AgentHarnessStreamOptions,
+  AgentMessage,
   AgentTool,
+  ModelIdentity,
+  NavigationResult,
   PromptTemplate,
+  QueueMode,
   Skill,
+  ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-
-/**
- * The complete public instance API of the pinned Pi `AgentHarness`, with its native generic
- * parameters. Protected integration hooks are not part of it.
- */
-export type AgentHarnessApi<
-  S extends Skill = Skill,
-  P extends PromptTemplate = PromptTemplate,
-  T extends AgentTool = AgentTool,
-> = Pick<AgentHarness<S, P, T>, keyof AgentHarness<S, P, T>>;
+import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -49,34 +46,71 @@ export type AgenticStep =
   | { readonly kind: "failed"; readonly error: unknown };
 
 /**
- * A native Pi harness that is also its own cooperative scheduling iterator. The native API is the
- * conversation/control plane; `next()` is the scheduling plane and carries no command payload.
+ * A cooperative iterator around one native Pi lane. The conversation/control surface delegates
+ * without a Context argument; the native lane is deliberately not public because a subclass can
+ * constrain tool configuration. `next()` is the scheduling plane and has no command payload.
  */
 export interface Agentic<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> extends AgentHarnessApi<S, P, T>,
-    AsyncGenerator<AgenticStep, void, void> {
+> extends AsyncGenerator<AgenticStep, void, void> {
   readonly status: AgenticStatus;
+  readonly events: AgentHarness<undefined>["events"];
+  readonly hooks: AgentHarness<undefined>["hooks"];
+
+  prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage>;
+  skill(name: string, additionalInstructions?: string): Promise<AssistantMessage>;
+  promptFromTemplate(name: string, args?: string[]): Promise<AssistantMessage>;
+  steer(text: string, options?: { images?: ImageContent[] }): Promise<void>;
+  followUp(text: string, options?: { images?: ImageContent[] }): Promise<void>;
+  nextTurn(text: string, options?: { images?: ImageContent[] }): Promise<void>;
+  appendMessage(message: AgentMessage): Promise<void>;
+  abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>;
+
+  getTools(): T[];
+  getActiveTools(): T[];
+  getResources(): AgentHarnessResources<S, P>;
+  setTools(tools: T[], activeToolNames?: string[]): Promise<void>;
+  setActiveTools(names: string[]): Promise<void>;
+  setResources(resources: AgentHarnessResources<S, P>): Promise<void>;
+  setModel(model: ModelIdentity): Promise<void>;
+  getModel(): Promise<Model<Api> | undefined>;
+  setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  getThinkingLevel(): Promise<ThinkingLevel>;
+  setStreamOptions(options: AgentHarnessStreamOptions): Promise<void>;
+  setSteeringMode(mode: QueueMode): Promise<void>;
+  setFollowUpMode(mode: QueueMode): Promise<void>;
+  /**
+   * Estimated tokens of the current main-lane conversation context (not capacity; compare with
+   * `getModel()`'s `contextWindow`). Committed current-branch context only.
+   */
+  context_size(): Promise<number>;
+  /**
+   * Queue Pi's compaction of the main lane after the admitted run ends, without aborting or
+   * resuming it. Requests run FIFO; new runs and navigation are busy while any is pending.
+   */
+  compact(options?: { customInstructions?: string }): Promise<void>;
+  /**
+   * Move the main lane's branch through Pi's native navigation only: no prompt starts and queued
+   * input stays for the next explicit or staged prompt, so the result never has a `run`. Native
+   * `completed`, `declined`, `failed` and `aborted` records are results; busy while a compaction
+   * is pending.
+   */
+  navigateTree(
+    targetId: string,
+    options?: { summarize?: boolean; label?: string; customInstructions?: string },
+  ): Promise<NavigationResult>;
 }
 
 /** Native harness options plus an optional initial prompt staged until the first `next()`. */
-export interface AgenticOptions<
+export type AgenticOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> extends AgentHarnessOptions<S, P, T> {
+> = Omit<AgentHarnessOptions<undefined>, "tools" | "resources" | "toolExecution"> & {
+  readonly tools?: T[];
+  readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string;
   readonly images?: ImageContent[];
-}
-
-/** Construction contract of an {@link Agentic} implementation. */
-export interface AgenticConstructor<
-  S extends Skill = Skill,
-  P extends PromptTemplate = PromptTemplate,
-  T extends AgentTool = AgentTool,
-  O = AgenticOptions<S, P, T>,
-> {
-  new (options: O): Agentic<S, P, T>;
-}
+};

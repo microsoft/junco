@@ -4,26 +4,25 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Scope and compatibility
 
-- This is a private ESM TypeScript library. It exposes one `JuncoAgent(options)` async generator that runs a single prompt through a Pi `AgentHarness` in a fresh `InMemorySessionRepo` session. It has no dataflow graph, durable session, persistence layer, capability checking, CLI, native code, or Cargo manifest. Do not reintroduce them, and never import from or depend on `../junco-runtime`.
-- Pins: Bun `1.3.14` for package management and tests, TypeScript `6.0.3`, and every `@earendil-works/*` package at `0.80.6`. That is the same Pi version `junco-tools` declares as its peer dependency. Supported runtime: Linux x86-64 with glibc and Node.js `>=22.19.0`.
-- Runtime dependencies are exactly `model-auth` (`workspace:*`), `junco-tools` (`file:../junco-tools`), `pi-agent-core`, `pi-ai`, and `pi-coding-agent`. `pi-coding-agent` is there only because `junco-tools` requires it as a peer. If the tools checkout moves, change only that `file:` path and the README prerequisite. Never substitute a registry package or the old monorepo's tools package.
+- This is a private ESM TypeScript library. `JuncoAgent` extends Pi's `AgentHarness` unchanged as the conversation/control plane and adds a cooperative lifetime iterator over scheduling boundaries. It has no dataflow graph, persistence layer, capability checking, standalone agent CLI, native code, or Cargo manifest; `bun run cli <seed>` only launches Pi's CLI with the `junco-tools` extension. Graphs of agents live in [`../junco-agency`](../junco-agency). Never import from or depend on `../junco-runtime`.
+- Pins: Bun `1.3.14` for package management and tests, TypeScript `6.0.3`, and every `@earendil-works/*` package at exactly `0.80.6` (also forced through `overrides` for `pi-agent-core`). That is the Pi version `junco-tools` declares as its peer and the version the patch targets. Supported runtime: Linux x86-64 with glibc and Node.js `>=22.19.0`.
+- Runtime dependencies are exactly `junco-tools` (`file:../junco-tools`), `pi-agent-core`, `pi-ai`, `pi-coding-agent` (Pi's login-backed `ModelRuntime`, also a `junco-tools` peer) and `typebox` (the `yield` schema). Never substitute a registry package or the old monorepo's tools package.
 - Keep changes scoped to the request and preserve unrelated local work. Unless explicitly authorized, do not push, publish, edit the sibling `../junco-tools` working tree, or create or mount Btrfs volumes.
 
 ## Source map
 
 | Path | Responsibility |
 | --- | --- |
-| `src/junco-agent.ts` | `JuncoAgent` and `JuncoAgentOptions`: startup on the first `next()`, the default `ToolCollection`, the `Turn` queue, the tool gate, delivery of controls, the completion value, and cancellation. |
-| `src/events.ts` | `JuncoControl`, `JuncoAbort`, and `JuncoResult`, the only protocol types. |
-| `src/index.ts` | Public exports: those three types, `JuncoAgent`, and `JuncoAgentOptions`. Nothing else. |
-| `packages/model-auth/src/model-provider.ts` | `ModelProvider` factories (`apiKey`, `custom`, `githubCopilot`, `httpProxy`), `resolveModel`, the memoized `authenticate` → `runAuth` login, HTTP-proxy and credential-store helpers, and device-flow callbacks. |
-| `packages/model-auth/src/copilot-cli.ts` | `discoverCopilotCliToken()` reads the Copilot CLI's `github-copilot/apps.json`. It returns `undefined` on any failure, so the device flow runs instead. |
-| `packages/model-auth/src/newtypes.ts` | Compile-time brands `ApiKey`, `HttpProxyUrl`, `ModelId`, and `RepoPath`. `Newtype` is local and unexported. |
-| `packages/model-auth/src/index.ts` | Public exports of the auth package. |
-| `test/harness.ts` | `scriptedModelProvider` (faux responses or factories, consumed in FIFO order), `newAgent` (faux model, `"sys"`, `PROMPT_TEXT`, `tools: []`, with overrides applied last), and `drive`. |
-| `test/junco-agent.test.ts` | Offline regressions: streaming order, failure and abort categories, the tool gate, `return()`/`throw()` at a marker, ordering of controls, and a shared provider. |
+| `src/agentic.ts` | The `Agentic` contract: `AgentHarnessApi`, `AgenticStatus`, `AgenticYieldReason`, `AgenticStep`, `AgenticOptions`, `AgenticConstructor`. Types only. |
+| `src/junco-agent.ts` | `JuncoAgent`: run admission through the patch's per-run integration, pause recording and gating, the demand queue, status, abort, terminal close, the protected subclass hooks, and the `create` factory with its owned resources. |
+| `src/yield-tool.ts` | `createYieldTool()` and the module-private registry that makes only its tools scheduling primitives. |
+| `src/index.ts` | Public exports: the contract types, `JuncoAgent`, `AgenticRun`, `JuncoAgentCreateOptions`, `createYieldTool` and its types. Nothing else. |
+| `patches/@earendil-works%2Fpi-agent-core@0.80.6.patch` | The one canonical Pi patch, registered here and by consumers (`../junco-agency`) from their own roots. |
+| `scripts/run-cli.sh` | Bun script launcher: enter the caller's dedicated Btrfs seed, exec pinned Pi `cli.js` with the installed `junco-tools` extension, and forward Pi arguments. |
+| `test/harness.ts` | Offline scaffolding: `scripted`/`nativeOptions` (faux model, in-memory session, no tools), `newAgent`, `gatedTool`, `countingTool`. |
+| `test/junco-agent.test.ts` | Native fidelity against a raw harness, iterator ordering, pauses, abort, terminal close, the native limits, `create` ownership, and saved Pi login/error behavior. |
 
-`dist/`, `packages/model-auth/dist/`, `node_modules/`, `*.tsbuildinfo`, and `graphify-out/` are generated and ignored. Keep `bun.lock` tracked. Do not copy the old monorepo's lockfile or `.npmrc`.
+`dist/`, `node_modules/`, `*.tsbuildinfo`, and `graphify-out/` are generated and ignored. Keep `bun.lock` and `patches/` tracked.
 
 ## Build and verification commands
 
@@ -37,47 +36,32 @@ bun run test
 ```
 
 - Install `junco-tools` first. If its `dist/` or `native/junco_tools.linux-x64-gnu.node` is missing, run `npm ci` and then `npm run build` in `../junco-tools`, following its README. Do not change its Cargo configuration or backend from here.
-- The hoisted linker is required. It installs `file:../junco-tools` as per-file symlinks, so the compiled output and native addon are read from their paths in the sibling checkout.
-- Root `src/` and `test/` import `model-auth` through its package exports, which point at `packages/model-auth/dist/`. `build` and `typecheck` rebuild that package first; `test` does not. After editing auth sources, run `bun run build` before testing. Without that output, the suite fails with `Cannot find package 'model-auth'`.
-- `tsconfig.json` includes only `src/**/*.ts`, so `typecheck` does not type-check the tests. Bun strips test types at runtime. `verbatimModuleSyntax` is on, so type-only imports must use `import type`.
+- The hoisted linker installs `file:../junco-tools` as per-file symlinks, so its compiled output and native addon are read from the sibling checkout.
+- `build` and `typecheck` invoke TypeScript directly. `tsconfig.json` includes only `src/**/*.ts`, so the tests are not type-checked. `verbatimModuleSyntax` is on.
 
-## Generator invariants
+## The Pi patch
 
-1. Nothing runs until the first `next()`. There is no initial empty yield and no separate initialization factory. On that call, the checks run in this order:
-   - An empty `systemPrompt` throws a plain `Error`.
-   - A prompt that is empty after trimming throws `{ code: "protocol" }`.
-   - Any failure in resolving the model, creating the session, loading the default tools, or constructing the harness throws `{ code: "invariant", message: "JuncoAgent: initialization failed: …" }`.
+- Change Pi only through `bun patch @earendil-works/pi-agent-core@0.80.6` and `bun patch --commit`, then make the committed file a standard `git diff` with `a/`/`b/` package-relative headers: Bun `1.3.14` writes machine-specific paths into deleted- and added-file headers, and its output is not portable until normalized. Deleted source maps keep header-only deletions, which Bun applies.
+- New files the patch adds live at the package root (`agentic-integration.js`/`.d.ts`, exported as `./agentic-integration`). Bun `1.3.14` creates a new file's parent directory relative to the installing project instead of the package, with the file's mode, so a new `dist/…` file leaves an unusable empty `dist/` in every consumer that installs the patch fresh.
+- The patch adds only per-run integration and never changes behavior without it. Its surface: the `./agentic-integration` export (`AGENTIC_INTEGRATION_REVISION` and the `AgentRunIntegration` observer type); protected `createRunIntegration(kind)`, called once by `prompt`/`skill`/`promptFromTemplate` after the busy guard and before their first await; protected `abortDependents()`, started by `abort()` right after notifying the run's controller and joined after `waitForIdle` and before the `abort` event; protected `flushPendingSessionWrites`; and an optional last `integration` argument of `runAgentLoop`. Uninstrumented calls keep their exact control flow and promises. Source maps are removed only for the edited modules.
+- Observer callbacks: `controller` after the run's `AbortController` is installed; `beforeTools` with the complete assistant message before its batch executes; `toolOutcome` right after each actual `execute` promise settles (argument validation, hooks and update listeners are not observed; a failure is rethrown unchanged); `track` for every started parallel worker and update emission, never awaited; `afterTurn` only on the normal path after `turn_end` delivery, before the next turn is prepared (a returned promise gates the next request); `abandoned` when the low-level run rejects, before native failure reporting. Only `afterTurn` may be asynchronous; none may throw.
+- Bump `AGENTIC_INTEGRATION_REVISION` together with `REQUIRED_INTEGRATION_REVISION` in `src/junco-agent.ts` whenever the observer contract changes.
 
-   Tests assert these error categories, not their wording.
-2. Normalize `cwd` with `resolve(options.cwd ?? process.cwd())` and nothing else. `thinkingLevel` defaults to `"off"`. `AgentHarness` uses its default generics and plain string prompts.
-3. Yield raw strings only: the content of each completed `thinking_end` or `text_end` block, and `[tool:<toolName>]` before each tool runs. Never yield token deltas or wrap values in an envelope.
-4. The completion value accumulates answer text only. If no answer block arrives, it falls back to the text of the final assistant message.
-   - On success, return `{ text: answer.trim(), details: { failed: false } }`.
-   - If the prompt rejects, or the final stop reason is `error` or `aborted`, return `{ text: "prompt failed: " + message, details: { failed: true, message } }`. Never yield that text.
-5. The `tool_call` hook returns a pending promise, and at most one gate is pending per generator, because Pi prepares tool calls one at a time. At a marker, deliver that resume's controls in array order before releasing the gate with `{}`: `steer` goes to `harness.steer`, `followUp` to `harness.followUp`. This ensures the next model turn cannot outrun the controls. Drop a control that fails because the prompt has already settled.
-6. On `return()` or `throw()` while the prompt is running, the order is:
-   1. `const aborting = harness.abort()`, not awaited.
-   2. Release the pending gate.
-   3. `await aborting`.
+## Lifetime invariants
 
-   In Pi `0.80.6`, `abort()` flips its signal synchronously and then waits for the run. The run is blocked on the gate, so awaiting first deadlocks. After the hook returns, `prepareToolCall` checks the signal again, so a released gated tool never executes. Propagate abort failures, and unsubscribe both listeners in a nested `finally` even when abort throws.
-7. A generator never calls `shutdownShellMux()`. That call is process-wide and would close other agents' shells. The embedding application awaits it once at shutdown.
-
-## Tools and auth boundaries
-
-- Only when `tools === undefined`, dynamically `import("junco-tools")` and call `ToolCollection.create(cwd)` once for that generator. The tools arrive in this order: `read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`. Keep the import dynamic, so explicit tools (including `[]`) never load the native addon.
-- Any explicit array replaces the defaults entirely. Do not append Pi's `write` or `ls`, add harness built-ins, or fall back to another backend when the native addon fails to load.
-- Each generator gets its own collection. Its single native `EditStore` is what makes the `[path#TAG]` headers from `read` and `grep` valid anchors for the hashline `edit`. Never share a collection across generators or create a store per tool.
-- Path existence, the Btrfs seed requirement, and tool execution errors belong to `junco-tools` at execution time. Do not add preflight validation, create `cwd`, or add a shell fallback.
-- Preserve the `ModelProvider` factories and the auth package's public exports. `authenticate` is memoized per provider instance (`authOnce`, keyed by the first caller's model), so generators that share a provider share one login. Keep the brands local; do not reintroduce a `share` package.
+1. `JuncoAgent` overrides only the three run-starting methods (to scope admission and reject while a prompt is staged or after close), the mutating operations (to reject after close and track them), `abort()`, and the protected hooks. It never proxies, re-emits, wraps tools or providers, or replaces native arguments, results, errors or event order. Native getters and `systemPrompt` keep native identity and `this`.
+2. Admission uses a stack of synchronous invocation scopes filled by `createRunIntegration`; a call Pi rejects as busy fills none and publishes nothing, while every admitted run publishes exactly one `settled` or `failed` boundary — including a `before_agent_start` hook that throws a busy-coded error, and missing skills or templates.
+3. Pause reasons belong to their run and assistant message, keyed by tool call id, and are ordered by the batch's tool results at `afterTurn`. Only tools created by `createYieldTool()` and errors satisfying `isMarshPolicyDenied` (a code check, never message text) record reasons. An abandoned run discards its reasons; late sibling outcomes stay tracked for close but cannot publish a pause.
+4. Demands are served strictly in order. A demand takes the oldest unread boundary; only with none does it resume the oldest consumed pause or start the staged prompt. Without a demand every gate stays shut.
+5. `abort()` marks the currently admitted runs stopping, calls `super.abort()` exactly once, then releases their gates and drops their unread pauses. It returns the native promise unchanged and never closes resources.
+6. Terminal close is one shared operation: it rejects native run-starting and mutating calls from its first instant, starts native abort and `closeDependents()` without awaiting them, releases every gate, joins all admitted operations and tracked work, then the abort and dependents, flushes session writes, and releases factory-owned resources exactly once. Failures aggregate in that order; task failures stay on their own promises and steps.
+7. `create` keeps `import("junco-tools")` dynamic so explicit tools never load the native addon, and takes ownership only of what it creates. Provider/model ID strings resolve through Pi's `ModelRuntime`, optionally shared via `models`; require the selected provider's saved Pi credential and resolve/refresh it before allocating default sessions/tools. Never start an interactive login or fall back to Copilot CLI credentials: missing/unusable credentials must tell the user to run `/login` in Pi. `fromResolved` remains caller-authenticated.
 
 ## Tests and operational boundaries
 
-- The suite is offline. Pi's `fauxProvider` supplies model turns through `scriptedModelProvider`. To inspect the next request context, use response factories. Keep assertions outside the factories, because faux turns a thrown assertion into a model error.
-- Use caller-supplied stateful tools only in gate and abort tests. Assert observable behavior: yields, completion values, captured model context, execution counts, and the run's abort signal. Do not assert spies, wiring, or wording. Lifecycle tests use a `5_000` ms test timeout to detect a stuck gate or abort. Never synchronize with sleeps.
-- Verify changes to the default native path with a throwaway ESM script against the built `dist/index.js`, run under both Node and Bun. No `tools` override is set. In an ordinary temporary directory, a faux model calls the real `read` and then the hashline `edit`.
-  - Assert the eight offered tool names, the yields, the file contents, and the completion value.
-  - In `finally`, close the generator, await `shutdownShellMux()` once, and remove only that temporary directory.
-  - Delete the script afterwards. Never commit it.
-- `bash` alone needs an existing **dedicated** Btrfs seed subvolume, a writable parent directory, and the `user_subvol_rm_allowed` mount option. Never point shell work at the home subvolume, use sudo, or mount an image. When no seed is available, report `bash` as untested.
+- The suite is offline. Pi's `fauxProvider` supplies model turns; use response factories to inspect a request's context and keep assertions outside them, because faux turns a thrown assertion into a model error.
+- Synchronize with `Promise.withResolvers` gates, never sleeps. `setImmediate` flushes appear only to show that nothing progressed. Lifecycle tests use a `5_000` ms timeout to detect a stuck gate or close.
+- Assert observable behavior — steps, statuses, request contexts, execution and request counts, signals, file contents and session state — never wording, spies or wiring.
+- A pristine-versus-patched comparison needs a separately installed pristine `0.80.6` (npm does not apply the patch; a Bun alias of the same package would be patched too). Run it from a disposable consumer, never against a second copy of the patched package.
+- Verify the native default path only against a disposable dedicated Btrfs seed. Never use an ordinary directory or the home subvolume, never use sudo or mount an image, and without a suitable seed report the default path as unverified.
 - Tests and verification never use live LLM credentials.
