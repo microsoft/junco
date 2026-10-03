@@ -140,19 +140,19 @@ test("stdout and stderr both reach the tool result", { timeout: 30_000 }, async 
   }
 });
 
-test("a nonzero process status rejects with its output and code", { timeout: 30_000 }, async (t) => {
+test("a nonzero process status produces a model-visible error result", { timeout: 30_000 }, async (t) => {
   const instance = await fixture();
   try {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({ mux: instance.mux, principal: "status-owner" }),
     });
-    await assert.rejects(tool.execute("failing", {
+    const result = await tool.execute("failing", {
       command: "printf 'before-failure\\n'; exit 7",
-    }, t.signal), (error) => {
-      assert.match(error.message, /before-failure/);
-      assert.match(error.message, /Command exited with code 7/);
-      return true;
-    });
+    }, t.signal);
+    assert.equal(result.isError, true);
+    assert.match(text(result), /before-failure/);
+    assert.match(text(result), /Command exited with code 7/);
+    assert.equal(result.structuredContent?.exit_code, 7);
   } finally {
     await closeFixture(instance);
   }

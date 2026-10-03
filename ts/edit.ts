@@ -50,8 +50,7 @@ export function createEditTool(
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
-      // Pi 0.80.6 has no streamed-argument interface, so the complete
-      // arguments go in through the engine's no-delta path.
+      // Pass the complete arguments through the engine's no-delta path.
       const outcome = await mux.edit(
         cwd,
         store,

@@ -3,10 +3,10 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  AuthStorage,
   DEFAULT_MAX_BYTES,
+  ModelRuntime,
   SessionManager,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
@@ -485,7 +485,11 @@ async function collectionSession(instance, principal) {
   const { session } = await createAgentSession({
     cwd: instance.seed,
     agentDir,
-    authStorage: AuthStorage.inMemory(),
+    modelRuntime: await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+    }),
     settingsManager,
     sessionManager: SessionManager.inMemory(instance.seed),
     resourceLoader,
@@ -494,7 +498,7 @@ async function collectionSession(instance, principal) {
   });
   try {
     await session.bindExtensions({ onError: (error) => errors.push(error) });
-    session.agent.streamFn = streamFn;
+    session.agent.streamFunction = streamFn;
   } catch (setupError) {
     // The caller never received this session, so nothing else can dispose it. The borrowed
     // mux stays the caller's, and is deliberately not closed here.

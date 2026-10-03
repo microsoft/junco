@@ -3,10 +3,10 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  AuthStorage,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   createAgentSession,
@@ -102,7 +102,11 @@ async function packagedSession(sessionManager) {
   const { session } = await createAgentSession({
     cwd: state.seed,
     agentDir: state.agentDir,
-    authStorage: AuthStorage.inMemory(),
+    modelRuntime: await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+    }),
     settingsManager,
     sessionManager,
     resourceLoader,
@@ -111,7 +115,7 @@ async function packagedSession(sessionManager) {
   try {
     await session.bindExtensions({ onError: (error) => state.errors.push(error) });
     assert.deepEqual(state.errors, []);
-    session.agent.streamFn = scripted.streamFn;
+    session.agent.streamFunction = scripted.streamFn;
   } catch (setupError) {
     // The caller never received this session, so nothing else can dispose it.
     try {
@@ -321,7 +325,7 @@ test("the packaged extension registers bash with the persisted prefix", { timeou
   state.session = session;
   state.sessionId = session.sessionId;
 
-  // Pi 0.80.6 seeds the active set with read/bash/edit/write and then adds extension tools whose
+  // Pi seeds the active set with read/bash/edit/write and then adds extension tools whose
   // names are not built-ins, so the collection's same-name grep and find replacements are
   // registered but inactive until a caller selects them.
   const active = session.getActiveToolNames();
@@ -386,7 +390,7 @@ test("the packaged extension drives a read into a hashline edit", { timeout: 120
   const session = state.session;
   assert.ok(session, "the packaged registration scenario did not produce a session");
   const scripted = scriptedModel();
-  session.agent.streamFn = scripted.streamFn;
+  session.agent.streamFunction = scripted.streamFn;
 
   const capture = {};
   scripted.faux.setResponses([
@@ -429,11 +433,11 @@ test("the packaged extension drives a read into a hashline edit", { timeout: 120
 test("reload keeps the session principal and replaces disposed operations", { timeout: 120_000 }, async () => {
   const session = state.session;
   assert.ok(session, "the packaged registration scenario did not produce a session");
-  // Bindings must survive: 0.80.6 only re-emits session_start when they exist.
+  // Bindings must survive reload so extension ownership is transferred to the fresh operations.
   await session.reload();
   assert.equal(session.sessionId, state.sessionId);
   const scripted = scriptedModel();
-  session.agent.streamFn = scripted.streamFn;
+  session.agent.streamFunction = scripted.streamFn;
 
   // A path no earlier session staked: reload disposes the old owner, so the next command
   // reopens the seed, and a recovered stake belongs to the snapshot that published it rather

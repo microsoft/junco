@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createReadTool as createPiReadTool,
   createReadToolDefinition as createPiReadToolDefinition,
-  type ExtensionContext,
+  type ExtensionToolContext,
   type ReadOperations,
   type ReadToolDetails,
   type ToolDefinition,
@@ -73,7 +73,7 @@ export function createReadTool(
   const tool = {
     ...fallback,
     description: `${fallback.description} ${HASHLINE_NOTE}`,
-    async execute(toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) {
+    async execute(toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) {
       throwIfAborted(signal);
       // Pi probes, sniffs, and reads the same path: one routed read serves them all.
       const loads = new Map<string, Promise<Buffer>>();
