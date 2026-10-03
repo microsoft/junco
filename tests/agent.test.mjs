@@ -3,8 +3,8 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { AuthStorage, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { ModelRuntime, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
 import {
   createBashTool,
   createEditTool,
@@ -356,7 +356,11 @@ test("an SDK-registered bash override executes through marsh", { timeout: 60_000
     ({ session } = await createAgentSession({
       cwd: instance.seed,
       agentDir,
-      authStorage: AuthStorage.inMemory(),
+      modelRuntime: await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        refreshOnCreate: false,
+        allowModelNetwork: false,
+      }),
       settingsManager,
       sessionManager: SessionManager.inMemory(instance.seed),
       resourceLoader,
@@ -366,7 +370,7 @@ test("an SDK-registered bash override executes through marsh", { timeout: 60_000
     }));
     await session.bindExtensions({ onError: (error) => errors.push(error) });
     assert.deepEqual(errors, []);
-    session.agent.streamFn = streamFn;
+    session.agent.streamFunction = streamFn;
 
     const active = session.getActiveToolNames();
     assert.deepEqual(active.filter((name) => name === "bash"), ["bash"]);

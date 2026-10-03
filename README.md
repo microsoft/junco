@@ -2,7 +2,9 @@
 
 Pi's file and shell tools backed by native Rust engines: `bash` runs on real [marsh](https://github.com/junco-org/marsh) ShellMux jobs, and `read`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, and `diff` run on Oh My Pi's AST, diff, walker, and edit libraries. The bash tool injects Pi's public `BashOperations` backend instead of replacing its tool schema, streaming output, truncation, renderers, or error formatting.
 
-**Compatibility:** `@earendil-works/pi-coding-agent@0.80.6` (Pi, not Oh My Pi). `ToolCollection` replaces Pi's `read`, `bash`, `edit`, `grep`, and `find`; Pi's `write`, `ls`, and interactive `user_bash` are unchanged. The `edit` replacement deliberately uses Oh My Pi's **hashline** contract — `{ input: string }` with `[path#TAG]` sections and numbered rows — not Pi's exact-text `oldText`/`newText` schema.
+**Compatibility:** `@earendil-works/pi-coding-agent@0.99.2` (Pi, not Oh My Pi). `ToolCollection` replaces Pi's `read`, `bash`, `edit`, `grep`, and `find`; Pi's `write`, `ls`, and interactive `user_bash` are unchanged. The `edit` replacement deliberately uses Oh My Pi's **hashline** contract — `{ input: string }` with `[path#TAG]` sections and numbered rows — not Pi's exact-text `oldText`/`newText` schema.
+
+The native crate keeps `ast-grep-core` on 0.39.9: pinned `pi-ast` shares its `Pattern`/`Edit` types with that version. Upgrading only this crate would split those Rust types.
 
 ## Build the local package
 
@@ -39,7 +41,7 @@ npm ci
 npm run build
 ```
 
-`npm run build` generates the production addon in `native/`, then compiles TypeScript into `dist/`. Both are needed at runtime. The package is private and is not published to npm; build the checkout before using it.
+`npm run build` generates the production addon in `native/`, then compiles TypeScript into `dist/`. Both are needed at runtime. The private package's `files` list ships only runtime artifacts and documentation to `file:` consumers, not the test addon under `target/native-test/`; build and load that from this checkout for policy tests.
 
 The launcher preserves explicit `CARGO_HOME`, `RUSTUP_HOME`, and SSH settings. Native build scripts use the committed Cargo lockfile and a process-local HTTPS-to-SSH rewrite for private junco dependencies; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
 
@@ -89,10 +91,12 @@ publication in progress and do not provide an atomic multi-file view.
 In another ESM TypeScript project, install the built checkout and the compatible Pi version:
 
 ```sh
-npm install "$HOME/git/junco-tools" @earendil-works/pi-coding-agent@0.80.6 @earendil-works/pi-agent-core@0.80.6
+npm install "$HOME/git/junco-tools" @earendil-works/pi-coding-agent@0.99.2 @earendil-works/pi-agent-core@0.99.2
 ```
 
 Use the package-root imports shown below. The package ships compiled ESM and declarations; it does not require Bun. A NodeNext TypeScript configuration matches this repository.
+
+This package pins `typebox` 1.3.34 with an override so Pi's older metadata pin does not create a second schema type. A consumer sharing schemas should use the same override.
 
 ### Pi SDK: the whole collection
 
@@ -122,6 +126,8 @@ try {
   await collection.close();
 }
 ```
+
+For deterministic offline SDK tests, pass `modelRuntime: await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), refreshOnCreate: false, allowModelNetwork: false })`; the SDK default uses its configured credential and model catalog stores.
 
 Each collection owns one snapshot store, so `read`, `grep`, and `edit` share anchors, seen-line provenance, and named clipboard registers; two collections share none of it. The store is in-memory only; the mux is the collection's one resource to close. Pass `sandbox: "always"` to sandbox every shell command and writing file tool, or borrow an existing mux with `{ mux, native }` (the addon that created it), which its caller keeps and closes. New files are still created with Pi's built-in `write`.
 
@@ -159,7 +165,7 @@ The same objects work as SDK `customTools` and with `pi.registerTool`. There, `r
 
 ### Pi SDK: bash only
 
-`createBashTool` returns an `AgentTool` that keeps Pi's bash renderers and prompt metadata, so it goes into **`customTools`** as is. In Pi 0.80.6, **`tools` is an allowlist of names**, not an array of tool objects.
+`createBashTool` returns a four-argument `AgentTool` that keeps Pi's bash renderers and prompt metadata, so it goes into **`customTools`** as is. In Pi 0.99.2, **`tools` is an allowlist of names**, not an array of tool objects.
 
 ```ts
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -259,6 +265,8 @@ Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata an
 
 Commands use marsh's brush interpreter, not Pi's local OS-shell backend. A process exit code of zero can still be rejected by publication policy. Snapshots are **not OS confinement**: absolute-path writes and network effects remain possible. Cancellation waits for backend-owned cleanup and can be delayed by commands racing ShellMux's stop scan; do not treat timeout as a universal hard wall-clock kill guarantee.
 
+Pi 0.99.2 reports a nonzero bash exit as a resolved result with `isError: true` and `structuredContent.exit_code`; the model sees the failure. Typed Marsh policy denials still reject the call, so handle them separately.
+
 The file tools are marsh calls too, each in a transient shell of the mux. Read-only calls run directly against the seed. `edit` and an applying `ast_edit` are edits the mux's policy may sandbox: then they write inside a private snapshot through marsh's reported I/O and publish only what its policy authorizes, so a refused publication rejects the call and changes nothing on the seed. Result and error paths always name the seed, never a snapshot. `edit` stages every file in memory before writing, so a compute or parse failure writes nothing, but a writer error or cancellation between files can leave earlier files already written — that is the upstream engine's behavior, not a transactional commit. `ast_edit` previews by default; only `dryRun: false` writes.
 
 An ordinary ext4 directory is not a production seed. The production addon never falls back to a fake filesystem. Development tests explicitly build a separate CopyTree-enabled addon and exercise the same binding, Pi factories, Agent loop, and SDK registration:
@@ -269,7 +277,9 @@ npm run build:native:test
 npm test
 ```
 
-`NativeMux.openCopyTree(seed, { sandbox? }?)` exists only in `target/native-test/index.js`. Its ordinary `NativeMux.open` still requires btrfs. These ext4 checks cover the adapter, interpreter, policy, and WAL; real-btrfs ioctls and storage atomicity remain unverified on the ext4 development host.
+`NativeMux.openCopyTree(seed, { sandbox? }?)` exists only in `target/native-test/index.js`. Its ordinary `NativeMux.open` still requires btrfs. CopyTree tests do not exercise real-btrfs ioctls or storage atomicity.
+
+The native tracer also needs readable kernel BTF/kallsyms and effective BPF/performance/system-log capabilities. On this WSL2 kernel, unprivileged runs lack `CAP_SYSLOG`, while privileged runs may still fail on kernel evidence loss or timing; do not weaken Marsh policy checks to hide those failures. Re-run native integration on a compatible kernel before treating that surface as verified.
 
 The packaged extension and default-owned muxes are covered by a separate opt-in lane that uses the **production** addon:
 
