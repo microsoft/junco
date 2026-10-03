@@ -53,6 +53,10 @@ export const inferredAnyRule: TriggerRule<number, string> = inferredAny;
 export const inferredWrongMessage: TriggerRule<string, string> = inferredAll;
 // @ts-expect-error the inferred result payload is string, not Date
 export const inferredWrongResult: TriggerRule<number, Date> = inferredAny;
+// @ts-expect-error anyOf retains the inferred number message payload
+export const inferredAnyWrongMessage: TriggerRule<string, string> = inferredAny;
+// @ts-expect-error allOf retains the inferred string result payload
+export const inferredAllWrongResult: TriggerRule<number, Date> = inferredAll;
 export const explicitWrongEntry = allOf<number, string>(
   on(numberEdge),
   // @ts-expect-error an explicit rule rejects an entry of another message type
@@ -70,6 +74,8 @@ export const messageUnionAnyRule: TriggerRule<number | number[], string> =
 // @ts-expect-error the second entry's number[] messages survive inference
 export const messageUnionNarrowed: TriggerRule<number, string> =
   messageUnionAll;
+// @ts-expect-error anyOf retains the second entry's number[] messages
+export const messageUnionAnyNarrowed: TriggerRule<number, string> = messageUnionAny;
 
 const resultUnionAll = allOf(on(numberEdge), on(numberResultEdge));
 const resultUnionAny = anyOf(on(numberEdge), on(numberResultEdge));
@@ -79,6 +85,8 @@ export const resultUnionAnyRule: TriggerRule<number, string | number> =
   resultUnionAny;
 // @ts-expect-error the second entry's number results survive inference
 export const resultUnionNarrowed: TriggerRule<number, string> = resultUnionAny;
+// @ts-expect-error allOf retains the second entry's number results
+export const resultUnionAllNarrowed: TriggerRule<number, string> = resultUnionAll;
 
 // --- 4. empty rules fit every graph; literals are checked per entry ------------------------------
 
