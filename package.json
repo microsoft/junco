@@ -12,6 +12,11 @@
       "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./workflows": {
+      "types": "./dist/workflows/index.d.ts",
+      "bun": "./src/workflows/index.ts",
+      "import": "./dist/workflows/index.js"
     }
   },
   "files": [
@@ -20,27 +25,42 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "bun build ./src/index.ts ./src/workflows/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts",
     "test:coverage": "bun run test --coverage",
-    "test:integration": "bun test ./test/junco-agency.test.ts ./test/pi-scheduler.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts",
+    "test:integration": "bun test ./test/junco-agency.test.ts ./test/pi-scheduler.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/ralph-workflow.test.ts",
     "test:native": "bun test ./test/policy-yield.test.ts",
     "test:all": "bun run test && bun run test:integration && bun run test:native",
     "smoke": "bun run test/deterministic-agency.fixture.ts",
-    "smoke:pi": "bun run examples/recursive-agency.ts"
+    "smoke:pi": "bun run examples/recursive-agency.ts",
+    "smoke:workflows": "node --experimental-strip-types ./test/workflows.fixture.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.2",
     "@earendil-works/pi-ai": "0.99.2",
     "@earendil-works/pi-coding-agent": "0.99.2",
     "dataflow-engine": "file:../dataflow-engine",
-    "dataflow-engine-opik": "file:../dataflow-engine-opik",
     "fp-ts": "^2.16.11",
     "junco-agent": "file:../junco-agent",
     "junco-scheduler": "file:../junco-scheduler",
-    "opik": "2.2.86",
     "typebox": "1.3.34"
+  },
+  "peerDependencies": {
+    "dataflow-engine-langflow": "^0.1.0",
+    "dataflow-engine-opik": "^0.1.0",
+    "opik": "^2.2.86"
+  },
+  "peerDependenciesMeta": {
+    "dataflow-engine-langflow": {
+      "optional": true
+    },
+    "dataflow-engine-opik": {
+      "optional": true
+    },
+    "opik": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

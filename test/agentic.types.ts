@@ -10,6 +10,9 @@ import {
   type DataflowGraph,
   type DataflowScheduler,
   type DataflowTracer,
+  type Message,
+  messageEdge,
+  msg,
   type NodeIdType,
   type NodeOptions,
   type NodeSpec,
@@ -158,6 +161,10 @@ export function wireTypesAndSchedulerArePreserved(
     raw,
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
+  graph.emit(ids[0]!, msg(messageEdge<number, string>("typed-output"), 1));
+  const chat: Message<string> = msg(messageEdge<string, string>("chat-output"), "hi");
+  // @ts-expect-error a chat message cannot be emitted on a numeric graph
+  graph.emit(ids[0]!, chat);
   const concrete: PiScheduler<number, string> = graph.scheduler;
   const selected: O.Option<string> = child.result(childId);
   const results: Promise<ReadonlyMap<NodeIdType, string>>[] = [graph.run(), graph.step({ signal: graph.signal })];

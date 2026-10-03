@@ -59,14 +59,6 @@ jobs:
           ssh-key: ${{ secrets.JUNCO_DATAFLOW_SSH_KEY }}
           persist-credentials: false
 
-      - name: Checkout dataflow-engine-opik
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/dataflow-engine-opik
-          path: dataflow-engine-opik
-          ssh-key: ${{ secrets.JUNCO_DATAFLOW_OPIK_SSH_KEY }}
-          persist-credentials: false
-
       - name: Checkout junco-agent
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -141,21 +133,16 @@ jobs:
           bun run typecheck
           bun run test
 
-      - name: Build dataflow-engine-opik
-        working-directory: dataflow-engine-opik
-        run: |
-          bun install --frozen-lockfile
-          bun run typecheck
-          bun run build
-
       - name: Build and test junco-agency
         working-directory: junco-agency
         run: |
           bun install --frozen-lockfile
-          bun run typecheck
           bun run build
+          bun run typecheck
           bun run test:coverage
           bun run smoke
+          bun run test:integration
+          bun run smoke:workflows
 
       - name: Installed engine identity
         working-directory: junco-agency

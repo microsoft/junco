@@ -1,8 +1,6 @@
 import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import { type Context, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { OpikDataflowTracer } from "dataflow-engine-opik";
 import { createYieldTool, JuncoAgent } from "junco-agent";
-import { Opik } from "opik";
 import { convene, createOssSearchTool, createReviewTool, type MemberId, type Members } from "../examples/oss-committee.ts";
 import { scripted } from "./support.ts";
 
@@ -275,11 +273,6 @@ export async function scriptedCommittee(script: {
 }
 
 if (import.meta.main) {
-  const tracer = new OpikDataflowTracer(new Opik(), "examples/oss-committee");
   await using committee = await scriptedCommittee();
-  try {
-    console.log(await convene(request, committee.members, committee.search, committee.review, tracer));
-  } finally {
-    await tracer.flush();
-  }
+  console.log(await convene(request, committee.members, committee.search, committee.review));
 }

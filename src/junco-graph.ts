@@ -1,5 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { DataflowGraph, type DataflowRunOptions, type DataflowScheduler, type NodeIdType } from "dataflow-engine";
+import { feature } from "bun:bundle";
+import {
+  DataflowGraph,
+  type DataflowRunOptions,
+  type DataflowScheduler,
+  type DataflowTracer,
+  type NodeIdType,
+  type Width,
+} from "dataflow-engine";
 import { JuncoAgentError, type JuncoAgent } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
 import type { Agentic, AgenticInput } from "./agentic.js";
@@ -28,6 +36,13 @@ type Kind = "abort" | "close";
 
 const closedGraph = (): JuncoAgentError => new JuncoAgentError("closed", "Graph is closed");
 
+/** A required Langflow tracing variable, read when the automatic Langflow tracer is first built. */
+function requiredLangflowEnv(name: "LANGFLOW_URL" | "LANGFLOW_API_KEY" | "LANGFLOW_FLOW_ID"): string {
+  const value = process.env[name];
+  if (!value?.trim()) throw new Error(`Missing ${name}; configure the Langflow URL, API key and existing owned Flow.`);
+  return value;
+}
+
 /**
  * A dataflow graph of {@link Agentic} node states that owns its members' lifecycle.
  *
@@ -44,6 +59,8 @@ export class JuncoGraph<
 > extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
   /** Graphs inside the synchronous dispatch of an abort or close cascade: their scheduler callbacks no-op. */
   static readonly #dispatch: Record<Kind, ReadonlySet<object> | undefined> = { abort: undefined, close: undefined };
+  /** The tracer shared by every automatically traced graph, built on first use under one feature. */
+  static #automaticTracer: DataflowTracer | undefined;
 
   #controller = new AbortController();
   /** Default run options, replaced with the controller. */
@@ -53,6 +70,44 @@ export class JuncoGraph<
   #close: Cascade | undefined;
   /** A root `close()` joining a close its own scheduler started. */
   #rootClose: Promise<void> | undefined;
+
+  /**
+   * The `opik` or `langflow` Bun feature selects an automatic tracer, shared by every graph that
+   * omits `tracer`; neither leaves such graphs untraced. A supplied `tracer` always wins.
+   *
+   * @throws {Error} when both features are enabled, or the selected provider cannot be loaded or
+   *   configured.
+   */
+  constructor(scheduler: Q, window: Width, threads: Width, tracer?: DataflowTracer) {
+    let selected = tracer;
+    if (feature("opik")) {
+      if (feature("langflow")) throw new Error('JuncoGraph features "opik" and "langflow" are mutually exclusive');
+      if (selected === undefined) {
+        if (JuncoGraph.#automaticTracer === undefined) {
+          const { OpikDataflowTracer } = require("dataflow-engine-opik");
+          const { Opik } = require("opik");
+          const automatic: DataflowTracer = new OpikDataflowTracer(new Opik(), "JuncoGraph.run");
+          JuncoGraph.#automaticTracer = automatic;
+        }
+        selected = JuncoGraph.#automaticTracer;
+      }
+    } else if (feature("langflow")) {
+      if (selected === undefined) {
+        if (JuncoGraph.#automaticTracer === undefined) {
+          const { LangflowDataflowTracer, LangflowTraceClient } = require("dataflow-engine-langflow");
+          const client = new LangflowTraceClient({
+            baseUrl: requiredLangflowEnv("LANGFLOW_URL"),
+            apiKey: requiredLangflowEnv("LANGFLOW_API_KEY"),
+            flowId: requiredLangflowEnv("LANGFLOW_FLOW_ID"),
+          });
+          const automatic: DataflowTracer = new LangflowDataflowTracer(client, "JuncoGraph.run");
+          JuncoGraph.#automaticTracer = automatic;
+        }
+        selected = JuncoGraph.#automaticTracer;
+      }
+    }
+    super(scheduler, window, threads, selected);
+  }
 
   /** Aborted by {@link abort} (then replaced once that settles) and, terminally, by {@link close}. */
   get signal(): AbortSignal {
