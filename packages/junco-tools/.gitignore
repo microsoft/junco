@@ -1,0 +1,8 @@
+/target/
+/dist/
+/native/*.node
+/native/index.js
+/native/index.d.ts
+/node_modules/
+*.tsbuildinfo
+/graphify-out/
