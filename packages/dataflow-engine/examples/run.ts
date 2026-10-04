@@ -29,7 +29,7 @@ if (name !== undefined && cookbook) {
   process.exit(2);
 }
 
-// Set before building, so the SDK preflight validates the same endpoint the examples export to.
+// Traced programs inherit the local default unless the caller configured an endpoint.
 if (!noTracing) process.env.OPIK_URL_OVERRIDE ??= DEFAULT_OPIK_URL;
 
 const built = await buildExamples(noTracing).catch((error: unknown) => {

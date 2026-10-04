@@ -14,7 +14,7 @@ const owners = new Set<Owner>();
 
 function openOwnedMux(owner: Owner, cwd: string): Promise<NativeMux> {
   if (!owner.opening) {
-    const opening = import("../native/index.js").then(({ NativeMux }) =>
+    const opening = import("junco-tools/native").then(({ NativeMux }) =>
       NativeMux.open(cwd),
     );
     owner.opening = opening;

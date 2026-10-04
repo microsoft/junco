@@ -4,9 +4,21 @@ Recursive agentic dataflow graphs. A `JuncoGraph` is a native [`dataflow-engine`
 
 ## Setup
 
-Requirements: Linux x86-64 with glibc, Node.js `>=22.19.0`, Bun `1.4.2`, and Rust `1.95.0` plus native build libraries for `junco-tools`. This repository is a Bun workspace: the agency sits at the root and `packages/` holds `junco-tools`, `junco-agent`, `dataflow-engine` (with its `examples` workspace), `dataflow-engine-opik`, and `junco-scheduler`, each imported with its full Git history. Only `marsh` and `junco-policy` stay external: keep their checkouts alongside this repository (`../marsh`, `../junco-policy`), where `packages/junco-tools/Cargo.toml` finds the marsh crates. The tracer adapters are optional at runtime (see [Tracing](#tracing-local-only)).
+Requirements: Linux x86-64 with glibc and Bun `1.4.2`. Package development additionally needs Node.js `>=22.19.0` (Node `dist` builds and smokes), and `junco-tools`' native addon needs Rust `1.95.0` plus native build libraries. This repository is a Bun workspace: the agency sits at the root and `packages/` holds `junco-tools`, `junco-agent`, `dataflow-engine` (with its `examples` workspace), `dataflow-engine-opik`, and `junco-scheduler`, each imported with its full Git history. Only `marsh` and `junco-policy` stay external: native development needs their checkouts alongside this repository (`../marsh`, `../junco-policy`), where `packages/junco-tools/Cargo.toml` finds the marsh crates. The source example bundles below need neither these checkouts nor Rust. The tracer adapters are optional at runtime (see [Tracing](#tracing-local-only)).
 
-Install once from the root, then build in dependency order (tools → engine → agent → scheduler → Opik adapter → agency):
+To run the root `examples/`, install once from the root and let Bun bundle them from workspace sources; no package, declaration, or native build comes first:
+
+```sh
+bun install --frozen-lockfile
+bun run build:examples
+bun --no-install examples/dist/recursive-agency.js
+```
+
+`build:examples` bundles `examples/recursive-agency.ts`, `mixed.ts`, and `oss-committee.ts` (with shared chunks and external source maps) into `examples/dist/` for Bun. Every reachable workspace package resolves through its `bun` export to TypeScript source, so the tools → engine → agent → scheduler → Opik adapter chain below is not a prerequisite. Six boundaries stay external and must be installed where the bundle runs: the generated `junco-tools/native` loader (loaded lazily, only when default native tools are created), `@oh-my-pi/pi-coding-agent`, the three `@earendil-works` Pi packages (which locate their assets from their own install), and the `opik` SDK. These three examples supply explicit tools, so they need no native addon; the recursive example is offline, while `mixed` and `oss-committee` still need their existing credentials and inputs. Tracing is chosen at build time: `bun run build:examples --feature=opik` rebuilds the same outputs with the workspace Opik adapter bundled (run them with the usual `OPIK_*` configuration); a runtime `--feature=opik` cannot enable tracing in an untraced bundle, and rebuilding without the flag returns to untraced output.
+
+`dataflow-engine`'s own examples follow the same contract: after the root install, `bun run examples` (or `examples:build`) in `packages/dataflow-engine` bundles them from workspace sources without any producer build; see its [README](packages/dataflow-engine/README.md#examples-and-development).
+
+For package development (Node `dist` builds, declarations, and the native addon), build in dependency order (tools → engine → agent → scheduler → Opik adapter → agency):
 
 ```sh
 bun install --frozen-lockfile
@@ -29,7 +41,7 @@ bun run smoke
 
 ## Tracing (local only)
 
-`JuncoGraph`'s constructor selects an automatic tracer from Bun's native feature flags. `--feature=opik` uses `dataflow-engine-opik` (configured by the SDK's `OPIK_*` variables); without it there is no automatic tracing. A tracer passed as the constructor's fourth argument (or to `createParallelAgentGraph`) always wins. The automatic tracer is built once per process, named `JuncoGraph.run`, and shared by every automatically traced graph, nested ones included; callers own `await graph.tracer?.flush()`, as every example does. A missing Opik adapter or configuration fails construction rather than running untraced. The Node `dist` build carries no features.
+`JuncoGraph`'s constructor selects an automatic tracer from Bun's native feature flags. `--feature=opik` uses `dataflow-engine-opik` (configured by the SDK's `OPIK_*` variables); without it there is no automatic tracing. A tracer passed as the constructor's fourth argument (or to `createParallelAgentGraph`) always wins. The automatic tracer is built once per process, named `JuncoGraph.run`, and shared by every automatically traced graph, nested ones included; callers own `await graph.tracer?.flush()`, as every example does. A missing Opik adapter or configuration fails construction rather than running untraced. The Node `dist` build carries no features; `examples/dist` carries the features it was built with (`bun run build:examples --feature=opik`).
 
 `dataflow-engine-opik` is a workspace package and a root development dependency, so the root install already provides it and `opik`; under Bun its `bun` export loads its source directly. Confirm with the `require.resolve` check:
 
@@ -42,7 +54,7 @@ OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency bun r
 
 `.github/workflows/ci.yml` runs on every push, pull request, and manual dispatch, with two independent jobs that each run one root `bun install --frozen-lockfile`:
 
-- `core` needs no secrets. It runs the root Biome check (`bun run check:ci`), then builds the engine, the scheduler's deterministic root (`build:core`, `typecheck:core` over that root with its scheduler suite and type fixture, then the scheduler suite), and the Opik adapter (build and typecheck); runs the engine's typecheck, tests with coverage (uploaded as the `coverage` artifact), and deterministic `--no-tracing` examples; packs the engine and scheduler into an isolated consumer without agent or Pi peers and runs the round-robin smoke under Bun and Node; and runs an offline Opik graph smoke through an in-memory Opik client.
+- `core` needs no secrets. It runs the root Biome check (`bun run check:ci`); then, before any package or native build, bundles the root examples from workspace sources (`bun run build:examples`), builds the engine's traced examples (`examples:build`, not executed) and runs its deterministic `--no-tracing` examples with their exact output, asserts after each that no package `dist`/`native`/`target` output appeared, and runs the copied root bundles in a temporary consumer that installs only the vendor externals (the recursive example's exact output and the committee's usage rejection). It then builds the engine, the scheduler's deterministic root (`build:core`, `typecheck:core` over that root with its scheduler suite and type fixture, then the scheduler suite), and the Opik adapter (build and typecheck); runs the engine's typecheck (Dummy) and `examples:typecheck` (Opik) against those declarations, and its tests with coverage (uploaded as the `coverage` artifact); packs the engine and scheduler into an isolated consumer without agent or Pi peers and runs the round-robin smoke under Bun and Node; and runs an offline Opik graph smoke through an in-memory Opik client.
 - `test` checks out the private `marsh` and `junco-policy` beside the repository using read-only deploy-key secrets `JUNCO_MARSH_SSH_KEY` and `JUNCO_POLICY_SSH_KEY`. It runs junco-tools' rustfmt, Clippy and Rust unit tests, builds its production and CopyTree test addons and runs its Node tests, then builds and tests tools → engine → agent → scheduler (full `typecheck` and both suites) → Opik adapter → agency. For the agency it runs build, typecheck (the built-package fixture needs the emitted declarations), the deterministic suites with coverage (uploaded as the `agency-coverage` artifact), the deterministic smoke, the offline integration suites, the native policy-yield suite (`bun run test:native`), and the `junco-agency/workflows` smoke under Bun (source entrypoints) and Node (built entrypoints), then checks that the workspace `junco-scheduler` and the agency share one `dataflow-engine` instance under Bun and Node, and runs the relocated `junco-agent` CLI launcher (`--version`).
 
 No Btrfs mount, tracing service, language server, or model credentials are required: native suites run on CopyTree workspaces. Forks and other runs without the deploy-key secrets cannot run the `test` job, so they have no native coverage.
@@ -166,6 +178,17 @@ class MockAgent<S, P, T> implements Agentic<S, P, T> /* junco-agent's protocol *
 // Every available node runs in each window: junco-scheduler's parallel policy, Width(1), UNBOUNDED.
 function createParallelAgentGraph<N = AgenticInput, T = AssistantMessage>(tracer?: DataflowTracer): JuncoGraph<N, T>;
 
+// graph.Spawn (namespace-only): a createParallelAgentGraph holding `root` plus one child per input,
+// built by `spawn` in order. Each child gets two fresh message edges, `${rootId}->${childId}` and
+// `${childId}->${rootId}`; children are never linked. Construction only wires queues: members send
+// and consume messages through their own triggers and yields. Ids are the ones `addNode` returns.
+// Factory/registration errors propagate synchronously; already-created members stay caller-owned.
+function Spawn<T, N = AgenticInput, R = AssistantMessage>(
+  root: AgenticNode<N, R>,
+  inputs: readonly T[],
+  spawn: (input: T) => AgenticNode<N, R>,
+): JuncoGraph<N, R>;
+
 // PiScheduler, PiSchedulerOptions, SchedulerInfo and ScheduleTool come from "junco-scheduler/agent";
 // the agency supplies the scheduler's adapter itself. A defined `model` selects PiScheduler.make
 // (requiring model, models and session); otherwise PiScheduler.opus selects Copilot Opus 5.5.
@@ -196,7 +219,7 @@ The root entry also re-exports the standard library for building junco workflows
 
 | Namespace | Contents | Source |
 |---|---|---|
-| `graph` | `DataflowGraph`, `JuncoGraph`, `createParallelAgentGraph`, edges (`messageEdge`, `valueEdge`, `msg`, `from`), `NodeId`/`EdgeId`, `Width`/`UNBOUNDED`, `Queue`, `renderPretty`, the definition/node errors, and the node/edge types | `dataflow-engine`, this package |
+| `graph` | `DataflowGraph`, `JuncoGraph`, `createParallelAgentGraph`, `Spawn`, edges (`messageEdge`, `valueEdge`, `msg`, `from`), `NodeId`/`EdgeId`, `Width`/`UNBOUNDED`, `Queue`, `renderPretty`, the definition/node errors, and the node/edge types | `dataflow-engine`, this package |
 | `graph.nodes` | Node constructors: `ConstFanout`, `ConstFanin`, `stepNode`, `emitOnce`, `agentNode`, `graphNode`, `deterministicNode`, `Deterministic`, and the `Agentic`/`AgenticInput`/`AgenticNode` types | `dataflow-engine`, this package |
 | `trigger` (also `graph.trigger`) | `TriggerRule`, `TriggerEntry` and `TriggerKind` (`"all"` or `"any"`); rules `allOf(...)`, `anyOf(...)`, `when(edge)`, `always()`, `never()`; entries `on(edge)`, typed by their edge's message and result payloads; `evaluateTrigger`, `satisfiedEdges` | `dataflow-engine` |
 | `agent` | `JuncoAgent`, `JuncoAgentError`, and the `Agentic` protocol types | `junco-agent` |

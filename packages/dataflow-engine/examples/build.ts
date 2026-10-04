@@ -13,26 +13,11 @@ export const standaloneNames = [
 const examplesDir = import.meta.dir;
 const engineDir = resolve(examplesDir, "..");
 
-const OPIK_BUILD_FAILED =
-  "Opik example build failed. Install the optional dependencies in examples/ or use --no-tracing.";
-
-/** Run `command` from the engine root with inherited stdio, failing on a nonzero exit. */
-async function spawnStep(label: string, command: string[]): Promise<void> {
-  const child = Bun.spawn(command, {
-    cwd: engineDir,
-    env: process.env,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await child.exited;
-  if (code !== 0) throw new Error(`${label} failed with exit code ${code}`);
-}
-
 /**
- * Typecheck, preflight (Opik only) and bundle every example with the selected tracer, returning the
- * absolute paths of the compiled programs. Rejects before returning any path if a step fails, so a
- * caller can never execute a stale bundle.
+ * Bundle every example with the selected tracer, returning the absolute paths of the compiled
+ * programs. Rejects before returning any path if bundling fails, so a caller can never execute a
+ * stale bundle. Semantic checks belong to the package typecheck scripts; traced programs construct
+ * the Opik SDK client when they start.
  */
 export async function buildExamples(noTracing = false): Promise<{
   outdir: string;
@@ -50,48 +35,25 @@ export async function buildExamples(noTracing = false): Promise<{
   const outputOf = (source: string) =>
     join(outdir, relative(engineDir, source).replace(/\.ts$/, ".js"));
 
-  try {
-    await spawnStep("Example typecheck", [
-      "bun",
-      "run",
-      "tsc",
-      "-p",
-      "examples/tsconfig.json",
-      ...(noTracing ? ["--customConditions", "dataflow-no-tracing"] : []),
-    ]);
-    if (!noTracing) {
-      // Constructs the SDK client, validating the current Opik configuration. Creates no trace.
-      await spawnStep("Opik SDK preflight", [
-        "bun",
-        "--no-install",
-        "--eval",
-        'import "./examples/tracing-opik.ts";',
-      ]);
-    }
-
-    rmSync(outdir, { recursive: true, force: true });
-    const result = await Bun.build({
-      entrypoints: [...standaloneSources, ...cookbookSources],
-      root: engineDir,
-      outdir,
-      target: "bun",
-      format: "esm",
-      packages: "bundle",
-      splitting: true,
-      sourcemap: "external",
-      env: "disable",
-      naming: { entry: "[dir]/[name].[ext]" },
-      tsconfig: join(examplesDir, "tsconfig.json"),
-      conditions: noTracing ? ["dataflow-no-tracing"] : [],
-      throw: false,
-    });
-    if (!result.success) {
-      for (const log of result.logs) console.error(log);
-      throw new Error("Example bundling failed");
-    }
-  } catch (error) {
-    if (!noTracing) console.error(OPIK_BUILD_FAILED);
-    throw error;
+  rmSync(outdir, { recursive: true, force: true });
+  const result = await Bun.build({
+    entrypoints: [...standaloneSources, ...cookbookSources],
+    root: engineDir,
+    outdir,
+    target: "bun",
+    format: "esm",
+    packages: "bundle",
+    splitting: true,
+    sourcemap: "external",
+    env: "disable",
+    naming: { entry: "[dir]/[name].[ext]" },
+    tsconfig: join(examplesDir, "tsconfig.json"),
+    conditions: noTracing ? ["dataflow-no-tracing"] : [],
+    throw: false,
+  });
+  if (!result.success) {
+    for (const log of result.logs) console.error(log);
+    throw new Error("Example bundling failed");
   }
 
   return {

@@ -37,5 +37,6 @@ export {
 } from "dataflow-engine";
 export { JuncoGraph } from "../junco-graph.js";
 export { createParallelAgentGraph } from "../parallel-agent-graph.js";
+export { Spawn } from "../spawn.js";
 export * as nodes from "./nodes.js";
 export * as trigger from "./trigger.js";

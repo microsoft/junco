@@ -68,7 +68,7 @@ export class ToolCollection {
     // evaluation, so `import { ToolCollection }` would fail before a caller
     // could report a missing or mismatched binary. `ts/operations.ts` defers
     // the same way. A load failure rejects here; there is no second backend.
-    const native = options.native ?? (await import("../native/index.js"));
+    const native = options.native ?? (await import("junco-tools/native"));
     // Rejects outside a seed: every file tool needs one.
     const mux =
       options.mux ??
