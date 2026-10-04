@@ -39,6 +39,102 @@ jobs:
       - name: Biome
         run: bun run check:ci
 
+      # Root and engine examples bundled from workspace sources before any producer build: a
+      # missing Bun source export fails here. The relocated root bundles resolve only the vendor
+      # externals; the engine's traced mode is built but not executed.
+      - name: Bundle and smoke workspace examples from source
+        run: |
+          bun --no-install --eval '
+          import assert from "node:assert/strict";
+          import { existsSync } from "node:fs";
+          import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          import { dirname, join } from "node:path";
+
+          const root = process.cwd();
+          const producerOutputs = [
+            "dist",
+            "packages/dataflow-engine/dist",
+            "packages/dataflow-engine-opik/dist",
+            "packages/junco-agent/dist",
+            "packages/junco-scheduler/dist",
+            "packages/junco-tools/dist",
+            "packages/junco-tools/native",
+            "packages/junco-tools/target",
+          ];
+          function assertNoProducers() {
+            for (const path of producerOutputs) {
+              assert.equal(existsSync(join(root, path)), false, `Unexpected producer output: ${path}`);
+            }
+          }
+          assertNoProducers();
+          const build = Bun.spawn([process.execPath, "run", "build:examples"], {
+            cwd: root, stdin: "ignore", stdout: "inherit", stderr: "inherit",
+          });
+          assert.equal(await build.exited, 0, "Example source build failed");
+          assertNoProducers();
+
+          const engineDir = join(root, "packages/dataflow-engine");
+          const tracedBuild = Bun.spawn([process.execPath, "run", "examples:build"], {
+            cwd: engineDir, stdin: "ignore", stdout: "inherit", stderr: "inherit",
+          });
+          assert.equal(await tracedBuild.exited, 0, "Traced engine example source build failed");
+          assertNoProducers();
+
+          const engineExamples = Bun.spawn([process.execPath, "run", "examples", "--no-tracing"], {
+            cwd: engineDir, stdin: "ignore", stdout: "pipe", stderr: "inherit",
+          });
+          const engineStdout = await new Response(engineExamples.stdout).text();
+          assert.equal(await engineExamples.exited, 0, "Engine example source smoke failed");
+          assert.deepEqual(engineStdout.trim().split(/\r?\n/u).map((line) => JSON.parse(line)), [
+            [0, 1, 1, 2, 3, 5, 8, 13, 21, 34],
+            [2, 4, 6],
+            { counts: [["A", 2], ["fantastic", 1], ["new", 2], ["of", 1], ["point", 1], ["view", 1], ["whole", 1], ["world", 1]], totalCharacters: 46 },
+            { sums: [["a", 6], ["b", 30], ["c", 100]], products: [["a", 6], ["b", 200], ["c", 100]] },
+          ]);
+          assertNoProducers();
+          console.log("deterministic-examples: ok");
+
+          const consumer = await mkdtemp(join(tmpdir(), "junco-example-consumer-"));
+          try {
+            await cp(join(root, "examples/dist"), consumer, { recursive: true });
+            await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
+            for (const name of [
+              "@earendil-works/pi-agent-core",
+              "@earendil-works/pi-ai",
+              "@earendil-works/pi-coding-agent",
+              "@oh-my-pi/pi-coding-agent",
+              "opik",
+            ]) {
+              const destination = join(consumer, "node_modules", name);
+              await mkdir(dirname(destination), { recursive: true });
+              await symlink(await realpath(join(root, "node_modules", name)), destination, "dir");
+            }
+            async function run(name) {
+              const child = Bun.spawn([process.execPath, "--no-install", join(consumer, name)], {
+                cwd: consumer, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+              });
+              const [stdout, stderr, code] = await Promise.all([
+                new Response(child.stdout).text(),
+                new Response(child.stderr).text(),
+                child.exited,
+              ]);
+              return { stdout, stderr, code };
+            }
+            const recursive = await run("recursive-agency.js");
+            assert.equal(recursive.code, 0, recursive.stderr);
+            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 8 root windows\n");
+            assert.equal(recursive.stderr, "");
+            const committee = await run("oss-committee.js");
+            assert.equal(committee.code, 1);
+            assert.equal(committee.stdout, "");
+            assert.match(committee.stderr, /^Usage:/);
+            console.log("source-example-bundles: ok");
+          } finally {
+            await rm(consumer, { recursive: true, force: true });
+          }
+          '
+
       - name: Build dataflow-engine
         working-directory: junco-agency/packages/dataflow-engine
         run: bun run build
@@ -57,30 +153,17 @@ jobs:
           bun run build
           bun run typecheck
 
+      # The parent config checks every example with the Dummy tracer; examples:typecheck checks
+      # the default Opik route against the engine, scheduler-core and adapter declarations.
       - name: dataflow-engine typecheck
         working-directory: junco-agency/packages/dataflow-engine
-        run: bun run typecheck
+        run: |
+          bun run typecheck
+          bun run examples:typecheck
 
       - name: dataflow-engine tests with coverage
         working-directory: junco-agency/packages/dataflow-engine
         run: bun run test:coverage
-
-      - name: dataflow-engine examples
-        working-directory: junco-agency/packages/dataflow-engine
-        run: |
-          bun --no-install --eval '
-          import assert from "node:assert/strict";
-          const child = Bun.spawn(["bun", "run", "examples", "--no-tracing"], { stdout: "pipe", stderr: "inherit" });
-          const stdout = await new Response(child.stdout).text();
-          assert.equal(await child.exited, 0);
-          assert.deepEqual(stdout.trim().split(/\r?\n/u).map((line) => JSON.parse(line)), [
-            [0, 1, 1, 2, 3, 5, 8, 13, 21, 34],
-            [2, 4, 6],
-            { counts: [["A", 2], ["fantastic", 1], ["new", 2], ["of", 1], ["point", 1], ["view", 1], ["whole", 1], ["world", 1]], totalCharacters: 46 },
-            { sums: [["a", 6], ["b", 30], ["c", 100]], products: [["a", 6], ["b", 200], ["c", 100]] },
-          ]);
-          console.log("deterministic-examples: ok");
-          '
 
       - name: Upload coverage
         if: always()

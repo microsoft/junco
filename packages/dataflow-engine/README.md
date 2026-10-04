@@ -227,7 +227,7 @@ Pass a `DataflowTracer` as the fourth constructor argument to observe execution;
 
 `bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with `junco-scheduler`'s round-robin scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
 
-Tests and examples take their schedulers from the workspace's [`junco-scheduler`](../junco-scheduler), a `workspace:*` development dependency (also of `examples/`; `src/` never imports it). After one `bun install --frozen-lockfile` at the workspace root, build this engine, then the scheduler's deterministic root against it:
+Tests and examples take their schedulers from the workspace's [`junco-scheduler`](../junco-scheduler), a `workspace:*` development dependency (also of `examples/`; `src/` never imports it). The examples bundle from workspace sources and need no build. The typecheck scripts read the scheduler's emitted declarations: after one `bun install --frozen-lockfile` at the workspace root, build this engine, then the scheduler's deterministic root against it:
 
 ```sh
 bun run build
@@ -238,9 +238,9 @@ bun run build
 
 The workspace links `dataflow-engine` to this package for every consumer, the scheduler included, so classes such as `DataflowDefinitionError` thrown by the scheduler here are this engine's own; downstream consumers that depend on `dataflow-engine` share one instance.
 
-Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` typechecks and bundles all sixteen programs into `examples/dist/{opik,dummy}` before running any of them. The Opik build constructs the SDK client once as a preflight, so a missing optional dependency, a type error or an invalid Opik configuration fails the build before any example runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
+Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` bundles all sixteen programs from workspace sources into `examples/dist/{opik,dummy}` and runs nothing unless that bundle succeeds, so a missing source or dependency fails before any example runs. Bundling does not typecheck: `bun run typecheck` checks every example with the Dummy tracer and `bun run examples:typecheck` checks the default Opik route. A traced program constructs the Opik SDK client when it starts, so an invalid Opik configuration fails that program before its graph runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 
-The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; build the engine and `../dataflow-engine-opik` first, then configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
+The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; the engine and adapter are bundled from source, so neither needs a build. Configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
 
 | Script | Purpose |
 |---|---|
@@ -249,19 +249,18 @@ The Opik build needs the examples workspace's optional dependencies (`dataflow-e
 | `bun run test` / `test:coverage` | Tests and cookbook fixtures with the Dummy tracer; the coverage run writes a text report and `coverage/lcov.info` |
 | `bun run examples` / `example:<name>` | Build and run the standalone examples (Opik; add `--no-tracing` for Dummy) |
 | `bun run examples:cookbook` | Build and run the twelve cookbook fixtures (Opik; add `--no-tracing` for Dummy) |
-| `bun run examples:build` | Build only (`--no-tracing` for Dummy) |
+| `bun run examples:build` | Bundle only, without typechecking (`--no-tracing` for Dummy) |
+| `bun run examples:typecheck` | Checks the examples with the default Opik tracer selected, against the engine, scheduler-core and Opik adapter declarations |
 | `bun run check` / `format` | Biome lint and format |
 
 ### Running Fibonacci with Opik
 
 Prerequisites: Bun, Docker with Compose, and the junco-agency workspace, which holds this package beside [`dataflow-engine-opik`](../dataflow-engine-opik). Run the commands from the workspace root:
 
-1. Install the workspace, which includes the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), then build the engine and the Opik integration, which consumes the engine's build output:
+1. Install the workspace, which includes the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`); the example bundles the engine and the Opik integration from source, so no package build comes first:
 
    ```sh
-   bun install
-   (cd packages/dataflow-engine && bun run build)
-   (cd packages/dataflow-engine-opik && bun run build)
+   bun install --frozen-lockfile
    ```
 
 2. Start a local Opik with its UI and API on port 8888:

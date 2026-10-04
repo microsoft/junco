@@ -15,14 +15,17 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "bun": "./ts/index.ts",
       "import": "./dist/index.js"
     },
     "./errors": {
       "types": "./dist/errors.d.ts",
+      "bun": "./ts/errors.ts",
       "import": "./dist/errors.js"
     },
     "./extension": {
       "types": "./dist/extension.d.ts",
+      "bun": "./ts/extension.ts",
       "import": "./dist/extension.js"
     },
     "./native": {
@@ -32,6 +35,7 @@
   },
   "files": [
     "dist",
+    "ts",
     "native",
     "README.md",
     "LICENSE.oh-my-pi"

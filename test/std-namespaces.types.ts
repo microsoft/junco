@@ -173,6 +173,44 @@ export async function graphTypesBuildAndReadTypedNodes(
   ];
 }
 
+type Task = { readonly label: string };
+
+export function spawnBuildsTypedStars(
+  root: graph.nodes.AgenticNode<number, string>,
+  child: (label: string) => graph.nodes.AgenticNode<number, string>,
+  stringChild: graph.nodes.AgenticNode<string, string>,
+  bare: graph.nodes.Agentic<number, string>,
+  state: graph.nodes.Deterministic<number, string>,
+  lead: agent.JuncoAgent,
+  worker: agent.JuncoAgent,
+) {
+  const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
+  const typed: graph.JuncoGraph<number, string> = graph.Spawn(
+    root,
+    tasks,
+    (task) => {
+      const inferred: Task = task;
+      // @ts-expect-error the factory input is the list's element type
+      task.missing;
+      return child(inferred.label);
+    },
+  );
+  const defaults: graph.JuncoGraph = graph.Spawn(
+    graph.nodes.agentNode(lead, { trigger: trigger.never() }),
+    tasks,
+    () => graph.nodes.agentNode(worker, { trigger: trigger.never() }),
+  );
+  // @ts-expect-error the root must be an adapted node, not a bare state
+  graph.Spawn(bare, tasks, (task) => child(task.label));
+  // @ts-expect-error the factory must return an adapted node, not a bare state
+  graph.Spawn(root, tasks, () => state);
+  // @ts-expect-error the factory must return a node, not an arbitrary value
+  graph.Spawn(root, tasks, (task) => task.label);
+  // @ts-expect-error a string-message child cannot join a number-wired star
+  graph.Spawn<Task, number, string>(root, tasks, () => stringChild);
+  return [typed, defaults];
+}
+
 // --- trigger and tracer ----------------------------------------------------------------------------
 
 export function triggerRulesDriveTypedNodes(

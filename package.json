@@ -30,10 +30,11 @@
   ],
   "scripts": {
     "build": "bun build ./src/index.ts ./src/workflows/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build:examples": "bun build ./examples/recursive-agency.ts ./examples/mixed.ts ./examples/oss-committee.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external opik",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
     "check:ci": "bun run --bun biome ci .",
-    "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts",
+    "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/spawn.test.ts",
     "test:coverage": "bun run test --coverage",
     "test:integration": "bun test ./test/junco-agency.test.ts ./test/pi-scheduler.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/ralph-workflow.test.ts",
     "test:native": "bun test ./test/policy-yield.test.ts",

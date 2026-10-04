@@ -43,7 +43,7 @@ cd packages/junco-tools
 bun run build
 ```
 
-`bun run build` generates the production addon in `native/`, then compiles TypeScript into `dist/`. Both are needed at runtime. The workspace links this directory into its consumers; the private package's `files` list ships only runtime artifacts and documentation in a packed tarball, not the test addon under `target/native-test/`; build and load that from this package for policy tests.
+`bun run build` generates the production addon in `native/`, then compiles TypeScript into `dist/` with declarations. Node consumers and the Pi extension path below load `dist/`; Bun resolves the package's `bun` exports to the TypeScript sources in `ts/`, so Bun imports and source bundles need no `dist/`. The addon is loaded lazily through `junco-tools/native`: creating a `ToolCollection` without an injected `native` module, or running native-backed operations, needs `native/`, while importing the package or creating explicit-only tools such as `createYieldTool()` does not. The workspace links this directory into its consumers; the private package's `files` list ships only runtime artifacts and documentation in a packed tarball, not the test addon under `target/native-test/`; build and load that from this package for policy tests.
 
 The launcher preserves explicit `CARGO_HOME`, `RUSTUP_HOME`, and SSH settings. Native build scripts use the committed Cargo lockfile and a process-local HTTPS-to-SSH rewrite for private junco dependencies; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
 

@@ -41,6 +41,7 @@
     "examples": "bun run examples/run.ts",
     "examples:cookbook": "bun run examples/run.ts --cookbook",
     "examples:build": "bun run examples/build.ts",
+    "examples:typecheck": "bun run tsc -p examples/tsconfig.json",
     "lint": "bun run --bun biome lint .",
     "format": "bun run --bun biome format --write .",
     "check": "bun run --bun biome check .",
