@@ -1,12 +1,8 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  BACKGROUND_CONTEXT,
-  MemorySessionRepo,
-} from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   fauxAssistantMessage,
@@ -14,15 +10,13 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { always, NodeId, UNBOUNDED } from "dataflow-engine";
+import { always, DummyTracer, NodeId, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
 import {
   type AgenticInput,
   agentNode,
-  createAgencyScheduler,
   graphNode,
   JuncoGraph,
   LspTool,
@@ -104,66 +98,6 @@ function counting(
   }
   return Counting.make();
 }
-
-test("an Opus agency scheduler from a saved Pi login owns its session and members, even if a caller passes an adapter", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "junco-agency-login-"));
-  const repo = new MemorySessionRepo();
-  try {
-    const authPath = join(directory, "auth.json");
-    await writeFile(
-      authPath,
-      JSON.stringify({
-        "github-copilot": {
-          type: "oauth",
-          access: "pi-fixture-access",
-          refresh: "pi-fixture-refresh",
-          expires: Number.MAX_SAFE_INTEGER,
-        },
-      }),
-    );
-    const models = await ModelRuntime.create({
-      authPath,
-      modelsPath: null,
-      refreshOnCreate: false,
-    });
-    const session = await repo.create({}, BACKGROUND_CONTEXT);
-    const ready = await leaf([fauxAssistantMessage("never")], { prompt: "go" });
-    let replaced = 0;
-    // An untyped caller's adapter: the factory's own adapter must still own the members.
-    const callerOptions = {
-      models,
-      session,
-      adapter: {
-        abortDependents: () => {
-          replaced++;
-          return undefined;
-        },
-        closeDependents: () => {
-          replaced++;
-          return undefined;
-        },
-      },
-    };
-    let graph: PiGraph | undefined;
-    const scheduler = await createAgencyScheduler(() => graph, callerOptions);
-    const selected = await scheduler.getModel();
-    assert.equal(selected?.provider, "github-copilot");
-    assert.equal(selected?.id, "claude-opus-5.5");
-
-    const constructed = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED);
-    graph = constructed;
-    constructed.addNode(member(ready.agent));
-    await scheduler.return();
-
-    assert.equal(ready.agent.status, "closed");
-    assert.equal(replaced, 0);
-    assert.equal(ready.faux.state.callCount, 0);
-    await assert.rejects(session.beginMutation(BACKGROUND_CONTEXT));
-  } finally {
-    await repo.close(BACKGROUND_CONTEXT);
-    await rm(directory, { recursive: true, force: true });
-  }
-});
 
 test(
   "thirty-two nested agencies settle while every graph forwards the innermost result",
@@ -403,7 +337,7 @@ test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared a
   const plain = await PiScheduler.make<AgenticInput, AssistantMessage>(
     (await nativeOptions([])).options,
   );
-  const root = new JuncoGraph(plain, UNBOUNDED, UNBOUNDED);
+  const root = new JuncoGraph(plain, UNBOUNDED, UNBOUNDED, new DummyTracer());
   root.addNode(member(counted));
   const child = await agency([counted, root], runAvailable, { idle: true });
   root.addNode(member(child.graph));

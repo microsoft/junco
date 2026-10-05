@@ -1,6 +1,6 @@
 ---
 name: junco-graph-create
-description: Create succinct, literate TypeScript Junco workflows using the public graph, agent, tools, schedulers, compaction, and tracer namespaces. Use whenever a user asks to build a Junco workflow or dataflow graph, coordinate agents, implement fan-out/fan-in or feedback loops, or compose deterministic nodes and nested agencies.
+description: Create succinct, literate TypeScript Junco workflows using the public graph, agent, tools, mcp, schedulers, compaction, and tracer namespaces. Use whenever a user asks to build a Junco workflow or dataflow graph, coordinate agents, implement fan-out/fan-in or feedback loops, or compose deterministic nodes and nested agencies.
 ---
 
 # Junco graph creation
@@ -229,7 +229,7 @@ Verbatim signature excerpts (Junco node states and bindings; `ImageContent` and 
 ```text
 export type AgenticInput =
   | {
-      readonly kind: "prompt" | "steer" | "followUp" | "nextTurn";
+      readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error"; // error: delivered via followUp
       readonly text: string;
       readonly images?: ImageContent[];
     }
@@ -376,7 +376,20 @@ export type JuncoAgentCreateOptions<
   readonly models?: ModelRuntime;
   readonly session?: Session;
   readonly cwd?: string;
-  readonly tools?: T[];
+  readonly tools?: JuncoAgentTools<T>;
+};
+
+export type JuncoAgentTools<T extends AgentTool = AgentTool> =
+  | JuncoMcpTools
+  | readonly (T | JuncoMcpTools)[];
+
+export type JuncoAgentResolvedOptions<
+  S extends Skill = Skill,
+  P extends PromptTemplate = PromptTemplate,
+  T extends AgentTool = AgentTool,
+> = Omit<AgenticOptions<S, P, T>, "tools"> & {
+  readonly cwd?: string;
+  readonly tools?: JuncoAgentTools<T>;
 };
 
 export class JuncoAgent<
@@ -385,16 +398,17 @@ export class JuncoAgent<
   T extends AgentTool = AgentTool,
 > implements Agentic<S, P, T>
 
-  static async fromResolved<
-    S extends Skill = Skill,
-    P extends PromptTemplate = PromptTemplate,
-    T extends AgentTool = AgentTool,
-  >(options: AgenticOptions<S, P, T>): Promise<JuncoAgent<S, P, T>>
+  static fromResolved<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate, T extends AgentTool = AgentTool>(
+    options: AgenticOptions<S, P, T> & { readonly cwd?: string },
+  ): Promise<JuncoAgent<S, P, T>>;
+  static fromResolved<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
+    options: JuncoAgentResolvedOptions<S, P, AgentTool>,
+  ): Promise<JuncoAgent<S, P, AgentTool>>;
   static create<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate, T extends AgentTool = AgentTool>(
     options: JuncoAgentCreateOptions<S, P, T> & { readonly tools: T[] },
   ): Promise<JuncoAgent<S, P, T>>;
   static create<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate>(
-    options: JuncoAgentCreateOptions<S, P, AgentTool> & { readonly tools?: undefined },
+    options: JuncoAgentCreateOptions<S, P, AgentTool>,
   ): Promise<JuncoAgent<S, P, AgentTool>>;
   protected constructor(options: AgenticOptions<S, P, T>, owned: OwnedResources = {})
 
@@ -416,6 +430,11 @@ export class JuncoAgent<
   context_size(): Promise<number>
   compact(options?: { customInstructions?: string }): Promise<void>
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
+  // JuncoAgent only, not Agentic:
+  runWithTaskHost<R>(host: TaskToolHost, work: () => Promise<R>): Promise<R>
+  createSubagents(options: readonly TaskAgentOptions[], signal?: AbortSignal): Promise<JuncoAgent<S, P, AgentTool>[]>
+
+export type TaskAgentOptions = { readonly model?: ModelIdentity; readonly tools?: readonly string[] };
 
 export class JuncoAgentError extends Error
   constructor(
@@ -430,6 +449,7 @@ The voluntary-suspension tool lives under **`tools`** (see below), not `agent`.
 - **Construct with the static factories.** The constructor is protected: `await agent.JuncoAgent.create(...)`, never `new agent.JuncoAgent(...)`.
 - **Normal construction:** `create({ models, provider, model, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
 - **Pre-resolved construction:** `fromResolved({ models, model, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
+- **MCP tool sources:** both factories accept `mcp.JuncoMcpTools` definitions in `tools`, alone or mixed with concrete tools (`tools: [servers, lsp, ...collection.tools]`), connected from `cwd`. Each agent gets fresh MCP clients and server processes, closed with it; discovered names are `mcp__<server>__<tool>`. A definition is a factory-only source: `setTools` takes concrete tools only.
 - **Three model argument shapes; never substitute one for another:** `create` takes a model ID *string* in `model`; `fromResolved` takes a resolved `Model<Api>` in `model`; `setModel` takes `{ provider, modelId }` (`ModelIdentity`).
 - **Final text:** use `contentText(message.content)` from `@earendil-works/pi-ai`; require `message.stopReason === "stop"` and nonblank trimmed text before forwarding a report.
 - **Iterator boundaries:** preserve `yield` / `settled` / `failed`; rethrow a failed boundary's `error`. `return()` and an early `for await` break close the agent terminally; to reuse an agent across rounds drive it with explicit `next()` (or let `agentNode` drive it).
@@ -462,11 +482,25 @@ export const LspTool = {
   async create(cwd: string, options: LspToolOptions = {}): Promise<LspTool>
   async shutdown(): Promise<void>
 
+export type ShellMuxOperations = BashOperations & { close(): Promise<void> };
 export function createShellMuxOperations(options?: {
+  readonly native?: NativeModule;
+  readonly mux?: NativeMux;
+  readonly sandbox?: "shared" | "always";
   principal?: string;
-  mux?: NativeMux;
-}): BashOperations
-export async function shutdownShellMux(): Promise<void>
+}): ShellMuxOperations
+
+export interface ShellMuxLease {
+  readonly mux: NativeMux;
+  readonly native: NativeModule;
+  readonly closed: boolean;
+  release(): void;
+}
+export function acquireShellMux(
+  cwd: string,
+  options?: { readonly native?: NativeModule; readonly mux?: NativeMux; readonly sandbox?: "shared" | "always" },
+): Promise<ShellMuxLease>
+export function shutdownShellMux(): Promise<void>
 
 export const MARSH_POLICY_DENIED = "MARSH_POLICY_DENIED";
 export interface MarshPolicyDeniedError extends Error {
@@ -478,9 +512,21 @@ export type YieldToolDetails = { readonly reason: string };
 export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
 export function createYieldTool(): YieldTool
 export function isYieldTool(tool: object): boolean
+
+export type TaskToolDetails = {
+  readonly tasks: readonly { readonly id: string; readonly name?: string }[];
+};
+export type TaskToolHost = (
+  toolCallId: string,
+  input: Static<typeof taskParameters>,
+  signal: AbortSignal,
+) => Promise<TaskToolDetails["tasks"]>;
+export function createTaskTool(host?: TaskToolHost): AgentTool<typeof taskParameters, TaskToolDetails>
+export function isTaskTool(tool: object): tool is AgentTool<typeof taskParameters, TaskToolDetails>
+export function invokeTaskTool(tool, host: TaskToolHost, toolCallId: string, input, signal: AbortSignal): Promise<AgentToolResult<TaskToolDetails>>
 ```
 
-(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object returned by `createYieldTool()`; a same-named tool or a spread copy is not one.)
+(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object returned by `createYieldTool()`; a same-named tool or a spread copy is not one. `taskParameters` is implementation-local: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`, required shared `context` prepended to every task, at least one task, non-blank strings, no extra properties. The same branding rule applies to `isTaskTool`.)
 
 (`UpstreamLspTool`, `UpstreamLspToolDetails`, `LspToolFields`, `TUnsafe` are implementation-local. `LspTool` is a factory object plus a tool type, not a constructible class.)
 
@@ -537,11 +583,51 @@ Prefer `tools.ToolCollection.create(cwd)` over assembling these factories by han
 
 Tool selection and ownership:
 
-- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus a yield tool. Explicit arrays replace defaults.
+- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task` and `yield`. Explicit arrays replace defaults.
 - **Voluntary suspension** needs the real `tools.createYieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues.
+- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately; at the following pause the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task, and each child's final `task_result` report reaches the caller as a follow-up. The node returns the caller's answer only after every report was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true })` for read-only roles; enable mutating LSP only for a role that edits. Requires Bun and caller-installed language-server binaries. LSP uses host filesystem/process access, not the native sandbox.
 - **Native coding tools** need the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). `ToolCollection.create` and omitted agent `tools` both require it, with no ordinary-filesystem fallback. Do not silently swap in other tools when prerequisites are missing; report them.
-- **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Borrowed muxes remain their owner's. Keep these resources outside multi-round loops when agents persist.
+- **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Every agent, graph, collection, operations owner and MCP connection in the process shares one ShellMux automatically; closing any of them never closes it. The application calls `tools.shutdownShellMux()` exactly once, last, after every user has stopped. Keep these resources outside multi-round loops when agents persist.
+
+### mcp
+
+Verbatim signature excerpts (`StdioTransportOptions` and `McpClientOptions` are `@earendil-works/pi-mcp` types):
+
+```text
+export type JuncoMcpServerOptions = {
+  readonly name: string;
+  readonly type: "stdio";
+  readonly clientOptions?: Omit<McpClientOptions, "name" | "version">;
+} & StdioTransportOptions;
+
+export interface JuncoMcpConnectOptions {
+  readonly cwd?: string;
+  readonly signal?: AbortSignal; // cancels acquisition only (McpAbortError)
+  readonly discardOnClose?: boolean; // close by cancelling: server effects never publish
+}
+
+export type JuncoMcpToolIdentity = { readonly serverName: string; readonly originalToolName: string };
+export function getJuncoMcpToolIdentity(tool: AgentTool): JuncoMcpToolIdentity | undefined;
+
+export interface JuncoMcpConnection {
+  readonly tools: AgentTool[];
+  close(): Promise<void>;
+}
+
+export class JuncoMcpTools {
+  constructor();
+  static add(options: JuncoMcpServerOptions): JuncoMcpTools;
+  add(options: JuncoMcpServerOptions): this;
+  connect(options?: JuncoMcpConnectOptions): Promise<JuncoMcpConnection>;
+  snapshot(): JuncoMcpTools; // detached copy; acquires nothing
+}
+```
+
+- **Declare a server** with `mcp.JuncoMcpTools.add({ name, type: "stdio", command, args })`; chain `.add(...)` on the result to put several servers in one definition. `command` is resolved through `PATH`, and `args` reach the program literally, never through a shell. Optional fields: `cwd` (resolved against the connecting agent's `cwd`; it must exist inside the seed), `env` (merged over the parent environment; `inheritEnv: false` passes only `env`), `stderr`/`onStderr`, `closeTimeoutMs`, and `clientOptions` (for example `{ requestTimeoutMs: 300_000 }` for a slow-starting server; pi-mcp's default is 30 seconds). `name` must be nonblank and unique within a definition, and becomes the `<server>` of each tool name.
+- **Pass the definition to an agent factory:** `tools: [servers]` (or mixed with concrete tools). Defining starts nothing; each agent connects its own client and server process from its `cwd` and closes them when the agent closes. Subagents reconnect fresh servers from a snapshot of the caller's definitions. Select MCP tools by their published `mcp__<server>__<tool>` names in `activeToolNames`.
+- **Direct use** outside an agent: `const connection = await servers.connect({ cwd, signal })`, use `connection.tools`, and `await connection.close()` in `finally`. `signal` cancels only acquisition (rejecting with `McpAbortError`) and stops any server already started; a returned connection ignores it.
+- **Stdio only.** Every server runs as an audited job of the shared ShellMux (needs the native addon and a Btrfs seed containing `cwd`); its effects publish only when it ends, and a refused publication rejects the closing agent or connection with `MARSH_POLICY_DENIED`. A reply is not proof of publication. Each server works on a snapshot taken when it starts: once another server publishes a change to a path this one has read or written, this server's close is refused, even if it wrote nothing itself. Prepare shared state before starting servers, and do not count on a server that stays running while another publishes to close cleanly.
 
 ### schedulers
 
@@ -695,7 +781,7 @@ export async function createAgencyScheduler<
 1. Declare `let workflow: graph.JuncoGraph | undefined`.
 2. Create a native session: `const repo = new MemorySessionRepo()` and `const session = await repo.create({}, BACKGROUND_CONTEXT)` (both from `@earendil-works/pi-agent-core`; not the coding-agent `SessionManager`).
 3. `const scheduler = await schedulers.createAgencyScheduler(() => workflow, { model, models, session, systemPrompt, prompt })`, passing the currently resolved `Model<Api>`, the runtime, and the session so the factory uses `PiScheduler.make`. Never rely on the factory's fixed-model default when `model` is omitted.
-4. `const constructed = new graph.JuncoGraph(scheduler, graph.UNBOUNDED, graph.UNBOUNDED)`, register and wire nodes, then `workflow = constructed`.
+4. `const constructed = new graph.JuncoGraph(scheduler, graph.UNBOUNDED, graph.UNBOUNDED, tracer.createTracer())`, register and wire nodes, then `workflow = constructed`.
 5. Drive only the scheduler: loop `await scheduler.next()`; continue after `kind === "yield"`, throw the error after `kind === "failed"`, finish after `kind === "settled"` (require `message.stopReason === "stop"`); `done` before settlement is an error. Do not start a competing `workflow.run()`: the scheduler's synchronous `schedule()` only consumes the model's staged decision.
 6. Read results with `workflow.result(id)`, which returns an fp-ts `Option` (no fp-ts import needed): `const r = workflow.result(id); if (r._tag !== "Some") throw …; use(r.value)`.
 7. In `finally`, `await workflow.close()` (cascades to the scheduler, which owns the transferred session, and to every member), then `await repo.close(BACKGROUND_CONTEXT)`.
@@ -731,6 +817,7 @@ export interface DataflowTracer {
   startRun<S, N, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
+  complain(nodeId: NodeId, complaint: string): void;
   flush(): Promise<void>;
 }
 
@@ -753,17 +840,26 @@ export class DummyTracer implements DataflowTracer
   startRun<S, N, T, EH>(
     _graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>
+  complain(_nodeId: NodeId, _complaint: string): void
   flush(): Promise<void>
+
+export class StdoutTracer implements DataflowTracer
+  constructor(name: string = "DataflowGraph.run")
+  startRun<S, N, T, EH>(graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T>
+  complain(nodeId: NodeIdType, complaint: string): void
+  flush(): Promise<void>
+
+export function createTracer(): DataflowTracer
 ```
 
 `DataflowTracer` is an interface a backend implements; never `new` it.
 
-- **Tracing is optional.** A `DataflowGraph` without an observer is untraced. A `JuncoGraph` without one is untraced only when neither automatic Bun feature is enabled. `new tracer.DummyTracer()` explicitly disables backend tracing; pass the same choice to every separately constructed child graph.
-- **Enable tracing** by passing a `tracer.DataflowTracer` as the fourth graph-constructor argument or to `createParallelAgentGraph(observer)`, or, when the user wants that backend, run with exactly one automatic feature: `bun run --feature=opik …` (needs the optional `dataflow-engine-opik` and `opik` modules) or `bun run --feature=langflow …` (needs `dataflow-engine-langflow` and nonblank `LANGFLOW_URL`, `LANGFLOW_API_KEY`, `LANGFLOW_FLOW_ID`). The features are mutually exclusive. These adapters are not namespace exports; never silently disable a requested backend after a configuration failure.
-- **Callbacks** are synchronous and read-only. `startRun` fires once per `run()`/`step()`; `startNode` fires per activation with phase `"prime"` (no view, `inputs === undefined`) or `"resume"` (the delivered view); run `end` receives cumulative results; `fail` reports the exact rejection or raw activation cause. Views and result maps are live: snapshot anything retained. The engine warns about and ignores observer exceptions.
+- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`); `createParallelAgentGraph()` (and `graph.Spawn`) default to `tracer.createTracer()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
+- **Backend selection.** `tracer.createTracer()` returns one shared backend per process: `tracer.StdoutTracer` by default, which prints each run's topology as a Unicode graph followed by every activation's full inputs and outcomes (payloads may be sensitive); or, when the user wants Opik, run with `bun run --feature=opik …` (needs the optional `dataflow-engine-opik` and `opik` modules). Any `tracer.DataflowTracer` passed explicitly always wins. The Opik adapter is not a namespace export; never silently fall back to another backend after a configuration failure.
+- **Callbacks** are synchronous and read-only. `startRun` fires once per `run()`/`step()`; `startNode` fires per activation with phase `"prime"` (no view, `inputs === undefined`) or `"resume"` (the delivered view); run `end` receives cumulative results; `fail` reports the exact rejection or raw activation cause. `complain` fires when an agent node's always-on `complain` tool records an issue (node ID and text only; the full issue is in `tools.issueLog`), at any time. Views and result maps are live: snapshot anything retained. The engine warns about and ignores observer exceptions.
 - **Flushing** is caller-owned and separate from disposal:
-  `try { … } finally { try { await workflow.close(); } finally { await workflow.tracer?.flush(); } }`.
-  `workflow.tracer` exposes the supplied or automatic backend; every graph built under one automatic feature shares a single backend instance. Share one backend across child graphs and flush each distinct backend once after all users stop (collect them in a `Set`). A successful flush does not prove remote ingestion.
+  `try { … } finally { try { await workflow.close(); } finally { await workflow.tracer.flush(); } }`.
+  `workflow.tracer` exposes the supplied or automatic backend; every graph given `createTracer()` shares a single backend instance. Share one backend across child graphs and flush each distinct backend once after all users stop (collect them in a `Set`). A successful flush does not prove remote ingestion.
 
 ### Supporting Pi APIs
 
@@ -890,7 +986,7 @@ Run with `bun run <file>.ts`; it prints `[9,7]`.
 ## Before returning
 
 - [ ] No checkout, source, example, or machine paths anywhere; only package imports.
-- [ ] Every name used exists in the namespace it is spelled from (`graph`, `graph.nodes`, `graph.trigger`, `agent`, `tools`, `schedulers`, `compaction`, `tracer`, or a Pi package).
+- [ ] Every name used exists in the namespace it is spelled from (`graph`, `graph.nodes`, `graph.trigger`, `agent`, `tools`, `mcp`, `schedulers`, `compaction`, `tracer`, or a Pi package).
 - [ ] Agent workflows pin models verified *now* (catalog + credentials + official freshness source, dated in JSDoc), or the missing prerequisite is reported. No model IDs were copied from memory or this skill.
 - [ ] Tools are explicit per role, with owners, prerequisites (Bun, language servers, native addon, Btrfs seed), and release order stated.
 - [ ] The stop condition is intentional and matches the task; finite generators can reach their `return`; no added retries, caps, or agents.

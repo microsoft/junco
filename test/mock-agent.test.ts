@@ -19,6 +19,7 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
+import { NodeId } from "dataflow-engine";
 import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import { Type } from "typebox";
 import {
@@ -900,6 +901,18 @@ describe("subscriptions, hooks and cancellation", () => {
       () => agent.hooks.on("before_drive", () => undefined),
       hasCode("closed"),
     );
+    const before = agent.issueLog.length;
+    assert.throws(
+      () =>
+        agent.complain({
+          nodeId: NodeId("closed"),
+          messages: [],
+          prompt: { messages: [] },
+          complaint: "too late",
+        }),
+      hasCode("closed"),
+    );
+    assert.equal(agent.issueLog.length, before);
     assert.deepEqual(agent.getTools(), [READ]);
     assert.deepEqual(agent.getActiveTools(), [READ]);
     assert.equal(agent.getResources(), resources);

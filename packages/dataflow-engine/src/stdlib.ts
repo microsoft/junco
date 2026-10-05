@@ -22,11 +22,11 @@ type ConstNodeOptions<S, T> = Pick<
 /**
  * A complete constant-node spec. Its body ignores `this` and its availability hook ignores the
  * view, so both are typed loosely enough to register into any graph whose state and payload types
- * admit `S` and `N`, rather than pinning the graph to the inferred ones.
+ * admit `S` and `N`, rather than pinning the graph to the inferred ones. It has no failure hook.
  */
 type ConstNodeSpec<S, N, T> = Omit<
   NodeSpec<S, N, T>,
-  "step" | "is_available"
+  "step" | "is_available" | "on_error"
 > & {
   readonly step: () => NodeGenerator<N, T>;
   readonly is_available?: AvailabilityFn<unknown, unknown>;

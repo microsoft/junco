@@ -1,0 +1,7 @@
+[test]
+# `bun run test:coverage` reports this package's `src/` only: `junco-tools` loads from its `bun`
+# source export (`../junco-tools`) and is covered by its own suite.
+coverageReporter = ["text", "lcov"]
+coverageDir = "coverage"
+coverageSkipTestFiles = true
+coveragePathIgnorePatterns = ["../**", "**/test/**", "**/dist/**", "**/node_modules/**"]

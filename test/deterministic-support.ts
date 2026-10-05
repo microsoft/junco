@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 import {
   type DataflowScheduler,
+  DummyTracer,
   UNBOUNDED,
   Width,
   type WidthType,
@@ -27,6 +28,9 @@ import { nodeInputs } from "../src/node-policy.ts";
 
 export type Strategy = "round-robin" | "parallel";
 export const STRATEGIES: readonly Strategy[] = ["round-robin", "parallel"];
+
+/** These helpers' graphs stay untraced, keeping deterministic output quiet. */
+const quiet = new DummyTracer();
 
 /** A policy scheduler; round robin also exposes its cursor. */
 export type PolicyScheduler = DataflowScheduler<
@@ -62,7 +66,7 @@ export function plainGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(policy(strategy), window, threads);
+  >(policy(strategy), window, threads, quiet);
 }
 
 /**
@@ -75,7 +79,9 @@ export function policyGraph(
   { threads }: { readonly threads?: WidthType } = {},
 ): JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler> {
   if (strategy === "parallel" && threads === undefined) {
-    return graphApi.createParallelAgentGraph<AgenticInput, AssistantMessage>();
+    return graphApi.createParallelAgentGraph<AgenticInput, AssistantMessage>(
+      quiet,
+    );
   }
   let graph:
     | JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>
@@ -89,7 +95,7 @@ export function policyGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(scheduler, window, width);
+  >(scheduler, window, width, quiet);
   graph = constructed;
   return constructed;
 }

@@ -5,6 +5,7 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { shutdownShellMux } from "../dist/index.js";
 
 const fixturePrefix = fileURLToPath(
   new URL("../target/bash-test-", import.meta.url),
@@ -50,11 +51,10 @@ export async function settleAgent(agent) {
 
 /**
  * A CopyTree seed with optional seed-relative `files` (strings or Buffers), defaulting to
- * `src/file0.txt` ("zero\n") and `src/file1.txt` ("one\n"), plus a test-addon mux over it.
- * `sandbox` defaults to "always", which keeps every shell command on the managed route the
- * suites were written against; `native` is the addon that created `mux`.
+ * `src/file0.txt` ("zero\n") and `src/file1.txt` ("one\n"), inside a fresh temporary root.
+ * Nothing is opened: automatic-acquisition tests let the first consumer open the singleton.
  */
-export async function fixture(options = {}) {
+export async function seedFixture(options = {}) {
   const root = await mkdtemp(fixturePrefix);
   const seed = join(root, "seed");
   try {
@@ -69,8 +69,52 @@ export async function fixture(options = {}) {
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, content);
     }
-    // Imported lazily so production-only suites never load the test-fs addon.
-    const native = await import("../target/native-test/index.js");
+    return { root, seed };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** The test-fs addon, imported lazily so production-only suites never load it. */
+export function testNative() {
+  return import("../target/native-test/index.js");
+}
+
+/** Every mux the {@link copyTreeNative} adapter opened, in order. */
+export const copyTreeOpens = [];
+
+let copyTreeAdapter;
+
+/**
+ * The test addon with `NativeMux.open` delegating to its real `openCopyTree`, so automatic
+ * acquisition opens a CopyTree seed. One stable object per process: the singleton compares
+ * native modules by identity. Each opened mux is appended to {@link copyTreeOpens}.
+ */
+export function copyTreeNative() {
+  copyTreeAdapter ??= testNative().then((native) => ({
+    ...native,
+    NativeMux: {
+      async open(root, options) {
+        const mux = await native.NativeMux.openCopyTree(root, options);
+        copyTreeOpens.push(mux);
+        return mux;
+      },
+    },
+  }));
+  return copyTreeAdapter;
+}
+
+/**
+ * {@link seedFixture} plus one raw test-addon mux over it. `sandbox` defaults to "always",
+ * which keeps every shell command on the managed route the suites were written against;
+ * `native` is the addon that created `mux`. Passing `mux` to an operations owner or a
+ * collection adopts it as the application singleton; {@link closeFixture} shuts that down.
+ */
+export async function fixture(options = {}) {
+  const { root, seed } = await seedFixture(options);
+  try {
+    const native = await testNative();
     const mux = await native.NativeMux.openCopyTree(seed, {
       sandbox: options.sandbox ?? "always",
     });
@@ -81,8 +125,14 @@ export async function fixture(options = {}) {
   }
 }
 
+/**
+ * Application shutdown — which closes the fixture's mux if a consumer adopted it — then the
+ * raw close (idempotent) for a mux nothing adopted, then the tree. Either way the addon's one
+ * mux slot is free again before the next raw generation.
+ */
 export async function closeFixture({ root, mux }, outputFiles = []) {
   await cleanup(
+    () => shutdownShellMux(),
     () => mux.close(),
     // Deliberately nonrecursive: an output-file entry that is not a file is a real failure,
     // and it must not stop the remaining files or the root from being attempted.

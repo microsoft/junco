@@ -18,6 +18,7 @@
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run tsc -p tsconfig.json --emitDeclarationOnly",
     "typecheck": "bun run tsc -p tsconfig.typecheck.json",
+    "test": "bun test ./tests/*.test.ts",
     "pack": "bun run build && bun pm pack --destination ./pack"
   },
   "peerDependencies": {

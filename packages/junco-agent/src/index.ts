@@ -10,4 +10,7 @@ export {
   JuncoAgent,
   type JuncoAgentCreateOptions,
   JuncoAgentError,
+  type JuncoAgentResolvedOptions,
+  type JuncoAgentTools,
+  type TaskAgentOptions,
 } from "./junco-agent.js";

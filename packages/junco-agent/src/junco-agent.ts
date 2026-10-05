@@ -30,10 +30,34 @@ import type {
   AssistantMessage,
   ImageContent,
   Model,
+  Models,
 } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createYieldTool, isYieldTool, ToolCollection } from "junco-tools";
+import { type DataflowTracer, NodeId, type NodeIdType } from "dataflow-engine";
+import {
+  getJuncoMcpToolIdentity,
+  type JuncoMcpConnection,
+  type JuncoMcpToolIdentity,
+  JuncoMcpTools,
+} from "junco-mcp";
+import {
+  type ComplainTool,
+  type ComplaintContext,
+  createComplainTool,
+  createTaskTool,
+  createYieldTool,
+  type Issue,
+  invokeComplainTool,
+  invokeTaskTool,
+  isComplainTool,
+  issueLog,
+  isTaskTool,
+  isYieldTool,
+  type Prompt,
+  type TaskToolHost,
+  ToolCollection,
+} from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import type {
   Agentic,
@@ -62,6 +86,25 @@ export interface AgenticRun {
   readonly stopping: boolean;
 }
 
+/**
+ * Factory-only tool sources: concrete tools and MCP definitions, in order. Each definition is
+ * connected for the agent being created; its discovered tools take its place in the list.
+ */
+export type JuncoAgentTools<T extends AgentTool = AgentTool> =
+  | JuncoMcpTools
+  | readonly (T | JuncoMcpTools)[];
+
+/** {@link JuncoAgent.fromResolved}'s options, with factory-only tool sources. */
+export type JuncoAgentResolvedOptions<
+  S extends Skill = Skill,
+  P extends PromptTemplate = PromptTemplate,
+  T extends AgentTool = AgentTool,
+> = Omit<AgenticOptions<S, P, T>, "tools"> & {
+  /** Base directory MCP server definitions connect from; default `process.cwd()`. */
+  readonly cwd?: string;
+  readonly tools?: JuncoAgentTools<T>;
+};
+
 /** Pi login-backed model resolution and optional owned default tools for {@link JuncoAgent.create}. */
 export type JuncoAgentCreateOptions<
   S extends Skill = Skill,
@@ -74,20 +117,70 @@ export type JuncoAgentCreateOptions<
   readonly models?: ModelRuntime;
   /** Transferred to JuncoAgent; its harness closes the supplied session. */
   readonly session?: Session;
-  /** Only used when tools are omitted and a local ToolCollection is created. */
+  /**
+   * Base directory of the default local ToolCollection (tools omitted) and of MCP server
+   * definitions; default `process.cwd()`.
+   */
   readonly cwd?: string;
-  /** Explicit tools are caller-owned; omitted tools include the local collection and yield. */
-  readonly tools?: T[];
+  /**
+   * Concrete tools are caller-owned; MCP definitions are connected for, and closed with, this
+   * agent. Omitted tools include the local collection and yield.
+   */
+  readonly tools?: JuncoAgentTools<T>;
 };
 
+/** Per-subagent overrides of {@link JuncoAgent.createSubagents}; omitted values inherit the caller's. */
+export type TaskAgentOptions = {
+  readonly model?: ModelIdentity;
+  /** Names among the caller's active tools; `[]` permits none. */
+  readonly tools?: readonly string[];
+};
+
+/** One MCP definition an agent connected: what subagents reconnect, and which wrappers it produced. */
+type McpSourceRegistration = {
+  readonly source: JuncoMcpTools;
+  /** The resolved base directory it connected from. */
+  readonly cwd: string;
+  readonly tools: readonly AgentTool[];
+};
+
+/**
+ * A ToolCollection shared by the agent that created it and every subagent borrowing its tools.
+ * Each holds one idempotent lease; the last release closes the collection.
+ */
+class SharedCollection {
+  #holders = 0;
+  constructor(readonly collection: { close(): Promise<void> }) {}
+  lease(): { close(): Promise<void> } {
+    this.#holders++;
+    let released: Promise<void> | undefined;
+    return {
+      close: () => {
+        released ??=
+          --this.#holders === 0 ? this.collection.close() : Promise.resolve();
+        return released;
+      },
+    };
+  }
+}
+
 type OwnedResources = {
+  /** Connections this agent's factory opened, in acquisition order. */
+  mcp?: JuncoMcpConnection[];
+  /** The definitions behind `mcp`, in the same order, for subagents to inherit. */
+  mcpSources?: McpSourceRegistration[];
   collection?: { close(): Promise<void> };
+  /** The owner `collection` leases from, when subagents may borrow its tools. */
+  sharedCollection?: SharedCollection;
   repo?: MemorySessionRepo;
 };
 
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
   for (const release of [
+    ...[...(owned.mcp ?? [])]
+      .reverse()
+      .map((connection) => () => connection.close()),
     owned.collection && (() => owned.collection!.close()),
     owned.repo && (() => owned.repo!.close(BACKGROUND_CONTEXT)),
   ]) {
@@ -99,6 +192,59 @@ async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
     }
   }
   return failures;
+}
+
+/**
+ * Before construction a factory owns the session and every acquired resource: closes the
+ * session, then releases `owned`, and rethrows `primary` — aggregated with any cleanup failure.
+ */
+async function failBeforeConstruction(
+  primary: unknown,
+  session: Session | undefined,
+  owned: OwnedResources,
+  message: string,
+): Promise<never> {
+  const failures: unknown[] = [];
+  try {
+    await session?.close(BACKGROUND_CONTEXT);
+  } catch (failure) {
+    failures.push(failure);
+  }
+  failures.push(...(await releaseOwned(owned)));
+  if (failures.length > 0) {
+    throw new AggregateError([primary, ...failures], message, {
+      cause: primary,
+    });
+  }
+  throw primary;
+}
+
+/**
+ * Expands factory-only sources in order: concrete tools keep their identity, and each MCP
+ * definition is connected from `cwd`, recorded in `owned` before its tools are appended.
+ * `signal` cancels connection acquisition only.
+ */
+async function resolveToolSources(
+  sources: JuncoAgentTools | undefined,
+  cwd: string,
+  owned: OwnedResources,
+  signal?: AbortSignal,
+): Promise<AgentTool[]> {
+  const tools: AgentTool[] = [];
+  if (sources === undefined) return tools;
+  for (const source of sources instanceof JuncoMcpTools ? [sources] : sources) {
+    if (source instanceof JuncoMcpTools) {
+      const connection = await source.connect({ cwd, signal });
+      owned.mcp ??= [];
+      owned.mcp.push(connection);
+      owned.mcpSources ??= [];
+      owned.mcpSources.push({ source, cwd, tools: connection.tools });
+      tools.push(...connection.tools);
+    } else {
+      tools.push(source);
+    }
+  }
+  return tools;
 }
 
 function validateActiveTools(
@@ -129,6 +275,29 @@ function validateActiveTools(
       );
     active.add(name);
   }
+}
+
+/**
+ * `tools` with every genuine complaint tool replaced in place by `own`, or `own` appended when none
+ * is present. Duplicates and same-named impostors are left for validation to reject.
+ */
+function withComplainTool<T extends AgentTool>(
+  tools: readonly T[],
+  own: ComplainTool,
+): (T | ComplainTool)[] {
+  let found = false;
+  const result = tools.map((tool): T | ComplainTool => {
+    if (!isComplainTool(tool)) return tool;
+    found = true;
+    return own;
+  });
+  if (!found) result.push(own);
+  return result;
+}
+
+/** An active-tool selection that always includes the mandatory `complain` tool. */
+function withComplainName(names: readonly string[]): string[] {
+  return names.includes("complain") ? [...names] : [...names, "complain"];
 }
 
 function valueOrThrow<T, E>(
@@ -182,9 +351,18 @@ class RunRecord implements AgenticRun {
     | {
         readonly reasons: Map<string, AgenticYieldReason>;
         readonly executedYields: Map<string, AgentTool>;
+        /** Task calls a bound host admitted: the executed tool and how many subagents it accepted. */
+        readonly admissions: Map<
+          string,
+          { readonly tool: AgentTool; readonly count: number }
+        >;
       }
     | undefined;
   held: Boundary | undefined;
+  /** The latest model request of this run, snapshotted at the provider boundary. */
+  prompt: Prompt | undefined;
+  /** Why the latest request could not be snapshotted, when it could not. */
+  promptCaptureError: unknown;
 
   constructor(readonly kind: AgenticRun["kind"]) {
     const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
@@ -211,14 +389,48 @@ export class JuncoAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> implements Agentic<S, P, T>
+> implements Agentic<S, P, T | ComplainTool>
 {
-  static async fromResolved<
+  /**
+   * An agent over already resolved options. `tools` may also hold MCP definitions, connected
+   * from `cwd` before construction and closed with the agent; the supplied session is
+   * transferred, and closed if construction fails.
+   */
+  static fromResolved<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
     T extends AgentTool = AgentTool,
-  >(options: AgenticOptions<S, P, T>): Promise<JuncoAgent<S, P, T>> {
-    const agent = new JuncoAgent(options);
+  >(
+    options: AgenticOptions<S, P, T> & { readonly cwd?: string },
+  ): Promise<JuncoAgent<S, P, T>>;
+  static fromResolved<
+    S extends Skill = Skill,
+    P extends PromptTemplate = PromptTemplate,
+  >(
+    options: JuncoAgentResolvedOptions<S, P, AgentTool>,
+  ): Promise<JuncoAgent<S, P, AgentTool>>;
+  static async fromResolved(
+    options: JuncoAgentResolvedOptions,
+  ): Promise<JuncoAgent> {
+    const { cwd, tools, ...native } = options;
+    const owned: OwnedResources = {};
+    let resolved: AgentTool[];
+    try {
+      resolved = await resolveToolSources(
+        tools,
+        resolve(cwd ?? process.cwd()),
+        owned,
+      );
+    } catch (error) {
+      // Before construction the factory owns the transferred session and every connection.
+      return await failBeforeConstruction(
+        error,
+        native.session,
+        owned,
+        "JuncoAgent.fromResolved cleanup failed",
+      );
+    }
+    const agent = new JuncoAgent({ ...native, tools: resolved }, owned);
     await agent.initialize();
     return agent;
   }
@@ -234,9 +446,7 @@ export class JuncoAgent<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
   >(
-    options: JuncoAgentCreateOptions<S, P, AgentTool> & {
-      readonly tools?: undefined;
-    },
+    options: JuncoAgentCreateOptions<S, P, AgentTool>,
   ): Promise<JuncoAgent<S, P, AgentTool>>;
   static async create(options: JuncoAgentCreateOptions): Promise<JuncoAgent> {
     const {
@@ -297,14 +507,22 @@ export class JuncoAgent<
       } else {
         session = suppliedSession;
       }
-      let agentTools = tools;
-      if (agentTools === undefined) {
+      let agentTools: AgentTool[];
+      if (tools === undefined) {
         // Explicit-tool construction does not allocate a local execution environment or addon.
         const collection = await ToolCollection.create(
           resolve(cwd ?? process.cwd()),
         );
-        owned.collection = collection;
-        agentTools = [...collection.tools, createYieldTool()];
+        // Subagents borrow its tools; the last of their leases closes it.
+        owned.sharedCollection = new SharedCollection(collection);
+        owned.collection = owned.sharedCollection.lease();
+        agentTools = [...collection.tools, createTaskTool(), createYieldTool()];
+      } else {
+        agentTools = await resolveToolSources(
+          tools,
+          resolve(cwd ?? process.cwd()),
+          owned,
+        );
       }
       agent = new JuncoAgent(
         { ...native, session, models, model, tools: agentTools },
@@ -315,23 +533,12 @@ export class JuncoAgent<
     } catch (error) {
       // Once constructed, initialize() owns failure cleanup; before then the factory does.
       if (agent !== undefined) throw error;
-      const failures: unknown[] = [];
-      if (session !== undefined) {
-        try {
-          await session.close(BACKGROUND_CONTEXT);
-        } catch (failure) {
-          failures.push(failure);
-        }
-      }
-      failures.push(...(await releaseOwned(owned)));
-      if (failures.length > 0) {
-        throw new AggregateError(
-          [error, ...failures],
-          "JuncoAgent.create cleanup failed",
-          { cause: error },
-        );
-      }
-      throw error;
+      return await failBeforeConstruction(
+        error,
+        session,
+        owned,
+        "JuncoAgent.create cleanup failed",
+      );
     }
   }
 
@@ -347,7 +554,11 @@ export class JuncoAgent<
       );
     return this.#lane;
   }
-  #tools: T[];
+  /** This agent's identity for complaints made outside a bound graph node. */
+  readonly nodeId: NodeIdType = NodeId(`agent-${crypto.randomUUID()}`);
+  /** The always-on complaint tool this agent owns; supplied genuine ones are rebound to it. */
+  readonly #complainTool: ComplainTool = createComplainTool();
+  #tools: (T | ComplainTool)[];
   #activeNames: string[] = [];
   #resources: AgentHarnessResources<S, P>;
   #toolMutation: Promise<void> = Promise.resolve();
@@ -371,6 +582,10 @@ export class JuncoAgent<
   #closing = false;
   #closed = false;
   #close: Promise<void> | undefined;
+  /** The graph host {@link runWithTaskHost} binds for its work; task calls admit through it. */
+  #taskHost: TaskToolHost | undefined;
+  /** The graph node {@link runWithComplaintContext} binds; complaints are attributed to it. */
+  #complaintContext: Omit<ComplaintContext, "prompt"> | undefined;
 
   protected constructor(
     options: AgenticOptions<S, P, T>,
@@ -378,7 +593,7 @@ export class JuncoAgent<
   ) {
     this.#options = options;
     this.#owned = owned;
-    this.#tools = [...(options.tools ?? [])];
+    this.#tools = withComplainTool(options.tools ?? [], this.#complainTool);
     this.#resources = options.resources ?? {};
     if (options.prompt !== undefined) {
       this.#staged = {
@@ -403,17 +618,22 @@ export class JuncoAgent<
       activeToolNames,
       ...native
     } = this.#options;
+    const requested =
+      activeToolNames === undefined
+        ? undefined
+        : withComplainName(activeToolNames);
     try {
       validateActiveTools(
         this.#tools,
-        activeToolNames ?? this.#tools.map((tool) => tool.name),
+        requested ?? this.#tools.map((tool) => tool.name),
       );
       const { harness, open } = await AgentHarness.create<undefined>(
         {
           ...native,
+          models: this.#captureRequests(native.models),
           tools: this.#tools.map((tool) => this.#adaptTool(tool)),
           resources: this.#resources,
-          activeToolNames,
+          activeToolNames: requested,
           toolExecution: "sequential",
         },
         BACKGROUND_CONTEXT,
@@ -427,9 +647,14 @@ export class JuncoAgent<
       }
       this.#lane = await harness.lane("main", BACKGROUND_CONTEXT);
       // A reopened idle lane retains its persisted selection, with no initial config_update event.
-      this.#activeNames =
-        await this.nativeLane.getActiveTools(BACKGROUND_CONTEXT);
+      const restored = await this.nativeLane.getActiveTools(BACKGROUND_CONTEXT);
+      this.#activeNames = withComplainName(restored);
       validateActiveTools(this.#tools, this.#activeNames);
+      if (this.#activeNames.length !== restored.length)
+        await this.nativeLane.setActiveTools(
+          this.#activeNames,
+          BACKGROUND_CONTEXT,
+        );
       harness.events.on("entry_added", (event) => this.#onEntryAdded(event));
       harness.events.on("turn_end", (event) => this.#onTurnEnd(event));
       harness.events.on("run_end", ({ lane, runId }) => {
@@ -478,6 +703,40 @@ export class JuncoAgent<
     return this.#staged === undefined ? "idle" : "ready";
   }
 
+  /**
+   * `models` with `streamSimple` snapshotting each request of the current run, after every native
+   * context hook and provider conversion, before delegating unchanged. Other members pass through.
+   */
+  #captureRequests(models: Models): Models {
+    const streamSimple: Models["streamSimple"] = (model, context, options) => {
+      const run = this.#currentRun;
+      if (run !== undefined) {
+        try {
+          run.prompt = structuredClone(context);
+          run.promptCaptureError = undefined;
+        } catch (error) {
+          run.prompt = undefined;
+          run.promptCaptureError = error;
+        }
+      }
+      return models.streamSimple(model, context, options);
+    };
+    const bound = new Map<unknown, unknown>();
+    return new Proxy(models, {
+      get: (target, key) => {
+        if (key === "streamSimple") return streamSimple;
+        const value: unknown = Reflect.get(target, key, target);
+        if (typeof value !== "function") return value;
+        let method = bound.get(value);
+        if (method === undefined) {
+          method = value.bind(target);
+          bound.set(value, method);
+        }
+        return method;
+      },
+    });
+  }
+
   #adaptTool(tool: AgentTool): AgentHarnessTool<undefined> {
     const { execute: _execute, prepareArguments, ...fields } = tool;
     return {
@@ -504,6 +763,41 @@ export class JuncoAgent<
         this.#runsByToolSignal.set(signal, run);
         if (isYieldTool(tool)) run.batch?.executedYields.set(id, tool);
         try {
+          const host = this.#taskHost;
+          if (host !== undefined && isTaskTool(tool)) {
+            const result = await invokeTaskTool(
+              tool,
+              host,
+              id,
+              params as Parameters<typeof invokeTaskTool>[3],
+              signal,
+            );
+            run.batch?.admissions.set(id, {
+              tool,
+              count: result.details.tasks.length,
+            });
+            return result;
+          }
+          if (isComplainTool(tool)) {
+            if (run.prompt === undefined)
+              throw new JuncoAgentError(
+                "invalid_state",
+                "Cannot record complaint: model request snapshot unavailable",
+                { cause: run.promptCaptureError },
+              );
+            const bound = this.#complaintContext ?? {
+              nodeId: this.nodeId,
+              messages: [],
+            };
+            return await invokeComplainTool(
+              tool,
+              this,
+              { ...bound, prompt: run.prompt },
+              id,
+              params as Parameters<typeof invokeComplainTool>[4],
+              signal,
+            );
+          }
           return await tool.execute(id, params, signal, (update) =>
             onUpdate(update),
           );
@@ -536,7 +830,11 @@ export class JuncoAgent<
       (item): item is AgentToolCall => item.type === "toolCall",
     );
     if (calls.length === 0) return;
-    run.batch = { reasons: new Map(), executedYields: new Map() };
+    run.batch = {
+      reasons: new Map(),
+      executedYields: new Map(),
+      admissions: new Map(),
+    };
     this.observeToolBatch?.(run, message, calls);
   }
 
@@ -573,9 +871,19 @@ export class JuncoAgent<
       });
     }
     const reasons: AgenticYieldReason[] = [];
+    // Source order; an admitted task pauses even if a later hook rewrote its result.
     for (const result of event.toolResults) {
       const reason = batch.reasons.get(result.toolCallId);
       if (reason !== undefined) reasons.push(reason);
+      const admission = batch.admissions.get(result.toolCallId);
+      if (admission !== undefined) {
+        reasons.push({
+          kind: "tool",
+          toolCallId: result.toolCallId,
+          toolName: admission.tool.name,
+          reason: `Scheduled ${admission.count} subagents`,
+        });
+      }
     }
     if (reasons.length === 0) return;
     const boundary: Boundary = {
@@ -767,6 +1075,8 @@ export class JuncoAgent<
     this.#activeRuns.delete(run);
     this.#readyYield(run);
     if (this.#currentRun === run) this.#currentRun = undefined;
+    run.prompt = undefined;
+    run.promptCaptureError = undefined;
     this.#publish({ step, run });
   }
 
@@ -779,10 +1089,10 @@ export class JuncoAgent<
       return Promise.reject(error);
     }
   }
-  getTools(): T[] {
+  getTools(): (T | ComplainTool)[] {
     return [...this.#tools];
   }
-  getActiveTools(): T[] {
+  getActiveTools(): (T | ComplainTool)[] {
     return this.#activeNames.map(
       (name) => this.#tools.find((tool) => tool.name === name)!,
     );
@@ -819,12 +1129,14 @@ export class JuncoAgent<
       throw new AggregateError(failures, error.message, { cause: failures[0] });
     });
   }
-  setTools(tools: T[], activeToolNames?: string[]): Promise<void> {
-    const nextTools = [...tools];
-    const names =
-      activeToolNames === undefined
-        ? nextTools.map((tool) => tool.name)
-        : [...activeToolNames];
+  setTools(
+    tools: (T | ComplainTool)[],
+    activeToolNames?: string[],
+  ): Promise<void> {
+    const nextTools = withComplainTool(tools, this.#complainTool);
+    const names = withComplainName(
+      activeToolNames ?? nextTools.map((tool) => tool.name),
+    );
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(nextTools, names);
@@ -862,12 +1174,272 @@ export class JuncoAgent<
     });
   }
   setActiveTools(names: string[]): Promise<void> {
-    const selection = [...names];
+    const selection = withComplainName(names);
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(this.#tools, selection);
       await this.nativeLane.setActiveTools(selection, BACKGROUND_CONTEXT);
       this.#activeNames = selection;
+    });
+  }
+
+  // Subagents ------------------------------------------------------------------------------------
+  /**
+   * Run `work` with `host` admitting this agent's `task` calls. Binding neither prompts nor resumes
+   * the agent; it ends when `work` settles. Only one host can be bound at a time.
+   */
+  async runWithTaskHost<R>(
+    host: TaskToolHost,
+    work: () => Promise<R>,
+  ): Promise<R> {
+    if (this.#taskHost !== undefined)
+      throw new JuncoAgentError("busy", "A task host is already bound");
+    this.#taskHost = host;
+    try {
+      return await work();
+    } finally {
+      this.#taskHost = undefined;
+    }
+  }
+
+  /**
+   * Run `work` with this agent's complaints attributed to the graph node `context` describes; each
+   * complaint adds the model request it arose in. Outside a binding, complaints use this agent's
+   * own {@link nodeId} and no delivered messages. Only one context can be bound at a time.
+   */
+  async runWithComplaintContext<N, R>(
+    context: Omit<ComplaintContext<N>, "prompt">,
+    work: () => Promise<R>,
+  ): Promise<R> {
+    if (this.#complaintContext !== undefined)
+      throw new JuncoAgentError("busy", "A complaint context is already bound");
+    this.#complaintContext = context;
+    try {
+      return await work();
+    } finally {
+      this.#complaintContext = undefined;
+    }
+  }
+
+  /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
+  complain<N>(
+    issue: Issue<N>,
+    tracer?: Pick<DataflowTracer, "complain">,
+  ): void {
+    if (this.#closing) throw closedError();
+    issueLog.append(issue, tracer);
+  }
+
+  /** The process-wide complaint history every agent and graph shares. */
+  get issueLog(): typeof issueLog {
+    return issueLog;
+  }
+
+  /**
+   * Fresh, unstarted agents for one task batch, in `options` order, each with its own in-memory
+   * session. They inherit this agent's current model, thinking level, active tools, resources and
+   * harness settings unless overridden; a tool subset can only narrow the active tools. Ordinary
+   * tools are shared; each MCP definition this agent registered is reconnected for every child,
+   * which exposes only the selected original tools. A local ToolCollection stays open until its
+   * last borrower closes. Everything is validated before any child is created; on failure or
+   * `signal` abort every created child is closed again.
+   */
+  createSubagents(
+    options: readonly TaskAgentOptions[],
+    signal?: AbortSignal,
+  ): Promise<JuncoAgent<S, P, AgentTool>[]> {
+    const requests = options.map(({ model, tools }) => ({
+      model: model && { provider: model.provider, modelId: model.modelId },
+      tools: tools && [...tools],
+    }));
+    return this.#operation(async () => {
+      if (requests.length === 0) return [];
+      const live = (): void => {
+        signal?.throwIfAborted();
+        if (this.#closing) throw closedError();
+      };
+      live();
+      const lane = this.nativeLane;
+      const harness = this.#harness!;
+      const models = this.#options.models;
+      const active: AgentTool[] = this.getActiveTools();
+      const resources = this.#resources;
+      // One detached copy of every registered definition serves the whole batch.
+      const registrations = (this.#owned.mcpSources ?? []).map(
+        (registration) => ({
+          ...registration,
+          source: registration.source.snapshot(),
+        }),
+      );
+      const inherited = await lane.getModel(BACKGROUND_CONTEXT);
+      const thinkingLevel = await lane.getThinkingLevel(BACKGROUND_CONTEXT);
+      const streamOptions = await harness.getStreamOptions(BACKGROUND_CONTEXT);
+      const retry = await harness.getRetryPolicy(BACKGROUND_CONTEXT);
+      const compaction =
+        await harness.getCompactionSettings(BACKGROUND_CONTEXT);
+      const steeringMode = await harness.getSteeringMode(BACKGROUND_CONTEXT);
+      const followUpMode = await harness.getFollowUpMode(BACKGROUND_CONTEXT);
+      live();
+
+      type Selection = {
+        readonly tool: AgentTool;
+        /** The registration whose connection produced `tool`, if it is an MCP wrapper. */
+        readonly mcp?: {
+          readonly occurrence: number;
+          readonly identity: JuncoMcpToolIdentity;
+        };
+      };
+      const plans: { model: Model<Api>; selection: Selection[] }[] = [];
+      for (const request of requests) {
+        let model: Model<Api>;
+        if (request.model === undefined) {
+          if (inherited === undefined)
+            throw new JuncoAgentError(
+              "invalid_state",
+              "Caller has no resolved model",
+            );
+          model = inherited;
+        } else {
+          const { provider, modelId } = request.model;
+          const found = models.getModel(provider, modelId);
+          if (found === undefined)
+            throw new JuncoAgentError(
+              "invalid_argument",
+              `Model not found: ${provider}/${modelId}`,
+            );
+          model = found;
+        }
+        const label = `${model.provider}/${model.id}`;
+        let auth: unknown;
+        try {
+          auth = await models.getAuth(model);
+        } catch (cause) {
+          throw new JuncoAgentError(
+            "invalid_state",
+            `No usable credentials for ${label}`,
+            { cause },
+          );
+        }
+        if (auth === undefined)
+          throw new JuncoAgentError(
+            "invalid_state",
+            `No usable credentials for ${label}`,
+          );
+        if (!getSupportedThinkingLevels(model).includes(thinkingLevel))
+          throw new JuncoAgentError(
+            "invalid_argument",
+            `${label} does not support thinking level ${thinkingLevel}`,
+          );
+        const names = request.tools ?? active.map((tool) => tool.name);
+        validateActiveTools(active, names);
+        const selection = names.map((name): Selection => {
+          const tool = active.find((candidate) => candidate.name === name)!;
+          const occurrence = registrations.findIndex(({ tools }) =>
+            tools.includes(tool),
+          );
+          if (occurrence === -1) return { tool };
+          const identity = getJuncoMcpToolIdentity(tool);
+          if (identity === undefined)
+            throw new JuncoAgentError(
+              "invalid_argument",
+              `Inherited MCP tool unavailable: ${name}`,
+            );
+          return { tool, mcp: { occurrence, identity } };
+        });
+        plans.push({ model, selection });
+      }
+
+      const children: JuncoAgent<S, P, AgentTool>[] = [];
+      try {
+        for (const { model, selection } of plans) {
+          live();
+          const owned: OwnedResources = { repo: new MemorySessionRepo() };
+          const shared = this.#owned.sharedCollection;
+          if (shared !== undefined) {
+            owned.sharedCollection = shared;
+            owned.collection = shared.lease();
+          }
+          let session: Session | undefined;
+          let child: JuncoAgent<S, P, AgentTool>;
+          try {
+            session = await owned.repo!.create({}, BACKGROUND_CONTEXT);
+            for (const { source, cwd } of registrations)
+              await resolveToolSources(source, cwd, owned, signal);
+            live();
+            // Rebind each selected MCP tool to the one fresh wrapper of the same operation.
+            const tools = selection.map(({ tool, mcp }) => {
+              if (mcp === undefined) return tool;
+              const { serverName, originalToolName } = mcp.identity;
+              const fresh = owned.mcpSources![mcp.occurrence]!.tools.filter(
+                (candidate) => {
+                  const identity = getJuncoMcpToolIdentity(candidate);
+                  return (
+                    identity?.serverName === serverName &&
+                    identity.originalToolName === originalToolName
+                  );
+                },
+              );
+              if (fresh.length !== 1)
+                throw new JuncoAgentError(
+                  "invalid_argument",
+                  `Inherited MCP tool unavailable: ${tool.name}`,
+                );
+              return fresh[0]!;
+            });
+            const activeToolNames = tools.map((tool) => tool.name);
+            validateActiveTools(tools, activeToolNames);
+            child = new JuncoAgent<S, P, AgentTool>(
+              {
+                session,
+                models,
+                model,
+                thinkingLevel,
+                systemPrompt: this.#options.systemPrompt,
+                toProviderMessages: this.#options.toProviderMessages,
+                entryProjectors: this.#options.entryProjectors,
+                streamOptions,
+                retry,
+                compaction,
+                steeringMode,
+                followUpMode,
+                tools,
+                activeToolNames,
+                resources,
+              },
+              owned,
+            );
+          } catch (error) {
+            // Awaited here, so a rejection reaches the batch rollback of earlier children.
+            return await failBeforeConstruction(
+              error,
+              session,
+              owned,
+              "JuncoAgent subagent cleanup failed",
+            );
+          }
+          // Once constructed, initialize() owns its own failure cleanup.
+          await child.initialize();
+          children.push(child);
+        }
+        live();
+        return children;
+      } catch (error) {
+        const failures: unknown[] = [];
+        for (const child of children) {
+          try {
+            await child.return();
+          } catch (failure) {
+            failures.push(failure);
+          }
+        }
+        if (failures.length > 0)
+          throw new AggregateError(
+            [error, ...failures],
+            "JuncoAgent.createSubagents cleanup failed",
+            { cause: error },
+          );
+        throw error;
+      }
     });
   }
   steer(text: string, options?: { images?: ImageContent[] }): Promise<void> {

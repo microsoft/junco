@@ -10,6 +10,7 @@ export {
   type Edge,
   EdgeId,
   type EdgeIdType,
+  type ErrorFn,
   emptyQueue,
   from,
   type Identifiable,

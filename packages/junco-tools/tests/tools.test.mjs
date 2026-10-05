@@ -22,17 +22,21 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
+  acquireShellMux,
   createBashTool,
   createShellMuxOperations,
   isMarshPolicyDenied,
   LspTool,
   MARSH_POLICY_DENIED,
+  shutdownShellMux,
   ToolCollection,
 } from "../dist/index.js";
 import {
   cleanup,
   closeFixture,
   collector,
+  copyTreeNative,
+  copyTreeOpens,
   deferred,
   fixture,
   hashlineTag,
@@ -40,7 +44,9 @@ import {
   nativeEnv,
   release,
   sdkResources,
+  seedFixture,
   settleAgent,
+  testNative,
   text,
 } from "./helpers.mjs";
 import {
@@ -50,8 +56,9 @@ import {
 } from "./scripted-model.mjs";
 
 /**
- * A CopyTree seed holding `files`, plus a collection over a borrowed test-addon mux on it.
- * `root` is the seed; its marsh state lives beside it, inside the disposable scratch root.
+ * A CopyTree seed holding `files`, plus a collection that adopts a raw test-addon mux on it
+ * as the application singleton. `root` is the seed; its marsh state lives beside it, inside
+ * the disposable scratch root. `dispose` shuts that singleton down.
  */
 async function workspace(files = {}, { sandbox = "shared" } = {}) {
   const instance = await fixture({ files, sandbox });
@@ -62,6 +69,7 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
     return {
       root,
       mux,
+      native,
       collection,
       call: (name, input, signal) =>
         byName.get(name).execute(`tools-${name}`, input, signal, undefined),
@@ -327,9 +335,19 @@ test("one invalid section stages nothing across files", {
 test("named registers live in the collection that cut them", {
   timeout: 30_000,
 }, async () => {
-  const owner = await workspace({ "a.txt": "a1\n", "b.txt": "b1\n" });
-  const other = await workspace({ "b.txt": "b1\n" });
+  const owner = await workspace({
+    "a.txt": "a1\n",
+    "b.txt": "b1\n",
+    "c.txt": "c1\n",
+  });
+  let other;
   try {
+    // A second collection on the same singleton mux.
+    other = await ToolCollection.create(owner.root, { native: owner.native });
+    const otherCall = (name, input) =>
+      other.tools
+        .find((tool) => tool.name === name)
+        .execute(`other-${name}`, input, undefined, undefined);
     const cutTag = tagOf(text(await owner.call("read", { path: "a.txt" })));
     await owner.call("edit", { input: `[a.txt#${cutTag}]\nCUT 1.=1 @reg\n` });
     assert.equal(await owner.file("a.txt"), "");
@@ -339,14 +357,16 @@ test("named registers live in the collection that cut them", {
     assert.equal(await owner.file("b.txt"), "a1\nb1\n");
 
     // A separate collection owns a separate store: the register is not visible.
-    const foreignTag = tagOf(text(await other.call("read", { path: "b.txt" })));
-    await other
-      .call("edit", { input: `[b.txt#${foreignTag}]\nPUT <1 @reg\n` })
-      .catch(() => undefined);
-    assert.equal(await other.file("b.txt"), "b1\n");
+    const foreignTag = tagOf(text(await otherCall("read", { path: "c.txt" })));
+    await otherCall("edit", {
+      input: `[c.txt#${foreignTag}]\nPUT <1 @reg\n`,
+    }).catch(() => undefined);
+    assert.equal(await owner.file("c.txt"), "c1\n");
   } finally {
-    await owner.dispose();
-    await other.dispose();
+    await cleanup(
+      () => other?.close(),
+      () => owner.dispose(),
+    );
   }
 });
 
@@ -659,7 +679,11 @@ async function collectionSession(instance, principal) {
     mux: instance.mux,
     native: instance.native,
     bash: {
-      operations: createShellMuxOperations({ mux: instance.mux, principal }),
+      operations: createShellMuxOperations({
+        mux: instance.mux,
+        native: instance.native,
+        principal,
+      }),
     },
   });
   const errors = [];
@@ -681,8 +705,8 @@ async function collectionSession(instance, principal) {
     await session.bindExtensions({ onError: (error) => errors.push(error) });
     session.agent.streamFunction = streamFn;
   } catch (setupError) {
-    // The caller never received this session, so nothing else can dispose it. The borrowed
-    // mux stays the caller's, and is deliberately not closed here.
+    // The caller never received this session, so nothing else can dispose it. The adopted
+    // singleton belongs to the caller's application shutdown, and is not closed here.
     try {
       await cleanup(
         () => settleAgent(session.agent),
@@ -813,6 +837,7 @@ test("the collection's bash still enforces marsh publication policy", {
     const claim = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "other-owner",
       }),
     });
@@ -869,6 +894,7 @@ test("writing file tools are gated by marsh publication", {
     const claim = createBashTool(ws.root, {
       operations: createShellMuxOperations({
         mux: ws.mux,
+        native: ws.native,
         principal: "other-owner",
       }),
     });
@@ -986,176 +1012,203 @@ test("a collection needs a marsh seed", { timeout: 30_000 }, async () => {
   }
 });
 
-/** The test addon with `NativeMux.open` over a CopyTree seed, recording every mux it opens. */
-function copyTreeNative(native, opened = []) {
-  return {
-    ...native,
-    NativeMux: {
-      async open(root, options) {
-        const mux = await native.NativeMux.openCopyTree(root, options);
-        opened.push(mux);
-        return mux;
-      },
-    },
-  };
-}
-
-/** The test addon with its `EditStore` replaced, and `NativeMux.open` over a CopyTree seed. */
-function failingNative(native, failure, opened = []) {
-  return {
-    ...copyTreeNative(native, opened),
-    EditStore: class {
-      constructor() {
-        throw failure;
-      }
-    },
-  };
-}
-
-test("failed construction closes an owned mux but never a borrowed one", {
-  timeout: 30_000,
-}, async () => {
-  const instance = await fixture();
-  const opened = [];
+test("closing a collection is local: its own calls stop, the singleton serves the rest", {
+  timeout: 60_000,
+}, async (t) => {
+  const { root, seed } = await seedFixture();
+  const native = await copyTreeNative();
+  const opens = copyTreeOpens.length;
+  const gate = join(root, "collection-close-gate");
+  let first;
+  let second;
+  let third;
+  let held;
   try {
-    const failure = new Error("store construction failed");
+    // "always": the held command stays managed, so it never excludes the other collection.
+    [first, second] = await Promise.all([
+      ToolCollection.create(seed, { native, sandbox: "always" }),
+      ToolCollection.create(seed, { native, sandbox: "always" }),
+    ]);
+    assert.equal(copyTreeOpens.length, opens + 1);
+    const mux = copyTreeOpens.at(-1);
+    const tool = (collection, name) =>
+      collection.tools.find((entry) => entry.name === name);
 
-    // Owned: the collection opened the mux, so rejection closes it.
-    await assert.rejects(
-      ToolCollection.create(instance.seed, {
-        native: failingNative(instance.native, failure, opened),
-      }),
-      (error) => error === failure,
-    );
-    assert.equal(opened.length, 1);
-    await assert.rejects(opened[0].exists(instance.seed, "src/file0.txt"));
-
-    // Owned, and closing fails too: both causes survive, the original first.
-    const closeFailure = new Error("mux close failed");
-    const native = failingNative(instance.native, failure, opened);
-    const open = native.NativeMux.open;
-    native.NativeMux.open = async (root, options) => {
-      const mux = await open(root, options);
-      const close = mux.close.bind(mux);
-      mux.close = async () => {
-        await close();
-        throw closeFailure;
-      };
-      return mux;
-    };
-    await assert.rejects(
-      ToolCollection.create(instance.seed, { native }),
-      (error) => {
-        assert.ok(error instanceof AggregateError);
-        assert.deepEqual(error.errors, [failure, closeFailure]);
-        assert.equal(error.cause, failure);
-        return true;
+    const ready = deferred(t.signal, "collection hold readiness");
+    held = tool(first, "bash").execute(
+      "held",
+      {
+        command: heldChild({ gate, ready: "HOLD_READY", done: "HOLD_DONE" }),
+      },
+      t.signal,
+      (update) => {
+        if (text(update).includes("HOLD_READY")) ready.resolve();
       },
     );
-    assert.equal(opened.length, 2);
-    await assert.rejects(opened[1].exists(instance.seed, "src/file0.txt"));
-
-    // Borrowed: the caller's mux stays open and usable.
-    await assert.rejects(
-      ToolCollection.create(instance.seed, {
-        mux: instance.mux,
-        native: failingNative(instance.native, failure),
+    await Promise.race([
+      ready.promise,
+      held.then(() => {
+        throw new Error("held command ended before readiness");
       }),
-      (error) => error === failure,
+    ]);
+    assert.match(
+      text(
+        await tool(second, "read").execute("concurrent-read", {
+          path: "src/file0.txt",
+        }),
+      ),
+      /^1:zero$/m,
     );
-    assert.equal(
-      await instance.mux.exists(instance.seed, "src/file0.txt"),
-      true,
+
+    // Close aborts and joins this collection's own invocation; the gate is never released.
+    await Promise.all([first.close(), assert.rejects(held, Error)]);
+    await first.close();
+    await assert.rejects(
+      tool(first, "read").execute("retained", { path: "src/file0.txt" }),
+      /ToolCollection is closed/,
     );
+
+    const after = await tool(second, "bash").execute(
+      "after-close",
+      { command: "printf 'still serving\\n'" },
+      t.signal,
+    );
+    assert.equal(text(after), "still serving\n");
+    assert.match(
+      text(
+        await tool(second, "read").execute("after", { path: "src/file1.txt" }),
+      ),
+      /^1:one$/m,
+    );
+
+    // With every collection closed the mux stays open: a later consumer receives it again.
+    await second.close();
+    const lease = await acquireShellMux(seed);
+    assert.equal(lease.mux, mux);
+    lease.release();
+    third = await ToolCollection.create(seed);
+    assert.match(
+      text(
+        await tool(third, "read").execute("reused", { path: "src/file0.txt" }),
+      ),
+      /^1:zero$/m,
+    );
+    assert.equal(copyTreeOpens.length, opens + 1);
   } finally {
-    // The prototype's close: one opened mux's own close was replaced to fail.
     await cleanup(
-      ...opened.map((mux) => () => Object.getPrototypeOf(mux).close.call(mux)),
-      () => closeFixture(instance),
+      () => release(gate),
+      () => Promise.allSettled([held]),
+      () => first?.close(),
+      () => second?.close(),
+      () => third?.close(),
+      () => shutdownShellMux(),
+      () => rm(root, { recursive: true, force: true }),
     );
   }
 });
 
-test("a collection closes only the mux it opened and rejects borrowed-mux misuse", {
+test("failed construction releases only its own lease", {
   timeout: 30_000,
 }, async () => {
-  const instance = await fixture();
+  const { root, seed } = await seedFixture();
+  const failure = new Error("store construction failed");
+  const real = await testNative();
   const opened = [];
-  let owned;
-  let borrowed;
+  let failNext = true;
+  // The real addon, whose EditStore constructor fails exactly once.
+  const native = {
+    ...real,
+    NativeMux: {
+      async open(cwd, options) {
+        const mux = await real.NativeMux.openCopyTree(cwd, options);
+        opened.push(mux);
+        return mux;
+      },
+    },
+    EditStore: function EditStore() {
+      if (failNext) {
+        failNext = false;
+        throw failure;
+      }
+      return new real.EditStore();
+    },
+  };
+  let collection;
   try {
-    const env = nativeEnv(instance.root);
-    const borrowedWorks = async (label) => {
-      assert.equal(
-        (await instance.mux.readFile(instance.seed, "src/file0.txt")).toString(
-          "utf8",
-        ),
-        "zero\n",
-        label,
-      );
-      const output = collector();
-      const run = instance.mux.start(
-        {
-          command: "printf borrowed",
-          cwd: instance.seed,
-          principal: "borrowed-collection",
-          env,
-        },
-        output.onData,
-      );
-      assert.deepEqual(
-        await run.wait(),
-        { exitCode: 0, cancelled: false, timedOut: false },
-        label,
-      );
-      assert.equal(output.output, "borrowed", label);
-    };
-
-    // Owned: the collection opens its own mux, reads through it, and closes it exactly once.
-    owned = await ToolCollection.create(instance.seed, {
-      native: copyTreeNative(instance.native, opened),
-    });
+    await assert.rejects(
+      ToolCollection.create(seed, { native }),
+      (error) => error === failure,
+    );
     assert.equal(opened.length, 1);
-    const read = owned.tools.find((tool) => tool.name === "read");
+    assert.equal(await opened[0].exists(seed, "src/file0.txt"), true);
+
+    collection = await ToolCollection.create(seed, { native });
+    assert.equal(opened.length, 1);
+    const read = collection.tools.find((tool) => tool.name === "read");
     assert.match(
-      text(await read.execute("owned-read", { path: "src/file0.txt" })),
+      text(await read.execute("after-failure", { path: "src/file0.txt" })),
       /^1:zero$/m,
     );
-    await Promise.all([owned.close(), owned.close()]);
-    await owned.close();
-    await assert.rejects(opened[0].exists(instance.seed, "src/file0.txt"));
-    await assert.rejects(opened[0].readFile(instance.seed, "src/file0.txt"));
-
-    // Borrowed: closing the collection leaves the caller's mux reading and executing.
-    borrowed = await ToolCollection.create(instance.seed, {
-      mux: instance.mux,
-      native: instance.native,
-    });
-    await Promise.all([borrowed.close(), borrowed.close()]);
-    await borrowedWorks("after borrowed close");
-
-    // Invalid borrowed-mux options reject without touching that mux.
-    await assert.rejects(
-      ToolCollection.create(instance.seed, { mux: instance.mux }),
-      Error,
-    );
-    await assert.rejects(
-      ToolCollection.create(instance.seed, {
-        mux: instance.mux,
-        native: instance.native,
-        sandbox: "shared",
-      }),
-      Error,
-    );
-    assert.equal(opened.length, 1);
-    await borrowedWorks("after rejected options");
+    const lease = await acquireShellMux(seed);
+    assert.equal(lease.mux, opened[0]);
+    lease.release();
   } finally {
     await cleanup(
-      () => owned?.close(),
-      () => borrowed?.close(),
+      () => collection?.close(),
+      () => shutdownShellMux(),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+  await assert.rejects(opened[0].exists(seed, "src/file0.txt"), /closed/);
+});
+
+test("a pre-opened mux is adopted strictly and refusals leave it untouched", {
+  timeout: 30_000,
+}, async () => {
+  const instance = await fixture({ sandbox: "always" });
+  const { seed, mux, native } = instance;
+  let collection;
+  try {
+    const usable = async (label) =>
+      assert.equal(await mux.exists(seed, "src/file0.txt"), true, label);
+
+    // Refused before anything is adopted: no native module, or a conflicting mode.
+    await assert.rejects(
+      ToolCollection.create(seed, { mux }),
+      /requires the native module/,
+    );
+    await assert.rejects(
+      ToolCollection.create(seed, { mux, native, sandbox: "shared" }),
+      /sandbox "shared" conflicts/,
+    );
+    await usable("after refused adoption");
+
+    collection = await ToolCollection.create(seed, { mux, native });
+    const read = collection.tools.find((tool) => tool.name === "read");
+    assert.match(
+      text(await read.execute("adopted", { path: "src/file0.txt" })),
+      /^1:zero$/m,
+    );
+    const lease = await acquireShellMux(seed);
+    assert.equal(lease.mux, mux);
+    assert.equal(lease.native, native);
+    lease.release();
+
+    // The adopted singleton refuses any other addon object, opening nothing.
+    const opens = copyTreeOpens.length;
+    await assert.rejects(
+      ToolCollection.create(seed, { native: await copyTreeNative() }),
+      /different native module/,
+    );
+    assert.equal(copyTreeOpens.length, opens);
+    await usable("after refused native");
+  } finally {
+    await cleanup(
+      () => collection?.close(),
       () => closeFixture(instance),
     );
   }
+  await assert.rejects(mux.exists(seed, "src/file0.txt"), /closed/);
 });
 
 test("diff reports structured hunks for the requested context", {

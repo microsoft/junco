@@ -1,7 +1,9 @@
 // Compile-only: Pi scheduler factory options. Covered by tsconfig.typecheck.json; never executed.
 
 import type { PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
+import type { DataflowTracer } from "dataflow-engine";
 import type { AgenticOptions } from "junco-agent";
+import type { Issue } from "junco-tools";
 import {
   PiScheduler,
   type PiSchedulerOptions,
@@ -34,4 +36,20 @@ export function bothFactoriesShareOneOptionsShape<
   const unchecked: Promise<PiScheduler> = PiScheduler.make({});
   const defaulted: Promise<PiScheduler> = PiScheduler.opus();
   return [empty, made, opus, fromNative, opusWithModel, unchecked, defaulted];
+}
+
+export function inheritedComplainTakesCompleteIssue<N>(
+  scheduler: PiScheduler<N>,
+  issue: Issue<N>,
+  tracer: Pick<DataflowTracer, "complain">,
+) {
+  const recorded: void = scheduler.complain(issue);
+  const observed: void = scheduler.complain(issue, tracer);
+  // @ts-expect-error a complaint string alone is not an issue
+  scheduler.complain("I am stuck.");
+  // @ts-expect-error an issue requires its node, messages and prompt context
+  scheduler.complain({ complaint: "I am stuck." });
+  // @ts-expect-error an issue is required
+  scheduler.complain();
+  return [recorded, observed];
 }

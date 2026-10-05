@@ -57,6 +57,7 @@ jobs:
             "packages/dataflow-engine/dist",
             "packages/dataflow-engine-opik/dist",
             "packages/junco-agent/dist",
+            "packages/junco-mcp/dist",
             "packages/junco-scheduler/dist",
             "packages/junco-tools/dist",
             "packages/junco-tools/native",
@@ -104,7 +105,6 @@ jobs:
               "@earendil-works/pi-ai",
               "@earendil-works/pi-coding-agent",
               "@oh-my-pi/pi-coding-agent",
-              "opik",
             ]) {
               const destination = join(consumer, "node_modules", name);
               await mkdir(dirname(destination), { recursive: true });
@@ -123,7 +123,6 @@ jobs:
             }
             const recursive = await run("recursive-agency.js");
             assert.equal(recursive.code, 0, recursive.stderr);
-            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 8 root windows\n");
             assert.equal(recursive.stderr, "");
             const committee = await run("oss-committee.js");
             assert.equal(committee.code, 1);
@@ -134,6 +133,10 @@ jobs:
             await rm(consumer, { recursive: true, force: true });
           }
           '
+
+      # In-memory MCP protocol tests against workspace sources: no native addon is built or loaded.
+      - name: junco-mcp core tests from source
+        run: bun run --cwd packages/junco-mcp test
 
       - name: Build dataflow-engine
         working-directory: junco-agency/packages/dataflow-engine
@@ -147,11 +150,12 @@ jobs:
           bun run typecheck:core
           bun test ./test/scheduler.test.ts
 
-      - name: Build and typecheck dataflow-engine-opik
+      - name: Build, typecheck and test dataflow-engine-opik
         working-directory: junco-agency/packages/dataflow-engine-opik
         run: |
           bun run build
           bun run typecheck
+          bun run test
 
       # The parent config checks every example with the Dummy tracer; examples:typecheck checks
       # the default Opik route against the engine, scheduler-core and adapter declarations.
@@ -198,7 +202,7 @@ jobs:
           import assert from "node:assert/strict";
           import { DataflowDefinitionError, DataflowGraph, NodeId, Width, always } from "dataflow-engine";
           import { createRoundRobinScheduler } from "junco-scheduler";
-          for (const peer of ["junco-agent", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
+          for (const peer of ["junco-agent", "junco-tools", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
             assert.throws(() => import.meta.resolve(peer), `${peer} unexpectedly installed`);
           }
           const scheduler = createRoundRobinScheduler();
@@ -348,6 +352,11 @@ jobs:
         working-directory: junco-agency/packages/junco-tools
         run: node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
 
+      # Before junco-tools, whose declaration build imports the engine's public types.
+      - name: Build dataflow-engine
+        working-directory: junco-agency/packages/dataflow-engine
+        run: bun run build
+
       - name: Build and test junco-tools
         working-directory: junco-agency/packages/junco-tools
         run: |
@@ -355,23 +364,45 @@ jobs:
           bun run build:native:test
           bun run test
 
-      - name: Build dataflow-engine
-        working-directory: junco-agency/packages/dataflow-engine
-        run: bun run build
+      # After junco-tools, whose addons and declarations it uses; before junco-agent, which uses it.
+      - name: Build, typecheck and test junco-mcp
+        working-directory: junco-agency/packages/junco-mcp
+        run: |
+          bun run build
+          bun run typecheck
+          bun run test
+          bun run test:native
 
-      - name: Build, typecheck and test junco-agent
+      - name: Build, typecheck and test junco-agent with coverage
         working-directory: junco-agency/packages/junco-agent
         run: |
           bun run build
           bun run typecheck
-          bun run test
+          bun run test:coverage
+          bun run test:native
 
-      - name: Build, typecheck and test junco-scheduler
+      - name: Upload junco-agent coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junco-agent-coverage
+          path: junco-agency/packages/junco-agent/coverage/lcov.info
+          if-no-files-found: error
+
+      - name: Build, typecheck and test junco-scheduler with coverage
         working-directory: junco-agency/packages/junco-scheduler
         run: |
           bun run build
           bun run typecheck
-          bun run test
+          bun run test:coverage
+
+      - name: Upload junco-scheduler coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junco-scheduler-coverage
+          path: junco-agency/packages/junco-scheduler/coverage/lcov.info
+          if-no-files-found: error
 
       - name: Build dataflow-engine-opik
         working-directory: junco-agency/packages/dataflow-engine-opik

@@ -65,6 +65,18 @@ export type NodeGenerator<N, T> = AsyncGenerator<
 export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
 
 /**
+ * Failure hook of a node whose body threw. Invoked once as `node.on_error(error, signal)` after the
+ * node became `done`, with the raw body error and the invocation's signal. The returned batch is
+ * routed like a yield in the same terminal activation; `[]` handles the failure silently. The node
+ * records no result and its outbound value edges stay unresolved. A throw rejects the invocation.
+ */
+export type ErrorFn<S, N, T> = (
+  this: Node<S, N, T>,
+  error: unknown,
+  signal: AbortSignal | undefined,
+) => readonly Message<N>[] | Promise<readonly Message<N>[]>;
+
+/**
  * Availability hook, consulted only for a node that is not `done`, after the runtime has evaluated
  * its trigger. `view` is a NON-destructive probe aliasing the live queues; `triggered` says whether
  * the node's {@link TriggerRule} fires right now. The default hook returns `triggered`.
@@ -96,11 +108,13 @@ export type Node<S, N, T> = Identifiable<NodeId> &
     status: NodeStatus;
     readonly is_available: AvailabilityFn<N, T>;
     readonly step: StepFn<S, N, T>;
+    readonly on_error?: ErrorFn<S, N, T>;
     generator: NodeGenerator<N, T> | undefined;
   };
 
-/** What a caller passes to `DataflowGraph.addNode`: common options plus state and body. */
+/** What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. */
 export type NodeSpec<S, N, T> = NodeOptions<N, T> & {
   readonly state: S;
   readonly step: StepFn<S, N, T>;
+  readonly on_error?: ErrorFn<S, N, T>;
 };

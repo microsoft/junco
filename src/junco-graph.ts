@@ -1,4 +1,3 @@
-import { feature } from "bun:bundle";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowGraph,
@@ -6,14 +5,17 @@ import {
   type DataflowScheduler,
   type DataflowTracer,
   type NodeIdType,
+  type NodeSpec,
   type Width,
 } from "dataflow-engine";
 import { type JuncoAgent, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
+import { issueLog } from "junco-tools";
 import { settleAll } from "./agent-operations.js";
 import type { Agentic, AgenticInput } from "./agentic.js";
 import { Deterministic } from "./deterministic.js";
 import type { MockAgent } from "./mock-agent.js";
+import { nodePolicies, registeredNodeTracers } from "./node-policy.js";
 
 /**
  * Internal entrypoint of an agency scheduler's abort and close callbacks: abort or close this
@@ -58,8 +60,6 @@ export class JuncoGraph<
     abort: undefined,
     close: undefined,
   };
-  /** The tracer shared by every automatically traced graph, built on first use under `opik`. */
-  static #automaticTracer: DataflowTracer | undefined;
 
   #controller = new AbortController();
   /** Default run options, replaced with the controller. */
@@ -70,39 +70,40 @@ export class JuncoGraph<
   /** A root `close()` joining a close its own scheduler started. */
   #rootClose: Promise<void> | undefined;
 
+  /** The execution observer every `run()`/`step()` of this graph reports to. */
+  declare readonly tracer: DataflowTracer;
+
   /**
-   * The `opik` Bun feature selects an automatic Opik tracer, shared by every graph that omits
-   * `tracer`; without it such graphs are untraced. A supplied `tracer` always wins.
-   *
-   * @throws {Error} when the `opik` feature is enabled and Opik cannot be loaded or configured.
+   * @param tracer Required execution observer; use `createTracer()` for the feature-selected one.
+   * @throws {TypeError} when `tracer` is missing.
    */
   constructor(
     scheduler: Q,
     window: Width,
     threads: Width,
-    tracer?: DataflowTracer,
+    tracer: DataflowTracer,
   ) {
-    let selected = tracer;
-    if (feature("opik")) {
-      if (selected === undefined) {
-        if (JuncoGraph.#automaticTracer === undefined) {
-          const { OpikDataflowTracer } = require("dataflow-engine-opik");
-          const { Opik } = require("opik");
-          const automatic: DataflowTracer = new OpikDataflowTracer(
-            new Opik(),
-            "JuncoGraph.run",
-          );
-          JuncoGraph.#automaticTracer = automatic;
-        }
-        selected = JuncoGraph.#automaticTracer;
-      }
+    if (tracer == null) {
+      throw new TypeError("JuncoGraph requires a tracer");
     }
-    super(scheduler, window, threads, selected);
+    super(scheduler, window, threads, tracer);
   }
 
   /** Aborted by {@link abort} (then replaced once that settles) and, terminally, by {@link close}. */
   get signal(): AbortSignal {
     return this.#controller.signal;
+  }
+
+  /** The process-wide complaint history every agent and graph shares. */
+  get issueLog(): typeof issueLog {
+    return issueLog;
+  }
+
+  /** Register a node as natively, recording this graph's tracer for that registration's complaints. */
+  override addNode(spec: NodeSpec<Agentic<N, T>, N, T>): NodeIdType {
+    const id = super.addNode(spec);
+    registeredNodeTracers.set(this.getNode(id)!, this.tracer);
+    return id;
   }
 
   /**
@@ -264,6 +265,12 @@ export class JuncoGraph<
       const children: JuncoGraph<N, T, unknown, DataflowScheduler<N, T>>[] = [];
       graph.forEachNode((_, node) => {
         const state = node.state;
+        // A failed task's report already carries this state's settled teardown.
+        if (
+          kind === "close" &&
+          nodePolicies.get(node.step)?.closedTaskState === state
+        )
+          return;
         if (state instanceof JuncoGraph) children.push(state);
         else resource(state);
       });

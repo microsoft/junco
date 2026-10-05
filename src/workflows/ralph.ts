@@ -125,7 +125,7 @@ export function ralph<
       },
     },
   );
-  const child = new JuncoGraph(scheduler, Width(1), UNBOUNDED);
+  const child = new JuncoGraph(scheduler, Width(1), UNBOUNDED, parent.tracer);
 
   /** One full native run of `text`, resuming through native yields, and its settled final message. */
   const runOnce = async (text: string): Promise<AssistantMessage> => {

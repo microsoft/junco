@@ -1,5 +1,5 @@
 // Compile-only: every type exported through the root `graph`, `trigger`, `tracer`, `schedulers`,
-// `agent` and `tools` namespaces, plus the flat LSP types, used as a consumer would: typed
+// `agent`, `tools` and `mcp` namespaces, plus the flat LSP types, used as a consumer would: typed
 // construction, callbacks and narrowing, with deliberate rejections. Detailed generic rules stay in
 // the engine and scheduler fixtures. Covered by tsconfig.typecheck.json; never executed.
 
@@ -17,6 +17,7 @@ import {
   type LspToolDetails,
   type LspToolInput,
   type LspToolOptions,
+  mcp,
   schedulers,
   tools,
   tracer,
@@ -98,10 +99,23 @@ export async function graphTypesBuildAndReadTypedNodes(
     ),
     is_available: availability,
   };
+  const recover: graph.ErrorFn<Counter, number, string> = async function (
+    this: graph.Node<Counter, number, string>,
+    error: unknown,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly graph.Message<number>[]> {
+    signal?.throwIfAborted();
+    return error instanceof Error ? [graph.msg(numbers, this.state.count)] : [];
+  };
   const spec: graph.NodeSpec<Counter, number, string> = {
     ...options,
     state: { count: 0 },
     step,
+    on_error: recover,
+  };
+  const notice: graph.nodes.AgenticInput = {
+    kind: "error",
+    text: "upstream failed",
   };
   const id: graph.NodeIdType = g.addNode(spec);
   g.addEdge(source, id, numbers).addEdge(source, id, done);
@@ -170,6 +184,7 @@ export async function graphTypesBuildAndReadTypedNodes(
     bareWidth,
     wrongPayload,
     incomplete,
+    notice,
   ];
 }
 
@@ -312,6 +327,10 @@ class CountingTracer implements tracer.DataflowTracer {
     };
   }
 
+  complain(nodeId: graph.NodeIdType, complaint: string): void {
+    this.events.push(`complain ${nodeId} ${complaint}`);
+  }
+
   async flush(): Promise<void> {
     this.events.length = 0;
   }
@@ -324,7 +343,12 @@ export async function tracerHandlesRetainPayloadTypes(
   edge: graph.Edge<number, string>,
 ) {
   const counting = new CountingTracer();
-  const tracers: tracer.DataflowTracer[] = [counting, new tracer.DummyTracer()];
+  const tracers: tracer.DataflowTracer[] = [
+    counting,
+    new tracer.DummyTracer(),
+    new tracer.StdoutTracer(),
+    tracer.createTracer(),
+  ];
   const run: tracer.DataflowRunTrace<number, string> = counting.startRun(g);
   const primed: tracer.DataflowStepTrace<number, string> = run.startNode(
     id,
@@ -353,6 +377,8 @@ export async function tracerHandlesRetainPayloadTypes(
     counting,
   );
   await Promise.all(tracers.map((each) => each.flush()));
+  // A factory-built agency graph always holds a tracer, flushable without optional access.
+  await graph.createParallelAgentGraph().tracer.flush();
   return traced;
 }
 
@@ -498,6 +524,7 @@ export async function piSchedulerTypesFixTheScheduleTool(
     agencyScheduler,
     graph.Width(1),
     graph.UNBOUNDED,
+    tracer.createTracer(),
   );
   const skillTags: ("skill" | undefined)[] = [
     scheduler,
@@ -505,8 +532,9 @@ export async function piSchedulerTypesFixTheScheduleTool(
     agencyScheduler,
   ].map((each) => each.getResources().skills?.[0]?.tag);
 
-  const [schedule]: schedulers.ScheduleTool[] = scheduler.getTools();
-  if (schedule === undefined) throw new Error("the schedule tool is fixed");
+  const [schedule] = scheduler.getTools();
+  if (schedule === undefined || tools.isComplainTool(schedule))
+    throw new Error("the schedule tool is fixed");
   const result = await schedule.execute("call-1", {
     lanes: [["a", "b"], ["c"]],
   });
@@ -519,7 +547,7 @@ export async function piSchedulerTypesFixTheScheduleTool(
 
   // @ts-expect-error schedule lanes hold string node IDs
   await schedule.execute("call-2", { lanes: [[1]] });
-  // @ts-expect-error the scheduler's tool set is fixed to `schedule`
+  // @ts-expect-error the scheduler's tool set is fixed to `schedule` and `complain`
   await scheduler.setTools([plainTool]);
   const replaced: schedulers.PiSchedulerOptions<number, string> = {
     // @ts-expect-error construction cannot replace the fixed tool set
@@ -618,6 +646,18 @@ export async function agentProtocolNarrowsSteps(
       described.push(code);
     }
   }
+  const issue: tools.Issue<number> = {
+    nodeId: graph.NodeId("n"),
+    messages: [],
+    prompt: { messages: [] },
+    complaint: "blocked",
+  };
+  const complained: void = protocol.complain(issue);
+  // @ts-expect-error a complaint string alone is not an issue
+  protocol.complain("blocked");
+  // @ts-expect-error an issue carries its messages and prompt
+  protocol.complain({ nodeId: graph.NodeId("n"), complaint: "blocked" });
+  described.push(String(complained));
 
   // @ts-expect-error a settled step carries its message
   const bareSettled: agent.AgenticStep = { kind: "settled" };
@@ -733,8 +773,9 @@ export async function toolFactoriesAreConsumerAgentTools(
   base: agent.AgenticOptions,
   signal: AbortSignal,
 ) {
-  const operations: tools.BashOperations = tools.createShellMuxOperations({
+  const operations: tools.ShellMuxOperations = tools.createShellMuxOperations({
     principal: "typed",
+    native,
     mux,
   });
   const chunks: Buffer[] = [];
@@ -885,5 +926,205 @@ export async function lspToolTypesThroughBothRoutes(
     unknownAction,
     textLine,
     textReadOnly,
+  ];
+}
+
+// --- shared ShellMux and MCP definitions -------------------------------------------------------------
+
+export async function sharedShellMuxLeasesAndAdoption(
+  cwd: string,
+  native: tools.NativeModule,
+  mux: tools.NativeMux,
+) {
+  const lease: tools.ShellMuxLease = await tools.acquireShellMux(cwd);
+  const adopted: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
+    native,
+    mux,
+    sandbox: "always",
+  });
+  const same: boolean = lease.mux === adopted.mux && !lease.closed;
+  const mode: "shared" | "always" = lease.mux.sandbox;
+  await lease.mux.validateCwd(cwd);
+  const process: tools.NativeProcess = await lease.mux.spawn(
+    { command: "true", cwd, principal: "typed", env: {} },
+    (error: Error | null, data: Buffer) => void [error, data],
+    (error: Error | null, data: Buffer) => void [error, data],
+  );
+  const finished: tools.NativeRunResult = await process.finish(500);
+  const processOptions: tools.NativeProcessOptions = {
+    command: "true",
+    args: ["a"],
+    cwd,
+    principal: "typed",
+    env: {},
+  };
+  lease.release();
+  adopted.release();
+  await tools.shutdownShellMux();
+
+  // @ts-expect-error a lease's sandbox is "shared" or "always"
+  await tools.acquireShellMux(cwd, { sandbox: "never" });
+  // @ts-expect-error a lease is released, not closed
+  await lease.close();
+  return [same, mode, finished, processOptions];
+}
+
+export async function mcpDefinitionsComposeWithAgentFactories(
+  cwd: string,
+  base: agent.AgenticOptions,
+  tool: TaggedTool,
+  lsp: LspTool,
+  collection: tools.ToolCollection,
+) {
+  const server: mcp.JuncoMcpServerOptions = {
+    name: "graft",
+    type: "stdio",
+    command: "npx",
+    args: ["-y", "@nanonets/graft", "mcp"],
+    cwd: ".",
+    env: { GRAFT: "1" },
+    inheritEnv: true,
+    stderr: "pipe",
+    onStderr: (chunk: string) => void chunk,
+    closeTimeoutMs: 2_000,
+    clientOptions: { requestTimeoutMs: 60_000 },
+  };
+  const graft: mcp.JuncoMcpTools = mcp.JuncoMcpTools.add(server);
+  const chained: mcp.JuncoMcpTools = new mcp.JuncoMcpTools()
+    .add(server)
+    .add({ ...server, name: "second" });
+  const connectOptions: mcp.JuncoMcpConnectOptions = { cwd };
+  const connection: mcp.JuncoMcpConnection =
+    await graft.connect(connectOptions);
+  const discovered: AgentTool[] = connection.tools;
+  await connection.close();
+
+  const sources: agent.JuncoAgentTools = [graft, lsp, ...collection.tools];
+  const mcpOnly: agent.JuncoAgent<Skill, PromptTemplate, AgentTool> =
+    await agent.JuncoAgent.create({
+      provider: "faux",
+      model: "plain",
+      cwd,
+      tools: graft,
+    });
+  const mixed: agent.JuncoAgent = await agent.JuncoAgent.create({
+    provider: "faux",
+    model: "plain",
+    cwd,
+    tools: [graft, lsp, ...collection.tools, tool],
+  });
+  const resolvedOptions: agent.JuncoAgentResolvedOptions = {
+    ...base,
+    cwd,
+    tools: sources,
+  };
+  const resolved: agent.JuncoAgent =
+    await agent.JuncoAgent.fromResolved(resolvedOptions);
+  // Ordinary arrays keep their specialization through both factories.
+  const specialized: agent.JuncoAgent<Skill, PromptTemplate, TaggedTool> =
+    await agent.JuncoAgent.fromResolved({ ...base, cwd, tools: [tool] });
+
+  // @ts-expect-error a stdio server needs its command
+  const noCommand: mcp.JuncoMcpServerOptions = { name: "x", type: "stdio" };
+  const unknownTransport: mcp.JuncoMcpServerOptions = {
+    name: "x",
+    // @ts-expect-error stdio is the only transport
+    type: "sse",
+    command: "server",
+  };
+  // @ts-expect-error definitions are factory-only sources, not concrete tools
+  await mixed.setTools([graft]);
+  // @ts-expect-error mixed sources cannot promise a specialized tool type
+  const narrowed: agent.JuncoAgent<Skill, PromptTemplate, TaggedTool> = mixed;
+  return [
+    chained,
+    discovered,
+    mcpOnly,
+    resolved,
+    specialized,
+    noCommand,
+    unknownTransport,
+    narrowed,
+  ];
+}
+
+export async function taskToolsAndSubagentsKeepTheirContracts(
+  specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
+  definition: mcp.JuncoMcpTools,
+  signal: AbortSignal,
+) {
+  const host: tools.TaskToolHost = async (_toolCallId, input, hostSignal) => {
+    hostSignal.throwIfAborted();
+    return input.tasks.map(({ name }, index) => ({
+      id: `task-${index}`,
+      ...(name === undefined ? {} : { name }),
+    }));
+  };
+  const task = tools.createTaskTool(host);
+  const unhosted: AgentTool = tools.createTaskTool();
+  const branded: boolean = tools.isTaskTool(unhosted);
+  const admitted = await tools.invokeTaskTool(
+    task,
+    host,
+    "call-1",
+    {
+      context: "shared",
+      tasks: [
+        { task: "a", name: "a", model: { provider: "p", modelId: "m" } },
+        { task: "b", tools: [] },
+      ],
+    },
+    signal,
+  );
+  const details: tools.TaskToolDetails = admitted.details;
+  const firstId: string | undefined = details.tasks[0]?.id;
+  const overrides: agent.TaskAgentOptions[] = [
+    { model: { provider: "p", modelId: "m" } },
+    { tools: ["read"] },
+  ];
+  // Children carry dynamically discovered MCP tools, so they are broad AgentTool agents.
+  const children: agent.JuncoAgent<TaggedSkill, TaggedTemplate, AgentTool>[] =
+    await specialized.createSubagents(overrides, signal);
+  const hosted: number = await specialized.runWithTaskHost(host, async () => 1);
+  const snapshot: mcp.JuncoMcpTools = definition.snapshot();
+  const identity: mcp.JuncoMcpToolIdentity | undefined =
+    mcp.getJuncoMcpToolIdentity(unhosted);
+  const cancellable: mcp.JuncoMcpConnectOptions = { signal };
+
+  // @ts-expect-error a task needs its instructions
+  await task.execute("call-2", { context: "c", tasks: [{ name: "x" }] });
+  await task.execute("call-3", {
+    context: "c",
+    // @ts-expect-error a model override names its provider and model ID
+    tasks: [{ task: "x", model: { provider: "p" } }],
+  });
+  // @ts-expect-error a tool subset lists tool names
+  await task.execute("call-4", { context: "c", tasks: [{ task: "x", tools: [1] }] });
+  // @ts-expect-error a task batch shares a context
+  await task.execute("call-5", { tasks: [{ task: "x" }] });
+  // @ts-expect-error hosts receive the input directly, not a request wrapper
+  await tools.invokeTaskTool(
+    task,
+    host,
+    { toolCallId: "c", input: {} },
+    signal,
+  );
+  // @ts-expect-error a handle ID is a string
+  const badHandles: tools.TaskToolDetails = { tasks: [{ id: 1 }] };
+  // @ts-expect-error children never promise the caller's specialized tool type
+  const narrowedChildren: agent.JuncoAgent<
+    TaggedSkill,
+    TaggedTemplate,
+    TaggedTool
+  >[] = children;
+  return [
+    branded,
+    firstId,
+    hosted,
+    snapshot,
+    identity,
+    cancellable,
+    badHandles,
+    narrowedChildren,
   ];
 }

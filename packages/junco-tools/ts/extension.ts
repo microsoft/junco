@@ -5,7 +5,8 @@ import {
 import { ToolCollection } from "./collection.js";
 
 export default function extension(pi: ExtensionAPI): void {
-  // The collection owns the session's mux; its bash borrows that mux.
+  // The collection holds a lease on the process's one ShellMux; session shutdown closes only
+  // the collection. The containing process owns the final shutdownShellMux().
   let collection: ToolCollection | undefined;
   pi.on("session_start", async (_event, ctx) => {
     await collection?.close();

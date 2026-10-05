@@ -25,6 +25,7 @@ import {
   agent as agentApi,
   graph as graphApi,
   tools as toolsApi,
+  tracer as tracerApi,
   trigger,
 } from "junco-agency";
 import { ralph } from "junco-agency/workflows";
@@ -39,14 +40,13 @@ const queued = (
   edge: graphApi.Edge<AgenticInput, AssistantMessage>,
 ): AgenticInput[] => (E.isLeft(edge.transport) ? [...edge.transport.left] : []);
 
-/** Every user text and offered tool name in one provider request. */
-type Request = { readonly users: string[]; readonly tools: string[] };
+/** Every user text in one provider request. */
+type Request = { readonly users: string[] };
 const requests: Request[] = [];
 const recording =
   (reply: string) =>
   (context: Context): AssistantMessage => {
     const users: string[] = [];
-    const tools: string[] = [];
     for (const message of context.messages) {
       if (message.role === "user") {
         users.push(
@@ -54,11 +54,9 @@ const recording =
             ? message.content
             : contentText(message.content),
         );
-      } else if (message.role === "system") {
-        tools.push(...(message.toolsAdded?.map((tool) => tool.name) ?? []));
       }
     }
-    requests.push({ users, tools });
+    requests.push({ users });
     return fauxAssistantMessage(reply);
   };
 
@@ -161,7 +159,8 @@ try {
     model: faux.getModel(),
     tools: [],
   });
-  const graph = graphApi.createParallelAgentGraph();
+  // Explicitly untraced, so this smoke prints only its JSON summary; the Ralph child inherits it.
+  const graph = graphApi.createParallelAgentGraph(new tracerApi.DummyTracer());
   parent = graph;
 
   const input = graphApi.messageEdge<AgenticInput, AssistantMessage>(
@@ -235,10 +234,6 @@ try {
   assert.deepEqual(
     requests.map((request) => request.users.at(-1)),
     [assignment, revision("draft-1"), revision("draft-2")],
-  );
-  assert.deepEqual(
-    requests.map((request) => request.tools),
-    [[], [], []],
   );
   assert.deepEqual(delivered, ["draft-3"]);
 

@@ -17,6 +17,7 @@ import {
 import type * as O from "fp-ts/lib/Option.js";
 import type { JuncoAgent } from "junco-agent";
 import type { PiScheduler } from "junco-scheduler/agent";
+import { isComplainTool } from "junco-tools";
 import type { AgenticInput, JuncoGraph } from "../src/index.ts";
 import { type RalphOptions, ralph } from "../src/workflows/index.ts";
 
@@ -43,7 +44,9 @@ export function ralphKeepsTypes(
   const result: O.Option<AssistantMessage> = parent.result(id);
   // The caller's own variables keep their concrete types.
   const scheduler: Scheduler = parent.scheduler;
-  const tool: "tool" | undefined = agent.getTools()[0]?.tag;
+  const [first] = agent.getTools();
+  const tool: "tool" | undefined =
+    first === undefined || isComplainTool(first) ? undefined : first.tag;
   return [anonymous, result, scheduler, tool];
 }
 

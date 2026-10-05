@@ -107,8 +107,14 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "dependent done");
     });
 
-    test("all five dispatched methods keep their order and reach only the wired recipient", async () => {
-      const images = [image("1"), image("2"), image("3"), image("4")] as const;
+    test("ordered input contents, including an error notification, reach only the wired recipient", async () => {
+      const images = [
+        image("1"),
+        image("2"),
+        image("3"),
+        image("4"),
+        image("5"),
+      ] as const;
       const note = { role: "user", content: "note", timestamp: 1 } as const;
       const sender = new MockAgent({
         prompt: "start",
@@ -159,6 +165,11 @@ for (const strategy of STRATEGIES) {
                 text: "confirm",
                 images: [images[3]],
               }),
+              msg(toRecipient, {
+                kind: "error",
+                text: "failed dependency",
+                images: [images[4]],
+              }),
             ],
           },
         ),
@@ -183,24 +194,11 @@ for (const strategy of STRATEGIES) {
       );
       graph.addEdge(s, r, toRecipient);
       graph.addEdge(s, b, toBystander);
+      // Its final tick drains both queued follow-ups: the ordinary one, then the error notification.
+      await recipient.setFollowUpMode("all");
 
       await graph.run();
 
-      assert.deepEqual(
-        recipient.calls.map(({ method }) => method),
-        ["appendMessage", "nextTurn", "prompt", "steer", "followUp"],
-      );
-      assert.equal(recipient.calls[0]!.args[0], note);
-      recipient.calls.slice(1).forEach(({ args }, index) => {
-        const options = args[1];
-        assert.ok(
-          typeof options === "object" &&
-            options !== null &&
-            "images" in options &&
-            Array.isArray(options.images),
-        );
-        assert.equal(options.images[0], images[index]);
-      });
       const history = recipient.history;
       assert.deepEqual(userTexts(history), [
         "note",
@@ -208,17 +206,26 @@ for (const strategy of STRATEGIES) {
         "then work",
         "adjust",
         "confirm",
+        "failed dependency",
       ]);
       const users = history.filter((message) => message.role === "user");
+      assert.deepEqual(users[0]?.content, "note");
       users.slice(1).forEach((message, index) => {
         assert.ok(Array.isArray(message.content));
-        assert.equal(message.content[1], images[index]);
+        assert.deepEqual(message.content[1], images[index]);
       });
       assert.deepEqual(requestTexts(recipient.requests), [
         ["note", "context first", "then work"],
-        ["note", "context first", "then work", "adjust", "confirm"],
+        [
+          "note",
+          "context first",
+          "then work",
+          "adjust",
+          "confirm",
+          "failed dependency",
+        ],
       ]);
-      assert.deepEqual(bystander.calls, []);
+      assert.deepEqual(bystander.requests, []);
       assert.equal(bystander.status, "idle");
       assert.equal(graph.getNode(b)!.status, "ready");
       assert.ok(O.isNone(graph.result(b)));

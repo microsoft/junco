@@ -18,6 +18,7 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
+import type { ComplainToolHost } from "junco-tools";
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -60,12 +61,14 @@ export type AgenticStep =
  * A cooperative iterator around one native Pi lane. The conversation/control surface delegates
  * without a Context argument; the native lane is deliberately not public because a subclass can
  * constrain tool configuration. `next()` is the scheduling plane and has no command payload.
+ * `complain(issue, tracer?)` synchronously appends a complete issue to the shared `issueLog`.
  */
 export interface Agentic<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> extends AsyncGenerator<AgenticStep, void, void> {
+> extends AsyncGenerator<AgenticStep, void, void>,
+    ComplainToolHost {
   readonly status: AgenticStatus;
   readonly events: AgentHarness<undefined>["events"];
   readonly hooks: AgentHarness<undefined>["hooks"];

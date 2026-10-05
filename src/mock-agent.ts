@@ -27,12 +27,14 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
+import type { DataflowTracer } from "dataflow-engine";
 import {
   type AgenticStatus,
   type AgenticStep,
   JuncoAgentError,
   type Agentic as JuncoAgentProtocol,
 } from "junco-agent";
+import { type Issue, issueLog } from "junco-tools";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
 // Hook outcomes and maintenance results come from typed records; the iterator, admission, queue,
@@ -633,6 +635,23 @@ export class MockAgent<
     return this.#operation(async () => {
       this.#history.push(message);
     });
+  }
+
+  // Complaints -------------------------------------------------------------------------------------
+
+  /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
+  complain<N>(
+    issue: Issue<N>,
+    tracer?: Pick<DataflowTracer, "complain">,
+  ): void {
+    this.#record("complain", tracer === undefined ? [issue] : [issue, tracer]);
+    if (this.#closing) throw closedError();
+    issueLog.append(issue, tracer);
+  }
+
+  /** The process-wide complaint history every agent and graph shares. */
+  get issueLog(): typeof issueLog {
+    return issueLog;
   }
 
   // Configuration ----------------------------------------------------------------------------------

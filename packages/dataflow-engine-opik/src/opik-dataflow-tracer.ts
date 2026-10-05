@@ -160,6 +160,20 @@ export class OpikDataflowTracer implements DataflowTracer {
     };
   }
 
+  /** Export one independent, already-completed trace per complaint; no graph parent is guessed. */
+  complain(nodeId: NodeIdType, complaint: string): void {
+    const at = new Date();
+    this.#client.trace({
+      name: `${this.#name}.complain`,
+      startTime: at,
+      endTime: at,
+      input: { nodeId },
+      output: { complaint },
+      metadata: { nodeId },
+    });
+    void this.flush();
+  }
+
   async flush(): Promise<void> {
     try {
       await this.#client.flush({ silent: true });

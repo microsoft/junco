@@ -8,6 +8,7 @@ import {
   anyOf,
   DataflowDefinitionError,
   DataflowNodeError,
+  DummyTracer,
   type Edge,
   from,
   type Message,
@@ -580,7 +581,12 @@ for (const strategy of STRATEGIES) {
             return lanes;
           },
         });
-        const child = new JuncoGraph(childScheduler, Width(1), UNBOUNDED);
+        const child = new JuncoGraph(
+          childScheduler,
+          Width(1),
+          UNBOUNDED,
+          new DummyTracer(),
+        );
         const innerId = child.addNode(
           deterministicNode(
             new Deterministic<AgenticInput, AssistantMessage>(
@@ -1202,6 +1208,7 @@ describe("nested graphs", () => {
       createParallelScheduler(),
       Width(1),
       UNBOUNDED,
+      new DummyTracer(),
     );
     const empty = child.addNode(
       deterministicNode(
@@ -1216,6 +1223,7 @@ describe("nested graphs", () => {
       createParallelScheduler(),
       Width(1),
       UNBOUNDED,
+      new DummyTracer(),
     );
     const selected = valueEdge<AgenticInput, Maybe>("nested=>reader");
     let observed:
@@ -1250,6 +1258,7 @@ describe("nested graphs", () => {
       createParallelScheduler(),
       Width(1),
       UNBOUNDED,
+      new DummyTracer(),
     );
     const source = child.addNode(
       deterministicNode(
@@ -1264,6 +1273,7 @@ describe("nested graphs", () => {
       createParallelScheduler(),
       Width(1),
       UNBOUNDED,
+      new DummyTracer(),
     );
     const cancelled = new Error("child cancelled");
     let captured: AbortSignal | undefined;

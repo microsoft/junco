@@ -289,7 +289,7 @@ export async function convene(
   review: Pick<ReviewTool, "takeVerdict">,
 ): Promise<string> {
   let feedback: string | undefined;
-  // Rounds share JuncoGraph's automatic tracer, if any: flush it once, however the committee ends.
+  // Rounds share the automatically selected tracer: flush it once, however the committee ends.
   let tracer: DataflowTracer | undefined;
   try {
     for (;;) {

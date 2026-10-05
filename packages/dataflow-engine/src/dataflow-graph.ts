@@ -229,6 +229,7 @@ export class DataflowGraph<
       ...(spec.description === undefined
         ? {}
         : { description: spec.description }),
+      ...(spec.on_error === undefined ? {} : { on_error: spec.on_error }),
     };
 
     this.#graph.addNode(id, node);
@@ -520,7 +521,7 @@ export class DataflowGraph<
       // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
       // rejection, and the error thrown is deterministically the lowest-lane one.
       const settled = await Promise.allSettled(
-        column.map((entry) => this.#runNode(entry, execution)),
+        column.map((entry) => this.#runNode(entry, execution, signal)),
       );
       const failed = settled.find((outcome) => outcome.status === "rejected");
       if (failed !== undefined) throw failed.reason;
@@ -627,14 +628,21 @@ export class DataflowGraph<
    * Prime a ready node without consuming its planned inputs, or deliver a running node's planned
    * batch, then advance the generator exactly once. `execution`, when present, observes the
    * activation: `"prime"` with no view, `"resume"` with exactly the delivered view.
+   *
+   * A throw from the body itself (`step()` or `next()`) ends the node; a configured `on_error` then
+   * runs once in this activation and its batch is routed instead of a result. Wiring, scheduling
+   * and routing failures never reach the hook.
    */
   async #runNode(
     { id, inputs }: NodeSchedule,
-    execution?: DataflowRunTrace<N, T>,
+    execution: DataflowRunTrace<N, T> | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<void> {
     const node = this.#graph.getNode(id)!.data;
     const runtime = this.#runtime.get(id)!;
     let activation: DataflowStepTrace<N, T> | undefined;
+    /** The current throw, if any, came from the node body. */
+    let inBody = false;
 
     try {
       let step: IteratorResult<Message<N>[], T>;
@@ -643,9 +651,11 @@ export class DataflowGraph<
           activation = this.#observe(() =>
             execution.startNode(id, "prime", undefined),
           );
+        inBody = true;
         node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
         step = await node.generator.next();
+        inBody = false;
       } else {
         if (node.generator === undefined) {
           throw new DataflowDefinitionError(
@@ -661,7 +671,9 @@ export class DataflowGraph<
           activation = this.#observe(() =>
             execution.startNode(id, "resume", view),
           );
+        inBody = true;
         step = await node.generator.next(view);
+        inBody = false;
       }
 
       if (step.done === true) {
@@ -678,7 +690,19 @@ export class DataflowGraph<
       if (failed !== undefined) this.#observe(() => failed.fail(cause));
       // A wiring violation raised while routing a yield is a graph bug, not a node error.
       if (cause instanceof DataflowDefinitionError) throw cause;
-      throw new DataflowNodeError<EH>(id, cause as EH);
+      if (!inBody || node.on_error === undefined)
+        throw new DataflowNodeError<EH>(id, cause as EH);
+      // Cancellation of a configured node is not a failure to recover from.
+      if (signal?.aborted === true && cause === signal.reason) throw cause;
+      let messages: readonly Message<N>[];
+      try {
+        messages = await node.on_error(cause, signal); // method call: the node is `this`
+      } catch (error) {
+        if (error instanceof DataflowDefinitionError) throw error;
+        if (signal?.aborted === true && error === signal.reason) throw error;
+        throw new DataflowNodeError<EH>(id, error as EH);
+      }
+      for (const message of messages) this.emit(id, message);
     }
   }
 

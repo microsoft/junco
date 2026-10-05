@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::future::pending;
+use std::future::{Future, pending};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -8,8 +8,8 @@ use brush_core::{ShellVariable, env::ShellEnvironment};
 use marsh_btrfs::{PersistenceLayer, Subvolumes};
 use marsh_core::builtins::BuiltinContext;
 use marsh_core::shellmux::{
-    CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell, ShellFrontend,
-    ShellId, ShellMux, SpawnOptions,
+    CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell,
+    ShellFrontend, ShellId, ShellMux, SpawnOptions, WaitError,
 };
 use marsh_core::{SandboxPolicy, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
@@ -18,10 +18,11 @@ use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
 use crate::frontend::{Frontend, OutputCallback, OutputRoute};
+use crate::process::{Admission, Admitted, ExecLine, ProcessState, ProcessTask, process_channels};
 use crate::tool::JuncoTool;
-use crate::{NativeRunOptions, NativeRunResult};
+use crate::{NativeProcessOptions, NativeRunOptions, NativeRunResult};
 
-type RunResult = Result<NativeRunResult, RoutedError>;
+pub(crate) type RunResult = Result<NativeRunResult, RoutedError>;
 type CloseResult = Result<(), String>;
 
 /// A routed call's or run's failure. `Denied` is exactly a Marsh policy denial of publication;
@@ -63,6 +64,19 @@ pub(crate) struct RunState {
 }
 
 impl RunState {
+    /// A pending state and the sender its worker publishes the one final result through.
+    fn pending() -> (Arc<Self>, watch::Sender<Option<RunResult>>) {
+        let (cancellation, _) = watch::channel(false);
+        let (result_sender, result) = watch::channel(None);
+        (
+            Arc::new(Self {
+                cancellation,
+                result,
+            }),
+            result_sender,
+        )
+    }
+
     pub(crate) fn abort(&self) {
         self.cancellation.send_replace(true);
     }
@@ -83,23 +97,23 @@ impl RunState {
         }
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         *self.cancellation.borrow()
     }
 
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         let mut cancellation = self.cancellation.subscribe();
         let _ = cancellation.wait_for(|cancelled| *cancelled).await;
     }
 }
 
 #[derive(Clone)]
-struct Backend {
-    mux: Arc<ShellMux>,
-    frontend: Arc<Mutex<Frontend>>,
+pub(crate) struct Backend {
+    pub(crate) mux: Arc<ShellMux>,
+    pub(crate) frontend: Arc<Mutex<Frontend>>,
     /// The one filesystem this session discovers seeds through. A second instance would
     /// know none of a CopyTree fixture's registered roots.
-    filesystem: Arc<dyn Subvolumes>,
+    pub(crate) filesystem: Arc<dyn Subvolumes>,
 }
 
 /// A task close joins before the mux shuts down: a run, which close also cancels through its
@@ -161,50 +175,134 @@ impl Session {
         &self.seed
     }
 
+    /// Whether close finished: every task joined, the mux shut down and the backend dropped,
+    /// whether or not that teardown reported a failure.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.borrow().is_some()
+    }
+
+    /// Resolves `cwd` exactly as an operation at it would, against this session's own seed and
+    /// filesystem: a missing or non-directory path, one outside the seed, or one inside a nested
+    /// or different seed is refused.
+    pub(crate) async fn validate_cwd(&self, cwd: String) -> Result<(), String> {
+        let filesystem = {
+            let session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let backend = session
+                .backend
+                .as_ref()
+                .ok_or_else(|| "ShellMux session is closed".to_string())?;
+            Arc::clone(&backend.filesystem)
+        };
+        let seed = self.seed.clone();
+        self.runtime
+            .spawn_blocking(move || working_directory(&cwd, &seed, filesystem.as_ref()))
+            .await
+            .map_err(|error| format!("Cannot resolve working directory: {error}"))?
+            .map(|_| ())
+    }
+
     pub(crate) fn start(
         self: &Arc<Self>,
         options: NativeRunOptions,
         callback: OutputCallback,
     ) -> Result<Arc<RunState>, String> {
-        // Admission and task registration share this lock with begin_close. The
-        // worker may finish immediately, but cannot remove itself before insertion.
+        let timeout = native_timeout(options.timeout_ms)?;
+        let (state, result_sender) = RunState::pending();
+        let route = OutputRoute::new(callback);
+        let runtime = self.runtime.clone();
+        let seed = self.seed.clone();
+        let principal = options.principal.clone();
+        let run_state = Arc::clone(&state);
+        self.admit(principal, &state, result_sender, move |backend| {
+            RunTask {
+                backend,
+                runtime,
+                seed,
+                options,
+                state: run_state,
+                route,
+                timeout,
+            }
+            .run()
+        })?;
+        Ok(state)
+    }
+
+    /// Launches one persistent process: `options.command` with its arguments through the managed
+    /// `exec` builtin, in a pipe shell that always takes the managed route. The receiver answers
+    /// once the command is admitted, or with its final, drained failure.
+    pub(crate) fn spawn(
+        self: &Arc<Self>,
+        options: NativeProcessOptions,
+        stdout: OutputCallback,
+        stderr: OutputCallback,
+    ) -> Result<(Arc<ProcessState>, Admitted), String> {
+        let NativeProcessOptions {
+            command,
+            args,
+            cwd,
+            principal,
+            env,
+        } = options;
+        let line = ExecLine::new(&command, args.as_deref().unwrap_or_default())?;
+        let (run, result_sender) = RunState::pending();
+        let (process, io) = process_channels(Arc::clone(&run));
+        let (admission, admitted) = Admission::new();
+        let route = OutputRoute::separate(stdout, stderr);
+        let runtime = self.runtime.clone();
+        let seed = self.seed.clone();
+        let shell = ShellId::from(principal.clone());
+        let task_state = Arc::clone(&run);
+        self.admit(principal, &run, result_sender, move |backend| {
+            ProcessTask {
+                backend,
+                runtime,
+                seed,
+                cwd,
+                principal: shell,
+                env,
+                line,
+                state: task_state,
+                route,
+                io,
+            }
+            .run(admission)
+        })?;
+        Ok((process, admitted))
+    }
+
+    /// Registers one run's worker in the task table and its principal's queue. Admission and
+    /// registration share this lock with begin_close: the worker may finish immediately, but
+    /// cannot remove itself before insertion, and close always joins it.
+    fn admit<Work>(
+        self: &Arc<Self>,
+        principal: String,
+        state: &Arc<RunState>,
+        result_sender: watch::Sender<Option<RunResult>>,
+        work: impl FnOnce(Backend) -> Work,
+    ) -> Result<(), String>
+    where
+        Work: Future<Output = RunResult> + Send + 'static,
+    {
         let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let backend = session
             .backend
             .as_ref()
             .ok_or_else(|| "ShellMux session is closed".to_string())?
             .clone();
-        let timeout = native_timeout(options.timeout_ms)?;
         let (release, released) = watch::channel(false);
-        let predecessor = session
-            .principals
-            .insert(options.principal.clone(), released);
-        let (cancellation, _) = watch::channel(false);
-        let (result_sender, result) = watch::channel(None);
-        let state = Arc::new(RunState {
-            cancellation,
-            result,
-        });
-        let route = OutputRoute::new(callback);
-        let run = RunTask {
-            backend,
-            runtime: self.runtime.clone(),
-            seed: self.seed.clone(),
-            options,
-            state: Arc::clone(&state),
-            route,
-            timeout,
-        };
+        let predecessor = session.principals.insert(principal, released);
+        let run = work(backend);
         let owner = Arc::downgrade(self);
         let task = self.runtime.spawn(async move {
-            // Linkage happened synchronously in start(), not when this worker
+            // Linkage happened synchronously in admit(), not when this worker
             // happened to be polled. Even an aborted queued run must join its
             // predecessor before releasing the next run in that principal's queue.
             let result = match predecessor_released(predecessor).await {
                 Ok(()) => {
-                    // run() drops every mux/callback reference before releasing
+                    // The worker drops every mux/callback reference before releasing
                     // this fence or publishing the result.
-                    let result = run.run().await;
+                    let result = run.await;
                     release.send_replace(true);
                     result
                 }
@@ -228,11 +326,11 @@ impl Session {
         session.tasks.insert(
             task.id(),
             TrackedTask {
-                run: Some(Arc::clone(&state)),
+                run: Some(Arc::clone(state)),
                 task,
             },
         );
-        Ok(state)
+        Ok(())
     }
 
     /// Runs `operation` as one call of `tool` in a transient shell at `cwd`, routed by the mux's
@@ -371,14 +469,7 @@ impl RunTask {
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
-        let mut environment = ShellEnvironment::new();
-        for (name, value) in env {
-            let mut variable = ShellVariable::new(value);
-            variable.export();
-            environment
-                .set_global(name, variable)
-                .map_err(|error| error.to_string())?;
-        }
+        let environment = shell_environment(env)?;
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
@@ -425,7 +516,7 @@ async fn predecessor_released(predecessor: Option<watch::Receiver<bool>>) -> Res
     Ok(())
 }
 
-enum StopCause {
+pub(crate) enum StopCause {
     Cancelled,
     TimedOut,
     Failed(RoutedError),
@@ -523,6 +614,16 @@ async fn completed_job(
         )
         .await
         .map_err(run_error)?;
+    published_result(shell, route, &completion).await
+}
+
+/// The answer for a command Marsh published: its shell's end, every queued output callback, and
+/// the program's own exit status.
+pub(crate) async fn published_result(
+    shell: &Shell,
+    route: &OutputRoute,
+    completion: &CommandCompletion,
+) -> RunResult {
     let end = shell
         .wait_closed()
         .await
@@ -543,7 +644,7 @@ async fn completed_job(
     })
 }
 
-async fn stop_and_settle(
+pub(crate) async fn stop_and_settle(
     shell: &Shell,
     accepted: Option<oneshot::Receiver<CommandHandle>>,
     route: &OutputRoute,
@@ -607,7 +708,7 @@ async fn stop_and_settle(
 }
 
 /// Upstream already decided publication; only its `Denied` kind is classified as a denial.
-fn run_error(error: RunError) -> RoutedError {
+pub(crate) fn run_error(error: RunError) -> RoutedError {
     if let Some(completion) = error.completion()
         && let Err(cause) = completion.result.as_ref()
         && let Some(denial) = denial(cause)
@@ -615,6 +716,32 @@ fn run_error(error: RunError) -> RoutedError {
         return denial;
     }
     RoutedError::Other(error.to_string())
+}
+
+/// A receipt's verdict as a run's: only a published completion is `Ok`. An unpublished one —
+/// denied, stale, discarded by cancellation, or failed — and a lost answer are failures, with a
+/// denial classified as one.
+pub(crate) fn completion_result(
+    verdict: Result<Arc<CommandCompletion>, WaitError>,
+) -> Result<Arc<CommandCompletion>, RoutedError> {
+    let completion = verdict.map_err(|error| RoutedError::Other(error.to_string()))?;
+    if let Err(cause) = completion.result.as_ref() {
+        return Err(denial(cause).unwrap_or_else(|| RoutedError::Other(cause.to_string())));
+    }
+    Ok(completion)
+}
+
+/// Exported variables replacing a shell's inherited and profile environment.
+pub(crate) fn shell_environment(env: HashMap<String, String>) -> Result<ShellEnvironment, String> {
+    let mut environment = ShellEnvironment::new();
+    for (name, value) in env {
+        let mut variable = ShellVariable::new(value);
+        variable.export();
+        environment
+            .set_global(name, variable)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(environment)
 }
 
 /// A routed tool call's failure, with a denial classified like a run's.
@@ -633,7 +760,7 @@ fn denial(cause: &ShellError) -> Option<RoutedError> {
         .then(|| RoutedError::Denied(format!("Marsh policy denied publication: {cause}")))
 }
 
-fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> NativeRunResult {
+pub(crate) fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> NativeRunResult {
     NativeRunResult {
         exit_code,
         cancelled: !timed_out,
@@ -672,7 +799,7 @@ fn native_timeout(milliseconds: Option<f64>) -> Result<Option<Duration>, String>
     Ok(Some(duration))
 }
 
-fn working_directory(
+pub(crate) fn working_directory(
     cwd: &str,
     seed: &Path,
     filesystem: &dyn Subvolumes,
