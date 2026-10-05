@@ -20,7 +20,7 @@ import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import type { SchedulerInfo } from "junco-scheduler/agent";
 import { createYieldTool } from "junco-tools";
-import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph } from "../src/index.ts";
+import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph, tracer } from "../src/index.ts";
 
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
@@ -75,7 +75,7 @@ async function agency(name: string, members: readonly (JuncoAgent | JuncoGraph)[
     systemPrompt: `You schedule ${name}.`,
     prompt: `Run ${name}.`,
   });
-  const graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED);
+  const graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer());
   current = graph;
   for (const [index, member] of members.entries()) {
     const options: NodeOptions<AgenticInput, AssistantMessage> = { description: `${name} member ${index}`, trigger: always() };
@@ -119,7 +119,7 @@ const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
 const root = await agency("root", [child.graph, sibling.agent], (info, request) =>
   request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
 );
-// JuncoGraph's automatic tracer, if a feature selects one, is shared by every nested graph.
+// Every nested graph shares the automatically selected tracer.
 try {
   const publicTools: string[] = [];
   root.scheduler.events.on("tool_start", (event) => {
@@ -160,5 +160,5 @@ try {
   }
   console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);
 } finally {
-  await root.graph.tracer?.flush();
+  await root.graph.tracer.flush();
 }

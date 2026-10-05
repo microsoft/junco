@@ -13,6 +13,7 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
+  fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -35,6 +36,7 @@ import {
   Width,
 } from "dataflow-engine";
 import { JuncoAgentError } from "junco-agent";
+import { type Issue, isComplainTool, issueLog } from "junco-tools";
 import { Type } from "typebox";
 import {
   PiScheduler,
@@ -132,9 +134,12 @@ test("the empty node id primes, resumes and completes through real schedule tool
 
 test("the fixed schedule tool cannot be replaced or disabled", async () => {
   const { scheduler } = await newScheduler([]);
-  const [tool] = scheduler.getTools();
-  assert.equal(scheduler.getTools().length, 1);
-  assert.equal(tool!.name, "schedule");
+  const [tool, complain] = scheduler.getTools();
+  assert.deepEqual(
+    scheduler.getTools().map((t) => t.name),
+    ["schedule", "complain"],
+  );
+  assert.ok(isComplainTool(complain!));
 
   const other: AgentTool = {
     name: "other",
@@ -151,23 +156,90 @@ test("the fixed schedule tool cannot be replaced or disabled", async () => {
     );
   await invalid(scheduler.setTools([other as never]));
   await invalid(scheduler.setTools([tool!, tool!]));
+  await invalid(scheduler.setTools([tool!, other as never]));
+  await invalid(scheduler.setTools([tool!, complain!, complain!]));
+  await invalid(scheduler.setTools([tool!, { ...complain! }]));
+  await invalid(scheduler.setTools([complain!]));
   await invalid(scheduler.setTools([tool!], ["other"]));
   await invalid(scheduler.setTools([]));
   await invalid(scheduler.setTools([tool!], []));
+  await invalid(scheduler.setTools([tool!], ["complain"]));
   await invalid(scheduler.setActiveTools([]));
+  await invalid(scheduler.setActiveTools(["complain"]));
+  await invalid(scheduler.setActiveTools(["schedule", "schedule"]));
+  await invalid(scheduler.setActiveTools(["schedule", "complain", "complain"]));
+  await invalid(scheduler.setActiveTools(["schedule", "other"]));
   assert.equal(scheduler.getTools()[0], tool);
   await scheduler.setTools([tool!], ["schedule"]);
+  await scheduler.setTools([tool!, complain!], ["schedule", "complain"]);
   await scheduler.setActiveTools(["schedule"]);
   assert.deepEqual(
-    scheduler.getActiveTools().map((active) => active.name),
-    ["schedule"],
+    scheduler.getTools().map((t) => t.name),
+    ["schedule", "complain"],
   );
+  assert.deepEqual(
+    scheduler.getActiveTools().map((active) => active.name),
+    ["schedule", "complain"],
+  );
+  await scheduler.setTools([complain!, tool!], ["complain", "schedule"]);
+  const reordered = scheduler.getTools();
+  assert.deepEqual(reordered, [complain, tool]);
+  assert.ok(isComplainTool(reordered[0]!));
+  const reorderedActive = scheduler.getActiveTools();
+  assert.deepEqual(
+    reorderedActive.map((active) => active.name),
+    ["complain", "schedule"],
+  );
+  assert.ok(isComplainTool(reorderedActive[0]!));
   await scheduler.return();
+});
+
+test("direct complaints record while unbound and reject after scheduler close", async () => {
+  const { scheduler, faux } = await newScheduler([]);
+  try {
+    const issue: Issue<never> = {
+      nodeId: scheduler.nodeId,
+      messages: [],
+      prompt: {
+        systemPrompt: "direct scheduler request",
+        messages: [],
+        tools: [],
+      },
+      complaint: "Cannot choose the next worker.",
+    };
+    const notifications: [string, string][] = [];
+    const before = issueLog.length;
+    scheduler.complain(issue, {
+      complain: (nodeId, text) => {
+        notifications.push([nodeId, text]);
+      },
+    });
+    assert.deepEqual(issueLog.snapshot().slice(before), [issue]);
+    assert.deepEqual(notifications, [[scheduler.nodeId, issue.complaint]]);
+    assert.equal(faux.state.callCount, 0);
+
+    await scheduler.return();
+    const afterClose = issueLog.length;
+    assert.throws(
+      () => scheduler.complain(issue),
+      (error) => error instanceof JuncoAgentError && error.code === "closed",
+    );
+    assert.equal(issueLog.length, afterClose);
+  } finally {
+    await scheduler.return();
+  }
 });
 
 test("each schedule call runs one real graph window and pauses until the next resume", async () => {
   const { scheduler, graph, faux, log } = await singleNode(
     [
+      toolTurn(
+        fauxToolCall(
+          "complain",
+          { complaint: "The plan is underspecified." },
+          { id: "complain-1" },
+        ),
+      ),
       toolTurn(scheduleCall([["0"]], "prime")),
       toolTurn(scheduleCall([["0"]], "run")),
       fauxAssistantMessage("finished"),
@@ -179,13 +251,26 @@ test("each schedule call runs one real graph window and pauses until the next re
     if (toolName === "schedule" && !isError)
       completed.push(result.details as SchedulerInfo);
   });
+  const before = issueLog.length;
   try {
     const first = await scheduler.next();
     assert.ok(first.done === false && first.value.kind === "yield");
+    assert.equal(completed.length, 1);
+    const issues = issueLog.snapshot().slice(before);
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0]!.complaint, "The plan is underspecified.");
+    assert.equal(issues[0]!.nodeId, scheduler.nodeId);
+    assert.deepEqual(issues[0]!.messages, []);
+    assert.deepEqual(
+      schedulerInfoOf(issues[0]!.prompt as Context).nodes.map((n) => n.id),
+      ["0"],
+    );
+    assert.ok(issues[0]!.prompt.tools!.some((t) => t.name === "schedule"));
+    assert.ok(issues[0]!.prompt.tools!.some((t) => t.name === "complain"));
     assert.deepEqual(completed[0]!.nodes, [{ id: "0", status: "running" }]);
     assert.equal(graph.getNode(NodeId("0"))!.status, "running");
     await new Promise<void>((resolve) => setImmediate(resolve)); // nothing progresses while paused
-    assert.equal(faux.state.callCount, 1);
+    assert.equal(faux.state.callCount, 2);
 
     const second = await scheduler.next();
     assert.ok(second.done === false && second.value.kind === "yield");
@@ -196,9 +281,9 @@ test("each schedule call runs one real graph window and pauses until the next re
       nodes: [],
     });
     assert.equal(graph.getNode(NodeId("0"))!.status, "done");
-    assert.equal(faux.state.callCount, 2);
-    assert.equal(settledText((await drive(scheduler)).last), "finished");
     assert.equal(faux.state.callCount, 3);
+    assert.equal(settledText((await drive(scheduler)).last), "finished");
+    assert.equal(faux.state.callCount, 4);
     assert.deepEqual(log, ["prime", "resume"]);
     assert.deepEqual(graph.result(NodeId("0")), {
       _tag: "Some",

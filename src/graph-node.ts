@@ -30,8 +30,11 @@ export type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
   readonly afterStep?: () => void | Promise<void>;
 };
 
-/** `error`, or `signal.reason` when `error` is that cancellation, possibly wrapped by node errors. */
-function cancellation(signal: AbortSignal, error: unknown): unknown {
+/**
+ * `error`, or `signal.reason` when `error` is that cancellation, possibly wrapped by node errors.
+ * Package-internal.
+ */
+export function cancellation(signal: AbortSignal, error: unknown): unknown {
   if (!signal.aborted) return error;
   let current = error;
   while (current instanceof DataflowNodeError) current = current.cause;

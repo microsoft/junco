@@ -1,5 +1,6 @@
 // The standard library for building junco workflows, indexed by namespace.
 export * as agent from "junco-agent";
+export * as mcp from "junco-mcp";
 export * as tools from "junco-tools";
 export {
   LspTool,

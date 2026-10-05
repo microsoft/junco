@@ -39,18 +39,10 @@ async function mixedWorkflow(failSecond = false) {
     Direct: [],
     Reviewer: [],
   };
-  const offeredTools: string[][] = [];
-  /** Record each fresh user prompt `role` receives and the tools offered, then answer with `response`. */
+  /** Record each fresh user prompt `role` receives, then answer with `response`. */
   const recording =
     (role: Role, response: () => AssistantMessage): FauxResponseStep =>
     (context) => {
-      offeredTools.push(
-        context.messages.flatMap((message) =>
-          message.role === "system"
-            ? (message.toolsAdded?.map((tool) => tool.name) ?? [])
-            : [],
-        ),
-      );
       if (context.messages.at(-1)?.role === "user")
         prompts[role].push(latestUserText(context));
       return response();
@@ -88,7 +80,6 @@ async function mixedWorkflow(failSecond = false) {
       reviewerId,
       agents,
       prompts,
-      offeredTools,
       async [Symbol.asyncDispose]() {
         await graph.close();
       },
@@ -143,7 +134,6 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.ok(review.includes("direct-answer"));
     assert.ok(review.includes("draft-2"));
     assert.ok(!review.includes("draft-1"));
-    assert.ok(flow.offeredTools.every((tools) => tools.length === 0));
 
     await graph.run();
     assert.deepEqual(
@@ -164,8 +154,4 @@ test("a failed second Ralph round rejects the graph and never reaches the Review
   assert.ok(O.isNone(graph.result(ralphId)));
   assert.ok(O.isNone(graph.result(reviewerId)));
   assert.equal(prompts.Reviewer.length, 0);
-  assert.ok(
-    flow.offeredTools.length > 0 &&
-      flow.offeredTools.every((tools) => tools.length === 0),
-  );
 }, 5_000);

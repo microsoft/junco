@@ -44,7 +44,11 @@ import {
 function bashAgent(instance, { principal, toolExecution = "sequential" }) {
   const { faux, model, streamFn } = scriptedModel();
   const tool = createBashTool(instance.seed, {
-    operations: createShellMuxOperations({ mux: instance.mux, principal }),
+    operations: createShellMuxOperations({
+      mux: instance.mux,
+      native: instance.native,
+      principal,
+    }),
   });
   const agent = new Agent({
     initialState: {
@@ -170,6 +174,7 @@ test("a conflicting zero-exit publication becomes a model-visible policy error",
     const owner = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "file-owner",
       }),
     });
@@ -582,6 +587,7 @@ test("an SDK-registered bash override executes through marsh", {
     const { faux, model, streamFn } = scriptedModel();
     const operations = createShellMuxOperations({
       mux: instance.mux,
+      native: instance.native,
       principal: "sdk-agent",
     });
     ({ session } = await createAgentSession({
@@ -632,6 +638,7 @@ test("an SDK-registered bash override executes through marsh", {
     const other = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "other-owner",
       }),
     });
@@ -663,7 +670,7 @@ test("an SDK-registered bash override executes through marsh", {
     await cleanup(
       () => (session ? settleAgent(session.agent) : undefined),
       () => session?.dispose(),
-      // Disposal is not native teardown: the borrowed mux is closed explicitly.
+      // Disposal is not native teardown: application shutdown closes the adopted mux.
       () => closeFixture(instance),
     );
   }

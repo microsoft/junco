@@ -38,6 +38,7 @@ import type {
   PiSchedulerOptions,
   ScheduleTool,
 } from "junco-scheduler/agent";
+import { type ComplainTool, type Issue, isComplainTool } from "junco-tools";
 import {
   type Agentic,
   type AgenticInput,
@@ -77,10 +78,35 @@ type TaggedScheduler = PiScheduler<
   TaggedTemplate
 >;
 
+export function protocolComplainTakesCompleteIssues(
+  protocol: JuncoAgentProtocol<TaggedSkill, TaggedTemplate, TaggedTool>,
+  scheduler: TaggedScheduler,
+  nodeId: NodeIdType,
+  messages: readonly Message<number>[],
+) {
+  const issue: Issue<number> = {
+    nodeId,
+    messages,
+    prompt: { systemPrompt: "s", messages: [] },
+    complaint: "blocked",
+  };
+  const recorded: void = protocol.complain(issue);
+  const inherited: void = scheduler.complain(issue, {
+    complain: (_id: NodeIdType, _text: string) => {},
+  });
+  // @ts-expect-error a complaint string alone is not an issue
+  protocol.complain("blocked");
+  // @ts-expect-error an issue carries its node, messages and prompt
+  protocol.complain({ nodeId, complaint: "blocked" });
+  return [recorded, inherited];
+}
+
 export function juncoAgentKeepsSpecializations(
   agent: JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
 ) {
-  const tool: "tool" | undefined = agent.getTools()[0]?.tag;
+  const [first] = agent.getTools();
+  const tool: "tool" | undefined =
+    first === undefined || isComplainTool(first) ? undefined : first.tag;
   const skill: "skill" | undefined = agent.getResources().skills?.[0]?.tag;
   const template: "template" | undefined =
     agent.getResources().promptTemplates?.[0]?.tag;
@@ -125,14 +151,18 @@ export async function factoriesKeepSpecializations(
     specialized.getResources().skills?.[0]?.tag;
   const template: "template" | undefined = (await fixed).getResources()
     .promptTemplates?.[0]?.tag;
-  const tools: ScheduleTool[] = specialized.getTools();
+  const tools: (ScheduleTool | ComplainTool)[] = specialized.getTools();
   const iterator: AsyncGenerator<AgenticStep, void, void> = specialized;
   const settlement: Promise<AssistantMessage> = specialized.prompt("typed");
-  const bounds: readonly [WidthType, WidthType, DataflowTracer | undefined] = [
+  const bounds: readonly [WidthType, WidthType, DataflowTracer] = [
     constructed.window,
     constructed.threads,
     constructed.tracer,
   ];
+  // @ts-expect-error a direct JuncoGraph requires a tracer
+  void new JuncoGraph(scheduler, Width(1), UNBOUNDED);
+  // @ts-expect-error an undefined tracer is not a tracer
+  void new JuncoGraph(scheduler, Width(1), UNBOUNDED, undefined);
   return [skill, template, tools, iterator, settlement, bounds];
 }
 
@@ -370,6 +400,7 @@ export function everyAgenticInputKindIsTyped(
     { kind: "steer", text: "steer" },
     { kind: "followUp", text: "follow", images: [image] },
     { kind: "nextTurn", text: "next" },
+    { kind: "error", text: "failed", images: [image] },
     { kind: "appendMessage", message },
   ];
   const described: string[] = inputs.map((input) =>
@@ -379,7 +410,7 @@ export function everyAgenticInputKindIsTyped(
   );
   // @ts-expect-error a text input requires its text
   const untexted: AgenticInput = { kind: "prompt", images: [image] };
-  // @ts-expect-error an input kind outside the five commands is rejected
+  // @ts-expect-error an input kind outside the declared commands is rejected
   const unknown: AgenticInput = { kind: "interrupt", text: "stop" };
   // @ts-expect-error appendMessage carries a message, not text
   const malformed: AgenticInput = { kind: "appendMessage", text: "hello" };

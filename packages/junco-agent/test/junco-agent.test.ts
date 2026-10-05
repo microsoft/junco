@@ -22,7 +22,7 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createYieldTool } from "junco-tools";
+import { createYieldTool, isComplainTool, issueLog } from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
 import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
@@ -66,6 +66,13 @@ const isCode =
   (error: unknown): boolean =>
     error instanceof JuncoAgentError && error.code === code;
 
+/** Asserts the optional tools in order, followed by exactly one genuine complain tool. */
+function assertTools(actual: readonly object[], expected: readonly object[]) {
+  assert.deepEqual(actual.slice(0, -1), expected);
+  assert.equal(isComplainTool(actual.at(-1)!), true);
+  assert.equal(actual.filter((tool) => isComplainTool(tool)).length, 1);
+}
+
 test("the caller's tools remain inspectable and active selection governs execution", async () => {
   const first = countingTool("first");
   const second = countingTool("second");
@@ -80,10 +87,10 @@ test("the caller's tools remain inspectable and active selection governs executi
     },
   );
   try {
-    assert.deepEqual(agent.getTools(), [first.tool, second.tool]);
-    assert.deepEqual(agent.getActiveTools(), [first.tool]);
+    assertTools(agent.getTools(), [first.tool, second.tool]);
+    assertTools(agent.getActiveTools(), [first.tool]);
     await agent.setActiveTools(["second"]);
-    assert.deepEqual(agent.getActiveTools(), [second.tool]);
+    assertTools(agent.getActiveTools(), [second.tool]);
     assert.equal((await agent.prompt("go")).stopReason, "stop");
     assert.equal(first.state.executions, 0);
     assert.equal(second.state.executions, 1);
@@ -443,10 +450,10 @@ test("duplicate and unknown active tools are rejected without changing the usabl
         isCode("invalid_argument"),
       );
     }
-    assert.deepEqual(agent.getTools(), [first.tool, second.tool]);
-    assert.deepEqual(agent.getActiveTools(), [first.tool, second.tool]);
+    assertTools(agent.getTools(), [first.tool, second.tool]);
+    assertTools(agent.getActiveTools(), [first.tool, second.tool]);
     await agent.setTools([second.tool], ["second"]);
-    assert.deepEqual(agent.getActiveTools(), [second.tool]);
+    assertTools(agent.getActiveTools(), [second.tool]);
     assert.equal((await agent.prompt("continue")).stopReason, "stop");
   } finally {
     await agent.return();
@@ -505,10 +512,10 @@ test("an idle reopened session restores its selected tool without advertising ot
     tools: [one.tool, two.tool],
   });
   try {
-    assert.deepEqual(second.getActiveTools(), [two.tool]);
+    assertTools(second.getActiveTools(), [two.tool]);
     assert.equal((await second.prompt("again")).stopReason, "stop");
     assert.equal(settledText(await second.next()), "reopened via tool");
-    assert.deepEqual(requests, [["two"]]);
+    assert.deepEqual(requests, [["two", "complain"]]);
     assert.equal(one.state.executions, 0);
     assert.equal(two.state.executions, 1);
   } finally {
@@ -650,8 +657,20 @@ test(
       for (const command of commands)
         await assert.rejects(command(), isCode("closed"));
       assert.equal(agent.status, "closed");
-      assert.deepEqual(agent.getTools(), [tool]);
-      assert.deepEqual(agent.getActiveTools(), [tool]);
+      const before = issueLog.length;
+      assert.throws(
+        () =>
+          agent.complain({
+            nodeId: agent.nodeId,
+            messages: [],
+            prompt: { messages: [] },
+            complaint: "late",
+          }),
+        isCode("closed"),
+      );
+      assert.equal(issueLog.length, before);
+      assertTools(agent.getTools(), [tool]);
+      assertTools(agent.getActiveTools(), [tool]);
       assert.equal(agent.getResources(), resources);
     };
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);

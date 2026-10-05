@@ -175,11 +175,11 @@ async function main(): Promise<void> {
     const results = await graph.run();
     console.log(`Final review:\n${finalText(results.get(reviewerId), "Reviewer")}`);
   } finally {
-    // Both graphs share JuncoGraph's automatic tracer, if any: flush it even when close fails.
+    // Both graphs share the automatically selected tracer: flush it even when close fails.
     try {
       await graph.close();
     } finally {
-      await graph.tracer?.flush();
+      await graph.tracer.flush();
     }
   }
 }

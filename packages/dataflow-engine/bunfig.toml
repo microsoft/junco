@@ -1,5 +1,7 @@
 [test]
+# Coverage reports this package's `src/` only: `junco-scheduler` loads from its `bun` source
+# export (`../junco-scheduler`) and is covered by its own suite.
 coverageReporter = ["text", "lcov"]
 coverageDir = "coverage"
 coverageSkipTestFiles = true
-coveragePathIgnorePatterns = ["**/tests/**", "**/examples/**", "**/dist/**"]
+coveragePathIgnorePatterns = ["../**", "**/tests/**", "**/examples/**", "**/dist/**"]

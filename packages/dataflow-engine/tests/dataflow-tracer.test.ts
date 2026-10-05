@@ -96,6 +96,8 @@ class RecordingTracer implements DataflowTracer {
     };
   }
 
+  complain(): void {}
+
   flush(): Promise<void> {
     return Promise.resolve();
   }
@@ -200,6 +202,9 @@ test("a throwing observer can neither replace a node's return nor its failure", 
           throw new Error("observer run fail");
         },
       }),
+      complain() {
+        throw new Error("observer complain");
+      },
       flush: () => Promise.resolve(),
     };
 
@@ -576,4 +581,51 @@ test("run() never flushes the tracer; the caller's explicit flush delivers buffe
   assert.deepEqual(tracer.delivered, []);
   await tracer.flush();
   assert.deepEqual(tracer.delivered, [new Map([[answer, 42]])]);
+});
+
+test("a handled failure traces one raw activation fail and a normal run end without the failed node", async () => {
+  const notice = messageEdge<number, string>("notice");
+  const tracer = new RecordingTracer();
+  const graph = new DataflowGraph<void, number, string, never>(
+    createParallelScheduler(),
+    Width(1),
+    UNBOUNDED,
+    tracer,
+  );
+  const cause = new Error("source exploded");
+  const consumed: number[] = [];
+  const src = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+    async *step(): NodeGenerator<number, string> {
+      throw cause;
+    },
+    on_error: () => [msg(notice, 5)],
+  });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: when(notice),
+    async *step(): NodeGenerator<number, string> {
+      const view = yield [];
+      consumed.push(...from(view, notice));
+      return "sink";
+    },
+  });
+  graph.addEdge(src, sink, notice);
+
+  const results = await graph.run();
+
+  const [run] = tracer.runs;
+  assert.equal(tracer.runs.length, 1);
+  assert.deepEqual(
+    run!.activations.filter((a) => a.id === src).map((a) => a.outcome),
+    [{ error: cause }],
+  );
+  const outcome = run!.activations.find((a) => a.id === src)!.outcome!;
+  assert.ok("error" in outcome && outcome.error === cause);
+  assert.deepEqual(consumed, [5]);
+  assert.equal(run!.error, undefined);
+  assert.deepEqual(run!.results, new Map([[sink, "sink"]]));
+  assert.deepEqual(results, new Map([[sink, "sink"]]));
 });

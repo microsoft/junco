@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { messageEdge } from "dataflow-engine";
+import { messageEdge, type NodeIdType } from "dataflow-engine";
 import type { AgenticInput, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import { createParallelAgentGraph } from "./parallel-agent-graph.js";
@@ -21,12 +21,25 @@ export function Spawn<T, N = AgenticInput, R = AssistantMessage>(
   spawn: (input: T) => AgenticNode<N, R>,
 ): JuncoGraph<N, R> {
   const graph = createParallelAgentGraph<N, R>();
-  const rootId = graph.addNode(root);
+  appendSpawnChildren(graph, graph.addNode(root), inputs, spawn);
+  return graph;
+}
+
+/**
+ * Register one child per element of `inputs` under the already registered `rootId`, each with
+ * {@link Spawn}'s paired message edges. Errors propagate synchronously; children registered before
+ * the failure stay in `graph`. Package-internal.
+ */
+export function appendSpawnChildren<T, N = AgenticInput, R = AssistantMessage>(
+  graph: JuncoGraph<N, R>,
+  rootId: NodeIdType,
+  inputs: readonly T[],
+  spawn: (input: T) => AgenticNode<N, R>,
+): void {
   for (const input of inputs) {
     const childId = graph.addNode(spawn(input));
     graph
       .addEdge(rootId, childId, messageEdge<N, R>(`${rootId}->${childId}`))
       .addEdge(childId, rootId, messageEdge<N, R>(`${childId}->${rootId}`));
   }
-  return graph;
 }

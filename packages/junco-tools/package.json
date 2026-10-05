@@ -45,7 +45,7 @@
     "build:native:test": "node scripts/with-junco-build-env.mjs napi build --platform --esm --features test-fs --output-dir target/native-test --js index.js --dts index.d.ts -- --locked",
     "build:ts": "tsc -p tsconfig.json",
     "build": "bun run build:native && bun run build:ts",
-    "test": "timeout --signal=TERM --kill-after=5s 900s node --test --test-concurrency=1 tests/bash.test.mjs tests/agent.test.mjs tests/tools.test.mjs",
+    "test": "timeout --signal=TERM --kill-after=5s 900s node --test --test-concurrency=1 tests/shell-mux.test.mjs tests/bash.test.mjs tests/agent.test.mjs tests/tools.test.mjs tests/task.test.mjs tests/complain.test.mjs",
     "test:btrfs": "node scripts/test-btrfs.mjs"
   },
   "napi": {
@@ -56,6 +56,7 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "18.2.11",
+    "dataflow-engine": "workspace:*",
     "typebox": "1.3.34"
   },
   "peerDependencies": {

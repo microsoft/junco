@@ -408,25 +408,36 @@ test("definition error: the same edge id twice in one node's inbound set is reje
 test("definition error: emitting on an unwired edge id is rejected", async () => {
   const ghost = messageEdge<number, string>("ghost");
   const graph = newGraph();
+  let handled = 0;
   const source = graph.addNode({
     state: undefined,
     trigger: always(),
     step: stepNode(() => [msg(ghost, 1)]),
+    on_error() {
+      handled += 1;
+      return [];
+    },
   });
   assert.throws(
     () => graph.emit(source, msg(ghost, 1)),
     DataflowDefinitionError,
   );
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
+  assert.equal(handled, 0);
 });
 
 test("definition error: emitting a message on a value edge is rejected", async () => {
   const v = valueEdge<number, string>("v");
   const graph = newGraph();
+  let handled = 0;
   const src = graph.addNode({
     state: undefined,
     trigger: always(),
     step: stepNode(() => [msg(v, 1)]),
+    on_error() {
+      handled += 1;
+      return [];
+    },
   });
   const dst = graph.addNode({
     state: undefined,
@@ -437,6 +448,7 @@ test("definition error: emitting a message on a value edge is rejected", async (
   assert.throws(() => graph.emit(src, msg(v, 1)), DataflowDefinitionError);
   assert.ok(E.isRight(v.transport) && O.isNone(v.transport.right));
   await assert.rejects(() => graph.run(), DataflowDefinitionError);
+  assert.equal(handled, 0);
 });
 
 test("public emit enqueues FIFO without driving, consuming, or completing any node", async () => {
@@ -1088,6 +1100,11 @@ test("an invalid resolved read map rejects before any node of that column advanc
   );
   const graph = scriptedGraph(scheduler);
   const seen: Record<string, number[]>[] = [];
+  let handled = 0;
+  const on_error = () => {
+    handled += 1;
+    return [];
+  };
   const p = graph.addNode({
     id: NodeId("P"),
     state: undefined,
@@ -1099,12 +1116,14 @@ test("an invalid resolved read map rejects before any node of that column advanc
     state: undefined,
     trigger: when(ex),
     step: recorder([ex], seen),
+    on_error,
   });
   const y = graph.addNode({
     id: NodeId("Y"),
     state: undefined,
     trigger: when(ey),
     step: recorder([ey], seen),
+    on_error,
   });
   graph.addEdge(p, x, ex);
   graph.addEdge(p, y, ey);
@@ -1113,6 +1132,7 @@ test("an invalid resolved read map rejects before any node of that column advanc
   await graph.step();
   await assert.rejects(graph.step(), DataflowDefinitionError);
   assert.deepEqual(seen, []);
+  assert.equal(handled, 0);
   assert.deepEqual(queued(ex), [1]);
   assert.deepEqual(queued(ey), [2]);
   assert.equal(graph.getNode(x)!.status, "running");
@@ -1128,6 +1148,11 @@ test("a throwing resolveInputs escapes unchanged before any node of that column 
   });
   const graph = scriptedGraph(scheduler);
   const seen: Record<string, number[]>[] = [];
+  let handled = 0;
+  const on_error = () => {
+    handled += 1;
+    return [];
+  };
   const p = graph.addNode({
     id: NodeId("P"),
     state: undefined,
@@ -1139,12 +1164,14 @@ test("a throwing resolveInputs escapes unchanged before any node of that column 
     state: undefined,
     trigger: when(ex),
     step: recorder([ex], seen),
+    on_error,
   });
   const y = graph.addNode({
     id: NodeId("Y"),
     state: undefined,
     trigger: when(ey),
     step: recorder([ey], seen),
+    on_error,
   });
   graph.addEdge(p, x, ex);
   graph.addEdge(p, y, ey);
@@ -1153,6 +1180,7 @@ test("a throwing resolveInputs escapes unchanged before any node of that column 
   await graph.step();
   await assert.rejects(graph.step(), (error) => error === sentinel);
   assert.deepEqual(seen, []);
+  assert.equal(handled, 0);
   assert.deepEqual(queued(ex), [1]);
   assert.deepEqual(queued(ey), [2]);
   assert.equal(graph.getNode(x)!.status, "running");
@@ -1178,6 +1206,7 @@ test("a throwing schedule callback rejects the invocation without node work; the
     UNBOUNDED,
   );
   const seen: Record<string, number[]>[] = [];
+  let handled = 0;
   const source = graph.addNode({
     state: undefined,
     trigger: always(),
@@ -1187,12 +1216,17 @@ test("a throwing schedule callback rejects the invocation without node work; the
     state: undefined,
     trigger: when(feed),
     step: recorder([feed], seen),
+    on_error() {
+      handled += 1;
+      return [];
+    },
   });
   graph.addEdge(source, sink, feed);
   graph.emit(source, msg(feed, 1));
 
   await assert.rejects(graph.run(), (error) => error === sentinel);
   assert.deepEqual(seen, []);
+  assert.equal(handled, 0);
   assert.deepEqual(queued(feed), [1]);
   assert.equal(graph.getNode(source)!.status, "ready");
   assert.equal(graph.getNode(sink)!.status, "ready");
@@ -1246,4 +1280,369 @@ test("without resolveInputs every occurrence keeps its planned partial read", as
   await graph.step();
   assert.deepEqual(seen, [{ feed: [1] }, { feed: [2] }]);
   assert.deepEqual(queued(feed), [3]);
+});
+
+test("on_error handles a synchronous step() throw and a rejected first advance once, without a result", async () => {
+  const notice = messageEdge<number, string>("notice");
+  const graph = new DataflowGraph<{ count: number }, number, string, never>(
+    createParallelScheduler(),
+    Width(1),
+    UNBOUNDED,
+  );
+  const syncCause = new Error("sync");
+  const asyncCause = new Error("async");
+  const calls: { cause: unknown; self: unknown; count: number }[] = [];
+  const syncId = graph.addNode({
+    id: NodeId("sync"),
+    state: { count: 0 },
+    trigger: always(),
+    step(): NodeGenerator<number, string> {
+      this.state.count += 1;
+      throw syncCause;
+    },
+    on_error(cause) {
+      calls.push({ cause, self: this, count: this.state.count });
+      return [];
+    },
+  });
+  const asyncId = graph.addNode({
+    id: NodeId("async"),
+    state: { count: 0 },
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must reject on its first advance.
+    async *step(): NodeGenerator<number, string> {
+      this.state.count += 1;
+      throw asyncCause;
+    },
+    async on_error(cause) {
+      calls.push({ cause, self: this, count: this.state.count });
+      return [msg(notice, 7)] as const;
+    },
+  });
+  const seen: Record<string, number[]>[] = [];
+  const sink = graph.addNode({
+    id: NodeId("sink"),
+    state: { count: 0 },
+    trigger: when(notice),
+    step: stepNode((_state, view) => {
+      seen.push({ notice: [...from(view, notice)] });
+      return [];
+    }),
+  });
+  graph.addEdge(asyncId, sink, notice);
+
+  const results = await graph.run();
+  await graph.run();
+
+  assert.deepEqual(calls, [
+    { cause: syncCause, self: graph.getNode(syncId), count: 1 },
+    { cause: asyncCause, self: graph.getNode(asyncId), count: 1 },
+  ]);
+  assert.equal(calls[0]!.self, graph.getNode(syncId));
+  assert.equal(calls[1]!.self, graph.getNode(asyncId));
+  for (const id of [syncId, asyncId]) {
+    assert.equal(graph.getNode(id)!.status, "done");
+    assert.ok(O.isNone(graph.result(id)));
+    assert.equal(results.has(id), false);
+  }
+  assert.deepEqual(seen, [{ notice: [7] }]);
+});
+
+test("on_error after a resume throw emits its batch in order and leaves the value edge unresolved", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const notice = messageEdge<number, string>("notice");
+  const v = valueEdge<number, string>("v");
+  const graph = new DataflowGraph<
+    { consumed: number[] },
+    number,
+    string,
+    never
+  >(fixedReader(1), Width(1), UNBOUNDED);
+  const cause = new Error("resume");
+  let handled = 0;
+  let afterValue = 0;
+  const seen: number[] = [];
+  const source = graph.addNode({
+    id: NodeId("source"),
+    state: { consumed: [] },
+    trigger: never(),
+    step: stepNode(() => []),
+  });
+  const failing = graph.addNode({
+    id: NodeId("failing"),
+    state: { consumed: [] as number[] },
+    trigger: when(feed),
+    async *step(): NodeGenerator<number, string> {
+      const view = yield [];
+      this.state.consumed.push(...from(view, feed));
+      throw cause;
+    },
+    on_error(error) {
+      handled += 1;
+      assert.equal(error, cause);
+      assert.deepEqual(this.state.consumed, [1]);
+      return [msg(notice, 91), msg(notice, 92)] as const;
+    },
+  });
+  const consumer = graph.addNode({
+    id: NodeId("consumer"),
+    state: { consumed: [] },
+    trigger: when(notice),
+    step: stepNode((_state, view) => {
+      seen.push(...from(view, notice));
+      return [];
+    }),
+  });
+  const dependent = graph.addNode({
+    id: NodeId("dependent"),
+    state: { consumed: [] },
+    trigger: when(v),
+    step: stepNode(() => {
+      afterValue += 1;
+      return [];
+    }),
+  });
+  graph.addEdge(source, failing, feed);
+  graph.addEdge(failing, consumer, notice);
+  graph.addEdge(failing, dependent, v);
+  graph.emit(source, msg(feed, 1));
+  graph.emit(source, msg(feed, 2));
+
+  await graph.run();
+
+  assert.equal(handled, 1);
+  assert.deepEqual(seen, [91, 92]);
+  assert.deepEqual(queued(feed), [2]);
+  assert.equal(graph.getNode(failing)!.status, "done");
+  assert.ok(O.isNone(graph.result(failing)));
+  assert.ok(E.isRight(v.transport) && O.isNone(v.transport.right));
+  assert.equal(afterValue, 0);
+});
+
+test("an unconfigured resume throw still surfaces as DataflowNodeError", async () => {
+  const feed = messageEdge<number, string>("feed");
+  const graph = newGraph();
+  const sentinel = new Error("sentinel");
+  const source = graph.addNode({
+    state: undefined,
+    trigger: never(),
+    step: stepNode(() => []),
+  });
+  const failing = graph.addNode({
+    state: undefined,
+    trigger: when(feed),
+    async *step(): NodeGenerator<number, string> {
+      yield [];
+      throw sentinel;
+    },
+  });
+  graph.addEdge(source, failing, feed);
+  graph.emit(source, msg(feed, 1));
+  await assert.rejects(
+    graph.run(),
+    (thrown: unknown) =>
+      thrown instanceof DataflowNodeError &&
+      thrown.nodeId === failing &&
+      thrown.cause === sentinel,
+  );
+  assert.equal(graph.getNode(failing)!.status, "done");
+});
+
+test("a failing on_error rejects with its own cause, is never re-run, and records nothing", async () => {
+  const notice = messageEdge<number, string>("notice");
+  const bodyCause = new Error("body");
+  for (const mode of ["throw", "reject", "definition"] as const) {
+    const graph = newGraph();
+    const handlerCause =
+      mode === "definition"
+        ? new DataflowDefinitionError("handler wiring")
+        : new Error(mode);
+    let handled = 0;
+    let delivered = 0;
+    const failing = graph.addNode({
+      state: undefined,
+      trigger: always(),
+      // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+      async *step(): NodeGenerator<number, string> {
+        throw bodyCause;
+      },
+      on_error() {
+        handled += 1;
+        if (mode === "reject") return Promise.reject(handlerCause);
+        throw handlerCause;
+      },
+    });
+    const sink = graph.addNode({
+      state: undefined,
+      trigger: when(notice),
+      step: stepNode(() => {
+        delivered += 1;
+        return [];
+      }),
+    });
+    graph.addEdge(failing, sink, notice);
+    await assert.rejects(graph.run(), (thrown: unknown) =>
+      mode === "definition"
+        ? thrown === handlerCause
+        : thrown instanceof DataflowNodeError &&
+          thrown.nodeId === failing &&
+          thrown.cause === handlerCause,
+    );
+    await graph.run();
+    assert.equal(handled, 1);
+    assert.equal(delivered, 0);
+    assert.deepEqual(queued(notice), []);
+    assert.equal(graph.getNode(failing)!.status, "done");
+    assert.ok(O.isNone(graph.result(failing)));
+  }
+});
+
+test("a body DataflowDefinitionError and a running node without a generator bypass on_error", async () => {
+  const definition = new DataflowDefinitionError("body wiring");
+  const graph = newGraph();
+  let handled = 0;
+  graph.addNode({
+    state: undefined,
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+    async *step(): NodeGenerator<number, string> {
+      throw definition;
+    },
+    on_error() {
+      handled += 1;
+      return [];
+    },
+  });
+  await assert.rejects(graph.run(), (thrown) => thrown === definition);
+
+  const orphanGraph = newGraph();
+  const orphan = orphanGraph.addNode({
+    state: undefined,
+    trigger: always(),
+    step: stepNode(() => []),
+    on_error() {
+      handled += 1;
+      return [];
+    },
+  });
+  (orphanGraph.getNode(orphan) as { status: string }).status = "running";
+  await assert.rejects(orphanGraph.run(), DataflowDefinitionError);
+  assert.equal(handled, 0);
+});
+
+test("an on_error batch with a later unwired message rejects, keeping earlier messages queued", async () => {
+  const notice = messageEdge<number, string>("notice");
+  const ghost = messageEdge<number, string>("ghost");
+  const graph = newGraph();
+  let handled = 0;
+  const failing = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+    async *step(): NodeGenerator<number, string> {
+      throw new Error("body");
+    },
+    on_error() {
+      handled += 1;
+      return [msg(notice, 1), msg(ghost, 2)];
+    },
+  });
+  const sink = graph.addNode({
+    state: undefined,
+    trigger: never(),
+    step: stepNode(() => []),
+  });
+  graph.addEdge(failing, sink, notice);
+  await assert.rejects(graph.run(), DataflowDefinitionError);
+  await graph.run();
+  assert.equal(handled, 1);
+  assert.deepEqual(queued(notice), [1]);
+  assert.ok(O.isNone(graph.result(failing)));
+});
+
+test("an abort during on_error joins the column, never starts the next one, and never records the failed node", async () => {
+  for (const cooperative of [false, true]) {
+    const notice = messageEdge<number, string>("notice");
+    const scheduler = scripted([[["F", "N"], ["S"]]]);
+    const graph = scriptedGraph(scheduler);
+    const handlerStarted = Promise.withResolvers<void>();
+    const siblingStarted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let nextRan = false;
+    const failing = graph.addNode({
+      id: NodeId("F"),
+      state: undefined,
+      trigger: always(),
+      // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+      async *step(): NodeGenerator<number, string> {
+        throw new Error("body");
+      },
+      async on_error(_error, signal) {
+        handlerStarted.resolve();
+        await release.promise;
+        if (cooperative) signal?.throwIfAborted();
+        return [msg(notice, 1)];
+      },
+    });
+    graph.addNode({
+      id: NodeId("N"),
+      state: undefined,
+      trigger: always(),
+      step: stepNode(() => {
+        nextRan = true;
+        return [];
+      }),
+    });
+    graph.addEdge(failing, NodeId("N"), notice);
+    const sibling = graph.addNode({
+      id: NodeId("S"),
+      state: undefined,
+      trigger: always(),
+      // biome-ignore lint/correctness/useYield: the body must return on its first activation.
+      async *step(): NodeGenerator<number, string> {
+        siblingStarted.resolve();
+        await release.promise;
+        return "S";
+      },
+    });
+    const controller = new AbortController();
+    const reason = new Error("stop");
+    const stepped = graph.step({ signal: controller.signal });
+    await Promise.all([handlerStarted.promise, siblingStarted.promise]);
+    controller.abort(reason);
+    release.resolve();
+    await assert.rejects(stepped, (error) => error === reason);
+    assert.equal(nextRan, false);
+    assert.deepEqual(queued(notice), cooperative ? [] : [1]);
+    assert.deepEqual(graph.result(sibling), O.some("S"));
+    assert.ok(O.isNone(graph.result(failing)));
+    assert.equal(graph.getNode(failing)!.status, "done");
+    assert.equal(graph.getNode(NodeId("N"))!.status, "ready");
+  }
+});
+
+test("a body throwing exactly the aborted signal's reason propagates it without calling on_error", async () => {
+  const graph = newGraph();
+  const controller = new AbortController();
+  const reason = new Error("stop");
+  let handled = 0;
+  const failing = graph.addNode({
+    state: undefined,
+    trigger: always(),
+    // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
+    async *step(): NodeGenerator<number, string> {
+      controller.abort(reason);
+      throw reason;
+    },
+    on_error() {
+      handled += 1;
+      return [];
+    },
+  });
+  await assert.rejects(
+    graph.run({ signal: controller.signal }),
+    (error) => error === reason,
+  );
+  assert.equal(handled, 0);
+  assert.equal(graph.getNode(failing)!.status, "done");
 });

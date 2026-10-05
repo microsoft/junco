@@ -15,6 +15,7 @@ export type { EdgeId as EdgeIdType, NodeId as NodeIdType } from "./identity.js";
 export { EdgeId, NodeId } from "./identity.js";
 export type {
   AvailabilityFn,
+  ErrorFn,
   Lookup,
   Message,
   Node,

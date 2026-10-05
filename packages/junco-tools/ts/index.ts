@@ -4,10 +4,28 @@ export type {
   BashToolInput,
   BashToolOptions,
 } from "@earendil-works/pi-coding-agent";
-export type { EditStore, NativeMux } from "../native/index.js";
+export type {
+  EditStore,
+  NativeMux,
+  NativeProcess,
+  NativeProcessOptions,
+  NativeRunResult,
+} from "../native/index.js";
 export { createAstEditTool, createAstGrepTool } from "./ast.js";
 export { createBashTool } from "./bash.js";
 export { ToolCollection, type ToolCollectionOptions } from "./collection.js";
+export {
+  type ComplainTool,
+  type ComplainToolHost,
+  type Complaint,
+  type ComplaintContext,
+  createComplainTool,
+  type Issue,
+  invokeComplainTool,
+  isComplainTool,
+  issueLog,
+  type Prompt,
+} from "./complain.js";
 export { createDiffTool } from "./diff.js";
 export { createEditTool, type HashlineEditDetails } from "./edit.js";
 export {
@@ -24,8 +42,23 @@ export {
   type LspToolOptions,
 } from "./lsp.js";
 export type { NativeModule } from "./native.js";
-export { createShellMuxOperations, shutdownShellMux } from "./operations.js";
+export {
+  createShellMuxOperations,
+  type ShellMuxOperations,
+} from "./operations.js";
 export { createReadTool } from "./read.js";
+export {
+  acquireShellMux,
+  type ShellMuxLease,
+  shutdownShellMux,
+} from "./shell-mux.js";
+export {
+  createTaskTool,
+  invokeTaskTool,
+  isTaskTool,
+  type TaskToolDetails,
+  type TaskToolHost,
+} from "./task.js";
 export {
   createYieldTool,
   isYieldTool,

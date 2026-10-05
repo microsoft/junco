@@ -6,10 +6,13 @@ import type { Deterministic } from "./deterministic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 
-/** One input for a prompt-agent member, dispatched through the native method of the same name. */
+/**
+ * One input for a prompt-agent member, dispatched through the native method of the same name. An
+ * `error` is a failure notification, delivered through the native follow-up queue.
+ */
 export type AgenticInput =
   | {
-      readonly kind: "prompt" | "steer" | "followUp" | "nextTurn";
+      readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error";
       readonly text: string;
       readonly images?: ImageContent[];
     }

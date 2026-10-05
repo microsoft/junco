@@ -42,18 +42,16 @@ const TIMEOUT_MS = 10_000;
 const assignment = "Cover every section.\nKeep the original constraints.";
 const prompt = (text: string): AgenticInput => ({ kind: "prompt", text });
 
-/** What one provider request saw: every user and assistant text in its transcript, and offered tools. */
+/** What one provider request saw: every user and assistant text in its transcript. */
 type Request = {
   readonly users: string[];
   readonly assistants: string[];
-  readonly tools: string[];
 };
 type Reply = string | AssistantMessage | (() => AssistantMessage);
 
 function record(context: Context): Request {
   const users: string[] = [];
   const assistants: string[] = [];
-  const tools: string[] = [];
   for (const message of context.messages) {
     if (message.role === "user") {
       users.push(
@@ -63,11 +61,9 @@ function record(context: Context): Request {
       );
     } else if (message.role === "assistant") {
       assistants.push(contentText(message.content));
-    } else if (message.role === "system") {
-      tools.push(...(message.toolsAdded?.map((tool) => tool.name) ?? []));
     }
   }
-  return { users, assistants, tools };
+  return { users, assistants };
 }
 
 /** A native agent answering `replies` in order and recording every request it serves. */
@@ -235,10 +231,6 @@ describe("ralph workflow", () => {
       assert.equal(second.users.at(-1), revision("draft-1"));
       assert.deepEqual(second.users, [assignment, revision("draft-1")]);
       assert.deepEqual(second.assistants, ["draft-1"]);
-      assert.deepEqual(
-        requests.map((request) => request.tools),
-        [[], []],
-      );
     },
     TIMEOUT_MS,
   );

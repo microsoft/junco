@@ -1,6 +1,6 @@
-// `tracer`: the optional execution observer. Pass a `DataflowTracer` to a graph to enable tracing
-// (or select the Opik adapter with the `opik` Bun feature, see JuncoGraph); omit it to run
-// untraced. `DummyTracer` is the shipped no-op.
+// `tracer`: the execution observer. A direct `JuncoGraph` takes one explicitly; `createTracer()`
+// selects the shared automatic one (the Opik adapter under the `opik` Bun feature, otherwise
+// `StdoutTracer`). `DummyTracer` is the shipped no-op.
 
 export {
   type DataflowRunTrace,
@@ -8,3 +8,5 @@ export {
   type DataflowTracer,
   DummyTracer,
 } from "dataflow-engine";
+export { createTracer } from "../create-tracer.js";
+export { StdoutTracer } from "../stdout-tracer.js";

@@ -11,6 +11,7 @@ import {
   createBashTool,
   createShellMuxOperations,
   isMarshPolicyDenied,
+  shutdownShellMux,
   ToolCollection,
 } from "junco-tools";
 import { flushMacrotasks, nativeOptions } from "./support.ts";
@@ -37,10 +38,14 @@ test("a real Marsh denial pauses the run as a policy yield and publishes nothing
   await writeFile(join(seed, SOURCE), "const value = seed;\n");
   const mux = await native.NativeMux.openCopyTree(seed, { sandbox: "always" });
   try {
-    // Borrowed: the mux's sandbox was fixed when it opened.
+    // Adopted as the process's one ShellMux: its sandbox was fixed when it opened.
     const collection = await ToolCollection.create(seed, { mux, native });
     const claim = createBashTool(seed, {
-      operations: createShellMuxOperations({ mux, principal: "other-owner" }),
+      operations: createShellMuxOperations({
+        mux,
+        native,
+        principal: "other-owner",
+      }),
     });
     await claim.execute(
       "claim",
@@ -157,6 +162,8 @@ test("a real Marsh denial pauses the run as a policy yield and publishes nothing
     await agent.return();
     await collection.close();
   } finally {
+    // Closes the adopted mux; a mux never adopted is closed directly.
+    await shutdownShellMux();
     await mux.close();
     await rm(root, { recursive: true, force: true });
   }

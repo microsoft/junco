@@ -2,19 +2,13 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import {
   type AssistantMessage,
-  type Context,
   fauxAssistantMessage,
-  fauxToolCall,
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
   always,
-  anyOf,
-  messageEdge,
-  msg,
   NodeId,
   type NodeIdType,
-  on,
   valueEdge,
   when,
 } from "dataflow-engine";
@@ -24,8 +18,6 @@ import type { PiScheduler, SchedulerInfo } from "junco-scheduler/agent";
 import {
   type AgenticInput,
   agentNode,
-  Deterministic,
-  deterministicNode,
   graphNode,
   type JuncoGraph,
 } from "../src/index.ts";
@@ -33,33 +25,20 @@ import {
   agencyGraph,
   drive,
   leaf,
-  newScheduler,
   runAvailable,
   type Script,
   scheduleCall,
   settledText,
 } from "./support.ts";
 
-// Agency-specific scheduling: candidate member metadata, per-member input fairness and nested Pi
-// graphs. The generic schedule tool, plan validation and lifetime cases live with PiScheduler in
-// junco-scheduler.
+// Agency scheduling over Pi members: repeated plans, window availability, dynamic nodes and nested
+// Pi graphs. The agency adapter's own contracts live in agency.test.ts; the generic schedule tool,
+// plan validation and lifetime cases live with PiScheduler in junco-scheduler.
 
 const textOf = (message: AssistantMessage) =>
   message.content
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("");
-const userTexts = (context: Context) =>
-  context.messages.flatMap((message) =>
-    message.role !== "user"
-      ? []
-      : [
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .map((block) => (block.type === "text" ? block.text : ""))
-                .join(""),
-        ],
-  );
 const toolTurn = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const MEMBER = NodeId("0");
@@ -105,119 +84,6 @@ function failureOf(step: AgenticStep): unknown {
     error = error.cause;
   return error;
 }
-
-test("SchedulerInfo describes only candidate members: native description, Agentic status and pause reasons", async () => {
-  const IDLE = "IDLE-DESCRIPTION-91f";
-  const RESULT = "WORKER-RESULT-7d1";
-  const worker = await leaf(
-    [
-      toolTurn(fauxToolCall("yield", { reason: "need review" }, { id: "y1" })),
-      fauxAssistantMessage(RESULT),
-    ],
-    { prompt: "work" },
-  );
-  const idle = await leaf([fauxAssistantMessage("never")]);
-  const infos: SchedulerInfo[] = [];
-  const transcripts: string[] = [];
-  const { graph, scheduler } = await agencyGraph(
-    (info) => {
-      infos.push(info);
-      return runAvailable(info);
-    },
-    { prompt: "go" },
-  );
-  graph.addNode(
-    agentNode(worker.agent, { description: "the worker", trigger: always() }),
-  );
-  graph.addNode(
-    agentNode(idle.agent, { description: IDLE, trigger: always() }),
-  );
-  const raw = graph.addNode({
-    description: "a raw step",
-    trigger: always(),
-    state: new Deterministic<AgenticInput, AssistantMessage>(
-      // biome-ignore lint/correctness/useYield: an inert state; the node's own step runs instead.
-      async function* () {
-        return fauxAssistantMessage("unused");
-      },
-    ),
-    step: async function* () {
-      yield [];
-      return fauxAssistantMessage("raw done");
-    },
-  });
-  const quiet = graph.addNode(
-    deterministicNode(
-      new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-        yield [];
-        return fauxAssistantMessage("quiet done");
-      }),
-      { trigger: always() },
-    ),
-  );
-  scheduler.hooks.on("transform_context", ({ messages }) => {
-    transcripts.push(JSON.stringify(messages));
-    return undefined;
-  });
-
-  assert.equal(settledText((await drive(scheduler)).last), "graph quiescent");
-
-  const pause = [
-    {
-      kind: "tool",
-      toolCallId: "y1",
-      toolName: "yield",
-      reason: "need review",
-    },
-  ];
-  assert.deepEqual(
-    infos.map((info) =>
-      info.nodes.map(({ id, status, details }) => ({ id, status, details })),
-    ),
-    [
-      [
-        {
-          id: "0",
-          status: "ready",
-          details: { description: "the worker", agentStatus: "ready" },
-        },
-        { id: "2", status: "ready", details: { description: "a raw step" } },
-        { id: "3", status: "ready", details: undefined },
-      ],
-      [
-        {
-          id: "0",
-          status: "running",
-          details: { description: "the worker", agentStatus: "ready" },
-        },
-        { id: "2", status: "running", details: { description: "a raw step" } },
-        { id: "3", status: "running", details: undefined },
-      ],
-      [
-        {
-          id: "0",
-          status: "running",
-          details: {
-            description: "the worker",
-            agentStatus: "suspended",
-            lastYield: pause,
-          },
-        },
-      ],
-      [],
-    ],
-  );
-  assert.equal(transcripts.length, infos.length);
-  for (const transcript of transcripts) {
-    assert.equal(transcript.includes(IDLE), false);
-    assert.equal(transcript.includes(RESULT), false);
-  }
-  assert.equal(resultOf(graph, MEMBER), RESULT);
-  assert.equal(resultOf(graph, raw), "raw done");
-  assert.equal(resultOf(graph, quiet), "quiet done");
-  assert.equal(idle.faux.state.callCount, 0);
-  await graph.close();
-});
 
 test("a repeated occurrence after its member returned keeps the result", async () => {
   const { scheduler, graph } = await singleMember(
@@ -271,75 +137,6 @@ test("only ids available when the window starts may be planned", async () => {
     [resultOf(graph, p), resultOf(graph, c)],
     ["produced", "consumed"],
   );
-  await graph.close();
-});
-
-test("an any trigger reads a newer message rather than an already delivered result", async () => {
-  const valueSource = await leaf([fauxAssistantMessage("the value")], {
-    prompt: "value",
-  });
-  const messenger = await leaf(
-    [
-      toolTurn(fauxToolCall("yield", { reason: "send more" }, { id: "m1" })),
-      fauxAssistantMessage("messenger done"),
-    ],
-    { prompt: "message" },
-  );
-  const requests: string[][] = [];
-  const record = (reply: AssistantMessage) => (context: Context) => {
-    requests.push(userTexts(context));
-    return reply;
-  };
-  const reader = await leaf([
-    record(
-      toolTurn(fauxToolCall("yield", { reason: "waiting" }, { id: "r1" })),
-    ),
-    record(fauxAssistantMessage("reader done")),
-    record(fauxAssistantMessage("reader after more")),
-  ]);
-  const { graph, scheduler } = await agencyGraph(runAvailable, {
-    prompt: "go",
-  });
-  const value = valueEdge<AgenticInput, AssistantMessage>("value->reader");
-  const more = messageEdge<AgenticInput, AssistantMessage>("messenger->reader");
-  const v = graph.addNode(
-    agentNode(valueSource.agent, { description: "value", trigger: always() }),
-  );
-  const m = graph.addNode(
-    agentNode(
-      messenger.agent,
-      { description: "messenger", trigger: always() },
-      { emit: () => [msg(more, { kind: "followUp", text: "more" })] },
-    ),
-  );
-  const r = graph.addNode(
-    agentNode(
-      reader.agent,
-      { description: "reader", trigger: anyOf(on(value), on(more)) },
-      {
-        receive: (view) => [
-          ...[...view.values.keys()].map(
-            (id): AgenticInput => ({
-              kind: "prompt",
-              text: `got ${textOf(view.values.get(id)!)}`,
-            }),
-          ),
-          ...(view.messages.get(more.id) ?? []),
-        ],
-      },
-    ),
-  );
-  graph.addEdge(v, r, value);
-  graph.addEdge(m, r, more);
-
-  const { last } = await drive(scheduler);
-
-  assert.equal(settledText(last), "graph quiescent");
-  assert.deepEqual(
-    [v, m, r].map((id) => resultOf(graph, id)),
-    ["the value", "messenger done", "reader after more"],
-  );
-  assert.deepEqual(requests.at(-1), ["got the value", "more"]);
   await graph.close();
 });
 
@@ -494,47 +291,4 @@ test("a triggered idle Pi child without a result or staged prompt fails instead 
   assert.ok(O.isNone(parent.graph.result(nested)));
   assert.equal(child.faux.state.callCount + member.faux.state.callCount, 0);
   await parent.graph.close();
-});
-
-test("a missing or foreign graph getter fails before provider work and touches no unrelated members", async () => {
-  const missing = await newScheduler(() => undefined, runAvailable, {
-    prompt: "go",
-  });
-  assert.ok(invalidState(failureOf((await drive(missing.scheduler)).last)));
-  assert.equal(missing.faux.state.callCount, 0);
-  await missing.scheduler.abort();
-  await missing.scheduler.return();
-  assert.equal(missing.scheduler.status, "closed");
-
-  const bystander = await leaf([fauxAssistantMessage("never")], {
-    prompt: "go",
-  });
-  const other = await agencyGraph(runAvailable, { prompt: "other" });
-  other.graph.addNode(
-    agentNode(bystander.agent, { description: "bystander", trigger: always() }),
-  );
-  const foreign = await newScheduler(() => other.graph, runAvailable, {
-    prompt: "go",
-  });
-  assert.ok(invalidState(failureOf((await drive(foreign.scheduler)).last)));
-  assert.equal(foreign.faux.state.callCount, 0);
-
-  const abortError = await foreign.scheduler.abort().then(
-    () => undefined,
-    (error: unknown) => error,
-  );
-  const closeError = await foreign.scheduler.return().then(
-    () => undefined,
-    (error: unknown) => error,
-  );
-  for (const error of [abortError, closeError]) {
-    const errors = error instanceof AggregateError ? error.errors : [error];
-    assert.ok(errors.length > 0 && errors.every(invalidState));
-  }
-  assert.equal(foreign.scheduler.status, "closed");
-  assert.equal(other.graph.signal.aborted, false);
-  assert.equal(bystander.agent.status, "ready");
-  assert.equal(other.scheduler.status, "ready");
-  await other.graph.close();
-  assert.equal(bystander.agent.status, "closed");
 });

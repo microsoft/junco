@@ -88,11 +88,22 @@ impl MarshTool for JuncoTool {
 }
 
 /// The marsh operand of a mux's routing policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SandboxMode {
     /// Sandbox while another live shell shares the seed.
     Shared,
     /// Always sandbox.
     Always,
+}
+
+impl SandboxMode {
+    /// The option value JavaScript selects this mode with.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Always => "always",
+        }
+    }
 }
 
 /// `mode`'s marsh operand conjoined with junco's: a file tool takes the managed route only when it

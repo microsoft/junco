@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use marsh_core::shellmux::{FrontendEvent, ShellFrontend, ShellMux};
+use marsh_core::shellmux::{FrontendEvent, OutputChannel, ShellFrontend, ShellMux};
 use marsh_core::Principal;
 use napi::Status;
 use napi::bindgen_prelude::Buffer;
@@ -17,16 +17,48 @@ struct RouteProgress {
     failure: Option<String>,
 }
 
+/// Where a route delivers a shell's bytes: one-shot runs merge both pipe streams into one
+/// callback, a persistent process keeps standard output and standard error apart.
+enum Destination {
+    Merged(OutputCallback),
+    Separate {
+        stdout: OutputCallback,
+        stderr: OutputCallback,
+    },
+}
+
+impl Destination {
+    fn callback(&self, channel: OutputChannel) -> &OutputCallback {
+        match (self, channel) {
+            (Self::Merged(callback), _) => callback,
+            (Self::Separate { stderr, .. }, OutputChannel::Stderr) => stderr,
+            (Self::Separate { stdout, .. }, OutputChannel::Stdout | OutputChannel::Terminal) => {
+                stdout
+            }
+        }
+    }
+}
+
+/// One shell's output destination. Both streams share one progress record, so a single drain
+/// fence covers every queued callback of either stream and the first failure of either stops it.
 pub(crate) struct OutputRoute {
-    callback: Mutex<Option<OutputCallback>>,
+    destination: Mutex<Option<Destination>>,
     progress: Arc<watch::Sender<RouteProgress>>,
 }
 
 impl OutputRoute {
     pub(crate) fn new(callback: OutputCallback) -> Arc<Self> {
+        Self::with(Destination::Merged(callback))
+    }
+
+    pub(crate) fn separate(stdout: OutputCallback, stderr: OutputCallback) -> Arc<Self> {
+        Self::with(Destination::Separate { stdout, stderr })
+    }
+
+    fn with(destination: Destination) -> Arc<Self> {
         let (progress, _) = watch::channel(RouteProgress::default());
         Arc::new(Self {
-            callback: Mutex::new(Some(callback)),
+            destination: Mutex::new(Some(destination)),
             progress: Arc::new(progress),
         })
     }
@@ -69,18 +101,21 @@ impl OutputRoute {
     }
 
     fn detach(&self) {
-        let callback = self
-            .callback
+        let destination = self
+            .destination
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        drop(callback);
+        drop(destination);
     }
 
-    fn output(&self, bytes: &[u8]) -> oneshot::Receiver<()> {
+    fn output(&self, channel: OutputChannel, bytes: &[u8]) -> oneshot::Receiver<()> {
         let (receipt, received) = oneshot::channel();
-        let callback = self.callback.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(callback) = callback.as_ref() else {
+        let destination = self
+            .destination
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(callback) = destination.as_ref().map(|it| it.callback(channel)) else {
             self.fail("ShellMux output route is detached".to_owned());
             // Dropping this sender is a failed receipt, never an acknowledgement of lost bytes.
             return received;
@@ -208,9 +243,13 @@ impl ShellFrontend for Frontend {
 
     fn update(&mut self, event: FrontendEvent<'_>) -> Option<oneshot::Receiver<()>> {
         match event {
-            FrontendEvent::Output { shell, bytes, .. } => {
+            FrontendEvent::Output {
+                shell,
+                channel,
+                bytes,
+            } => {
                 if let Some(route) = self.routes.get(&shell.uid) {
-                    return Some(route.output(bytes));
+                    return Some(route.output(channel, bytes));
                 }
                 // An unregistered consumer cannot truthfully acknowledge these bytes.
                 let (receipt, received) = oneshot::channel();

@@ -4,6 +4,7 @@ import type {
   DataflowStepTrace,
   DataflowTracer,
 } from "./dataflow-tracer.js";
+import type { NodeId } from "./identity.js";
 
 const noop = (): void => {};
 
@@ -29,6 +30,8 @@ export class DummyTracer implements DataflowTracer {
   ): DataflowRunTrace<N, T> {
     return RUN;
   }
+
+  complain(_nodeId: NodeId, _complaint: string): void {}
 
   flush(): Promise<void> {
     return FLUSHED;

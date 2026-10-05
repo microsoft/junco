@@ -14,7 +14,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { UNBOUNDED, type WidthType } from "dataflow-engine";
+import { DummyTracer, UNBOUNDED, type WidthType } from "dataflow-engine";
 import type {
   AgenticStep,
   JuncoAgent,
@@ -240,7 +240,12 @@ export async function agencyGraph(
     script,
     { prompt },
   );
-  const graph: PiGraph = new JuncoGraph(scheduler, window, threads);
+  const graph: PiGraph = new JuncoGraph(
+    scheduler,
+    window,
+    threads,
+    new DummyTracer(),
+  );
   current = graph;
   return { graph, scheduler, faux, session };
 }

@@ -1,0 +1,7 @@
+[test]
+# `bun run test:coverage` reports this package's `src/` only: workspace dependencies load from
+# their `bun` source exports (`../*`) and are covered by their own suites.
+coverageReporter = ["text", "lcov"]
+coverageDir = "coverage"
+coverageSkipTestFiles = true
+coveragePathIgnorePatterns = ["../**", "**/test/**", "**/dist/**", "**/node_modules/**"]

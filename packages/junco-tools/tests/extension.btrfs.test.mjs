@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   access,
   mkdir,
@@ -10,6 +11,7 @@ import {
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -22,14 +24,19 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { createShellMuxOperations, shutdownShellMux } from "../dist/index.js";
-import { NativeMux } from "../native/index.js";
+import {
+  acquireShellMux,
+  createShellMuxOperations,
+  shutdownShellMux,
+  ToolCollection,
+} from "../dist/index.js";
 import { readBtrfsFixture } from "./btrfs-fixture.mjs";
 import {
   cleanup,
   deferred,
   hashlineTag,
   heldChild,
+  nativeEnv,
   release,
   settleAgent,
   text,
@@ -85,8 +92,8 @@ after(async () => {
   state.session = undefined;
   await cleanup(
     () => (session ? closePackagedSession(session) : undefined),
-    // The separate final native backstop: a leaked extension lease must fail here rather
-    // than be hidden by the per-case reopen probes, which deliberately run earlier.
+    // The process's one application shutdown, after every session and consumer stopped: it
+    // closes the singleton every case and the packaged extension shared.
     () => shutdownShellMux(),
     () => {
       if (state.previousAgentDir === undefined)
@@ -173,132 +180,147 @@ async function packagedSession(sessionManager) {
   return { session, scripted };
 }
 
-/** An idle handle proves nothing about usability; only an executed command confirms the seed still works. */
-async function assertSeedReusable(seed) {
-  const mux = await NativeMux.open(seed);
+/**
+ * An idle handle proves nothing about usability; only an executed command confirms the
+ * application's singleton (or, after a shutdown, the next generation over the seed) still works.
+ */
+async function assertSingletonUsable(seed) {
+  const probe = createShellMuxOperations({ principal: "singleton-probe" });
   try {
-    const probe = createShellMuxOperations({
-      principal: "lease-reopen-probe",
-      mux,
-    });
     const chunks = [];
-    const result = await probe.exec("printf 'lease-reacquired\\n'", seed, {
+    const result = await probe.exec("printf 'singleton-usable\\n'", seed, {
       onData: (data) => chunks.push(data),
     });
     assert.equal(result.exitCode, 0);
-    assert.equal(Buffer.concat(chunks).toString("utf8"), "lease-reacquired\n");
+    assert.equal(Buffer.concat(chunks).toString("utf8"), "singleton-usable\n");
   } finally {
-    await mux.close();
+    await probe.close();
   }
 }
 
-test("default owners run concurrently over shared source authority", {
-  timeout: 120_000,
-}, async (t) => {
-  // A held direct command excludes every other admission; keep this source managed so the
-  // independent default owner can exercise concurrent publication authority.
-  const holder = await NativeMux.open(state.seed, { sandbox: "always" });
-  const contender = createShellMuxOperations({ principal: "opening-owner" });
-  const gate = join(state.testRoot, "shared-authority-gate");
-  let held;
-  let heldSettled = false;
+/**
+ * A persistent process on the singleton: Marsh always runs it in a managed shell, so while it is
+ * live, ordinary default-owned commands stay off the exclusive direct route. It prints `ready`,
+ * then exits on its own once the host creates `gate`.
+ */
+async function managedHold(t, { gate, ready, done }) {
+  const lease = await acquireShellMux(state.seed);
+  const seen = deferred(t.signal, `${ready} readiness`);
+  const hold = { lease, output: "" };
   try {
-    await assertSeedReusable(state.seed);
-
-    const holding = createShellMuxOperations({
-      principal: "holding-owner",
-      mux: holder,
-    });
-    const ready = deferred(t.signal, "shared-authority hold readiness");
-    let output = "";
-    held = holding.exec(
-      heldChild({ gate, ready: "SHARE_READY", done: "SHARE_DONE" }),
-      state.seed,
+    hold.process = await lease.mux.spawn(
       {
-        signal: t.signal,
-        onData: (data) => {
-          output += data.toString("utf8");
-          if (output.includes("SHARE_READY")) ready.resolve();
-        },
+        command: process.execPath,
+        args: [
+          "-e",
+          [
+            'const fs = require("node:fs");',
+            `process.stdout.write(${JSON.stringify(`${ready}\n`)});`,
+            `const gate = ${JSON.stringify(gate)};`,
+            "const poll = setInterval(() => {",
+            "  if (!fs.existsSync(gate)) return;",
+            "  clearInterval(poll);",
+            `  process.stdout.write(${JSON.stringify(`${done}\n`)});`,
+            "  process.exit(0);",
+            "}, 10);",
+          ].join("\n"),
+        ],
+        cwd: state.seed,
+        principal: `hold-${ready}`,
+        env: nativeEnv(state.testRoot),
+      },
+      (error, data) => {
+        if (error) throw error;
+        hold.output += data.toString("utf8");
+        if (hold.output.includes(ready)) seen.resolve();
+      },
+      (error) => {
+        if (error) throw error;
       },
     );
-    const settled = () => {
-      heldSettled = true;
-    };
-    held.then(settled, settled);
     await Promise.race([
-      ready.promise,
-      held.then(() => {
-        throw new Error("shared-authority hold ended before readiness");
+      seen.promise,
+      hold.process.wait().then(() => {
+        throw new Error(`${ready} hold ended before readiness`);
       }),
     ]);
+    return hold;
+  } catch (error) {
+    hold.process?.abort();
+    await Promise.allSettled([hold.process?.wait()]);
+    lease.release();
+    throw error;
+  }
+}
+
+/** Release a hold's gate, join its own exit, and drop its lease. */
+async function settleHold(hold, gate) {
+  await cleanup(
+    () => release(gate),
+    () => hold?.process?.wait(),
+    () => hold?.lease.release(),
+  );
+}
+
+test("independent owners share one singleton and run concurrently", {
+  timeout: 120_000,
+}, async (t) => {
+  const gate = join(state.testRoot, "shared-authority-gate");
+  const contender = createShellMuxOperations({ principal: "opening-owner" });
+  let hold;
+  try {
+    await assertSingletonUsable(state.seed);
+    hold = await managedHold(t, {
+      gate,
+      ready: "SHARE_READY",
+      done: "SHARE_DONE",
+    });
+    assert.equal(hold.lease.mux.sandbox, "shared");
 
     // Read-only: an unrelated file write here could turn a source-sharing test into a
     // policy or stale-view test, copying tests/bash.test.mjs's independent-principal pattern.
-    const concurrentChunks = [];
-    const concurrentResult = await contender.exec(
-      "printf 'concurrent-ok\\n'",
-      state.seed,
-      {
-        signal: t.signal,
-        onData: (data) => concurrentChunks.push(data),
-      },
+    const collected = [[], [], []];
+    const results = await Promise.all(
+      ["concurrent-ok\n", "first", "second"].map((output, index) =>
+        contender.exec(`printf '${output.replace("\n", "\\n")}'`, state.seed, {
+          signal: t.signal,
+          onData: (data) => collected[index].push(data),
+        }),
+      ),
     );
-    assert.equal(concurrentResult.exitCode, 0);
-    assert.equal(
-      Buffer.concat(concurrentChunks).toString("utf8"),
-      "concurrent-ok\n",
+    assert.deepEqual(
+      results.map((entry) => entry.exitCode),
+      [0, 0, 0],
     );
-    assert.equal(heldSettled, false);
+    assert.deepEqual(
+      collected.map((chunks) => Buffer.concat(chunks).toString("utf8")),
+      ["concurrent-ok\n", "first", "second"],
+    );
 
     await release(gate);
-    const heldResult = await held;
-    assert.equal(heldResult.exitCode, 0);
-    assert.equal(output, "SHARE_READY\nSHARE_DONE\n");
-    await holder.close();
-
-    // The same retained native session recovers: closing the borrowed mux disposed neither it
-    // nor the default owners' shared source authority.
-    const chunks = [];
-    const result = await contender.exec("printf 'reopened\\n'", state.seed, {
-      onData: (data) => chunks.push(data),
+    assert.deepEqual(await hold.process.wait(), {
+      exitCode: 0,
+      cancelled: false,
+      timedOut: false,
     });
-    assert.equal(result.exitCode, 0);
-    assert.equal(Buffer.concat(chunks).toString("utf8"), "reopened\n");
+    assert.equal(hold.output, "SHARE_READY\nSHARE_DONE\n");
+
+    // Closing one owner leaves the singleton: a later lease receives the same mux.
+    await contender.close();
+    await assertSingletonUsable(state.seed);
+    const again = await acquireShellMux(state.seed);
+    assert.equal(again.mux, hold.lease.mux);
+    again.release();
   } finally {
     await cleanup(
-      () => release(gate),
-      () => holder.close(),
-      () => Promise.allSettled([held]),
+      () => settleHold(hold, gate),
+      () => contender.close(),
       () => shutdownShellMux(),
     );
   }
 
-  const concurrent = createShellMuxOperations({
-    principal: "concurrent-owner",
-  });
-  try {
-    const collected = [[], []];
-    const results = await Promise.all([
-      concurrent.exec("printf first", state.seed, {
-        onData: (data) => collected[0].push(data),
-      }),
-      concurrent.exec("printf second", state.seed, {
-        onData: (data) => collected[1].push(data),
-      }),
-    ]);
-    assert.deepEqual(
-      results.map((entry) => entry.exitCode),
-      [0, 0],
-    );
-    assert.equal(Buffer.concat(collected[0]).toString("utf8"), "first");
-    assert.equal(Buffer.concat(collected[1]).toString("utf8"), "second");
-  } finally {
-    await shutdownShellMux();
-  }
-
-  // Constructor rejection and retry: the filesystem root is not an admissible seed, and that
-  // failure is the opening promise's own.
+  // A fresh generation whose first open fails: the filesystem root is not an admissible seed,
+  // and that failure is the opening promise's own. The same owner then retries.
   const discovery = createShellMuxOperations({ principal: "discovery-owner" });
   try {
     const rejected = [];
@@ -323,47 +345,35 @@ test("default owners run concurrently over shared source authority", {
       "discovery-retried\n",
     );
   } finally {
-    await shutdownShellMux();
+    await cleanup(
+      () => discovery.close(),
+      () => shutdownShellMux(),
+    );
   }
 });
 
-test("owned shutdown joins active work and closes admission", {
+test("application shutdown joins active work and closes admission", {
   timeout: 120_000,
 }, async (t) => {
   const gate = join(state.testRoot, "shutdown-gate");
   const peerGate = join(state.testRoot, "shutdown-peer-gate");
-  const peer = await NativeMux.open(state.seed, { sandbox: "always" });
   const owner = createShellMuxOperations({ principal: "shutdown-owner" });
   const concurrentOwner = createShellMuxOperations({
     principal: "concurrent-during-shutdown",
   });
+  let collection;
+  let peer;
   let held;
-  let peerRun;
   let heldSettled = false;
   try {
-    // An independent managed shell keeps both default-owned commands off the exclusive direct route.
-    const peerReady = deferred(t.signal, "production managed-peer readiness");
-    let peerOutput = "";
-    peerRun = createShellMuxOperations({
-      mux: peer,
-      principal: "shutdown-managed-peer",
-    }).exec(
-      heldChild({ gate: peerGate, ready: "PEER_READY", done: "PEER_DONE" }),
-      state.seed,
-      {
-        signal: t.signal,
-        onData: (data) => {
-          peerOutput += data.toString("utf8");
-          if (peerOutput.includes("PEER_READY")) peerReady.resolve();
-        },
-      },
-    );
-    await Promise.race([
-      peerReady.promise,
-      peerRun.then(() => {
-        throw new Error("managed peer ended before readiness");
-      }),
-    ]);
+    collection = await ToolCollection.create(state.seed);
+    // A live managed process keeps both default-owned commands off the exclusive direct route.
+    peer = await managedHold(t, {
+      gate: peerGate,
+      ready: "PEER_READY",
+      done: "PEER_DONE",
+    });
+    const { mux } = peer.lease;
 
     const ready = deferred(t.signal, "production hold readiness");
     let output = "";
@@ -389,8 +399,8 @@ test("owned shutdown joins active work and closes admission", {
       }),
     ]);
 
-    // A second default owner runs concurrently over the same shared source authority while
-    // the first command is still held; shutdown, not admission, must stop the active command.
+    // A second default owner runs concurrently over the same singleton while the first
+    // command is still held; shutdown, not admission, must stop the active command.
     const concurrentChunks = [];
     const concurrentResult = await concurrentOwner.exec(
       "printf 'not-blocked\\n'",
@@ -407,26 +417,35 @@ test("owned shutdown joins active work and closes admission", {
     );
     assert.equal(heldSettled, false);
 
+    // Neither gate is released: shutdown reclaims the held command and the managed process.
     const shutdown = shutdownShellMux();
-    await Promise.all([assert.rejects(held, Error), shutdown]);
+    const [, peerResult] = await Promise.all([
+      assert.rejects(held, Error),
+      peer.process.wait(),
+      shutdown,
+    ]);
+    assert.equal(peerResult.cancelled, true);
+    assert.equal(peer.lease.closed, true);
     await assert.rejects(
       owner.exec("printf late", state.seed, { onData: () => {} }),
       /closed/,
     );
-    await release(peerGate);
-    assert.equal((await peerRun).exitCode, 0);
-    assert.equal(peerOutput, "PEER_READY\nPEER_DONE\n");
-    await peer.close();
+    await assert.rejects(
+      collection.tools
+        .find((tool) => tool.name === "read")
+        .execute("late", { path: "src/file0.txt" }),
+      /closed/,
+    );
+    await assert.rejects(mux.exists(state.seed, "src/file0.txt"), /closed/);
 
-    // The seed is a usable source again after shutdown settled; this is an execution probe,
-    // never proof that some exclusive lease was reacquired.
-    await assertSeedReusable(state.seed);
+    // A consumer created after shutdown completed opens the next generation over the seed.
+    await assertSingletonUsable(state.seed);
   } finally {
     await cleanup(
       () => release(gate),
-      () => release(peerGate),
-      () => Promise.allSettled([held, peerRun]),
-      () => peer.close(),
+      () => Promise.allSettled([held]),
+      () => settleHold(peer, peerGate),
+      () => collection?.close(),
       () => shutdownShellMux(),
     );
   }
@@ -472,34 +491,17 @@ test("the packaged extension registers bash with the persisted prefix", {
     assert.ok(registered.includes(name), `${name} is no longer registered`);
   }
 
-  // A direct write publishes no durable grants; another live managed shell makes this
-  // extension command a managed publication that the later-session test can challenge.
-  const peer = await NativeMux.open(state.seed, { sandbox: "always" });
+  // A direct write publishes no durable grants; a live managed process on the same singleton
+  // makes this extension command a managed publication that the later-session test can
+  // challenge.
   const gate = join(state.testRoot, "claim-peer-gate");
-  let peerRun;
+  let peer;
   try {
-    const ready = deferred(t.signal, "managed claim peer readiness");
-    let output = "";
-    peerRun = createShellMuxOperations({
-      mux: peer,
-      principal: "managed-claim-peer",
-    }).exec(
-      heldChild({ gate, ready: "CLAIM_READY", done: "CLAIM_DONE" }),
-      state.seed,
-      {
-        signal: t.signal,
-        onData: (data) => {
-          output += data.toString("utf8");
-          if (output.includes("CLAIM_READY")) ready.resolve();
-        },
-      },
-    );
-    await Promise.race([
-      ready.promise,
-      peerRun.then(() => {
-        throw new Error("claim peer ended before readiness");
-      }),
-    ]);
+    peer = await managedHold(t, {
+      gate,
+      ready: "CLAIM_READY",
+      done: "CLAIM_DONE",
+    });
 
     const capture = scriptBashTurn(scripted.faux, [
       {
@@ -524,14 +526,10 @@ test("the packaged extension registers bash with the persisted prefix", {
     );
     assert.deepEqual(state.errors, []);
     await release(gate);
-    assert.equal((await peerRun).exitCode, 0);
-    assert.equal(output, "CLAIM_READY\nCLAIM_DONE\n");
+    assert.equal((await peer.process.wait()).exitCode, 0);
+    assert.equal(peer.output, "CLAIM_READY\nCLAIM_DONE\n");
   } finally {
-    await cleanup(
-      () => release(gate),
-      () => Promise.allSettled([peerRun]),
-      () => peer.close(),
-    );
+    await settleHold(peer, gate);
   }
 });
 
@@ -634,7 +632,7 @@ test("reload keeps the session principal and replaces disposed operations", {
     state.session = undefined;
     await closing;
   }
-  await assertSeedReusable(state.seed);
+  await assertSingletonUsable(state.seed);
 });
 
 test("a new session cannot inherit the previous principal's grants", {
@@ -644,34 +642,17 @@ test("a new session cannot inherit the previous principal's grants", {
   const { session, scripted } = await packagedSession(sessionManager);
   try {
     assert.notEqual(session.sessionId, state.sessionId);
-    // Direct writes do not consult durable grants; hold another shell so this challenge
-    // uses the managed route that checked the earlier session's publication.
-    const peer = await NativeMux.open(state.seed, { sandbox: "always" });
+    // Direct writes do not consult durable grants; hold a managed process on the same
+    // singleton so this challenge uses the managed route that checked the earlier session's
+    // publication.
     const gate = join(state.testRoot, "denial-peer-gate");
-    let peerRun;
+    let peer;
     try {
-      const ready = deferred(t.signal, "managed denial peer readiness");
-      let output = "";
-      peerRun = createShellMuxOperations({
-        mux: peer,
-        principal: "managed-denial-peer",
-      }).exec(
-        heldChild({ gate, ready: "DENIAL_READY", done: "DENIAL_DONE" }),
-        state.seed,
-        {
-          signal: t.signal,
-          onData: (data) => {
-            output += data.toString("utf8");
-            if (output.includes("DENIAL_READY")) ready.resolve();
-          },
-        },
-      );
-      await Promise.race([
-        ready.promise,
-        peerRun.then(() => {
-          throw new Error("denial peer ended before readiness");
-        }),
-      ]);
+      peer = await managedHold(t, {
+        gate,
+        ready: "DENIAL_READY",
+        done: "DENIAL_DONE",
+      });
 
       const capture = scriptBashTurn(scripted.faux, [
         {
@@ -694,17 +675,32 @@ test("a new session cannot inherit the previous principal's grants", {
         (error) => error.code === "ENOENT",
       );
       await release(gate);
-      assert.equal((await peerRun).exitCode, 0);
-      assert.equal(output, "DENIAL_READY\nDENIAL_DONE\n");
+      assert.equal((await peer.process.wait()).exitCode, 0);
+      assert.equal(peer.output, "DENIAL_READY\nDENIAL_DONE\n");
     } finally {
-      await cleanup(
-        () => release(gate),
-        () => Promise.allSettled([peerRun]),
-        () => peer.close(),
-      );
+      await settleHold(peer, gate);
     }
   } finally {
     await closePackagedSession(session);
   }
-  await assertSeedReusable(state.seed);
+  await assertSingletonUsable(state.seed);
+});
+
+test("a nested btrfs seed is refused without disturbing the singleton", {
+  timeout: 120_000,
+}, async () => {
+  const lease = await acquireShellMux(state.seed);
+  const nested = join(state.seed, "nested-seed");
+  try {
+    await promisify(execFile)("btrfs", ["subvolume", "create", nested]);
+    await assert.rejects(acquireShellMux(nested), Error);
+    await assert.rejects(acquireShellMux(join(state.testRoot)), Error);
+    const again = await acquireShellMux(join(state.seed, "src"));
+    assert.equal(again.mux, lease.mux);
+    again.release();
+    await assertSingletonUsable(state.seed);
+  } finally {
+    // The fixture owner deletes every subvolume under its root, this one included.
+    lease.release();
+  }
 });

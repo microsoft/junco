@@ -48,6 +48,7 @@ test("complete multi-chunk UTF-8 output and final marker precede settlement", {
   try {
     const operations = createShellMuxOperations({
       mux: instance.mux,
+      native: instance.native,
       principal: "output-owner",
     });
     const tool = createBashTool(instance.seed, { operations });
@@ -90,6 +91,7 @@ test("callback failure rejects without killing Node or disabling the session", {
   try {
     const operations = createShellMuxOperations({
       mux: instance.mux,
+      native: instance.native,
       principal: "callback-owner",
     });
     const tool = createBashTool(instance.seed, { operations });
@@ -131,12 +133,14 @@ test("a zero-exit policy denial leaves all seed contents unchanged", {
     const owner = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "file-owner",
       }),
     });
     const intruder = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "another-agent",
       }),
     });
@@ -197,6 +201,7 @@ test("a pipeline result is returned and published to the seed", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "publish-owner",
       }),
     });
@@ -226,6 +231,7 @@ test("stdout and stderr both reach the tool result", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "streams-owner",
       }),
     });
@@ -252,6 +258,7 @@ test("a nonzero process status produces a model-visible error result", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "status-owner",
       }),
     });
@@ -279,6 +286,7 @@ test("commands run without a PTY and receive a real stdin EOF", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "stdin-owner",
       }),
     });
@@ -317,6 +325,7 @@ test("cwd, prefix, hook and literal environment reach the command verbatim", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "context-owner",
       }),
       commandPrefix: "export JUNCO_PREFIX=prefix-value",
@@ -381,6 +390,7 @@ test("a working directory outside the seed never silently runs at its root", {
     await symlink(outside, join(instance.seed, "escape"), "dir");
     const operations = createShellMuxOperations({
       mux: instance.mux,
+      native: instance.native,
       principal: "cwd-owner",
     });
     const rejected = [
@@ -433,6 +443,7 @@ test("each call gets a fresh shell over a durable filesystem", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "reuse-owner",
       }),
     });
@@ -466,6 +477,7 @@ test("a silent successful command uses Pi's empty-output result", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "silent-owner",
       }),
     });
@@ -486,6 +498,7 @@ test("the line limit bounds the tail and persists complete output", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "lines-owner",
       }),
     });
@@ -549,6 +562,7 @@ test("the byte limit truncates only past its boundary and keeps every byte", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "bytes-owner",
       }),
     });
@@ -599,6 +613,7 @@ test("aborting a running command keeps its output and publishes nothing", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "cancel-owner",
       }),
     });
@@ -663,6 +678,7 @@ test("a timeout keeps its output and publishes nothing", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "timeout-owner",
       }),
     });
@@ -723,6 +739,7 @@ test("a pre-aborted signal rejects before the command can run", {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
         mux: instance.mux,
+        native: instance.native,
         principal: "pre-abort-owner",
       }),
     });
@@ -760,6 +777,7 @@ test("invalid timeouts are rejected before any work is admitted", {
   try {
     const operations = createShellMuxOperations({
       mux: instance.mux,
+      native: instance.native,
       principal: "validation-owner",
     });
     // Direct calls: NaN and Infinity have no JSON tool-argument representation.
@@ -985,10 +1003,18 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
     );
 
     const owner = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({ mux, principal: "file-owner" }),
+      operations: createShellMuxOperations({
+        mux,
+        native: instance.native,
+        principal: "file-owner",
+      }),
     });
     const intruder = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({ mux, principal: "another-agent" }),
+      operations: createShellMuxOperations({
+        mux,
+        native: instance.native,
+        principal: "another-agent",
+      }),
     });
     // A fresh shell gets an opaque owner unrelated to any principal name: reusing the name that
     // took the earlier stake grants no ownership of it, even against the same live mux.
@@ -1027,7 +1053,9 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
       (error) => error.code === "ENOENT",
     );
 
-    await mux.close();
+    // The operations adopted this mux as the application singleton: only application
+    // shutdown closes it, after which a fresh raw generation may open.
+    await shutdownShellMux();
     // The retained run reference stays alive across this reopen on purpose.
     mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
     assert.deepEqual(await retained.wait(), claimed);
@@ -1035,7 +1063,11 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
     // A fresh shell after reopen is exactly as unprivileged as a fresh shell before it: a
     // returning name inherits nothing an earlier session left unsettled.
     const returning = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({ mux, principal: "file-owner" }),
+      operations: createShellMuxOperations({
+        mux,
+        native: instance.native,
+        principal: "file-owner",
+      }),
     });
     await assert.rejects(
       returning.execute(
@@ -1166,53 +1198,68 @@ test("close fences admission, joins runs, and discards staged work", {
   }
 });
 
-test("shutdownShellMux leaves a borrowed mux and its active run alone", {
+test("shutdownShellMux closes an adopted mux and joins its active run", {
   timeout: 30_000,
 }, async (t) => {
   const instance = await fixture();
-  const gate = join(instance.root, "borrowed-gate");
+  let mux = instance.mux;
+  // Deliberately never released: shutdown must reclaim the held job itself.
+  const gate = join(instance.root, "adopted-gate");
   let run;
   try {
     const tool = createBashTool(instance.seed, {
       operations: createShellMuxOperations({
-        mux: instance.mux,
-        principal: "borrowed-owner",
+        mux,
+        native: instance.native,
+        principal: "adopted-owner",
       }),
     });
-    const ready = deferred(t.signal, "borrowed readiness");
+    const ready = deferred(t.signal, "adopted readiness");
     run = tool.execute(
-      "borrowed",
+      "adopted",
       {
         command: heldChild({
           gate,
-          ready: "BORROW_READY",
-          done: "BORROW_DONE",
+          ready: "ADOPT_READY",
+          done: "ADOPT_DONE",
         }),
       },
       t.signal,
       (update) => {
-        if (text(update).includes("BORROW_READY")) ready.resolve();
+        if (text(update).includes("ADOPT_READY")) ready.resolve();
       },
     );
     await ready.promise;
-    await shutdownShellMux();
-    await release(gate);
-    const result = await run;
-    assert.ok(text(result).includes("BORROW_DONE\n"));
-    const after = await tool.execute(
-      "after-shutdown",
-      { command: "printf 'still open\\n'" },
+    await Promise.all([shutdownShellMux(), assert.rejects(run, Error)]);
+    // The adopted mux was closed exactly by shutdown, and its owner stays fenced.
+    await assert.rejects(mux.exists(instance.seed, "src/file0.txt"), /closed/);
+    await assert.rejects(
+      tool.execute("after-shutdown", { command: "printf late" }, t.signal),
+      /closed/,
+    );
+
+    // A consumer created after shutdown completed starts a new generation.
+    mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
+    const fresh = createBashTool(instance.seed, {
+      operations: createShellMuxOperations({
+        mux,
+        native: instance.native,
+        principal: "adopted-owner",
+      }),
+    });
+    const after = await fresh.execute(
+      "next-generation",
+      { command: "printf 'next generation\\n'" },
       t.signal,
     );
-    assert.equal(text(after), "still open\n");
+    assert.equal(text(after), "next generation\n");
   } finally {
-    await release(gate).catch(() => {});
     await Promise.allSettled([run]);
-    await closeFixture(instance);
+    await closeFixture({ root: instance.root, mux });
   }
 });
 
-test("shutdownShellMux fences a dormant default-owned operations", {
+test("shutdownShellMux fences a dormant operations owner", {
   timeout: 30_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(
