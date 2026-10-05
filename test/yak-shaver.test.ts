@@ -1,5 +1,6 @@
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -631,7 +632,9 @@ function recordingApplier(
   const apply: RefactorApplier = async (refactor) => {
     await before?.(refactor);
     applied.push(refactor);
-    return [...new Set(refactor.proposal.edits.map((edit) => edit.path))].sort();
+    return [
+      ...new Set(refactor.proposal.edits.map((edit) => edit.path)),
+    ].sort();
   };
   return { applied, apply };
 }
@@ -676,7 +679,10 @@ describe("acceptance gates", () => {
       Array(4).fill("rejected"),
     );
     CRITERIA.forEach((name, index) =>
-      assert.match(outcomes[index]?.reason ?? "", new RegExp(`^${name} failed`)),
+      assert.match(
+        outcomes[index]?.reason ?? "",
+        new RegExp(`^${name} failed`),
+      ),
     );
     assert.equal(applied.length, 0);
   }, 30_000);
@@ -885,7 +891,11 @@ describe("admission", () => {
       "new candidates are never admitted",
     );
     assert.deepEqual(
-      run.applied.map((entry) => [entry.rank, entry.candidate.definition.id, entry.files]),
+      run.applied.map((entry) => [
+        entry.rank,
+        entry.candidate.definition.id,
+        entry.files,
+      ]),
       [[1, "fx/C1.ts#C1", ["fx/shared.ts"]]],
     );
     assert.deepEqual(run.totals, {
@@ -1122,7 +1132,7 @@ describe("candidate batch graph", () => {
         },
       },
       { readAssigned: true },
-      { failShard: "Search3" },
+      { failures: { Search3: 1 } },
     ];
     const lanes = await Promise.all(
       laneWorks().map((work, index) =>
@@ -1185,7 +1195,11 @@ describe("candidate batch graph", () => {
       "researchers have neither task nor the proposer's result tool",
     );
     assert.equal(three!.judgeCalls, 0);
-    assert.equal(three!.reads, laneSnapshot.files.length, "researchers read their whole shards");
+    assert.equal(
+      three!.reads,
+      laneSnapshot.files.length,
+      "researchers read their whole shards",
+    );
     assert.equal(four!.judgeCalls, 0);
     for (const [log, own, other] of [
       [one!, "GEN-C1", "GEN-C2"],
@@ -1216,9 +1230,7 @@ describe("candidate batch graph", () => {
       ],
     );
     assert.deepEqual(
-      recorder.applied
-        .map((entry) => entry.candidate.definition.id)
-        .sort(),
+      recorder.applied.map((entry) => entry.candidate.definition.id).sort(),
       ["fx/C1.ts#C1", "fx/C2.ts#C2"],
     );
     const failed = outcomes[3]!;
@@ -1229,8 +1241,8 @@ describe("candidate batch graph", () => {
       [
         ["Search1", "complete"],
         ["Search2", "complete"],
-        ["Search3", "incomplete"],
       ],
+      "an ignored researcher leaves no record",
     );
     assert.match(failed.proposal.reason, /Search3/);
     assertClosed(lanes);
@@ -1263,7 +1275,11 @@ describe("candidate batch graph", () => {
       observer: quiet(),
       apply: recorder.apply,
     });
-    assert.equal(observed.length, 1, "applied exactly once despite cumulative step results");
+    assert.equal(
+      observed.length,
+      1,
+      "applied exactly once despite cumulative step results",
+    );
     assert.equal(observed[0]?.id, "fx/C1.ts#C1");
     assert.ok(
       observed[0]!.yields < 20 && observed[0]!.handles === 0,
@@ -1392,6 +1408,83 @@ describe("candidate batch graph", () => {
     assert.equal(recorder.applied.length, 0);
     assertClosed(created);
   }, 30_000);
+
+  test("failed researchers: ignored shards stay missing, while immediate discretion retries only the failed shard", async () => {
+    const work = laneWorks()[0]!;
+    const cases = [
+      { failures: { Search2: 1 }, missing: ["Search2"] },
+      {
+        failures: { Search1: 1, Search2: 1, Search3: 1 },
+        missing: ["Search1", "Search2", "Search3"],
+      },
+      {
+        failures: { Search2: 1 },
+        missing: [],
+        policy: { retries: 0 },
+        failureDecision: "retry",
+      },
+    ] as const;
+    for (const { failures, missing, ...recovery } of cases) {
+      const scripted = await scriptedLane(work, laneSnapshot, laneSources, {
+        proposal: dupProposal(1),
+        failures,
+        ...("failureDecision" in recovery
+          ? { failureDecision: recovery.failureDecision }
+          : {}),
+      });
+      const recorder = recordingApplier();
+      const [outcome] = await runCandidateBatch({
+        snapshot: laneSnapshot,
+        lanes: [scripted.lane],
+        observer: quiet(),
+        apply: recorder.apply,
+        ...("policy" in recovery ? { taskFailurePolicy: recovery.policy } : {}),
+      });
+      const { log } = scripted;
+      const label = JSON.stringify({ failures, ...recovery });
+      assert.deepEqual(log.handles, ["Search1", "Search2", "Search3"], label);
+      // Each shard succeeds at most once: retries rerun only the failed shard.
+      const expectedStarts = Object.fromEntries(
+        work.shards.map(({ name }) => [
+          name,
+          1 +
+            (missing.length === 0
+              ? ((failures as Record<string, number>)[name] ?? 0)
+              : 0),
+        ]),
+      );
+      assert.deepEqual(log.starts, expectedStarts, label);
+      assert.equal(log.decisions.length, missing.length === 0 ? 1 : 0, label);
+      assert.ok(outcome, label);
+      if (missing.length > 0) {
+        assert.equal(outcome.status, "no-proposal", label);
+        if (outcome.status !== "no-proposal") continue;
+        assert.deepEqual(
+          outcome.proposal.research.map(({ shard }) => shard).sort(),
+          work.shards
+            .map(({ name }) => name)
+            .filter((name) => !missing.includes(name as never)),
+          label,
+        );
+        for (const name of missing)
+          assert.match(outcome.proposal.reason, new RegExp(name), label);
+        assert.equal(log.judgeCalls, 0, label);
+        assert.equal(recorder.applied.length, 0, label);
+      } else {
+        assert.equal(outcome.status, "applied", label);
+        assert.equal(log.judgeCalls, 1, label);
+        assert.equal(recorder.applied.length, 1, label);
+        assert.deepEqual(
+          recorder.applied[0]?.proposal.research
+            .map(({ shard, status }) => [shard, status])
+            .sort(),
+          work.shards.map(({ name }) => [name, "complete"]),
+          label,
+        );
+      }
+      assertClosed([scripted]);
+    }
+  }, 30_000);
 });
 
 // ## The controller
@@ -1406,14 +1499,20 @@ describe("controller", () => {
       seen.push(batch.length);
       return batch.map(none);
     };
-    const { workflow, rankId, resultId } = createYakShaverGraph({
-      snapshot: five,
+    let builds = 0;
+    const { workflow, buildId, rankId, resultId } = createYakShaverGraph({
+      buildSnapshot: async () => {
+        builds++;
+        return five;
+      },
       runBatch,
       refreshSnapshot: noRefresh,
       observer: quiet(),
     });
     try {
       const results = await workflow.run();
+      assert.equal(builds, 1);
+      assert.equal(results.get(buildId)?.kind, "snapshot");
       assert.equal(results.get(rankId)?.kind, "ranking");
       const result = results.get(resultId);
       assert.equal(result?.kind, "run");
@@ -1435,13 +1534,41 @@ describe("controller", () => {
     }
   });
 
+  test("a failed graft build stops the run before ranking or any batch", async () => {
+    let calls = 0;
+    const { workflow, rankId } = createYakShaverGraph({
+      buildSnapshot: async () => {
+        throw new Error("graft build failed");
+      },
+      runBatch: async () => {
+        calls++;
+        return [];
+      },
+      refreshSnapshot: noRefresh,
+      observer: quiet(),
+    });
+    try {
+      await assert.rejects(
+        workflow.run(),
+        (error: unknown) =>
+          error instanceof Error &&
+          "nodeId" in error &&
+          error.nodeId === "GraftBuild",
+      );
+      assert.equal(workflow.result(rankId)._tag, "None");
+      assert.equal(calls, 0);
+    } finally {
+      await workflow.close();
+    }
+  });
+
   test("an empty ranking completes a run without any batch", async () => {
     const empty = snapshotOf([
       { id: "src/f.ts#f", kind: "function", exported: true },
     ]);
     let calls = 0;
     const { workflow, resultId } = createYakShaverGraph({
-      snapshot: empty,
+      buildSnapshot: async () => empty,
       runBatch: async () => {
         calls++;
         return [];
@@ -1471,7 +1598,7 @@ describe("controller", () => {
     const recorder = recordingApplier();
     let calls = 0;
     const { workflow, resultId } = createYakShaverGraph({
-      snapshot: five,
+      buildSnapshot: async () => five,
       signal: controller.signal,
       observer: quiet(),
       refreshSnapshot: noRefresh,
@@ -1527,12 +1654,13 @@ describe("command line", () => {
       stderr: "pipe",
     });
 
-  test("a missing graph fails before any model work; extra arguments are refused", async () => {
+  test("a directory outside a dedicated seed fails before building or any model work; extra arguments are refused", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yak-shaver-"));
     try {
       const run = cli(dir);
       assert.notEqual(await run.exited, 0);
-      assert.match(await new Response(run.stderr).text(), /graft build/);
+      assert.notEqual((await new Response(run.stderr).text()).trim(), "");
+      assert.equal(existsSync(join(dir, "graft")), false, "no graft build ran");
       const extra = cli(dir, "extra");
       assert.notEqual(await extra.exited, 0);
       assert.match(

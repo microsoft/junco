@@ -53,9 +53,17 @@ export {
   shutdownShellMux,
 } from "./shell-mux.js";
 export {
+  type AssignedTaskTool,
+  createAssignedTaskTool,
   createTaskTool,
   invokeTaskTool,
+  isAssignedTaskTool,
   isTaskTool,
+  type TaskCall,
+  type TaskDecision,
+  type TaskInput,
+  type TaskRequest,
+  type TaskTool,
   type TaskToolDetails,
   type TaskToolHost,
 } from "./task.js";

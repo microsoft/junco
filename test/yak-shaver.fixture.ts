@@ -127,15 +127,23 @@ export const userTexts = (context: Context): string[] =>
 export type TaskReport = {
   readonly id: string;
   readonly name?: string;
+  readonly attempt: number;
   readonly status: "completed" | "failed";
   readonly output: string;
   readonly error?: string;
+  readonly decisionRequired?: true;
 };
 
 const reportsIn = (context: Context): TaskReport[] =>
   userTexts(context)
     .filter((text) => text.startsWith('{"type":"task_result"'))
     .map((text) => JSON.parse(text));
+
+/** IDs of every `task_batch_complete` marker in `context`. */
+const completedBatchesIn = (context: Context): string[][] =>
+  userTexts(context)
+    .filter((text) => text.startsWith('{"type":"task_batch_complete"'))
+    .map((text) => JSON.parse(text).ids);
 
 let calls = 0;
 export const call = (name: string, args: Record<string, unknown>) =>
@@ -190,8 +198,10 @@ export type LaneScript = {
     readonly entered: () => void;
     readonly gate: Promise<void>;
   };
-  /** This shard's researcher fails. */
-  readonly failShard?: string;
+  /** How many initial fresh attempts of each named shard fail, at their final answer. */
+  readonly failures?: Readonly<Record<string, number>>;
+  /** The proposer's answer to each failed report that asks for a decision; default `ignore`. */
+  readonly failureDecision?: "retry" | "ignore";
   /** This shard's researcher calls this (waiting) tool first. */
   readonly hang?: { readonly shard: string; readonly tool: string };
   /** The proposer fails instead of researching. */
@@ -214,10 +224,16 @@ export type LaneScript = {
 
 /** What one scripted lane observed. */
 export type LaneLog = {
+  /** Names of the original launch's handles. */
   handles: string[];
   submitErrors: string[];
   forbidden: { toolName: string; isError: boolean; text: string }[];
+  /** Fresh researcher starts, every attempt counted. */
   researchers: number;
+  /** Fresh researcher starts per shard. */
+  starts: Record<string, number>;
+  /** Task decisions the proposer made, as `action id attempt`. */
+  decisions: string[];
   /** Completed `yield` calls the proposer made before researching. */
   yields: number;
   /** Successful `read` results researchers received. */
@@ -248,6 +264,8 @@ export async function scriptedLane(
     submitErrors: [],
     forbidden: [],
     researchers: 0,
+    starts: {},
+    decisions: [],
     yields: 0,
     reads: 0,
     judgeCalls: 0,
@@ -262,6 +280,8 @@ export async function scriptedLane(
   let earlyTried = false;
   let started = false;
   let yieldsLeft = script.beforeResearchYields ?? 0;
+  /** The original launch's handle IDs. */
+  let launched: string[] | undefined;
 
   const researcher = async (
     context: Context,
@@ -278,9 +298,13 @@ export async function scriptedLane(
     );
     if (!answered) {
       log.researchers++;
+      log.starts[shard] = (log.starts[shard] ?? 0) + 1;
       if (script.forbiddenProbe === shard) {
         return toolUse(
-          call("task", { context: "Recursive research", tasks: [{ task: "recurse" }] }),
+          call("task", {
+            context: "Recursive research",
+            tasks: [{ task: "recurse" }],
+          }),
           call("submit_refactor", {
             candidateId: work.candidate.definition.id,
             kind: "none",
@@ -297,19 +321,20 @@ export async function scriptedLane(
       }
       if (script.readAssigned)
         return toolUse(...files.map((path) => call("read", { path })));
-      if (script.failShard === shard) {
-        script.onResearched?.();
-        return fauxAssistantMessage("partial", {
-          stopReason: "error",
-          errorMessage: "researcher crashed",
-        });
-      }
     } else if (script.forbiddenProbe === shard) {
       log.forbidden.push(...latestResults(context));
     } else if (script.readAssigned) {
       log.reads += latestResults(context).filter(
         (result) => result.toolName === "read" && !result.isError,
       ).length;
+    }
+    // Attempts of one shard run one after another, so its latest start is this attempt.
+    if ((log.starts[shard] ?? 0) <= (script.failures?.[shard] ?? 0)) {
+      script.onResearched?.();
+      return fauxAssistantMessage("partial", {
+        stopReason: "error",
+        errorMessage: "researcher crashed",
+      });
     }
     const report: SearchReport = {
       shard,
@@ -344,13 +369,13 @@ export async function scriptedLane(
           errorMessage: "proposer exploded",
         });
       await script.barrier?.();
-      const tasks = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(prompt)![1]!);
-      return toolUse(call("task", tasks));
+      return toolUse(call("task", {}));
     }
     const results = latestResults(context);
     const task = results.find((result) => result.toolName === "task");
-    if (task !== undefined) {
+    if (task !== undefined && launched === undefined) {
       const parsed = JSON.parse(task.text.slice(task.text.indexOf("\n") + 1));
+      launched = parsed.tasks.map((handle: { id: string }) => handle.id);
       log.handles = parsed.tasks.map((handle: { name: string }) => handle.name);
       if (script.earlySubmit && !earlyTried) {
         earlyTried = true;
@@ -379,28 +404,53 @@ export async function scriptedLane(
     }
     if (submitted !== undefined) return fauxAssistantMessage("result recorded");
     const reports = reportsIn(context);
-    if (reports.length < work.shards.length)
-      return fauxAssistantMessage("waiting for researchers");
-    const research: SearchReport[] = reports.map((report) =>
-      report.status === "completed"
-        ? JSON.parse(report.output)
-        : {
-            shard: report.name ?? "",
-            searchedFiles: [],
-            status: "incomplete",
-            report: `${report.name} failed: ${report.error}`,
-          },
+    const decided = new Set(log.decisions);
+    const question = reports.find(
+      ({ decisionRequired, id, attempt }) =>
+        decisionRequired === true &&
+        !decided.has(`retry ${id} ${attempt}`) &&
+        !decided.has(`ignore ${id} ${attempt}`),
     );
-    const failed = research.filter((record) => record.status !== "complete");
+    if (question !== undefined) {
+      const action = script.failureDecision ?? "ignore";
+      log.decisions.push(`${action} ${question.id} ${question.attempt}`);
+      return toolUse(
+        call("task", { action, id: question.id, attempt: question.attempt }),
+      );
+    }
+    const ids = launched ?? [];
+    if (
+      !completedBatchesIn(context).some((batch) =>
+        ids.every((id) => batch.includes(id)),
+      )
+    )
+      return fauxAssistantMessage("waiting for researchers");
+    // Only valid completed reports are evidence; every other shard is missing.
+    const research: SearchReport[] = reports.flatMap((report) => {
+      if (report.status !== "completed") return [];
+      try {
+        return [JSON.parse(report.output) as SearchReport];
+      } catch {
+        return [];
+      }
+    });
+    const missing = work.shards
+      .map((shard) => shard.name)
+      .filter(
+        (name) =>
+          !research.some(
+            (record) => record.shard === name && record.status === "complete",
+          ),
+      );
     const args =
-      script.proposal === undefined || failed.length > 0
+      script.proposal === undefined || missing.length > 0
         ? {
             candidateId: work.candidate.definition.id,
             kind: "none",
             research,
             reason:
-              failed.length > 0
-                ? `Incomplete: ${failed.map((record) => record.shard).join(", ")}`
+              missing.length > 0
+                ? `Incomplete: ${missing.join(", ")}`
                 : "No duplicated responsibility found.",
           }
         : script.proposal(research);

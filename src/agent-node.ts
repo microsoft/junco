@@ -11,8 +11,19 @@ import {
   type ParentView,
   type StepFn,
 } from "dataflow-engine";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "junco-agent";
-import type { TaskToolDetails, TaskToolHost } from "junco-tools";
+import {
+  type AgenticStep,
+  JuncoAgent,
+  JuncoAgentError,
+  type TaskAgentOptions,
+  type TaskFailurePolicy,
+} from "junco-agent";
+import type {
+  TaskDecision,
+  TaskInput,
+  TaskToolDetails,
+  TaskToolHost,
+} from "junco-tools";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import { cancellation } from "./graph-node.js";
 import type { JuncoGraph } from "./junco-graph.js";
@@ -49,22 +60,51 @@ export type AgentNodeBinding = {
 /** The final report a subagent sends back to the agent that started it, as JSON follow-up text. */
 type TaskReport = {
   type: "task_result";
+  /** The stable handle ID, whichever attempt reports. */
   id: string;
   name?: string;
+  attempt: number;
   status: "completed" | "failed";
   output: string;
   stopReason: AssistantMessage["stopReason"];
   error?: string;
+  /** The failed task waits for the caller to retry or ignore it. */
+  decisionRequired?: true;
 };
 
-/** A subagent a task call acquired, not yet registered in a graph. */
+/** A subagent a task call or retry acquired, not yet registered in a graph. */
 type StagedChild = {
+  /** Its node's ID: the task ID for the first attempt, then `<taskId>:attempt:<n>`. */
   readonly id: string;
+  readonly taskId: string;
+  readonly attempt: number;
   readonly name?: string;
   readonly prompt: string;
   readonly agent: JuncoAgent;
-  /** The admitting tool call's native abort signal. */
+  /** The acquiring call's abort signal. */
   readonly signal: AbortSignal;
+};
+
+/** The tasks one launch admitted, in admission order, and how many are not yet resolved. */
+type TaskBatch = { readonly ids: readonly string[]; open: number };
+
+/** One logical task across its attempts. */
+type TaskRecord = {
+  readonly id: string;
+  readonly name?: string;
+  readonly prompt: string;
+  /** The first attempt's resolved model and active tools; every retry uses exactly these. */
+  readonly selection: TaskAgentOptions;
+  readonly policy: TaskFailurePolicy;
+  /** Automatic retries left. */
+  retries: number;
+  attempt: number;
+  /** The current attempt's node ID. */
+  node: string;
+  state: "running" | "retrying" | "awaiting-decision" | "terminal";
+  readonly batch: TaskBatch;
+  /** The queued decision request, while one is pending. */
+  question?: string;
 };
 
 /** The node-internal binding: the public one, plus what a task subagent's node adds. */
@@ -73,7 +113,10 @@ type DriverBinding = {
   readonly receive: NonNullable<AgentNodeBinding["receive"]>;
   readonly emit: NonNullable<AgentNodeBinding["emit"]>;
   /** Messages routed once the final result is ready, one activation before it is returned. */
-  readonly complete?: (message: AssistantMessage) => Message<AgenticInput>[];
+  readonly complete?: (
+    this: Node<Agentic, AgenticInput, AssistantMessage>,
+    message: AssistantMessage,
+  ) => Message<AgenticInput>[] | Promise<Message<AgenticInput>[]>;
   readonly inputMode?: "all-messages";
 };
 
@@ -83,9 +126,9 @@ const PROCESS_REPORTS = "Process the queued task reports.";
 const closedNode = (): JuncoAgentError =>
   new JuncoAgentError("closed", "Agentic node closed before prompt settlement");
 
-/** Close children no graph owns, then rethrow `primary` with any cleanup failures. */
+/** Close agents no graph owns, then rethrow `primary` with any cleanup failures. */
 async function disposeStaged(
-  children: readonly StagedChild[],
+  children: readonly { readonly agent: JuncoAgent }[],
   primary: unknown,
 ): Promise<never> {
   const failures: unknown[] = [];
@@ -105,15 +148,85 @@ async function disposeStaged(
   throw primary;
 }
 
-/** A report on its child's return queue: failed reports are `error` inputs, the rest follow-ups. */
-function taskReportMessage(report: TaskReport): Message<AgenticInput> {
+/** `error` and every value reachable from it through `Error.cause` and `AggregateError.errors`. */
+function reachable(error: unknown): Set<unknown> {
+  const seen = new Set<unknown>();
+  const pending = [error];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (value instanceof AggregateError) pending.push(...value.errors);
+    if (value instanceof Error && "cause" in value) pending.push(value.cause);
+  }
+  return seen;
+}
+
+/**
+ * Whether `cleanup` reports a failure beyond `failure`: closing a faulted agent rethrows the fault
+ * that failed it, which is no separate cleanup failure.
+ */
+function addsFailure(cleanup: unknown, failure: unknown): boolean {
+  const known = reachable(failure);
+  const seen = new Set<unknown>();
+  const pending = [cleanup];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (known.has(value) || seen.has(value)) continue;
+    seen.add(value);
+    if (!(value instanceof AggregateError)) return true;
+    pending.push(...value.errors);
+  }
+  return false;
+}
+
+/** A report on its attempt's return queue: failed reports are `error` inputs, the rest follow-ups. */
+function taskReportMessage(
+  child: StagedChild,
+  report: Pick<TaskReport, "status" | "output" | "stopReason" | "error">,
+): Message<AgenticInput> {
+  const full: TaskReport = {
+    type: "task_result",
+    id: child.taskId,
+    ...(child.name === undefined ? {} : { name: child.name }),
+    attempt: child.attempt,
+    ...report,
+  };
   return {
-    id: EdgeId(`${report.id}->${ROOT}`),
+    id: EdgeId(`${child.id}->${ROOT}`),
     payload: {
       kind: report.status === "failed" ? "error" : "followUp",
-      text: JSON.stringify(report),
+      text: JSON.stringify(full),
     },
   };
+}
+
+/** A delivered report, or a protocol error: only task nodes write to the root. */
+function parseReport(text: string): TaskReport {
+  let report: unknown;
+  try {
+    report = JSON.parse(text);
+  } catch (cause) {
+    throw new JuncoAgentError("invalid_state", "Malformed task report", {
+      cause,
+    });
+  }
+  if (
+    typeof report !== "object" ||
+    report === null ||
+    !("type" in report) ||
+    report.type !== "task_result" ||
+    !("id" in report) ||
+    typeof report.id !== "string" ||
+    !("attempt" in report) ||
+    typeof report.attempt !== "number" ||
+    !Number.isSafeInteger(report.attempt) ||
+    report.attempt < 1 ||
+    !("status" in report) ||
+    (report.status !== "completed" && report.status !== "failed")
+  )
+    throw new JuncoAgentError("invalid_state", "Malformed task report");
+  return report as TaskReport;
 }
 
 /**
@@ -160,10 +273,14 @@ class AgentDriver {
   readonly inputs: AgenticInput[] = [];
   /** Messages the agent's yields routed, emitted by the original node's body. */
   readonly outbox: Message<AgenticInput>[] = [];
-  /** Subagents accepted by task calls and not yet registered in a graph. */
+  /** Subagents accepted by task calls or retries and not yet registered in a graph. */
   staged: StagedChild[] = [];
-  /** Accepted subagents whose report has not crossed into this agent's node. */
+  /** Every admitted task by its stable handle ID. */
+  readonly tasks = new Map<string, TaskRecord>();
+  /** Admitted tasks neither completed nor ignored. */
   readonly outstanding = new Set<string>();
+  /** Report and completion texts to queue natively, in order, at the next opportunity. */
+  readonly notices: string[] = [];
   /** Report texts queued natively that have not entered the agent's context. */
   readonly unread = new Set<string>();
   /** A native assistant message followed the latest report that entered the context. */
@@ -183,7 +300,7 @@ class AgentDriver {
     this.policy = policy;
   }
 
-  /** Admits a task batch: acquires every subagent, then stages them with fresh handle IDs. */
+  /** Admits a launch or applies a decision. */
   readonly host: TaskToolHost = async (_toolCallId, input, signal) => {
     const caller = this.agent;
     if (!(caller instanceof JuncoAgent))
@@ -191,41 +308,224 @@ class AgentDriver {
         "invalid_state",
         "Only a JuncoAgent runs tasks",
       );
+    return "action" in input
+      ? this.#decide(caller, input, signal)
+      : this.#launch(caller, input, signal);
+  };
+
+  /** Acquires and prepares every subagent, then stages them all with fresh handle IDs. */
+  async #launch(
+    caller: JuncoAgent,
+    input: TaskInput,
+    signal: AbortSignal,
+  ): Promise<TaskToolDetails["tasks"]> {
+    const policy = caller.getTaskFailurePolicy();
     const children = await caller.createSubagents(
       input.tasks.map(({ model, tools }) => ({ model, tools })),
       signal,
     );
-    const staged = children.map((agent, index): StagedChild => {
-      const { name, task } = input.tasks[index]!;
-      return {
-        id: `task-${crypto.randomUUID()}`,
-        ...(name === undefined ? {} : { name }),
-        prompt: `${input.context}\n\n${task}`,
-        agent,
-        signal,
-      };
-    });
-    this.staged.push(...staged);
-    for (const { id } of staged) this.outstanding.add(id);
-    return staged.map(({ id, name }): TaskToolDetails["tasks"][number] =>
+    const ids = children.map(() => `task-${crypto.randomUUID()}`);
+    const batch: TaskBatch = { ids, open: ids.length };
+    const prepared: { child: StagedChild; record: TaskRecord }[] = [];
+    try {
+      for (const [index, agent] of children.entries()) {
+        const { name, task } = input.tasks[index]!;
+        const id = ids[index]!;
+        const prompt = `${input.context}\n\n${task}`;
+        const model = await agent.getModel();
+        if (model === undefined)
+          throw new JuncoAgentError("invalid_state", "Subagent has no model");
+        const named = name === undefined ? {} : { name };
+        prepared.push({
+          child: {
+            id,
+            taskId: id,
+            attempt: 1,
+            ...named,
+            prompt,
+            agent,
+            signal,
+          },
+          record: {
+            id,
+            ...named,
+            prompt,
+            selection: {
+              model: { provider: model.provider, modelId: model.id },
+              tools: agent.getActiveTools().map((tool) => tool.name),
+            },
+            policy,
+            retries: policy === "ignore" ? 0 : policy.retries,
+            attempt: 1,
+            node: id,
+            state: "running",
+            batch,
+          },
+        });
+      }
+      signal.throwIfAborted();
+    } catch (error) {
+      return disposeStaged(
+        children.map((agent) => ({ agent })),
+        error,
+      );
+    }
+    for (const { child, record } of prepared) {
+      this.staged.push(child);
+      this.tasks.set(record.id, record);
+      this.outstanding.add(record.id);
+    }
+    return prepared.map(({ record: { id, name } }) =>
       name === undefined ? { id } : { id, name },
     );
-  };
+  }
+
+  /** Retries or ignores a failed task awaiting the caller's decision about its current attempt. */
+  async #decide(
+    caller: JuncoAgent,
+    { action, id, attempt }: TaskDecision,
+    signal: AbortSignal,
+  ): Promise<TaskToolDetails["tasks"]> {
+    const record = this.tasks.get(id);
+    if (record === undefined) throw new Error(`Unknown task ${id}`);
+    if (record.state !== "awaiting-decision")
+      throw new Error(`Task ${id} is not awaiting a decision`);
+    if (attempt !== record.attempt)
+      throw new Error(
+        `Task ${id} awaits a decision about attempt ${record.attempt}, not ${attempt}`,
+      );
+    if (action === "ignore") {
+      this.#resolve(record);
+      return [];
+    }
+    // Reserved while acquiring, so a concurrent decision cannot start a second attempt.
+    record.state = "retrying";
+    try {
+      this.staged.push(await this.#acquire(caller, record, signal));
+    } catch (error) {
+      record.state = "awaiting-decision";
+      throw error;
+    }
+    record.question = undefined;
+    return [record.name === undefined ? { id } : { id, name: record.name }];
+  }
+
+  /** A fresh attempt of `record` with its pinned model, tools and prompt. */
+  async #acquire(
+    caller: JuncoAgent,
+    record: TaskRecord,
+    signal: AbortSignal,
+  ): Promise<StagedChild> {
+    const [agent] = await caller.createSubagents([record.selection], signal);
+    if (agent === undefined)
+      throw new JuncoAgentError("invalid_state", "No subagent acquired");
+    record.attempt += 1;
+    record.node = `${record.id}:attempt:${record.attempt}`;
+    record.state = "running";
+    return {
+      id: record.node,
+      taskId: record.id,
+      attempt: record.attempt,
+      ...(record.name === undefined ? {} : { name: record.name }),
+      prompt: record.prompt,
+      agent,
+      signal,
+    };
+  }
+
+  /** Ends `record` as completed or ignored; its batch's last resolution queues its completion. */
+  #resolve(record: TaskRecord): void {
+    record.state = "terminal";
+    record.question = undefined;
+    this.outstanding.delete(record.id);
+    record.batch.open -= 1;
+    if (record.batch.open === 0)
+      this.notices.push(
+        JSON.stringify({ type: "task_batch_complete", ids: record.batch.ids }),
+      );
+  }
 
   /**
-   * One activation: dispatch pending inputs, queue `reports` as follow-ups, then advance the run
-   * at most once. A real agent does this with its task host bound, observing which reports enter
-   * its context, and with its complaints attributed to the registered `node`'s id, its delivered
-   * `messages` and the tracer of the graph `node` was registered in, if any.
+   * Consume one report from a task node: only the current attempt's first report on its own
+   * return edge counts; duplicate or stale deliveries change nothing.
+   */
+  async #receive(
+    { id: edge, payload }: Message<AgenticInput>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (payload.kind !== "followUp" && payload.kind !== "error")
+      throw new JuncoAgentError("invalid_state", "Malformed task report");
+    const report = parseReport(payload.text);
+    const record = this.tasks.get(report.id);
+    if (record === undefined)
+      throw new JuncoAgentError("invalid_state", "Malformed task report");
+    if (
+      edge !== EdgeId(`${record.node}->${ROOT}`) ||
+      report.attempt !== record.attempt ||
+      record.state !== "running"
+    )
+      return;
+    if (report.status === "completed") {
+      this.notices.push(payload.text);
+      this.#resolve(record);
+      return;
+    }
+    if (record.policy === "ignore") {
+      this.#resolve(record);
+      return;
+    }
+    let error = report.error;
+    while (record.retries > 0) {
+      record.retries -= 1;
+      record.state = "retrying";
+      try {
+        this.staged.push(
+          await this.#acquire(this.agent as JuncoAgent, record, signal),
+        );
+        return;
+      } catch (failure) {
+        if (signal.aborted) throw failure;
+        error = taskErrorText(failure);
+      }
+    }
+    record.state = "awaiting-decision";
+    record.question = JSON.stringify({
+      ...report,
+      ...(error === undefined ? {} : { error }),
+      decisionRequired: true,
+    } satisfies TaskReport);
+    this.notices.push(record.question);
+  }
+
+  /** Queue every pending notice natively, in order. */
+  async #flush(): Promise<void> {
+    for (const text of this.notices.splice(0)) {
+      this.unread.add(text);
+      await this.agent.followUp(text);
+    }
+  }
+
+  /**
+   * One activation: dispatch pending inputs, consume task reports, then advance the run at most
+   * once. A real agent does this with its task host bound, observing which reports enter its
+   * context, and with its complaints attributed to the registered `node`'s id, its delivered
+   * `messages` and the tracer of the graph `node` was registered in, if any. `reports` are an
+   * expanded root's deliveries, with the signal of the graph that owns their tasks.
    */
   async activate(
     node: Node<Agentic, AgenticInput, AssistantMessage>,
     messages: readonly Message<AgenticInput>[],
-    reports: readonly string[],
     emit: DriverBinding["emit"],
+    reports?: { readonly signal: AbortSignal },
   ): Promise<void> {
     const agent = this.agent;
-    if (!(agent instanceof JuncoAgent)) return this.#advance(reports, emit);
+    const advance = async () => {
+      if (reports !== undefined)
+        for (const message of messages)
+          await this.#receive(message, reports.signal);
+      return this.#advance(emit);
+    };
+    if (!(agent instanceof JuncoAgent)) return advance();
     const unsubscribe = agent.events.on("message_end", ({ lane, message }) => {
       if (lane !== "main") return;
       if (message.role === "user") {
@@ -243,18 +543,14 @@ class AgentDriver {
           messages,
           ...(tracer === undefined ? {} : { tracer }),
         },
-        () =>
-          agent.runWithTaskHost(this.host, () => this.#advance(reports, emit)),
+        () => agent.runWithTaskHost(this.host, advance),
       );
     } finally {
       unsubscribe();
     }
   }
 
-  async #advance(
-    reports: readonly string[],
-    emit: DriverBinding["emit"],
-  ): Promise<void> {
+  async #advance(emit: DriverBinding["emit"]): Promise<void> {
     const agent = this.agent;
     for (const input of this.inputs.splice(0)) await this.#dispatch(input);
     if (this.#prompt !== undefined) {
@@ -262,19 +558,7 @@ class AgentDriver {
       this.#prompt = undefined;
       await this.#dispatch({ kind: "prompt", text });
     }
-    for (const text of reports) {
-      const report: unknown = JSON.parse(text);
-      if (
-        typeof report !== "object" ||
-        report === null ||
-        !("id" in report) ||
-        typeof report.id !== "string"
-      )
-        throw new JuncoAgentError("invalid_state", "Malformed task report");
-      this.outstanding.delete(report.id);
-      this.unread.add(text);
-      await agent.followUp(text);
-    }
+    await this.#flush();
     if (!this.started) {
       // A control-only delivery to an idle agent has nothing to await.
       if (agent.status !== "ready") return;
@@ -297,9 +581,19 @@ class AgentDriver {
     }
     this.active = false;
     if (boundary.kind === "failed") throw boundary.error;
+    // Notices a task call queued during this run keep its answer interim.
+    await this.#flush();
+    if (this.unread.size > 0 || !this.answered) return;
+    const undecided = [...this.tasks.values()].filter(
+      ({ question }) => question !== undefined,
+    );
+    if (undecided.length > 0)
+      throw new JuncoAgentError(
+        "invalid_state",
+        `Task failure decisions required: ${undecided.map(({ id }) => id).join(", ")}`,
+      );
     // An earlier answer is interim until every accepted report was answered.
-    if (this.outstanding.size === 0 && this.unread.size === 0 && this.answered)
-      this.result = boundary.message;
+    if (this.outstanding.size === 0) this.result = boundary.message;
   }
 
   async #dispatch(input: AgenticInput): Promise<void> {
@@ -366,8 +660,36 @@ function driverNode(
   let spawned: JuncoGraph | undefined;
 
   /**
-   * A task subagent's node: started by its queued prompt, reporting its final message. A thrown
-   * failure closes the subagent and reports it as an `error` input instead of a result.
+   * Close a failed attempt's node state exactly once, record its failure for the root, and report
+   * it. Teardown failure is no task failure: it propagates with both causes.
+   */
+  const retire = async (
+    node: Node<Agentic, AgenticInput, AssistantMessage>,
+    child: StagedChild,
+    failure: unknown,
+    report: Pick<TaskReport, "output" | "stopReason" | "error">,
+  ): Promise<Message<AgenticInput>[]> => {
+    // The failed subagent, or the Spawn graph it expanded into; never the containing graph.
+    const state = node.state;
+    // This teardown owns the state's outcome; the owning graph's close must not repeat it.
+    nodePolicies.get(node.step)!.closedTaskState = state;
+    try {
+      await state[Symbol.asyncDispose]();
+    } catch (cleanupError) {
+      if (addsFailure(cleanupError, failure))
+        throw new AggregateError(
+          [failure, cleanupError],
+          "Task subagent execution and cleanup failed",
+          { cause: failure },
+        );
+    }
+    return [taskReportMessage(child, { status: "failed", ...report })];
+  };
+
+  /**
+   * A task subagent's node: started by its queued prompt, reporting its final message. An
+   * unsuccessful settlement or a thrown failure closes the subagent and reports the failure as an
+   * `error` input; cancellation of the owning graph propagates instead.
    */
   const childNode = (child: StagedChild): AgenticNode => ({
     ...driverNode(
@@ -383,50 +705,46 @@ function driverNode(
             (id) => view.messages.get(id) ?? [],
           ),
         emit: () => [],
-        complete: (message) => [
-          taskReportMessage({
-            type: "task_result",
-            id: child.id,
-            ...(child.name === undefined ? {} : { name: child.name }),
-            status: message.stopReason === "stop" ? "completed" : "failed",
-            output: contentText(message.content),
-            stopReason: message.stopReason,
-            ...(message.errorMessage === undefined
+        async complete(message) {
+          const output = contentText(message.content);
+          const error =
+            message.errorMessage === undefined
               ? {}
-              : { error: message.errorMessage }),
-          }),
-        ],
+              : { error: message.errorMessage };
+          if (message.stopReason === "stop")
+            return [
+              taskReportMessage(child, {
+                status: "completed",
+                output,
+                stopReason: message.stopReason,
+                ...error,
+              }),
+            ];
+          spawned?.signal.throwIfAborted();
+          if (agent.status === "closed") throw closedNode();
+          return retire(
+            this,
+            child,
+            new Error(
+              message.errorMessage ?? `Subagent stopped: ${message.stopReason}`,
+            ),
+            { output, stopReason: message.stopReason, ...error },
+          );
+        },
         inputMode: "all-messages",
       },
     ),
     async on_error(error, signal) {
       signal?.throwIfAborted();
-      // The failed subagent, or the Spawn graph it expanded into; never the containing graph.
-      const state = this.state;
-      let failure = error;
-      try {
-        await state[Symbol.asyncDispose]();
-      } catch (cleanupError) {
-        failure = new AggregateError(
-          [error, cleanupError],
-          "Task subagent execution and cleanup failed",
-          { cause: error },
-        );
-      }
-      const notification = [
-        taskReportMessage({
-          type: "task_result",
-          id: child.id,
-          ...(child.name === undefined ? {} : { name: child.name }),
-          status: "failed",
-          output: "",
-          stopReason: "error",
-          error: taskErrorText(failure),
-        }),
-      ];
+      // A failed teardown already retired this attempt; it never retires twice.
+      if (nodePolicies.get(this.step)!.closedTaskState === this.state)
+        throw error;
+      const notification = await retire(this, child, error, {
+        output: "",
+        stopReason: "error",
+        error: taskErrorText(error),
+      });
       signal?.throwIfAborted();
-      // The report owns this teardown's outcome; the owning graph's close must not rethrow it.
-      nodePolicies.get(this.step)!.closedTaskState = state;
       return notification;
     },
   });
@@ -436,6 +754,9 @@ function driverNode(
     const staged = driver.staged;
     if (staged.length === 0) return;
     driver.staged = [];
+    // As at expansion: a call aborted after acquiring its children never publishes them.
+    const aborted = staged.find(({ signal }) => signal.aborted)?.signal;
+    if (aborted !== undefined) await disposeStaged(staged, aborted.reason);
     try {
       appendSpawnChildren(graph, ROOT, staged, childNode);
     } catch (error) {
@@ -466,17 +787,11 @@ function driverNode(
     const rootPolicy: NodePolicy = { agent, inputMode: "all-messages" };
     const rootStep: StepFn<Agentic, AgenticInput, AssistantMessage> =
       async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-        let reports: string[] = [];
         let messages: Message<AgenticInput>[] = [];
         while (true) {
-          await driver.activate(this, messages, reports, emit);
+          await driver.activate(this, messages, emit, { signal: graph.signal });
           if (driver.result !== undefined) return driver.result;
-          const view = yield [];
-          messages = deliveredMessages(view);
-          reports = [];
-          for (const { payload } of messages)
-            if (payload.kind === "followUp" || payload.kind === "error")
-              reports.push(payload.text);
+          messages = deliveredMessages(yield []);
         }
       };
     nodePolicies.set(rootStep, rootPolicy);
@@ -564,9 +879,11 @@ function driverNode(
   const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
     async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
       let view = yield [];
-      let reported = false;
+      /** The result already reported; a failed attempt's state is closed by then. */
+      let reported: AssistantMessage | undefined;
       try {
         while (true) {
+          if (reported !== undefined) return reported;
           const messages = deliveredMessages(view);
           for (const input of receive({
             messages: view.messages,
@@ -575,7 +892,7 @@ function driverNode(
             driver.inputs.push(input);
           if (driver.outbox.length === 0 && finished() === undefined) {
             if (spawned === undefined) {
-              await driver.activate(this, messages, [], emit);
+              await driver.activate(this, messages, emit);
               if (driver.staged.length > 0) spawned = await expand(this);
             } else {
               await advanceGraph(spawned);
@@ -588,9 +905,9 @@ function driverNode(
           }
           const result = finished();
           if (result !== undefined) {
-            if (complete === undefined || reported) return result;
-            reported = true;
-            view = yield complete(result);
+            if (complete === undefined) return result;
+            reported = result;
+            view = yield await complete.call(this, result);
             continue;
           }
           view = yield [];
@@ -620,9 +937,9 @@ function driverNode(
       ((view, triggered) => {
         if (spawned !== undefined)
           return (
+            driver.result !== undefined ||
             spawned.available().size > 0 ||
             driver.outbox.length > 0 ||
-            driver.result !== undefined ||
             (triggered && hasFreshInput(view))
           );
         return (

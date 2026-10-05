@@ -15,7 +15,10 @@
  *    resolved against the current snapshot. One batch is one `JuncoGraph` of parallel lanes
  *    `Proposer:r ==proposal:r==> Judge:r`; every proposer expands at runtime into a native Spawn
  *    star of up to three read-only researchers (`Search1`–`Search3`) that split the whole indexed
- *    file list far-first. A proposer records one structured result through `submit_refactor`; an
+ *    file list far-first. Each proposer's research batch is fixed by `setTaskBatch`; the model only
+ *    launches it with `task({})`. Failed research follows `taskFailurePolicy` (default `"ignore"`:
+ *    dropped silently and counted as missing coverage; `{ retries: 0 }` asks the proposer to retry
+ *    or ignore at once). A proposer records one structured result through `submit_refactor`; an
  *    independent judge records four criteria through `judge_refactor`.
  * 4. **Application.** As soon as a lane's review completes with all four criteria, at least one new
  *    caller definition, and a positive projected net of removed nonblank source lines, its edits
@@ -23,15 +26,16 @@
  *    command, so the lane's owner both edits and releases its files. Completed applications drain
  *    one at a time; research and review stay parallel. After a batch that applied anything, a
  *    private, discarded `graft build` refreshes the in-memory snapshot for the next admission.
- * 5. **Output.** A structured run on stdout; no report file. Nothing is committed, and the Graft
- *    cache is never published: rebuild it before the next run.
+ * 5. **Output.** A structured run on stdout; no report file. Nothing is committed.
  *
- * Controller topology (two deterministic nodes, no model nodes):
+ * Controller topology (three deterministic nodes, no model nodes). `GraftBuild` is setup: it runs
+ * `graft build .` through the tool collection's sandboxed `bash` tool, so every run starts from a
+ * current index, and reads the published `graft/.graph/wiring.json`:
  *
  * ```text
- * [RankCandidates] ==ranking==> [RefactorBatches]
- *                                      | drives one stepwise batch graph at a time;
- *                                      | a completed lane: review → apply + git add
+ * [GraftBuild] ==snapshot==> [RankCandidates] ==ranking==> [RefactorBatches]
+ *                                                                 | drives one stepwise batch graph at a time;
+ *                                                                 | a completed lane: review → apply + git add
  * ```
  *
  * Ownership: the runner owns the process ShellMux lease (opened `sandbox: "always"` before any
@@ -40,8 +44,8 @@
  * their native research children and is closed before the next batch is admitted. Previously
  * applied and staged refactors are retained when a later step fails.
  *
- * Prerequisites: an installed `graft` (0.21.1-compatible, run as `graft mcp <root>`), a current
- * index (`graft build <root>` beforehand; Graft's normal query refresh stays enabled), the
+ * Prerequisites: an installed `graft` (0.21.1-compatible, run as `graft mcp <root>` and
+ * `graft build .`; Graft's normal query refresh stays enabled), the
  * production `junco-tools/native` addon, the Git working-tree root inside a dedicated Btrfs seed,
  * and a saved Pi GitHub Copilot login entitled to both pinned models. Run:
  *
@@ -85,9 +89,8 @@ const PROVIDER = "github-copilot";
 const PROPOSER_MODEL = { model: "claude-sonnet-5.5", thinkingLevel: "medium" } as const;
 const JUDGE_MODEL = { model: "gpt-6.1-sol", thinkingLevel: "high" } as const;
 
-/** The Graft MCP tools researchers use; freshness stays with the deterministic runner. */
+/** The Graft MCP tools researchers use; the index itself is rebuilt by the `GraftBuild` node. */
 const GRAFT_RESEARCH_TOOLS = ["graft_find_code", "graft_find_all", "graft_file_api", "graft_trace_calls"] as const;
-const GRAFT_FRESHNESS_TOOL = "graft_check_freshness";
 const FILE_RESEARCH_TOOLS = ["read", "grep"] as const;
 
 // ## 2. The Graft snapshot
@@ -1240,8 +1243,8 @@ function candidateContract(snapshot: GraftSnapshot, work: CandidateWork): string
   return lines.join("\n");
 }
 
-/** The exact `task` input a proposer submits: one read-only researcher per shard. */
-function researchTasks(work: CandidateWork, contract: string, researchTools: readonly string[]) {
+/** A proposer's assigned research batch, stored on its `task` tool: one read-only researcher per shard. */
+function researchTasks(work: CandidateWork, contract: string, researchTools: readonly string[]): tools.TaskInput {
   return {
     context: `You are a read-only researcher for one refactor candidate.\n\n${contract}`,
     tasks: work.shards.map((shard) => ({
@@ -1264,15 +1267,15 @@ function proposerPrompt(snapshot: GraftSnapshot, work: CandidateWork, researchTo
   const contract = candidateContract(snapshot, work);
   const trace = researchTools.find((name) => name.endsWith("graft_trace_calls")) ?? "graft_trace_calls";
   const symbol = node.id.slice(node.id.indexOf("#") + 1).replace(/~\d+(?=\.|$)/g, "");
-  const tasks = researchTasks(work, contract, researchTools);
+  const shards = work.shards.map((shard) => `${shard.name} (${shard.files.length} files)`).join(", ");
   return [
     "You propose one generalizing refactor for the candidate below: make it serve more existing code so duplicated code elsewhere disappears, with the minimum necessary change. Line numbers and source refer to the repository as of this admission batch, which already contains every refactor applied earlier in the run.",
     contract,
     `## Phase 1: callers\nFor the candidate and each owned method, call \`${trace}\` with { "symbol": <its qualified name after "#", without ~N suffixes>, "in": "${node.path}", "direction": "in", "depth": 1 } (for the candidate: "${symbol}"). Graft does not resolve full IDs, so match results to the IDs above. Reconcile the deterministic count of ${work.candidate.callerIds.length} distinct callers, then read each caller's source. Report unresolved evidence; do not guess.`,
-    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with exactly this input (copy it verbatim; researchers inherit your model and may use only the listed tools):\n\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\`\nThen wait for all ${work.shards.length} reports. A failed or malformed report means that shard is incomplete, not that it found nothing.`,
+    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with \`{}\`. It starts your ${work.shards.length} assigned read-only researchers (${shards}); their assignments are fixed, they inherit your model and may use only ${researchTools.join(", ")}. It returns one handle ID per researcher. Their reports arrive later as messages carrying those IDs; wait until a \`task_batch_complete\` message lists every returned handle ID, which means every researcher finished or was given up. A failed report marked decisionRequired must first be resolved through \`${TASK_TOOL}\` as its tool description says. A missing, failed, malformed, or incomplete report means that shard is incomplete, not that it found nothing.`,
     [
-      `## Phase 3: one result\nMerge compatible findings into at most one cohesive generalization of this candidate and call \`${SUBMIT_TOOL}\` exactly once:`,
-      `- research: every researcher's returned JSON report, copied verbatim (one per shard).`,
+      `## Phase 3: one result\nMerge compatible findings into at most one cohesive generalization of this candidate and record it with one successful \`${SUBMIT_TOOL}\` call (if it rejects your input, correct it and call again):`,
+      `- research: every valid researcher JSON report you actually received, copied verbatim (at most one per shard); never write a record for a researcher that returned none.`,
       `- kind "proposal" only when every shard is complete. Give generalization (final API/signatures and ordered implementation steps), compatibility (one entry per existing caller ID above), substitutions (existing definitions whose duplicate code your edits replace, by edit index), edits, newSites, and dependencyReason (which duplicate layer or branch disappears and why the shared abstraction is coherent).`,
       `- edits use the current source as you read it: kind "replace" copies the exact current lines as beforeLines starting at 1-based startLine ([] beforeLines inserts before startLine; [] afterLines deletes); kind "create" adds a new file (startLine 1, beforeLines []), which counts against line savings. Edits must not overlap. If the judge approves, your edits are applied in place and their files staged automatically; a file changed meanwhile by a concurrent lane makes the application fail, so keep edits to the files your generalization needs.`,
       `- newSites: each new use of the generalized candidate inside an existing indexed definition that does not use it today: callerId, editIndex, afterLine and column (1-based, within that edit's afterLines) and the exact expression. New files or tests do not count.`,
@@ -1320,6 +1323,8 @@ export type CandidateBatchGraphOptions = {
   readonly snapshot: GraftSnapshot;
   readonly lanes: readonly CandidateLane[];
   readonly observer?: tracer.DataflowTracer;
+  /** What happens to a failed researcher; default `"ignore"`: its shard stays incomplete. */
+  readonly taskFailurePolicy?: agent.TaskFailurePolicy;
 };
 
 export type CandidateBatchRunOptions = CandidateBatchGraphOptions & {
@@ -1345,28 +1350,6 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   const text = contentText(message.content).trim();
   if (!text) throw new Error(`${member} produced an empty final message`);
   return text;
-}
-
-/**
- * Researchers inherit the proposer's pinned model and get only its research tools: never `task`
- * (no recursive spawning) and never `submit_refactor`. A task omitting `tools` gets the research set;
- * one asking for anything else, or another model, fails as a tool error the proposer can correct.
- */
-function confineResearchers(proposer: agent.JuncoAgent): void {
-  const create = proposer.createSubagents.bind(proposer);
-  proposer.createSubagents = async (options, signal) => {
-    const research = proposer.getActiveTools().map((tool) => tool.name).filter((name) => name !== TASK_TOOL && name !== SUBMIT_TOOL);
-    const confined = options.map((option, index) => {
-      if (option.model !== undefined) throw new Error(`tasks[${index}]: researchers inherit your model; omit model`);
-      const requested = option.tools ?? research;
-      const forbidden = requested.filter((name) => !research.includes(name));
-      if (forbidden.length > 0) {
-        throw new Error(`tasks[${index}]: researchers may use only ${research.join(", ")}; remove ${forbidden.join(", ")}`);
-      }
-      return { tools: [...requested] };
-    });
-    return create(confined, signal);
-  };
 }
 
 async function disposeAll(primary: unknown, closers: readonly (() => Promise<unknown>)[], message: string): Promise<never> {
@@ -1396,10 +1379,12 @@ export async function createCandidateBatchGraph(options: CandidateBatchGraphOpti
       throw new Error(`A candidate batch has 1–${CANDIDATE_BATCH_SIZE} lanes, not ${lanes.length}`);
     }
     if (new Set(lanes.map((lane) => lane.work.rank)).size !== lanes.length) throw new Error("Candidate batch ranks must be unique");
-    const graphLanes = lanes.map((lane): CandidateGraphLane => {
+    const graphLanes: CandidateGraphLane[] = [];
+    for (const lane of lanes) {
       const { work } = lane;
       const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter((name) => name !== TASK_TOOL && name !== SUBMIT_TOOL);
-      confineResearchers(lane.proposer);
+      await lane.proposer.setTaskBatch(researchTasks(work, candidateContract(snapshot, work), research));
+      lane.proposer.setTaskFailurePolicy(options.taskFailurePolicy ?? "ignore");
       lane.proposer.events.on("message_end", ({ lane: channel, message }) => {
         if (channel === "main" && message.role === "user") lane.proposal.noteTaskReport(contentText(message.content));
       });
@@ -1442,8 +1427,8 @@ export async function createCandidateBatchGraph(options: CandidateBatchGraphOpti
       });
       unregistered.delete(lane.judge);
       workflow.addEdge(proposerId, judgeId, proposalEdge);
-      return { work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId };
-    });
+      graphLanes.push({ work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId });
+    }
     return { workflow, lanes: graphLanes };
   } catch (error) {
     return disposeAll(
@@ -1555,41 +1540,61 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
 
 // ## 9. The controller
 //
-// Two deterministic nodes on one value edge. `RefactorBatches` awaits one batch runner call per
-// admission group inside its own coroutine; the batch graphs are not members of the controller.
+// Three deterministic nodes on two value edges. `GraftBuild` rebuilds the Graft index first;
+// `RefactorBatches` awaits one batch runner call per admission group inside its own coroutine; the
+// batch graphs are not members of the controller.
 
 export type RefactorValue =
-  | { readonly kind: "ranking"; readonly candidates: readonly Candidate[] }
+  | { readonly kind: "snapshot"; readonly snapshot: GraftSnapshot }
+  | { readonly kind: "ranking"; readonly snapshot: GraftSnapshot; readonly candidates: readonly Candidate[] }
   | { readonly kind: "run"; readonly run: RefactorRun };
 
-/** The controller graph and its two node IDs; `resultId` names `RefactorBatches`. */
+/** Rebuilds the Graft index in place and reads the fresh snapshot. */
+export type SnapshotBuilder = (signal: AbortSignal) => Promise<GraftSnapshot>;
+
+/** The controller graph and its node IDs; `resultId` names `RefactorBatches`. */
 export type YakShaverGraph = {
   readonly workflow: graph.JuncoGraph<never, RefactorValue>;
+  readonly buildId: graph.NodeIdType;
   readonly rankId: graph.NodeIdType;
   readonly resultId: graph.NodeIdType;
 };
 
-/** The controller graph: rank once, then refactor every admission group. */
+/** The controller graph: build the index, rank once, then refactor every admission group. */
 export function createYakShaverGraph(options: {
-  readonly snapshot: GraftSnapshot;
+  readonly buildSnapshot: SnapshotBuilder;
   readonly runBatch: BatchRunner;
   readonly refreshSnapshot: SnapshotRefresher;
   readonly signal?: AbortSignal;
   readonly observer?: tracer.DataflowTracer;
 }): YakShaverGraph {
-  const { snapshot, runBatch, refreshSnapshot, signal } = options;
+  const { buildSnapshot, runBatch, refreshSnapshot, signal } = options;
   const combined = (own: AbortSignal) => (signal === undefined ? own : AbortSignal.any([signal, own]));
+  const built = graph.valueEdge<never, RefactorValue>("snapshot");
   const ranking = graph.valueEdge<never, RefactorValue>("ranking");
   const workflow = graph.createParallelAgentGraph<never, RefactorValue>(options.observer);
+
+  /** GraftBuild: setup; runs `graft build` so every later node sees a current index. */
+  const buildId = workflow.addNode(
+    graph.nodes.deterministicNode(
+      new graph.nodes.Deterministic<never, RefactorValue>(async function* (own): graph.NodeGenerator<never, RefactorValue> {
+        return { kind: "snapshot", snapshot: await buildSnapshot(combined(own)) };
+      }),
+      { id: graph.NodeId("GraftBuild"), description: "Rebuilds the Graft index with `graft build`.", trigger: graph.trigger.always() },
+    ),
+  );
 
   /** RankCandidates: inventory, longest-path depths, distinct callers, and order. */
   const rankId = workflow.addNode(
     graph.nodes.deterministicNode(
       new graph.nodes.Deterministic<never, RefactorValue>(async function* (own): graph.NodeGenerator<never, RefactorValue> {
+        const view = yield [];
+        const value = view.values.get(built.id);
+        if (value?.kind !== "snapshot") throw new Error("RankCandidates received no snapshot");
         combined(own).throwIfAborted();
-        return { kind: "ranking", candidates: rankCandidates(snapshot) };
+        return { kind: "ranking", snapshot: value.snapshot, candidates: rankCandidates(value.snapshot) };
       }),
-      { id: graph.NodeId("RankCandidates"), description: "Ranks every indexed type by longest root distance.", trigger: graph.trigger.always() },
+      { id: graph.NodeId("RankCandidates"), description: "Ranks every indexed type by longest root distance.", trigger: graph.trigger.when(built) },
     ),
   );
 
@@ -1600,7 +1605,10 @@ export function createYakShaverGraph(options: {
         const view = yield [];
         const value = view.values.get(ranking.id);
         if (value?.kind !== "ranking") throw new Error("RefactorBatches received no ranking");
-        return { kind: "run", run: await refactorCandidates(snapshot, value.candidates, runBatch, refreshSnapshot, combined(own)) };
+        return {
+          kind: "run",
+          run: await refactorCandidates(value.snapshot, value.candidates, runBatch, refreshSnapshot, combined(own)),
+        };
       }),
       {
         id: graph.NodeId("RefactorBatches"),
@@ -1610,16 +1618,18 @@ export function createYakShaverGraph(options: {
     ),
   );
 
+  workflow.addEdge(buildId, rankId, built);
   workflow.addEdge(rankId, resultId, ranking);
-  return { workflow, rankId, resultId };
+  return { workflow, buildId, rankId, resultId };
 }
 
 // ## 10. The live runner
 //
-// Preflight first: the graph, the process ShellMux lease (`sandbox: "always"`, before any other
-// consumer), the Git working-tree root, and Graft freshness over one discard-only MCP connection.
-// Then the controller and — lazily, on the first nonempty batch — one tool collection and one model
-// runtime shared by every batch. Each research call opens and discards its own Graft connection.
+// Preflight first: the process ShellMux lease (`sandbox: "always"`, before any other consumer) and
+// the Git working-tree root. Then the controller, whose `GraftBuild` node opens the one tool
+// collection and runs `graft build` through its bash tool; the first nonempty batch adds one model
+// runtime and the Graft research tool schemas (one discard-only MCP connection) shared by every
+// batch. Each research call opens and discards its own Graft connection.
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -1765,19 +1775,6 @@ async function callTool(tool: AgentTool, args: Record<string, unknown>, signal?:
   return text;
 }
 
-/** Structural freshness: `graph check: OK`, or STALE with only stale summaries. */
-async function checkFreshness(tool: AgentTool, root: string, signal?: AbortSignal): Promise<void> {
-  const text = await callTool(tool, {}, signal);
-  const lines = text.split(/\r?\n/);
-  const status = lines.find((line) => line.startsWith("graph check:"));
-  const structural = lines.some((line) => /^(changed|added|removed) \(/.test(line));
-  if (status?.startsWith("graph check: OK")) return;
-  if (status === "graph check: STALE" && !structural) return;
-  throw new Error(
-    `The Graft index is not current${status === undefined ? " (no graph check report)" : ""}; run \`graft build ${root}\` first.\n${text}`,
-  );
-}
-
 async function pinnedModels(): Promise<ModelRuntime> {
   const models = await ModelRuntime.create();
   if (!(await models.listCredentials()).some(({ providerId }) => providerId === PROVIDER)) {
@@ -1794,8 +1791,13 @@ async function pinnedModels(): Promise<ModelRuntime> {
   return models;
 }
 
-/** The live batch runner and refresher, and the release of the tool collection they acquired. */
-type LiveRunner = { readonly runBatch: BatchRunner; readonly refreshSnapshot: SnapshotRefresher; readonly close: () => Promise<void> };
+/** The live index builder, batch runner and refresher, and the release of the tool collection they acquired. */
+type LiveRunner = {
+  readonly buildSnapshot: SnapshotBuilder;
+  readonly runBatch: BatchRunner;
+  readonly refreshSnapshot: SnapshotRefresher;
+  readonly close: () => Promise<void>;
+};
 
 /**
  * The live runner: shared resources once; per batch a fresh source baseline, fresh agents and
@@ -1805,7 +1807,9 @@ function liveRunner(options: {
   readonly root: string;
   readonly rootReal: string;
   readonly mux: tools.NativeMux;
-  readonly graftTools: readonly AgentTool[];
+  /** The Graft MCP definition and the runner's set of connections not yet discarded. */
+  readonly graft: mcp.JuncoMcpTools;
+  readonly connections: Set<mcp.JuncoMcpConnection>;
   readonly observer: tracer.DataflowTracer;
   readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
 }): LiveRunner {
@@ -1813,17 +1817,44 @@ function liveRunner(options: {
   let collection: tools.ToolCollection | undefined;
   let shared: { readonly models: ModelRuntime; readonly research: readonly AgentTool[] } | undefined;
 
+  const collectionTool = async (name: string): Promise<AgentTool> => {
+    collection ??= await tools.ToolCollection.create(root);
+    const tool = collection.tools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
+    return tool;
+  };
+
+  /** `graft build .` through the collection's sandboxed bash tool, then the published snapshot. */
+  const buildSnapshot: SnapshotBuilder = async (signal) => {
+    await callTool(await collectionTool("bash"), { command: "graft build ." }, signal);
+    return parseSnapshot(await readFile(join(root, GRAPH_FILE), "utf8"));
+  };
+
+  /** The research tool schemas, read over one discard-only connection once `GraftBuild` made an index. */
+  const graftTools = async (signal?: AbortSignal): Promise<AgentTool[]> => {
+    const { graft, connections } = options;
+    const preflight = await graft.connect({ cwd: root, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
+    connections.add(preflight);
+    try {
+      return GRAFT_RESEARCH_TOOLS.map((name) =>
+        discardingGraftTool(graft, root, graftTool(preflight.tools, name), name, connections),
+      );
+    } finally {
+      try {
+        await preflight.close();
+      } finally {
+        connections.delete(preflight);
+      }
+    }
+  };
+
   const acquireShared = async (signal?: AbortSignal) => {
     if (shared !== undefined) return shared;
     const models = await pinnedModels();
     signal?.throwIfAborted();
-    collection = await tools.ToolCollection.create(root);
-    const files = FILE_RESEARCH_TOOLS.map((name) => {
-      const tool = collection!.tools.find((candidate) => candidate.name === name);
-      if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
-      return tool;
-    });
-    shared = { models, research: [...options.graftTools, ...files] };
+    const research = await graftTools(signal);
+    for (const name of FILE_RESEARCH_TOOLS) research.push(await collectionTool(name));
+    shared = { models, research };
     return shared;
   };
 
@@ -1873,10 +1904,11 @@ function liveRunner(options: {
       options.onApplied(refactor, files);
       return files;
     };
-    return runCandidateBatch({ snapshot, lanes, observer, apply }, signal);
+    return runCandidateBatch({ snapshot, lanes, observer, apply, taskFailurePolicy: "ignore" }, signal);
   };
 
   return {
+    buildSnapshot,
     runBatch,
     refreshSnapshot: (signal) => refreshGraftSnapshot(root, mux, signal),
     close: async () => collection?.close(),
@@ -1891,22 +1923,6 @@ function liveRunner(options: {
 export async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: AbortSignal): Promise<RefactorRun> {
   const root = resolve(repositoryRoot);
   if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
-  const graphPath = join(root, GRAPH_FILE);
-  let graphBytes: Uint8Array;
-  try {
-    graphBytes = await readFile(graphPath);
-  } catch (error) {
-    throw new Error(`Cannot read ${graphPath}; run \`graft build ${root}\` first`, { cause: error });
-  }
-  let snapshot: GraftSnapshot;
-  try {
-    snapshot = parseSnapshot(Buffer.from(graphBytes).toString("utf8"));
-  } catch (error) {
-    throw new Error(`${error instanceof Error ? error.message : String(error)}; run \`graft build ${root}\` with Graft 0.21.1`, { cause: error });
-  }
-  // Preflight only: refreshed snapshots live in memory and never match the unpublished cache.
-  const graphHash = sha256(graphBytes);
-  const initial = await captureBaseline(root, snapshot);
   signal?.throwIfAborted();
 
   const observer = tracer.createTracer();
@@ -1927,27 +1943,12 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
       args: ["mcp", root],
       clientOptions: { requestTimeoutMs: 300_000 },
     });
-    const preflight = await graft.connect({ cwd: root, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
-    connections.add(preflight);
-    await checkFreshness(graftTool(preflight.tools, GRAFT_FRESHNESS_TOOL), root, signal);
-    const templates = GRAFT_RESEARCH_TOOLS.map((name) => [name, graftTool(preflight.tools, name)] as const);
-    try {
-      await preflight.close();
-    } finally {
-      connections.delete(preflight);
-    }
-    const changed: string[] = [];
-    if ((await hashFile(graphPath)) !== graphHash) changed.push(GRAPH_FILE);
-    const checked = await captureBaseline(root, snapshot);
-    for (const [path, hash] of initial) if (checked.get(path) !== hash) changed.push(path);
-    if (changed.length > 0) {
-      throw new Error(`The repository changed during the Graft freshness check: ${changed.join(", ")}; run \`graft build ${root}\` again`);
-    }
     live = liveRunner({
       root,
       rootReal: await realpath(root),
       mux: lease.mux,
-      graftTools: templates.map(([name, template]) => discardingGraftTool(graft, root, template, name, connections)),
+      graft,
+      connections,
       observer,
       onApplied: (refactor, files) => {
         applied++;
@@ -1955,7 +1956,7 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
       },
     });
     controller = createYakShaverGraph({
-      snapshot,
+      buildSnapshot: live.buildSnapshot,
       runBatch: live.runBatch,
       refreshSnapshot: live.refreshSnapshot,
       observer,
@@ -2011,7 +2012,6 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
   console.log(
     `Applied and staged refactors: ${totals.applied}; projected new call sites: ${totals.addedCallSites}; net nonblank lines removed: ${totals.netLinesRemoved}`,
   );
-  if (totals.applied > 0) console.log(`Graft cache was not published; run graft build ${root} before the next run.`);
   return run;
 }
 
