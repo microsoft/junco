@@ -1,5 +1,6 @@
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1498,14 +1499,20 @@ describe("controller", () => {
       seen.push(batch.length);
       return batch.map(none);
     };
-    const { workflow, rankId, resultId } = createYakShaverGraph({
-      snapshot: five,
+    let builds = 0;
+    const { workflow, buildId, rankId, resultId } = createYakShaverGraph({
+      buildSnapshot: async () => {
+        builds++;
+        return five;
+      },
       runBatch,
       refreshSnapshot: noRefresh,
       observer: quiet(),
     });
     try {
       const results = await workflow.run();
+      assert.equal(builds, 1);
+      assert.equal(results.get(buildId)?.kind, "snapshot");
       assert.equal(results.get(rankId)?.kind, "ranking");
       const result = results.get(resultId);
       assert.equal(result?.kind, "run");
@@ -1527,13 +1534,41 @@ describe("controller", () => {
     }
   });
 
+  test("a failed graft build stops the run before ranking or any batch", async () => {
+    let calls = 0;
+    const { workflow, rankId } = createYakShaverGraph({
+      buildSnapshot: async () => {
+        throw new Error("graft build failed");
+      },
+      runBatch: async () => {
+        calls++;
+        return [];
+      },
+      refreshSnapshot: noRefresh,
+      observer: quiet(),
+    });
+    try {
+      await assert.rejects(
+        workflow.run(),
+        (error: unknown) =>
+          error instanceof Error &&
+          "nodeId" in error &&
+          error.nodeId === "GraftBuild",
+      );
+      assert.equal(workflow.result(rankId)._tag, "None");
+      assert.equal(calls, 0);
+    } finally {
+      await workflow.close();
+    }
+  });
+
   test("an empty ranking completes a run without any batch", async () => {
     const empty = snapshotOf([
       { id: "src/f.ts#f", kind: "function", exported: true },
     ]);
     let calls = 0;
     const { workflow, resultId } = createYakShaverGraph({
-      snapshot: empty,
+      buildSnapshot: async () => empty,
       runBatch: async () => {
         calls++;
         return [];
@@ -1563,7 +1598,7 @@ describe("controller", () => {
     const recorder = recordingApplier();
     let calls = 0;
     const { workflow, resultId } = createYakShaverGraph({
-      snapshot: five,
+      buildSnapshot: async () => five,
       signal: controller.signal,
       observer: quiet(),
       refreshSnapshot: noRefresh,
@@ -1619,12 +1654,13 @@ describe("command line", () => {
       stderr: "pipe",
     });
 
-  test("a missing graph fails before any model work; extra arguments are refused", async () => {
+  test("a directory outside a dedicated seed fails before building or any model work; extra arguments are refused", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yak-shaver-"));
     try {
       const run = cli(dir);
       assert.notEqual(await run.exited, 0);
-      assert.match(await new Response(run.stderr).text(), /graft build/);
+      assert.notEqual((await new Response(run.stderr).text()).trim(), "");
+      assert.equal(existsSync(join(dir, "graft")), false, "no graft build ran");
       const extra = cli(dir, "extra");
       assert.notEqual(await extra.exited, 0);
       assert.match(
