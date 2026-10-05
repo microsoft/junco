@@ -281,6 +281,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -318,6 +319,7 @@ dependencies = [
 [[package]]
 name = "brush-interactive"
 version = "0.4.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "bon",
  "brush-core",
@@ -1530,6 +1532,7 @@ dependencies = [
 [[package]]
 name = "junco-policy"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/junco-policy.git#d46ea94f0fdc41669d528b6ef1e5619a3cab4657"
 dependencies = [
  "bumpalo",
  "hashbrown 0.16.1",
@@ -1709,6 +1712,7 @@ dependencies = [
 [[package]]
 name = "marsh-btrfs"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "btrfsutil",
  "hex",
@@ -1722,6 +1726,7 @@ dependencies = [
 [[package]]
 name = "marsh-core"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "brush-builtins",
  "brush-core",
@@ -1749,6 +1754,7 @@ dependencies = [
 [[package]]
 name = "marsh-instrument"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "libc",
  "lurk-cli",
@@ -1761,6 +1767,7 @@ dependencies = [
 [[package]]
 name = "marsh-lib"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "tokio",
 ]
@@ -1768,6 +1775,7 @@ dependencies = [
 [[package]]
 name = "marsh-wal"
 version = "0.1.0"
+source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "hex",
  "marsh-lib",

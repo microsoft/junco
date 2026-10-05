@@ -253,13 +253,13 @@ describe("complaints through real graphs", () => {
     const flow = newGraph(new ThrowingTracer());
     const { workerId } = wire(flow, await worker("observer throws"));
     const before = tools.issueLog.length;
-    const warn = console.warn;
-    console.warn = () => {};
+    const print = console.log;
+    console.log = () => {};
     try {
       const results = await flow.run();
       assert.equal(resultText(results, workerId), "continued");
     } finally {
-      console.warn = warn;
+      console.log = print;
     }
     assert.deepEqual(
       tools.issueLog
@@ -382,15 +382,15 @@ describe("direct Agentic.complain", () => {
     assert.equal(real.status, "idle");
     assert.deepEqual(mock.requests, []);
 
-    const warn = console.warn;
-    console.warn = () => {};
+    const print = console.log;
+    console.log = () => {};
     try {
       real.complain(
         { nodeId, messages: [], prompt, complaint: "observer throws" },
         new ThrowingTracer(),
       );
     } finally {
-      console.warn = warn;
+      console.log = print;
     }
     assert.equal(
       tools.issueLog.snapshot().at(-1)?.complaint,

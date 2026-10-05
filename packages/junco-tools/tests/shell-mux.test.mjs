@@ -151,9 +151,9 @@ test("under Bun, the TypeScript source and the built module share one mux and ru
     const built = await import(${JSON.stringify(url("../dist/index.js"))});
     const addon = await import(${JSON.stringify(url("../target/native-test/index.js"))});
     let opens = 0;
-    const native = { ...addon, NativeMux: { open: (root, options) => {
+    const native = { ...addon, NativeMux: { open: (root, options, onPolicyDecision) => {
       opens += 1;
-      return addon.NativeMux.openCopyTree(root, options);
+      return addon.NativeMux.openCopyTree(root, options, onPolicyDecision);
     } } };
     const seed = ${JSON.stringify(seed)};
     const [fromSource, fromBuilt] = await Promise.all([
@@ -326,10 +326,14 @@ test("shutdown during opening closes once and fences the whole generation", {
   const barrier = {
     ...real,
     NativeMux: {
-      async open(cwd, options) {
+      async open(cwd, options, onPolicyDecision) {
         entered.resolve();
         await proceed.promise;
-        const mux = await real.NativeMux.openCopyTree(cwd, options);
+        const mux = await real.NativeMux.openCopyTree(
+          cwd,
+          options,
+          onPolicyDecision,
+        );
         const close = mux.close.bind(mux);
         mux.close = () => {
           closes += 1;
@@ -403,8 +407,12 @@ test("settled shutdown replays its failure until a new consumer starts", {
   const failing = {
     ...real,
     NativeMux: {
-      async open(cwd, options) {
-        const mux = await real.NativeMux.openCopyTree(cwd, options);
+      async open(cwd, options, onPolicyDecision) {
+        const mux = await real.NativeMux.openCopyTree(
+          cwd,
+          options,
+          onPolicyDecision,
+        );
         const close = mux.close.bind(mux);
         mux.close = async () => {
           closes += 1;

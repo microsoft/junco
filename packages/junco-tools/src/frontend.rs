@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use marsh_core::shellmux::{FrontendEvent, OutputChannel, ShellFrontend, ShellMux};
-use marsh_core::Principal;
+use marsh_core::{Action, Event, PolicyDecision, Principal};
 use napi::Status;
 use napi::bindgen_prelude::Buffer;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use tokio::sync::{oneshot, watch};
 
+use crate::NativePolicyDecision;
+
 pub(crate) type OutputCallback = ThreadsafeFunction<Buffer, ()>;
+pub(crate) type PolicyCallback =
+    ThreadsafeFunction<NativePolicyDecision, (), NativePolicyDecision, Status, true, true>;
 
 #[derive(Default)]
 struct RouteProgress {
@@ -84,6 +88,7 @@ impl OutputRoute {
         state.failure.clone().map_or(Ok(()), Err)
     }
 
+    /// Records the first failure; later ones are dropped.
     fn fail(&self, error: String) {
         self.progress.send_if_modified(|state| {
             if state.failure.is_some() {
@@ -124,7 +129,7 @@ impl OutputRoute {
         self.progress.send_modify(|state| state.pending += 1);
         let completion = Arc::new(CallbackCompletion {
             progress: Arc::downgrade(&self.progress),
-            receipt: Mutex::new(Some(receipt)),
+            receipt: Mutex::new(Some(CallbackReceipt::Output(receipt))),
         });
         let returned = Arc::clone(&completion);
         let status = callback.call_with_return_value(
@@ -148,12 +153,112 @@ impl OutputRoute {
     }
 }
 
+/// One mux's policy-decision log: the JavaScript sink, whether grants are delivered, and the
+/// pending/failure record close drains. A failed callback is reported at close and never
+/// affects authorization or execution. The callback is weak: a mux-lifetime logger never keeps
+/// Node alive; close's own promise does until every enqueued decision returned. The close task
+/// owns the last reference and releases the callback once drained.
+pub(crate) struct PolicyLog {
+    callback: PolicyCallback,
+    grants: bool,
+    progress: Arc<watch::Sender<RouteProgress>>,
+}
+
+impl PolicyLog {
+    pub(crate) fn new(callback: PolicyCallback, grants: bool) -> Arc<Self> {
+        let (progress, _) = watch::channel(RouteProgress::default());
+        Arc::new(Self {
+            callback,
+            grants,
+            progress: Arc::new(progress),
+        })
+    }
+
+    /// Enqueues one decision. Runs under the authority's write lock: never waits for JavaScript.
+    pub(crate) fn observe(&self, event: &Event, decision: &PolicyDecision) {
+        let (granted, failed_precondition, allowed_fixes) = match decision {
+            PolicyDecision::Grant if !self.grants => return,
+            PolicyDecision::Grant => (true, None, None),
+            PolicyDecision::Deny {
+                failed_precondition,
+                allowed_fixes,
+            } => (
+                false,
+                Some(failed_precondition.clone()),
+                Some(allowed_fixes.clone()),
+            ),
+        };
+        let data = NativePolicyDecision {
+            granted,
+            principal: event.principal.as_str().to_owned(),
+            action: action_name(&event.action).to_owned(),
+            resource: event.resource.segments().to_vec(),
+            failed_precondition,
+            allowed_fixes,
+        };
+        self.progress.send_modify(|state| state.pending += 1);
+        let completion = Arc::new(CallbackCompletion {
+            progress: Arc::downgrade(&self.progress),
+            receipt: Mutex::new(Some(CallbackReceipt::Policy)),
+        });
+        let returned = Arc::clone(&completion);
+        let status = self.callback.call_with_return_value(
+            Ok(data),
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                returned.complete(
+                    result.map_err(|error| format!("ShellMux policy log callback failed: {error}")),
+                );
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            completion.complete(Err(format!(
+                "ShellMux policy log callback enqueue failed: {status}"
+            )));
+        }
+    }
+
+    /// Resolves once every enqueued decision returned, with the first callback failure.
+    pub(crate) async fn drained(&self) -> Result<(), String> {
+        let mut progress = self.progress.subscribe();
+        let state = progress
+            .wait_for(|state| state.pending == 0)
+            .await
+            .map_err(|_| "ShellMux policy log ended before draining".to_owned())?;
+        state.failure.clone().map_or(Ok(()), Err)
+    }
+}
+
+const fn action_name(action: &Action) -> &'static str {
+    match action {
+        Action::Read => "Read",
+        Action::Edit => "Edit",
+        Action::Stage => "Stage",
+        Action::Unstage => "Unstage",
+        Action::Commit { .. } => "Commit",
+        Action::Checkout => "Checkout",
+        Action::Stash => "Stash",
+        Action::Delete => "Delete",
+        Action::Clean => "Clean",
+        Action::Diff => "Diff",
+        Action::History => "History",
+    }
+}
+
+/// What a settled callback releases: an output chunk's acknowledgement, or nothing for a
+/// policy record, which no producer waits on.
+enum CallbackReceipt {
+    Output(oneshot::Sender<()>),
+    Policy,
+}
+
 // Queued completions must not own the route, its TSFN, or a mux. In particular, napi 3.9 can
 // retain the allocated callback when enqueueing fails; the synchronous failure path still
 // settles this token and releases its receipt without retaining the session or JS function.
 struct CallbackCompletion {
     progress: Weak<watch::Sender<RouteProgress>>,
-    receipt: Mutex<Option<oneshot::Sender<()>>>,
+    receipt: Mutex<Option<CallbackReceipt>>,
 }
 
 impl CallbackCompletion {
@@ -166,7 +271,7 @@ impl CallbackCompletion {
         let Some(receipt) = receipt else {
             return;
         };
-        // Taking the sender is the once-only latch shared by enqueue failure, callback return,
+        // Taking the receipt is the once-only latch shared by enqueue failure, callback return,
         // and callback destruction. Even a callback racing the enqueue result decrements once.
         let successful = result.is_ok();
         if let Some(progress) = self.progress.upgrade() {
@@ -177,7 +282,7 @@ impl CallbackCompletion {
                 }
             });
         }
-        if successful {
+        if successful && let CallbackReceipt::Output(receipt) = receipt {
             // A forced stop may already have dropped the native receiver. That does not make
             // a successful JS return an output error and must not escape to napi either.
             let _ = receipt.send(());
@@ -187,16 +292,20 @@ impl CallbackCompletion {
 
 impl Drop for CallbackCompletion {
     fn drop(&mut self) {
-        if self
+        let dropped = match self
             .receipt
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
         {
-            self.complete(Err(
-                "ShellMux output callback was dropped before returning".to_owned()
-            ));
-        }
+            None => return,
+            Some(CallbackReceipt::Output(_)) => {
+                "ShellMux output callback was dropped before returning"
+            }
+            Some(CallbackReceipt::Policy) => {
+                "ShellMux policy log callback was dropped before returning"
+            }
+        };
+        self.complete(Err(dropped.to_owned()));
     }
 }
 

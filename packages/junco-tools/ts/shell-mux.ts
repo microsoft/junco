@@ -1,4 +1,6 @@
+import { DefaultLogLevels } from "tslog";
 import type { NativeMux } from "../native/index.js";
+import { flushLog, log, logPolicyDecision } from "./log.js";
 import type { NativeModule } from "./native.js";
 
 type Sandbox = "shared" | "always";
@@ -134,7 +136,17 @@ function beginOpening(
     // Dynamic by design: importing junco-tools must not load the addon.
     const native = options.native ?? (await import("junco-tools/native"));
     generation.native = native;
-    return native.NativeMux.open(cwd, { sandbox: generation.sandbox });
+    // The native producer's filter is fixed here: grants at DEBUG or below, violations at INFO
+    // or below, no observer at all above INFO.
+    const level = log.settings.minLevel;
+    return native.NativeMux.open(
+      cwd,
+      {
+        sandbox: generation.sandbox,
+        policyDebug: level <= DefaultLogLevels.DEBUG,
+      },
+      level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
+    );
   })();
   generation.opening = opening;
   opening.then(
@@ -247,7 +259,23 @@ export function shutdownShellMux(): Promise<void> {
           // A failed open holds no handle; its acquisition reported the failure.
         }
       }
-      await mux?.close();
+      // Native close drains every policy record first; the flush then makes the last one —
+      // often the violation that ended the run — observable before shutdown resolves.
+      const closed = await mux?.close().then(
+        () => undefined,
+        (error: unknown) => ({ error }),
+      );
+      try {
+        await flushLog();
+      } catch (flushError) {
+        if (closed === undefined) throw flushError;
+        throw new AggregateError(
+          [closed.error, flushError],
+          "ShellMux shutdown and log flush failed",
+          { cause: closed.error },
+        );
+      }
+      if (closed !== undefined) throw closed.error;
     } finally {
       generation.state = "closed";
     }

@@ -15,8 +15,10 @@
 // 4. The runner closes the graph (and with it both agents and their graft servers), flushes the
 //    tracer, and finally shuts the ShellMux down — the application owns that last step.
 //
-// Graft's index must be current in the repository root (`graft build`). Run it after `pi` →
-// `/login` → GitHub Copilot:
+// Prerequisites: junco-tools' Rust toolchain and system libraries (packages/junco-tools/README.md),
+// so that `bun install --frozen-lockfile` at the root also builds the production native addon
+// (Cargo fetches marsh and junco-policy from GitHub); this checkout inside a Btrfs seed subvolume;
+// and a current graft index (`graft build`). Then run it after `pi` → `/login` → GitHub Copilot:
 //
 //   bun run examples/mcp.ts
 //

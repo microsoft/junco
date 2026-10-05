@@ -32,8 +32,9 @@ jobs:
         with:
           bun-version: '1.4.2'
 
+      # No native addon in this job: --ignore-scripts skips the root postinstall's native build.
       - name: Install workspace
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # One Biome policy over the agency, engine, scheduler, agent and tools sources and tests.
       - name: Biome
@@ -271,7 +272,7 @@ jobs:
           bun --no-install --eval "$smoke"
           node --input-type=module --eval "$smoke"
 
-  # Native tools, agent, full scheduler and agency integration against the private marsh/policy inputs.
+  # Native tools, agent, full scheduler and agency integration; Cargo fetches marsh and junco-policy from GitHub.
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -291,22 +292,6 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: junco-agency
-          persist-credentials: false
-
-      - name: Checkout marsh
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/marsh
-          path: marsh
-          ssh-key: ${{ secrets.JUNCO_MARSH_SSH_KEY }}
-          persist-credentials: false
-
-      - name: Checkout junco-policy
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: junco-org/junco-policy
-          path: junco-policy
-          ssh-key: ${{ secrets.JUNCO_POLICY_SSH_KEY }}
           persist-credentials: false
 
       - name: Install native build libraries

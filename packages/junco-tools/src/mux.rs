@@ -11,13 +11,13 @@ use marsh_core::shellmux::{
     CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell,
     ShellFrontend, ShellId, ShellMux, SpawnOptions, WaitError,
 };
-use marsh_core::{SandboxPolicy, ShellError, ShellErrorKind};
+use marsh_core::{PolicyObserver, SandboxPolicy, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
-use crate::frontend::{Frontend, OutputCallback, OutputRoute};
+use crate::frontend::{Frontend, OutputCallback, OutputRoute, PolicyLog};
 use crate::process::{Admission, Admitted, ExecLine, ProcessState, ProcessTask, process_channels};
 use crate::tool::JuncoTool;
 use crate::{NativeProcessOptions, NativeRunOptions, NativeRunResult};
@@ -127,6 +127,8 @@ struct SessionState {
     backend: Option<Backend>,
     tasks: HashMap<Id, TrackedTask>,
     principals: HashMap<String, watch::Receiver<bool>>,
+    /// Every capability decision of this mux's shells; close takes, drains and releases it.
+    policy_log: Option<Arc<PolicyLog>>,
 }
 
 pub(crate) struct Session {
@@ -141,12 +143,18 @@ impl Session {
         seed: PathBuf,
         filesystem: Arc<dyn Subvolumes>,
         policy: SandboxPolicy,
+        policy_log: Option<Arc<PolicyLog>>,
         create_mux: impl FnOnce(MuxProfile, Arc<Mutex<Frontend>>) -> Result<Arc<ShellMux>, MuxError>,
     ) -> Result<Arc<Self>, String> {
         let runtime = Handle::current();
         let frontend = Arc::new(Mutex::new(Frontend::new(24, 80)));
         let profile = MuxProfile {
             sandbox_policy: policy,
+            policy_observer: policy_log.clone().map(|log| {
+                Arc::new(PolicyObserver::new(move |event, decision| {
+                    log.observe(event, decision);
+                }))
+            }),
             ..Default::default()
         };
         // Leases nothing: the seed's exclusive lease, its log recovery and its one validator
@@ -166,6 +174,7 @@ impl Session {
                 }),
                 tasks: HashMap::new(),
                 principals: HashMap::new(),
+                policy_log,
             }),
             closed,
         }))
@@ -401,6 +410,7 @@ impl Session {
             run.abort();
         }
         let closed = self.closed.clone();
+        let policy_log = session.policy_log.take();
         // No caller owns this cleanup future, so cancelling a close promise cannot
         // cancel teardown or let another close return ahead of it.
         self.runtime.spawn(async move {
@@ -422,6 +432,16 @@ impl Session {
             // through is marsh's, shared with any other live shell or mux over the same
             // backend, and was never an exclusive resource this idle session retained.
             drop(backend);
+            // Every producer is joined; the last decision is enqueued. Drain it before release.
+            if let Some(log) = policy_log {
+                let drained = log.drained().await;
+                if let Err(error) = drained {
+                    failure = Some(match failure {
+                        Some(shutdown) => format!("{shutdown}\n{error}"),
+                        None => error,
+                    });
+                }
+            }
             closed.send_replace(Some(failure.map_or(Ok(()), Err)));
         });
         completion

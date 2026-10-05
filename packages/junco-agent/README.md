@@ -14,7 +14,7 @@
 
 This package lives in the junco-agency Bun workspace at `packages/junco-agent`. Bun source consumers — such as the workspace root's `bun run build:examples` — resolve `junco-agent` and `junco-tools` through their `bun` exports to TypeScript source after one root `bun install --frozen-lockfile`; they need no `dist/` and, with explicit tools, no native addon (see the [workspace setup](../../README.md#setup)).
 
-Building and typechecking this package consume `junco-tools`' emitted declarations, which `junco-tools`' `bun run build` produces together with its native addon. Requirements for this lane: Linux x86-64 with glibc, Node.js `>=22.19.0`, Bun `1.4.2`, and `junco-tools`' native prerequisites (Rust toolchain, the external `marsh` checkout beside the workspace, native libraries; see its [README](../junco-tools/README.md)).
+Building and typechecking this package consume `junco-tools`' emitted declarations, which `junco-tools`' `bun run build` produces together with its native addon. Requirements for this lane: Linux x86-64 with glibc, Node.js `>=22.19.0`, Bun `1.4.2`, and `junco-tools`' native prerequisites (Rust toolchain and native libraries; Cargo fetches marsh from GitHub; see its [README](../junco-tools/README.md)).
 
 Install once at the workspace root, build `junco-tools` (its `dist/` and `native/junco_tools.linux-x64-gnu.node`), then build and test this package:
 
@@ -31,7 +31,7 @@ The workspace links `junco-tools` to `packages/junco-tools`, so its compiled out
 
 ## CI
 
-The workspace's `.github/workflows/ci.yml` `test` job checks out the private `marsh` and `junco-policy` beside the workspace, builds the real native addon, then builds, typechecks, and runs this package's offline Bun unit suite with coverage (`bun run test:coverage`, LCOV at `coverage/lcov.info`, uploaded as the `junco-agent-coverage` artifact; it reports this package's `src/` only) and launches `bun run cli <seed> --version`. CI needs no Btrfs mount or live model credentials.
+The workspace's `.github/workflows/ci.yml` `test` job builds the real native addon (Cargo fetches the public `marsh` and `junco-policy` from GitHub), then builds, typechecks, and runs this package's offline Bun unit suite with coverage (`bun run test:coverage`, LCOV at `coverage/lcov.info`, uploaded as the `junco-agent-coverage` artifact; it reports this package's `src/` only) and launches `bun run cli <seed> --version`. CI needs no Btrfs mount or live model credentials.
 
 ## Pi CLI
 

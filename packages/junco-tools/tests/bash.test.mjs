@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   access,
   mkdir,
@@ -191,6 +192,190 @@ test("a zero-exit policy denial leaves all seed contents unchanged", {
   } finally {
     await closeFixture(instance);
   }
+});
+
+/**
+ * The zero-exit denial scenario in a fresh Node process at `level`, through production
+ * acquisition: the singleton opens the CopyTree seed and installs the real logger callback, and
+ * the first `shutdownShellMux()` is the logging fence. `failAfterGrant` wraps that callback to
+ * throw once, after logging the first grant. Returns the child's stdout, stderr and the
+ * structured records the logger's real transport had seen when shutdown settled.
+ */
+async function policyLogScenario(level, failAfterGrant = false) {
+  const url = (path) => JSON.stringify(new URL(path, import.meta.url).href);
+  const script = `
+    import assert from "node:assert/strict";
+    import { access, readFile, rm } from "node:fs/promises";
+    import { join } from "node:path";
+    import {
+      acquireShellMux, createBashTool, createShellMuxOperations, isMarshPolicyDenied, shutdownShellMux,
+    } from ${url("../dist/index.js")};
+    import { log } from ${url("../dist/log.js")};
+    import { cleanup, copyTreeNative, seedFixture } from ${url("./helpers.mjs")};
+    const records = [];
+    log.attachTransport((record) => records.push({ level: record._meta.logLevelName, data: record[1] }));
+    const base = await copyTreeNative();
+    let thrown = false;
+    const native = !${failAfterGrant} ? base : {
+      ...base,
+      NativeMux: {
+        open(cwd, options, onPolicyDecision) {
+          assert.equal(typeof onPolicyDecision, "function");
+          return base.NativeMux.open(cwd, options, (error, data) => {
+            onPolicyDecision(error, data);
+            if (data.granted && !thrown) {
+              thrown = true;
+              throw new Error("policy sink exploded");
+            }
+          });
+        },
+      },
+    };
+    const { root, seed } = await seedFixture();
+    let lease;
+    let shutdown;
+    let shutdownError;
+    let snapshot;
+    try {
+      lease = await acquireShellMux(seed, { native, sandbox: "always" });
+      // A closed handle stays reachable; the child must still exit on its own.
+      globalThis.retainedLease = lease;
+      const tool = (principal) => createBashTool(seed, {
+        operations: createShellMuxOperations({ native, principal }),
+      });
+      await tool("file-owner").execute("claim-file", {
+        command: "cat src/file0.txt > /dev/null; printf 'owned\\\\n' > src/file0.txt",
+      });
+      await assert.rejects(
+        tool("another-agent").execute("denied-publication", {
+          command: "printf 'new\\\\n' > src/new.txt; printf 'stolen\\\\n' > src/file0.txt; true",
+        }),
+        isMarshPolicyDenied,
+      );
+      assert.equal(await readFile(join(seed, "src/file0.txt"), "utf8"), "owned\\n");
+      await assert.rejects(access(join(seed, "src/new.txt")), { code: "ENOENT" });
+      // The first shutdown is the fence: native close drained every decision, the log flushed.
+      const closing = shutdownShellMux();
+      assert.equal(shutdownShellMux(), closing);
+      shutdown = await closing.then(() => "ok", (error) => {
+        shutdownError = error;
+        return error.message;
+      });
+      snapshot = records.slice();
+      assert.equal(shutdownShellMux(), closing);
+      const replayed = await shutdownShellMux().then(() => undefined, (error) => error);
+      assert.equal(replayed, shutdownError);
+    } finally {
+      await cleanup(
+        () => lease?.release(),
+        () => shutdownShellMux().catch((error) => {
+          if (shutdownError === undefined || error !== shutdownError) throw error;
+        }),
+        () => rm(root, { recursive: true, force: true }),
+      );
+    }
+    process.stdout.write("RECORDS " + JSON.stringify({ shutdown, thrown, records: snapshot }) + "\\n");
+  `;
+  const child = spawn(
+    process.execPath,
+    ["--input-type=module", "--eval", script],
+    {
+      env: { ...process.env, LOG_LEVEL: level },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const code = await new Promise((resolve) => child.once("close", resolve));
+  assert.equal(code, 0, `${stderr}\n${stdout}`);
+  const line = stdout.split("\n").find((it) => it.startsWith("RECORDS "));
+  assert.ok(line, stdout);
+  return { stdout, stderr, ...JSON.parse(line.slice("RECORDS ".length)) };
+}
+
+const decision = (records, granted, action, resource) =>
+  records.filter(
+    ({ data }) =>
+      data?.granted === granted &&
+      data.action === action &&
+      JSON.stringify(data.resource) === JSON.stringify(resource),
+  );
+
+test("policy decisions reach the shared stdout logger: grants at DEBUG, violations at INFO, none at WARN", {
+  timeout: 90_000,
+}, async () => {
+  for (const level of ["DEBUG", "INFO", "WARN"]) {
+    const { stdout, stderr, shutdown, records } =
+      await policyLogScenario(level);
+    assert.equal(shutdown, "ok");
+    assert.equal(stderr, "");
+    if (level === "WARN") {
+      // Authorization and rollback were asserted in the child; nothing was logged.
+      assert.deepEqual(records, []);
+      assert.doesNotMatch(
+        stdout,
+        /^(SILLY|TRACE|DEBUG|INFO|WARN|ERROR|FATAL) /m,
+      );
+      continue;
+    }
+    const grants = records.filter(({ data }) => data?.granted === true);
+    const [violation, ...others] = records.filter(
+      ({ data }) => data?.granted === false,
+    );
+    assert.equal(others.length, 0, JSON.stringify(others));
+    assert.equal(violation.level, "INFO");
+    assert.equal(violation.data.action, "Edit");
+    assert.deepEqual(violation.data.resource, ["src", "file0.txt"]);
+    assert.match(
+      violation.data.failedPrecondition,
+      /^src\/file0\.txt is unstaged by \S+;/,
+    );
+    assert.ok(violation.data.allowedFixes.length > 0);
+    assert.match(stdout, /^INFO /m);
+    if (level === "INFO") {
+      assert.equal(grants.length, 0);
+      assert.doesNotMatch(stdout, /^DEBUG /m);
+      continue;
+    }
+    for (const grant of grants) {
+      assert.equal(grant.level, "DEBUG");
+      assert.equal("failedPrecondition" in grant.data, false);
+    }
+    const [read] = decision(records, true, "Read", ["src", "file0.txt"]);
+    const [edit] = decision(records, true, "Edit", ["src", "file0.txt"]);
+    const [created] = decision(records, true, "Edit", ["src", "new.txt"]);
+    assert.ok(read && edit && created, JSON.stringify(grants));
+    // The owner's native principal read and edited the file; another's tentative grant for
+    // the new file precedes its violation, which names the owner.
+    assert.equal(read.data.principal, edit.data.principal);
+    assert.equal(created.data.principal, violation.data.principal);
+    assert.notEqual(violation.data.principal, edit.data.principal);
+    assert.ok(
+      violation.data.failedPrecondition.includes(
+        `unstaged by ${edit.data.principal};`,
+      ),
+    );
+    assert.ok(records.indexOf(read) < records.indexOf(edit));
+    assert.ok(records.indexOf(edit) < records.indexOf(created));
+    assert.ok(records.indexOf(created) < records.indexOf(violation));
+    assert.match(stdout, /^DEBUG /m);
+  }
+});
+
+test("a failing policy log callback is reported at close and changes no authorization", {
+  timeout: 60_000,
+}, async () => {
+  const { shutdown, thrown, records } = await policyLogScenario("DEBUG", true);
+  assert.equal(thrown, true);
+  // The owner's publication succeeded and the conflicting command still rejected as denied,
+  // inside the child; the violation was still delivered after the callback failure.
+  assert.equal(records.filter(({ data }) => data?.granted === false).length, 1);
+  assert.match(
+    shutdown,
+    /ShellMux policy log callback failed: .*policy sink exploded/,
+  );
 });
 
 test("a pipeline result is returned and published to the seed", {

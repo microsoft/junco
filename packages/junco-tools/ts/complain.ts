@@ -7,6 +7,7 @@ import type {
 } from "dataflow-engine";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { log } from "./log.js";
 
 /** Free-form complaint text, in the reporting agent's own words. */
 export type Complaint = string;
@@ -99,7 +100,7 @@ export const issueLog: {
     try {
       tracer.complain(stored.nodeId, stored.complaint);
     } catch (error) {
-      console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+      log.warn("[dataflow-engine] DataflowTracer callback failed", error);
     }
   },
   snapshot(): readonly Issue<unknown>[] {

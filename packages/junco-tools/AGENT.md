@@ -46,7 +46,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Build and verification commands
 
-Install once with `bun install --frozen-lockfile` at the junco-agency workspace root, then run from `packages/junco-tools` after installing the prerequisites in README, with the external `marsh` checkout present beside the workspace (`../../../marsh`):
+Install once with `bun install --frozen-lockfile` at the junco-agency workspace root, then run from `packages/junco-tools` after installing the prerequisites in README; Cargo fetches marsh and junco-policy from GitHub:
 
 ```sh
 bun run build
@@ -68,15 +68,15 @@ node scripts/with-junco-build-env.mjs rustfmt --edition 2024 src/lib.rs src/mux.
 
 Format junco-authored files only. The transplanted `pi-natives` modules keep upstream's formatting so re-extracting them from a newer pinned revision stays a readable diff; `cargo fmt --all` would rewrite all of them.
 
-The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.local/share/junco-tools/rustup`, while preserving explicitly supplied homes and SSH settings. It supplies Cargo's CLI-fetch environment and the private junco HTTPS-to-SSH transport rewrite to child processes. Do not replace it with Cargo `[env]`, a consumer-only Git rewrite, or global credential configuration.
+The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.local/share/junco-tools/rustup`, while preserving explicitly supplied homes. It supplies Cargo's CLI-fetch environment to child processes. Do not replace it with Cargo `[env]` or global configuration.
 
 ### Dependency changes
 
-- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved sources. The marsh crates are deliberately `path` dependencies on the external checkout at `../../../marsh` (beside the junco-agency workspace); everything else stays on its pinned Git revision or registry version. Do not silently switch anything else to a branch tip or a local path to make a build pass.
-- Keep the consumer-root `[patch.crates-io]` for `brush-core`, now pointing at `../../../marsh/crates/brush-core`. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
-- Keep every direct and transitive marsh crate resolving to that one checkout with a single crate identity each. Do not add the root `marsh` application or the rmux packages to this package, and never commit, publish or edit the marsh working tree from here.
+- Treat `Cargo.toml` and `Cargo.lock` as the source of truth for approved sources. The marsh crates are deliberately git dependencies on the default branch of `https://github.com/junco-org/marsh.git` (no `rev`), and `build:native` moves them and junco-policy to that HEAD with `cargo update -p marsh-core -p junco-policy` before its locked build; everything else stays on its pinned Git revision or registry version. Do not switch anything else to a branch tip or a local path to make a build pass.
+- Keep the consumer-root `[patch.crates-io]` for `brush-core` and `brush-interactive`, pointing at that same marsh git source. Registry brush-core does not provide the required fork behavior; a dependency's own patch does not propagate to this consumer.
+- Keep every direct and transitive marsh crate resolving to that one marsh revision with a single crate identity each. Do not add the root `marsh` application or the rmux packages to this package, and never commit to or publish marsh from here.
 - The lockfile deliberately keeps `napi-derive-backend` at 5.0.4 for napi 3.9.0 compatibility. Review codegen compatibility before changing that resolution.
-- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate resolving to `../../../marsh`, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
+- Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one git-patched brush-core, every marsh crate resolving to the same `junco-org/marsh` revision, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
 - The Oh My Pi engines are pinned Git dependencies (`pi-ast`, `pi-diff`, `pi-walker`, `pi-edit` at `7ae76f8e4daca0c8f409f61bcd514260cd522365`). Import them unmodified from that one URL/revision so each package keeps a single crate identity. Do not vendor them, add a `path` dependency, follow a branch, or point any build step at a local Oh My Pi checkout.
 - `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, re-apply only the routing seams listed in the source map, and keep the source/licence attribution.
 - Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.95.0 or export `RUSTC_BOOTSTRAP` globally.
