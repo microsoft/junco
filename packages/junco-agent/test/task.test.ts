@@ -17,7 +17,10 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createTaskTool,
+  isAssignedTaskTool,
   isComplainTool,
+  isTaskTool,
+  type TaskInput,
   type TaskToolDetails,
   type TaskToolHost,
 } from "junco-tools";
@@ -86,12 +89,14 @@ const isCode =
   (error: unknown): boolean =>
     error instanceof JuncoAgentError && error.code === code;
 
-/** A host recording each admission and returning one handle per task. */
+/** A host recording each request: one handle per launched task, the retried ID, none for ignore. */
 function recordingHost(prefix = "h") {
   const calls: { toolCallId: string; input: Parameters<TaskToolHost>[1] }[] =
     [];
   const host: TaskToolHost = async (toolCallId, input) => {
     calls.push({ toolCallId, input });
+    if ("action" in input)
+      return input.action === "retry" ? [{ id: input.id }] : [];
     return input.tasks.map((item, index) => ({
       id: `${prefix}-${toolCallId}-${index}`,
       ...(item.name === undefined ? {} : { name: item.name }),
@@ -244,6 +249,63 @@ test(
       assert.deepEqual(
         calls.map(({ toolCallId }) => toolCallId),
         ["first", "second"],
+      );
+      assert.equal(settledText(await agent.next()), "done");
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "a task policy rejects an input as a tool error before admission, then admits a corrected call",
+  async () => {
+    const { host, calls } = recordingHost();
+    const seen: string[] = [];
+    const capture: { context?: Context } = {};
+    const { agent } = await newAgent(
+      [
+        toolTurn(
+          taskCall("narrowed", { context: "c", tasks: [{ task: "part" }] }),
+        ),
+        (context) => {
+          capture.context = context;
+          return toolTurn(
+            taskCall("assigned", { context: "c", tasks: [{ task: "whole" }] }),
+          );
+        },
+        fauxAssistantMessage("done"),
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    agent.setTaskPolicy((input) => {
+      seen.push(input.tasks.map(({ task }) => task).join());
+      if (input.tasks[0]?.task !== "whole")
+        throw new Error("not the assigned batch");
+    });
+    try {
+      const paused = await agent.runWithTaskHost(host, async () =>
+        step(await agent.next()),
+      );
+      assert.deepEqual(paused, {
+        kind: "yield",
+        reasons: [
+          {
+            kind: "tool",
+            toolCallId: "assigned",
+            toolName: "task",
+            reason: "Scheduled 1 subagents",
+          },
+        ],
+      });
+      const rejected = toolResultOf(capture.context!.messages, "narrowed");
+      assert.equal(rejected.isError, true);
+      assert.match(blockText(rejected.content), /not the assigned batch/);
+      assert.deepEqual(seen, ["part", "whole"]);
+      assert.deepEqual(
+        calls.map(({ toolCallId }) => toolCallId),
+        ["assigned"],
       );
       assert.equal(settledText(await agent.next()), "done");
     } finally {
@@ -561,6 +623,444 @@ test(
   TIMEOUT,
 );
 
+// Assigned batches and decisions ------------------------------------------------------------------
+
+const batch = (): TaskInput => ({
+  context: "shared",
+  tasks: [{ name: " alpha ", task: "do a", tools: [] }, { task: "do b" }],
+});
+const canonical: TaskInput = {
+  context: "shared",
+  tasks: [{ name: "alpha", task: "do a", tools: [] }, { task: "do b" }],
+};
+
+test(
+  "setTaskBatch replaces the genuine task tool in place, keeping order and activity",
+  async () => {
+    const a = countingTool("a");
+    const b = countingTool("b");
+    const ordinary = createTaskTool();
+    const active = await newAgent([], {
+      tools: [a.tool, ordinary, b.tool],
+      activeToolNames: ["task", "a"],
+    });
+    const inactive = await newAgent([], {
+      tools: [a.tool, createTaskTool(), b.tool],
+      activeToolNames: ["b"],
+    });
+    try {
+      await active.agent.setTaskBatch(batch());
+      const tools = active.agent.getTools();
+      const assigned = tools[1]!;
+      assert.notEqual(assigned, ordinary);
+      assert.equal(isAssignedTaskTool(assigned), true);
+      assertTools(tools, [a.tool, assigned, b.tool]);
+      assertTools(active.agent.getActiveTools(), [assigned, a.tool]);
+      // Replacing a not-yet-admitted batch is allowed.
+      await active.agent.setTaskBatch(batch());
+      assert.notEqual(active.agent.getTools()[1], assigned);
+      assert.equal(isAssignedTaskTool(active.agent.getTools()[1]!), true);
+
+      await inactive.agent.setTaskBatch(batch());
+      assert.equal(isAssignedTaskTool(inactive.agent.getTools()[1]!), true);
+      assertTools(inactive.agent.getActiveTools(), [b.tool]);
+    } finally {
+      await Promise.all([active.agent.return(), inactive.agent.return()]);
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "setTaskBatch rejects a missing or spoofed task tool, an invalid batch and a busy agent",
+  async () => {
+    const none = await newAgent([], { tools: [countingTool("a").tool] });
+    const spoofed = await newAgent([], { tools: [countingTool("task").tool] });
+    const { host } = recordingHost();
+    const held = await newAgent(
+      [
+        toolTurn(taskCall("t1", { context: "c", tasks: [{ task: "x" }] })),
+        fauxAssistantMessage("done"),
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    try {
+      for (const { agent } of [none, spoofed])
+        await assert.rejects(
+          agent.setTaskBatch(batch()),
+          isCode("invalid_state"),
+        );
+      const original = held.agent.getTools();
+      for (const input of [
+        { context: "c", tasks: [] },
+        { context: " ", tasks: [{ task: "x" }] },
+        { context: "c", tasks: [{ task: "x", extra: 1 }] },
+      ])
+        await assert.rejects(
+          held.agent.setTaskBatch(input as TaskInput),
+          isCode("invalid_argument"),
+          JSON.stringify(input),
+        );
+      assert.deepEqual(held.agent.getTools(), original);
+
+      const paused = await held.agent.runWithTaskHost(host, async () =>
+        step(await held.agent.next()),
+      );
+      assert.equal(paused.kind, "yield");
+      assert.equal(held.agent.status, "suspended");
+      await assert.rejects(held.agent.setTaskBatch(batch()), isCode("busy"));
+      assert.deepEqual(held.agent.getTools(), original);
+      assert.equal(settledText(await held.agent.next()), "done");
+    } finally {
+      await Promise.all(
+        [none, spoofed, held].map(({ agent }) => agent.return()),
+      );
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "an assigned batch launches its canonical input once: a rejection may be retried, a duplicate may not",
+  async () => {
+    const recorder = recordingHost();
+    let refuse = true;
+    let attempts = 0;
+    const host: TaskToolHost = async (...args) => {
+      attempts += 1;
+      if (refuse) {
+        refuse = false;
+        throw new Error("allocation refused");
+      }
+      return recorder.host(...args);
+    };
+    const contexts: Context[] = [];
+    const { agent } = await newAgent(
+      [
+        toolTurn(taskCall("t1", {})),
+        toolTurn(taskCall("t2", {})),
+        (context) => {
+          contexts.push(context);
+          return toolTurn(taskCall("t3", {}));
+        },
+        (context) => {
+          contexts.push(context);
+          return fauxAssistantMessage("done");
+        },
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    const input = batch();
+    await agent.setTaskBatch(input);
+    // The batch was copied: later caller mutation changes nothing.
+    input.tasks[0]!.tools!.push("bash");
+    (input.tasks as TaskInput["tasks"][number][]).push({ task: "late" });
+    try {
+      const paused = await agent.runWithTaskHost(host, async () =>
+        step(await agent.next()),
+      );
+      assert.deepEqual(paused, {
+        kind: "yield",
+        reasons: [
+          {
+            kind: "tool",
+            toolCallId: "t2",
+            toolName: "task",
+            reason: "Scheduled 2 subagents",
+          },
+        ],
+      });
+
+      const settled = await agent.runWithTaskHost(host, () => agent.next());
+      assert.equal(settledText(settled), "done");
+      const rejected = toolResultOf(contexts[0]!.messages, "t1");
+      assert.equal(rejected.isError, true);
+      assert.match(blockText(rejected.content), /allocation refused/);
+      assert.deepEqual(
+        recorder.calls.map(({ toolCallId, input }) => [toolCallId, input]),
+        [["t2", canonical]],
+      );
+      assert.deepEqual(toolResultOf(contexts[0]!.messages, "t2").details, {
+        tasks: [{ id: "h-t2-0", name: "alpha" }, { id: "h-t2-1" }],
+      });
+      const duplicate = toolResultOf(contexts[1]!.messages, "t3");
+      assert.equal(duplicate.isError, true);
+      assert.equal(
+        blockText(duplicate.content),
+        "Task batch already admitted; wait for its results.",
+      );
+      assert.equal(attempts, 2);
+      assert.equal(recorder.calls.length, 1);
+      // An admitted batch cannot be replaced either, though the agent is idle again.
+      assert.equal(agent.status, "idle");
+      await assert.rejects(
+        agent.setTaskBatch(batch()),
+        isCode("invalid_state"),
+      );
+      assert.equal(isAssignedTaskTool(agent.getTools()[0]!), true);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "a fulfilled host with a malformed receipt still consumes the assigned batch",
+  async () => {
+    let calls = 0;
+    const host: TaskToolHost = async () => {
+      calls += 1;
+      return [];
+    };
+    const contexts: Context[] = [];
+    const { agent } = await newAgent(
+      [
+        toolTurn(taskCall("t1", {})),
+        (context) => {
+          contexts.push(context);
+          return toolTurn(taskCall("t2", {}));
+        },
+        (context) => {
+          contexts.push(context);
+          return fauxAssistantMessage("done");
+        },
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    await agent.setTaskBatch(batch());
+    try {
+      const result = await agent.runWithTaskHost(host, () => agent.next());
+      assert.equal(settledText(result), "done");
+      const malformed = toolResultOf(contexts[0]!.messages, "t1");
+      assert.equal(malformed.isError, true);
+      assert.match(blockText(malformed.content), /0 handles for 2 tasks/);
+      const duplicate = toolResultOf(contexts[1]!.messages, "t2");
+      assert.equal(duplicate.isError, true);
+      assert.match(blockText(duplicate.content), /already admitted/);
+      assert.equal(calls, 1);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "two launches in one assistant message are serialized: a held admission is never duplicated",
+  async () => {
+    // Task calls execute sequentially, so the second launch observes the first's outcome rather
+    // than racing it; the in-progress guard is defensive and unreachable from one agent's run.
+    const release = Promise.withResolvers<TaskToolDetails["tasks"]>();
+    const started = Promise.withResolvers<void>();
+    let calls = 0;
+    const host: TaskToolHost = () => {
+      calls += 1;
+      started.resolve();
+      return release.promise;
+    };
+    const capture: { context?: Context } = {};
+    const { agent } = await newAgent(
+      [
+        toolTurn(taskCall("first", {}), taskCall("second", {})),
+        (context) => {
+          capture.context = context;
+          return fauxAssistantMessage("done");
+        },
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    await agent.setTaskBatch(batch());
+    try {
+      const outcome = agent.runWithTaskHost(host, async () =>
+        step(await agent.next()),
+      );
+      await started.promise;
+      for (let index = 0; index < 5; index += 1) await tick();
+      assert.equal(calls, 1);
+      release.resolve([{ id: "a", name: "alpha" }, { id: "b" }]);
+      assert.deepEqual(await outcome, {
+        kind: "yield",
+        reasons: [
+          {
+            kind: "tool",
+            toolCallId: "first",
+            toolName: "task",
+            reason: "Scheduled 2 subagents",
+          },
+        ],
+      });
+      assert.equal(settledText(await agent.next()), "done");
+      const second = toolResultOf(capture.context!.messages, "second");
+      assert.equal(second.isError, true);
+      assert.match(blockText(second.content), /already admitted/);
+      assert.equal(calls, 1);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "decisions bypass the launch guard and task policy; a retry pauses, an ignore does not",
+  async () => {
+    const { host, calls } = recordingHost();
+    const launches: TaskInput[] = [];
+    const { agent } = await newAgent(
+      [
+        toolTurn(taskCall("launch", {})),
+        toolTurn(
+          taskCall("retry", { action: "retry", id: "h-launch-0", attempt: 1 }),
+          taskCall("ignore", {
+            action: "ignore",
+            id: "h-launch-1",
+            attempt: 1,
+          }),
+        ),
+        toolTurn(
+          taskCall("ignore-again", {
+            action: "ignore",
+            id: "h-launch-0",
+            attempt: 2,
+          }),
+        ),
+        fauxAssistantMessage("done"),
+      ],
+      { tools: [createTaskTool()], prompt: "go" },
+    );
+    await agent.setTaskBatch(batch());
+    agent.setTaskPolicy((input) => {
+      launches.push(input);
+    });
+    try {
+      const launched = await agent.runWithTaskHost(host, async () =>
+        step(await agent.next()),
+      );
+      assert.equal(launched.kind, "yield");
+      // Decisions are not launches: the policy now refuses everything, the batch is admitted.
+      agent.setTaskPolicy(() => {
+        throw new Error("no launches");
+      });
+      const retried = await agent.runWithTaskHost(host, async () =>
+        step(await agent.next()),
+      );
+      assert.deepEqual(retried, {
+        kind: "yield",
+        reasons: [
+          {
+            kind: "tool",
+            toolCallId: "retry",
+            toolName: "task",
+            reason: "Scheduled 1 subagents",
+          },
+        ],
+      });
+      // An ignore alone admits nothing, so the run continues to its answer without a pause.
+      const settled = await agent.runWithTaskHost(host, () => agent.next());
+      assert.equal(settledText(settled), "done");
+      assert.deepEqual(launches, [canonical]);
+      assert.deepEqual(
+        calls.map(({ toolCallId, input }) => [toolCallId, input]),
+        [
+          ["launch", canonical],
+          ["retry", { action: "retry", id: "h-launch-0", attempt: 1 }],
+          ["ignore", { action: "ignore", id: "h-launch-1", attempt: 1 }],
+          ["ignore-again", { action: "ignore", id: "h-launch-0", attempt: 2 }],
+        ],
+      );
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "independent agents admit their own assigned batches",
+  async () => {
+    const first = recordingHost("a");
+    const second = recordingHost("b");
+    const agents = await Promise.all(
+      ["a", "b"].map(() =>
+        newAgent([toolTurn(taskCall("go", {})), fauxAssistantMessage("done")], {
+          tools: [createTaskTool()],
+          prompt: "go",
+        }),
+      ),
+    );
+    try {
+      for (const { agent } of agents) await agent.setTaskBatch(batch());
+      const [a, b] = agents.map(({ agent }) => agent);
+      assert.equal(
+        (
+          await a!.runWithTaskHost(first.host, async () =>
+            step(await a!.next()),
+          )
+        ).kind,
+        "yield",
+      );
+      assert.equal(settledText(await a!.next()), "done");
+      // The first agent's admission does not consume the second's.
+      assert.equal(
+        (
+          await b!.runWithTaskHost(second.host, async () =>
+            step(await b!.next()),
+          )
+        ).kind,
+        "yield",
+      );
+      assert.equal(settledText(await b!.next()), "done");
+      assert.deepEqual(
+        [first.calls, second.calls].map((calls) =>
+          calls.map(({ input }) => input),
+        ),
+        [[canonical], [canonical]],
+      );
+    } finally {
+      await Promise.all(agents.map(({ agent }) => agent.return()));
+    }
+  },
+  TIMEOUT,
+);
+
+test("task failure policy defaults to zero retries and validates retry counts", async () => {
+  const { agent } = await newAgent([], { tools: [createTaskTool()] });
+  try {
+    assert.deepEqual(agent.getTaskFailurePolicy(), { retries: 0 });
+    for (const retries of [
+      -1,
+      0.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ])
+      assert.throws(
+        () => agent.setTaskFailurePolicy({ retries }),
+        (error: unknown) =>
+          isCode("invalid_argument")(error) &&
+          (error as Error).message ===
+            "Task retries must be a nonnegative safe integer",
+        String(retries),
+      );
+    assert.deepEqual(agent.getTaskFailurePolicy(), { retries: 0 });
+    const policy = { retries: 3 };
+    agent.setTaskFailurePolicy(policy);
+    policy.retries = 7;
+    const read = agent.getTaskFailurePolicy() as { retries: number };
+    assert.deepEqual(read, { retries: 3 });
+    read.retries = 9;
+    assert.deepEqual(agent.getTaskFailurePolicy(), { retries: 3 });
+    agent.setTaskFailurePolicy({ retries: Number.MAX_SAFE_INTEGER });
+    agent.setTaskFailurePolicy({ retries: 0 });
+    assert.deepEqual(agent.getTaskFailurePolicy(), { retries: 0 });
+    agent.setTaskFailurePolicy("ignore");
+    assert.equal(agent.getTaskFailurePolicy(), "ignore");
+  } finally {
+    await agent.return();
+  }
+});
+
 // createSubagents ---------------------------------------------------------------------------------
 
 /** One Models with two faux providers: `faux` (reasoning `main`, non-reasoning `plain`) and `faux2`. */
@@ -856,6 +1356,148 @@ test(
       assert.equal(owned.state.executions, 2);
     } finally {
       await Promise.all([agent.return(), child.return()]);
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "children get a fresh ordinary task tool, not the parent's assigned batch or policies",
+  async () => {
+    const a = countingTool("a");
+    const { agent, main } = await twoProviderParent([createTaskTool(), a.tool]);
+    await agent.setTaskBatch(batch());
+    agent.setTaskFailurePolicy("ignore");
+    agent.setTaskPolicy(() => {
+      throw new Error("parent policy");
+    });
+    const assigned = agent.getTools()[0]!;
+    const [child] = await agent.createSubagents([{}]);
+    assert.ok(child);
+    const { host, calls } = recordingHost();
+    const contexts: Context[] = [];
+    try {
+      const fresh = child.getTools()[0]!;
+      assert.notEqual(fresh, assigned);
+      assert.equal(isTaskTool(fresh), true);
+      assert.equal(isAssignedTaskTool(fresh), false);
+      assertTools(child.getActiveTools(), [fresh, a.tool]);
+      assert.deepEqual(child.getTaskFailurePolicy(), { retries: 0 });
+
+      // `{}` is no launch for an ordinary tool; a full launch skips the parent's policy.
+      main.setResponses([
+        toolTurn(taskCall("empty", {})),
+        (context) => {
+          contexts.push(context);
+          return toolTurn(
+            taskCall("own", { context: "c", tasks: [{ task: "x" }] }),
+          );
+        },
+        fauxAssistantMessage("child done"),
+      ]);
+      const paused = await child.runWithTaskHost(host, async () => {
+        void child.prompt("delegate");
+        return step(await child.next());
+      });
+      assert.equal(paused.kind, "yield");
+      assert.equal(settledText(await child.next()), "child done");
+      assert.equal(toolResultOf(contexts[0]!.messages, "empty").isError, true);
+      assert.deepEqual(calls, [
+        { toolCallId: "own", input: { context: "c", tasks: [{ task: "x" }] } },
+      ]);
+      // The child's own batch is independent of the parent's (still unadmitted) one.
+      await child.setTaskBatch(batch());
+      assert.equal(agent.getTools()[0], assigned);
+    } finally {
+      await Promise.all([agent.return(), child.return()]);
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "a subagent observer gates acquisition, sees each child first, and is not inherited",
+  async () => {
+    const a = countingTool("a");
+    const { agent, main } = await twoProviderParent([a.tool]);
+    const refused = new Error("acquisition refused");
+    const rejected = new Error("child refused");
+    const seen: { child: JuncoAgent; index: number; status: string }[] = [];
+    let requests: unknown[] = [];
+    let refuseAt: number | undefined;
+    agent.setSubagentObserver({
+      acquiring: (options) => {
+        requests = [...options];
+        if (options.length === 3) throw refused;
+      },
+      acquired: (child, index) => {
+        seen.push({ child, index, status: child.status });
+        if (index === refuseAt) throw rejected;
+        // Attached before anything runs the child.
+        child.hooks.on("before_tool", () => ({
+          block: { reason: "observed" },
+        }));
+      },
+    });
+    const spy = spySessions();
+    const children: JuncoAgent[] = [];
+    try {
+      // Throwing from `acquiring` creates nothing.
+      await assert.rejects(
+        agent.createSubagents([{}, {}, { tools: [] }]),
+        (error) => error === refused,
+      );
+      assert.equal(requests.length, 3);
+      assert.equal(spy.sessions.length, 0);
+      assert.equal(seen.length, 0);
+
+      // Throwing from `acquired` closes every child the batch created.
+      refuseAt = 1;
+      await assert.rejects(
+        agent.createSubagents([{}, {}]),
+        (error) => error === rejected,
+      );
+      assert.deepEqual(
+        seen.map(({ index }) => index),
+        [0, 1],
+      );
+      assert.equal(spy.sessions.length, 2);
+      for (const session of spy.sessions)
+        assert.equal(await isClosed(session), true);
+      for (const { child } of seen) assert.equal(child.status, "closed");
+
+      // Each child is seen unstarted, in batch order, before the caller receives it.
+      refuseAt = undefined;
+      seen.length = 0;
+      children.push(...(await agent.createSubagents([{}, { tools: ["a"] }])));
+      assert.deepEqual(
+        seen.map(({ child, index, status }) => [child, index, status]),
+        [
+          [children[0], 0, "idle"],
+          [children[1], 1, "idle"],
+        ],
+      );
+      main.setResponses([
+        toolTurn(fauxToolCall("a", {}, { id: "blocked" })),
+        fauxAssistantMessage("child done"),
+      ]);
+      await children[1]!.prompt("use a");
+      assert.equal(settledText(await children[1]!.next()), "child done");
+      assert.equal(a.state.executions, 0);
+
+      // Children do not inherit the observer; `undefined` removes it from the parent.
+      seen.length = 0;
+      children.push(...(await children[0]!.createSubagents([{}])));
+      assert.equal(seen.length, 0);
+      agent.setSubagentObserver(undefined);
+      children.push(...(await agent.createSubagents([{}, {}, {}])));
+      assert.equal(seen.length, 0);
+    } finally {
+      spy.restore();
+      await Promise.all([
+        agent.return(),
+        ...children.map((child) => child.return()),
+      ]);
     }
   },
   TIMEOUT,

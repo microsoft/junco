@@ -15,7 +15,10 @@
  *    resolved against the current snapshot. One batch is one `JuncoGraph` of parallel lanes
  *    `Proposer:r ==proposal:r==> Judge:r`; every proposer expands at runtime into a native Spawn
  *    star of up to three read-only researchers (`Search1`–`Search3`) that split the whole indexed
- *    file list far-first. A proposer records one structured result through `submit_refactor`; an
+ *    file list far-first. Each proposer's research batch is fixed by `setTaskBatch`; the model only
+ *    launches it with `task({})`. Failed research follows `taskFailurePolicy` (default `"ignore"`:
+ *    dropped silently and counted as missing coverage; `{ retries: 0 }` asks the proposer to retry
+ *    or ignore at once). A proposer records one structured result through `submit_refactor`; an
  *    independent judge records four criteria through `judge_refactor`.
  * 4. **Application.** As soon as a lane's review completes with all four criteria, at least one new
  *    caller definition, and a positive projected net of removed nonblank source lines, its edits
@@ -1240,8 +1243,8 @@ function candidateContract(snapshot: GraftSnapshot, work: CandidateWork): string
   return lines.join("\n");
 }
 
-/** The exact `task` input a proposer submits: one read-only researcher per shard. */
-function researchTasks(work: CandidateWork, contract: string, researchTools: readonly string[]) {
+/** A proposer's assigned research batch, stored on its `task` tool: one read-only researcher per shard. */
+function researchTasks(work: CandidateWork, contract: string, researchTools: readonly string[]): tools.TaskInput {
   return {
     context: `You are a read-only researcher for one refactor candidate.\n\n${contract}`,
     tasks: work.shards.map((shard) => ({
@@ -1264,15 +1267,15 @@ function proposerPrompt(snapshot: GraftSnapshot, work: CandidateWork, researchTo
   const contract = candidateContract(snapshot, work);
   const trace = researchTools.find((name) => name.endsWith("graft_trace_calls")) ?? "graft_trace_calls";
   const symbol = node.id.slice(node.id.indexOf("#") + 1).replace(/~\d+(?=\.|$)/g, "");
-  const tasks = researchTasks(work, contract, researchTools);
+  const shards = work.shards.map((shard) => `${shard.name} (${shard.files.length} files)`).join(", ");
   return [
     "You propose one generalizing refactor for the candidate below: make it serve more existing code so duplicated code elsewhere disappears, with the minimum necessary change. Line numbers and source refer to the repository as of this admission batch, which already contains every refactor applied earlier in the run.",
     contract,
     `## Phase 1: callers\nFor the candidate and each owned method, call \`${trace}\` with { "symbol": <its qualified name after "#", without ~N suffixes>, "in": "${node.path}", "direction": "in", "depth": 1 } (for the candidate: "${symbol}"). Graft does not resolve full IDs, so match results to the IDs above. Reconcile the deterministic count of ${work.candidate.callerIds.length} distinct callers, then read each caller's source. Report unresolved evidence; do not guess.`,
-    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with exactly this input (copy it verbatim; researchers inherit your model and may use only the listed tools):\n\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\`\nThen wait for all ${work.shards.length} reports. A failed or malformed report means that shard is incomplete, not that it found nothing.`,
+    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with \`{}\`. It starts your ${work.shards.length} assigned read-only researchers (${shards}); their assignments are fixed, they inherit your model and may use only ${researchTools.join(", ")}. It returns one handle ID per researcher. Their reports arrive later as messages carrying those IDs; wait until a \`task_batch_complete\` message lists every returned handle ID, which means every researcher finished or was given up. A failed report marked decisionRequired must first be resolved through \`${TASK_TOOL}\` as its tool description says. A missing, failed, malformed, or incomplete report means that shard is incomplete, not that it found nothing.`,
     [
-      `## Phase 3: one result\nMerge compatible findings into at most one cohesive generalization of this candidate and call \`${SUBMIT_TOOL}\` exactly once:`,
-      `- research: every researcher's returned JSON report, copied verbatim (one per shard).`,
+      `## Phase 3: one result\nMerge compatible findings into at most one cohesive generalization of this candidate and record it with one successful \`${SUBMIT_TOOL}\` call (if it rejects your input, correct it and call again):`,
+      `- research: every valid researcher JSON report you actually received, copied verbatim (at most one per shard); never write a record for a researcher that returned none.`,
       `- kind "proposal" only when every shard is complete. Give generalization (final API/signatures and ordered implementation steps), compatibility (one entry per existing caller ID above), substitutions (existing definitions whose duplicate code your edits replace, by edit index), edits, newSites, and dependencyReason (which duplicate layer or branch disappears and why the shared abstraction is coherent).`,
       `- edits use the current source as you read it: kind "replace" copies the exact current lines as beforeLines starting at 1-based startLine ([] beforeLines inserts before startLine; [] afterLines deletes); kind "create" adds a new file (startLine 1, beforeLines []), which counts against line savings. Edits must not overlap. If the judge approves, your edits are applied in place and their files staged automatically; a file changed meanwhile by a concurrent lane makes the application fail, so keep edits to the files your generalization needs.`,
       `- newSites: each new use of the generalized candidate inside an existing indexed definition that does not use it today: callerId, editIndex, afterLine and column (1-based, within that edit's afterLines) and the exact expression. New files or tests do not count.`,
@@ -1320,6 +1323,8 @@ export type CandidateBatchGraphOptions = {
   readonly snapshot: GraftSnapshot;
   readonly lanes: readonly CandidateLane[];
   readonly observer?: tracer.DataflowTracer;
+  /** What happens to a failed researcher; default `"ignore"`: its shard stays incomplete. */
+  readonly taskFailurePolicy?: agent.TaskFailurePolicy;
 };
 
 export type CandidateBatchRunOptions = CandidateBatchGraphOptions & {
@@ -1345,28 +1350,6 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   const text = contentText(message.content).trim();
   if (!text) throw new Error(`${member} produced an empty final message`);
   return text;
-}
-
-/**
- * Researchers inherit the proposer's pinned model and get only its research tools: never `task`
- * (no recursive spawning) and never `submit_refactor`. A task omitting `tools` gets the research set;
- * one asking for anything else, or another model, fails as a tool error the proposer can correct.
- */
-function confineResearchers(proposer: agent.JuncoAgent): void {
-  const create = proposer.createSubagents.bind(proposer);
-  proposer.createSubagents = async (options, signal) => {
-    const research = proposer.getActiveTools().map((tool) => tool.name).filter((name) => name !== TASK_TOOL && name !== SUBMIT_TOOL);
-    const confined = options.map((option, index) => {
-      if (option.model !== undefined) throw new Error(`tasks[${index}]: researchers inherit your model; omit model`);
-      const requested = option.tools ?? research;
-      const forbidden = requested.filter((name) => !research.includes(name));
-      if (forbidden.length > 0) {
-        throw new Error(`tasks[${index}]: researchers may use only ${research.join(", ")}; remove ${forbidden.join(", ")}`);
-      }
-      return { tools: [...requested] };
-    });
-    return create(confined, signal);
-  };
 }
 
 async function disposeAll(primary: unknown, closers: readonly (() => Promise<unknown>)[], message: string): Promise<never> {
@@ -1396,10 +1379,12 @@ export async function createCandidateBatchGraph(options: CandidateBatchGraphOpti
       throw new Error(`A candidate batch has 1–${CANDIDATE_BATCH_SIZE} lanes, not ${lanes.length}`);
     }
     if (new Set(lanes.map((lane) => lane.work.rank)).size !== lanes.length) throw new Error("Candidate batch ranks must be unique");
-    const graphLanes = lanes.map((lane): CandidateGraphLane => {
+    const graphLanes: CandidateGraphLane[] = [];
+    for (const lane of lanes) {
       const { work } = lane;
       const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter((name) => name !== TASK_TOOL && name !== SUBMIT_TOOL);
-      confineResearchers(lane.proposer);
+      await lane.proposer.setTaskBatch(researchTasks(work, candidateContract(snapshot, work), research));
+      lane.proposer.setTaskFailurePolicy(options.taskFailurePolicy ?? "ignore");
       lane.proposer.events.on("message_end", ({ lane: channel, message }) => {
         if (channel === "main" && message.role === "user") lane.proposal.noteTaskReport(contentText(message.content));
       });
@@ -1442,8 +1427,8 @@ export async function createCandidateBatchGraph(options: CandidateBatchGraphOpti
       });
       unregistered.delete(lane.judge);
       workflow.addEdge(proposerId, judgeId, proposalEdge);
-      return { work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId };
-    });
+      graphLanes.push({ work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId });
+    }
     return { workflow, lanes: graphLanes };
   } catch (error) {
     return disposeAll(
@@ -1873,7 +1858,7 @@ function liveRunner(options: {
       options.onApplied(refactor, files);
       return files;
     };
-    return runCandidateBatch({ snapshot, lanes, observer, apply }, signal);
+    return runCandidateBatch({ snapshot, lanes, observer, apply, taskFailurePolicy: "ignore" }, signal);
   };
 
   return {

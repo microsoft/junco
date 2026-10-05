@@ -1055,6 +1055,8 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
 ) {
   const host: tools.TaskToolHost = async (_toolCallId, input, hostSignal) => {
     hostSignal.throwIfAborted();
+    if ("action" in input)
+      return input.action === "retry" ? [{ id: input.id }] : [];
     return input.tasks.map(({ name }, index) => ({
       id: `task-${index}`,
       ...(name === undefined ? {} : { name }),
@@ -1086,6 +1088,29 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   const children: agent.JuncoAgent<TaggedSkill, TaggedTemplate, AgentTool>[] =
     await specialized.createSubagents(overrides, signal);
   const hosted: number = await specialized.runWithTaskHost(host, async () => 1);
+  const batch: tools.TaskInput = { context: "c", tasks: [{ task: "x" }] };
+  const assigned: tools.AssignedTaskTool = tools.createAssignedTaskTool(batch);
+  const launched = await tools.invokeTaskTool(
+    assigned,
+    host,
+    "call-6",
+    {},
+    signal,
+  );
+  const decision: tools.TaskDecision = { action: "retry", id: "t", attempt: 1 };
+  const call: tools.TaskCall = decision;
+  const retried = await tools.invokeTaskTool(
+    task,
+    host,
+    "call-7",
+    call,
+    signal,
+  );
+  const configured: Promise<void> = specialized.setTaskBatch(batch);
+  const failurePolicy: agent.TaskFailurePolicy =
+    specialized.getTaskFailurePolicy();
+  specialized.setTaskFailurePolicy("ignore");
+  specialized.setTaskFailurePolicy({ retries: 2 });
   const snapshot: mcp.JuncoMcpTools = definition.snapshot();
   const identity: mcp.JuncoMcpToolIdentity | undefined =
     mcp.getJuncoMcpToolIdentity(unhosted);
@@ -1098,10 +1123,21 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
     // @ts-expect-error a model override names its provider and model ID
     tasks: [{ task: "x", model: { provider: "p" } }],
   });
-  // @ts-expect-error a tool subset lists tool names
-  await task.execute("call-4", { context: "c", tasks: [{ task: "x", tools: [1] }] });
-  // @ts-expect-error a task batch shares a context
-  await task.execute("call-5", { tasks: [{ task: "x" }] });
+  await task.execute("call-4", {
+    context: "c",
+    // @ts-expect-error a tool subset lists tool names
+    tasks: [{ task: "x", tools: [1] }],
+  });
+  await tools.invokeTaskTool(
+    task,
+    host,
+    "c",
+    // @ts-expect-error a decision retries or ignores
+    { action: "redo", id: "x", attempt: 1 },
+    signal,
+  );
+  // @ts-expect-error a failure policy ignores or bounds retries
+  specialized.setTaskFailurePolicy("retry");
   // @ts-expect-error hosts receive the input directly, not a request wrapper
   await tools.invokeTaskTool(
     task,
@@ -1119,6 +1155,10 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   >[] = children;
   return [
     branded,
+    launched,
+    retried,
+    configured,
+    failurePolicy,
     firstId,
     hosted,
     snapshot,

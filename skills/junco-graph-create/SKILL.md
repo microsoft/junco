@@ -432,9 +432,22 @@ export class JuncoAgent<
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
   // JuncoAgent only, not Agentic:
   runWithTaskHost<R>(host: TaskToolHost, work: () => Promise<R>): Promise<R>
+  setTaskPolicy(policy: TaskPolicy | undefined): void // throw to reject a hosted task launch (not a decision) as a tool error
+  setTaskBatch(input: TaskInput): Promise<void> // idle only; model launches the stored batch once with task({}); children get an ordinary task tool
+  setTaskFailurePolicy(policy: TaskFailurePolicy): void // default { retries: 0 }; snapshotted per admitted task; not inherited
+  getTaskFailurePolicy(): TaskFailurePolicy
+  setSubagentObserver(observer: SubagentObserver | undefined): void // sees every createSubagents batch, incl. graph launches/retries
   createSubagents(options: readonly TaskAgentOptions[], signal?: AbortSignal): Promise<JuncoAgent<S, P, AgentTool>[]>
 
 export type TaskAgentOptions = { readonly model?: ModelIdentity; readonly tools?: readonly string[] };
+export type TaskPolicy = (input: TaskInput) => void; // TaskInput from junco-tools
+// "ignore": drop failures silently; { retries: n }: rerun up to n times, then ask the caller (task decision).
+// n must be a nonnegative safe integer, else invalid_argument "Task retries must be a nonnegative safe integer".
+export type TaskFailurePolicy = "ignore" | { readonly retries: number };
+export type SubagentObserver = {
+  readonly acquiring?: (options: readonly TaskAgentOptions[]) => void; // throw: reject, nothing created
+  readonly acquired?: (child: JuncoAgent, index: number) => void; // throw: fail batch, children closed
+};
 
 export class JuncoAgentError extends Error
   constructor(
@@ -516,17 +529,25 @@ export function isYieldTool(tool: object): boolean
 export type TaskToolDetails = {
   readonly tasks: readonly { readonly id: string; readonly name?: string }[];
 };
+export type TaskInput = Static<typeof launchSchema>;
+export type TaskDecision = { readonly action: "retry" | "ignore"; readonly id: string; readonly attempt: number };
+export type TaskRequest = TaskInput | TaskDecision;
+export type TaskCall = TaskRequest | Readonly<Record<string, never>>;
 export type TaskToolHost = (
   toolCallId: string,
-  input: Static<typeof taskParameters>,
+  input: TaskRequest, // discriminate with "action" in input
   signal: AbortSignal,
-) => Promise<TaskToolDetails["tasks"]>;
-export function createTaskTool(host?: TaskToolHost): AgentTool<typeof taskParameters, TaskToolDetails>
-export function isTaskTool(tool: object): tool is AgentTool<typeof taskParameters, TaskToolDetails>
-export function invokeTaskTool(tool, host: TaskToolHost, toolCallId: string, input, signal: AbortSignal): Promise<AgentToolResult<TaskToolDetails>>
+) => Promise<TaskToolDetails["tasks"]>; // launch: one handle per task; retry: the task's handle; ignore: none. Reject only if nothing was admitted.
+export type TaskTool = AgentTool<typeof taskParameters, TaskToolDetails>;
+export type AssignedTaskTool = AgentTool<typeof assignedParameters, TaskToolDetails>;
+export function createTaskTool(host?: TaskToolHost): TaskTool
+export function createAssignedTaskTool(input: TaskInput): AssignedTaskTool // model launches the stored batch with task({})
+export function isTaskTool(tool: object): tool is TaskTool | AssignedTaskTool
+export function isAssignedTaskTool(tool: object): tool is AssignedTaskTool
+export function invokeTaskTool(tool: TaskTool | AssignedTaskTool, host: TaskToolHost, toolCallId: string, input: TaskCall, signal: AbortSignal): Promise<AgentToolResult<TaskToolDetails>>
 ```
 
-(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object returned by `createYieldTool()`; a same-named tool or a spread copy is not one. `taskParameters` is implementation-local: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`, required shared `context` prepended to every task, at least one task, non-blank strings, no extra properties. The same branding rule applies to `isTaskTool`.)
+(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object returned by `createYieldTool()`; a same-named tool or a spread copy is not one. `launchSchema` is implementation-local: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`, required shared `context` prepended to every task, at least one task, non-blank strings, no extra properties. `taskParameters`/`assignedParameters` are one model-facing object (launch fields and/or decision fields `action`, `id`, `attempt`, all optional); each call is checked against the exact launch (free-form only), `{}` (assigned only) or decision shape (`attempt` a positive safe integer). The same branding rule applies to `isTaskTool` and `isAssignedTaskTool`.)
 
 (`UpstreamLspTool`, `UpstreamLspToolDetails`, `LspToolFields`, `TUnsafe` are implementation-local. `LspTool` is a factory object plus a tool type, not a constructible class.)
 
@@ -585,7 +606,7 @@ Tool selection and ownership:
 
 - **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task` and `yield`. Explicit arrays replace defaults.
 - **Voluntary suspension** needs the real `tools.createYieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues.
-- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately; at the following pause the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task, and each child's final `task_result` report reaches the caller as a follow-up. The node returns the caller's answer only after every report was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error.
+- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately; at the following pause the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true })` for read-only roles; enable mutating LSP only for a role that edits. Requires Bun and caller-installed language-server binaries. LSP uses host filesystem/process access, not the native sandbox.
 - **Native coding tools** need the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). `ToolCollection.create` and omitted agent `tools` both require it, with no ordinary-filesystem fallback. Do not silently swap in other tools when prerequisites are missing; report them.
 - **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Every agent, graph, collection, operations owner and MCP connection in the process shares one ShellMux automatically; closing any of them never closes it. The application calls `tools.shutdownShellMux()` exactly once, last, after every user has stopped. Keep these resources outside multi-round loops when agents persist.

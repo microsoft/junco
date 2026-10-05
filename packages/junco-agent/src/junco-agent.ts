@@ -44,17 +44,21 @@ import {
 import {
   type ComplainTool,
   type ComplaintContext,
+  createAssignedTaskTool,
   createComplainTool,
   createTaskTool,
   createYieldTool,
   type Issue,
   invokeComplainTool,
   invokeTaskTool,
+  isAssignedTaskTool,
   isComplainTool,
   issueLog,
   isTaskTool,
   isYieldTool,
   type Prompt,
+  type TaskCall,
+  type TaskInput,
   type TaskToolHost,
   ToolCollection,
 } from "junco-tools";
@@ -134,6 +138,26 @@ export type TaskAgentOptions = {
   readonly model?: ModelIdentity;
   /** Names among the caller's active tools; `[]` permits none. */
   readonly tools?: readonly string[];
+};
+
+/** Checks a hosted `task` launch before admission; throwing rejects it. See {@link JuncoAgent.setTaskPolicy}. */
+export type TaskPolicy = (input: TaskInput) => void;
+
+/**
+ * What a graph does with a failed task: drop it silently, or run it again up to `retries` more
+ * times and then ask the caller to retry or ignore it. See {@link JuncoAgent.setTaskFailurePolicy}.
+ */
+export type TaskFailurePolicy = "ignore" | { readonly retries: number };
+
+/** Sees the subagents one agent acquires; see {@link JuncoAgent.setSubagentObserver}. */
+export type SubagentObserver = {
+  /** Before anything is acquired for a batch; throwing rejects the batch with nothing created. */
+  readonly acquiring?: (options: readonly TaskAgentOptions[]) => void;
+  /**
+   * Each fresh, unstarted child in batch order, before the caller receives the batch; throwing
+   * fails the batch and closes every child it created.
+   */
+  readonly acquired?: (child: JuncoAgent, index: number) => void;
 };
 
 /** One MCP definition an agent connected: what subagents reconnect, and which wrappers it produced. */
@@ -584,6 +608,14 @@ export class JuncoAgent<
   #close: Promise<void> | undefined;
   /** The graph host {@link runWithTaskHost} binds for its work; task calls admit through it. */
   #taskHost: TaskToolHost | undefined;
+  /** Checks each hosted `task` launch before admission; see {@link setTaskPolicy}. */
+  #taskPolicy: TaskPolicy | undefined;
+  /** What graphs do with this agent's failed tasks; see {@link setTaskFailurePolicy}. */
+  #taskFailurePolicy: TaskFailurePolicy = { retries: 0 };
+  /** This agent's assigned batch was admitted: a host admits it at most once. */
+  #taskAdmitted = false;
+  /** Sees this agent's subagent acquisitions; see {@link setSubagentObserver}. */
+  #subagentObserver: SubagentObserver | undefined;
   /** The graph node {@link runWithComplaintContext} binds; complaints are attributed to it. */
   #complaintContext: Omit<ComplaintContext, "prompt"> | undefined;
 
@@ -765,17 +797,32 @@ export class JuncoAgent<
         try {
           const host = this.#taskHost;
           if (host !== undefined && isTaskTool(tool)) {
+            const assigned = isAssignedTaskTool(tool);
             const result = await invokeTaskTool(
               tool,
-              host,
+              async (toolCallId, input, admission) => {
+                if ("action" in input)
+                  return host(toolCallId, input, admission);
+                if (assigned && this.#taskAdmitted)
+                  throw new Error(
+                    "Task batch already admitted; wait for its results.",
+                  );
+                this.#taskPolicy?.(input);
+                // `task` runs sequentially, so no second launch overlaps this admission.
+                const handles = await host(toolCallId, input, admission);
+                // Committed before the receipt is checked: a fulfilled host admitted children.
+                if (assigned) this.#taskAdmitted = true;
+                return handles;
+              },
               id,
-              params as Parameters<typeof invokeTaskTool>[3],
+              params as TaskCall,
               signal,
             );
-            run.batch?.admissions.set(id, {
-              tool,
-              count: result.details.tasks.length,
-            });
+            if (result.details.tasks.length > 0)
+              run.batch?.admissions.set(id, {
+                tool,
+                count: result.details.tasks.length,
+              });
             return result;
           }
           if (isComplainTool(tool)) {
@@ -1203,6 +1250,97 @@ export class JuncoAgent<
   }
 
   /**
+   * Check every `task` launch a bound host would admit: `policy` receives the validated, detached
+   * batch and throws to reject it, which the model receives as an ordinary tool error before any
+   * subagent exists. Decisions about failed tasks are not launches. `undefined` removes the
+   * policy. Subagents never inherit it.
+   */
+  setTaskPolicy(policy: TaskPolicy | undefined): void {
+    this.#taskPolicy = policy;
+  }
+
+  /**
+   * Replace this idle agent's genuine `task` tool, in place and keeping whether it is active, by
+   * one that launches a detached copy of `input` when the model calls `task({})`. A host admits
+   * that batch at most once per agent: a rejected admission may be retried, an admitted batch can
+   * be neither launched again nor replaced. Subagents receive an ordinary `task` tool instead.
+   */
+  setTaskBatch(input: TaskInput): Promise<void> {
+    if (this.#closing) return Promise.reject(closedError());
+    const status = this.status;
+    if (status !== "idle" && status !== "ready")
+      return Promise.reject(
+        new JuncoAgentError("busy", "Cannot assign a task batch while running"),
+      );
+    if (this.#taskAdmitted)
+      return Promise.reject(
+        new JuncoAgentError("invalid_state", "Task batch already admitted"),
+      );
+    const index = this.#tools.findIndex(({ name }) => name === "task");
+    const current = this.#tools[index];
+    if (current === undefined || !isTaskTool(current))
+      return Promise.reject(
+        new JuncoAgentError("invalid_state", "Agent has no genuine task tool"),
+      );
+    let assigned: T;
+    try {
+      assigned = createAssignedTaskTool(input) as AgentTool as T;
+    } catch (cause) {
+      return Promise.reject(
+        new JuncoAgentError(
+          "invalid_argument",
+          cause instanceof Error ? cause.message : String(cause),
+          { cause },
+        ),
+      );
+    }
+    const tools = [...this.#tools];
+    tools[index] = assigned;
+    return this.setTools(tools, [...this.#activeNames]);
+  }
+
+  /**
+   * Choose what graphs do with this agent's failed tasks, from its next admission on: `"ignore"`
+   * drops a failure; `{ retries }` reruns it up to that many times and then asks this agent to
+   * retry or ignore it. Default `{ retries: 0 }`. Subagents never inherit it.
+   */
+  setTaskFailurePolicy(policy: TaskFailurePolicy): void {
+    if (policy === "ignore") {
+      this.#taskFailurePolicy = policy;
+      return;
+    }
+    const retries: unknown =
+      typeof policy === "object" && policy !== null
+        ? policy.retries
+        : Number.NaN;
+    if (
+      typeof retries !== "number" ||
+      !Number.isSafeInteger(retries) ||
+      retries < 0
+    )
+      throw new JuncoAgentError(
+        "invalid_argument",
+        "Task retries must be a nonnegative safe integer",
+      );
+    this.#taskFailurePolicy = { retries };
+  }
+
+  getTaskFailurePolicy(): TaskFailurePolicy {
+    const policy = this.#taskFailurePolicy;
+    return policy === "ignore" ? policy : { retries: policy.retries };
+  }
+
+  /**
+   * Observe every later {@link createSubagents} batch, including graph task admissions and
+   * retries: `observer.acquiring` may reject a batch before acquisition, `observer.acquired` sees
+   * (and may attach hooks or listeners to) each child before anything runs it. `undefined`
+   * removes it. Subagents never inherit it.
+   */
+  setSubagentObserver(observer: SubagentObserver | undefined): void {
+    this.#subagentObserver = observer;
+  }
+
+  /**
    * Run `work` with this agent's complaints attributed to the graph node `context` describes; each
    * complaint adds the model request it arose in. Outside a binding, complaints use this agent's
    * own {@link nodeId} and no delivered messages. Only one context can be bound at a time.
@@ -1259,6 +1397,8 @@ export class JuncoAgent<
         if (this.#closing) throw closedError();
       };
       live();
+      const observer = this.#subagentObserver;
+      observer?.acquiring?.(requests);
       const lane = this.nativeLane;
       const harness = this.#harness!;
       const models = this.#options.models;
@@ -1366,9 +1506,11 @@ export class JuncoAgent<
             for (const { source, cwd } of registrations)
               await resolveToolSources(source, cwd, owned, signal);
             live();
-            // Rebind each selected MCP tool to the one fresh wrapper of the same operation.
+            // Rebind each selected MCP tool to the one fresh wrapper of the same operation; an
+            // assigned batch belongs to this agent, so a child gets an ordinary task tool.
             const tools = selection.map(({ tool, mcp }) => {
-              if (mcp === undefined) return tool;
+              if (mcp === undefined)
+                return isAssignedTaskTool(tool) ? createTaskTool() : tool;
               const { serverName, originalToolName } = mcp.identity;
               const fresh = owned.mcpSources![mcp.occurrence]!.tools.filter(
                 (candidate) => {
@@ -1421,6 +1563,8 @@ export class JuncoAgent<
           await child.initialize();
           children.push(child);
         }
+        for (const [index, child] of children.entries())
+          observer?.acquired?.(child, index);
         live();
         return children;
       } catch (error) {

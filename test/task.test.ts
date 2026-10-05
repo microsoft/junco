@@ -16,6 +16,7 @@ import {
   fauxProvider,
   fauxToolCall,
   type JsonValue,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import type { TaskToolDetails } from "junco-tools";
@@ -41,10 +42,12 @@ type Agent = agentApi.JuncoAgent;
 type Report = {
   id: string;
   name?: string;
+  attempt: number;
   status: string;
   output: string;
   stopReason: string;
   error?: string;
+  decisionRequired?: true;
 };
 
 const closers: (() => Promise<unknown>)[] = [];
@@ -103,26 +106,56 @@ async function newCaller(
 }
 
 /** Observes each real child `parent.createSubagents` returned, before the caller receives it. */
-type SubagentObserver = (parent: Agent, child: Agent, index: number) => void;
+type ChildObserver = (parent: Agent, child: Agent, index: number) => void;
 
 /** Records every agent `caller.createSubagents` returns, recursively for descendants. */
 function trackSubagents(
   caller: Agent,
-  observe?: SubagentObserver,
+  observe?: ChildObserver,
   created: Agent[] = [],
 ): Agent[] {
-  const create = caller.createSubagents.bind(caller);
-  caller.createSubagents = async (options, signal) => {
-    const children = await create(options, signal);
-    children.forEach((child, index) => {
+  caller.setSubagentObserver({
+    acquired: (child, index) => {
       created.push(child);
       trackSubagents(child, observe, created);
       observe?.(caller, child, index);
-    });
-    return children;
-  };
+    },
+  });
   return created;
 }
+
+/**
+ * Each fresh direct child of `caller` by its task's model provider, in acquisition order.
+ * `instrument` sees each before it starts; `reject` may refuse an acquisition before it creates any.
+ */
+function childrenOf(
+  caller: Agent,
+  instrument?: (provider: string, child: Agent, nth: number) => void,
+  reject?: (options: readonly agentApi.TaskAgentOptions[]) => void,
+) {
+  const byProvider = new Map<string, Agent[]>();
+  let batch: readonly agentApi.TaskAgentOptions[] = [];
+  caller.setSubagentObserver({
+    acquiring: (options) => {
+      reject?.(options);
+      batch = options;
+    },
+    acquired: (child, index) => {
+      const provider = batch[index]?.model?.provider ?? "";
+      const list = byProvider.get(provider) ?? [];
+      list.push(child);
+      byProvider.set(provider, list);
+      instrument?.(provider, child, list.length);
+    },
+  });
+  return (provider: string) => byProvider.get(provider) ?? [];
+}
+
+/** Makes `child`'s first run throw before it reaches its model. */
+const explode = (child: Agent, message: string) =>
+  child.hooks.on("before_drive", ({ operation }) => {
+    if (operation === "run") throw new Error(message);
+  });
 
 /** A tool whose calls block until `release()`; `started` resolves on the first call. */
 function holdTool(name = "hold") {
@@ -226,7 +259,7 @@ const taskCall = (tasks: JsonValue[], id = "task-call") =>
   fauxToolCall("task", { context: TASK_CONTEXT, tasks }, { id });
 const yieldCall = (reason: string, id = "yield-call") =>
   fauxToolCall("yield", { reason }, { id });
-const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) =>
+const toolUse = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
 
 function callerNode(caller: Agent, prompt = "Start") {
@@ -252,6 +285,131 @@ function linksOf(g: JuncoGraph): string[] {
 
 const pairedLinks = (ids: readonly string[]) =>
   ids.flatMap((id) => [`root->${id}`, `${id}->root`]).sort();
+
+/** The ids of every batch-completion marker among `context`'s user messages. */
+const markersIn = (context: Context): string[][] =>
+  userTexts(context)
+    .filter((text) => text.startsWith('{"type":"task_batch_complete"'))
+    .map((text) => JSON.parse(text).ids);
+
+/** Every tool result in `context` by its call id. */
+const toolResultsIn = (context: Context) =>
+  new Map(
+    context.messages.flatMap((message) =>
+      message.role === "toolResult"
+        ? [[message.toolCallId, message] as const]
+        : [],
+    ),
+  );
+
+const decision = (
+  action: "retry" | "ignore",
+  { id, attempt }: { id: string; attempt: number },
+  callId = `${action}-${id}-${attempt}`,
+) => fauxToolCall("task", { action, id, attempt }, { id: callId });
+
+/**
+ * Caller turns answered from context, however many turns the reports take: each new failure
+ * question gets `decide`'s calls, a context with a completion marker gets `finish`, and anything
+ * else answers `waiting for researchers`.
+ */
+function answering(
+  decide: ((report: Report) => ToolCall[]) | undefined,
+  finish: (context: Context) => AssistantMessage,
+): FauxResponseStep[] {
+  const asked = new Set<string>();
+  const step = (context: Context) => {
+    for (const report of reportsIn(context)) {
+      const key = `${report.id}#${report.attempt}`;
+      if (decide === undefined || !report.decisionRequired || asked.has(key))
+        continue;
+      asked.add(key);
+      return toolUse(...decide(report));
+    }
+    return markersIn(context).length > 0
+      ? finish(context)
+      : fauxAssistantMessage("waiting for researchers");
+  };
+  return Array.from({ length: 16 }, () => step);
+}
+
+/** A one-turn worker answer: a native error stop, or a completed `<name>-report`. */
+const outcome = (name: string, failed: boolean, attempt: number) =>
+  failed
+    ? fauxAssistantMessage(`${name} partial ${attempt}`, {
+        stopReason: "error",
+        errorMessage: `${name} boom ${attempt}`,
+      })
+    : fauxAssistantMessage(`${name}-report`);
+
+/** Scripts `name`'s worker: its first `failures` attempts stop with an error, later ones report. */
+function worker(
+  r: ReturnType<typeof registry>,
+  name: string,
+  failures = 0,
+  prompts: string[] = [],
+): string[] {
+  r.script(
+    name,
+    Array.from({ length: failures + 2 }, (_, index) => (context: Context) => {
+      prompts.push(userTexts(context)[0] ?? "");
+      return outcome(name, index < failures, index + 1);
+    }),
+  );
+  return prompts;
+}
+
+/** A task on `name`'s model with no tools. */
+const taskOn = (r: ReturnType<typeof registry>, name: string) => ({
+  name,
+  task: `do ${name}`,
+  model: r.model(name),
+  tools: [],
+});
+
+/** A caller whose first turn launches `names`' tasks under `policy`, then answers with `turns`. */
+async function failingCaller(
+  r: ReturnType<typeof registry>,
+  names: string[],
+  policy: agentApi.TaskFailurePolicy,
+  turns: FauxResponseStep[],
+) {
+  r.script("caller", [
+    toolUse(taskCall(names.map((name) => taskOn(r, name)))),
+    ...turns,
+  ]);
+  const caller = await newCaller(r.models, "caller", [
+    toolsApi.createTaskTool(),
+  ]);
+  caller.setTaskFailurePolicy(policy);
+  const outer = createParallelAgentGraph();
+  closers.push(() => outer.close());
+  const id = outer.addNode(callerNode(caller));
+  return { caller, outer, id };
+}
+
+/** The node ids under the expanded caller's Spawn root, in registration order. */
+function taskNodes(outer: JuncoGraph): string[] {
+  const ids: string[] = [];
+  innerOf(outer).forEachNode((child) => {
+    if (child !== "root") ids.push(child);
+  });
+  return ids;
+}
+
+/** `error` and everything reachable through `cause` and `AggregateError.errors`. */
+function causesOf(error: unknown): unknown[] {
+  const seen = new Set<unknown>();
+  const pending = [error];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (seen.has(value)) continue;
+    seen.add(value);
+    if (value instanceof AggregateError) pending.push(...value.errors);
+    if (value instanceof Error && "cause" in value) pending.push(value.cause);
+  }
+  return [...seen];
+}
 
 describe("task tool through agentNode", () => {
   test("workers run under a Spawn root while the caller continues; their reports finish the original node", async () => {
@@ -796,36 +954,25 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const entered = Promise.withResolvers<void>();
-    const gate = Promise.withResolvers<void>();
-    const create = caller.createSubagents.bind(caller);
-    const acquisition: unknown[] = [];
-    caller.createSubagents = async (options, signal) => {
-      entered.resolve();
-      await gate.promise;
-      try {
-        const children = await create(options, signal);
-        acquisition.push(...children);
-        return children;
-      } catch (error) {
-        acquisition.push(error);
-        throw error;
-      }
-    };
     const outer = createParallelAgentGraph();
     const id = outer.addNode(callerNode(caller));
-    const running = outer.run();
-    await entered.promise;
-    const closing = outer.close();
-    gate.resolve();
-    await assert.rejects(running);
+    let closing: Promise<unknown> | undefined;
+    const acquired: Agent[] = [];
+    caller.setSubagentObserver({
+      // The graph closes while the batch is being acquired.
+      acquiring: () => {
+        closing = outer.close();
+      },
+      acquired: (child) => acquired.push(child),
+    });
+    await assert.rejects(outer.run());
+    assert.ok(closing);
     await closing;
     assert.equal(caller.status, "closed");
     assert.equal(outer.getNode(id)?.state, caller);
-    assert.equal(acquisition.length, 1);
-    assert.ok(
-      acquisition[0] instanceof agentApi.JuncoAgentError &&
-        acquisition[0].code === "closed",
+    assert.equal(
+      acquired.length,
+      0,
       "acquisition was refused, so no child exists",
     );
   });
@@ -866,16 +1013,18 @@ describe("task tool through agentNode", () => {
     for (const child of created) assert.equal(child.status, "closed");
   });
 
-  test("a native error stop is queued as an error report with its real output, while the child keeps its assistant result", async () => {
+  test("a native error stop asks the caller with its real output by default; the caller's ignore finishes the batch", async () => {
     const r = registry("caller", "worker");
-    let reports: Report[] = [];
+    let finalContext: Context | undefined;
     r.script("caller", [
       toolUse(taskCall([{ name: "w", task: "a", model: r.model("worker") }])),
-      fauxAssistantMessage("interim"),
-      (context) => {
-        reports = reportsIn(context);
-        return fauxAssistantMessage("final");
-      },
+      ...answering(
+        (report) => [decision("ignore", report, "ignore-w")],
+        (context) => {
+          finalContext = context;
+          return fauxAssistantMessage("final");
+        },
+      ),
     ]);
     r.script("worker", [
       fauxAssistantMessage("partial output", {
@@ -894,9 +1043,13 @@ describe("task tool through agentNode", () => {
     const final = outer.result(id);
     assert.ok(O.isSome(final), "the caller's original node finished");
     assert.equal(contentText(final.value.content), "final");
+    assert.ok(finalContext);
+    const reports = reportsIn(finalContext);
     assert.equal(reports.length, 1);
     const [report] = reports;
     assert.equal(report?.status, "failed");
+    assert.equal(report?.attempt, 1);
+    assert.equal(report?.decisionRequired, true);
     assert.equal(report?.stopReason, "error");
     assert.equal(report?.error, "boom");
     assert.equal(report?.output, "partial output");
@@ -904,6 +1057,10 @@ describe("task tool through agentNode", () => {
       queued.map(({ kind, report }) => [kind, report.id, report.status]),
       [["error", report?.id, "failed"]],
     );
+    const ignored = toolResultsIn(finalContext).get("ignore-w");
+    assert.equal(ignored?.isError, false);
+    assert.equal(textOf(ignored!), `Ignored task ${report?.id}.`);
+    assert.deepEqual(markersIn(finalContext), [[report?.id]]);
     const value = innerOf(outer).result(graph.NodeId(report?.id ?? ""));
     assert.ok(
       O.isSome(value),
@@ -914,17 +1071,14 @@ describe("task tool through agentNode", () => {
     assert.equal(value.value.errorMessage, "boom");
   });
 
-  test("a thrown worker failure reaches the caller as one error report beside its sibling's follow-up report", async () => {
+  test("an ignored thrown worker failure is consumed internally; only its sibling's report and the completion marker reach the caller", async () => {
     const r = registry("caller", "bad", "good");
     let handles: TaskToolDetails["tasks"] = [];
     let finalContext: Context | undefined;
-    // Reports may arrive in one or two caller runs; it answers finally once both are in context.
-    const afterReports = (context: Context) => {
-      if (reportsIn(context).length < 2)
-        return fauxAssistantMessage("still waiting");
+    const afterReports = answering(undefined, (context) => {
       finalContext = context;
       return fauxAssistantMessage("handled both");
-    };
+    });
     r.script("caller", [
       toolUse(
         taskCall([
@@ -936,21 +1090,19 @@ describe("task tool through agentNode", () => {
         handles = handlesIn(context);
         return fauxAssistantMessage("interim");
       },
-      afterReports,
-      afterReports,
+      ...afterReports,
     ]);
     r.script("bad", [fauxAssistantMessage("must not run")]);
     r.script("good", [fauxAssistantMessage("good-report")]);
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
+    caller.setTaskFailurePolicy("ignore");
     let bad: Agent | undefined;
     trackSubagents(caller, (parent, child, index) => {
       if (parent !== caller || index !== 0) return;
       bad = child;
-      child.hooks.on("before_drive", () => {
-        throw new Error("worker exploded");
-      });
+      explode(child, "worker exploded");
     });
     const outer = createParallelAgentGraph();
     closers.push(() => outer.close());
@@ -993,16 +1145,12 @@ describe("task tool through agentNode", () => {
     assert.equal(completed.report.output, "good-report");
 
     assert.ok(finalContext);
-    const finalReports = reportsIn(finalContext);
     assert.deepEqual(
-      finalReports.map(({ id }) => id).sort(),
-      [badId, goodId].sort(),
-      "one final-context report per handle",
+      reportsIn(finalContext).map(({ id }) => id),
+      [goodId],
+      "the ignored failure never entered the caller's context",
     );
-    assert.deepEqual(
-      finalReports.find(({ id }) => id === badId),
-      failed.report,
-    );
+    assert.deepEqual(markersIn(finalContext), [[badId, goodId]]);
 
     const inner = innerOf(outer);
     const badNode = inner.getNode(graph.NodeId(badId));
@@ -1017,7 +1165,7 @@ describe("task tool through agentNode", () => {
     await outer.close();
   });
 
-  test("a failed expanded task cancels its blocked descendants and reports once to its parent", async () => {
+  test("an ignored failed expanded task cancels its blocked descendants and is consumed once by its parent", async () => {
     const waiting = waitingTool("wait", { endOnAbort: true });
     const r = registry("caller", "child", "fast", "slow");
     let handles: TaskToolDetails["tasks"] = [];
@@ -1037,10 +1185,10 @@ describe("task tool through agentNode", () => {
         handles = handlesIn(context);
         return fauxAssistantMessage("caller interim");
       },
-      (context) => {
+      ...answering(undefined, (context) => {
         finalContext = context;
         return fauxAssistantMessage("caller handled");
-      },
+      }),
     ]);
     r.script("child", [
       toolUse(
@@ -1073,6 +1221,7 @@ describe("task tool through agentNode", () => {
       toolsApi.createYieldTool(),
       waiting.tool,
     ]);
+    caller.setTaskFailurePolicy("ignore");
     const created = trackSubagents(caller, (parent, child) => {
       if (parent !== caller) return;
       let runs = 0;
@@ -1099,7 +1248,7 @@ describe("task tool through agentNode", () => {
     assert.equal(
       queued.length,
       1,
-      "only the child's report reached the caller",
+      "only the child's report was queued for the caller",
     );
     const [{ kind, report }] = queued as [QueuedReport];
     assert.equal(kind, "error");
@@ -1110,10 +1259,8 @@ describe("task tool through agentNode", () => {
     assert.equal(report.stopReason, "error");
     assert.match(report.error ?? "", /nested worker exploded/);
     assert.ok(finalContext);
-    assert.deepEqual(
-      reportsIn(finalContext).map(({ id }) => id),
-      [childHandle.id],
-    );
+    assert.deepEqual(reportsIn(finalContext), [], "the failure was ignored");
+    assert.deepEqual(markersIn(finalContext), [[childHandle.id]]);
 
     assert.equal(created.length, 3, "the child and both grandchildren");
     for (const agent of created) assert.equal(agent.status, "closed");
@@ -1178,16 +1325,16 @@ describe("task tool through agentNode", () => {
       reports?.messages.map((message) => message.id),
       [`${child.id}->root`],
     );
-    assert.deepEqual(reports?.messages[0]?.payload, {
-      kind: "followUp",
-      text: JSON.stringify({
-        type: "task_result",
-        id: child.id,
-        name: "w",
-        status: "completed",
-        output: "worker-report",
-        stopReason: "stop",
-      }),
+    const payload = reports?.messages[0]?.payload as AgenticInput | undefined;
+    assert.ok(payload?.kind === "followUp");
+    assert.deepEqual(JSON.parse(payload.text), {
+      type: "task_result",
+      id: child.id,
+      name: "w",
+      attempt: 1,
+      status: "completed",
+      output: "worker-report",
+      stopReason: "stop",
     });
     const childIssue = byText.get("child blocked");
     assert.equal(childIssue?.nodeId, child.id);
@@ -1204,4 +1351,484 @@ describe("task tool through agentNode", () => {
       ),
     );
   }, 5_000);
+
+  test("an assigned batch launches its stored assignments from task({}) once; a rejected admission can be retried", async () => {
+    const r = registry("caller", "a", "b");
+    const prompts = { a: worker(r, "a"), b: worker(r, "b") };
+    let finalContext: Context | undefined;
+    const launch = (id: string) => fauxToolCall("task", {}, { id });
+    r.script("caller", [
+      toolUse(launch("l1"), launch("l2"), launch("l3")),
+      ...answering(undefined, (context) => {
+        finalContext = context;
+        return fauxAssistantMessage("final");
+      }),
+    ]);
+    const caller = await newCaller(r.models, "caller", [
+      toolsApi.createTaskTool(),
+    ]);
+    const batch = {
+      context: "Original context.",
+      tasks: [taskOn(r, "a"), taskOn(r, "b")],
+    };
+    await caller.setTaskBatch(batch);
+    batch.context = "tampered";
+    batch.tasks[0]!.task = "tampered";
+    batch.tasks.pop();
+    let acquisitions = 0;
+    const children = childrenOf(caller, undefined, () => {
+      if (++acquisitions === 1) throw new Error("admission rejected");
+    });
+    const outer = createParallelAgentGraph();
+    closers.push(() => outer.close());
+    const id = outer.addNode(callerNode(caller));
+
+    const results = await outer.run();
+    assert.equal(contentText(results.get(id)?.content ?? []), "final");
+    assert.ok(finalContext);
+    const tools = toolResultsIn(finalContext);
+    assert.equal(tools.get("l1")?.isError, true);
+    assert.match(textOf(tools.get("l1")!), /admission rejected/);
+    assert.equal(tools.get("l2")?.isError, false);
+    const handles = (tools.get("l2")!.details as TaskToolDetails).tasks;
+    assert.deepEqual(
+      handles.map(({ name }) => name),
+      ["a", "b"],
+    );
+    assert.equal(tools.get("l3")?.isError, true);
+    assert.equal(
+      textOf(tools.get("l3")!),
+      "Task batch already admitted; wait for its results.",
+    );
+    assert.equal(acquisitions, 2);
+    assert.equal(children("a").length, 1);
+    assert.equal(children("b").length, 1);
+    assert.deepEqual(prompts, {
+      a: ["Original context.\n\ndo a"],
+      b: ["Original context.\n\ndo b"],
+    });
+    assert.deepEqual(
+      taskNodes(outer),
+      handles.map(({ id }) => id),
+    );
+    assert.deepEqual(markersIn(finalContext), [handles.map(({ id }) => id)]);
+  });
+
+  test("ignore: failed attempts are closed and dropped; the caller answers from the success after one marker", async () => {
+    const r = registry("caller", "a", "b", "c");
+    worker(r, "a");
+    worker(r, "b", 1);
+    worker(r, "c");
+    let finalContext: Context | undefined;
+    const { caller, outer, id } = await failingCaller(
+      r,
+      ["a", "b", "c"],
+      "ignore",
+      answering(undefined, (context) => {
+        finalContext = context;
+        const outputs = reportsIn(context).map(({ output }) => output);
+        return fauxAssistantMessage(`final: ${outputs.join(",")}`);
+      }),
+    );
+    const children = childrenOf(caller, (provider, child) => {
+      if (provider === "a") explode(child, "a exploded");
+    });
+
+    const results = await outer.run();
+    assert.equal(
+      contentText(results.get(id)?.content ?? []),
+      "final: c-report",
+    );
+    assert.ok(finalContext);
+    assert.deepEqual(
+      reportsIn(finalContext).map(({ name, status }) => [name, status]),
+      [["c", "completed"]],
+    );
+    assert.deepEqual(markersIn(finalContext), [taskNodes(outer)]);
+    assert.equal(r.calls("a"), 0, "the thrown failure never reached its model");
+    assert.equal(r.calls("b"), 1);
+    for (const name of ["a", "b", "c"]) assert.equal(children(name).length, 1);
+    for (const name of ["a", "b"])
+      assert.equal(children(name)[0]?.status, "closed");
+  });
+
+  test("ignore: when every task fails, the marker wakes the settled caller for a fresh final answer", async () => {
+    const r = registry("caller", "a", "b", "c");
+    worker(r, "a");
+    worker(r, "b", 1);
+    worker(r, "c", 1);
+    let finalContext: Context | undefined;
+    const { caller, outer, id } = await failingCaller(
+      r,
+      ["a", "b", "c"],
+      "ignore",
+      answering(undefined, (context) => {
+        finalContext = context;
+        return fauxAssistantMessage("fresh final");
+      }),
+    );
+    childrenOf(caller, (provider, child) => {
+      if (provider === "a") explode(child, "a exploded");
+    });
+
+    const results = await outer.run();
+    assert.equal(contentText(results.get(id)?.content ?? []), "fresh final");
+    assert.ok(finalContext);
+    assert.ok(
+      finalContext.messages.some(
+        (message) =>
+          message.role === "assistant" &&
+          textOf(message) === "waiting for researchers",
+      ),
+      "the caller answered before the marker",
+    );
+    assert.deepEqual(reportsIn(finalContext), []);
+    assert.deepEqual(markersIn(finalContext), [taskNodes(outer)]);
+  });
+
+  test("{ retries: 2 }: a task failing twice reruns with its pinned prompt and model while its sibling runs once", async () => {
+    const r = registry("caller", "a", "b");
+    const prompts = worker(r, "a", 2);
+    worker(r, "b");
+    let finalContext: Context | undefined;
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a", "b"],
+      { retries: 2 },
+      answering(
+        () => assert.fail("no failure question"),
+        (context) => {
+          finalContext = context;
+          return fauxAssistantMessage("final");
+        },
+      ),
+    );
+    const children = childrenOf(caller);
+
+    await outer.run();
+    assert.ok(finalContext);
+    const [a, b] = markersIn(finalContext)[0] ?? [];
+    assert.ok(a && b);
+    assert.deepEqual(taskNodes(outer), [
+      a,
+      b,
+      `${a}:attempt:2`,
+      `${a}:attempt:3`,
+    ]);
+    assert.equal(children("a").length, 3);
+    assert.equal(children("b").length, 1);
+    assert.equal(r.calls("a"), 3);
+    assert.deepEqual(prompts, Array(3).fill(childPrompt("do a")));
+    const toolNames = children("a").map((child) =>
+      child.getActiveTools().map(({ name }) => name),
+    );
+    assert.ok(!toolNames[0]?.includes("task"), "the assignment's tool subset");
+    for (const names of toolNames) assert.deepEqual(names, toolNames[0]);
+    const reports = reportsIn(finalContext);
+    assert.deepEqual(
+      [a, b].map((id) =>
+        reports
+          .filter((report) => report.id === id)
+          .map(({ attempt, status }) => [attempt, status]),
+      ),
+      [[[3, "completed"]], [[1, "completed"]]],
+    );
+    assert.equal(markersIn(finalContext).length, 1);
+  });
+
+  test("{ retries: 2 }: after exhaustion every failure asks; an explicit retry does not reset the budget", async () => {
+    const r = registry("caller", "a", "b");
+    worker(r, "a", 4);
+    worker(r, "b");
+    const questions: number[] = [];
+    let finalContext: Context | undefined;
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a", "b"],
+      { retries: 2 },
+      answering(
+        (report) => {
+          questions.push(report.attempt);
+          return [
+            decision(questions.length === 1 ? "retry" : "ignore", report),
+          ];
+        },
+        (context) => {
+          finalContext = context;
+          return fauxAssistantMessage("final");
+        },
+      ),
+    );
+    const children = childrenOf(caller);
+
+    await outer.run();
+    assert.ok(finalContext);
+    assert.deepEqual(questions, [3, 4]);
+    const [a, b] = markersIn(finalContext)[0] ?? [];
+    assert.ok(a && b);
+    assert.equal(children("a").length, 4);
+    assert.equal(children("b").length, 1);
+    const tools = toolResultsIn(finalContext);
+    assert.deepEqual(
+      (tools.get(`retry-${a}-3`)!.details as TaskToolDetails).tasks,
+      [{ id: a, name: "a" }],
+    );
+    assert.deepEqual(
+      (tools.get(`ignore-${a}-4`)!.details as TaskToolDetails).tasks,
+      [],
+    );
+    assert.deepEqual(
+      reportsIn(finalContext)
+        .filter(({ id }) => id === a)
+        .map(({ attempt, status, decisionRequired }) => [
+          attempt,
+          status,
+          decisionRequired,
+        ]),
+      [
+        [3, "failed", true],
+        [4, "failed", true],
+      ],
+    );
+    assert.equal(markersIn(finalContext).length, 1);
+  });
+
+  test("{ retries: 0 }: the first failure asks; invalid decisions change nothing and a retry reuses the logical id", async () => {
+    const r = registry("caller", "a", "b");
+    worker(r, "a", 1);
+    worker(r, "b");
+    let finalContext: Context | undefined;
+    let probed = false;
+    const { caller, outer, id } = await failingCaller(
+      r,
+      ["a", "b"],
+      { retries: 0 },
+      answering(
+        (report) => [
+          decision("ignore", { id: "task-unknown", attempt: 1 }, "unknown"),
+          decision("retry", { id: report.id, attempt: 2 }, "stale"),
+          decision("retry", report, "retry"),
+          decision("ignore", report, "repeated"),
+        ],
+        (context) => {
+          finalContext = context;
+          if (probed) return fauxAssistantMessage("final");
+          probed = true;
+          const [a] = markersIn(context)[0] ?? [];
+          // The retried attempt completed: no decision about it is pending.
+          return toolUse(
+            decision("ignore", { id: a!, attempt: 2 }, "completed"),
+          );
+        },
+      ),
+    );
+    const children = childrenOf(caller);
+
+    const results = await outer.run();
+    assert.equal(contentText(results.get(id)?.content ?? []), "final");
+    assert.ok(finalContext);
+    const [a, b] = markersIn(finalContext)[0] ?? [];
+    assert.ok(a && b);
+    const tools = toolResultsIn(finalContext);
+    for (const call of ["unknown", "stale", "repeated", "completed"])
+      assert.equal(tools.get(call)?.isError, true, call);
+    assert.equal(tools.get("retry")?.isError, false);
+    assert.deepEqual((tools.get("retry")!.details as TaskToolDetails).tasks, [
+      { id: a, name: "a" },
+    ]);
+    assert.equal(children("a").length, 2);
+    assert.equal(children("b").length, 1);
+    assert.deepEqual(taskNodes(outer), [a, b, `${a}:attempt:2`]);
+    assert.deepEqual(
+      reportsIn(finalContext)
+        .filter((report) => report.id === a)
+        .map(({ attempt, status, decisionRequired }) => [
+          attempt,
+          status,
+          decisionRequired,
+        ]),
+      [
+        [1, "failed", true],
+        [2, "completed", undefined],
+      ],
+    );
+    assert.equal(markersIn(finalContext).length, 1);
+  });
+
+  test("a caller that settles with a consumed, undecided failure question fails its graph", async () => {
+    const r = registry("caller", "a");
+    worker(r, "a", 1);
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a"],
+      { retries: 0 },
+      answering(undefined, () => assert.fail("no marker")),
+    );
+    const children = childrenOf(caller);
+    const failure = await outer.run().then(
+      () => assert.fail("the graph failed"),
+      (error: unknown) => error,
+    );
+    assert.ok(
+      causesOf(failure).some(
+        (cause) =>
+          cause instanceof agentApi.JuncoAgentError &&
+          /^Task failure decisions required: task-/.test(cause.message),
+      ),
+    );
+    assert.equal(children("a").length, 1);
+  });
+
+  test("a rejected retry allocation consumes a retry and creates no attempt; exhaustion asks the caller", async () => {
+    const r = registry("caller", "a");
+    worker(r, "a", 1);
+    let acquisitions = 0;
+    let rejections = 0;
+    const questions: Report[] = [];
+    let finalContext: Context | undefined;
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a"],
+      { retries: 1 },
+      answering(
+        (report) => {
+          questions.push(report);
+          return [
+            decision("retry", report, "retry"),
+            decision("ignore", report, "ignore"),
+          ];
+        },
+        (context) => {
+          finalContext = context;
+          return fauxAssistantMessage("final");
+        },
+      ),
+    );
+    // Only the launch acquires; every retry allocation is refused.
+    const children = childrenOf(caller, undefined, () => {
+      if (++acquisitions === 1) return;
+      rejections += 1;
+      throw new Error("no capacity");
+    });
+
+    await outer.run();
+    assert.ok(finalContext);
+    assert.equal(rejections, 2, "the automatic and the explicit retry");
+    assert.deepEqual(
+      questions.map(({ attempt, decisionRequired }) => [
+        attempt,
+        decisionRequired,
+      ]),
+      [[1, true]],
+    );
+    assert.match(questions[0]?.error ?? "", /no capacity/);
+    const tools = toolResultsIn(finalContext);
+    assert.equal(tools.get("retry")?.isError, true);
+    assert.match(textOf(tools.get("retry")!), /no capacity/);
+    assert.equal(tools.get("ignore")?.isError, false);
+    assert.equal(children("a").length, 1);
+    assert.deepEqual(taskNodes(outer), [questions[0]?.id]);
+    assert.equal(markersIn(finalContext).length, 1);
+  });
+
+  test("a failed attempt whose teardown fails fails the graph and starts no replacement, even under ignore", async () => {
+    for (const policy of ["ignore", { retries: 1 }] as const) {
+      const r = registry("caller", "a");
+      worker(r, "a", 1);
+      const { caller, outer } = await failingCaller(
+        r,
+        ["a"],
+        policy,
+        answering(undefined, () => fauxAssistantMessage("final")),
+      );
+      // Sessions created while the caller acquires a child refuse to close.
+      let arm = false;
+      const create = MemorySessionRepo.prototype.create;
+      MemorySessionRepo.prototype.create = async function (...args) {
+        const session = await create.apply(this, args);
+        if (arm) {
+          const close = session.close.bind(session);
+          session.close = async (...rest) => {
+            await close(...rest);
+            throw new Error("session close failed");
+          };
+        }
+        return session;
+      };
+      try {
+        const children = childrenOf(caller, undefined, () => {
+          arm = true;
+        });
+        const failure = await outer.run().then(
+          () => assert.fail("the graph failed"),
+          (error: unknown) => error,
+        );
+        const causes = causesOf(failure);
+        assert.ok(
+          causes.some(
+            (cause) =>
+              cause instanceof Error &&
+              cause.message === "session close failed",
+          ),
+        );
+        assert.equal(children("a").length, 1, "no replacement attempt");
+        assert.equal(r.calls("a"), 1);
+      } finally {
+        MemorySessionRepo.prototype.create = create;
+      }
+    }
+  });
+
+  test("closing the graph while a failure retires propagates cancellation without retrying", async () => {
+    const r = registry("caller", "a");
+    let closing: Promise<unknown> | undefined;
+    let outerGraph: JuncoGraph | undefined;
+    r.script("a", [
+      () => {
+        closing = outerGraph?.close();
+        return outcome("a", true, 1);
+      },
+      fauxAssistantMessage("must not run"),
+    ]);
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a"],
+      { retries: 2 },
+      answering(
+        () => assert.fail("no question"),
+        () => assert.fail("no marker"),
+      ),
+    );
+    outerGraph = outer;
+    const children = childrenOf(caller);
+    await assert.rejects(outer.run());
+    await closing?.catch(() => {});
+    assert.equal(r.calls("a"), 1);
+    assert.equal(children("a").length, 1);
+    assert.equal(children("a")[0]?.status, "closed");
+    assert.equal(caller.status, "closed");
+  });
+
+  test("an abort after a retry is allocated and before publication closes the new attempt", async () => {
+    const r = registry("caller", "a");
+    worker(r, "a", 1);
+    const { caller, outer } = await failingCaller(
+      r,
+      ["a"],
+      { retries: 0 },
+      answering(
+        (report) => [decision("retry", report, "retry")],
+        () => assert.fail("no marker"),
+      ),
+    );
+    caller.hooks.on("after_tool", ({ toolCallId }) => {
+      if (toolCallId === "retry") void caller.abort();
+      return undefined;
+    });
+    const children = childrenOf(caller);
+    await assert.rejects(outer.run());
+    assert.equal(children("a").length, 2, "the retry was allocated");
+    for (const child of children("a")) assert.equal(child.status, "closed");
+    assert.equal(r.calls("a"), 1, "the retry never ran");
+  });
 });
