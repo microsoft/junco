@@ -43,7 +43,7 @@
     "smoke:pi": "bun run examples/recursive-agency.ts",
     "smoke:workflows": "node --experimental-strip-types ./test/workflows.fixture.ts",
     "smoke:workflows:bun": "bun run ./test/workflows.fixture.ts",
-    "postinstall": "if [ -d ../marsh/crates ]; then cd packages/junco-tools && bun run build:native; else echo 'postinstall: ../marsh not found; skipped the junco-tools native addon (see packages/junco-tools/README.md)' >&2; fi"
+    "postinstall": "if [ -x \"${CARGO_HOME:-$HOME/.local/share/junco-tools/cargo}/bin/cargo\" ]; then cd packages/junco-tools && bun run build:native; else echo 'postinstall: no Rust toolchain for junco-tools (see packages/junco-tools/README.md); skipped its native addon' >&2; fi"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.2",

@@ -12,7 +12,7 @@ Requirements:
 
 - Linux x86-64 with glibc; Node.js **22.19.0 or newer** and Bun **1.4.2**.
 - Rust **1.95.0**, selected by `rust-toolchain.toml`.
-- This package lives in the junco-agency Bun workspace at `packages/junco-tools`. A `marsh` checkout beside the workspace (`../../../marsh` from this package), with `junco-policy` beside it for marsh's own path dependency: `marsh-core`, `marsh-btrfs` and the patched `brush-core` are consumed as local path dependencies, not from Git. SSH read access to `junco-org/marsh` and `junco-org/junco-policy`, with trusted GitHub SSH host keys, plus HTTPS access to the public `can1357/oh-my-pi` repository for the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision (or that revision already in the Cargo cache).
+- This package lives in the junco-agency Bun workspace at `packages/junco-tools`. Cargo fetches `marsh-core`, `marsh-btrfs` and the patched `brush-core`/`brush-interactive` from the default branch of the public [`junco-org/marsh`](https://github.com/junco-org/marsh) repository (which takes `junco-policy` from [`junco-org/junco-policy`](https://github.com/junco-org/junco-policy) the same way), and the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision from the public `can1357/oh-my-pi` repository: HTTPS access to GitHub, or those revisions already in the Cargo cache. No sibling checkout or SSH key is needed.
 - Native build libraries. On Ubuntu 24.04:
 
 ```sh
@@ -34,8 +34,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 Then build the package:
 
 ```sh
-git clone git@github.com:junco-org/marsh.git "$HOME/git/marsh"
-git clone git@github.com:junco-org/junco-policy.git "$HOME/git/junco-policy"
 git clone git@github.com:junco-org/junco-agency.git "$HOME/git/junco-agency"
 cd "$HOME/git/junco-agency"
 bun install --frozen-lockfile
@@ -43,17 +41,17 @@ cd packages/junco-tools
 bun run build
 ```
 
-The root `bun install` already runs `bun run build:native` through the workspace's `postinstall` when `marsh` is checked out beside the workspace; without it, the install skips the addon with a notice.
+The root `bun install` already runs `bun run build:native` through the workspace's `postinstall` when the launcher's Rust toolchain is installed (`$CARGO_HOME/bin/cargo`, by default the isolated home above); otherwise it skips the addon with a notice. `build:native` first moves the marsh and junco-policy entries of `Cargo.lock` to those repositories' current default-branch HEAD (`cargo update -p marsh-core -p junco-policy`, which leaves every other locked crate alone), then builds locked, so every install picks up their latest pushes and may leave `Cargo.lock` modified.
 
 `bun run build` generates the production addon in `native/`, then compiles TypeScript into `dist/` with declarations. Node consumers and the Pi extension path below load `dist/`; Bun resolves the package's `bun` exports to the TypeScript sources in `ts/`, so Bun imports and source bundles need no `dist/`. The addon is loaded lazily through `junco-tools/native`: creating a `ToolCollection` without an injected `native` module, or running native-backed operations, needs `native/`, while importing the package or creating explicit-only tools such as `createYieldTool()` does not. The workspace links this directory into its consumers; the private package's `files` list ships only runtime artifacts and documentation in a packed tarball, not the test addon under `target/native-test/`; build and load that from this package for policy tests.
 
-The launcher preserves explicit `CARGO_HOME`, `RUSTUP_HOME`, and SSH settings. Native build scripts use the committed Cargo lockfile and a process-local HTTPS-to-SSH rewrite for private junco dependencies; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
+The launcher preserves explicit `CARGO_HOME` and `RUSTUP_HOME`. Native build scripts use the committed Cargo lockfile (refreshed for marsh and junco-policy as above) and fetch Git dependencies with the git CLI over anonymous HTTPS; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
 
 The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`. Oh My Pi builds on nightly, and `pi-edit`'s pinned transitive dependency `xutf 1.5.0` unconditionally enables `portable_simd`. The shim exports `RUSTC_BOOTSTRAP` **only** while compiling that one crate, so junco's own crate and every other dependency still compile as plain stable 1.95.0 rather than moving the toolchain off the stable channel.
 
 ## CI
 
-The junco-agency workspace's `.github/workflows/ci.yml` `test` job covers this package. Configure the workspace repository secrets `JUNCO_MARSH_SSH_KEY` and `JUNCO_POLICY_SSH_KEY` with read-only deploy keys for `junco-org/marsh` and `junco-org/junco-policy`; CI checks them out beside the workspace and sets `CARGO_TARGET_DIR` to this package's `target/cargo`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then the root `bun install --frozen-lockfile`, `bun run build`, `bun run build:native:test`, and `bun run test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
+The junco-agency workspace's `.github/workflows/ci.yml` `test` job covers this package. It needs no secrets: Cargo fetches the public marsh and junco-policy repositories. It sets `CARGO_TARGET_DIR` to this package's `target/cargo`, and its root `bun install --frozen-lockfile` builds the production addon through the `postinstall`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then `bun run build`, `bun run build:native:test`, and `bun run test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
 
 ## Run with `pi -e`
 
