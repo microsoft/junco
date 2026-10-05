@@ -149,6 +149,7 @@
       "dependencies": {
         "@oh-my-pi/pi-coding-agent": "18.2.11",
         "dataflow-engine": "workspace:*",
+        "tslog": "4.11.0",
         "typebox": "1.3.34",
       },
       "devDependencies": {

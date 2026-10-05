@@ -24,7 +24,8 @@ async function script(
     ],
     {
       cwd: root,
-      env: { ...process.env, ...env },
+      // Explicit, so an inherited developer setting cannot change the case.
+      env: { ...process.env, LOG_LEVEL: "INFO", ...env },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -48,8 +49,15 @@ function graphSection(stdout: string, run: number): string {
   return stdout.slice(start, end);
 }
 
-const lines = (stdout: string, pattern: string): string[] =>
-  stdout.split("\n").filter((line) => line.includes(pattern));
+/**
+ * The records containing `pattern`, each required to be logged at `level`, without that prefix.
+ */
+function lines(stdout: string, pattern: string, level = "INFO"): string[] {
+  const found = stdout.split("\n").filter((line) => line.includes(pattern));
+  for (const line of found)
+    assert.ok(line.startsWith(`${level} `), `not at ${level}: ${line}`);
+  return found.map((line) => line.slice(level.length + 1));
+}
 
 const GENERIC = `
 import assert from "node:assert/strict";
@@ -270,15 +278,96 @@ await observer.flush();
     `[complaint] node="busy" { complaint: 'during the run' }`,
     `[complaint] node="busy" { complaint: 'after the run' }`,
   ]);
-  const all = stdout.split("\n");
-  assert.ok(
-    all.indexOf(complaints[1]!) <
-      all.findIndex((line) => line.startsWith("[run ")),
+  assert.ok(stdout.indexOf(complaints[1]!) < stdout.indexOf("[run "));
+  assert.ok(stdout.indexOf(complaints[3]!) > stdout.indexOf("] end"));
+});
+
+test("above INFO, trace records are suppressed while operational warnings still reach stdout", async () => {
+  const { stdout, stderr } = await script(
+    `${GENERIC}
+const observer = new tracer.StdoutTracer();
+class Unrenderable extends DataflowGraph {
+  constructor() { super(createParallelScheduler(), Width(1), UNBOUNDED, observer); }
+  pretty() { throw new Error("pretty exploded"); }
+}
+const graph = new Unrenderable();
+add(graph, "only");
+assert.deepEqual([...await graph.run()], [["only", "done"]]);
+observer.complain(NodeId("only"), "hidden");
+await observer.flush();
+`,
+    { env: { LOG_LEVEL: "WARN" } },
   );
-  assert.ok(
-    all.indexOf(complaints[3]!) >
-      all.findIndex((line) => line.includes("] end")),
+  assert.equal(stderr, "");
+  assert.equal(stdout.includes("[run 1]"), false);
+  assert.equal(stdout.includes("[complaint]"), false);
+  assert.equal(
+    lines(stdout, "StdoutTracer graph rendering failed", "WARN").length,
+    1,
   );
+  assert.ok(stdout.includes("pretty exploded"));
+});
+
+test("LOG_LEVEL is parsed once at startup: missing or blank is INFO, names are case-insensitive, others refuse", async () => {
+  // Child imports are dynamic on purpose: LOG_LEVEL is read when the logger module loads.
+  const printed = async (value: string | undefined): Promise<string[]> => {
+    const { stdout, stderr } = await script(
+      `${value === undefined ? "delete process.env.LOG_LEVEL;" : ""}
+const { log, flushLog } = await import("junco-tools/log");
+log.debug("LEVEL_SENTINEL debug");
+log.info("LEVEL_SENTINEL info");
+log.warn("LEVEL_SENTINEL warn");
+await flushLog();
+`,
+      value === undefined ? {} : { env: { LOG_LEVEL: value } },
+    );
+    assert.equal(stderr, "");
+    return stdout.split("\n").filter((line) => line.includes("LEVEL_SENTINEL"));
+  };
+  const infoAndUp = ["INFO LEVEL_SENTINEL info", "WARN LEVEL_SENTINEL warn"];
+  assert.deepEqual(await printed(undefined), infoAndUp);
+  assert.deepEqual(await printed("   "), infoAndUp);
+  assert.deepEqual(await printed("  dEbUg  "), [
+    "DEBUG LEVEL_SENTINEL debug",
+    ...infoAndUp,
+  ]);
+  assert.deepEqual(await printed("WARN"), ["WARN LEVEL_SENTINEL warn"]);
+  for (const value of ["2", "BOGUS"]) {
+    const { stdout, stderr } = await script(
+      `import assert from "node:assert/strict";
+await assert.rejects(import("junco-tools/log"), {
+  message: "Junco LOG_LEVEL must be one of SILLY, TRACE, DEBUG, INFO, WARN, ERROR, FATAL",
+});
+`,
+      { env: { LOG_LEVEL: value } },
+    );
+    assert.equal(stdout, "");
+    assert.equal(stderr, "");
+  }
+});
+
+test("a failing complaint observer warns on stdout at WARN, is silent at ERROR, and the issue is kept", async () => {
+  const source = `
+import assert from "node:assert/strict";
+import { NodeId } from "dataflow-engine";
+import { issueLog } from "junco-tools";
+import { flushLog } from "junco-tools/log";
+issueLog.append(
+  { nodeId: NodeId("warning-check"), messages: [], prompt: { systemPrompt: "check", messages: [] }, complaint: "kept" },
+  { complain() { throw new Error("complaint-observer-smoke"); } },
+);
+assert.equal(issueLog.snapshot().at(-1).complaint, "kept");
+await flushLog();
+`;
+  const warned = await script(source, { env: { LOG_LEVEL: "WARN" } });
+  assert.equal(warned.stderr, "");
+  assert.equal(
+    lines(warned.stdout, "DataflowTracer callback failed", "WARN").length,
+    1,
+  );
+  assert.ok(warned.stdout.includes("complaint-observer-smoke"));
+  const silent = await script(source, { env: { LOG_LEVEL: "ERROR" } });
+  assert.deepEqual(silent, { stdout: "", stderr: "" });
 });
 
 test("activation errors, handled recoveries, run failures, and rendering failures are all printed", async () => {
@@ -354,12 +443,13 @@ for (const kind of ["throw", "unsupported"]) {
   assert.ok(stdout.includes("REJECTION "));
   // Runs 3 and 4: rendering diagnostics, with usable interaction traces.
   assert.equal(
-    stderr.match(/\[junco-agency\] StdoutTracer graph rendering failed/g)
-      ?.length,
+    lines(stdout, "[junco-agency] StdoutTracer graph rendering failed", "WARN")
+      .length,
     2,
   );
-  assert.ok(stderr.includes("pretty exploded"));
-  assert.ok(stderr.includes("Unsupported DataflowGraph Mermaid output"));
+  assert.equal(stderr, "");
+  assert.ok(stdout.includes("pretty exploded"));
+  assert.ok(stdout.includes("Unsupported DataflowGraph Mermaid output"));
   assert.ok(graphSection(stdout, 3).endsWith("\n(graph rendering failed)\n"));
   assert.ok(
     graphSection(stdout, 4).includes("(graph rendering failed)\n'graph LR;'"),

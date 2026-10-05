@@ -25,10 +25,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
 use marsh_core::shellmux::ShellMux;
 use napi::bindgen_prelude::{Buffer, PromiseRaw};
-use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
+use frontend::{OutputCallback, PolicyCallback};
 use mux::{RunState, Session};
 use process::{CloseTimeout, ProcessState};
 use tool::SandboxMode;
@@ -90,17 +90,47 @@ pub struct NativeMuxOptions {
     /// while another live shell shares the seed, `"always"` sandboxes every one. A read-only file
     /// tool always runs directly.
     pub sandbox: Option<String>,
+    /// Also deliver granted capabilities to `onPolicyDecision`; violations always are.
+    pub policy_debug: Option<bool>,
 }
 
-/// The routing mode `options` select, refused before anything is discovered.
-fn sandbox_mode(options: Option<NativeMuxOptions>) -> Result<SandboxMode> {
-    match options.and_then(|options| options.sandbox).as_deref() {
-        None | Some("shared") => Ok(SandboxMode::Shared),
-        Some("always") => Ok(SandboxMode::Always),
-        Some(value) => Err(Error::from_reason(format!(
-            "Invalid sandbox option: {value}; expected \"shared\" or \"always\""
-        ))),
-    }
+/// One junco-policy capability decision, as `Authority::check` made it. A grant is tentative: a
+/// later denial in its batch or a failed publication rolls it back.
+#[napi(object)]
+pub struct NativePolicyDecision {
+    pub granted: bool,
+    pub principal: String,
+    #[napi(
+        ts_type = "\"Read\" | \"Edit\" | \"Stage\" | \"Unstage\" | \"Commit\" | \"Checkout\" | \"Stash\" | \"Delete\" | \"Clean\" | \"Diff\" | \"History\""
+    )]
+    pub action: String,
+    /// Seed-relative path segments; `[]` is the root.
+    pub resource: Vec<String>,
+    pub failed_precondition: Option<String>,
+    pub allowed_fixes: Option<Vec<String>>,
+}
+
+/// The routing mode `options` select, refused before anything is discovered, and the policy log
+/// a supplied callback receives decisions through.
+fn mux_options(
+    options: Option<NativeMuxOptions>,
+    on_policy_decision: Option<PolicyCallback>,
+) -> Result<(SandboxMode, Option<Arc<frontend::PolicyLog>>)> {
+    let (sandbox, debug) = options.map_or((None, None), |options| {
+        (options.sandbox, options.policy_debug)
+    });
+    let mode = match sandbox.as_deref() {
+        None | Some("shared") => SandboxMode::Shared,
+        Some("always") => SandboxMode::Always,
+        Some(value) => {
+            return Err(Error::from_reason(format!(
+                "Invalid sandbox option: {value}; expected \"shared\" or \"always\""
+            )));
+        }
+    };
+    let log = on_policy_decision
+        .map(|callback| frontend::PolicyLog::new(callback, debug.unwrap_or(false)));
+    Ok((mode, log))
 }
 
 #[napi(object)]
@@ -237,8 +267,13 @@ impl NativeMux {
 impl NativeMux {
     /// Opens the addon's one mux; refused while another is opening, open, or closing.
     #[napi(factory)]
-    pub async fn open(cwd: String, options: Option<NativeMuxOptions>) -> Result<Self> {
-        let sandbox = sandbox_mode(options)?;
+    pub async fn open(
+        cwd: String,
+        options: Option<NativeMuxOptions>,
+        #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
+        on_policy_decision: Option<PolicyCallback>,
+    ) -> Result<Self> {
+        let (sandbox, policy_log) = mux_options(options, on_policy_decision)?;
         let reservation = MuxReservation::acquire()?;
         let policy = tool::sandbox_policy(sandbox);
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
@@ -252,8 +287,8 @@ impl NativeMux {
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        let session =
-            Session::new(seed, filesystem, policy, ShellMux::new).map_err(Error::from_reason)?;
+        let session = Session::new(seed, filesystem, policy, policy_log, ShellMux::new)
+            .map_err(Error::from_reason)?;
         Ok(Self::committed(session, sandbox, reservation))
     }
 
@@ -283,9 +318,9 @@ impl NativeMux {
         env: &'env Env,
         options: NativeProcessOptions,
         #[napi(ts_arg_type = "(error: Error | null, data: Buffer) => void")]
-        on_stdout: ThreadsafeFunction<Buffer, ()>,
+        on_stdout: OutputCallback,
         #[napi(ts_arg_type = "(error: Error | null, data: Buffer) => void")]
-        on_stderr: ThreadsafeFunction<Buffer, ()>,
+        on_stderr: OutputCallback,
     ) -> Result<PromiseRaw<'env, NativeProcess>> {
         // Registered in the session's task table now, not when the promise is polled; a refusal
         // (closed mux, NUL in the command line) rejects the returned promise.
@@ -315,7 +350,7 @@ impl NativeMux {
         &self,
         options: NativeRunOptions,
         #[napi(ts_arg_type = "(error: Error | null, data: Buffer) => void")]
-        on_data: ThreadsafeFunction<Buffer, ()>,
+        on_data: OutputCallback,
     ) -> Result<NativeRun> {
         Ok(NativeRun {
             state: self
@@ -353,8 +388,13 @@ impl NativeMux {
 impl NativeMux {
     /// Opens the addon's one mux over a CopyTree fixture; gated exactly like `open`.
     #[napi(factory)]
-    pub async fn open_copy_tree(seed: String, options: Option<NativeMuxOptions>) -> Result<Self> {
-        let sandbox = sandbox_mode(options)?;
+    pub async fn open_copy_tree(
+        seed: String,
+        options: Option<NativeMuxOptions>,
+        #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
+        on_policy_decision: Option<PolicyCallback>,
+    ) -> Result<Self> {
+        let (sandbox, policy_log) = mux_options(options, on_policy_decision)?;
         let reservation = MuxReservation::acquire()?;
         let policy = tool::sandbox_policy(sandbox);
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
@@ -382,7 +422,7 @@ impl NativeMux {
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
         let execution_filesystem = Arc::clone(&filesystem);
-        let session = Session::new(seed, filesystem, policy, move |profile, frontend| {
+        let session = Session::new(seed, filesystem, policy, policy_log, move |profile, frontend| {
             marsh_core::test_support::mux(profile, frontend, execution_filesystem)
         })
         .map_err(Error::from_reason)?;

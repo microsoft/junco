@@ -13,7 +13,11 @@
 //    while the Ralph node's state is the workflow's nested graph.
 // 4. The Reviewer runs once, only after Direct's answer and Ralph's final message both exist.
 //
-// Run it after `pi` → `/login` → GitHub Copilot:
+// From the repository root, install workspace dependencies first:
+//
+//   bun install --frozen-lockfile
+//
+// Then run after `pi` → `/login` → GitHub Copilot:
 //
 //   bun run examples/mixed.ts
 //

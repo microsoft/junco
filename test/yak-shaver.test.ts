@@ -678,12 +678,12 @@ describe("acceptance gates", () => {
       outcomes.map((outcome) => outcome.status),
       Array(4).fill("rejected"),
     );
-    CRITERIA.forEach((name, index) =>
+    CRITERIA.forEach((name, index) => {
       assert.match(
         outcomes[index]?.reason ?? "",
         new RegExp(`^${name} failed`),
-      ),
-    );
+      );
+    });
     assert.equal(applied.length, 0);
   }, 30_000);
 

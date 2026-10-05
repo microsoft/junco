@@ -38,9 +38,9 @@ const opens: string[] = [];
 const copyTree = {
   ...testAddon,
   NativeMux: {
-    async open(root: string, options?: { sandbox?: string }) {
-      opens.push(root);
-      return testAddon.NativeMux.openCopyTree(root, options);
+    async open(...args: Parameters<NativeModule["NativeMux"]["open"]>) {
+      opens.push(args[0]);
+      return testAddon.NativeMux.openCopyTree(...args);
     },
   },
 } as unknown as NativeModule;

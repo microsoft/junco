@@ -95,8 +95,12 @@ export function copyTreeNative() {
   copyTreeAdapter ??= testNative().then((native) => ({
     ...native,
     NativeMux: {
-      async open(root, options) {
-        const mux = await native.NativeMux.openCopyTree(root, options);
+      async open(root, options, onPolicyDecision) {
+        const mux = await native.NativeMux.openCopyTree(
+          root,
+          options,
+          onPolicyDecision,
+        );
         copyTreeOpens.push(mux);
         return mux;
       },

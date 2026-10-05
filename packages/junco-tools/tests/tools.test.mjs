@@ -1119,8 +1119,12 @@ test("failed construction releases only its own lease", {
   const native = {
     ...real,
     NativeMux: {
-      async open(cwd, options) {
-        const mux = await real.NativeMux.openCopyTree(cwd, options);
+      async open(cwd, options, onPolicyDecision) {
+        const mux = await real.NativeMux.openCopyTree(
+          cwd,
+          options,
+          onPolicyDecision,
+        );
         opened.push(mux);
         return mux;
       },

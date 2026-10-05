@@ -56,9 +56,9 @@ const opens: string[] = [];
 const copyTree = {
   ...testAddon,
   NativeMux: {
-    async open(root: string, options?: { sandbox?: string }) {
-      opens.push(root);
-      return testAddon.NativeMux.openCopyTree(root, options);
+    async open(...args: Parameters<NativeModule["NativeMux"]["open"]>) {
+      opens.push(args[0]);
+      return testAddon.NativeMux.openCopyTree(...args);
     },
   },
 } as NativeModule;
@@ -140,62 +140,66 @@ function pidOf(message: AssistantMessage | undefined): number {
   return Number(contentText(message.content));
 }
 
-test("root, nested and separate graphs share one ShellMux; closing one graph leaves the others' servers working", () =>
-  withNativeCleanup(async (defer) => {
-    // Each member is the test's until a graph owns it; each graph is the test's until closed.
-    const separateMember = await member();
-    const forgetSeparateMember = defer(() => separateMember.return());
-    const separate = single(separateMember);
-    const forgetSeparate = defer(() => separate.graph.close());
-    forgetSeparateMember();
+test(
+  "root, nested and separate graphs share one ShellMux; closing one graph leaves the others' servers working",
+  () =>
+    withNativeCleanup(async (defer) => {
+      // Each member is the test's until a graph owns it; each graph is the test's until closed.
+      const separateMember = await member();
+      const forgetSeparateMember = defer(() => separateMember.return());
+      const separate = single(separateMember);
+      const forgetSeparate = defer(() => separate.graph.close());
+      forgetSeparateMember();
 
-    const nestedMember = await member();
-    const forgetNestedMember = defer(() => nestedMember.return());
-    const nested = single(nestedMember);
-    const forgetNested = defer(() => nested.graph.close());
-    forgetNestedMember();
+      const nestedMember = await member();
+      const forgetNestedMember = defer(() => nestedMember.return());
+      const nested = single(nestedMember);
+      const forgetNested = defer(() => nested.graph.close());
+      forgetNestedMember();
 
-    const rootMember = await member();
-    const forgetRootMember = defer(() => rootMember.return());
-    const rootGraph = createParallelAgentGraph();
-    const forgetRoot = defer(() => rootGraph.close());
-    const rootId = rootGraph.addNode(
-      agentNode(
-        rootMember,
-        { id: NodeId("root"), trigger: always() },
-        { prompt: "go" },
-      ),
-    );
-    forgetRootMember();
-    const nestedId = rootGraph.addNode(
-      graphNode(
-        nested.graph,
-        { id: NodeId("nested"), trigger: always() },
-        { result: nested.id },
-      ),
-    );
-    forgetNested();
+      const rootMember = await member();
+      const forgetRootMember = defer(() => rootMember.return());
+      const rootGraph = createParallelAgentGraph();
+      const forgetRoot = defer(() => rootGraph.close());
+      const rootId = rootGraph.addNode(
+        agentNode(
+          rootMember,
+          { id: NodeId("root"), trigger: always() },
+          { prompt: "go" },
+        ),
+      );
+      forgetRootMember();
+      const nestedId = rootGraph.addNode(
+        graphNode(
+          nested.graph,
+          { id: NodeId("nested"), trigger: always() },
+          { result: nested.id },
+        ),
+      );
+      forgetNested();
 
-    // The separate graph runs and closes first, closing its agent and that agent's server.
-    const separatePid = pidOf((await separate.graph.run()).get(separate.id));
-    await separate.graph.close().finally(forgetSeparate);
+      // The separate graph runs and closes first, closing its agent and that agent's server.
+      const separatePid = pidOf((await separate.graph.run()).get(separate.id));
+      await separate.graph.close().finally(forgetSeparate);
 
-    // The root and nested agents' servers started before that close and still answer.
-    const results = await rootGraph.run();
-    const rootPid = pidOf(results.get(rootId));
-    const nestedPid = pidOf(results.get(nestedId));
-    expect(new Set([separatePid, rootPid, nestedPid]).size).toBe(3);
-    for (const pid of [separatePid, rootPid, nestedPid]) {
-      expect(Number.isInteger(pid) && pid > 0).toBe(true);
-    }
-    await rootGraph.close().finally(forgetRoot);
+      // The root and nested agents' servers started before that close and still answer.
+      const results = await rootGraph.run();
+      const rootPid = pidOf(results.get(rootId));
+      const nestedPid = pidOf(results.get(nestedId));
+      expect(new Set([separatePid, rootPid, nestedPid]).size).toBe(3);
+      for (const pid of [separatePid, rootPid, nestedPid]) {
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
+      }
+      await rootGraph.close().finally(forgetRoot);
 
-    // Every agent in every graph acquired the observer's one raw open; no close shut it down.
-    expect(opens).toEqual([seed]);
-    const again = await acquireShellMux(seed);
-    defer(() => again.release());
-    expect(again.mux).toBe(observer.mux);
-  }), 60_000);
+      // Every agent in every graph acquired the observer's one raw open; no close shut it down.
+      expect(opens).toEqual([seed]);
+      const again = await acquireShellMux(seed);
+      defer(() => again.release());
+      expect(again.mux).toBe(observer.mux);
+    }),
+  60_000,
+);
 
 /** The text of every tool result for `name` in `context`. */
 const toolTexts = (context: Context, name: string) =>
@@ -268,55 +272,60 @@ function mcpScript(label: string, delegate?: string): FauxResponseStep[] {
   ];
 }
 
-test("a task child and grandchild call the inherited MCP tool on their own servers; reports finish the original node", () =>
-  withNativeCleanup(async (defer) => {
-    const models = createModels();
-    const scripts: Record<string, FauxResponseStep[]> = {
-      caller: mcpScript("caller", "worker"),
-      worker: mcpScript("worker", "grand"),
-      grand: mcpScript("grand"),
-    };
-    for (const [name, responses] of Object.entries(scripts)) {
-      const faux = fauxProvider({
-        api: name,
-        provider: name,
-        tokenSize: { min: 4, max: 4 },
+test(
+  "a task child and grandchild call the inherited MCP tool on their own servers; reports finish the original node",
+  () =>
+    withNativeCleanup(async (defer) => {
+      const models = createModels();
+      const scripts: Record<string, FauxResponseStep[]> = {
+        caller: mcpScript("caller", "worker"),
+        worker: mcpScript("worker", "grand"),
+        grand: mcpScript("grand"),
+      };
+      for (const [name, responses] of Object.entries(scripts)) {
+        const faux = fauxProvider({
+          api: name,
+          provider: name,
+          tokenSize: { min: 4, max: 4 },
+        });
+        faux.setResponses(responses);
+        models.setProvider(faux.provider);
+      }
+      const caller = await JuncoAgent.fromResolved({
+        session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+        models,
+        model: models.getModels("caller")[0]!,
+        systemPrompt: "sys",
+        cwd: seed,
+        tools: [createTaskTool(), fixture],
       });
-      faux.setResponses(responses);
-      models.setProvider(faux.provider);
-    }
-    const caller = await JuncoAgent.fromResolved({
-      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-      models,
-      model: models.getModels("caller")[0]!,
-      systemPrompt: "sys",
-      cwd: seed,
-      tools: [createTaskTool(), fixture],
-    });
-    const forgetCaller = defer(() => caller.return());
-    const outer = createParallelAgentGraph();
-    const forgetOuter = defer(() => outer.close());
-    const id = outer.addNode(
-      agentNode(
-        caller,
-        { id: NodeId("caller"), trigger: always() },
-        { prompt: "go" },
-      ),
-    );
-    forgetCaller();
+      const forgetCaller = defer(() => caller.return());
+      const outer = createParallelAgentGraph();
+      const forgetOuter = defer(() => outer.close());
+      const id = outer.addNode(
+        agentNode(
+          caller,
+          { id: NodeId("caller"), trigger: always() },
+          { prompt: "go" },
+        ),
+      );
+      forgetCaller();
 
-    const final = (await outer.run()).get(id);
-    assert.ok(final, "the caller's node produced a message");
-    const parts = contentText(final.content).split("|");
-    expect(parts.map((part) => part.split(":")[0])).toEqual([
-      "caller",
-      "worker",
-      "grand",
-    ]);
-    const pids = parts.map((part) => Number(part.split(":")[1]));
-    expect(new Set(pids).size).toBe(3);
-    for (const pid of pids) expect(Number.isInteger(pid) && pid > 0).toBe(true);
+      const final = (await outer.run()).get(id);
+      assert.ok(final, "the caller's node produced a message");
+      const parts = contentText(final.content).split("|");
+      expect(parts.map((part) => part.split(":")[0])).toEqual([
+        "caller",
+        "worker",
+        "grand",
+      ]);
+      const pids = parts.map((part) => Number(part.split(":")[1]));
+      expect(new Set(pids).size).toBe(3);
+      for (const pid of pids)
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
 
-    await outer.close().finally(forgetOuter);
-    expect(caller.status).toBe("closed");
-  }), 60_000);
+      await outer.close().finally(forgetOuter);
+      expect(caller.status).toBe("closed");
+    }),
+  60_000,
+);
