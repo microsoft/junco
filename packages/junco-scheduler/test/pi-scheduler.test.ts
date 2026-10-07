@@ -667,6 +667,7 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
       provider: "conflicting",
     });
     const shared: PiSchedulerOptions = {
+      policy: "GitPolicy",
       models,
       session,
       model: conflicting.getModel(),
@@ -685,7 +686,11 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
     });
     const transferred = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models: missing, session: transferred }),
+      PiScheduler.opus({
+        policy: "GitPolicy",
+        models: missing,
+        session: transferred,
+      }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_state");
@@ -712,9 +717,9 @@ test("make validates required shared options before adopting resources", async (
       { models, session },
       { model, session },
       { model, models },
-    ] satisfies PiSchedulerOptions[]) {
+    ] satisfies Omit<PiSchedulerOptions, "policy">[]) {
       await assert.rejects(
-        PiScheduler.make({ ...partial, prompt: "go" }),
+        PiScheduler.make({ ...partial, policy: "GitPolicy", prompt: "go" }),
         (error: unknown) => {
           assert.ok(error instanceof JuncoAgentError);
           assert.equal(error.code, "invalid_argument");
@@ -758,7 +763,12 @@ test("opus never falls back to a supplied model when the fixed model is missing"
   try {
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models, session, model: copilot.getModel() }),
+      PiScheduler.opus({
+        policy: "GitPolicy",
+        models,
+        session,
+        model: copilot.getModel(),
+      }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_argument");
@@ -788,7 +798,7 @@ test("opus over a native model collection without saved logins fails its login c
   try {
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models, session, prompt: "go" }),
+      PiScheduler.opus({ policy: "GitPolicy", models, session, prompt: "go" }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_state");
@@ -830,7 +840,10 @@ test("an unbound scheduler fails its first request before any provider call, thr
   const resolved = await nativeOptions([fauxAssistantMessage("never")]);
 
   for (const [faux, make] of [
-    [copilot, () => PiScheduler.opus({ models, prompt: "go" })],
+    [
+      copilot,
+      () => PiScheduler.opus({ policy: "GitPolicy", models, prompt: "go" }),
+    ],
     [
       resolved.faux,
       () => PiScheduler.make({ ...resolved.options, prompt: "go" }),

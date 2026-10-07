@@ -152,20 +152,37 @@ export class JuncoGraph<
   Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
 > extends DataflowGraph<Agentic<N, T>, N, T, EH, Q>
 
-  constructor(scheduler: Q, window: Width, threads: Width, tracer?: DataflowTracer)
+  constructor(
+    scheduler: Q,
+    window: Width,
+    threads: Width,
+    tracer: DataflowTracer,
+    policy: ToolCollectionOptions["policy"],
+    collection?: ToolCollection,
+  )
+  static async create<N, T, EH, Q extends DataflowScheduler<N, T>>(
+    cwd: string,
+    options: ToolCollectionOptions,
+    build: (collection: ToolCollection) =>
+      JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>,
+  ): Promise<JuncoGraph<N, T, EH, Q>>
+  readonly policy: ToolCollectionOptions["policy"]
+  get collection(): ToolCollection | undefined
   get signal(): AbortSignal
   abort(reason: unknown = new DOMException("Graph aborted", "AbortError")): Promise<void>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
 export function createParallelAgentGraph<N = AgenticInput, T = AssistantMessage>(
-  tracer?: DataflowTracer,
+  policy: ToolCollectionOptions["policy"],
+  tracer: DataflowTracer = createTracer(),
+  collection?: ToolCollection,
 ): JuncoGraph<N, T>
 ```
 
 Construction rules:
 
-- **Choose the graph class by node state.** `graph.DataflowGraph<S, N, T, EH>` holds ordinary state such as `undefined`. `graph.JuncoGraph` / `graph.createParallelAgentGraph()` hold lifecycle-owned states only: prompt agents, nested `JuncoGraph`s, and `graph.nodes.Deterministic` coroutines. Never cast `{ state: undefined }` into a `JuncoGraph`.
+- **Choose the graph class by node state.** `graph.DataflowGraph<S, N, T, EH>` holds ordinary state such as `undefined`. `graph.JuncoGraph` / `graph.createParallelAgentGraph(policy)` hold lifecycle-owned states only: prompt agents, nested `JuncoGraph`s, and `graph.nodes.Deterministic` coroutines. Never cast `{ state: undefined }` into a `JuncoGraph`.
 - **`graph.nodes.Agentic` is the graph-state union**, not the cooperative agent interface `agent.Agentic`.
 - **Edges.** Message edges queue emitted `N`; value edges receive the source's returned `T` once. Read message batches with `graph.from(view, edge)` or `view.messages`; read parent results through `view.values.get(edge.id)`. `msg`/`emit` target wired message edges, never value edges. Edge IDs must be unique per source-outbound and per target-inbound set. Register both endpoints before `addEdge`. Never mutate an edge's transport.
 - **Generator protocol.** A dependent body starts with `let view = yield []`; priming does not consume its queued inputs. Each activation advances the generator once. Returning `T` marks the node done and resolves its value edges. Annotate a hand-written body as `async function* (): graph.NodeGenerator<N, T> { … }`.
@@ -257,20 +274,31 @@ export type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
 
 export function agentNode(
   agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage>,
+  options: NodeOptions<AgenticInput, AssistantMessage> &
+    Pick<ToolCollectionOptions, "policy">,
   binding: AgentNodeBinding = {},
 ): AgenticNode
 
-export function deterministicNode<N, T>(state: Deterministic<N, T>, options: NodeOptions<N, T>): AgenticNode<N, T>
+export function deterministicNode<N, T>(
+  state: Deterministic<N, T>,
+  options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
+): AgenticNode<N, T>
 
 export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
   graph: JuncoGraph<N, T, EH, Q>,
-  options: NodeOptions<N, T>,
+  options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
   binding: GraphNodeBinding<N, T>,
 ): AgenticNode<N, T>
 
 export class Deterministic<N = AgenticInput, T = AssistantMessage> implements NodeGenerator<N, T>
-  constructor(body: (signal: AbortSignal) => NodeGenerator<N, T>)
+  constructor(
+    body: (
+      signal: AbortSignal,
+      collection?: ToolCollection,
+    ) => NodeGenerator<N, T>,
+    policy: ToolCollectionOptions["policy"],
+    collection?: ToolCollection,
+  )
   abort(reason: unknown = new DOMException("Deterministic aborted", "AbortError")): Promise<void>
   close(): Promise<void>
 ```
@@ -460,8 +488,9 @@ export class JuncoAgentError extends Error
 The voluntary-suspension tool lives under **`tools`** (see below), not `agent`.
 
 - **Construct with the static factories.** The constructor is protected: `await agent.JuncoAgent.create(...)`, never `new agent.JuncoAgent(...)`.
-- **Normal construction:** `create({ models, provider, model, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
-- **Pre-resolved construction:** `fromResolved({ models, model, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
+- **Policy and collection:** every factory requires `policy: "GitPolicy" | "EmptyPolicy"`; an optional `collection` (same policy, else `invalid_argument`) is borrowed through the agent's own lease and binds its native lifetime, not its tools. Every node spec (`agentNode`, `deterministicNode`, `graphNode`, raw specs) also requires `policy`, equal to its state's.
+- **Normal construction:** `create({ models, provider, model, policy, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
+- **Pre-resolved construction:** `fromResolved({ models, model, policy, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
 - **MCP tool sources:** both factories accept `mcp.JuncoMcpTools` definitions in `tools`, alone or mixed with concrete tools (`tools: [servers, lsp, ...collection.tools]`), connected from `cwd`. Each agent gets fresh MCP clients and server processes, closed with it; discovered names are `mcp__<server>__<tool>`. A definition is a factory-only source: `setTools` takes concrete tools only.
 - **Three model argument shapes; never substitute one for another:** `create` takes a model ID *string* in `model`; `fromResolved` takes a resolved `Model<Api>` in `model`; `setModel` takes `{ provider, modelId }` (`ModelIdentity`).
 - **Final text:** use `contentText(message.content)` from `@earendil-works/pi-ai`; require `message.stopReason === "stop"` and nonblank trimmed text before forwarding a report.
@@ -474,16 +503,20 @@ Verbatim signature excerpts (`NativeMux`, `NativeModule`, `EditStore` are native
 ```text
 export interface ToolCollectionOptions {
   bash?: BashToolOptions;
-  mux?: NativeMux;
   native?: NativeModule;
   sandbox?: "shared" | "always";
+  policy: "GitPolicy" | "EmptyPolicy";
   principal?: string;
 }
 
 export class ToolCollection
   readonly tools: AgentTool<any>[];
-  static async create(cwd: string, options: ToolCollectionOptions = {}): Promise<ToolCollection>
-  async close(): Promise<void>
+  readonly policy: ToolCollectionOptions["policy"];
+  readonly mux: NativeMux;
+  readonly native: NativeModule;
+  static async create(cwd: string, options: ToolCollectionOptions): Promise<ToolCollection>
+  lease(): { close(): Promise<void> }
+  close(): Promise<void>
 
 export interface LspToolOptions {
   readonly readOnly?: boolean;
@@ -500,6 +533,7 @@ export function createShellMuxOperations(options?: {
   readonly native?: NativeModule;
   readonly mux?: NativeMux;
   readonly sandbox?: "shared" | "always";
+  readonly policy?: ToolCollectionOptions["policy"];
   principal?: string;
 }): ShellMuxOperations
 
@@ -507,13 +541,16 @@ export interface ShellMuxLease {
   readonly mux: NativeMux;
   readonly native: NativeModule;
   readonly closed: boolean;
-  release(): void;
+  release(): Promise<void>;
 }
-export function acquireShellMux(
+export async function acquireShellMux(
   cwd: string,
-  options?: { readonly native?: NativeModule; readonly mux?: NativeMux; readonly sandbox?: "shared" | "always" },
+  options: {
+    readonly native?: NativeModule;
+    readonly sandbox?: "shared" | "always";
+    readonly policy: ToolCollectionOptions["policy"];
+  },
 ): Promise<ShellMuxLease>
-export function shutdownShellMux(): Promise<void>
 
 export const MARSH_POLICY_DENIED = "MARSH_POLICY_DENIED";
 export interface MarshPolicyDeniedError extends Error {
@@ -561,7 +598,12 @@ export function createReadTool(
   mux: NativeMux,
 ): AgentTool<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined>
 
-export const createBashTool: typeof createPiBashTool = (cwd, options) =>
+export function createBashTool(
+  cwd: string,
+  options: BashToolOptions & {
+    operations: NonNullable<BashToolOptions["operations"]>;
+  },
+): AgentTool<any>
 
 export function createEditTool(
   cwd: string,
@@ -600,7 +642,7 @@ export function createDiffTool(
 ): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>>
 ```
 
-Prefer `tools.ToolCollection.create(cwd)` over assembling these factories by hand: it builds all eight tools, and its `read`, `grep`, and `edit` share one provenance store. LSP is not in the collection. There is no `tools.write` or `tools.ls`.
+Prefer `tools.ToolCollection.create(cwd, { policy })` over assembling these factories by hand: it builds all eight tools, and its `read`, `grep`, and `edit` share one provenance store. LSP is not in the collection. There is no `tools.write` or `tools.ls`.
 
 Tool selection and ownership:
 
@@ -609,7 +651,7 @@ Tool selection and ownership:
 - **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately; at the following pause the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true })` for read-only roles; enable mutating LSP only for a role that edits. Requires Bun and caller-installed language-server binaries. LSP uses host filesystem/process access, not the native sandbox.
 - **Native coding tools** need the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). `ToolCollection.create` and omitted agent `tools` both require it, with no ordinary-filesystem fallback. Do not silently swap in other tools when prerequisites are missing; report them.
-- **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Every agent, graph, collection, operations owner and MCP connection in the process shares one ShellMux automatically; closing any of them never closes it. The application calls `tools.shutdownShellMux()` exactly once, last, after every user has stopped. Keep these resources outside multi-round loops when agents persist.
+- **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Each `ToolCollection` owns its own ShellMux and policy; agents, graphs, coroutines and MCP connections given that collection borrow it through their own `lease()` and release only that hold. The final release (usually the creator's `close()` or the root graph of `graph.JuncoGraph.create`) closes the mux. Borrowers never close the collection itself. Keep these resources outside multi-round loops when agents persist.
 
 ### mcp
 
@@ -624,6 +666,7 @@ export type JuncoMcpServerOptions = {
 
 export interface JuncoMcpConnectOptions {
   readonly cwd?: string;
+  readonly collection?: ToolCollection; // required by a nonempty definition; borrowed via lease()
   readonly signal?: AbortSignal; // cancels acquisition only (McpAbortError)
   readonly discardOnClose?: boolean; // close by cancelling: server effects never publish
 }
@@ -640,6 +683,7 @@ export class JuncoMcpTools {
   constructor();
   static add(options: JuncoMcpServerOptions): JuncoMcpTools;
   add(options: JuncoMcpServerOptions): this;
+  get size(): number;
   connect(options?: JuncoMcpConnectOptions): Promise<JuncoMcpConnection>;
   snapshot(): JuncoMcpTools; // detached copy; acquires nothing
 }
@@ -647,8 +691,8 @@ export class JuncoMcpTools {
 
 - **Declare a server** with `mcp.JuncoMcpTools.add({ name, type: "stdio", command, args })`; chain `.add(...)` on the result to put several servers in one definition. `command` is resolved through `PATH`, and `args` reach the program literally, never through a shell. Optional fields: `cwd` (resolved against the connecting agent's `cwd`; it must exist inside the seed), `env` (merged over the parent environment; `inheritEnv: false` passes only `env`), `stderr`/`onStderr`, `closeTimeoutMs`, and `clientOptions` (for example `{ requestTimeoutMs: 300_000 }` for a slow-starting server; pi-mcp's default is 30 seconds). `name` must be nonblank and unique within a definition, and becomes the `<server>` of each tool name.
 - **Pass the definition to an agent factory:** `tools: [servers]` (or mixed with concrete tools). Defining starts nothing; each agent connects its own client and server process from its `cwd` and closes them when the agent closes. Subagents reconnect fresh servers from a snapshot of the caller's definitions. Select MCP tools by their published `mcp__<server>__<tool>` names in `activeToolNames`.
-- **Direct use** outside an agent: `const connection = await servers.connect({ cwd, signal })`, use `connection.tools`, and `await connection.close()` in `finally`. `signal` cancels only acquisition (rejecting with `McpAbortError`) and stops any server already started; a returned connection ignores it.
-- **Stdio only.** Every server runs as an audited job of the shared ShellMux (needs the native addon and a Btrfs seed containing `cwd`); its effects publish only when it ends, and a refused publication rejects the closing agent or connection with `MARSH_POLICY_DENIED`. A reply is not proof of publication. Each server works on a snapshot taken when it starts: once another server publishes a change to a path this one has read or written, this server's close is refused, even if it wrote nothing itself. Prepare shared state before starting servers, and do not count on a server that stays running while another publishes to close cleanly.
+- **Direct use** outside an agent: `const connection = await servers.connect({ cwd, signal, collection })`, use `connection.tools`, and `await connection.close()` in `finally`. `signal` cancels only acquisition (rejecting with `McpAbortError`) and stops any server already started; a returned connection ignores it.
+- **Stdio only.** Every server runs as an audited job of the supplied collection's ShellMux under its policy (needs the native addon and a Btrfs seed containing `cwd`); a nonempty definition without a collection rejects with `TypeError`; its effects publish only when it ends, and a refused publication rejects the closing agent or connection with `MARSH_POLICY_DENIED`. A reply is not proof of publication. Each server works on a snapshot taken when it starts: once another server publishes a change to a path this one has read or written, this server's close is refused, even if it wrote nothing itself. Prepare shared state before starting servers, and do not count on a server that stays running while another publishes to close cleanly.
 
 ### schedulers
 
@@ -790,7 +834,7 @@ export async function createAgencyScheduler<
 
 | Requirement | Construction and drive |
 |---|---|
-| Ordinary independent agent or mixed work | `graph.createParallelAgentGraph()`; `await workflow.run()`. Its agency-aware live reads avoid redelivering retained values. |
+| Ordinary independent agent or mixed work | `graph.createParallelAgentGraph(policy)`; `await workflow.run()`. Its agency-aware live reads avoid redelivering retained values. |
 | Pure deterministic parallel graph | `schedulers.createParallelScheduler()`, `graph.Width(1)`, `graph.UNBOUNDED`; `run()` or `step()`. One lane per available node; a finite thread bound does not throttle it and can reject the plan. |
 | One-node-at-a-time deterministic fairness | `schedulers.createRoundRobinScheduler()`, `graph.Width(1)`, `graph.Width(1)`; `run()` or `step()`. Rotation follows string ID order, so `"1" < "10" < "2"`. |
 | Custom or model-driven scheduling | `createScheduler` only for a requested policy; `createAgencyScheduler` when a model must judge scheduling. Drive with the Pi protocol below. |
@@ -875,7 +919,7 @@ export function createTracer(): DataflowTracer
 
 `DataflowTracer` is an interface a backend implements; never `new` it.
 
-- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`); `createParallelAgentGraph()` (and `graph.Spawn`) default to `tracer.createTracer()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
+- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`) and a policy as its fifth; `createParallelAgentGraph(policy)` (and `graph.Spawn`) default to `tracer.createTracer()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
 - **Backend selection.** `tracer.createTracer()` returns one shared backend per process: `tracer.StdoutTracer` by default, which prints each run's topology as a Unicode graph followed by every activation's full inputs and outcomes (payloads may be sensitive); or, when the user wants Opik, run with `bun run --feature=opik …` (needs the optional `dataflow-engine-opik` and `opik` modules). Any `tracer.DataflowTracer` passed explicitly always wins. The Opik adapter is not a namespace export; never silently fall back to another backend after a configuration failure.
 - **Callbacks** are synchronous and read-only. `startRun` fires once per `run()`/`step()`; `startNode` fires per activation with phase `"prime"` (no view, `inputs === undefined`) or `"resume"` (the delivered view); run `end` receives cumulative results; `fail` reports the exact rejection or raw activation cause. `complain` fires when an agent node's always-on `complain` tool records an issue (node ID and text only; the full issue is in `tools.issueLog`), at any time. Views and result maps are live: snapshot anything retained. The engine warns about and ignores observer exceptions.
 - **Flushing** is caller-owned and separate from disposal:
@@ -930,7 +974,7 @@ close(context: Context): Promise<void>;
 
 **Feedback recurrence.** A source (`emitOnce`, trigger `always()`) seeds the recurrence; the recurrence node's trigger `anyOf(on(seed), on(loop))` takes seed or feedback; a self-edge (`addEdge(id, id, loop)`) carries the next state; the task's finite count ends production with a `return`. A generator cannot emit and return in one activation, so the activation that emits the last value still sends feedback; the next activation checks the count and returns. Assert the recurrence's result in the `run()` map to prove completion. A `stepNode` sink drains the output and quiesces without returning. Read the delivered pair with `graph.from` and check its length/types before use instead of non-null assertions. Ten Fibonacci values from seeds `0, 1` are `[0,1,1,2,3,5,8,13,21,34]`.
 
-**Research/review committee.** Agents and their sessions persist; each round builds a fresh `createParallelAgentGraph()`. Value edges fan final reports out, and an `allOf` reviewer fans them in. An optional message edge carries a real `yield` reason (via `agentNode`'s `emit`) as a partial handoff. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
+**Research/review committee.** Agents and their sessions persist; each round builds a fresh `createParallelAgentGraph(policy)`. Value edges fan final reports out, and an `allOf` reviewer fans them in. An optional message edge carries a real `yield` reason (via `agentNode`'s `emit`) as a partial handoff. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
 
 **Mixed nested work.** A deterministic source (`Deterministic` + `deterministicNode`, `is_available: () => !published`) publishes one `{ kind: "prompt", text }` to an agent and to a nested graph. The nested `JuncoGraph` is registered with `graph.nodes.graphNode(child, options, { result: finalId, receive })`, exposing only its deliberately selected final node, so intermediate drafts never escape. A reviewer joins the required finals with `allOf`. Close the root (recursive) and flush separately.
 

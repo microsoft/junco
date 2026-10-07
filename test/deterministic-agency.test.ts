@@ -170,6 +170,7 @@ const member = (agent: MockAgent, description = "member", id?: string) =>
   agentNode(agent, {
     ...(id === undefined ? {} : { id: NodeId(id) }),
     description,
+    policy: "GitPolicy",
     trigger: always(),
   });
 
@@ -177,7 +178,12 @@ const member = (agent: MockAgent, description = "member", id?: string) =>
 const detached = (child: PolicyGraph, result: NodeId, description = "nested") =>
   graphNode(
     child,
-    { description, trigger: always(), is_available: () => false },
+    {
+      description,
+      policy: "GitPolicy",
+      trigger: always(),
+      is_available: () => false,
+    },
     { result },
   );
 
@@ -251,19 +257,23 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         agentNode(
           sender,
-          { description: "sender", trigger: always() },
+          { description: "sender", policy: "GitPolicy", trigger: always() },
           { emit: () => [msg(work, { kind: "prompt", text: "work" })] },
         ),
       );
       const w = graph.addNode(
         agentNode(
           worker,
-          { description: "worker", trigger: when(work) },
+          { description: "worker", policy: "GitPolicy", trigger: when(work) },
           { receive: (view) => view.messages.get(work.id) ?? [] },
         ),
       );
       const c = graph.addNode(
-        agentNode(child, { description: "child", trigger: when(result) }),
+        agentNode(child, {
+          description: "child",
+          policy: "GitPolicy",
+          trigger: when(result),
+        }),
       );
       graph.addEdge(s, w, work).addEdge(w, c, result);
 
@@ -321,7 +331,12 @@ for (const strategy of STRATEGIES) {
       const b = graph.addNode(
         agentNode(
           messenger,
-          { id: NodeId("b"), description: "messenger", trigger: when(ask) },
+          {
+            id: NodeId("b"),
+            description: "messenger",
+            policy: "GitPolicy",
+            trigger: when(ask),
+          },
           {
             receive: (view) => view.messages.get(ask.id) ?? [],
             emit: () => [msg(more, { kind: "followUp", text: "more" })],
@@ -334,6 +349,7 @@ for (const strategy of STRATEGIES) {
           {
             id: NodeId("c"),
             description: "reader",
+            policy: "GitPolicy",
             trigger: anyOf(on(value), on(more)),
           },
           {
@@ -401,7 +417,12 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         agentNode(
           sender,
-          { id: NodeId("s"), description: "sender", trigger: always() },
+          {
+            id: NodeId("s"),
+            description: "sender",
+            policy: "GitPolicy",
+            trigger: always(),
+          },
           { emit: () => outbox.splice(0) },
         ),
       );
@@ -411,6 +432,7 @@ for (const strategy of STRATEGIES) {
           {
             id: NodeId("m"),
             description: "gated",
+            policy: "GitPolicy",
             trigger: allOf(on(left), on(right)),
           },
           {
@@ -499,21 +521,21 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         agentNode(
           source,
-          { trigger: always() },
+          { policy: "GitPolicy", trigger: always() },
           { emit: () => [msg(go, { kind: "prompt", text: "go" })] },
         ),
       );
       const n = graph.addNode(
         graphNode(
           child,
-          { id: NodeId("nested"), trigger: when(go) },
+          { id: NodeId("nested"), policy: "GitPolicy", trigger: when(go) },
           { result: innerId },
         ),
       );
       const c = graph.addNode(
         agentNode(
           consumer,
-          { trigger: when(selected) },
+          { policy: "GitPolicy", trigger: when(selected) },
           {
             receive: (view) => [
               {
@@ -586,6 +608,7 @@ for (const strategy of STRATEGIES) {
           Width(1),
           UNBOUNDED,
           new DummyTracer(),
+          "GitPolicy",
         );
         const innerId = child.addNode(
           deterministicNode(
@@ -595,8 +618,9 @@ for (const strategy of STRATEGIES) {
                 while (childScheduler.state.texts.length < 2) yield [];
                 return assistant(childScheduler.state.texts.join("+"));
               },
+              "GitPolicy",
             ),
-            { id: NodeId("inner"), trigger: always() },
+            { id: NodeId("inner"), policy: "GitPolicy", trigger: always() },
           ),
         );
 
@@ -612,8 +636,9 @@ for (const strategy of STRATEGIES) {
                 yield [msg(edge, prompt(text))];
                 return assistant(`${text} sent`);
               },
+              "GitPolicy",
             ),
-            { id: NodeId(text), trigger: always() },
+            { id: NodeId(text), policy: "GitPolicy", trigger: always() },
           );
         const observed = { n3: [] as string[][], n4: [] as string[][] };
         const consumer = (
@@ -627,8 +652,9 @@ for (const strategy of STRATEGIES) {
                 observed[name].push(from(view, edge).map(inputText));
                 return assistant(`${name} done`);
               },
+              "GitPolicy",
             ),
-            { id: NodeId(name), trigger: when(edge) },
+            { id: NodeId(name), policy: "GitPolicy", trigger: when(edge) },
           );
 
         const deliveries: string[][] = [];
@@ -639,6 +665,7 @@ for (const strategy of STRATEGIES) {
             child,
             {
               id: NodeId("nested"),
+              policy: "GitPolicy",
               trigger:
                 kind === "all"
                   ? allOf(on(left), on(right))
@@ -739,7 +766,11 @@ for (const strategy of STRATEGIES) {
       );
       let ran = false;
       const n = graph.addNode(
-        graphNode(child, { trigger: always() }, { result: idleId }),
+        graphNode(
+          child,
+          { policy: "GitPolicy", trigger: always() },
+          { result: idleId },
+        ),
       );
       const d = graph.addNode(
         deterministicNode(
@@ -747,8 +778,8 @@ for (const strategy of STRATEGIES) {
             yield [];
             ran = true;
             return assistant("unused");
-          }),
-          { trigger: when(selected) },
+          }, "GitPolicy"),
+          { policy: "GitPolicy", trigger: when(selected) },
         ),
       );
       graph.addEdge(n, d, selected);
@@ -770,7 +801,7 @@ for (const strategy of STRATEGIES) {
         () =>
           graphNode(
             empty,
-            { trigger: always() },
+            { policy: "GitPolicy", trigger: always() },
             { result: NodeId("missing") },
           ),
         (error) => error instanceof DataflowDefinitionError,
@@ -780,8 +811,11 @@ for (const strategy of STRATEGIES) {
 
     test("one shared availability predicate holds agent, coroutine and graph nodes until released", async () => {
       let admitted = false;
-      const shared: NodeOptions<AgenticInput, AssistantMessage> = {
+      const shared: NodeOptions<AgenticInput, AssistantMessage> & {
+        readonly policy: "GitPolicy";
+      } = {
         trigger: always(),
+        policy: "GitPolicy",
         is_available: (_view, triggered) => admitted && triggered,
       };
       const agent = new MockAgent({
@@ -793,6 +827,7 @@ for (const strategy of STRATEGIES) {
           yield [];
           return assistant("coroutine done");
         },
+        "GitPolicy",
       );
       const inner = new MockAgent({
         prompt: "inner",
@@ -1209,14 +1244,15 @@ describe("nested graphs", () => {
       Width(1),
       UNBOUNDED,
       new DummyTracer(),
+      "GitPolicy",
     );
     const empty = child.addNode(
       deterministicNode(
         // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
         new Deterministic<AgenticInput, Maybe>(async function* () {
           return undefined;
-        }),
-        { trigger: always() },
+        }, "GitPolicy"),
+        { policy: "GitPolicy", trigger: always() },
       ),
     );
     const parent = new JuncoGraph<AgenticInput, Maybe>(
@@ -1224,13 +1260,18 @@ describe("nested graphs", () => {
       Width(1),
       UNBOUNDED,
       new DummyTracer(),
+      "GitPolicy",
     );
     const selected = valueEdge<AgenticInput, Maybe>("nested=>reader");
     let observed:
       | { readonly delivered: boolean; readonly value: Maybe }
       | undefined;
     const n = parent.addNode(
-      graphNode(child, { trigger: always() }, { result: empty }),
+      graphNode(
+        child,
+        { policy: "GitPolicy", trigger: always() },
+        { result: empty },
+      ),
     );
     const r = parent.addNode(
       deterministicNode(
@@ -1241,8 +1282,8 @@ describe("nested graphs", () => {
             value: view.values.get(selected.id),
           };
           return assistant("read");
-        }),
-        { trigger: when(selected) },
+        }, "GitPolicy"),
+        { policy: "GitPolicy", trigger: when(selected) },
       ),
     );
     parent.addEdge(n, r, selected);
@@ -1259,14 +1300,15 @@ describe("nested graphs", () => {
       Width(1),
       UNBOUNDED,
       new DummyTracer(),
+      "GitPolicy",
     );
     const source = child.addNode(
       deterministicNode(
         // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           return assistant("child-result");
-        }),
-        { trigger: always() },
+        }, "GitPolicy"),
+        { policy: "GitPolicy", trigger: always() },
       ),
     );
     const parent = new JuncoGraph<AgenticInput, AssistantMessage>(
@@ -1274,13 +1316,14 @@ describe("nested graphs", () => {
       Width(1),
       UNBOUNDED,
       new DummyTracer(),
+      "GitPolicy",
     );
     const cancelled = new Error("child cancelled");
     let captured: AbortSignal | undefined;
     const nested = parent.addNode(
       graphNode(
         child,
-        { trigger: always() },
+        { policy: "GitPolicy", trigger: always() },
         {
           result: source,
           // Fully settle the child's abort, which gives it a fresh signal, before completion is tested.

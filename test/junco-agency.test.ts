@@ -42,8 +42,16 @@ const toolTurn = (...calls: ToolCall[]) =>
 /** A prompt agent, or a nested graph forwarding its member `0`'s result. */
 const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
   agent instanceof JuncoGraph
-    ? graphNode(agent, { description, trigger: always() }, { result: MEMBER })
-    : agentNode(agent, { description, trigger: always() });
+    ? graphNode(
+        agent,
+        { policy: "GitPolicy", description, trigger: always() },
+        { result: MEMBER },
+      )
+    : agentNode(agent, {
+        policy: "GitPolicy",
+        description,
+        trigger: always(),
+      });
 
 /** An agency over `members`, planned by `script`, staged with a prompt unless `idle`. */
 async function agency(
@@ -337,7 +345,13 @@ test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared a
   const plain = await PiScheduler.make<AgenticInput, AssistantMessage>(
     (await nativeOptions([])).options,
   );
-  const root = new JuncoGraph(plain, UNBOUNDED, UNBOUNDED, new DummyTracer());
+  const root = new JuncoGraph(
+    plain,
+    UNBOUNDED,
+    UNBOUNDED,
+    new DummyTracer(),
+    "GitPolicy",
+  );
   root.addNode(member(counted));
   const child = await agency([counted, root], runAvailable, { idle: true });
   root.addNode(member(child.graph));

@@ -89,7 +89,12 @@ function member(
 }
 
 const node = (agent: MockAgent, id: string) =>
-  agentNode(agent, { id: NodeId(id), description: id, trigger: always() });
+  agentNode(agent, {
+    id: NodeId(id),
+    policy: "GitPolicy",
+    description: id,
+    trigger: always(),
+  });
 
 const resultText = (
   graph: JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>,
@@ -139,6 +144,7 @@ async function policyGraph() {
   ids.c = graph.addNode(
     agentNode(agents.c, {
       id: NodeId("c"),
+      policy: "GitPolicy",
       description: "c",
       trigger: when(never),
     }),
@@ -425,17 +431,19 @@ describe("policy boundaries", () => {
           yield [];
           return assistant("coroutine done");
         },
+        "GitPolicy",
       );
       const childId = graph.addNode(
         graphNode(
           child,
-          { id: NodeId("child"), trigger: always() },
+          { id: NodeId("child"), policy: "GitPolicy", trigger: always() },
           { result: innerId },
         ),
       );
       const coroutineId = graph.addNode(
         deterministicNode(coroutine, {
           id: NodeId("coroutine"),
+          policy: "GitPolicy",
           trigger: always(),
         }),
       );

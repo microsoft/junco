@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { NodeSpec } from "dataflow-engine";
 import type { JuncoAgent } from "junco-agent";
+import type { ToolCollectionOptions } from "junco-tools";
 import type { Deterministic } from "./deterministic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
@@ -28,9 +29,9 @@ export type Agentic<N = AgenticInput, T = AssistantMessage> =
   | MockAgent
   | Deterministic<N, T>;
 
-/** A native node spec whose state is {@link Agentic}. */
+/** A native node spec whose state is {@link Agentic}, registered under an authorization policy. */
 export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<
   Agentic<N, T>,
   N,
   T
->;
+> & { readonly policy: ToolCollectionOptions["policy"] };

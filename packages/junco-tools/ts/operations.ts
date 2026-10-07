@@ -3,14 +3,11 @@ import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { NativeMux, NativeRun } from "../native/index.js";
+import type { ToolCollectionOptions } from "./collection.js";
 import type { NativeModule } from "./native.js";
-import {
-  acquireShellMuxFrom,
-  currentShellMuxGeneration,
-  type ShellMuxLease,
-} from "./shell-mux.js";
+import { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
 
-/** Bash operations on the application's one ShellMux, closable without closing that mux. */
+/** Bash operations on one ShellMux; closing stops only this owner's commands. */
 export type ShellMuxOperations = BashOperations & { close(): Promise<void> };
 
 function resolveTimeoutMs(timeout: number | undefined): number | undefined {
@@ -28,10 +25,9 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 /**
  * A principal names and orders one agent's commands; it is not a policy identity. Every
  * command runs in a fresh marsh shell with an opaque owner, so no grant carries over between
- * commands. Every operations owner runs on the application's one ShellMux, acquired on first
- * use from the generation current when this owner was created; `mux`/`native`/`sandbox` follow
- * {@link acquireShellMux}'s adoption rules. `close()` stops only this owner's commands and
- * releases its lease; {@link shutdownShellMux} alone closes the mux.
+ * commands. A supplied `mux` is borrowed and never closed; an explicit `policy`/`sandbox` must
+ * match it. Without one, the first command opens an owned mux (`policy` defaults to
+ * `"GitPolicy"`), which `close()` closes after aborting and draining this owner's commands.
  * ShellMux snapshots are not OS confinement. Cancellation waits for owned cleanup and
  * can be delayed by external commands racing the backend's stop scan.
  */
@@ -39,22 +35,36 @@ export function createShellMuxOperations(options?: {
   readonly native?: NativeModule;
   readonly mux?: NativeMux;
   readonly sandbox?: "shared" | "always";
+  readonly policy?: ToolCollectionOptions["policy"];
   principal?: string;
 }): ShellMuxOperations {
-  if (options?.mux !== undefined && options.native === undefined) {
-    throw new Error(
-      "createShellMuxOperations: a mux requires the native module that created it",
-    );
+  const borrowed = options?.mux;
+  if (borrowed !== undefined) {
+    if (options?.native === undefined) {
+      throw new Error(
+        "createShellMuxOperations: a mux requires the native module that created it",
+      );
+    }
+    if (options.policy !== undefined && options.policy !== borrowed.policy) {
+      throw new Error(
+        `createShellMuxOperations: policy "${options.policy}" conflicts with the mux's "${borrowed.policy}"`,
+      );
+    }
+    if (options.sandbox !== undefined && options.sandbox !== borrowed.sandbox) {
+      throw new Error(
+        `createShellMuxOperations: sandbox "${options.sandbox}" conflicts with the mux's "${borrowed.sandbox}"`,
+      );
+    }
   }
   const principal = options?.principal ?? `pi-${randomUUID()}`;
-  const generation = currentShellMuxGeneration();
   const acquisition = {
     native: options?.native,
-    mux: options?.mux,
     sandbox: options?.sandbox,
-  };
-  let lease: ShellMuxLease | undefined;
-  let acquiring: Promise<ShellMuxLease> | undefined;
+    policy: options?.policy ?? "GitPolicy",
+  } as const;
+  let mux: NativeMux | undefined;
+  let owned: ShellMuxLease | undefined;
+  let acquiring: Promise<NativeMux> | undefined;
   let closing: Promise<void> | undefined;
   const runs = new Set<NativeRun>();
   const pending = new Set<Promise<unknown>>();
@@ -66,25 +76,28 @@ export function createShellMuxOperations(options?: {
   };
   const closedError = () => new Error("ShellMux session is closed");
 
-  // Assigned before it is awaited, so an aborted caller leaves the eventual lease owned by
-  // close() instead of orphaning it; a rejected attempt is cleared so later calls retry on
-  // the same, still-open generation.
-  const acquire = (cwd: string): Promise<ShellMuxLease> => {
-    if (lease !== undefined) {
-      return lease.closed
-        ? Promise.reject(closedError())
-        : Promise.resolve(lease);
-    }
+  // Tracked before it is awaited, so close() drains an in-flight open and releases what it
+  // produced; a rejected attempt is cleared so later calls retry.
+  const acquire = (cwd: string): Promise<NativeMux> => {
+    if (mux !== undefined) return Promise.resolve(mux);
     if (acquiring === undefined) {
       const attempt = track(
-        acquireShellMuxFrom(generation, cwd, acquisition).then((acquired) => {
+        (async () => {
+          if (borrowed !== undefined) {
+            await borrowed.validateCwd(cwd);
+            if (closing !== undefined) throw closedError();
+            mux = borrowed;
+            return borrowed;
+          }
+          const lease = await acquireShellMux(cwd, acquisition);
           if (closing !== undefined) {
-            acquired.release();
+            await lease.release();
             throw closedError();
           }
-          lease = acquired;
-          return acquired;
-        }),
+          owned = lease;
+          mux = lease.mux;
+          return lease.mux;
+        })(),
       );
       acquiring = attempt;
       attempt.catch(() => {
@@ -98,7 +111,7 @@ export function createShellMuxOperations(options?: {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       const timeoutMs = resolveTimeoutMs(timeout);
       if (signal?.aborted) throw new Error("aborted");
-      if (closing !== undefined || lease?.closed) throw closedError();
+      if (closing !== undefined) throw closedError();
 
       let run: NativeRun | undefined;
       let notifyAbort: (() => void) | undefined;
@@ -144,9 +157,9 @@ export function createShellMuxOperations(options?: {
           if (signal?.aborted) throw new Error("aborted");
           if (closing !== undefined) throw closedError();
 
-          const { mux } = await beforeStart(acquire(cwd));
+          const mux = await beforeStart(acquire(cwd));
           if (signal?.aborted) throw new Error("aborted");
-          if (closing !== undefined || lease?.closed) throw closedError();
+          if (closing !== undefined) throw closedError();
           const environment = Object.fromEntries(
             Object.entries(env ?? process.env).filter(
               (entry): entry is [string, string] => entry[1] !== undefined,
@@ -184,7 +197,7 @@ export function createShellMuxOperations(options?: {
       closing ??= (async () => {
         for (const run of runs) run.abort();
         await Promise.allSettled([...pending]);
-        lease?.release();
+        await owned?.release();
       })();
       return closing;
     },

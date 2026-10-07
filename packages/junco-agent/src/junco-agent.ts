@@ -61,6 +61,7 @@ import {
   type TaskInput,
   type TaskToolHost,
   ToolCollection,
+  type ToolCollectionOptions,
 } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import type {
@@ -122,13 +123,13 @@ export type JuncoAgentCreateOptions<
   /** Transferred to JuncoAgent; its harness closes the supplied session. */
   readonly session?: Session;
   /**
-   * Base directory of the default local ToolCollection (tools omitted) and of MCP server
-   * definitions; default `process.cwd()`.
+   * Base directory of the default or MCP-required ToolCollection (when none is supplied) and of
+   * MCP server definitions; default `process.cwd()`.
    */
   readonly cwd?: string;
   /**
    * Concrete tools are caller-owned; MCP definitions are connected for, and closed with, this
-   * agent. Omitted tools include the local collection and yield.
+   * agent. Omitted tools include the collection's tools, task and yield.
    */
   readonly tools?: JuncoAgentTools<T>;
 };
@@ -168,36 +169,34 @@ type McpSourceRegistration = {
   readonly tools: readonly AgentTool[];
 };
 
-/**
- * A ToolCollection shared by the agent that created it and every subagent borrowing its tools.
- * Each holds one idempotent lease; the last release closes the collection.
- */
-class SharedCollection {
-  #holders = 0;
-  constructor(readonly collection: { close(): Promise<void> }) {}
-  lease(): { close(): Promise<void> } {
-    this.#holders++;
-    let released: Promise<void> | undefined;
-    return {
-      close: () => {
-        released ??=
-          --this.#holders === 0 ? this.collection.close() : Promise.resolve();
-        return released;
-      },
-    };
-  }
-}
-
 type OwnedResources = {
   /** Connections this agent's factory opened, in acquisition order. */
   mcp?: JuncoMcpConnection[];
   /** The definitions behind `mcp`, in the same order, for subagents to inherit. */
   mcpSources?: McpSourceRegistration[];
+  /** This agent's hold on `toolCollection`: its creator hold or a lease. */
   collection?: { close(): Promise<void> };
-  /** The owner `collection` leases from, when subagents may borrow its tools. */
-  sharedCollection?: SharedCollection;
+  /** The actual collection MCP connections run on and the agent binds. */
+  toolCollection?: ToolCollection;
   repo?: MemorySessionRepo;
 };
+
+/** Rejects a missing or unknown policy, or a collection opened under another policy. */
+function checkPolicy(
+  policy: unknown,
+  collection: ToolCollection | undefined,
+): void {
+  if (policy !== "GitPolicy" && policy !== "EmptyPolicy")
+    throw new JuncoAgentError(
+      "invalid_argument",
+      'policy must be "GitPolicy" or "EmptyPolicy"',
+    );
+  if (collection !== undefined && collection.policy !== policy)
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "Collection policy does not match agent policy",
+    );
+}
 
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
@@ -245,20 +244,30 @@ async function failBeforeConstruction(
 
 /**
  * Expands factory-only sources in order: concrete tools keep their identity, and each MCP
- * definition is connected from `cwd`, recorded in `owned` before its tools are appended.
- * `signal` cancels connection acquisition only.
+ * definition is connected from `cwd` on `owned.toolCollection`, recorded in `owned` before its
+ * tools are appended. A nonempty definition without a collection first creates one under
+ * `policy`, owned by `owned`. `signal` cancels connection acquisition only.
  */
 async function resolveToolSources(
   sources: JuncoAgentTools | undefined,
   cwd: string,
   owned: OwnedResources,
+  policy: ToolCollectionOptions["policy"],
   signal?: AbortSignal,
 ): Promise<AgentTool[]> {
   const tools: AgentTool[] = [];
   if (sources === undefined) return tools;
   for (const source of sources instanceof JuncoMcpTools ? [sources] : sources) {
     if (source instanceof JuncoMcpTools) {
-      const connection = await source.connect({ cwd, signal });
+      if (source.size > 0 && owned.toolCollection === undefined) {
+        owned.toolCollection = await ToolCollection.create(cwd, { policy });
+        owned.collection = owned.toolCollection;
+      }
+      const connection = await source.connect({
+        cwd,
+        signal,
+        collection: owned.toolCollection,
+      });
       owned.mcp ??= [];
       owned.mcp.push(connection);
       owned.mcpSources ??= [];
@@ -436,13 +445,24 @@ export class JuncoAgent<
   static async fromResolved(
     options: JuncoAgentResolvedOptions,
   ): Promise<JuncoAgent> {
-    const { cwd, tools, ...native } = options;
-    const owned: OwnedResources = {};
-    let resolved: AgentTool[];
+    const { cwd, tools, policy, collection, ...native } = options;
+    const owned: OwnedResources = { toolCollection: collection };
+    let agent: JuncoAgent;
     try {
-      resolved = await resolveToolSources(
+      checkPolicy(policy, collection);
+      const resolved = await resolveToolSources(
         tools,
         resolve(cwd ?? process.cwd()),
+        owned,
+        policy,
+      );
+      agent = new JuncoAgent(
+        {
+          ...native,
+          policy,
+          collection: owned.toolCollection,
+          tools: resolved,
+        },
         owned,
       );
     } catch (error) {
@@ -454,7 +474,6 @@ export class JuncoAgent<
         "JuncoAgent.fromResolved cleanup failed",
       );
     }
-    const agent = new JuncoAgent({ ...native, tools: resolved }, owned);
     await agent.initialize();
     return agent;
   }
@@ -480,12 +499,15 @@ export class JuncoAgent<
       session: suppliedSession,
       cwd,
       tools,
+      policy,
+      collection,
       ...native
     } = options;
-    const owned: OwnedResources = {};
+    const owned: OwnedResources = { toolCollection: collection };
     let session: Session | undefined = suppliedSession;
     let agent: JuncoAgent | undefined;
     try {
+      checkPolicy(policy, collection);
       const models =
         suppliedModels ??
         (await (
@@ -534,22 +556,36 @@ export class JuncoAgent<
       let agentTools: AgentTool[];
       if (tools === undefined) {
         // Explicit-tool construction does not allocate a local execution environment or addon.
-        const collection = await ToolCollection.create(
-          resolve(cwd ?? process.cwd()),
-        );
-        // Subagents borrow its tools; the last of their leases closes it.
-        owned.sharedCollection = new SharedCollection(collection);
-        owned.collection = owned.sharedCollection.lease();
-        agentTools = [...collection.tools, createTaskTool(), createYieldTool()];
+        if (owned.toolCollection === undefined) {
+          owned.toolCollection = await ToolCollection.create(
+            resolve(cwd ?? process.cwd()),
+            { policy },
+          );
+          owned.collection = owned.toolCollection;
+        }
+        agentTools = [
+          ...owned.toolCollection.tools,
+          createTaskTool(),
+          createYieldTool(),
+        ];
       } else {
         agentTools = await resolveToolSources(
           tools,
           resolve(cwd ?? process.cwd()),
           owned,
+          policy,
         );
       }
       agent = new JuncoAgent(
-        { ...native, session, models, model, tools: agentTools },
+        {
+          ...native,
+          session,
+          models,
+          model,
+          policy,
+          collection: owned.toolCollection,
+          tools: agentTools,
+        },
         owned,
       );
       await agent.initialize();
@@ -567,6 +603,13 @@ export class JuncoAgent<
   }
 
   readonly #options: AgenticOptions<S, P, T>;
+  /** Authorization policy of this agent's native resources. */
+  readonly policy: ToolCollectionOptions["policy"];
+  /**
+   * The collection binding this agent's policy and lifetime, borrowed: the agent holds its own
+   * lease. Take `collection.lease()` to keep it beyond the agent; never close it directly.
+   */
+  readonly collection: ToolCollection | undefined;
   readonly #owned: OwnedResources;
   #harness: AgentHarness<undefined> | undefined;
   #lane: AgentLane | undefined;
@@ -623,7 +666,10 @@ export class JuncoAgent<
     options: AgenticOptions<S, P, T>,
     owned: OwnedResources = {},
   ) {
+    checkPolicy(options.policy, options.collection);
     this.#options = options;
+    this.policy = options.policy;
+    this.collection = options.collection;
     this.#owned = owned;
     this.#tools = withComplainTool(options.tools ?? [], this.#complainTool);
     this.#resources = options.resources ?? {};
@@ -633,6 +679,8 @@ export class JuncoAgent<
         ...(options.images === undefined ? {} : { images: options.images }),
       };
     }
+    // The single borrowing site: factories that created the collection already hold it.
+    owned.collection ??= options.collection?.lease();
   }
 
   /** Complete the asynchronous native acquisition before any caller uses the agent. */
@@ -647,6 +695,8 @@ export class JuncoAgent<
       images: _images,
       tools: _tools,
       resources: _resources,
+      policy: _policy,
+      collection: _collection,
       activeToolNames,
       ...native
     } = this.#options;
@@ -1378,8 +1428,8 @@ export class JuncoAgent<
    * session. They inherit this agent's current model, thinking level, active tools, resources and
    * harness settings unless overridden; a tool subset can only narrow the active tools. Ordinary
    * tools are shared; each MCP definition this agent registered is reconnected for every child,
-   * which exposes only the selected original tools. A local ToolCollection stays open until its
-   * last borrower closes. Everything is validated before any child is created; on failure or
+   * which exposes only the selected original tools, on this agent's collection and policy. Each
+   * child holds its own collection lease. Everything is validated before any child is created; on failure or
    * `signal` abort every created child is closed again.
    */
   createSubagents(
@@ -1493,18 +1543,16 @@ export class JuncoAgent<
       try {
         for (const { model, selection } of plans) {
           live();
-          const owned: OwnedResources = { repo: new MemorySessionRepo() };
-          const shared = this.#owned.sharedCollection;
-          if (shared !== undefined) {
-            owned.sharedCollection = shared;
-            owned.collection = shared.lease();
-          }
+          const owned: OwnedResources = {
+            repo: new MemorySessionRepo(),
+            toolCollection: this.collection,
+          };
           let session: Session | undefined;
           let child: JuncoAgent<S, P, AgentTool>;
           try {
             session = await owned.repo!.create({}, BACKGROUND_CONTEXT);
             for (const { source, cwd } of registrations)
-              await resolveToolSources(source, cwd, owned, signal);
+              await resolveToolSources(source, cwd, owned, this.policy, signal);
             live();
             // Rebind each selected MCP tool to the one fresh wrapper of the same operation; an
             // assigned batch belongs to this agent, so a child gets an ordinary task tool.
@@ -1535,6 +1583,8 @@ export class JuncoAgent<
                 session,
                 models,
                 model,
+                policy: this.policy,
+                collection: owned.toolCollection,
                 thinkingLevel,
                 systemPrompt: this.#options.systemPrompt,
                 toProviderMessages: this.#options.toProviderMessages,

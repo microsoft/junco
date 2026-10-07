@@ -146,6 +146,7 @@ test("complaint-only configurations still offer and execute exactly one genuine 
         models.registerNativeProvider(faux.provider);
         const agent = await JuncoAgent.create({
           models,
+          policy: "GitPolicy",
           provider: "faux",
           model: "faux-1",
           tools: [],
@@ -229,6 +230,7 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
       JuncoAgent.fromResolved({
         session: await repo.create({}, BACKGROUND_CONTEXT),
         models,
+        policy: "GitPolicy",
         model,
         tools,
       }),
@@ -315,6 +317,7 @@ test("a legacy persisted selection is repaired with complain on reopen without r
   const agent = await JuncoAgent.fromResolved({
     session: reopened,
     models,
+    policy: "GitPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -379,6 +382,7 @@ test("agents sharing one Models registry keep their request snapshots isolated",
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
+      policy: "GitPolicy",
       model,
       tools: [],
     });

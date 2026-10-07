@@ -142,7 +142,7 @@ export type SchedulerOptions<State, N = unknown, T = unknown> = {
  * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
  * import { PiScheduler } from "junco-scheduler/agent";
  *
- * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
+ * const scheduler = await PiScheduler.opus({ policy: "GitPolicy", prompt: "Run available work." });
  * try {
  *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED); // configures and binds it
  *   // ...graph.addNode(...) / graph.addEdge(...)

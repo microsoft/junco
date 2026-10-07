@@ -23,6 +23,7 @@ import type {
   TaskInput,
   TaskToolDetails,
   TaskToolHost,
+  ToolCollectionOptions,
 } from "junco-tools";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import { cancellation } from "./graph-node.js";
@@ -645,7 +646,8 @@ function deliveredMessages<N, T>(view: ParentView<N, T>): Message<N>[] {
 /** The node body and availability of one prompt agent, expanding into a Spawn graph on `task`. */
 function driverNode(
   agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage>,
+  options: NodeOptions<AgenticInput, AssistantMessage> &
+    Pick<ToolCollectionOptions, "policy">,
   binding: DriverBinding,
 ): AgenticNode {
   const { prompt, receive, emit, complete, inputMode } = binding;
@@ -697,6 +699,7 @@ function driverNode(
       {
         id: NodeId(child.id),
         trigger: always(),
+        policy: options.policy,
         ...(child.name === undefined ? {} : { description: child.name }),
       },
       {
@@ -801,6 +804,7 @@ function driverNode(
         {
           id: ROOT,
           trigger: always(),
+          policy: options.policy,
           state: agent,
           step: rootStep,
           is_available: (view) =>
@@ -976,7 +980,8 @@ function driverNode(
  */
 export function agentNode(
   agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage>,
+  options: NodeOptions<AgenticInput, AssistantMessage> &
+    Pick<ToolCollectionOptions, "policy">,
   binding: AgentNodeBinding = {},
 ): AgenticNode {
   const { prompt, receive = () => [], emit = () => [] } = binding;

@@ -47,11 +47,7 @@ export {
   type ShellMuxOperations,
 } from "./operations.js";
 export { createReadTool } from "./read.js";
-export {
-  acquireShellMux,
-  type ShellMuxLease,
-  shutdownShellMux,
-} from "./shell-mux.js";
+export { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
 export {
   type AssignedTaskTool,
   createAssignedTaskTool,

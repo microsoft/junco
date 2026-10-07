@@ -348,6 +348,7 @@ export async function scriptedCommittee(
       model,
       systemPrompt: `You are the ${id} of a three-member design committee.`,
       tools,
+      policy: "GitPolicy",
     });
     created.push(agent);
     return agent;

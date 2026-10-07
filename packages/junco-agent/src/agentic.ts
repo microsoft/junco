@@ -18,7 +18,11 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import type { ComplainToolHost } from "junco-tools";
+import type {
+  ComplainToolHost,
+  ToolCollection,
+  ToolCollectionOptions,
+} from "junco-tools";
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -143,4 +147,11 @@ export type AgenticOptions<
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string;
   readonly images?: ImageContent[];
+  /** Authorization policy of the agent's native ShellMux; must equal `collection.policy`. */
+  readonly policy: ToolCollectionOptions["policy"];
+  /**
+   * Borrowed collection binding the agent's policy and native lifetime: the agent holds a lease
+   * until closed, and closes only that lease, never the collection. Grants no tools by itself.
+   */
+  readonly collection?: ToolCollection;
 };

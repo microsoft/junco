@@ -62,6 +62,7 @@ const agent = await JuncoAgent.create({
   systemPrompt: "You are a concise coding assistant. Read files before editing.",
   prompt: "Read README.md and summarize this repository.",
   cwd: process.cwd(),
+  policy: "GitPolicy",
   // Omitted tools: owned junco-tools collection plus yield.
 });
 agent.events.on("message_end", ({ message }) => console.log(message));
@@ -82,12 +83,12 @@ try {
 
 Leaving `for await` early calls terminal `return()`. To reuse an agent after a settlement, call `next()` directly rather than breaking out of the iterator, then start another run with `prompt()`.
 
-For an already resolved `{ models, model }`, use `await JuncoAgent.fromResolved({ session, models, model, tools, resources, prompt })`. `await JuncoAgent.create({ provider, model: modelId, tools, ... })` takes provider/model ID strings and resolves them through Pi's `ModelRuntime` and saved login; an optional `models: ModelRuntime` shares an existing runtime. Omitted `tools` opens the default collection. Explicit `tools` replace that collection entirely and need no Btrfs seed or local execution environment; include `createYieldTool()` if voluntary pauses are needed:
+For an already resolved `{ models, model }`, use `await JuncoAgent.fromResolved({ session, models, model, policy, tools, resources, prompt })`. `await JuncoAgent.create({ provider, model: modelId, policy, tools, ... })` takes provider/model ID strings and resolves them through Pi's `ModelRuntime` and saved login; an optional `models: ModelRuntime` shares an existing runtime. Omitted `tools` opens the default collection. Explicit `tools` replace that collection entirely and need no Btrfs seed or local execution environment; include `createYieldTool()` if voluntary pauses are needed:
 
 ```ts
 import { JuncoAgent } from "junco-agent";
 import { createYieldTool } from "junco-tools";
-const agent = await JuncoAgent.fromResolved({ session, models, model, tools: [myTool, createYieldTool()] });
+const agent = await JuncoAgent.fromResolved({ session, models, model, policy: "GitPolicy", tools: [myTool, createYieldTool()] });
 try {
   const response = await agent.prompt("Use the tools, then summarize.");
   console.log(response);
@@ -118,13 +119,13 @@ Here `session`, `models`, `model`, and `myTool` are caller-provided. A supplied 
 
 ## Tools
 
-With `tools` omitted, `create` opens one `ToolCollection.create(cwd)` from `junco-tools` and passes `read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`, `task` and `yield`, in that order, followed by the always-on `complain`. There is no fallback backend, no Pi built-in tool, and no `write` or `ls` tool. Outside an `agentNode`, a `task` call fails as an ordinary tool error.
+Every factory requires `policy: "GitPolicy" | "EmptyPolicy"`. An optional `collection` binds that policy and the agent's native lifetime (the agent borrows it through its own lease; never close it from the agent's side) and must have the same policy, else construction fails with `invalid_argument`. With `tools` omitted, `create` uses the supplied collection or opens one `ToolCollection.create(cwd, { policy })` from `junco-tools` and passes `read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`, `task` and `yield`, in that order, followed by the always-on `complain`. There is no fallback backend, no Pi built-in tool, and no `write` or `ls` tool. Outside an `agentNode`, a `task` call fails as an ordinary tool error.
 
 - `edit` is the hashline editor; it anchors on `[path#TAG]` snapshots from an earlier `read` or `grep` of the same collection.
-- `ToolCollection.create(cwd)` opens its native mux immediately, so the default tools need `cwd` inside an existing dedicated Btrfs seed subvolume with a writable parent and `user_subvol_rm_allowed` on the mount. `create` rejects outside a seed.
+- `ToolCollection.create(cwd, { policy })` opens its own native mux immediately, so the default tools need `cwd` inside an existing dedicated Btrfs seed subvolume with a writable parent and `user_subvol_rm_allowed` on the mount. `create` rejects outside a seed.
 - Explicit `tools` replace the defaults entirely (the agent still adds its `complain` tool); add `createYieldTool()` from `junco-tools` to let a run pause voluntarily. A collection you create and pass stays yours to close after the agent.
-- `tools` may also hold `JuncoMcpTools` definitions from `junco-mcp`, alone or mixed with concrete tools, in both `create` and `fromResolved`. Each definition is connected from `cwd` for this agent (fresh clients and stdio server processes, run as audited jobs of the process's one ShellMux), its discovered `mcp__<server>__<tool>` tools take its place in order, and the agent closes those connections when it closes. A name clash with any other tool fails construction and closes every connection it opened. Definitions are factory-only: `setTools` takes concrete tools.
-- Neither closing an agent nor closing a collection shuts the ShellMux down; the application calls `shutdownShellMux()` from `junco-tools` once, after every agent, graph and collection has stopped.
+- `tools` may also hold `JuncoMcpTools` definitions from `junco-mcp`, alone or mixed with concrete tools, in both `create` and `fromResolved`. Each definition is connected from `cwd` for this agent (fresh clients and stdio server processes, run as audited jobs of the agent's collection mux, opened under `policy` when no collection was supplied; subagents reuse that collection), its discovered `mcp__<server>__<tool>` tools take its place in order, and the agent closes those connections when it closes. A name clash with any other tool fails construction and closes every connection it opened. Definitions are factory-only: `setTools` takes concrete tools.
+- Each collection owns its own mux; the last of its holds (creator, agents, subagents, MCP connections) closes it.
 - File tools and `bash` share the collection's mux. Writes may run in a private snapshot and publish only what Marsh's policy authorizes; a refused publication rejects the call with a typed `MARSH_POLICY_DENIED` error, which pauses the run as a `policy` step.
 
 ## Authentication

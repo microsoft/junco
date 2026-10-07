@@ -88,17 +88,23 @@ function wire(
       yield [graph.msg(edge, delivered)];
       return fauxAssistantMessage("seeded");
     },
+    "GitPolicy",
   );
   const sourceId = flow.addNode(
     deterministicNode(source, {
       id: graph.NodeId(`source-${crypto.randomUUID()}`),
+      policy: "GitPolicy",
       trigger: trigger.always(),
     }),
   );
   const workerId = flow.addNode(
     agentNode(
       member,
-      { ...(id === undefined ? {} : { id }), trigger: trigger.when(edge) },
+      {
+        ...(id === undefined ? {} : { id }),
+        policy: "GitPolicy",
+        trigger: trigger.when(edge),
+      },
       { receive: (view) => graph.from(view, edge) },
     ),
   );
@@ -107,7 +113,7 @@ function wire(
 }
 
 function newGraph(tracer: DummyTracer = new RecordingTracer()) {
-  const flow = createParallelAgentGraph(tracer);
+  const flow = createParallelAgentGraph("GitPolicy", tracer);
   closers.push(() => flow.close());
   return flow;
 }
@@ -273,7 +279,7 @@ describe("complaints through real graphs", () => {
   test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
     const innerTracer = new RecordingTracer();
     const outerTracer = new RecordingTracer();
-    const inner = createParallelAgentGraph(innerTracer);
+    const inner = createParallelAgentGraph("GitPolicy", innerTracer);
     const { workerId } = wire(
       inner,
       await worker("nested"),
@@ -283,7 +289,11 @@ describe("complaints through real graphs", () => {
     const wrapper = outer.addNode(
       graphNode(
         inner,
-        { id: graph.NodeId("wrapper"), trigger: trigger.always() },
+        {
+          id: graph.NodeId("wrapper"),
+          policy: "GitPolicy",
+          trigger: trigger.always(),
+        },
         { result: workerId },
       ),
     );
@@ -307,7 +317,11 @@ describe("complaints through real graphs", () => {
     const member = await worker("shared spec");
     const spec = agentNode(
       member,
-      { id: graph.NodeId("shared"), trigger: trigger.always() },
+      {
+        id: graph.NodeId("shared"),
+        policy: "GitPolicy",
+        trigger: trigger.always(),
+      },
       { prompt: "go" },
     );
     const a = newGraph(tracerA);

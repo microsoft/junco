@@ -1,4 +1,4 @@
-// Both JuncoAgent factories with real MCP stdio servers on the shared Junco ShellMux, over a
+// Both JuncoAgent factories with real MCP stdio servers on one shared ToolCollection, over a
 // CopyTree seed of the test-fs addon. The model is Pi's faux provider; the servers are the
 // junco-mcp fixture, launched natively.
 
@@ -31,12 +31,10 @@ import {
   JuncoMcpTools,
 } from "junco-mcp";
 import {
-  acquireShellMux,
   createTaskTool,
   isTaskTool,
   type NativeModule,
-  type ShellMuxLease,
-  shutdownShellMux,
+  ToolCollection,
 } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
@@ -49,20 +47,14 @@ const SERVER = fileURLToPath(
 );
 const TIMEOUT = 60_000;
 
-const opens: string[] = [];
 const copyTree = {
   ...testAddon,
-  NativeMux: {
-    async open(...args: Parameters<NativeModule["NativeMux"]["open"]>) {
-      opens.push(args[0]);
-      return testAddon.NativeMux.openCopyTree(...args);
-    },
-  },
+  NativeMux: { open: testAddon.NativeMux.openCopyTree.bind(testAddon.NativeMux) },
 } as unknown as NativeModule;
 
 let root: string;
 let seed: string;
-let observer: ShellMuxLease;
+let collection: ToolCollection;
 
 beforeAll(async () => {
   root = await mkdtemp(
@@ -71,13 +63,12 @@ beforeAll(async () => {
   seed = join(root, "seed");
   // A server cwd below the seed; it must exist before the CopyTree mux opens.
   await mkdir(join(seed, "work"), { recursive: true });
-  observer = await acquireShellMux(seed, { native: copyTree });
+  collection = await ToolCollection.create(seed, { native: copyTree, policy: "GitPolicy" });
 });
 
 afterAll(async () => {
-  observer?.release();
   try {
-    await shutdownShellMux();
+    await collection?.close();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -157,6 +148,8 @@ test("create runs an MCP tool beside an ordinary tool", async () => {
     provider: "faux",
     model: "faux-1",
     cwd: seed,
+    policy: "GitPolicy",
+    collection,
     tools: [fixture(), ordinary.tool],
     prompt: "go",
   });
@@ -183,6 +176,8 @@ test("fromResolved accepts a lone definition and several definitions in order", 
     models,
     model,
     cwd: seed,
+    policy: "GitPolicy",
+    collection,
     tools: [fixture("a"), fixture("b")],
     prompt: "go",
   });
@@ -198,6 +193,8 @@ test("fromResolved accepts a lone definition and several definitions in order", 
     models,
     model,
     cwd: seed,
+    policy: "GitPolicy",
+    collection,
     tools: fixture("solo"),
   });
   try {
@@ -219,6 +216,8 @@ test("two agents reusing one definition get their own servers; closing one leave
       provider: "faux",
       model: "faux-1",
       cwd: seed,
+      policy: "GitPolicy",
+      collection,
       tools: [definition],
       prompt: "go",
     });
@@ -228,6 +227,8 @@ test("two agents reusing one definition get their own servers; closing one leave
       provider: "faux",
       model: "faux-1",
       cwd: seed,
+      policy: "GitPolicy",
+      collection,
       tools: [definition],
       prompt: "go",
     });
@@ -238,8 +239,6 @@ test("two agents reusing one definition get their own servers; closing one leave
       settledText(await second.next()).split(":").slice(1).join(":"),
     ).pid;
     expect(secondPid).not.toBe(firstPid);
-    // Every factory acquired the one singleton opened by the observer.
-    expect(opens).toEqual([seed]);
   }), TIMEOUT);
 
 test("a failing source, a name conflict or an unknown active tool closes only that factory's resources", async () => {
@@ -253,6 +252,8 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         provider: "faux",
         model: "faux-1",
         cwd: seed,
+        policy: "GitPolicy",
+        collection,
         tools: [fixture("good"), fixture("bad", { JUNCO_MCP_FIXTURE_MODE: "list-failure" })],
       }),
     ).rejects.toThrow('JuncoMcpTools: failed to initialize server "bad"');
@@ -263,6 +264,8 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         provider: "faux",
         model: "faux-1",
         cwd: seed,
+        policy: "GitPolicy",
+        collection,
         tools: [fixture("fx"), countingTool("mcp__fx__echo").tool],
       }),
       (error) => error instanceof JuncoAgentError && /Duplicate tool name/.test(error.message),
@@ -276,6 +279,8 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         models: resolvedModels,
         model,
         cwd: seed,
+        policy: "GitPolicy",
+        collection,
         tools: [fixture("selected")],
         activeToolNames: ["mcp__selected__missing"],
       }),
@@ -287,11 +292,13 @@ test("a failing source, a name conflict or an unknown active tool closes only th
   }
   // Every connection the failed factories opened was closed: retained tools reject.
   for (const connection of tracker.connections) await expectClosed(connection);
-  // The singleton still serves a new agent.
+  // The collection still serves a new agent.
   const after = await JuncoAgent.fromResolved({
     session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
     ...scripted([]),
     cwd: seed,
+    policy: "GitPolicy",
+    collection,
     tools: [fixture("after")],
   });
   await after.return();
@@ -304,7 +311,7 @@ test("a late Marsh denial surfaces from agent disposal", () =>
       type: "stdio",
       command: process.execPath,
       args: [SERVER],
-    }).connect({ cwd: seed });
+    }).connect({ cwd: seed, collection });
     const forgetOwner = defer(() => owner.close());
     const writer = owner.tools.find((tool) => tool.name === "mcp__owner__write_file");
     await writer!.execute("own", { path: "agent-owned.txt", content: "first\n" } as never);
@@ -325,6 +332,8 @@ test("a late Marsh denial surfaces from agent disposal", () =>
       provider: "faux",
       model: "faux-1",
       cwd: seed,
+      policy: "GitPolicy",
+      collection,
       tools: [fixture("intruder")],
       prompt: "go",
     });
@@ -363,6 +372,8 @@ async function resolvedAgent(
     models,
     model,
     cwd: seed,
+    policy: "GitPolicy",
+    collection,
     tools,
     ...(activeToolNames === undefined ? {} : { activeToolNames }),
   });
@@ -432,7 +443,7 @@ async function expectClosed(connection: JuncoMcpConnection): Promise<void> {
 }
 
 test("a failing native-test scope still closes every resource and keeps the body's error", async () => {
-  const owner = await fixture("cleanup").connect({ cwd: seed });
+  const owner = await fixture("cleanup").connect({ cwd: seed, collection });
   try {
     const writer = toolNamed(owner.tools, "mcp__cleanup__write_file");
     assert.ok(writer);
@@ -444,7 +455,7 @@ test("a failing native-test scope still closes every resource and keeps the body
   const sentinel = new Error("native test body failed");
   const pids: number[] = [];
   const failure = await withNativeCleanup(async (defer) => {
-    const survivor = await fixture("survivor").connect({ cwd: seed });
+    const survivor = await fixture("survivor").connect({ cwd: seed, collection });
     defer(() => survivor.close());
     const intruder = await resolvedAgent([], [fixture("intruder")]);
     defer(() => intruder.return());
@@ -468,8 +479,8 @@ test("a failing native-test scope still closes every resource and keeps the body
   for (const pid of pids) expect(alive(pid)).toBe(false);
   expect(await readFile(join(seed, "cleanup-owned.txt"), "utf8")).toBe("first\n");
 
-  // The same singleton still serves a fresh server.
-  const fresh = await fixture("fresh").connect({ cwd: seed });
+  // The same collection still serves a fresh server.
+  const fresh = await fixture("fresh").connect({ cwd: seed, collection });
   try {
     const echo = toolNamed(fresh.tools, "mcp__fresh__echo");
     assert.ok(echo);
@@ -526,6 +537,8 @@ test("subagents of a mixed list share ordinary tools and reconnect every definit
       provider: "faux",
       model: "faux-1",
       cwd: seed,
+      policy: "GitPolicy",
+      collection,
       tools: [
         task,
         ordinary.tool,

@@ -3,7 +3,7 @@
 import type { PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import type { DataflowTracer } from "dataflow-engine";
 import type { AgenticOptions } from "junco-agent";
-import type { Issue } from "junco-tools";
+import type { Issue, ToolCollection } from "junco-tools";
 import {
   PiScheduler,
   type PiSchedulerOptions,
@@ -20,12 +20,15 @@ export function bothFactoriesShareOneOptionsShape<
   native: Required<
     Pick<AgenticOptions<S, P, ScheduleTool>, "model" | "models" | "session">
   >,
+  collection: ToolCollection,
 ) {
-  const empty: PiSchedulerOptions = {};
+  const empty: PiSchedulerOptions = { policy: "EmptyPolicy" };
   const made: Promise<PiScheduler<N, T, S, P>> = PiScheduler.make(shared);
   const opus: Promise<PiScheduler<N, T, S, P>> = PiScheduler.opus(shared);
   const resolved: PiSchedulerOptions<N, T, S, P> = {
     ...native,
+    policy: "GitPolicy",
+    collection,
     prompt: "Run available work.",
   };
   const fromNative: Promise<PiScheduler<N, T, S, P>> =
@@ -33,9 +36,26 @@ export function bothFactoriesShareOneOptionsShape<
   // A redundant model is accepted on opus, which keeps its own fixed selection.
   const opusWithModel: Promise<PiScheduler<N, T, S, P>> =
     PiScheduler.opus(resolved);
-  const unchecked: Promise<PiScheduler> = PiScheduler.make({});
+  const unchecked: Promise<PiScheduler> = PiScheduler.make({
+    policy: "GitPolicy",
+  });
+  // @ts-expect-error The policy is required; there is no default.
+  const missingPolicy: PiSchedulerOptions = {};
+  // @ts-expect-error Policies are the two case-sensitive literals.
+  const invalidPolicy: PiSchedulerOptions = { policy: "gitpolicy" };
+  // @ts-expect-error opus has no default options.
   const defaulted: Promise<PiScheduler> = PiScheduler.opus();
-  return [empty, made, opus, fromNative, opusWithModel, unchecked, defaulted];
+  return [
+    empty,
+    made,
+    opus,
+    fromNative,
+    opusWithModel,
+    unchecked,
+    missingPolicy,
+    invalidPolicy,
+    defaulted,
+  ];
 }
 
 export function inheritedComplainTakesCompleteIssue<N>(

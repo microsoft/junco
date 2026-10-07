@@ -56,7 +56,11 @@ async function singleMember(script: Script, reply = "member done") {
     prompt: "schedule it",
   });
   graph.addNode(
-    agentNode(member.agent, { description: "the member", trigger: always() }),
+    agentNode(member.agent, {
+      description: "the member",
+      trigger: always(),
+      policy: "GitPolicy",
+    }),
   );
   return { scheduler, graph, session, faux };
 }
@@ -118,6 +122,7 @@ test("only ids available when the window starts may be planned", async () => {
       id: NodeId("producer"),
       description: "producer",
       trigger: always(),
+      policy: "GitPolicy",
     }),
   );
   const c = graph.addNode(
@@ -125,6 +130,7 @@ test("only ids available when the window starts may be planned", async () => {
       id: NodeId("consumer"),
       description: "consumer",
       trigger: when(edge),
+      policy: "GitPolicy",
     }),
   );
   graph.addEdge(p, c, edge);
@@ -158,6 +164,7 @@ test("a node added between completed windows is described and executed", async (
             id: NodeId("late"),
             description: "late member",
             trigger: always(),
+            policy: "GitPolicy",
           }),
         );
       }
@@ -166,7 +173,11 @@ test("a node added between completed windows is described and executed", async (
     { prompt: "go" },
   );
   graph.addNode(
-    agentNode(first.agent, { description: "first member", trigger: always() }),
+    agentNode(first.agent, {
+      description: "first member",
+      trigger: always(),
+      policy: "GitPolicy",
+    }),
   );
 
   assert.equal(settledText((await drive(scheduler)).last), "graph quiescent");
@@ -192,7 +203,11 @@ test("a nested Pi graph consumes its completion response before its parent publi
   });
   const child = await agencyGraph(runAvailable, { prompt: "run child" });
   const leafId = child.graph.addNode(
-    agentNode(member.agent, { description: "leaf", trigger: always() }),
+    agentNode(member.agent, {
+      description: "leaf",
+      trigger: always(),
+      policy: "GitPolicy",
+    }),
   );
   const parent = await agencyGraph(runAvailable, { prompt: "run parent" });
   const edge = valueEdge<AgenticInput, AssistantMessage>("child->consumer");
@@ -201,14 +216,18 @@ test("a nested Pi graph consumes its completion response before its parent publi
   const nested = parent.graph.addNode(
     graphNode(
       child.graph,
-      { description: "child", trigger: always() },
+      { description: "child", trigger: always(), policy: "GitPolicy" },
       { result: leafId },
     ),
   );
   const c = parent.graph.addNode(
     agentNode(
       consumer.agent,
-      { description: "consumer", trigger: when(edge) },
+      {
+        description: "consumer",
+        trigger: when(edge),
+        policy: "GitPolicy",
+      },
       {
         receive: (view) => {
           childRequestsAtDelivery = child.faux.state.callCount;
@@ -244,7 +263,11 @@ test("an already settled idle Pi child returns its retained result without anoth
   });
   const child = await agencyGraph(runAvailable, { prompt: "run child" });
   const leafId = child.graph.addNode(
-    agentNode(member.agent, { description: "leaf", trigger: always() }),
+    agentNode(member.agent, {
+      description: "leaf",
+      trigger: always(),
+      policy: "GitPolicy",
+    }),
   );
   assert.equal(
     settledText((await drive(child.scheduler)).last),
@@ -256,7 +279,7 @@ test("an already settled idle Pi child returns its retained result without anoth
   const nested = parent.graph.addNode(
     graphNode(
       child.graph,
-      { description: "child", trigger: always() },
+      { description: "child", trigger: always(), policy: "GitPolicy" },
       { result: leafId },
     ),
   );
@@ -275,13 +298,17 @@ test("a triggered idle Pi child without a result or staged prompt fails instead 
   const member = await leaf([fauxAssistantMessage("never")]);
   const child = await agencyGraph(runAvailable);
   const leafId = child.graph.addNode(
-    agentNode(member.agent, { description: "leaf", trigger: always() }),
+    agentNode(member.agent, {
+      description: "leaf",
+      trigger: always(),
+      policy: "GitPolicy",
+    }),
   );
   const parent = await agencyGraph(runAvailable, { prompt: "run parent" });
   const nested = parent.graph.addNode(
     graphNode(
       child.graph,
-      { description: "child", trigger: always() },
+      { description: "child", trigger: always(), policy: "GitPolicy" },
       { result: leafId },
     ),
   );

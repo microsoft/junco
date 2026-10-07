@@ -211,9 +211,16 @@ export function spawnBuildsTypedStars(
     },
   );
   const defaults: graph.JuncoGraph = graph.Spawn(
-    graph.nodes.agentNode(lead, { trigger: trigger.never() }),
+    graph.nodes.agentNode(lead, {
+      trigger: trigger.never(),
+      policy: "GitPolicy",
+    }),
     tasks,
-    () => graph.nodes.agentNode(worker, { trigger: trigger.never() }),
+    () =>
+      graph.nodes.agentNode(worker, {
+        trigger: trigger.never(),
+        policy: "GitPolicy",
+      }),
   );
   // @ts-expect-error the root must be an adapted node, not a bare state
   graph.Spawn(bare, tasks, (task) => child(task.label));
@@ -378,7 +385,7 @@ export async function tracerHandlesRetainPayloadTypes(
   );
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await graph.createParallelAgentGraph().tracer.flush();
+  await graph.createParallelAgentGraph("GitPolicy").tracer.flush();
   return traced;
 }
 
@@ -518,14 +525,19 @@ export async function piSchedulerTypesFixTheScheduleTool(
     TaggedTemplate
   > = await schedulers.createAgencyScheduler<TaggedSkill, TaggedTemplate>(
     () => agency,
-    { prompt: "Run the agency." },
+    { prompt: "Run the agency.", policy: "GitPolicy" },
   );
   agency = new graph.JuncoGraph(
     agencyScheduler,
     graph.Width(1),
     graph.UNBOUNDED,
     tracer.createTracer(),
+    "GitPolicy",
   );
+  // @ts-expect-error an agency scheduler requires its policy
+  void schedulers.createAgencyScheduler(() => agency, { prompt: "x" });
+  // @ts-expect-error an agency scheduler requires options
+  void schedulers.createAgencyScheduler(() => agency);
   const skillTags: ("skill" | undefined)[] = [
     scheduler,
     opus,
@@ -550,6 +562,7 @@ export async function piSchedulerTypesFixTheScheduleTool(
   // @ts-expect-error the scheduler's tool set is fixed to `schedule` and `complain`
   await scheduler.setTools([plainTool]);
   const replaced: schedulers.PiSchedulerOptions<number, string> = {
+    policy: "GitPolicy",
     // @ts-expect-error construction cannot replace the fixed tool set
     tools: [plainTool],
   };
@@ -725,6 +738,7 @@ export async function agentFactoriesKeepSpecializations(
     model: "plain",
     tools: [yieldTool],
     thinkingLevel: "high",
+    policy: "GitPolicy",
   };
   const explicit: agent.JuncoAgent<Skill, PromptTemplate, tools.YieldTool> =
     await agent.JuncoAgent.create(createOptions);
@@ -734,6 +748,7 @@ export async function agentFactoriesKeepSpecializations(
       model: "plain",
       cwd: "/tmp",
       resources: { skills: [skill] },
+      policy: "EmptyPolicy",
     });
   const paused = await yieldTool.execute("call-1", { reason: "waiting" });
   const details: tools.YieldToolDetails = paused.details;
@@ -744,7 +759,15 @@ export async function agentFactoriesKeepSpecializations(
   // @ts-expect-error yield requires its reason
   await yieldTool.execute("call-2", {});
   // @ts-expect-error create requires a provider
-  const noProvider: agent.JuncoAgentCreateOptions = { model: "plain" };
+  const noProvider: agent.JuncoAgentCreateOptions = {
+    model: "plain",
+    policy: "GitPolicy",
+  };
+  // @ts-expect-error create requires a policy
+  const noPolicy: agent.JuncoAgentCreateOptions = {
+    provider: "faux",
+    model: "plain",
+  };
   const malformedResources: agent.AgenticOptions<TaggedSkill>["resources"] = {
     // @ts-expect-error specialized resources reject an untagged skill
     skills: [plainSkill],
@@ -758,6 +781,7 @@ export async function agentFactoriesKeepSpecializations(
     audited,
     agents,
     noProvider,
+    noPolicy,
     malformedResources,
     malformedTools,
   ];
@@ -789,10 +813,10 @@ export async function toolFactoriesAreConsumerAgentTools(
     },
   );
   const failed: boolean = exit.exitCode === null || exit.exitCode !== 0;
-  const bashOptions: tools.BashToolOptions = {
+  const bashOptions = {
     operations,
     commandPrefix: "set -e",
-  };
+  } satisfies tools.BashToolOptions;
   const bashInput: tools.BashToolInput = { command: "printf ok", timeout: 5 };
   const bash = tools.createBashTool(cwd, bashOptions);
   const bashResult = await bash.execute("bash-1", bashInput, signal);
@@ -813,14 +837,23 @@ export async function toolFactoriesAreConsumerAgentTools(
     {
       bash: bashOptions,
       native,
-      mux,
+      policy: "GitPolicy",
       principal: "typed",
     },
   );
+  const borrowed: { close(): Promise<void> } = collection.lease();
+  const muxPolicy: "GitPolicy" | "EmptyPolicy" = collection.mux.policy;
   const collectionOptions: tools.ToolCollectionOptions = {
     sandbox: "always",
+    policy: "EmptyPolicy",
     principal: "owned",
   };
+  // @ts-expect-error a collection requires its policy
+  const unselected: tools.ToolCollectionOptions = { sandbox: "always" };
+  // @ts-expect-error a collection opens its own mux
+  await tools.ToolCollection.create(cwd, { policy: "GitPolicy", mux });
+  // @ts-expect-error a collection requires options
+  await tools.ToolCollection.create(cwd);
   const agentTools: AgentTool[] = [
     tools.createReadTool(cwd, store, native, mux),
     edit,
@@ -838,6 +871,7 @@ export async function toolFactoriesAreConsumerAgentTools(
   });
 
   try {
+    await borrowed.close();
     await collection.close();
   } catch (error) {
     if (tools.isMarshPolicyDenied(error)) {
@@ -847,7 +881,6 @@ export async function toolFactoriesAreConsumerAgentTools(
     }
   }
   const deniedCode: typeof tools.MARSH_POLICY_DENIED = "MARSH_POLICY_DENIED";
-  await tools.shutdownShellMux();
 
   // @ts-expect-error bash requires a command
   const noCommand: tools.BashToolInput = { timeout: 5 };
@@ -855,8 +888,11 @@ export async function toolFactoriesAreConsumerAgentTools(
   const stringTimeout: tools.BashToolInput = { command: "true", timeout: "5" };
   // @ts-expect-error a command prefix is a string
   const numericPrefix: tools.BashToolOptions = { commandPrefix: 1 };
-  // @ts-expect-error a collection sandbox is "shared" or "always"
-  const invalidSandbox: tools.ToolCollectionOptions = { sandbox: "never" };
+  const invalidSandbox: tools.ToolCollectionOptions = {
+    policy: "GitPolicy",
+    // @ts-expect-error a collection sandbox is "shared" or "always"
+    sandbox: "never",
+  };
   // @ts-expect-error streamed output is a Buffer
   await operations.exec("true", cwd, { onData: (data: string) => void data });
   return [
@@ -865,6 +901,8 @@ export async function toolFactoriesAreConsumerAgentTools(
     truncated,
     outcomes,
     collectionOptions,
+    unselected,
+    muxPolicy,
     nativeAgent,
     deniedCode,
     noCommand,
@@ -931,18 +969,20 @@ export async function lspToolTypesThroughBothRoutes(
 
 // --- shared ShellMux and MCP definitions -------------------------------------------------------------
 
-export async function sharedShellMuxLeasesAndAdoption(
+export async function independentShellMuxLeases(
   cwd: string,
   native: tools.NativeModule,
-  mux: tools.NativeMux,
 ) {
-  const lease: tools.ShellMuxLease = await tools.acquireShellMux(cwd);
-  const adopted: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
+  const lease: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
     native,
-    mux,
-    sandbox: "always",
+    policy: "GitPolicy",
   });
-  const same: boolean = lease.mux === adopted.mux && !lease.closed;
+  const other: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
+    native,
+    sandbox: "always",
+    policy: "EmptyPolicy",
+  });
+  const independent: boolean = lease.mux !== other.mux && !lease.closed;
   const mode: "shared" | "always" = lease.mux.sandbox;
   await lease.mux.validateCwd(cwd);
   const process: tools.NativeProcess = await lease.mux.spawn(
@@ -958,15 +998,19 @@ export async function sharedShellMuxLeasesAndAdoption(
     principal: "typed",
     env: {},
   };
-  lease.release();
-  adopted.release();
-  await tools.shutdownShellMux();
+  const released: Promise<void> = lease.release();
+  await released;
+  await other.release();
 
   // @ts-expect-error a lease's sandbox is "shared" or "always"
-  await tools.acquireShellMux(cwd, { sandbox: "never" });
+  await tools.acquireShellMux(cwd, { sandbox: "never", policy: "GitPolicy" });
+  // @ts-expect-error a lease requires its policy
+  await tools.acquireShellMux(cwd, { native });
+  // @ts-expect-error a lease opens its own mux
+  await tools.acquireShellMux(cwd, { policy: "GitPolicy", mux: other.mux });
   // @ts-expect-error a lease is released, not closed
   await lease.close();
-  return [same, mode, finished, processOptions];
+  return [independent, mode, finished, processOptions];
 }
 
 export async function mcpDefinitionsComposeWithAgentFactories(
@@ -993,7 +1037,7 @@ export async function mcpDefinitionsComposeWithAgentFactories(
   const chained: mcp.JuncoMcpTools = new mcp.JuncoMcpTools()
     .add(server)
     .add({ ...server, name: "second" });
-  const connectOptions: mcp.JuncoMcpConnectOptions = { cwd };
+  const connectOptions: mcp.JuncoMcpConnectOptions = { cwd, collection };
   const connection: mcp.JuncoMcpConnection =
     await graft.connect(connectOptions);
   const discovered: AgentTool[] = connection.tools;
@@ -1006,12 +1050,15 @@ export async function mcpDefinitionsComposeWithAgentFactories(
       model: "plain",
       cwd,
       tools: graft,
+      policy: "GitPolicy",
     });
   const mixed: agent.JuncoAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "plain",
     cwd,
     tools: [graft, lsp, ...collection.tools, tool],
+    policy: collection.policy,
+    collection,
   });
   const resolvedOptions: agent.JuncoAgentResolvedOptions = {
     ...base,

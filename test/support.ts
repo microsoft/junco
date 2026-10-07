@@ -61,7 +61,7 @@ export function scripted(responses: readonly FauxResponseStep[] = []) {
   return { faux, models, model: faux.getModel() };
 }
 
-/** Native options over `responses` with a fresh in-memory session. */
+/** Native options over `responses` with a fresh in-memory session, under `GitPolicy`. */
 export async function nativeOptions(
   responses: readonly FauxResponseStep[] = [],
 ) {
@@ -72,6 +72,7 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
+      policy: "GitPolicy" as const,
     },
   };
 }
@@ -215,6 +216,7 @@ export async function newScheduler(
     session,
     models,
     model,
+    policy: "GitPolicy",
     ...(prompt === undefined ? {} : { prompt }),
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
   });
@@ -245,6 +247,7 @@ export async function agencyGraph(
     window,
     threads,
     new DummyTracer(),
+    "GitPolicy",
   );
   current = graph;
   return { graph, scheduler, faux, session };

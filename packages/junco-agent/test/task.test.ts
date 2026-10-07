@@ -1090,6 +1090,7 @@ async function twoProviderParent(
   const agent = await JuncoAgent.fromResolved({
     session,
     models,
+    policy: "GitPolicy",
     model: main.getModel("main")!,
     thinkingLevel: "high",
     systemPrompt: "sys",
@@ -1268,6 +1269,7 @@ test(
     const parent = await JuncoAgent.fromResolved({
       session,
       models: withAuth,
+      policy: "GitPolicy",
       model,
     });
     const spy = spySessions();

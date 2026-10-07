@@ -13,6 +13,7 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
+import type { ToolCollectionOptions } from "junco-tools";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import { nodePolicies, unseenValues } from "./node-policy.js";
@@ -56,7 +57,7 @@ export function cancellation(signal: AbortSignal, error: unknown): unknown {
  */
 export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
   graph: JuncoGraph<N, T, EH, Q>,
-  options: NodeOptions<N, T>,
+  options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
   binding: GraphNodeBinding<N, T>,
 ): AgenticNode<N, T> {
   const { result, receive, afterStep } = binding;

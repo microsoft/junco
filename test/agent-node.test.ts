@@ -66,12 +66,20 @@ for (const strategy of STRATEGIES) {
         "upstream->dependent",
       );
       const u = graph.addNode(
-        agentNode(upstream, { description: "upstream", trigger: always() }),
+        agentNode(upstream, {
+          policy: "GitPolicy",
+          description: "upstream",
+          trigger: always(),
+        }),
       );
       const d = graph.addNode(
         agentNode(
           dependent,
-          { description: "dependent", trigger: when(edge) },
+          {
+            policy: "GitPolicy",
+            description: "dependent",
+            trigger: when(edge),
+          },
           {
             receive: (view) =>
               [...view.values.keys()].map((id) => ({
@@ -141,7 +149,11 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         graphApi.nodes.agentNode(
           sender,
-          { description: "sender", trigger: always() },
+          {
+            policy: "GitPolicy",
+            description: "sender",
+            trigger: always(),
+          },
           {
             emit: () => [
               msg(toRecipient, { kind: "appendMessage", message: note }),
@@ -181,14 +193,22 @@ for (const strategy of STRATEGIES) {
       const r = graph.addNode(
         graphApi.nodes.agentNode(
           recipient,
-          { description: "recipient", trigger: when(toRecipient) },
+          {
+            policy: "GitPolicy",
+            description: "recipient",
+            trigger: when(toRecipient),
+          },
           byMessages(toRecipient),
         ),
       );
       const b = graph.addNode(
         graphApi.nodes.agentNode(
           bystander,
-          { description: "bystander", trigger: when(toBystander) },
+          {
+            policy: "GitPolicy",
+            description: "bystander",
+            trigger: when(toBystander),
+          },
           byMessages(toBystander),
         ),
       );
@@ -237,7 +257,11 @@ for (const strategy of STRATEGIES) {
       const idle = new MockAgent({ runs: [yieldsThen(0, "never")] });
       const graph = plainGraph(strategy);
       graph.addNode(
-        agentNode(idle, { description: "idle", trigger: always() }),
+        agentNode(idle, {
+          policy: "GitPolicy",
+          description: "idle",
+          trigger: always(),
+        }),
       );
 
       assert.equal(graph.available().size, 0);
@@ -259,7 +283,11 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         agentNode(
           sender,
-          { description: "sender", trigger: always() },
+          {
+            policy: "GitPolicy",
+            description: "sender",
+            trigger: always(),
+          },
           {
             emit: () => [
               msg(edge, {
@@ -277,7 +305,11 @@ for (const strategy of STRATEGIES) {
       const m = graph.addNode(
         agentNode(
           member,
-          { description: "member", trigger: when(edge) },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: when(edge),
+          },
           { receive: (view) => view.messages.get(edge.id) ?? [] },
         ),
       );
@@ -306,7 +338,11 @@ for (const strategy of STRATEGIES) {
         });
         const graph = plainGraph(strategy);
         const id = graph.addNode(
-          agentNode(erring, { description: "erring", trigger: always() }),
+          agentNode(erring, {
+            policy: "GitPolicy",
+            description: "erring",
+            trigger: always(),
+          }),
         );
 
         await graph.run();
@@ -330,10 +366,18 @@ for (const strategy of STRATEGIES) {
       const graph = plainGraph(strategy);
       const edge = valueEdge<AgenticInput, AssistantMessage>("failing->child");
       const f = graph.addNode(
-        agentNode(failing, { description: "failing", trigger: always() }),
+        agentNode(failing, {
+          policy: "GitPolicy",
+          description: "failing",
+          trigger: always(),
+        }),
       );
       const c = graph.addNode(
-        agentNode(child, { description: "child", trigger: when(edge) }),
+        agentNode(child, {
+          policy: "GitPolicy",
+          description: "child",
+          trigger: when(edge),
+        }),
       );
       graph.addEdge(f, c, edge);
 
@@ -351,7 +395,11 @@ for (const strategy of STRATEGIES) {
       const exhausted = new MockAgent({ prompt: "go", runs: [] });
       const graph = plainGraph(strategy);
       const id = graph.addNode(
-        agentNode(exhausted, { description: "exhausted", trigger: always() }),
+        agentNode(exhausted, {
+          policy: "GitPolicy",
+          description: "exhausted",
+          trigger: always(),
+        }),
       );
 
       const error = await graph.run().catch((thrown: unknown) => thrown);
@@ -367,7 +415,11 @@ for (const strategy of STRATEGIES) {
       });
       const graph = plainGraph(strategy);
       const id = graph.addNode(
-        agentNode(member, { description: "member", trigger: always() }),
+        agentNode(member, {
+          policy: "GitPolicy",
+          description: "member",
+          trigger: always(),
+        }),
       );
 
       await graph.step(); // prime
@@ -393,12 +445,20 @@ for (const strategy of STRATEGIES) {
       const graph = plainGraph(strategy);
       const edge = valueEdge<AgenticInput, AssistantMessage>("up->member");
       const u = graph.addNode(
-        agentNode(upstream, { description: "upstream", trigger: always() }),
+        agentNode(upstream, {
+          policy: "GitPolicy",
+          description: "upstream",
+          trigger: always(),
+        }),
       );
       const m = graph.addNode(
         agentNode(
           member,
-          { description: "member", trigger: when(edge) },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: when(edge),
+          },
           { receive: () => [{ kind: "prompt", text: "received" }] },
         ),
       );
@@ -431,12 +491,20 @@ for (const strategy of STRATEGIES) {
         "upstream->member",
       );
       const upstreamId = first.addNode(
-        agentNode(upstream, { description: "upstream", trigger: always() }),
+        agentNode(upstream, {
+          policy: "GitPolicy",
+          description: "upstream",
+          trigger: always(),
+        }),
       );
       const firstId = first.addNode(
         agentNode(
           member,
-          { description: "member", trigger: when(edge) },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: when(edge),
+          },
           {
             prompt: "round one",
             receive: (view) =>
@@ -458,7 +526,11 @@ for (const strategy of STRATEGIES) {
       const secondId = second.addNode(
         agentNode(
           member,
-          { description: "member", trigger: always() },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: always(),
+          },
           { prompt: "round two" },
         ),
       );
@@ -483,7 +555,11 @@ for (const strategy of STRATEGIES) {
       const id = graph.addNode(
         agentNode(
           member,
-          { description: "member", trigger: always() },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: always(),
+          },
           { prompt: "node" },
         ),
       );
@@ -515,7 +591,11 @@ for (const strategy of STRATEGIES) {
       const s = graph.addNode(
         agentNode(
           sender,
-          { description: "sender", trigger: always() },
+          {
+            policy: "GitPolicy",
+            description: "sender",
+            trigger: always(),
+          },
           {
             emit: (step) => {
               const text = step.reasons[0]!.reason;
@@ -529,7 +609,11 @@ for (const strategy of STRATEGIES) {
       const m = graph.addNode(
         agentNode(
           member,
-          { description: "member", trigger: when(edge) },
+          {
+            policy: "GitPolicy",
+            description: "member",
+            trigger: when(edge),
+          },
           { receive: (view) => view.messages.get(edge.id) ?? [] },
         ),
       );
@@ -548,7 +632,10 @@ for (const strategy of STRATEGIES) {
 
     test("one shared availability predicate holds ready agent, coroutine and graph nodes until released", async () => {
       let admitted = false;
-      const shared: NodeOptions<AgenticInput, AssistantMessage> = {
+      const shared: NodeOptions<AgenticInput, AssistantMessage> & {
+        readonly policy: "GitPolicy";
+      } = {
+        policy: "GitPolicy",
         trigger: always(),
         is_available: (_view, triggered) => admitted && triggered,
       };
@@ -561,7 +648,9 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "inner done")],
       });
       const child = plainGraph(strategy);
-      const innerId = child.addNode(agentNode(inner, { trigger: always() }));
+      const innerId = child.addNode(
+        agentNode(inner, { policy: "GitPolicy", trigger: always() }),
+      );
       let entered = false;
       const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
         async function* () {
@@ -569,6 +658,7 @@ for (const strategy of STRATEGIES) {
           yield [];
           return assistant("coroutine done");
         },
+        "GitPolicy",
       );
       const consumer = new MockAgent({ runs: [yieldsThen(0, "consumed")] });
       const graph = plainGraph(strategy);
@@ -591,7 +681,7 @@ for (const strategy of STRATEGIES) {
       const c = graph.addNode(
         agentNode(
           consumer,
-          { trigger: when(fromAgent) },
+          { policy: "GitPolicy", trigger: when(fromAgent) },
           {
             receive: (view) => [
               {

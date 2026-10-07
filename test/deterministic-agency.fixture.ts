@@ -51,6 +51,7 @@ export async function runDeterministicFixture(
       {
         id: NodeId("producer"),
         description: "produces the seed",
+        policy: "GitPolicy",
         trigger: always(),
       },
       {
@@ -66,6 +67,7 @@ export async function runDeterministicFixture(
       worker,
       {
         id: NodeId("worker"),
+        policy: "GitPolicy",
         description: "works from the seed",
         trigger: anyOf(on(handoff), on(value)),
       },

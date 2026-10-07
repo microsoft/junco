@@ -189,7 +189,7 @@ type RunState = {
  * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
  * import { PiScheduler } from "junco-scheduler/agent";
  *
- * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
+ * const scheduler = await PiScheduler.opus({ policy: "GitPolicy", prompt: "Run available work." });
  * try {
  *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
  *   // ...graph.addNode(...) / graph.addEdge(...)
@@ -256,7 +256,7 @@ export class PiScheduler<
    * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
    * import { PiScheduler } from "junco-scheduler/agent";
    *
-   * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
+   * const scheduler = await PiScheduler.opus({ policy: "GitPolicy", prompt: "Run available work." });
    * try {
    *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
    *   // ...graph.addNode(...) / graph.addEdge(...)
@@ -274,9 +274,7 @@ export class PiScheduler<
     T = unknown,
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
-  >(
-    options: PiSchedulerOptions<N, T, S, P> = {},
-  ): Promise<PiScheduler<N, T, S, P>> {
+  >(options: PiSchedulerOptions<N, T, S, P>): Promise<PiScheduler<N, T, S, P>> {
     const {
       models: suppliedModels,
       session: suppliedSession,

@@ -76,9 +76,9 @@ The packaged extension:
 - Registers the whole `ToolCollection` on `session_start`. **Do not disable the built-in tools**: Pi supports same-name overrides, and `read`, `bash`, `edit`, `grep`, and `find` are replaced by name.
 - Uses `pi-${sessionId}` as the session's principal name (its command queue and display name), including reload/resume of that session.
 - Reads the persisted shell command prefix through Pi's `SettingsManager`.
-- Leases the process's one ShellMux (opened on first use over the session's seed), shared by `bash` and every file tool, and on `session_shutdown` closes only its own collection. The mux stays open for later sessions; the containing process owns the final `shutdownShellMux()`.
+- Opens one `ToolCollection` per session with `policy: "GitPolicy"`; that collection owns its own ShellMux over the session's seed, shared by `bash` and every file tool, and `session_shutdown` closes the collection and therefore its mux.
 
-`bash` and the file tools are all marsh calls on that mux, routed by its sandbox policy. Read-only tools (`read`, `grep`, `find`, `ast_grep`, and a previewing `ast_edit`) always run directly against the seed. Shell commands, `edit`, and an applying `ast_edit` run in a private snapshot while another live shell in the process shares the seed — or always, when the singleton is opened with `sandbox: "always"` — and there publish only what marsh's policy authorizes; alone, they act on the seed directly. Pi's separate interactive `user_bash`/`!` command path is **not** intercepted. The agent bash tool still takes `{ command: string, timeout?: number }`; timeout is in **seconds**, with no default deadline.
+`bash` and the file tools are all marsh calls on that mux, routed by its sandbox mode and authorized by its policy: `GitPolicy` (Git ownership rules) or `EmptyPolicy` (grants every event, while marsh still keeps snapshots, freshness checks and atomic publication). Read-only tools (`read`, `grep`, `find`, `ast_grep`, and a previewing `ast_edit`) always run directly against the seed. Shell commands, `edit`, and an applying `ast_edit` run in a private snapshot while another live shell shares the seed — or always, when the mux is opened with `sandbox: "always"` — and there publish only what the mux's policy authorizes; alone, they act on the seed directly. Pi's separate interactive `user_bash`/`!` command path is **not** intercepted. The agent bash tool still takes `{ command: string, timeout?: number }`; timeout is in **seconds**, with no default deadline.
 
 These direct reads can complete while a different shell's `bash` command is still running in both
 sandbox modes; writes and recovery retain their exclusion. They observe the live seed, not bash's
@@ -102,15 +102,16 @@ The junco-agency workspace root pins `typebox` 1.3.34 with an override so Pi's o
 
 ### Pi SDK: the whole collection
 
-`ToolCollection.create` returns Pi `AgentTool` objects that also keep Pi's prompt metadata and renderers, so `tools` goes straight into SDK `customTools`, `pi.registerTool`, or a bare `Agent`'s tools. The cwd must lie inside the btrfs seed of the process's one ShellMux: the collection leases that singleton (opening it on first use), which `bash` and every file tool share, and `close()` stops only this collection's calls and releases its lease. `shutdownShellMux()` closes the mux once the application is done with it.
+`ToolCollection.create` returns Pi `AgentTool` objects that also keep Pi's prompt metadata and renderers, so `tools` goes straight into SDK `customTools`, `pi.registerTool`, or a bare `Agent`'s tools. The cwd must lie inside a btrfs seed. Each collection opens its own ShellMux with the required `policy`, shared by `bash` and every file tool; the final release of the collection closes that mux.
 
 ```ts
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { ToolCollection, shutdownShellMux } from "junco-tools";
+import { ToolCollection } from "junco-tools";
 
 const sessionManager = SessionManager.create(process.cwd());
 const cwd = sessionManager.getCwd(); // Must be inside a btrfs seed.
 const collection = await ToolCollection.create(cwd, {
+  policy: "GitPolicy",
   principal: `pi-${sessionManager.getSessionId()}`,
 });
 try {
@@ -125,14 +126,13 @@ try {
     session.dispose();
   }
 } finally {
-  await collection.close();
-  await shutdownShellMux(); // Application exit: no other consumer remains.
+  await collection.close(); // Final release: closes this collection's mux.
 }
 ```
 
 For deterministic offline SDK tests, pass `modelRuntime: await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), refreshOnCreate: false, allowModelNetwork: false })`; the SDK default uses its configured credential and model catalog stores.
 
-Each collection owns one snapshot store, so `read`, `grep`, and `edit` share anchors, seen-line provenance, and named clipboard registers; two collections share none of it, although they share the one mux. The store is in-memory only. `close()` is terminal for that collection alone: it aborts and joins its own tool calls and default bash commands, then rejects every retained tool; other collections and the mux are untouched. Pass `sandbox: "always"` on the first acquisition to sandbox every shell command and writing file tool, or adopt a mux you opened with `{ mux, native }` (the addon that created it) as the process singleton, after which `shutdownShellMux()` closes it. New files are still created with Pi's built-in `write`.
+Each collection owns one snapshot store, so `read`, `grep`, and `edit` share anchors, seen-line provenance, and named clipboard registers; two collections share none of it, and each has its own mux. The store is in-memory only. Its readonly `policy`, `mux`, and `native` let explicit borrowers reuse it. Lifetime is reference-counted: `close()` releases the creator's hold once; `lease()` takes another hold and returns a handle whose idempotent `close()` releases it. Borrowers close their handle, never the collection. Only the final release aborts and joins the collection's tool calls and default bash commands, rejects every retained tool, and closes its mux; other collections are untouched. Pass `sandbox: "always"` to sandbox every shell command and writing file tool. New files are still created with Pi's built-in `write`.
 
 ### Bare Agent: individual tools
 
@@ -162,7 +162,7 @@ export function createFileAgent(cwd: string, model: Model<Api>, mux: native.Nati
 }
 ```
 
-Obtain the mux from a lease, `const { mux, native } = await acquireShellMux(cwd)` (optionally `{ sandbox: "always" }` on the first acquisition), call `lease.release()` once every tool using it has finished, and `await shutdownShellMux()` at application exit. Releasing never closes the mux.
+Obtain the mux from a lease, `const lease = await acquireShellMux(cwd, { policy: "GitPolicy" })` (optionally `sandbox: "always"`), or borrow `collection.mux`/`collection.native`. Each `acquireShellMux` opens a fresh mux; `await lease.release()` once every tool using it has finished closes it and flushes its policy log.
 
 The same objects work as SDK `customTools` and with `pi.registerTool`. There, `read` also receives Pi's runtime context, which adds Pi's notice when the active model cannot accept an image; a bare `Agent` calls tools without that context, exactly as Pi's own `createReadTool` does.
 
@@ -172,11 +172,12 @@ The same objects work as SDK `customTools` and with `pi.registerTool`. There, `r
 
 ```ts
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { createBashTool, createShellMuxOperations, shutdownShellMux } from "junco-tools";
+import { createBashTool, createShellMuxOperations } from "junco-tools";
 
 const sessionManager = SessionManager.create(process.cwd());
 const cwd = sessionManager.getCwd(); // Must be inside a btrfs seed.
 const operations = createShellMuxOperations({
+  policy: "GitPolicy",
   principal: `pi-${sessionManager.getSessionId()}`,
 });
 
@@ -193,7 +194,7 @@ try {
     session.dispose();
   }
 } finally {
-  await shutdownShellMux();
+  await operations.close(); // Releases its lazily opened mux.
 }
 ```
 
@@ -219,6 +220,7 @@ export default function extension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     await collection?.close();
     collection = await ToolCollection.create(ctx.cwd, {
+      policy: "GitPolicy",
       principal: `pi-${ctx.sessionManager.getSessionId()}`,
       bash: { commandPrefix: SettingsManager.create(ctx.cwd).getShellCommandPrefix() },
     });
@@ -232,7 +234,7 @@ export default function extension(pi: ExtensionAPI): void {
 }
 ```
 
-Register `createBashTool(ctx.cwd, …)` alone instead when only the shell backend should change.
+Register `createBashTool(ctx.cwd, { operations })` alone instead when only the shell backend should change; the caller owns and closes `operations`.
 
 Load your extension instead of the packaged one:
 
@@ -244,28 +246,27 @@ pi -e /absolute/path/to/my-junco-extension.ts
 
 | Export | Use |
 | --- | --- |
-| `ToolCollection.create(cwd, { bash?, principal?, sandbox?, mux?, native? }?)` | Every tool (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`) in `collection.tools`, sharing one `EditStore` and a lease on the process's one mux. `mux`/`native`/`sandbox` follow `acquireShellMux`. |
-| `collection.close()` | Abort and join this collection's own calls and default bash commands, reject its retained tools, and release its lease; never closes caller-supplied operations or the mux. Idempotent. If `create` itself fails, it releases only its own lease and default operations before rejecting. |
+| `ToolCollection.create(cwd, { policy, bash?, principal?, sandbox?, native? })` | Every tool (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`) in `collection.tools`, sharing one `EditStore` and the collection's own mux. `policy` (`"GitPolicy"` or `"EmptyPolicy"`) is required; `native`/`sandbox` follow `acquireShellMux`. Readonly `policy`, `mux`, `native`. |
+| `collection.lease()`, `collection.close()` | `lease()` takes a borrower hold, returning `{ close() }`; `close()` releases the creator hold once. The final release aborts and joins this collection's calls and default bash commands, rejects its retained tools, closes owned operations, and closes its mux; it never closes caller-supplied operations. Idempotent. If `create` itself fails, it releases only what it acquired before rejecting. |
 | `isMarshPolicyDenied(error)`, `MARSH_POLICY_DENIED`, `MarshPolicyDeniedError` (also from the native-free `junco-tools/errors`) | Recognize a publication refused by marsh's policy. |
-| `createBashTool(cwd, options?)` | `bash` through ShellMux. |
+| `createBashTool(cwd, { operations, ... })` | `bash` through ShellMux. `operations` (from `createShellMuxOperations`) is required, so there is no host-bash fallback; the caller closes it. |
 | `createReadTool(cwd, store, native, mux)`, `createGrepTool(cwd, store, native, mux)`, `createEditTool(cwd, store, native, mux)` | Hashline `read`, native `grep`, and hashline `edit` as routed calls on `mux`; pass them one shared `EditStore`. |
 | `createFindTool(cwd, native, mux)`, `createAstGrepTool(cwd, native, mux)`, `createAstEditTool(cwd, native, mux)`, `createDiffTool(native)` | Native `find`, `ast_grep`, previewing `ast_edit` as routed calls on `mux`, and in-memory `diff`. |
-| `createShellMuxOperations({ principal?, native?, mux?, sandbox? }?)` | Pi-compatible `BashOperations` backed by ShellMux, plus `close()`, which stops only this owner's commands and releases its lease. It acquires the singleton lazily on first execution from the generation current at creation; `mux` requires `native`. |
-| `acquireShellMux(cwd, { native?, mux?, sandbox? }?)` | A lease `{ mux, native, closed, release() }` on the process's one ShellMux. The first acquisition opens it at `cwd` (default `"shared"`) or adopts a pre-opened `mux` (which requires its `native`); later ones inherit it, and an explicitly different addon, sandbox, or mux is refused. Every acquisition validates its own `cwd` against the seed. `release()` never closes the mux. |
-| `shutdownShellMux()` | Application shutdown: fence every lease, operations owner, and collection of the current generation, await an in-flight open, and close the mux exactly once. Concurrent callers join one result. Only consumers created afterwards start a new generation. |
+| `createShellMuxOperations({ principal?, native?, mux?, policy?, sandbox? }?)` | Pi-compatible `BashOperations` backed by ShellMux, plus `close()`, which stops only this owner's commands. A supplied `mux` is borrowed and never closed (an explicit `policy`/`sandbox` must match it); otherwise the first command lazily opens an owned mux (`policy` defaults to `"GitPolicy"`) that `close()` releases. |
+| `acquireShellMux(cwd, { policy, native?, sandbox? })` | Opens one fresh ShellMux at `cwd` (default `"shared"`) with `policy`, returning `{ mux, native, closed, release() }`. `await release()` closes that mux, then flushes its policy log; repeated calls return the same promise. |
 | `LspTool.create(cwd, { readOnly? }?)`, `LspTool.shutdown()` | Oh My Pi's `lsp` tool, from the pinned npm `@oh-my-pi/pi-coding-agent@18.2.11`, as a Pi `AgentTool` for any `tools` array (also re-exported by `junco-agency`). **Bun >=1.3.14 only**: `create` rejects under Node, though importing the package stays safe. Caller-installed language servers are discovered by upstream configuration; navigation uses a one-based `line` plus `symbol`; `timeout` is in seconds (default 20, 5–300); `readOnly` rejects upstream's write-tier actions. Semantic failures reject with upstream's text and the original result as `Error.cause`. It runs with host filesystem/process access, **not** through marsh's sandbox or hashline provenance, and is not part of `ToolCollection` or the Pi extension. `shutdown()` is process-wide teardown of upstream's client registry, called once all LSP users drain. |
 | `createYieldTool()`, `isYieldTool(tool)`, `YieldTool`, `YieldToolDetails` | The native-free voluntary-suspension `yield` tool: executing it returns its non-empty `reason` as text and `details.reason`, and nothing else. `JuncoAgent` (`junco-agent`) treats a successful call as a pause after the tool batch; a bare Pi `Agent` continues. `isYieldTool` is true only for an object `createYieldTool()` returned, never for a same-named tool or a spread copy. It is not part of `ToolCollection`. |
 | `createTaskTool(host?)`, `createAssignedTaskTool(input)`, `isTaskTool(tool)`, `isAssignedTaskTool(tool)`, `invokeTaskTool(tool, host, toolCallId, input, signal)`, `TaskInput`, `TaskDecision`, `TaskRequest`, `TaskCall`, `TaskTool`, `AssignedTaskTool`, `TaskToolHost`, `TaskToolDetails` | The native-free `task` tool. `createTaskTool` launches a free-form `TaskInput` `{ context, tasks: [{ task, name?, model?: { provider, modelId }, tools? }] }` (required shared `context` prepended to every task, at least one task, non-blank text, no extra properties). `createAssignedTaskTool(input)` validates and stores a detached copy of `input` off its schema; the model launches it with `task({})`. Both also accept a `TaskDecision` `{ action: "retry" \| "ignore", id, attempt }` (positive safe integer `attempt`, no extra properties) for a failed report marked `decisionRequired`. The model-facing schema is one object with optional fields (providers reject top-level unions); each call is checked against the exact launch, trigger or decision shape, and the host receives a detached `TaskRequest` (a `TaskInput` or a `TaskDecision`). A successful launch returns one opaque handle `{ id, name? }` per task (in `details.tasks` and as JSON text), a retry exactly the retried task's handle, an ignore none (`Ignored task <id>.`); any other receipt is an error, though the fulfilled host has already committed. A host rejection must mean nothing was admitted. Execution goes through the host passed to `createTaskTool`, or the one a `JuncoAgent` binds while an `agentNode` drives it (`invokeTaskTool`); without either it fails with `task requires an agentNode graph host`. `isTaskTool` is true only for an object either factory returned, `isAssignedTaskTool` only for `createAssignedTaskTool`'s; never for a same-named tool or a spread copy. Not part of `ToolCollection`; `JuncoAgent.create` adds a `createTaskTool()` to its defaults. |
 | `createComplainTool(host?, context?)`, `isComplainTool(tool)`, `invokeComplainTool(tool, host, context, toolCallId, input, signal)`, `issueLog`, `Issue`, `Prompt`, `Complaint`, `ComplaintContext`, `ComplainToolHost`, `ComplainTool` | The native-free, frozen `complain` tool: `{ complaint }` (non-blank string, no extra properties), returning `Complaint recorded.` without pausing anything. Execution resolves a `ComplaintContext` (node ID, delivered messages, full model `Prompt`, optional tracer) and calls `host.complain(issue, tracer)` once; without a host and context it fails with `complain requires an agent context`. `JuncoAgent` always owns one and supplies its context. `issueLog` is the process-wide append-only history: `append(issue, tracer?)` stores a frozen snapshot (structured-cloned prompt, copied message list; node payloads stay references) and then notifies `tracer.complain(nodeId, complaint)`, isolating observer failures; `snapshot()` returns a frozen copy; nothing is ever removed. Not part of `ToolCollection`. |
 | `NativeModule`, `NativeMux`, `EditStore` (types only) | The `native`, `mux` and `store` parameter contracts of the factories above. The root exports them as types only so importing tools never loads the addon; the runtime module and constructors come from `junco-tools/native`. |
-| `NativeMux` from `junco-tools/native` | The raw native session: `NativeMux.open(cwd, { sandbox? }?)`, `mux.seed`, `mux.sandbox`, `mux.validateCwd(cwd)`, and `mux.close()`. One loaded addon permits only one mux opening, open, or closing at a time; a second `open` rejects. Prefer `acquireShellMux`. `sandbox` is `"shared"` (the default: sandbox a shell command or writing file tool while another live shell shares the seed) or `"always"`. |
+| `NativeMux` from `junco-tools/native` | The raw native session: `NativeMux.open(cwd, { sandbox?, policy? }?)`, `mux.seed`, `mux.sandbox`, `mux.policy`, `mux.validateCwd(cwd)`, and `mux.close()`. `policy` defaults to `"GitPolicy"` here only. Muxes are independent; several may be open over one seed and share its source authority. Prefer `acquireShellMux`. `sandbox` is `"shared"` (the default: sandbox a shell command or writing file tool while another live shell shares the seed) or `"always"`. |
 
-Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata and renderers: pass it to a bare `Agent`, SDK `customTools`, or `pi.registerTool` without wrapping. `native` is the `junco-tools/native` module; `store` is `new native.EditStore()`; `mux` is the singleton from a lease. `BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
+Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata and renderers: pass it to a bare `Agent`, SDK `customTools`, or `pi.registerTool` without wrapping. `native` is the `junco-tools/native` module; `store` is `new native.EditStore()`; `mux` comes from a lease or a collection. `BashOperations`, `BashToolInput`, `BashToolDetails`, and `BashToolOptions` are re-exported from Pi, not independently defined tool types. `HashlineEditDetails` is junco's own edit-result shape (`{ files: EditFileOutcome[] }` from the native engine) and is deliberately **not** Pi's `EditToolDetails`.
 
-- Every agent, collection, and operations owner in the process (and every copy of this module loaded in it) shares one ShellMux, so later working directories must remain inside its seed. A shutdown permanently closes the consumers of that generation; create fresh ones afterwards.
+- Each collection, lease, and owning operations instance has its own ShellMux with its own policy; working directories must remain inside that mux's seed. Consumers that should share a mux and policy borrow one collection.
 - Without `principal`, one `pi-`-prefixed UUID is generated per operations instance, not per command. The principal is a queue and display name, not a policy identity: each command gets a fresh opaque shell owner. A later managed command under the same name cannot inherit an earlier shell's grants.
 - Marsh shares a seed's source authority across live shells and muxes; an idle mux holds no exclusive lease. A direct shell command excludes other non-read admissions over that seed until it settles, though read-only file tools can overlap. Managed shell commands can overlap. Direct writes change the seed without recording durable grants or consulting earlier grants; managed publications perform those checks.
-- The mux belongs to the application, not to any consumer: closing a collection or operations owner, or releasing a lease, never closes it, even when nothing else holds it. Call `shutdownShellMux()` once, after all users stop. It is process-wide teardown, not a per-agent close method.
+- A mux belongs to its owner: the final collection release, `lease.release()`, or an owning operations `close()` closes it. Borrowers never close what they borrowed.
 - Commands sharing a principal are serialized. Each call gets a fresh shell/snapshot: shell variables and functions do not persist between invocations, and no grant carries over from an earlier call or a reopened seed.
 - Commands are observed in-process: marsh's tracer threads seize each spawned command before it runs, and the interpreter reports its own file accesses. No companion executable is needed. Node children work: libuv's epoll-only `io_uring` ring is accepted, while rings that submit filesystem operations are refused.
 - A publication marsh's policy refuses rejects a routed file tool (`edit`, an applying `ast_edit`), `bash`, or a native `NativeRun.wait()` with a real `Error` whose own `code` is `"MARSH_POLICY_DENIED"`; its message is marsh's diagnostic. Test it with `isMarshPolicyDenied`, never the message text. Every other failure, including cancellation, timeouts, and read-only tool errors, stays a plain error without that code. A refused hashline `edit` also discards the anchors it recorded, so its unpublished result cannot back a later edit.
@@ -290,7 +291,7 @@ bun run test
 
 The native tracer also needs readable kernel BTF/kallsyms and effective BPF/performance/system-log capabilities. On this WSL2 kernel, unprivileged runs lack `CAP_SYSLOG`, while privileged runs may still fail on kernel evidence loss or timing; do not weaken Marsh policy checks to hide those failures. Re-run native integration on a compatible kernel before treating that surface as verified.
 
-The packaged extension and the production singleton's lifecycle are covered by a separate opt-in lane that uses the **production** addon:
+The packaged extension and the production addon's mux lifecycle are covered by a separate opt-in lane that uses the **production** addon:
 
 ```sh
 bun run test:btrfs

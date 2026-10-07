@@ -85,7 +85,7 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
 export function createMixedGraph(
   members: Members,
 ): { graph: JuncoGraph; reviewerId: NodeIdType } {
-  const graph = createParallelAgentGraph();
+  const graph = createParallelAgentGraph("GitPolicy");
   const directInput = messageEdge<AgenticInput, AssistantMessage>("Goals->Direct");
   const ralphInput = messageEdge<AgenticInput, AssistantMessage>("Goals->Ralph");
   const ralphFinal = messageEdge<AgenticInput, AssistantMessage>("Ralph->Reviewer");
@@ -101,9 +101,11 @@ export function createMixedGraph(
         yield [msg(directInput, assignment), msg(ralphInput, assignment)];
       }
     },
+    "EmptyPolicy",
   );
   const goalsId = graph.addNode(deterministicNode(goalsSource, {
     id: NodeId("Goals"),
+    policy: "EmptyPolicy",
     description: "Publishes the assignment once to both competitors.",
     trigger: always(),
     is_available: () => !published,
@@ -111,12 +113,14 @@ export function createMixedGraph(
 
   const directId = graph.addNode(agentNode(members.Direct, {
     id: NodeId("Direct"),
+    policy: "GitPolicy",
     description: "Completes every goal in one response.",
     trigger: when(directInput),
   }, { receive: (view) => from(view, directInput) }));
 
   const ralphId = ralph(graph, members.Ralph, {
     id: NodeId("Ralph"),
+    policy: "GitPolicy",
     description: "Runs two full-assignment rounds and sends only the final answer.",
     input: ralphInput,
     output: ralphFinal,
@@ -125,6 +129,7 @@ export function createMixedGraph(
 
   const reviewerId = graph.addNode(agentNode(members.Reviewer, {
     id: NodeId("Reviewer"),
+    policy: "GitPolicy",
     description: "Compares the Direct and Ralph answers once both exist.",
     trigger: allOf(on(directResult), on(ralphFinal)),
   }, {
@@ -170,6 +175,7 @@ async function main(): Promise<void> {
     models,
     systemPrompt: systemPrompts[id],
     tools: [],
+    policy: "GitPolicy",
   });
   await using Ralph = await member("Ralph");
   await using Direct = await member("Direct");

@@ -38,9 +38,14 @@ export function ralphKeepsTypes(
     input,
     output,
     rounds: 2,
+    policy: "GitPolicy",
   };
   const id: NodeIdType = ralph(parent, agent, options);
-  const anonymous: NodeIdType = ralph(parent, agent, { input, output });
+  const anonymous: NodeIdType = ralph(parent, agent, {
+    input,
+    output,
+    policy: "EmptyPolicy",
+  });
   const result: O.Option<AssistantMessage> = parent.result(id);
   // The caller's own variables keep their concrete types.
   const scheduler: Scheduler = parent.scheduler;
@@ -59,13 +64,17 @@ export function ralphRejectsMistypedOptions(
   numericParent: JuncoGraph<number, string>,
 ) {
   // @ts-expect-error rounds is a number
-  ralph(parent, agent, { input, output, rounds: "2" });
+  ralph(parent, agent, { input, output, rounds: "2", policy: "GitPolicy" });
   // @ts-expect-error ids are branded NodeIds
-  ralph(parent, agent, { id: "Ralph", input, output });
+  ralph(parent, agent, { id: "Ralph", input, output, policy: "GitPolicy" });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input: numeric, output });
+  ralph(parent, agent, { input: numeric, output, policy: "GitPolicy" });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input, output: numeric });
+  ralph(parent, agent, { input, output: numeric, policy: "GitPolicy" });
   // @ts-expect-error Ralph registers only in AgenticInput/AssistantMessage graphs
-  ralph(numericParent, agent, { input, output });
+  ralph(numericParent, agent, { input, output, policy: "GitPolicy" });
+  // @ts-expect-error Ralph requires a policy
+  ralph(parent, agent, { input, output });
+  // @ts-expect-error policies are the two case-sensitive literals
+  ralph(parent, agent, { input, output, policy: "Git" });
 }

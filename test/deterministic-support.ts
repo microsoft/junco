@@ -66,7 +66,7 @@ export function plainGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(policy(strategy), window, threads, quiet);
+  >(policy(strategy), window, threads, quiet, "GitPolicy");
 }
 
 /**
@@ -80,6 +80,7 @@ export function policyGraph(
 ): JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler> {
   if (strategy === "parallel" && threads === undefined) {
     return graphApi.createParallelAgentGraph<AgenticInput, AssistantMessage>(
+      "GitPolicy",
       quiet,
     );
   }
@@ -95,7 +96,7 @@ export function policyGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(scheduler, window, width, quiet);
+  >(scheduler, window, width, quiet, "GitPolicy");
   graph = constructed;
   return constructed;
 }

@@ -142,20 +142,23 @@ impl Session {
     pub(crate) fn new(
         seed: PathBuf,
         filesystem: Arc<dyn Subvolumes>,
-        policy: SandboxPolicy,
+        sandbox_policy: SandboxPolicy,
+        shell_policy: Arc<dyn marsh_core::Policy>,
         policy_log: Option<Arc<PolicyLog>>,
         create_mux: impl FnOnce(MuxProfile, Arc<Mutex<Frontend>>) -> Result<Arc<ShellMux>, MuxError>,
     ) -> Result<Arc<Self>, String> {
         let runtime = Handle::current();
         let frontend = Arc::new(Mutex::new(Frontend::new(24, 80)));
         let profile = MuxProfile {
-            sandbox_policy: policy,
+            environment: ShellEnvironment::default(),
+            builtins: HashMap::default(),
+            sandbox_policy,
+            shell_policy,
             policy_observer: policy_log.clone().map(|log| {
                 Arc::new(PolicyObserver::new(move |event, decision| {
                     log.observe(event, decision);
                 }))
             }),
-            ..Default::default()
         };
         // Leases nothing: the seed's exclusive lease, its log recovery and its one validator
         // are opened by the first shell whose working directory names it. That source-domain
@@ -182,12 +185,6 @@ impl Session {
 
     pub(crate) fn seed(&self) -> &Path {
         &self.seed
-    }
-
-    /// Whether close finished: every task joined, the mux shut down and the backend dropped,
-    /// whether or not that teardown reported a failure.
-    pub(crate) fn is_closed(&self) -> bool {
-        self.closed.borrow().is_some()
     }
 
     /// Resolves `cwd` exactly as an operation at it would, against this session's own seed and

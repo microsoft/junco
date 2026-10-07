@@ -17,6 +17,7 @@ function idle(started: Set<Member>): Member {
       yield [];
       return "idle";
     },
+    "GitPolicy",
   );
   return state;
 }
@@ -48,7 +49,10 @@ describe("graph.Spawn", () => {
     const root = idle(started);
     const children: Member[] = [];
     const g = graph.Spawn(
-      graph.nodes.deterministicNode(root, { trigger: trigger.never() }),
+      graph.nodes.deterministicNode(root, {
+        trigger: trigger.never(),
+        policy: "GitPolicy",
+      }),
       inputs,
       (input) => {
         calls.push(input);
@@ -56,6 +60,7 @@ describe("graph.Spawn", () => {
         children.push(child);
         return graph.nodes.deterministicNode(child, {
           trigger: trigger.never(),
+          policy: "GitPolicy",
         });
       },
     );
@@ -130,11 +135,13 @@ describe("graph.Spawn", () => {
           closed.root = true;
         }
       },
+      "GitPolicy",
     );
     const g = graph.Spawn(
       graph.nodes.deterministicNode(root, {
         id: rootId,
         trigger: trigger.anyOf(trigger.on(reply.left), trigger.on(reply.right)),
+        policy: "GitPolicy",
       }),
       names,
       (name) => {
@@ -151,10 +158,12 @@ describe("graph.Spawn", () => {
               closed[name] = true;
             }
           },
+          "GitPolicy",
         );
         return graph.nodes.deterministicNode(child, {
           id: graph.NodeId(name),
           trigger: trigger.when(request[name]),
+          policy: "GitPolicy",
         });
       },
     );
@@ -187,14 +196,19 @@ describe("graph.Spawn", () => {
         yield [];
         return "solo";
       },
+      "GitPolicy",
     );
     const g = graph.Spawn(
-      graph.nodes.deterministicNode(root, { trigger: trigger.always() }),
+      graph.nodes.deterministicNode(root, {
+        trigger: trigger.always(),
+        policy: "GitPolicy",
+      }),
       [] as readonly string[],
       (input) => {
         calls.push(input);
         return graph.nodes.deterministicNode(idle(new Set()), {
           trigger: trigger.never(),
+          policy: "GitPolicy",
         });
       },
     );
@@ -221,7 +235,10 @@ describe("graph.Spawn", () => {
       assert.throws(
         () =>
           graph.Spawn(
-            graph.nodes.deterministicNode(root, { trigger: trigger.never() }),
+            graph.nodes.deterministicNode(root, {
+              trigger: trigger.never(),
+              policy: "GitPolicy",
+            }),
             ["a", "b", "c"],
             (input) => {
               visited.push(input);
@@ -230,6 +247,7 @@ describe("graph.Spawn", () => {
               created.push(child);
               return graph.nodes.deterministicNode(child, {
                 trigger: trigger.never(),
+                policy: "GitPolicy",
               });
             },
           ),
@@ -256,6 +274,7 @@ describe("graph.Spawn", () => {
             graph.nodes.deterministicNode(root, {
               id: rootId,
               trigger: trigger.never(),
+              policy: "GitPolicy",
             }),
             ["a", "b"],
             (input) => {
@@ -265,6 +284,7 @@ describe("graph.Spawn", () => {
               return graph.nodes.deterministicNode(child, {
                 id: rootId,
                 trigger: trigger.never(),
+                policy: "GitPolicy",
               });
             },
           ),

@@ -7,6 +7,7 @@ import type {
 } from "dataflow-engine";
 import { triggerInputs } from "dataflow-engine";
 import type { AgenticYieldReason, JuncoAgent } from "junco-agent";
+import type { ToolCollection, ToolCollectionOptions } from "junco-tools";
 import type { MockAgent } from "./mock-agent.js";
 
 // Internal execution bookkeeping of adapter-built node bodies; not part of the public surface.
@@ -39,6 +40,17 @@ export const nodePolicies = new WeakMap<object, NodePolicy>();
  * Node record: a reused spec or body registered in several graphs keeps each graph's tracer.
  */
 export const registeredNodeTracers = new WeakMap<object, DataflowTracer>();
+
+/** Rejects a missing or unknown policy, or a collection opened under another policy. */
+export function checkPolicy(
+  policy: ToolCollectionOptions["policy"],
+  collection: ToolCollection | undefined,
+): void {
+  if (policy !== "GitPolicy" && policy !== "EmptyPolicy")
+    throw new TypeError('policy must be "GitPolicy" or "EmptyPolicy"');
+  if (collection !== undefined && collection.policy !== policy)
+    throw new TypeError("Collection policy does not match the selected policy");
+}
 
 /** Only the resolved parent results `seen` has not recorded, recording them now. */
 export function unseenValues<T>(

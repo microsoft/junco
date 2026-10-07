@@ -89,6 +89,7 @@ const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
 const member = (agent: MockAgent, description: string, id?: string) =>
   agentNode(agent, {
     ...(id === undefined ? {} : { id: NodeId(id) }),
+    policy: "GitPolicy",
     description,
     trigger: always(),
   });
@@ -117,6 +118,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   const w = graph.addNode(member(worker, "the worker"));
   const i = graph.addNode(member(idle, IDLE));
   const raw = graph.addNode({
+    policy: "GitPolicy",
     description: "",
     trigger: always(),
     state: new Deterministic<AgenticInput, AssistantMessage>(
@@ -124,6 +126,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
       async function* () {
         return fauxAssistantMessage("unused");
       },
+      "GitPolicy",
     ),
     step: async function* () {
       yield [];
@@ -135,8 +138,8 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
       new Deterministic<AgenticInput, AssistantMessage>(async function* () {
         yield [];
         return fauxAssistantMessage("quiet done");
-      }),
-      { trigger: always() },
+      }, "GitPolicy"),
+      { trigger: always(), policy: "GitPolicy" },
     ),
   );
   scheduler.hooks.on("transform_context", ({ messages }) => {
@@ -237,7 +240,12 @@ test("an any trigger reads a newer message although a delivered result stays sat
   const b = graph.addNode(
     agentNode(
       messenger,
-      { id: NodeId("b"), description: "messenger", trigger: when(ask) },
+      {
+        id: NodeId("b"),
+        policy: "GitPolicy",
+        description: "messenger",
+        trigger: when(ask),
+      },
       {
         receive: (view) => view.messages.get(ask.id) ?? [],
         emit: () => [msg(more, { kind: "followUp", text: "more" })],
@@ -249,6 +257,7 @@ test("an any trigger reads a newer message although a delivered result stays sat
       reader,
       {
         id: NodeId("c"),
+        policy: "GitPolicy",
         description: "reader",
         trigger: anyOf(on(value), on(more)),
       },
@@ -377,6 +386,7 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
     let replaced = 0;
     // An untyped caller's adapter: the factory's own adapter must still own the members.
     const callerOptions = {
+      policy: "GitPolicy" as const,
       models,
       session,
       adapter: {
@@ -397,6 +407,7 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
       UNBOUNDED,
       UNBOUNDED,
       new DummyTracer(),
+      "GitPolicy",
     );
     graph = constructed;
     constructed.addNode(member(ready, "member"));
@@ -432,6 +443,7 @@ test("a graph constructed on the scheduler but not yet published fails admission
     UNBOUNDED,
     UNBOUNDED,
     new DummyTracer(),
+    "GitPolicy",
   );
   const ready = new MockAgent({
     prompt: "go",

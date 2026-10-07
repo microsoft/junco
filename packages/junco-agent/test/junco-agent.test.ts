@@ -420,6 +420,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session,
       models,
+      policy: "GitPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["first", "first"],
@@ -430,6 +431,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
+      policy: "GitPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["missing"],
@@ -469,6 +471,7 @@ test("an idle reopened session restores its selected tool without advertising ot
   const first = await JuncoAgent.fromResolved({
     session,
     models,
+    policy: "GitPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -508,6 +511,7 @@ test("an idle reopened session restores its selected tool without advertising ot
   const second = await JuncoAgent.fromResolved({
     session: reopened,
     models,
+    policy: "GitPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -594,7 +598,12 @@ test(
     ]);
     const repo = new MemorySessionRepo();
     const session = await repo.create({}, BACKGROUND_CONTEXT);
-    const agent = await JuncoAgent.fromResolved({ session, models, model });
+    const agent = await JuncoAgent.fromResolved({
+      session,
+      models,
+      model,
+      policy: "GitPolicy",
+    });
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
       const pending = agent.prompt("held").catch((error: unknown) => error);
@@ -712,6 +721,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   models.registerNativeProvider(faux.provider);
   const agent = await JuncoAgent.create({
     models,
+    policy: "GitPolicy",
     provider: "faux",
     model: "faux-1",
     tools: [],
@@ -726,6 +736,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   await assert.rejects(
     JuncoAgent.create({
       models,
+      policy: "GitPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [duplicate, countingTool("same").tool],
@@ -745,6 +756,7 @@ test("create rejects an unsupported thinking level before reading credentials", 
   await assert.rejects(
     JuncoAgent.create({
       models,
+      policy: "GitPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [],
@@ -774,6 +786,7 @@ test("create requires the selected provider's saved Pi login and closes a transf
       await assert.rejects(
         JuncoAgent.create({
           models,
+          policy: "GitPolicy",
           provider: "github-copilot",
           model: "claude-opus-5.5",
           session,
@@ -818,6 +831,7 @@ test("create reuses Pi's saved OAuth login without starting a login flow", async
     });
     agent = await JuncoAgent.create({
       models,
+      policy: "GitPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -864,6 +878,7 @@ test("an unrefreshable Pi login fails with login guidance before creating an age
   await assert.rejects(
     JuncoAgent.create({
       models,
+      policy: "GitPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -1947,6 +1962,7 @@ test(
     const agent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
+      policy: "GitPolicy",
       model: faux.getModel("plain")!,
       systemPrompt: "sys",
     });

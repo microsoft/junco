@@ -16,7 +16,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isMarshPolicyDenied, type NativeMux } from "junco-tools";
+import {
+  isMarshPolicyDenied,
+  type NativeModule,
+  type NativeMux,
+  ToolCollection,
+} from "junco-tools";
 import {
   type AcceptedRefactor,
   applyRefactor,
@@ -36,6 +41,13 @@ const native = await import(
     ),
   )
 );
+const copyTree = {
+  ...native,
+  NativeMux: {
+    open: (...args: Parameters<NativeModule["NativeMux"]["open"]>) =>
+      native.NativeMux.openCopyTree(...args),
+  },
+} as NativeModule;
 
 const BOM8 = Buffer.from([0xef, 0xbb, 0xbf]);
 const BOM16 = Buffer.from([0xff, 0xfe]);
@@ -44,11 +56,14 @@ const utf16 = (text: string) =>
 
 type Fixture = {
   readonly seed: string;
+  /** The protected `GitPolicy` mux: the applier's. */
   readonly mux: NativeMux;
+  /** The trusted-build `EmptyPolicy` mux: index refresh's. */
+  readonly buildMux: NativeMux;
   readonly git: (...args: string[]) => string;
 };
 
-/** A committed Git repository holding `files`, and the one native mux over it. */
+/** A committed Git repository holding `files`, and Yak Shaver's two collections over it. */
 async function withRepository(
   files: Readonly<Record<string, string | Uint8Array>>,
   body: (fixture: Fixture) => Promise<void>,
@@ -78,11 +93,24 @@ async function withRepository(
       "-m",
       "baseline",
     );
-    const mux: NativeMux = await native.NativeMux.openCopyTree(seed, {
+    const protectedTools = await ToolCollection.create(seed, {
+      native: copyTree,
+      policy: "GitPolicy",
       sandbox: "always",
     });
-    defer(() => mux.close());
-    await body({ seed, mux, git });
+    defer(() => protectedTools.close());
+    const buildTools = await ToolCollection.create(seed, {
+      native: copyTree,
+      policy: "EmptyPolicy",
+      sandbox: "always",
+    });
+    defer(() => buildTools.close());
+    await body({
+      seed,
+      mux: protectedTools.mux,
+      buildMux: buildTools.mux,
+      git,
+    });
   });
 }
 
@@ -496,9 +524,10 @@ test("a failed git add aborts the command and publishes neither private edit", a
   );
 }, 60_000);
 
-test("a foreign unstaged owner's lock denies application despite a fresh read", async () => {
+test("a trusted-build owner's lock denies the Git-policy applier despite a fresh read", async () => {
   await withRepository({ "claimed.ts": "seed\n" }, async (fixture) => {
-    const claim = fixture.mux.start(
+    // The EmptyPolicy mux grants its own write; the GitPolicy applier must still respect it.
+    const claim = fixture.buildMux.start(
       {
         command: "cat claimed.ts > /dev/null; printf 'owned\\n' > claimed.ts",
         cwd: fixture.seed,
@@ -542,7 +571,10 @@ test("refreshGraftSnapshot sees current source without publishing the Graft cach
         ["src/a.ts"],
       );
       const before = await state(fixture);
-      const snapshot = await refreshGraftSnapshot(fixture.seed, fixture.mux);
+      const snapshot = await refreshGraftSnapshot(
+        fixture.seed,
+        fixture.buildMux,
+      );
       const names = snapshot.nodes
         .filter((node) => node.path === "src/a.ts" && node.kind === "class")
         .map((node) => node.name);

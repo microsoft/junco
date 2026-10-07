@@ -288,6 +288,20 @@ test("an already aborted connect rejects with McpAbortError before acquiring the
   assert.equal(nativeAddonLoaded(), false);
 });
 
+test("a nonempty definition without a collection rejects before starting anything", async () => {
+  const definition = JuncoMcpTools.add({
+    name: "server",
+    type: "stdio",
+    command: "server",
+  });
+  assert.equal(definition.size, 1);
+  await assert.rejects(definition.connect({ cwd: "/nonexistent" }), {
+    name: "TypeError",
+    message: "JuncoMcpTools: a nonempty definition requires a collection",
+  });
+  assert.equal(nativeAddonLoaded(), false);
+});
+
 test("tool names are sanitized, bounded, and collision-hashed independent of order", async () => {
   const long = "x".repeat(80);
   const pages = [

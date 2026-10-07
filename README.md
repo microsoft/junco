@@ -42,11 +42,11 @@ bun run smoke
 
 ## Tracing (local only)
 
-A direct `JuncoGraph` requires a tracer as its constructor's fourth argument (`TypeError` when missing), and its `tracer` property is never `undefined`. `tracer.createTracer()` returns the automatically selected tracer from Bun's native feature flags: `--feature=opik` uses `dataflow-engine-opik` (configured by the SDK's `OPIK_*` variables); without it, `tracer.StdoutTracer`. `createParallelAgentGraph()` (and so `graph.Spawn`) defaults to it; an explicit tracer, such as `new tracer.DummyTracer()` for no output, always wins. The automatic tracer is built once per process, named `JuncoGraph.run`, and shared by every graph given it, nested ones included; Ralph's child graph uses its parent's tracer. Callers own `await graph.tracer.flush()`, as every example does. A missing Opik adapter or configuration fails `createTracer()` rather than falling back to stdout. The Node `dist` build carries no features, so it selects `StdoutTracer`; `examples/dist` carries the features it was built with (`bun run build:examples --feature=opik`).
+A direct `JuncoGraph` requires a tracer as its constructor's fourth argument (`TypeError` when missing), and its `tracer` property is never `undefined`. `tracer.createTracer()` returns the automatically selected tracer from Bun's native feature flags: `--feature=opik` uses `dataflow-engine-opik` (configured by the SDK's `OPIK_*` variables); without it, `tracer.StdoutTracer`. `createParallelAgentGraph(policy)` (and so `graph.Spawn`) defaults to it; an explicit tracer, such as `new tracer.DummyTracer()` for no output, always wins. The automatic tracer is built once per process, named `JuncoGraph.run`, and shared by every graph given it, nested ones included; Ralph's child graph uses its parent's tracer. Callers own `await graph.tracer.flush()`, as every example does. A missing Opik adapter or configuration fails `createTracer()` rather than falling back to stdout. The Node `dist` build carries no features, so it selects `StdoutTracer`; `examples/dist` carries the features it was built with (`bun run build:examples --feature=opik`).
 
 `StdoutTracer` prints each `run()`/`step()` as it happens: a `[run <n>] <name>` header, the graph's topology drawn as Unicode boxes and arrows with [`mermaid-ascii`](https://www.npmjs.com/package/mermaid-ascii) (patched under `patches/`; every subgraph drawn separately under a `Subgraph [<path>]:` heading), then `Trace:` and one line per activation start (`prime`/`resume` with its delivered inputs) and outcome (`yield`, `return` or the raw `error`), ending with the run's cumulative results or escaping error. Payloads are printed in full with `util.inspect`, snapshotted when each event happens, without invoking application getters or custom inspection; they may include sensitive data. Parallel edges between the same two nodes share one arrow with their labels joined by ` / `; opposite-direction edges between the same pair can overlap each other's labels.
 
-Every `StdoutTracer` record is written at INFO through `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) stdout logger, prefixed with its level (`INFO `, `WARN `, …); tracer diagnostics and `issueLog`'s complaint-observer failures use WARN. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; any other value fails before native or model work. The same logger receives every junco-policy capability decision of the ShellMux `acquireShellMux` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. `shutdownShellMux()` drains those records and flushes stdout before it resolves.
+Every `StdoutTracer` record is written at INFO through `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) stdout logger, prefixed with its level (`INFO `, `WARN `, …); tracer diagnostics and `issueLog`'s complaint-observer failures use WARN. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; any other value fails before native or model work. The same logger receives every junco-policy capability decision of the ShellMux `acquireShellMux` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. Each mux's `lease.release()` (and so a collection's final release) drains those records and flushes stdout before it resolves.
 
 `dataflow-engine-opik` is a workspace package and a root development dependency, so the root install already provides it and `opik`; under Bun its `bun` export loads its source directly. Confirm with the `require.resolve` check:
 
@@ -79,26 +79,26 @@ import { type AgenticInput, agentNode, createAgencyScheduler, JuncoGraph, tracer
 const sessions = new MemorySessionRepo();
 const researcher = await JuncoAgent.fromResolved({
   ...researcherOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
-  tools: [createYieldTool()], prompt: "Find the facts.",
+  policy: "GitPolicy", tools: [createYieldTool()], prompt: "Find the facts.",
 });
 const writer = await JuncoAgent.fromResolved({
-  ...writerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), prompt: "Draft the summary.",
+  ...writerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), policy: "GitPolicy", prompt: "Draft the summary.",
 });
 // With a native `model` the scheduler uses it; without one it is GitHub Copilot `claude-opus-5.5`
 // through Pi's saved login (run Pi's /login first).
 type Agency = JuncoGraph<AgenticInput, AssistantMessage, unknown, PiScheduler<AgenticInput, AssistantMessage>>;
 let current: Agency | undefined; // the scheduler reads its graph through this live getter
 const scheduler = await createAgencyScheduler(() => current, {
-  ...schedulerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
+  ...schedulerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), policy: "GitPolicy",
   systemPrompt: "Coordinate the team.", prompt: "Produce the report.",
 });
 scheduler.events.on("run_end", ({ status }) => { if (status === "failed") console.error("Scheduler run failed"); });
 // scheduler.hooks.on("transform_context", handler) registers native request hooks.
 // Invalid local arguments/state and overlapping work reject with JuncoAgentError.
-await using graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer()); // disposal closes every member
+await using graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer(), "GitPolicy"); // disposal closes every member
 current = graph;
 for (const [agent, description] of [[researcher, "researches"], [writer, "writes"]] as const) {
-  graph.addNode(agentNode(agent, { description, trigger: always() }));
+  graph.addNode(agentNode(agent, { description, policy: "GitPolicy", trigger: always() }));
 }
 
 for await (const step of scheduler) {
@@ -114,7 +114,7 @@ for await (const step of scheduler) {
 
 ### OSS committee (live, optionally traced)
 
-[`examples/oss-committee.ts`](examples/oss-committee.ts) is a literate, top-to-bottom junco example and **not** a `PiScheduler` agency: three persistent `JuncoAgent` members run review rounds, each a fresh `createParallelAgentGraph()` graph over the same members, whose sessions keep every earlier round. The Librarian (`claude-opus-5.5`, medium reasoning) uses `search_oss` with generic technical terms rather than the verbatim request; each result reports GitHub stars and last push time alongside the repository URL and reported license. The Architect (`gpt-6-sol`, high) is toolless and designs from the available research; the Reducer (`claude-sonnet-5.5`, xhigh) combines both final reports, records a typed verdict with its `review` tool and produces the **only** titled Markdown plan. A revision request starts another round in which the Librarian continues investigating and the Architect revises its design from the Reducer's feedback; approval — minimal, clean custom code over well-trusted OSS libraries — publishes the plan. There is no round limit, and a round that ends without a verdict fails without publishing. Normally, a value edge gates Architect on a valid successful lookup and a nonempty, normally stopped Librarian report. After a failed lookup in any round, Librarian must call the real `yield` tool with its available public research, the failure and the remaining gaps in the reason. A message edge hands that partial snapshot to Architect while Librarian stays paused. Librarian resumes only after Architect returns, then writes its closing report without further searches. Reducer still waits for both final reports; missing, empty or truncated final reports cannot publish a plan. Returning after a failed lookup without the required yield is rejected rather than silently accepted. `JuncoAgent.create` rejects a reasoning level a model does not support, so no reasoning level is silently downgraded.
+[`examples/oss-committee.ts`](examples/oss-committee.ts) is a literate, top-to-bottom junco example and **not** a `PiScheduler` agency: three persistent `JuncoAgent` members run review rounds, each a fresh `createParallelAgentGraph("GitPolicy")` graph over the same members, whose sessions keep every earlier round. The Librarian (`claude-opus-5.5`, medium reasoning) uses `search_oss` with generic technical terms rather than the verbatim request; each result reports GitHub stars and last push time alongside the repository URL and reported license. The Architect (`gpt-6-sol`, high) is toolless and designs from the available research; the Reducer (`claude-sonnet-5.5`, xhigh) combines both final reports, records a typed verdict with its `review` tool and produces the **only** titled Markdown plan. A revision request starts another round in which the Librarian continues investigating and the Architect revises its design from the Reducer's feedback; approval — minimal, clean custom code over well-trusted OSS libraries — publishes the plan. There is no round limit, and a round that ends without a verdict fails without publishing. Normally, a value edge gates Architect on a valid successful lookup and a nonempty, normally stopped Librarian report. After a failed lookup in any round, Librarian must call the real `yield` tool with its available public research, the failure and the remaining gaps in the reason. A message edge hands that partial snapshot to Architect while Librarian stays paused. Librarian resumes only after Architect returns, then writes its closing report without further searches. Reducer still waits for both final reports; missing, empty or truncated final reports cannot publish a plan. Returning after a failed lookup without the required yield is rejected rather than silently accepted. `JuncoAgent.create` rejects a reasoning level a model does not support, so no reasoning level is silently downgraded.
 
 Before running the live example, start `pi`, use `/login`, and select GitHub Copilot. The committee shares Pi's `ModelRuntime` and uses the saved login in `~/.pi/agent/auth.json` (or `$PI_CODING_AGENT_DIR/auth.json`); Pi handles OAuth refresh. A missing or unusable login fails with instructions to run `/login`, without starting an interactive login or publishing a plan. Environment-only tokens and Copilot CLI credentials do not replace the saved Pi login.
 
@@ -129,7 +129,7 @@ The tool restricts search to GitHub repositories but cannot detect secrets in a 
 
 ### MCP graph (live, optionally traced)
 
-[`examples/mcp.ts`](examples/mcp.ts) runs exactly two `github-copilot/claude-sonnet-5.5` agents on this repository, each with only the tools of its own graft MCP server (`mcp.JuncoMcpTools`, `npx -y @nanonets/graft mcp`). Research maps the repository and selects five central classes; Dependencies receives that report on a value edge and traces all five itself with outbound all-depth `graft_trace_calls`. Both servers run as audited jobs of the process's one Junco ShellMux, so the repository must be inside a Btrfs seed with the production native addon built, and graft's index must be current (`graft build`): graft refreshes the index before a query only when the working tree drifted from the last build, so over a current index its queries write nothing, while two servers refreshing a stale shared index would overlap and Marsh refuses the later publication. The runner closes the graph, flushes the tracer, then calls `tools.shutdownShellMux()`.
+[`examples/mcp.ts`](examples/mcp.ts) runs exactly two `github-copilot/claude-sonnet-5.5` agents on this repository, each with only the tools of its own graft MCP server (`mcp.JuncoMcpTools`, `npx -y @nanonets/graft mcp`). Research maps the repository and selects five central classes; Dependencies receives that report on a value edge and traces all five itself with outbound all-depth `graft_trace_calls`. Both servers run as audited jobs of one `GitPolicy` collection's ShellMux, created by `JuncoGraph.create` and passed to both agents, so the repository must be inside a Btrfs seed with the production native addon built, and graft's index must be current (`graft build`): graft refreshes the index before a query only when the working tree drifted from the last build, so over a current index its queries write nothing, while two servers refreshing a stale shared index would overlap and Marsh refuses the later publication. The runner closes the graph, whose final collection release closes the mux, then flushes the tracer.
 
 ```sh
 OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency bun run --feature=opik examples/mcp.ts
@@ -161,7 +161,14 @@ type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<Agentic<N, T
 // `tracer.createTracer()` for the feature-selected one (see Tracing).
 class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>>
   extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
-  constructor(scheduler: Q, window: Width, threads: Width, tracer: DataflowTracer); // TypeError without a tracer
+  // policy: "GitPolicy" | "EmptyPolicy"; a supplied collection must match it and is borrowed until close.
+  constructor(scheduler: Q, window: Width, threads: Width, tracer: DataflowTracer, policy: ToolCollectionOptions["policy"], collection?: ToolCollection); // TypeError without a tracer
+  // Creates one collection, passes it to `build` (which must hand it to every member), checks every
+  // member's collection/policy, and gives the returned root graph the creator hold.
+  static create<N, T, EH, Q extends DataflowScheduler<N, T>>(cwd: string, options: ToolCollectionOptions,
+    build: (collection: ToolCollection) => JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>): Promise<JuncoGraph<N, T, EH, Q>>;
+  readonly policy: ToolCollectionOptions["policy"];
+  readonly collection: ToolCollection | undefined;
   readonly tracer: DataflowTracer;
   get signal(): AbortSignal;                 // step()/run() observe it automatically
   abort(reason?: unknown): Promise<void>;    // recursive; a fresh signal once settled
@@ -176,20 +183,23 @@ type AgentNodeBinding = {
   readonly emit?: (step: Extract<AgenticStep, { kind: "yield" }>) => Message<AgenticInput>[]; // omitted: route nothing
 };
 function agentNode(
-  agent: JuncoAgent | MockAgent, options: NodeOptions<AgenticInput, AssistantMessage>, binding?: AgentNodeBinding,
+  agent: JuncoAgent | MockAgent, options: NodeOptions<AgenticInput, AssistantMessage> & Pick<ToolCollectionOptions, "policy">, binding?: AgentNodeBinding,
 ): AgenticNode;
-function deterministicNode<N, T>(state: Deterministic<N, T>, options: NodeOptions<N, T>): AgenticNode<N, T>;
+function deterministicNode<N, T>(state: Deterministic<N, T>, options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">): AgenticNode<N, T>;
 type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
   readonly result: NodeId; // the registered child node whose result this node returns
   readonly receive?: (view: ParentView<N, T>) => void | Promise<void>;
   readonly afterStep?: () => void | Promise<void>;
 };
 function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
-  graph: JuncoGraph<N, T, EH, Q>, options: NodeOptions<N, T>, binding: GraphNodeBinding<N, T>,
+  graph: JuncoGraph<N, T, EH, Q>, options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">, binding: GraphNodeBinding<N, T>,
 ): AgenticNode<N, T>;
 
 class Deterministic<N = AgenticInput, T = AssistantMessage> implements NodeGenerator<N, T> {
-  constructor(body: (signal: AbortSignal) => NodeGenerator<N, T>);
+  // A supplied collection must match `policy`; the coroutine borrows a lease until close().
+  constructor(body: (signal: AbortSignal, collection?: ToolCollection) => NodeGenerator<N, T>, policy: ToolCollectionOptions["policy"], collection?: ToolCollection);
+  readonly policy: ToolCollectionOptions["policy"];
+  readonly collection: ToolCollection | undefined;
   readonly signal: AbortSignal;
   readonly step: () => NodeGenerator<N, T>; // hands out this coroutine once
   abort(reason?: unknown): Promise<void>;
@@ -200,9 +210,11 @@ class MockAgent<S, P, T> implements Agentic<S, P, T> /* junco-agent's protocol *
 }
 
 // Every available node runs in each window: junco-scheduler's parallel policy, Width(1), UNBOUNDED.
-function createParallelAgentGraph<N = AgenticInput, T = AssistantMessage>(tracer: DataflowTracer = createTracer()): JuncoGraph<N, T>;
+function createParallelAgentGraph<N = AgenticInput, T = AssistantMessage>(
+  policy: ToolCollectionOptions["policy"], tracer: DataflowTracer = createTracer(), collection?: ToolCollection,
+): JuncoGraph<N, T>;
 
-// graph.Spawn (namespace-only): a createParallelAgentGraph holding `root` plus one child per input,
+// graph.Spawn (namespace-only): a createParallelAgentGraph(root.policy) holding `root` plus one child per input,
 // built by `spawn` in order. Each child gets two fresh message edges, `${rootId}->${childId}` and
 // `${childId}->${rootId}`; children are never linked. Construction only wires queues: members send
 // and consume messages through their own triggers and yields. Ids are the ones `addNode` returns.
@@ -285,7 +297,7 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 
 ### Workflows: `junco-agency/workflows`
 
-- `ralph(parent, agent, { id?, description?, input, output, rounds? })` registers one node in `parent` and returns its id. The node's state is a nested one-worker `JuncoGraph` whose worker's state is the supplied native `JuncoAgent`, so closing `parent` closes both. `input` and `output` are caller-owned message edges; wire them to the returned id before driving, and read the final `AssistantMessage` with `parent.result(id)`. Registration makes no model request; omitted ids are engine-generated, so several workflows coexist in one parent.
+- `ralph(parent, agent, { id?, description?, policy, input, output, rounds? })` registers one node in `parent` and returns its id. The node's state is a nested one-worker `JuncoGraph` whose worker's state is the supplied native `JuncoAgent`, so closing `parent` closes both. `input` and `output` are caller-owned message edges; wire them to the returned id before driving, and read the final `AssistantMessage` with `parent.result(id)`. Registration makes no model request; omitted ids are engine-generated, so several workflows coexist in one parent.
 - `rounds` defaults to `2` and must be a positive safe integer; anything else throws `RangeError` before anything is registered. The first round prompts the exact assignment; every later round prompts the assignment plus the immediately preceding complete draft, in the same session. Native yields resume within a round and never count as one.
 - The node expects exactly one text `prompt` on `input` (no images); a second assignment, any other input kind, or a nonempty `images` array fails the node. Each round must settle with stop reason `stop` and nonempty text; otherwise the node fails and nothing is published. A non-idle agent fails with `invalid_state`; cancellation through the nested graph's signal wins.
 - Only the final round's trimmed text is emitted, once, as `{ kind: "prompt", text }` on `output`, in the same parent step that publishes the node's result. `examples/mixed.ts` uses it with `rounds: 2`.
@@ -293,7 +305,7 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 
 ### Coroutines: `Deterministic` and `deterministicNode`
 
-- `new Deterministic(body)` invokes `body(signal)` once; the generator speaks the engine's own protocol (dependent bodies start with `let view = yield []`, sources may emit immediately) and its closure holds any state. `step()` hands the coroutine to one consumer only; a second registration or a direct advance before it fails with `invalid_state`, and advancing a finished coroutine fails with `invalid_state`.
+- `new Deterministic(body, policy, collection?)` invokes `body(signal, collection)` once; the generator speaks the engine's own protocol (dependent bodies start with `let view = yield []`, sources may emit immediately) and its closure holds any state. `step()` hands the coroutine to one consumer only; a second registration or a direct advance before it fails with `invalid_state`, and advancing a finished coroutine fails with `invalid_state`.
 - `abort(reason)` aborts `signal` and joins the advance in flight; a rejection with exactly that reason is cancellation. `close()` (and async disposal) is cached: it signals pending work, joins it, then drains the generator through `return()`, discarding cleanup batches; later advances reject with `closed`, and an advance in flight when close began rejects with the signal's reason rather than publishing cleanup output. A sole cleanup error rejects as itself, several as `AggregateError("Deterministic close failed")`. Bodies that ignore their signal cannot be preempted.
 
 ### Scheduling: `createAgencyScheduler`

@@ -100,6 +100,7 @@ async function newCaller(
     model,
     systemPrompt: "sys",
     tools,
+    policy: "GitPolicy",
   });
   closers.push(() => agent.return());
   return agent;
@@ -265,7 +266,11 @@ const toolUse = (...calls: ToolCall[]) =>
 function callerNode(caller: Agent, prompt = "Start") {
   return agentNode(
     caller,
-    { id: graph.NodeId("caller"), trigger: trigger.always() },
+    {
+      id: graph.NodeId("caller"),
+      trigger: trigger.always(),
+      policy: "GitPolicy",
+    },
     { prompt },
   );
 }
@@ -382,7 +387,7 @@ async function failingCaller(
     toolsApi.createTaskTool(),
   ]);
   caller.setTaskFailurePolicy(policy);
-  const outer = createParallelAgentGraph();
+  const outer = createParallelAgentGraph("GitPolicy");
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
   return { caller, outer, id };
@@ -465,7 +470,7 @@ describe("task tool through agentNode", () => {
       if (lane === "main") runIds.add(runId);
     });
 
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     const id = outer.addNode(callerNode(caller, "Start the workers"));
     closers.push(() => outer.close());
     const node = outer.getNode(id);
@@ -581,15 +586,15 @@ describe("task tool through agentNode", () => {
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const sourceId = outer.addNode(
       deterministicNode(
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           yield [];
           return upstreamValue;
-        }),
-        { trigger: trigger.always() },
+        }, "GitPolicy"),
+        { trigger: trigger.always(), policy: "GitPolicy" },
       ),
     );
     const notesId = outer.addNode(
@@ -600,9 +605,13 @@ describe("task tool through agentNode", () => {
             { id: notes, payload: { kind: "followUp", text: "note-2" } },
           ];
           return fauxAssistantMessage("notes done");
-        }),
+        }, "GitPolicy"),
         // Emits once the worker is running, while the caller's node is expanded.
-        { trigger: trigger.always(), is_available: () => alphaStarted },
+        {
+          trigger: trigger.always(),
+          is_available: () => alphaStarted,
+          policy: "GitPolicy",
+        },
       ),
     );
     const callerId = outer.addNode(
@@ -610,6 +619,7 @@ describe("task tool through agentNode", () => {
         caller,
         {
           id: graph.NodeId("caller"),
+          policy: "GitPolicy",
           trigger: trigger.anyOf(trigger.on(notesEdge), trigger.on(sourceEdge)),
         },
         {
@@ -651,8 +661,9 @@ describe("task tool through agentNode", () => {
             }
             view = yield [];
           }
-        }),
+        }, "GitPolicy"),
         {
+          policy: "GitPolicy",
           trigger: trigger.anyOf(
             trigger.on(outboundEdge),
             trigger.on(resultEdge),
@@ -730,7 +741,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -801,7 +812,7 @@ describe("task tool through agentNode", () => {
       toolsApi.createTaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -867,7 +878,7 @@ describe("task tool through agentNode", () => {
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -909,7 +920,7 @@ describe("task tool through agentNode", () => {
       toolsApi.createTaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -937,7 +948,7 @@ describe("task tool through agentNode", () => {
       if (toolCallId === "t1") void caller.abort();
       return undefined;
     });
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -954,7 +965,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     const id = outer.addNode(callerNode(caller));
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
@@ -999,7 +1010,7 @@ describe("task tool through agentNode", () => {
       hold.tool,
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     const id = outer.addNode(callerNode(caller));
     const running = outer.run();
     await hold.started;
@@ -1035,7 +1046,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1104,7 +1115,7 @@ describe("task tool through agentNode", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1232,7 +1243,7 @@ describe("task tool through agentNode", () => {
         throw new Error("nested worker exploded");
       });
     });
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1299,7 +1310,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
@@ -1379,7 +1390,7 @@ describe("task tool through agentNode", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const outer = createParallelAgentGraph();
+    const outer = createParallelAgentGraph("GitPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 

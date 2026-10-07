@@ -69,7 +69,7 @@ import { tracer } from "junco-agency";
 const newGraph = (observer) =>
   new DataflowGraph(createParallelScheduler(), Width(1), UNBOUNDED, observer);
 const add = (graph, id, state = undefined) =>
-  graph.addNode({ id: NodeId(id), state, trigger: always(), step: emitOnce(() => [], "done") });
+  graph.addNode({ id: NodeId(id), state, policy: "GitPolicy", trigger: always(), step: emitOnce(() => [], "done") });
 `;
 
 test("the graph section draws every engine Mermaid form as Unicode before any interaction", async () => {
@@ -198,7 +198,7 @@ import { graph, schedulers, tracer } from "junco-agency";
 let hooks = 0;
 function build(observer) {
   const workflow = new graph.JuncoGraph(
-    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer,
+    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer, "GitPolicy",
   );
   const feed = graph.messageEdge("feed");
   const payload = {
@@ -214,8 +214,8 @@ function build(observer) {
     new graph.nodes.Deterministic(async function* () {
       yield [graph.msg(feed, payload)];
       return "sent";
-    }),
-    { id: graph.NodeId("source"), trigger: graph.trigger.always() },
+    }, "GitPolicy"),
+    { id: graph.NodeId("source"), trigger: graph.trigger.always(), policy: "GitPolicy" },
   ));
   const sink = workflow.addNode(graph.nodes.deterministicNode(
     new graph.nodes.Deterministic(async function* () {
@@ -223,8 +223,8 @@ function build(observer) {
       const [received] = graph.from(inputs, feed);
       received.marker = "after";
       return received;
-    }),
-    { id: graph.NodeId("sink"), trigger: graph.trigger.when(feed) },
+    }, "GitPolicy"),
+    { id: graph.NodeId("sink"), trigger: graph.trigger.when(feed), policy: "GitPolicy" },
   ));
   workflow.addEdge(source, sink, feed);
   return workflow;
@@ -264,6 +264,7 @@ observer.complain(NodeId(""), "no run is active");
 const graph = newGraph(observer);
 graph.addNode({
   id: NodeId("busy"), state: undefined, trigger: always(),
+  policy: "GitPolicy",
   step: async function* () { observer.complain(NodeId("busy"), "during the run"); return "done"; },
 });
 await graph.run();
@@ -380,6 +381,7 @@ function failing(observer, handled) {
     id: NodeId("source"),
     state: undefined,
     trigger: always(),
+    policy: "GitPolicy",
     async *step() { throw cause; },
     ...(handled ? { on_error: () => [msg(notice, 5)] } : {}),
   });
@@ -387,6 +389,7 @@ function failing(observer, handled) {
     id: NodeId("sink"),
     state: undefined,
     trigger: when(notice),
+    policy: "GitPolicy",
     async *step() { yield []; return "sink"; },
   });
   graph.addEdge(source, sink, notice);
@@ -472,12 +475,14 @@ const source = graph.addNode({
   id: NodeId("source"),
   state: undefined,
   trigger: always(),
+  policy: "GitPolicy",
   async *step() { primes++; yield [msg(feed, 1)]; return 7; },
 });
 const sink = graph.addNode({
   id: NodeId("sink"),
   state: undefined,
   trigger: when(feed),
+  policy: "GitPolicy",
   async *step() { const view = yield []; return view.messages.get(feed.id).length; },
 });
 graph.addEdge(source, sink, feed);
@@ -496,6 +501,7 @@ const gated = (name) => {
     id: NodeId(name),
     state: undefined,
     trigger: always(),
+    policy: "GitPolicy",
     async *step() { await gates[name].promise; return name + "-result"; },
   });
   return g;
@@ -551,13 +557,13 @@ import { DummyTracer } from "dataflow-engine";
 import { graph, schedulers, tracer } from "junco-agency";
 async function deterministic(observer) {
   const workflow = new graph.JuncoGraph(
-    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer,
+    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer, "GitPolicy",
   );
   workflow.addNode(graph.nodes.deterministicNode(
-    new graph.nodes.Deterministic(async function* () { return 3; }),
-    { id: graph.NodeId("only"), trigger: graph.trigger.always() },
+    new graph.nodes.Deterministic(async function* () { return 3; }, "GitPolicy"),
+    { id: graph.NodeId("only"), trigger: graph.trigger.always(), policy: "GitPolicy" },
   ));
-  const factory = graph.createParallelAgentGraph(observer);
+  const factory = graph.createParallelAgentGraph("GitPolicy", observer);
   assert.equal(factory.tracer, observer);
   try {
     assert.deepEqual([...await workflow.run()], [["only", 3]]);
@@ -578,10 +584,10 @@ const selected = tracer.createTracer();
 assert.ok(selected instanceof tracer.StdoutTracer);
 assert.equal(tracer.createTracer(), selected);
 const direct = new graph.JuncoGraph(
-  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(),
+  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(), "GitPolicy",
 );
 assert.equal(direct.tracer, selected);
-const factory = graph.createParallelAgentGraph();
+const factory = graph.createParallelAgentGraph("GitPolicy");
 assert.equal(factory.tracer, selected);
 
 const scheduler = schedulers.createRoundRobinScheduler();
@@ -604,9 +610,10 @@ const agent = await agentApi.JuncoAgent.fromResolved({
   models,
   model: faux.getModel(),
   tools: [],
+  policy: "GitPolicy",
 });
-const parent = graph.createParallelAgentGraph(new tracer.StdoutTracer("parent"));
-const id = ralph(parent, agent, { input: graph.messageEdge("in"), output: graph.messageEdge("out") });
+const parent = graph.createParallelAgentGraph("GitPolicy", new tracer.StdoutTracer("parent"));
+const id = ralph(parent, agent, { input: graph.messageEdge("in"), output: graph.messageEdge("out"), policy: "GitPolicy" });
 assert.equal(parent.getNode(id).state.tracer, parent.tracer);
 await parent.close();
 await Promise.all([direct.close(), factory.close()]);
@@ -646,10 +653,10 @@ const selected = tracer.createTracer();
 assert.ok(selected instanceof OpikDataflowTracer);
 assert.equal(tracer.createTracer(), selected);
 const direct = new graph.JuncoGraph(
-  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(),
+  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(), "GitPolicy",
 );
 assert.equal(direct.tracer, selected);
-assert.equal(graph.createParallelAgentGraph().tracer, selected);
+assert.equal(graph.createParallelAgentGraph("GitPolicy").tracer, selected);
 console.log("OPIK");
 process.exit(0);
 `,

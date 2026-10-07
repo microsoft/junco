@@ -204,7 +204,7 @@ function finalText(message: AssistantMessage | undefined, member: MemberId): str
 }
 
 export function reviewRound(request: string, members: Members, search: SearchCounts, feedback?: string) {
-  const graph = createParallelAgentGraph();
+  const graph = createParallelAgentGraph("GitPolicy");
   const research = valueEdge<AgenticInput, AssistantMessage>("Librarian->Architect");
   const partialResearch = messageEdge<AgenticInput, AssistantMessage>("Librarian~>Architect");
   const researchForReducer = valueEdge<AgenticInput, AssistantMessage>("Librarian->Reducer");
@@ -216,6 +216,7 @@ export function reviewRound(request: string, members: Members, search: SearchCou
 
   const librarian = agentNode(members.Librarian, {
     id: NodeId("Librarian"),
+    policy: "GitPolicy",
     description: roles.Librarian.focus,
     trigger: always(),
   }, {
@@ -240,6 +241,7 @@ export function reviewRound(request: string, members: Members, search: SearchCou
   });
   const architectId = graph.addNode(agentNode(members.Architect, {
     id: NodeId("Architect"),
+    policy: "GitPolicy",
     description: roles.Architect.focus,
     trigger: anyOf(on(partialResearch), on(research)),
   }, {
@@ -253,6 +255,7 @@ export function reviewRound(request: string, members: Members, search: SearchCou
   }));
   const reducerId = graph.addNode(agentNode(members.Reducer, {
     id: NodeId("Reducer"),
+    policy: "GitPolicy",
     description: roles.Reducer.focus,
     trigger: allOf(on(researchForReducer), on(design)),
   }, {
@@ -340,6 +343,7 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[]): Pr
     thinkingLevel: roles[id].thinkingLevel,
     systemPrompt: roles[id].instructions,
     tools,
+    policy: "GitPolicy",
   });
   const search = createOssSearchTool();
   const review = createReviewTool();

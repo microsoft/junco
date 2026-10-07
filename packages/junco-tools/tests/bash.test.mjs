@@ -3,13 +3,11 @@ import { spawn } from "node:child_process";
 import {
   access,
   mkdir,
-  mkdtemp,
   readFile,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -21,7 +19,6 @@ import {
   createBashTool,
   createShellMuxOperations,
   isMarshPolicyDenied,
-  shutdownShellMux,
 } from "../dist/index.js";
 import { NativeMux } from "../target/native-test/index.js";
 import {
@@ -196,10 +193,10 @@ test("a zero-exit policy denial leaves all seed contents unchanged", {
 
 /**
  * The zero-exit denial scenario in a fresh Node process at `level`, through production
- * acquisition: the singleton opens the CopyTree seed and installs the real logger callback, and
- * the first `shutdownShellMux()` is the logging fence. `failAfterGrant` wraps that callback to
+ * acquisition: an owned lease opens the CopyTree seed and installs the real logger callback,
+ * and its first `release()` is the logging fence. `failAfterGrant` wraps that callback to
  * throw once, after logging the first grant. Returns the child's stdout, stderr and the
- * structured records the logger's real transport had seen when shutdown settled.
+ * structured records the logger's real transport had seen when release settled.
  */
 async function policyLogScenario(level, failAfterGrant = false) {
   const url = (path) => JSON.stringify(new URL(path, import.meta.url).href);
@@ -208,7 +205,7 @@ async function policyLogScenario(level, failAfterGrant = false) {
     import { access, readFile, rm } from "node:fs/promises";
     import { join } from "node:path";
     import {
-      acquireShellMux, createBashTool, createShellMuxOperations, isMarshPolicyDenied, shutdownShellMux,
+      acquireShellMux, createBashTool, createShellMuxOperations, isMarshPolicyDenied,
     } from ${url("../dist/index.js")};
     import { log } from ${url("../dist/log.js")};
     import { cleanup, copyTreeNative, seedFixture } from ${url("./helpers.mjs")};
@@ -233,16 +230,19 @@ async function policyLogScenario(level, failAfterGrant = false) {
     };
     const { root, seed } = await seedFixture();
     let lease;
+    const owners = [];
     let shutdown;
     let shutdownError;
     let snapshot;
     try {
-      lease = await acquireShellMux(seed, { native, sandbox: "always" });
+      lease = await acquireShellMux(seed, { native, sandbox: "always", policy: "GitPolicy" });
       // A closed handle stays reachable; the child must still exit on its own.
       globalThis.retainedLease = lease;
-      const tool = (principal) => createBashTool(seed, {
-        operations: createShellMuxOperations({ native, principal }),
-      });
+      const tool = (principal) => {
+        const operations = createShellMuxOperations({ native, mux: lease.mux, principal });
+        owners.push(operations);
+        return createBashTool(seed, { operations });
+      };
       await tool("file-owner").execute("claim-file", {
         command: "cat src/file0.txt > /dev/null; printf 'owned\\\\n' > src/file0.txt",
       });
@@ -254,21 +254,22 @@ async function policyLogScenario(level, failAfterGrant = false) {
       );
       assert.equal(await readFile(join(seed, "src/file0.txt"), "utf8"), "owned\\n");
       await assert.rejects(access(join(seed, "src/new.txt")), { code: "ENOENT" });
-      // The first shutdown is the fence: native close drained every decision, the log flushed.
-      const closing = shutdownShellMux();
-      assert.equal(shutdownShellMux(), closing);
+      for (const owner of owners) await owner.close();
+      // The first release is the fence: native close drained every decision, the log flushed.
+      const closing = lease.release();
+      assert.equal(lease.release(), closing);
       shutdown = await closing.then(() => "ok", (error) => {
         shutdownError = error;
         return error.message;
       });
       snapshot = records.slice();
-      assert.equal(shutdownShellMux(), closing);
-      const replayed = await shutdownShellMux().then(() => undefined, (error) => error);
+      assert.equal(lease.release(), closing);
+      const replayed = await lease.release().then(() => undefined, (error) => error);
       assert.equal(replayed, shutdownError);
     } finally {
       await cleanup(
-        () => lease?.release(),
-        () => shutdownShellMux().catch((error) => {
+        ...owners.map((owner) => () => owner.close()),
+        () => lease?.release().catch((error) => {
           if (shutdownError === undefined || error !== shutdownError) throw error;
         }),
         () => rm(root, { recursive: true, force: true }),
@@ -1238,9 +1239,8 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
       (error) => error.code === "ENOENT",
     );
 
-    // The operations adopted this mux as the application singleton: only application
-    // shutdown closes it, after which a fresh raw generation may open.
-    await shutdownShellMux();
+    // Closing the fixture mux leaves the seed for a fresh mux to reopen.
+    await mux.close();
     // The retained run reference stays alive across this reopen on purpose.
     mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
     assert.deepEqual(await retained.wait(), claimed);
@@ -1383,89 +1383,57 @@ test("close fences admission, joins runs, and discards staged work", {
   }
 });
 
-test("shutdownShellMux closes an adopted mux and joins its active run", {
+test("closing an operations owner joins its run and leaves a borrowed mux open", {
   timeout: 30_000,
 }, async (t) => {
   const instance = await fixture();
-  let mux = instance.mux;
-  // Deliberately never released: shutdown must reclaim the held job itself.
-  const gate = join(instance.root, "adopted-gate");
+  const { mux } = instance;
+  // Deliberately never released: close must reclaim the held job itself.
+  const gate = join(instance.root, "borrowed-gate");
   let run;
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
-        mux,
-        native: instance.native,
-        principal: "adopted-owner",
-      }),
+    const operations = createShellMuxOperations({
+      mux,
+      native: instance.native,
+      principal: "borrowed-owner",
     });
-    const ready = deferred(t.signal, "adopted readiness");
+    const tool = createBashTool(instance.seed, { operations });
+    const ready = deferred(t.signal, "borrowed readiness");
     run = tool.execute(
-      "adopted",
+      "borrowed",
       {
         command: heldChild({
           gate,
-          ready: "ADOPT_READY",
-          done: "ADOPT_DONE",
+          ready: "BORROW_READY",
+          done: "BORROW_DONE",
         }),
       },
       t.signal,
       (update) => {
-        if (text(update).includes("ADOPT_READY")) ready.resolve();
+        if (text(update).includes("BORROW_READY")) ready.resolve();
       },
     );
     await ready.promise;
-    await Promise.all([shutdownShellMux(), assert.rejects(run, Error)]);
-    // The adopted mux was closed exactly by shutdown, and its owner stays fenced.
-    await assert.rejects(mux.exists(instance.seed, "src/file0.txt"), /closed/);
+    const closing = operations.close();
+    assert.equal(operations.close(), closing);
+    await Promise.all([closing, assert.rejects(run, Error)]);
     await assert.rejects(
-      tool.execute("after-shutdown", { command: "printf late" }, t.signal),
+      tool.execute("after-close", { command: "printf late" }, t.signal),
       /closed/,
     );
-
-    // A consumer created after shutdown completed starts a new generation.
-    mux = await NativeMux.openCopyTree(instance.seed, { sandbox: "always" });
-    const fresh = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
-        mux,
-        native: instance.native,
-        principal: "adopted-owner",
-      }),
+    // The borrowed mux is still open for its owner.
+    const fresh = createShellMuxOperations({
+      mux,
+      native: instance.native,
+      principal: "next-owner",
     });
-    const after = await fresh.execute(
-      "next-generation",
-      { command: "printf 'next generation\\n'" },
-      t.signal,
-    );
-    assert.equal(text(after), "next generation\n");
+    const after = await createBashTool(instance.seed, {
+      operations: fresh,
+    }).execute("next-owner", { command: "printf 'still open\\n'" }, t.signal);
+    await fresh.close();
+    assert.equal(text(after), "still open\n");
   } finally {
     await Promise.allSettled([run]);
-    await closeFixture({ root: instance.root, mux });
-  }
-});
-
-test("shutdownShellMux fences a dormant operations owner", {
-  timeout: 30_000,
-}, async () => {
-  const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), "junco-tools-dormant-"),
-  );
-  try {
-    const operations = createShellMuxOperations({ principal: "dormant-owner" });
-    const chunks = [];
-    const onData = (data) => chunks.push(data);
-    await shutdownShellMux();
-    await assert.rejects(
-      operations.exec("printf must-not-run", temporaryDirectory, { onData }),
-      Error,
-    );
-    await shutdownShellMux();
-    await assert.rejects(
-      operations.exec("printf must-not-run", temporaryDirectory, { onData }),
-      Error,
-    );
-    assert.deepEqual(chunks, []);
-  } finally {
-    await rm(temporaryDirectory, { recursive: true, force: true });
+    await closeFixture(instance);
   }
 });

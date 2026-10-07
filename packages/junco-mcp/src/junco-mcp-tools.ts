@@ -9,11 +9,11 @@ import {
   type StdioTransportOptions,
   type Tool,
 } from "@earendil-works/pi-mcp";
-import { acquireShellMux, type ShellMuxLease } from "junco-tools";
+import type { ToolCollection } from "junco-tools";
 import { ShellMuxStdioTransport } from "./stdio.js";
 import { adaptMcpTools, restoreTerminalError } from "./tools.js";
 
-/** One MCP server, launched over stdio as a managed job of the shared Junco ShellMux. */
+/** One MCP server, launched over stdio as a managed job of a Junco ToolCollection's ShellMux. */
 export type JuncoMcpServerOptions = {
   readonly name: string;
   readonly type: "stdio";
@@ -34,12 +34,17 @@ export interface JuncoMcpConnectOptions {
    * Default: `false`, which ends standard input and publishes the server's effects.
    */
   readonly discardOnClose?: boolean;
+  /**
+   * Collection whose ShellMux (and so authorization policy) runs every server. Required by a
+   * nonempty definition; the connection holds a lease on it until closed.
+   */
+  readonly collection?: ToolCollection;
 }
 
 /** Fresh clients and processes for every server of a definition, with their tools. */
 export interface JuncoMcpConnection {
   readonly tools: AgentTool[];
-  /** Close every server in reverse order and release the ShellMux lease. Idempotent. */
+  /** Close every server in reverse order and release the collection lease. Idempotent. */
   close(): Promise<void>;
 }
 
@@ -60,7 +65,7 @@ const CLIENT_IDENTITY = { name: "junco-mcp", version: "0.1.0" } as const;
 /**
  * A declarative, ordered collection of MCP stdio servers. Defining servers does no process
  * or network work; each {@link connect} starts fresh clients and processes on the
- * application's shared Junco ShellMux.
+ * supplied collection's ShellMux.
  */
 export class JuncoMcpTools {
   readonly #servers: ServerDefinition[] = [];
@@ -81,6 +86,11 @@ export class JuncoMcpTools {
     }
     this.#servers.push({ name, options });
     return this;
+  }
+
+  /** Number of servers in the definition. */
+  get size(): number {
+    return this.#servers.length;
   }
 
   /**
@@ -130,14 +140,21 @@ export class JuncoMcpTools {
       return { tools: [], close: () => Promise.resolve() };
     }
     if (signal?.aborted) throw new McpAbortError();
+    const collection = options.collection;
+    if (collection === undefined) {
+      throw new TypeError(
+        "JuncoMcpTools: a nonempty definition requires a collection",
+      );
+    }
 
-    const lease = await acquireShellMux(base);
+    const lease = collection.lease();
+    const mux = collection.mux;
     const records: ServerRecord[] = [];
     try {
       if (signal?.aborted) throw new McpAbortError();
       for (const server of servers) {
         try {
-          await lease.mux.validateCwd(server.cwd);
+          await mux.validateCwd(server.cwd);
         } catch (error) {
           throw new Error(
             `JuncoMcpTools: failed to initialize server "${server.name}"`,
@@ -148,7 +165,7 @@ export class JuncoMcpTools {
       }
       for (const server of servers) {
         const { name, type: _type, clientOptions, ...stdio } = server;
-        const transport = new ShellMuxStdioTransport(lease.mux, {
+        const transport = new ShellMuxStdioTransport(mux, {
           ...stdio,
           ...(options.discardOnClose ? { discardOnClose: true } : {}),
         });
@@ -249,7 +266,7 @@ function copyServerOptions(
  */
 async function closeServers(
   records: readonly ServerRecord[],
-  lease: ShellMuxLease,
+  lease: { close(): Promise<void> },
   primary?: unknown,
 ): Promise<unknown[]> {
   const seen = new Set<unknown>();
@@ -269,10 +286,6 @@ async function closeServers(
     await client.close().catch(collect);
     await transport.closed.catch(collect);
   }
-  try {
-    lease.release();
-  } catch (error) {
-    collect(error);
-  }
+  await lease.close().catch(collect);
   return failures;
 }
