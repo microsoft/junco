@@ -19,6 +19,7 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { type JuncoAgent, JuncoAgentError } from "junco-agent";
 import { createScheduler } from "junco-scheduler";
+import type { ToolCollectionOptions } from "junco-tools";
 import type { AgenticInput } from "../agentic.js";
 import { graphNode } from "../graph-node.js";
 import { JuncoGraph } from "../junco-graph.js";
@@ -34,6 +35,8 @@ export type RalphOptions = Pick<
   readonly output: Edge<AgenticInput, AssistantMessage>;
   /** Full-assignment rounds to run; a positive safe integer, two when omitted. */
   readonly rounds?: number;
+  /** Policy of the worker and outer node; must equal `agent.policy`. */
+  readonly policy: ToolCollectionOptions["policy"];
 };
 
 const assignmentError = () =>
@@ -94,11 +97,13 @@ class RalphState {
  * draft in the same session, then emits only the final answer on `output`.
  *
  * The registered node's state is the child graph, whose sole worker's state is `agent`, so closing
- * `parent` closes both. `agent` must be idle and is lent exclusively to the workflow while it runs.
+ * `parent` closes both. The child graph borrows `agent.collection`. `agent` must be idle and is
+ * lent exclusively to the workflow while it runs.
  * Wire `input` into and `output` out of the returned id before driving `parent`; the final
  * `AssistantMessage` is `parent.result(id)`. Registration makes no model request.
  *
  * @throws {RangeError} before registering anything when `rounds` is not a positive safe integer.
+ * @throws {TypeError} before registering anything when `agent.policy` is not `options.policy`.
  */
 export function ralph<
   EH,
@@ -113,6 +118,9 @@ export function ralph<
   if (!(Number.isSafeInteger(rounds) && rounds >= 1)) {
     throw new RangeError("Ralph rounds must be a positive safe integer");
   }
+  if (agent.policy !== options.policy) {
+    throw new TypeError("Node policy does not match its state");
+  }
 
   const scheduler = createScheduler<RalphState, AgenticInput, AssistantMessage>(
     {
@@ -125,7 +133,14 @@ export function ralph<
       },
     },
   );
-  const child = new JuncoGraph(scheduler, Width(1), UNBOUNDED, parent.tracer);
+  const child = new JuncoGraph(
+    scheduler,
+    Width(1),
+    UNBOUNDED,
+    parent.tracer,
+    options.policy,
+    agent.collection,
+  );
 
   /** One full native run of `text`, resuming through native yields, and its settled final message. */
   const runOnce = async (text: string): Promise<AssistantMessage> => {
@@ -168,6 +183,7 @@ export function ralph<
   const workerId = child.addNode({
     id: NodeId("RalphStep"),
     state: agent,
+    policy: options.policy,
     trigger: always(),
     step,
     is_available: () => scheduler.state.assignment !== undefined,
@@ -179,6 +195,7 @@ export function ralph<
       {
         id: options.id,
         description: options.description,
+        policy: options.policy,
         trigger: when(input),
       },
       {
@@ -191,6 +208,17 @@ export function ralph<
             nodeId,
             msg(output, { kind: "prompt", text: finalText(retained.value) }),
           );
+        },
+        contract: (edgeId) => {
+          if (edgeId !== input.id)
+            throw new JuncoAgentError(
+              "invalid_state",
+              `No contract for edge "${edgeId}"`,
+            );
+          return {
+            expect:
+              "Exactly one image-free prompt containing the complete assignment; duplicate assignments are rejected, and the final revised draft is emitted after all rounds.",
+          };
         },
       },
     ),

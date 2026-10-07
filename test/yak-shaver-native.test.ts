@@ -16,7 +16,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isMarshPolicyDenied, type NativeMux } from "junco-tools";
+import {
+  isMarshPolicyDenied,
+  type NativeModule,
+  type NativeMux,
+  ToolCollection,
+} from "junco-tools";
 import {
   type AcceptedRefactor,
   applyRefactor,
@@ -36,6 +41,13 @@ const native = await import(
     ),
   )
 );
+const copyTree = {
+  ...native,
+  NativeMux: {
+    open: (...args: Parameters<NativeModule["NativeMux"]["open"]>) =>
+      native.NativeMux.openCopyTree(...args),
+  },
+} as NativeModule;
 
 const BOM8 = Buffer.from([0xef, 0xbb, 0xbf]);
 const BOM16 = Buffer.from([0xff, 0xfe]);
@@ -44,11 +56,14 @@ const utf16 = (text: string) =>
 
 type Fixture = {
   readonly seed: string;
+  /** The protected `LockPolicy` mux: the applier's. */
   readonly mux: NativeMux;
+  /** The trusted-build `EmptyPolicy` mux: index refresh's. */
+  readonly buildMux: NativeMux;
   readonly git: (...args: string[]) => string;
 };
 
-/** A committed Git repository holding `files`, and the one native mux over it. */
+/** A committed Git repository holding `files`, and Yak Shaver's two collections over it. */
 async function withRepository(
   files: Readonly<Record<string, string | Uint8Array>>,
   body: (fixture: Fixture) => Promise<void>,
@@ -78,11 +93,24 @@ async function withRepository(
       "-m",
       "baseline",
     );
-    const mux: NativeMux = await native.NativeMux.openCopyTree(seed, {
+    const protectedTools = await ToolCollection.create(seed, {
+      native: copyTree,
+      policy: "LockPolicy",
       sandbox: "always",
     });
-    defer(() => mux.close());
-    await body({ seed, mux, git });
+    defer(() => protectedTools.close());
+    const buildTools = await ToolCollection.create(seed, {
+      native: copyTree,
+      policy: "EmptyPolicy",
+      sandbox: "always",
+    });
+    defer(() => buildTools.close());
+    await body({
+      seed,
+      mux: protectedTools.mux,
+      buildMux: buildTools.mux,
+      git,
+    });
   });
 }
 
@@ -185,7 +213,7 @@ const blobOf = (fixture: Fixture, path: string) =>
 
 const QUOTED = 'dir with space/it\'s "q".ts';
 
-test("applies a multi-file refactor in place and stages exactly its paths", async () => {
+test("applies a multi-file refactor in place and releases exactly its paths", async () => {
   await withRepository(
     {
       "lf.ts": "a\nb\nc\n",
@@ -203,7 +231,7 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
       git("add", "lf.ts");
       await writeFile(join(seed, "staged.txt"), "staged change\n");
       git("add", "staged.txt");
-      const stagedBefore = indexBlob(fixture, "staged.txt");
+      const indexBefore = git("ls-files", "--stage");
 
       const paths = await apply(fixture, 1, [
         {
@@ -263,27 +291,16 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
       };
       for (const [path, bytes] of Object.entries(expected)) {
         assert.deepEqual(await readFile(join(seed, path)), bytes, path);
-        assert.equal(
-          indexBlob(fixture, path),
-          blobOf(fixture, path),
-          `${path} is staged`,
-        );
       }
       assert.equal((await stat(join(seed, "lf.ts"))).mode & 0o777, 0o755);
-      assert.match(git("ls-files", "--stage", "--", "lf.ts"), /^100755 /);
-      assert.equal(indexBlob(fixture, "staged.txt"), stagedBefore);
       assert.equal(
         await readFile(join(seed, "untouched.ts"), "utf8"),
         "keep\n",
       );
       assert.equal(git("status", "--porcelain=v1", "--", "untouched.ts"), "");
-      assert.equal(
-        git("diff", "--name-only"),
-        "",
-        "nothing touched is left unstaged",
-      );
+      assert.equal(git("ls-files", "--stage"), indexBefore, "release stages nothing");
 
-      // A fresh owner edits and stages the same file: the first owner's Stage released it.
+      // A fresh owner edits the same file: the first owner's release relinquished it.
       assert.deepEqual(
         await apply(fixture, 2, [replace("lf.ts", 1, ["top"], ["TOP"])]),
         ["lf.ts"],
@@ -292,7 +309,7 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
         await readFile(join(seed, "lf.ts"), "utf8"),
         "TOP\na\nB1\nB2\n",
       );
-      assert.equal(indexBlob(fixture, "lf.ts"), blobOf(fixture, "lf.ts"));
+      assert.equal(git("ls-files", "--stage"), indexBefore);
     },
   );
 }, 120_000);
@@ -473,32 +490,10 @@ test("refused proposals change neither source nor index", async () => {
   );
 }, 180_000);
 
-test("a failed git add aborts the command and publishes neither private edit", async () => {
-  await withRepository(
-    { ".gitignore": "ignored/\n", "tracked.ts": "one\n" },
-    async (fixture) => {
-      const before = await state(fixture);
-      await assert.rejects(
-        apply(fixture, 3, [
-          replace("tracked.ts", 1, ["one"], ["ONE"]),
-          {
-            kind: "create",
-            path: "ignored/new.ts",
-            startLine: 1,
-            beforeLines: [],
-            afterLines: ["x"],
-          },
-        ]),
-        /git add exited 1; its changes were discarded[\s\S]*ignored/,
-      );
-      assert.deepEqual(await state(fixture), before);
-    },
-  );
-}, 60_000);
-
-test("a foreign unstaged owner's lock denies application despite a fresh read", async () => {
+test("a trusted-build owner's lock denies the LockPolicy applier despite a fresh read", async () => {
   await withRepository({ "claimed.ts": "seed\n" }, async (fixture) => {
-    const claim = fixture.mux.start(
+    // The EmptyPolicy mux grants its own write; the LockPolicy applier must still respect it.
+    const claim = fixture.buildMux.start(
       {
         command: "cat claimed.ts > /dev/null; printf 'owned\\n' > claimed.ts",
         cwd: fixture.seed,
@@ -542,7 +537,10 @@ test("refreshGraftSnapshot sees current source without publishing the Graft cach
         ["src/a.ts"],
       );
       const before = await state(fixture);
-      const snapshot = await refreshGraftSnapshot(fixture.seed, fixture.mux);
+      const snapshot = await refreshGraftSnapshot(
+        fixture.seed,
+        fixture.buildMux,
+      );
       const names = snapshot.nodes
         .filter((node) => node.path === "src/a.ts" && node.kind === "class")
         .map((node) => node.name);

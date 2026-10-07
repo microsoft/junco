@@ -51,12 +51,15 @@ const input: AgenticInput = {
   text: "Contact the coordinator.",
 };
 
-/** A real agent that complains `complaint` once and then answers "continued". */
+/** A real agent that receives its inbox, complains `complaint` once and then answers "continued". */
 async function worker(
   complaint: string,
   systemPrompt: string = "complaint system",
 ) {
   const { options } = await nativeOptions([
+    fauxAssistantMessage([fauxToolCall("recv", {}, { id: "recv-1" })], {
+      stopReason: "toolUse",
+    }),
     fauxAssistantMessage(
       [fauxToolCall("complain", { complaint }, { id: "complaint-1" })],
       { stopReason: "toolUse" },
@@ -66,12 +69,23 @@ async function worker(
   const member = await agentApi.JuncoAgent.fromResolved({
     ...options,
     systemPrompt,
-    tools: [],
-    activeToolNames: [],
+    tools: [tools.RecvTool()],
   });
   closers.push(() => member.return());
   return member;
 }
+
+/** The user and tool-result texts of a complaint's request snapshot. */
+const promptTexts = (issue: tools.Issue) =>
+  issue.prompt.messages.flatMap((message) =>
+    message.role === "user" || message.role === "toolResult"
+      ? [
+          typeof message.content === "string"
+            ? message.content
+            : contentText(message.content),
+        ]
+      : [],
+  );
 
 /** `member` registered behind a deterministic source sending `delivered` on `source->worker`. */
 function wire(
@@ -88,18 +102,24 @@ function wire(
       yield [graph.msg(edge, delivered)];
       return fauxAssistantMessage("seeded");
     },
+    "LockPolicy",
   );
   const sourceId = flow.addNode(
     deterministicNode(source, {
       id: graph.NodeId(`source-${crypto.randomUUID()}`),
+      policy: "LockPolicy",
       trigger: trigger.always(),
     }),
   );
   const workerId = flow.addNode(
     agentNode(
       member,
-      { ...(id === undefined ? {} : { id }), trigger: trigger.when(edge) },
-      { receive: (view) => graph.from(view, edge) },
+      {
+        ...(id === undefined ? {} : { id }),
+        policy: "LockPolicy",
+        trigger: trigger.when(edge),
+      },
+      { prompt: "Call recv and follow the delivered request." },
     ),
   );
   flow.addEdge(sourceId, workerId, edge);
@@ -107,7 +127,7 @@ function wire(
 }
 
 function newGraph(tracer: DummyTracer = new RecordingTracer()) {
-  const flow = createParallelAgentGraph(tracer);
+  const flow = createParallelAgentGraph("LockPolicy", tracer);
   closers.push(() => flow.close());
   return flow;
 }
@@ -133,20 +153,16 @@ describe("complaints through real graphs", () => {
     assert.equal(issue!.nodeId, workerId);
     assert.equal(issue!.complaint, "I cannot reach the coordinator.");
     assert.deepEqual(issue!.messages, [{ id: edge.id, payload: input }]);
-    assert.equal(issue!.prompt.systemPrompt, "complaint system");
-    assert.ok(
-      issue!.prompt.messages.some(
-        (message) =>
-          message.role === "user" &&
-          (typeof message.content === "string"
-            ? message.content
-            : contentText(message.content)) === "Contact the coordinator.",
-      ),
+    assert.equal(
+      issue!.prompt.systemPrompt,
+      "complaint system\n\nAfter you write to a file use release to relinquish ownership",
     );
-    assert.deepEqual(
-      issue!.prompt.tools?.map((tool) => tool.name),
-      ["complain"],
-    );
+    // The delivered payload reached the request as recv's result, not as a native user message.
+    assert.ok(promptTexts(issue!).some((text) => text.includes(input.text)));
+    assert.deepEqual(issue!.prompt.tools?.map((tool) => tool.name).sort(), [
+      "complain",
+      "recv",
+    ]);
     assert.deepEqual(tracer.complaints, [
       [workerId, "I cannot reach the coordinator."],
     ]);
@@ -234,18 +250,13 @@ describe("complaints through real graphs", () => {
       assert.equal(wired.workerId, id);
       assert.equal(issue.nodeId, id);
       assert.deepEqual(issue.messages, [{ id: wired.edge.id, payload: own }]);
-      assert.equal(issue.prompt.systemPrompt, systemPrompt);
-      const userTexts = issue.prompt.messages.flatMap((message) =>
-        message.role === "user"
-          ? [
-              typeof message.content === "string"
-                ? message.content
-                : contentText(message.content),
-            ]
-          : [],
+      assert.equal(
+        issue.prompt.systemPrompt,
+        `${systemPrompt}\n\nAfter you write to a file use release to relinquish ownership`,
       );
-      assert.ok(userTexts.includes(own.text));
-      assert.ok(!userTexts.includes(foreign.text));
+      const texts = promptTexts(issue);
+      assert.ok(texts.some((text) => text.includes(own.text)));
+      assert.ok(!texts.some((text) => text.includes(foreign.text)));
     }
   }, 5_000);
 
@@ -273,7 +284,7 @@ describe("complaints through real graphs", () => {
   test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
     const innerTracer = new RecordingTracer();
     const outerTracer = new RecordingTracer();
-    const inner = createParallelAgentGraph(innerTracer);
+    const inner = createParallelAgentGraph("LockPolicy", innerTracer);
     const { workerId } = wire(
       inner,
       await worker("nested"),
@@ -283,7 +294,11 @@ describe("complaints through real graphs", () => {
     const wrapper = outer.addNode(
       graphNode(
         inner,
-        { id: graph.NodeId("wrapper"), trigger: trigger.always() },
+        {
+          id: graph.NodeId("wrapper"),
+          policy: "LockPolicy",
+          trigger: trigger.always(),
+        },
         { result: workerId },
       ),
     );
@@ -307,7 +322,11 @@ describe("complaints through real graphs", () => {
     const member = await worker("shared spec");
     const spec = agentNode(
       member,
-      { id: graph.NodeId("shared"), trigger: trigger.always() },
+      {
+        id: graph.NodeId("shared"),
+        policy: "LockPolicy",
+        trigger: trigger.always(),
+      },
       { prompt: "go" },
     );
     const a = newGraph(tracerA);

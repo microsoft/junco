@@ -16,9 +16,12 @@ import {
   type DataflowGraph,
   type DataflowScheduler,
   type DataflowTracer,
+  EdgeId,
+  type EdgeIdType,
   type Message,
   messageEdge,
   msg,
+  NodeId,
   type NodeIdType,
   type NodeOptions,
   type NodeSpec,
@@ -38,7 +41,13 @@ import type {
   PiSchedulerOptions,
   ScheduleTool,
 } from "junco-scheduler/agent";
-import { type ComplainTool, type Issue, isComplainTool } from "junco-tools";
+import {
+  type ComplainTool,
+  type Contract,
+  type Issue,
+  isComplainTool,
+  type ToolCollection,
+} from "junco-tools";
 import {
   type Agentic,
   type AgenticInput,
@@ -113,6 +122,36 @@ export function juncoAgentKeepsSpecializations(
   return [tool, skill, template];
 }
 
+export function agentFactoriesRequirePolicy(
+  native: Omit<
+    Parameters<typeof JuncoAgent.fromResolved>[0],
+    "policy" | "collection"
+  >,
+  collection: ToolCollection,
+  agent: JuncoAgent,
+) {
+  const borrowed = JuncoAgent.fromResolved({
+    ...native,
+    policy: "LockPolicy",
+    collection,
+  });
+  const permissive = JuncoAgent.create({
+    provider: "p",
+    model: "m",
+    policy: "EmptyPolicy",
+    tools: [],
+  });
+  // @ts-expect-error the policy is required
+  void JuncoAgent.fromResolved(native);
+  // @ts-expect-error policies are the two case-sensitive literals
+  void JuncoAgent.create({ provider: "p", model: "m", policy: "gitpolicy" });
+  const bound: [ToolCollection | undefined, "LockPolicy" | "EmptyPolicy"] = [
+    agent.collection,
+    agent.policy,
+  ];
+  return [borrowed, permissive, bound];
+}
+
 export async function factoriesKeepSpecializations(
   resolved: Omit<
     PiSchedulerOptions<
@@ -133,6 +172,7 @@ export async function factoriesKeepSpecializations(
     "adapter"
   >,
   tracer: DataflowTracer,
+  collection: NonNullable<JuncoGraph["collection"]>,
 ) {
   let graph: JuncoGraph | undefined;
   const made: Promise<TaggedScheduler> = createAgencyScheduler(
@@ -144,7 +184,14 @@ export async function factoriesKeepSpecializations(
     opus,
   );
   const scheduler = await made;
-  const constructed = new JuncoGraph(scheduler, Width(1), UNBOUNDED, tracer);
+  const constructed = new JuncoGraph(
+    scheduler,
+    Width(1),
+    UNBOUNDED,
+    tracer,
+    "LockPolicy",
+    collection,
+  );
   graph = constructed;
   const specialized: TaggedScheduler = constructed.scheduler;
   const skill: "skill" | undefined =
@@ -162,8 +209,42 @@ export async function factoriesKeepSpecializations(
   // @ts-expect-error a direct JuncoGraph requires a tracer
   void new JuncoGraph(scheduler, Width(1), UNBOUNDED);
   // @ts-expect-error an undefined tracer is not a tracer
-  void new JuncoGraph(scheduler, Width(1), UNBOUNDED, undefined);
-  return [skill, template, tools, iterator, settlement, bounds];
+  void new JuncoGraph(scheduler, Width(1), UNBOUNDED, undefined, "LockPolicy");
+  // @ts-expect-error a direct JuncoGraph requires a policy
+  void new JuncoGraph(scheduler, Width(1), UNBOUNDED, tracer);
+  // @ts-expect-error policies are the two case-sensitive literals
+  void new JuncoGraph(scheduler, Width(1), UNBOUNDED, tracer, "gitpolicy");
+  // @ts-expect-error createParallelAgentGraph requires a policy
+  void graphApi.createParallelAgentGraph();
+  // @ts-expect-error a coroutine requires a policy
+  void new Deterministic(async function* () {});
+  const created: Promise<JuncoGraph> = JuncoGraph.create(
+    ".",
+    { policy: "EmptyPolicy", sandbox: "always" },
+    (shared) =>
+      graphApi.createParallelAgentGraph("EmptyPolicy", tracer, shared),
+  );
+  // @ts-expect-error JuncoGraph.create requires a policy
+  void JuncoGraph.create(".", {}, () => constructed);
+  const injected = new Deterministic<AgenticInput, string>(
+    async function* (signal, borrowed) {
+      signal.throwIfAborted();
+      yield [];
+      return borrowed?.policy ?? "pure";
+    },
+    "LockPolicy",
+    collection,
+  );
+  return [
+    skill,
+    template,
+    tools,
+    iterator,
+    settlement,
+    bounds,
+    created,
+    injected,
+  ];
 }
 
 export function everyKindSharesOneNodeOptions(
@@ -174,31 +255,29 @@ export function everyKindSharesOneNodeOptions(
   result: NodeIdType,
   message: AssistantMessage,
 ) {
-  const options: NodeOptions<AgenticInput, AssistantMessage> = {
-    trigger: always(),
-  };
+  const options: NodeOptions<AgenticInput, AssistantMessage> & {
+    readonly policy: "LockPolicy";
+  } = { trigger: always(), policy: "LockPolicy" };
   const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
     async function* (signal) {
       const view = yield [];
       signal.throwIfAborted();
       return [...view.values.keys()].length === 0 ? message : message;
     },
+    "LockPolicy",
   );
-  const agentBinding: AgentNodeBinding = {
-    prompt: "go",
-    receive: (view) =>
-      [...view.messages.keys()].flatMap(
-        (edge) => view.messages.get(edge) ?? [],
-      ),
-  };
+  const agentBinding: AgentNodeBinding = { prompt: "go" };
+  const contract = (edgeId: EdgeIdType) => ({ expect: `data on ${edgeId}` });
   const graphBinding: GraphNodeBinding = {
     result,
     receive: () => undefined,
     afterStep: async () => undefined,
+    contract,
   };
-  const raw: NodeSpec<Agentic, AgenticInput, AssistantMessage> = {
+  const raw: AgenticNode = {
     ...options,
     state: mock,
+    contract,
     // biome-ignore lint/correctness/useYield: compile-only step that completes without yielding.
     step: async function* () {
       return message;
@@ -207,13 +286,29 @@ export function everyKindSharesOneNodeOptions(
   const nodes: AgenticNode[] = [
     agentNode(junco, options),
     agentNode(mock, options, agentBinding),
-    deterministicNode(coroutine, options),
+    deterministicNode(coroutine, { ...options, contract }),
     graphNode(child, options, graphBinding),
     raw,
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
+  const agreed: Contract[] = [
+    junco.contract(EdgeId("in")),
+    mock.contract(EdgeId("in")),
+  ];
+  // @ts-expect-error a contract is queried by edge, not node
+  void junco.contract(NodeId("in"));
+  // @ts-expect-error a contract is synchronous metadata
+  const later: Promise<Contract> = mock.contract(EdgeId("in"));
+  // @ts-expect-error every node spec carries its policy
+  void agentNode(mock, { trigger: always() });
+  // @ts-expect-error raw node specs carry their policy too
+  void graph.addNode({ trigger: always(), state: mock, step: raw.step });
+  // @ts-expect-error agent nodes read deliveries through recv, not a receive binding
+  void agentNode(mock, options, { receive: () => [] });
+  // @ts-expect-error agent nodes send through the send tool, not an emit binding
+  void agentNode(mock, options, { emit: () => [] });
   const concrete: TaggedScheduler = graph.scheduler;
-  return [ids, concrete];
+  return [ids, concrete, agreed, later];
 }
 
 export function bindingsStayOutOfNodeOptions(
@@ -236,12 +331,20 @@ export function bindingsStayOutOfNodeOptions(
     // @ts-expect-error input adaptation is execution, not a registration option
     receive: () => [],
   };
-  // @ts-expect-error agentNode takes its prompt in the binding
-  const agent = agentNode(mock, { trigger: always(), prompt: "go" });
-  // @ts-expect-error graphNode takes its result in the binding
-  const nested = graphNode(child, { trigger: always(), result }, { result });
+  const agent = agentNode(mock, {
+    trigger: always(),
+    policy: "LockPolicy",
+    // @ts-expect-error agentNode takes its prompt in the binding
+    prompt: "go",
+  });
+  const nested = graphNode(
+    child,
+    // @ts-expect-error graphNode takes its result in the binding
+    { trigger: always(), policy: "LockPolicy", result },
+    { result },
+  );
   // @ts-expect-error graphNode requires its result-selecting binding
-  const unbound = graphNode(child, { trigger: always() });
+  const unbound = graphNode(child, { trigger: always(), policy: "LockPolicy" });
   // @ts-expect-error a trigger is required
   const untriggered: NodeOptions<AgenticInput, AssistantMessage> = {
     description: "no trigger",
@@ -254,7 +357,9 @@ export function wireTypesAndSchedulerArePreserved(
   mock: MockAgent,
   tracer: DataflowTracer,
 ) {
-  const options: NodeOptions<number, string> = { trigger: always() };
+  const options: NodeOptions<number, string> & {
+    readonly policy: "LockPolicy";
+  } = { trigger: always(), policy: "LockPolicy" };
   const fibonacci = new Deterministic<number, string>(async function* (signal) {
     let view = yield [];
     signal.throwIfAborted();
@@ -263,15 +368,16 @@ export function wireTypesAndSchedulerArePreserved(
     );
     view = yield [];
     return `${counts.length}:${[...view.values.keys()].length}`;
-  });
+  }, "LockPolicy");
   const child = new JuncoGraph<number, string>(
     createParallelScheduler<number, string>(),
     Width(1),
     UNBOUNDED,
     tracer,
+    "LockPolicy",
   );
   const childId = child.addNode(deterministicNode(fibonacci, options));
-  const raw: NodeSpec<Agentic<number, string>, number, string> = {
+  const raw: AgenticNode<number, string> = {
     ...options,
     state: mock,
     // biome-ignore lint/correctness/useYield: compile-only step that completes without yielding.
@@ -309,7 +415,7 @@ export function wireTypesAndSchedulerArePreserved(
   // @ts-expect-error a policy outside CompactionPolicy is rejected
   void compactGraph(graph, "most");
   // @ts-expect-error a chat-typed node cannot join a numeric graph
-  graph.addNode(agentNode(mock, { trigger: always() }));
+  graph.addNode(agentNode(mock, { trigger: always(), policy: "LockPolicy" }));
   return [ids, concrete, selected, results, compaction];
 }
 
@@ -327,6 +433,7 @@ export function juncoGraphIsTheRuntimeGraphState(
     Width(1),
     UNBOUNDED,
     tracer,
+    "EmptyPolicy",
   );
   const states: Agentic[] = [junco, mock, coroutine, graph, constructed];
   const native: DataflowGraph<
@@ -638,18 +745,19 @@ export function namespacedNodeBindingsKeepWireTypes(
   childResult: NodeIdType,
   tracer: DataflowTracer,
 ) {
-  const options: NodeOptions<number, string> = {
-    trigger: graphApi.trigger.always(),
-  };
+  const options: NodeOptions<number, string> & {
+    readonly policy: "LockPolicy";
+  } = { trigger: graphApi.trigger.always(), policy: "LockPolicy" };
   const graph: JuncoGraph<number, string> = graphApi.createParallelAgentGraph<
     number,
     string
-  >(tracer);
+  >("LockPolicy", tracer);
   const coroutine = new graphApi.nodes.Deterministic<number, string>(
     async function* () {
       const view = yield [];
       return `${[...view.messages.keys()].length}`;
     },
+    "LockPolicy",
   );
   const binding: graphApi.nodes.GraphNodeBinding<number, string> = {
     result: childResult,
@@ -661,18 +769,10 @@ export function namespacedNodeBindingsKeepWireTypes(
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
   const states: graphApi.nodes.Agentic<number, string>[] = [child, coroutine];
-  const promptBinding: graphApi.nodes.AgentNodeBinding = {
-    prompt: "go",
-    receive: (view) =>
-      [...view.messages.keys()].flatMap(
-        (edge): graphApi.nodes.AgenticInput[] => [
-          ...(view.messages.get(edge) ?? []),
-        ],
-      ),
-  };
+  const promptBinding: graphApi.nodes.AgentNodeBinding = { prompt: "go" };
   const chat: graphApi.nodes.AgenticNode = graphApi.nodes.agentNode(
     mock,
-    { trigger: graphApi.trigger.always() },
+    { trigger: graphApi.trigger.always(), policy: "LockPolicy" },
     promptBinding,
   );
   // @ts-expect-error a chat-typed prompt-agent node cannot join a numeric graph

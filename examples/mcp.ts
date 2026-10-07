@@ -6,14 +6,16 @@
 //
 // 1. `graft` is a declarative `mcp.JuncoMcpTools` definition. Defining it starts nothing; each agent
 //    factory connects a fresh graft client and server process for that agent and closes them with
-//    it. Both servers run as audited jobs of the application's one Junco ShellMux, acquired
-//    automatically: nothing here opens, passes, or registers a mux.
+//    it. Both servers run as audited jobs of the graph's one Git-policy tool collection, opened by
+//    `JuncoGraph.create` and passed explicitly to both agent factories.
 // 2. Research maps the repository with `mcp__graft__graft_repo_map` and selects exactly five
 //    central, repository-owned classes, confirming each declaration.
-// 3. Dependencies runs once Research's report exists, as a value edge, and traces every one of
-//    those five classes itself with outbound all-depth `mcp__graft__graft_trace_calls`.
-// 4. The runner closes the graph (and with it both agents and their graft servers), flushes the
-//    tracer, and finally shuts the ShellMux down — the application owns that last step.
+// 3. A deterministic DependenciesInput node runs once Research's report exists, as a value edge,
+//    validates it and sends the prepared dependency assignment on a message edge. Dependencies
+//    `recv`s that assignment and traces every one of those five classes itself with outbound
+//    all-depth `mcp__graft__graft_trace_calls`.
+// 4. The runner closes the graph (and with it both agents, their graft servers and, last, the
+//    collection's ShellMux), then flushes the tracer.
 //
 // Prerequisites: junco-tools' Rust toolchain and system libraries (packages/junco-tools/README.md),
 // so that `bun install --frozen-lockfile` at the root also builds the production native addon
@@ -21,10 +23,6 @@
 // and a current graft index (`graft build`). Then run it after `pi` → `/login` → GitHub Copilot:
 //
 //   bun run examples/mcp.ts
-//
-// Traced to the Opik backend configured as in README.md:
-//
-//   OPIK_URL_OVERRIDE=http://localhost:8888/api OPIK_PROJECT_NAME=junco-agency bun run --feature=opik examples/mcp.ts
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +83,17 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   return text;
 }
 
+/** A finite receiver's contracts by incoming edge id; it expects nothing on any other edge. */
+function contracts(
+  byEdge: Readonly<Record<string, tools.Contract>>,
+): (edgeId: graph.EdgeIdType) => tools.Contract {
+  return (edgeId) => {
+    if (!Object.hasOwn(byEdge, edgeId))
+      throw new agent.JuncoAgentError("invalid_state", `No contract for edge "${edgeId}"`);
+    return byEdge[edgeId]!;
+  };
+}
+
 // ## 3. Prompts
 
 const systemPrompts = {
@@ -122,8 +131,13 @@ function dependencyPrompt(report: string): string {
 
 // ## 4. The graph
 //
-// Research runs once on its own prompt. Its final message is a value on `Research->Dependencies`;
-// Dependencies triggers on that value and receives the complete report exactly once.
+// Research runs once on its own prompt. Its final message is a value on
+// `Research->DependenciesInput`; that deterministic node validates the report once, embeds it in
+// the dependency assignment and sends it on `DependenciesInput->Dependencies`, where Dependencies
+// receives it through `recv`.
+
+const researchReportId = graph.EdgeId("Research->DependenciesInput");
+const dependencyAssignmentId = graph.EdgeId("DependenciesInput->Dependencies");
 
 /** The graph and its two member nodes. */
 export interface McpGraph {
@@ -134,27 +148,51 @@ export interface McpGraph {
 
 export function createMcpGraph(members: Members): McpGraph {
   const researchResult = graph.valueEdge<graph.nodes.AgenticInput, AssistantMessage>(
-    "Research->Dependencies",
+    researchReportId,
   );
-  const g = graph.createParallelAgentGraph();
+  const assignment = graph.messageEdge<graph.nodes.AgenticInput, AssistantMessage>(
+    dependencyAssignmentId,
+  );
+  const g = graph.createParallelAgentGraph("LockPolicy");
   const researchId = g.addNode(graph.nodes.agentNode(members.Research, {
     id: graph.NodeId("Research"),
+    policy: "LockPolicy",
     description: "Selects five central classes of the repository through graft.",
     trigger: graph.trigger.always(),
   }, { prompt: researchPrompt }));
+  let published = false;
+  const prepare = new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(
+    async function* (signal): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
+      let view = yield [];
+      while (true) {
+        signal.throwIfAborted();
+        const report = finalText(view.values.get(researchResult.id), "Research");
+        published = true;
+        view = yield [graph.msg(assignment, { kind: "prompt", text: dependencyPrompt(report) })];
+      }
+    },
+    "EmptyPolicy",
+  );
+  const inputId = g.addNode(graph.nodes.deterministicNode(prepare, {
+    id: graph.NodeId("DependenciesInput"),
+    policy: "EmptyPolicy",
+    description: "Embeds Research's validated report in the dependency assignment, once.",
+    trigger: graph.trigger.when(researchResult),
+    is_available: (_view, triggered) => triggered && !published,
+    contract: contracts({
+      [researchReportId]: {
+        expect:
+          "Normally completed, non-empty research report selecting five classes, embedded as untrusted data in the dependency-analysis prompt.",
+      },
+    }),
+  }));
   const dependencyId = g.addNode(graph.nodes.agentNode(members.Dependencies, {
     id: graph.NodeId("Dependencies"),
+    policy: "LockPolicy",
     description: "Traces the dependency chains of Research's five classes through graft.",
-    trigger: graph.trigger.when(researchResult),
-  }, {
-    receive: (view) => {
-      // Delivered once; a later resumption sees no unseen value and dispatches nothing.
-      const report = view.values.get(researchResult.id);
-      if (report === undefined) return [];
-      return [{ kind: "prompt", text: dependencyPrompt(finalText(report, "Research")) }];
-    },
-  }));
-  g.addEdge(researchId, dependencyId, researchResult);
+    trigger: graph.trigger.when(assignment),
+  }, { prompt: "Call recv once and carry out the prompt in the single received message." }));
+  g.addEdge(researchId, inputId, researchResult).addEdge(inputId, dependencyId, assignment);
   return { graph: g, researchId, dependencyId };
 }
 
@@ -191,40 +229,73 @@ async function modelRuntime(): Promise<ModelRuntime> {
   return models;
 }
 
-/** The complete application: runs the graph once, then owns the final ShellMux shutdown. */
+/** The complete application: runs the graph once; closing it also closes its ShellMux. */
 export async function runMcpExample(): Promise<void> {
   const failures: unknown[] = [];
   let researchText: string | undefined;
   let dependencyText: string | undefined;
-  const acquired: agent.JuncoAgent[] = [];
   let built: McpGraph | undefined;
   try {
     const models = await modelRuntime();
-    const member = async (id: keyof Members) => {
-      const created = await agent.JuncoAgent.create({
-        provider,
-        model: modelId,
-        models,
-        // Copilot rejects this model's "off" level (thinking `disabled`) with a 400, which is what
-        // Pi sends when no level is given.
-        thinkingLevel: "medium",
-        systemPrompt: systemPrompts[id],
-        cwd: repositoryRoot,
-        tools: [graft],
-      });
-      acquired.push(created);
-      const names = new Set(created.getTools().map((tool) => tool.name));
-      const missing = requiredTools.filter((name) => !names.has(name));
-      if (missing.length > 0) {
-        throw new Error(
-          `Graft MCP did not expose required tools: ${missing.join(", ")}. Run graft build in the repository root.`,
-        );
+    let made: McpGraph | undefined;
+    await graph.JuncoGraph.create(repositoryRoot, { policy: "LockPolicy" }, async (collection) => {
+      const acquired: agent.JuncoAgent[] = [];
+      try {
+        const member = async (id: keyof Members) => {
+          const created = await agent.JuncoAgent.create({
+            provider,
+            model: modelId,
+            models,
+            // Copilot rejects this model's "off" level (thinking `disabled`) with a 400, which is
+            // what Pi sends when no level is given.
+            thinkingLevel: "medium",
+            systemPrompt: systemPrompts[id],
+            cwd: repositoryRoot,
+            tools:
+              id === "Dependencies" ? [graft, tools.RecvTool(), tools.InfoTool()] : [graft],
+            ...(id === "Dependencies"
+              ? {
+                  contract: contracts({
+                    [dependencyAssignmentId]: {
+                      expect:
+                        "One prompt message containing the prepared five-class dependency-analysis assignment, consumed through recv.",
+                    },
+                  }),
+                }
+              : {}),
+            policy: "LockPolicy",
+            collection,
+          });
+          acquired.push(created);
+          const names = new Set(created.getTools().map((tool) => tool.name));
+          const missing = requiredTools.filter((name) => !names.has(name));
+          if (missing.length > 0) {
+            throw new Error(
+              `Graft MCP did not expose required tools: ${missing.join(", ")}. Run graft build in the repository root.`,
+            );
+          }
+          return created;
+        };
+        const Research = await member("Research");
+        const Dependencies = await member("Dependencies");
+        made = createMcpGraph({ Research, Dependencies });
+        return made.graph;
+      } catch (error) {
+        // Not yet owned by a graph: return every acquired agent, then rethrow.
+        const cleanup: unknown[] = [error];
+        for (const created of acquired.reverse()) {
+          try {
+            await created.return();
+          } catch (failure) {
+            cleanup.push(failure);
+          }
+        }
+        if (cleanup.length === 1) throw error;
+        throw new AggregateError(cleanup, "MCP graph construction failed", { cause: error });
       }
-      return created;
-    };
-    const Research = await member("Research");
-    const Dependencies = await member("Dependencies");
-    built = createMcpGraph({ Research, Dependencies });
+    });
+    // Owned only once `create` accepted it; a rejected graph was already closed.
+    built = made!;
     const results = await built.graph.run();
     researchText = finalText(results.get(built.researchId), "Research");
     dependencyText = finalText(results.get(built.dependencyId), "Dependencies");
@@ -233,28 +304,14 @@ export async function runMcpExample(): Promise<void> {
   }
   // Every release is attempted, in order, whatever failed before it.
   try {
-    if (built !== undefined) {
-      // The graph owns its registered agents: closing it returns both, and their graft servers.
-      await built.graph.close();
-    } else {
-      for (const created of [...acquired].reverse()) {
-        try {
-          await created.return();
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-    }
+    // The graph owns its registered agents, their graft servers and the collection: closing it
+    // returns all of them.
+    await built?.graph.close();
   } catch (error) {
     failures.push(error);
   }
   try {
     await built?.graph.tracer.flush();
-  } catch (error) {
-    failures.push(error);
-  }
-  try {
-    await tools.shutdownShellMux();
   } catch (error) {
     failures.push(error);
   }

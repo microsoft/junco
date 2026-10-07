@@ -14,7 +14,12 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DummyTracer, UNBOUNDED, type WidthType } from "dataflow-engine";
+import {
+  DummyTracer,
+  type EdgeIdType,
+  UNBOUNDED,
+  type WidthType,
+} from "dataflow-engine";
 import type {
   AgenticStep,
   JuncoAgent,
@@ -61,7 +66,7 @@ export function scripted(responses: readonly FauxResponseStep[] = []) {
   return { faux, models, model: faux.getModel() };
 }
 
-/** Native options over `responses` with a fresh in-memory session. */
+/** Native options over `responses` with a fresh in-memory session, under `LockPolicy`. */
 export async function nativeOptions(
   responses: readonly FauxResponseStep[] = [],
 ) {
@@ -72,6 +77,7 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
+      policy: "LockPolicy" as const,
     },
   };
 }
@@ -82,7 +88,12 @@ export async function leaf(
   {
     prompt,
     tools = [],
-  }: { readonly prompt?: string; readonly tools?: readonly AgentTool[] } = {},
+    contract,
+  }: {
+    readonly prompt?: string;
+    readonly tools?: readonly AgentTool[];
+    readonly contract?: (edgeId: EdgeIdType) => toolsApi.Contract;
+  } = {},
 ): Promise<{ faux: FauxProviderHandle; agent: JuncoAgent }> {
   const { faux, options } = await nativeOptions(responses);
   return {
@@ -92,6 +103,7 @@ export async function leaf(
       systemPrompt: "leaf",
       tools: [toolsApi.createYieldTool(), ...tools],
       ...(prompt === undefined ? {} : { prompt }),
+      ...(contract === undefined ? {} : { contract }),
     }),
   };
 }
@@ -215,6 +227,7 @@ export async function newScheduler(
     session,
     models,
     model,
+    policy: "LockPolicy",
     ...(prompt === undefined ? {} : { prompt }),
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
   });
@@ -245,6 +258,7 @@ export async function agencyGraph(
     window,
     threads,
     new DummyTracer(),
+    "LockPolicy",
   );
   current = graph;
   return { graph, scheduler, faux, session };
@@ -253,14 +267,12 @@ export async function agencyGraph(
 /** Resume through every pause until the current run settles or fails; returns that step. */
 export async function drive(
   agentic: JuncoAgentProtocol,
-): Promise<{ readonly yields: number; readonly last: AgenticStep }> {
-  let yields = 0;
+): Promise<AgenticStep> {
   while (true) {
     const result = await agentic.next();
     if (result.done)
       throw new Error("iterator finished before its run settled");
-    if (result.value.kind !== "yield") return { yields, last: result.value };
-    yields++;
+    if (result.value.kind !== "yield") return result.value;
   }
 }
 

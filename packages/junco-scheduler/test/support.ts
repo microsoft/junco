@@ -43,6 +43,7 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model: faux.getModel(),
+      policy: "LockPolicy" as const,
     },
   };
 }
@@ -98,7 +99,10 @@ export type Script = Decide | readonly FauxResponseStep[];
 /** A PiScheduler over `script`, staged with `prompt` when given. */
 export async function newScheduler<N = unknown, T = unknown>(
   script: Script = runAvailable,
-  extra: Omit<PiSchedulerOptions<N, T>, "session" | "models" | "model"> = {},
+  extra: Omit<
+    PiSchedulerOptions<N, T>,
+    "session" | "models" | "model" | "policy"
+  > = {},
 ) {
   let requests = 0;
   const scripted = (decide: Decide): FauxResponseFactory => {
@@ -118,18 +122,12 @@ export async function newScheduler<N = unknown, T = unknown>(
   return { scheduler, faux, session: options.session };
 }
 
-/** Resume through every pause until the current run settles or fails; returns that step. */
-export async function drive(
-  agentic: Agentic,
-): Promise<{ readonly yields: number; readonly last: AgenticStep }> {
-  let yields = 0;
-  while (true) {
-    const result = await agentic.next();
-    if (result.done)
-      throw new Error("iterator finished before its run settled");
-    if (result.value.kind !== "yield") return { yields, last: result.value };
-    yields++;
-  }
+/** One public next(): schedule windows run inside it, so it must settle or fail without a yield. */
+export async function settle(agentic: Agentic): Promise<AgenticStep> {
+  const result = await agentic.next();
+  if (result.done) throw new Error("iterator finished before its run settled");
+  if (result.value.kind === "yield") throw new Error("unexpected public yield");
+  return result.value;
 }
 
 /** The text of a settled step. */

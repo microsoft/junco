@@ -15,6 +15,7 @@ import {
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
+import type { ToolCollection } from "junco-tools";
 import {
   type AgenticInput,
   agentNode,
@@ -79,7 +80,7 @@ function consumer<T>(result: T) {
     state.ran = true;
     yield [];
     return result;
-  });
+  }, "LockPolicy");
   return {
     coroutine,
     get ran() {
@@ -90,7 +91,7 @@ function consumer<T>(result: T) {
 
 describe("abort", () => {
   test("joins a gated finally, cleans up once and starts no downstream work", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const result = valueEdge<string, string>("waiting-result");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
@@ -107,13 +108,16 @@ describe("abort", () => {
         cleaned++;
       }
       return "never";
-    });
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const waitingId = graph.addNode(
-      deterministicNode(waiting, { trigger: always() }),
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
-      deterministicNode(downstream.coroutine, { trigger: when(result) }),
+      deterministicNode(downstream.coroutine, {
+        policy: "LockPolicy",
+        trigger: when(result),
+      }),
     );
     graph.addEdge(waitingId, downstreamId, result);
 
@@ -145,7 +149,7 @@ describe("abort", () => {
   });
 
   test("preserves an unrelated cleanup error, which a later close does not report again", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
     const failing = new Deterministic<string, string>(async function* (signal) {
@@ -157,8 +161,10 @@ describe("abort", () => {
         throw unrelated;
       }
       return "never";
-    });
-    const id = graph.addNode(deterministicNode(failing, { trigger: always() }));
+    }, "LockPolicy");
+    const id = graph.addNode(
+      deterministicNode(failing, { policy: "LockPolicy", trigger: always() }),
+    );
 
     const drive = failureOf(graph.run());
     await entered.promise;
@@ -177,7 +183,7 @@ describe("abort", () => {
   });
 
   test("a run failure already delivered to its drive is not reported again by close", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const broken = new Error("body failed");
     let cleaned = 0;
     const failing = new Deterministic<string, string>(async function* () {
@@ -187,8 +193,10 @@ describe("abort", () => {
       } finally {
         cleaned++;
       }
-    });
-    const id = graph.addNode(deterministicNode(failing, { trigger: always() }));
+    }, "LockPolicy");
+    const id = graph.addNode(
+      deterministicNode(failing, { policy: "LockPolicy", trigger: always() }),
+    );
 
     const failure = await failureOf(graph.run());
     assert.ok(
@@ -209,7 +217,7 @@ describe("abort", () => {
 
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const input = messageEdge<string, string>("input");
     const suspendedCleanup = messageEdge<string, string>("suspended-cleanup");
     const waitingCleanup = messageEdge<string, string>("waiting-cleanup");
@@ -228,7 +236,7 @@ describe("close", () => {
         cleaned.suspended++;
       }
       return "suspended result";
-    });
+    }, "LockPolicy");
     const waiting = new Deterministic<string, string>(async function* (signal) {
       yield [];
       entered.resolve();
@@ -241,16 +249,20 @@ describe("close", () => {
         yield [msg(waitingCleanup, "waiting cleanup")];
       }
       return "waiting result";
-    });
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const suspendedId = graph.addNode(
-      deterministicNode(suspended, { trigger: when(input) }),
+      deterministicNode(suspended, {
+        policy: "LockPolicy",
+        trigger: when(input),
+      }),
     );
     const waitingId = graph.addNode(
-      deterministicNode(waiting, { trigger: always() }),
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
       deterministicNode(downstream.coroutine, {
+        policy: "LockPolicy",
         trigger: anyOf(on(suspendedCleanup), on(waitingCleanup)),
       }),
     );
@@ -297,7 +309,7 @@ describe("close", () => {
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
-    const graph = createParallelAgentGraph();
+    const graph = createParallelAgentGraph("LockPolicy");
     const failure = new Error("finally failed");
     const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
       async function* () {
@@ -308,11 +320,21 @@ describe("close", () => {
           throw failure;
         }
       },
+      "LockPolicy",
     );
     const sibling = new MockAgent({ runs: [] });
-    graph.addNode(deterministicNode(coroutine, { trigger: always() }));
     graph.addNode(
-      agentNode(sibling, { trigger: always(), is_available: () => false }),
+      deterministicNode(coroutine, {
+        policy: "LockPolicy",
+        trigger: always(),
+      }),
+    );
+    graph.addNode(
+      agentNode(sibling, {
+        policy: "LockPolicy",
+        trigger: always(),
+        is_available: () => false,
+      }),
     );
     await graph.step();
 
@@ -334,7 +356,7 @@ describe("close", () => {
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -350,8 +372,10 @@ describe("close", () => {
         cleaned++;
       }
       return "never";
-    });
-    const id = graph.addNode(deterministicNode(waiting, { trigger: always() }));
+    }, "LockPolicy");
+    const id = graph.addNode(
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
+    );
 
     const drive = failureOf(graph.run());
     await entered.promise;
@@ -398,14 +422,18 @@ describe("close", () => {
         counts.cleanup++;
       }
       return "never published";
-    });
-    const child = createParallelAgentGraph<string, string>();
+    }, "LockPolicy");
+    const child = createParallelAgentGraph<string, string>("LockPolicy");
     const result = child.addNode(
-      deterministicNode(coroutine, { trigger: always() }),
+      deterministicNode(coroutine, {
+        policy: "LockPolicy",
+        trigger: always(),
+      }),
     );
-    const parent = createParallelAgentGraph<string, string>();
+    const parent = createParallelAgentGraph<string, string>("LockPolicy");
     parent.addNode(
       deterministicNode(coroutine, {
+        policy: "LockPolicy",
         trigger: always(),
         is_available: () => false,
       }),
@@ -413,7 +441,11 @@ describe("close", () => {
     parent.addNode(
       graphNode(
         child,
-        { trigger: always(), is_available: () => false },
+        {
+          policy: "LockPolicy",
+          trigger: always(),
+          is_available: () => false,
+        },
         { result },
       ),
     );
@@ -450,25 +482,28 @@ describe("close", () => {
 
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
-    const first = createParallelAgentGraph<string, string>();
+    const first = createParallelAgentGraph<string, string>("LockPolicy");
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
       return "first";
-    });
+    }, "LockPolicy");
     const firstId = first.addNode(
-      deterministicNode(shared, { trigger: always() }),
+      deterministicNode(shared, { policy: "LockPolicy", trigger: always() }),
     );
     await first.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
-    const second = createParallelAgentGraph<string, string>();
+    const second = createParallelAgentGraph<string, string>("LockPolicy");
     const value = valueEdge<string, string>("shared-result");
     const downstream = consumer("downstream");
     const againId = second.addNode(
-      deterministicNode(shared, { trigger: always() }),
+      deterministicNode(shared, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = second.addNode(
-      deterministicNode(downstream.coroutine, { trigger: when(value) }),
+      deterministicNode(downstream.coroutine, {
+        policy: "LockPolicy",
+        trigger: when(value),
+      }),
     );
     second.addEdge(againId, downstreamId, value);
 
@@ -490,20 +525,23 @@ describe("single consumer", () => {
   });
 
   test("a coroutine closed before priming fails on activation without resolving its value edge", async () => {
-    const graph = createParallelAgentGraph<string, string>();
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const value = valueEdge<string, string>("closed-result");
     let bodyRan = false;
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const closed = new Deterministic<string, string>(async function* () {
       bodyRan = true;
       return "never";
-    });
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const closedId = graph.addNode(
-      deterministicNode(closed, { trigger: always() }),
+      deterministicNode(closed, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
-      deterministicNode(downstream.coroutine, { trigger: when(value) }),
+      deterministicNode(downstream.coroutine, {
+        policy: "LockPolicy",
+        trigger: when(value),
+      }),
     );
     graph.addEdge(closedId, downstreamId, value);
     await closed.close();
@@ -525,13 +563,16 @@ describe("single consumer", () => {
   });
 
   test("a body genuinely returning undefined resolves its value edge", async () => {
-    const graph = createParallelAgentGraph<string, string | undefined>();
+    const graph = createParallelAgentGraph<string, string | undefined>(
+      "LockPolicy",
+    );
     const value = valueEdge<string, string | undefined>("undefined-result");
     const source = new Deterministic<string, string | undefined>(
       // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
       async function* () {
         return undefined;
       },
+      "LockPolicy",
     );
     let observed:
       | { readonly has: boolean; readonly value: string | undefined }
@@ -545,12 +586,16 @@ describe("single consumer", () => {
         };
         return "consumed";
       },
+      "LockPolicy",
     );
     const sourceId = graph.addNode(
-      deterministicNode(source, { trigger: always() }),
+      deterministicNode(source, { policy: "LockPolicy", trigger: always() }),
     );
     const dependentId = graph.addNode(
-      deterministicNode(dependent, { trigger: when(value) }),
+      deterministicNode(dependent, {
+        policy: "LockPolicy",
+        trigger: when(value),
+      }),
     );
     graph.addEdge(sourceId, dependentId, value);
 
@@ -581,6 +626,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
+      "LockPolicy",
     );
     assert.deepEqual(await coroutine.next(), { done: false, value: [] });
     assert.deepEqual(await coroutine.return("forced"), {
@@ -613,6 +659,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
+      "LockPolicy",
     );
     await coroutine.next();
     assert.deepEqual(await coroutine.throw(sentinel), {
@@ -638,6 +685,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
+      "LockPolicy",
     );
     const payloads: number[] = [];
     for await (const batch of coroutine)
@@ -645,5 +693,190 @@ describe("direct protocol", () => {
     assert.deepEqual(payloads, [1, 2]);
     assert.equal(cleaned, 1);
     await coroutine.close();
+  });
+});
+
+/** A collection double counting holds; only `policy`, `lease()` and `close()` are exercised. */
+function countedCollection(
+  policy: "LockPolicy" | "EmptyPolicy",
+  events: string[],
+) {
+  let holds = 1;
+  const collection = {
+    policy,
+    lease() {
+      holds++;
+      let released = false;
+      return {
+        close: async () => {
+          if (released) return;
+          released = true;
+          events.push(`release:${--holds}`);
+        },
+      };
+    },
+    close: async () => void events.push(`creator:${--holds}`),
+  };
+  return collection as unknown as ToolCollection;
+}
+
+describe("policy and borrowed collections", () => {
+  test("constructors reject a missing policy or a collection with another policy", () => {
+    const body = async function* () {
+      yield [];
+      return "x";
+    };
+    const empty = countedCollection("EmptyPolicy", []);
+    assert.throws(
+      () => new Deterministic<string, string>(body, "gitpolicy" as never),
+      (error) =>
+        error instanceof TypeError &&
+        error.message === 'policy must be "LockPolicy" or "EmptyPolicy"',
+    );
+    assert.throws(
+      () => new Deterministic<string, string>(body, "LockPolicy", empty),
+      TypeError,
+    );
+    assert.throws(
+      () => createParallelAgentGraph("LockPolicy", undefined, empty),
+      TypeError,
+    );
+    assert.throws(
+      () => createParallelAgentGraph(undefined as never),
+      TypeError,
+    );
+  });
+
+  test("addNode requires a real state's policy to equal its spec's; a mock takes the spec's", async () => {
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
+    const coroutine = new Deterministic<string, string>(async function* () {
+      yield [];
+      return "x";
+    }, "LockPolicy");
+    assert.throws(
+      () =>
+        graph.addNode(
+          deterministicNode(coroutine, {
+            policy: "EmptyPolicy",
+            trigger: always(),
+          }),
+        ),
+      (error) =>
+        error instanceof TypeError &&
+        error.message === "Node policy does not match its state",
+    );
+    const child = createParallelAgentGraph<string, string>("EmptyPolicy");
+    const childId = child.addNode(
+      deterministicNode(
+        new Deterministic<string, string>(async function* () {
+          yield [];
+          return "y";
+        }, "EmptyPolicy"),
+        { policy: "EmptyPolicy", trigger: always() },
+      ),
+    );
+    assert.throws(
+      () =>
+        graph.addNode(
+          graphNode(
+            child,
+            { policy: "LockPolicy", trigger: always() },
+            { result: childId },
+          ),
+        ),
+      TypeError,
+    );
+    graph.addNode(
+      graphNode(
+        child,
+        { policy: "EmptyPolicy", trigger: always() },
+        { result: childId },
+      ),
+    );
+    const agents = createParallelAgentGraph("LockPolicy");
+    agents.addNode(
+      agentNode(new MockAgent({ runs: [] }), {
+        policy: "EmptyPolicy",
+        trigger: always(),
+      }),
+    );
+    await Promise.all([graph.close(), agents.close(), coroutine.close()]);
+  });
+
+  test("a coroutine hands its body the collection and releases its lease after cleanup", async () => {
+    const events: string[] = [];
+    const collection = countedCollection("EmptyPolicy", events);
+    let seen: unknown;
+    const coroutine = new Deterministic<string, string>(
+      async function* (_signal, borrowed) {
+        seen = borrowed;
+        try {
+          yield [];
+          return "x";
+        } finally {
+          events.push("finally");
+        }
+      },
+      "EmptyPolicy",
+      collection,
+    );
+    assert.equal(coroutine.collection, collection);
+    await coroutine.next();
+    // A generator body runs on its first step.
+    assert.equal(seen, collection);
+    await coroutine.close();
+    await coroutine.close();
+    assert.deepEqual(events, ["finally", "release:1"]);
+  });
+
+  test("graph close settles members before releasing every visited graph's lease; abort releases none", async () => {
+    const events: string[] = [];
+    const collection = countedCollection("LockPolicy", events);
+    const root = createParallelAgentGraph<string, string>(
+      "LockPolicy",
+      undefined,
+      collection,
+    );
+    const child = createParallelAgentGraph<string, string>(
+      "LockPolicy",
+      undefined,
+      collection,
+    );
+    const coroutine = new Deterministic<string, string>(
+      async function* () {
+        try {
+          yield [];
+          return "x";
+        } finally {
+          events.push("finally");
+        }
+      },
+      "LockPolicy",
+      collection,
+    );
+    const childId = child.addNode(
+      deterministicNode(coroutine, { policy: "LockPolicy", trigger: always() }),
+    );
+    root.addNode(
+      graphNode(
+        child,
+        { policy: "LockPolicy", trigger: always() },
+        { result: childId },
+      ),
+    );
+    assert.equal(root.collection, collection);
+    await coroutine.next();
+    await root.abort();
+    assert.deepEqual(events, []);
+    await root.close();
+    await root.close();
+    assert.deepEqual(events, [
+      "finally",
+      "release:3",
+      "release:2",
+      "release:1",
+    ]);
+    await collection.close();
+    assert.deepEqual(events.at(-1), "creator:0");
   });
 });

@@ -34,7 +34,12 @@ import type {
 } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type DataflowTracer, NodeId, type NodeIdType } from "dataflow-engine";
+import {
+  type DataflowTracer,
+  type EdgeIdType,
+  NodeId,
+  type NodeIdType,
+} from "dataflow-engine";
 import {
   getJuncoMcpToolIdentity,
   type JuncoMcpConnection,
@@ -44,10 +49,12 @@ import {
 import {
   type ComplainTool,
   type ComplaintContext,
+  type Contract,
   createAssignedTaskTool,
   createComplainTool,
   createTaskTool,
   createYieldTool,
+  InfoTool,
   type Issue,
   invokeComplainTool,
   invokeTaskTool,
@@ -57,10 +64,14 @@ import {
   isTaskTool,
   isYieldTool,
   type Prompt,
+  RecvTool,
+  SendTool,
   type TaskCall,
   type TaskInput,
   type TaskToolHost,
+  type ToolBinding,
   ToolCollection,
+  type ToolCollectionOptions,
 } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import type {
@@ -122,13 +133,13 @@ export type JuncoAgentCreateOptions<
   /** Transferred to JuncoAgent; its harness closes the supplied session. */
   readonly session?: Session;
   /**
-   * Base directory of the default local ToolCollection (tools omitted) and of MCP server
-   * definitions; default `process.cwd()`.
+   * Base directory of the default or MCP-required ToolCollection (when none is supplied) and of
+   * MCP server definitions; default `process.cwd()`.
    */
   readonly cwd?: string;
   /**
    * Concrete tools are caller-owned; MCP definitions are connected for, and closed with, this
-   * agent. Omitted tools include the local collection and yield.
+   * agent. Omitted tools include the collection's tools, task and yield.
    */
   readonly tools?: JuncoAgentTools<T>;
 };
@@ -138,6 +149,18 @@ export type TaskAgentOptions = {
   readonly model?: ModelIdentity;
   /** Names among the caller's active tools; `[]` permits none. */
   readonly tools?: readonly string[];
+};
+
+/**
+ * What one graph activation binds while a {@link JuncoAgent} runs: the node's retained inbox,
+ * outgoing routes and topology for recv/send/info, its task host, and complaint attribution.
+ */
+export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
+  readonly messaging?: NonNullable<Parameters<typeof RecvTool<N, T>>[0]> &
+    NonNullable<Parameters<typeof SendTool<N>>[0]> &
+    NonNullable<Parameters<typeof InfoTool>[0]>;
+  readonly task?: TaskToolHost;
+  readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
 };
 
 /** Checks a hosted `task` launch before admission; throwing rejects it. See {@link JuncoAgent.setTaskPolicy}. */
@@ -168,36 +191,36 @@ type McpSourceRegistration = {
   readonly tools: readonly AgentTool[];
 };
 
-/**
- * A ToolCollection shared by the agent that created it and every subagent borrowing its tools.
- * Each holds one idempotent lease; the last release closes the collection.
- */
-class SharedCollection {
-  #holders = 0;
-  constructor(readonly collection: { close(): Promise<void> }) {}
-  lease(): { close(): Promise<void> } {
-    this.#holders++;
-    let released: Promise<void> | undefined;
-    return {
-      close: () => {
-        released ??=
-          --this.#holders === 0 ? this.collection.close() : Promise.resolve();
-        return released;
-      },
-    };
-  }
-}
-
 type OwnedResources = {
   /** Connections this agent's factory opened, in acquisition order. */
   mcp?: JuncoMcpConnection[];
   /** The definitions behind `mcp`, in the same order, for subagents to inherit. */
   mcpSources?: McpSourceRegistration[];
+  /** This agent's creator hold on `toolCollection`, when its factory created it. */
   collection?: { close(): Promise<void> };
-  /** The owner `collection` leases from, when subagents may borrow its tools. */
-  sharedCollection?: SharedCollection;
+  /** This agent's own policy owner over `toolCollection`, which also holds it. */
+  binding?: ToolBinding;
+  /** The actual collection MCP connections run on and the agent binds. */
+  toolCollection?: ToolCollection;
   repo?: MemorySessionRepo;
 };
+
+/** Rejects a missing or unknown policy, or a collection opened under another policy. */
+function checkPolicy(
+  policy: unknown,
+  collection: ToolCollection | undefined,
+): void {
+  if (policy !== "LockPolicy" && policy !== "EmptyPolicy")
+    throw new JuncoAgentError(
+      "invalid_argument",
+      'policy must be "LockPolicy" or "EmptyPolicy"',
+    );
+  if (collection !== undefined && collection.policy !== policy)
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "Collection policy does not match agent policy",
+    );
+}
 
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
@@ -205,6 +228,7 @@ async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
     ...[...(owned.mcp ?? [])]
       .reverse()
       .map((connection) => () => connection.close()),
+    owned.binding && (() => owned.binding!.close()),
     owned.collection && (() => owned.collection!.close()),
     owned.repo && (() => owned.repo!.close(BACKGROUND_CONTEXT)),
   ]) {
@@ -245,20 +269,30 @@ async function failBeforeConstruction(
 
 /**
  * Expands factory-only sources in order: concrete tools keep their identity, and each MCP
- * definition is connected from `cwd`, recorded in `owned` before its tools are appended.
- * `signal` cancels connection acquisition only.
+ * definition is connected from `cwd` on `owned.toolCollection`, recorded in `owned` before its
+ * tools are appended. A nonempty definition without a collection first creates one under
+ * `policy`, owned by `owned`. `signal` cancels connection acquisition only.
  */
 async function resolveToolSources(
   sources: JuncoAgentTools | undefined,
   cwd: string,
   owned: OwnedResources,
+  policy: ToolCollectionOptions["policy"],
   signal?: AbortSignal,
 ): Promise<AgentTool[]> {
   const tools: AgentTool[] = [];
   if (sources === undefined) return tools;
   for (const source of sources instanceof JuncoMcpTools ? [sources] : sources) {
     if (source instanceof JuncoMcpTools) {
-      const connection = await source.connect({ cwd, signal });
+      if (source.size > 0 && owned.toolCollection === undefined) {
+        owned.toolCollection = await ToolCollection.create(cwd, { policy });
+        owned.collection = owned.toolCollection;
+      }
+      const connection = await source.connect({
+        cwd,
+        signal,
+        collection: owned.toolCollection,
+      });
       owned.mcp ??= [];
       owned.mcp.push(connection);
       owned.mcpSources ??= [];
@@ -303,11 +337,13 @@ function validateActiveTools(
 
 /**
  * `tools` with every genuine complaint tool replaced in place by `own`, or `own` appended when none
- * is present. Duplicates and same-named impostors are left for validation to reject.
+ * is present, and the collection's genuine `release` tool appended when absent. Duplicates and
+ * same-named impostors are left for validation to reject.
  */
-function withComplainTool<T extends AgentTool>(
+function withRequiredTools<T extends AgentTool>(
   tools: readonly T[],
   own: ComplainTool,
+  release: AgentTool | undefined,
 ): (T | ComplainTool)[] {
   let found = false;
   const result = tools.map((tool): T | ComplainTool => {
@@ -316,13 +352,27 @@ function withComplainTool<T extends AgentTool>(
     return own;
   });
   if (!found) result.push(own);
+  if (release !== undefined && !result.includes(release as T))
+    result.push(release as T);
   return result;
 }
 
-/** An active-tool selection that always includes the mandatory `complain` tool. */
-function withComplainName(names: readonly string[]): string[] {
-  return names.includes("complain") ? [...names] : [...names, "complain"];
+/** An active-tool selection that always includes `complain`, and `release` when required. */
+function withRequiredNames(
+  names: readonly string[],
+  release: AgentTool | undefined,
+): string[] {
+  const result = [...names];
+  for (const name of release === undefined
+    ? ["complain"]
+    : ["complain", "release"])
+    if (!result.includes(name)) result.push(name);
+  return result;
 }
+
+/** The sentence every model request's system prompt carries. */
+const RELEASE_INSTRUCTION =
+  "After you write to a file use release to relinquish ownership";
 
 function valueOrThrow<T, E>(
   result: { ok: true; value: T } | { ok: false; error: E },
@@ -375,11 +425,6 @@ class RunRecord implements AgenticRun {
     | {
         readonly reasons: Map<string, AgenticYieldReason>;
         readonly executedYields: Map<string, AgentTool>;
-        /** Task calls a bound host admitted: the executed tool and how many subagents it accepted. */
-        readonly admissions: Map<
-          string,
-          { readonly tool: AgentTool; readonly count: number }
-        >;
       }
     | undefined;
   held: Boundary | undefined;
@@ -436,13 +481,24 @@ export class JuncoAgent<
   static async fromResolved(
     options: JuncoAgentResolvedOptions,
   ): Promise<JuncoAgent> {
-    const { cwd, tools, ...native } = options;
-    const owned: OwnedResources = {};
-    let resolved: AgentTool[];
+    const { cwd, tools, policy, collection, ...native } = options;
+    const owned: OwnedResources = { toolCollection: collection };
+    let agent: JuncoAgent;
     try {
-      resolved = await resolveToolSources(
+      checkPolicy(policy, collection);
+      const resolved = await resolveToolSources(
         tools,
         resolve(cwd ?? process.cwd()),
+        owned,
+        policy,
+      );
+      agent = new JuncoAgent(
+        {
+          ...native,
+          policy,
+          collection: owned.toolCollection,
+          tools: resolved,
+        },
         owned,
       );
     } catch (error) {
@@ -454,7 +510,6 @@ export class JuncoAgent<
         "JuncoAgent.fromResolved cleanup failed",
       );
     }
-    const agent = new JuncoAgent({ ...native, tools: resolved }, owned);
     await agent.initialize();
     return agent;
   }
@@ -480,12 +535,15 @@ export class JuncoAgent<
       session: suppliedSession,
       cwd,
       tools,
+      policy,
+      collection,
       ...native
     } = options;
-    const owned: OwnedResources = {};
+    const owned: OwnedResources = { toolCollection: collection };
     let session: Session | undefined = suppliedSession;
     let agent: JuncoAgent | undefined;
     try {
+      checkPolicy(policy, collection);
       const models =
         suppliedModels ??
         (await (
@@ -534,22 +592,39 @@ export class JuncoAgent<
       let agentTools: AgentTool[];
       if (tools === undefined) {
         // Explicit-tool construction does not allocate a local execution environment or addon.
-        const collection = await ToolCollection.create(
-          resolve(cwd ?? process.cwd()),
-        );
-        // Subagents borrow its tools; the last of their leases closes it.
-        owned.sharedCollection = new SharedCollection(collection);
-        owned.collection = owned.sharedCollection.lease();
-        agentTools = [...collection.tools, createTaskTool(), createYieldTool()];
+        if (owned.toolCollection === undefined) {
+          owned.toolCollection = await ToolCollection.create(
+            resolve(cwd ?? process.cwd()),
+            { policy },
+          );
+          owned.collection = owned.toolCollection;
+        }
+        agentTools = [
+          ...owned.toolCollection.tools,
+          createTaskTool(),
+          createYieldTool(),
+          RecvTool(),
+          SendTool(),
+          InfoTool(),
+        ];
       } else {
         agentTools = await resolveToolSources(
           tools,
           resolve(cwd ?? process.cwd()),
           owned,
+          policy,
         );
       }
       agent = new JuncoAgent(
-        { ...native, session, models, model, tools: agentTools },
+        {
+          ...native,
+          session,
+          models,
+          model,
+          policy,
+          collection: owned.toolCollection,
+          tools: agentTools,
+        },
         owned,
       );
       await agent.initialize();
@@ -567,10 +642,18 @@ export class JuncoAgent<
   }
 
   readonly #options: AgenticOptions<S, P, T>;
+  /** Authorization policy of this agent's native resources. */
+  readonly policy: ToolCollectionOptions["policy"];
+  /**
+   * The collection binding this agent's policy and lifetime, borrowed: the agent holds it through
+   * its own binding, whose tools act as this agent's one policy owner. Take `collection.lease()`
+   * to keep it beyond the agent; never close it directly.
+   */
+  readonly collection: ToolCollection | undefined;
   readonly #owned: OwnedResources;
   #harness: AgentHarness<undefined> | undefined;
   #lane: AgentLane | undefined;
-  protected get nativeLane(): AgentLane {
+  get #nativeLane(): AgentLane {
     if (this.#lane === undefined)
       throw new JuncoAgentError(
         "invalid_state",
@@ -582,13 +665,14 @@ export class JuncoAgent<
   readonly nodeId: NodeIdType = NodeId(`agent-${crypto.randomUUID()}`);
   /** The always-on complaint tool this agent owns; supplied genuine ones are rebound to it. */
   readonly #complainTool: ComplainTool = createComplainTool();
+  /** The collection's genuine `release` tool, always present and active with a collection. */
+  readonly #releaseTool: AgentTool | undefined;
   #tools: (T | ComplainTool)[];
   #activeNames: string[] = [];
   #resources: AgentHarnessResources<S, P>;
   #toolMutation: Promise<void> = Promise.resolve();
-  readonly #runsByOperation = new Map<string, RunRecord>();
   readonly #runsByToolSignal = new WeakMap<AbortSignal, RunRecord>();
-  readonly #activeRuns = new Set<RunRecord>();
+  /** The one admitted run; admission permits no second until it settles. */
   #currentRun: RunRecord | undefined;
   readonly #drives = new Set<Promise<unknown>>();
   readonly #operations = new Set<Promise<unknown>>();
@@ -598,7 +682,6 @@ export class JuncoAgent<
   /** FIFO of queued compactions; never rejects, so one failure cannot poison later requests. */
   #compactionTail: Promise<void> = Promise.resolve();
   #pendingCompactions = 0;
-  #pendingAdmission = false;
   #aborting = false;
   #staged:
     | { readonly text: string; readonly images?: ImageContent[] }
@@ -606,8 +689,8 @@ export class JuncoAgent<
   #closing = false;
   #closed = false;
   #close: Promise<void> | undefined;
-  /** The graph host {@link runWithTaskHost} binds for its work; task calls admit through it. */
-  #taskHost: TaskToolHost | undefined;
+  /** The graph activation {@link runWithNodeContext} binds for its work. */
+  #nodeContext: JuncoAgentNodeContext | undefined;
   /** Checks each hosted `task` launch before admission; see {@link setTaskPolicy}. */
   #taskPolicy: TaskPolicy | undefined;
   /** What graphs do with this agent's failed tasks; see {@link setTaskFailurePolicy}. */
@@ -616,16 +699,24 @@ export class JuncoAgent<
   #taskAdmitted = false;
   /** Sees this agent's subagent acquisitions; see {@link setSubagentObserver}. */
   #subagentObserver: SubagentObserver | undefined;
-  /** The graph node {@link runWithComplaintContext} binds; complaints are attributed to it. */
-  #complaintContext: Omit<ComplaintContext, "prompt"> | undefined;
 
   protected constructor(
     options: AgenticOptions<S, P, T>,
     owned: OwnedResources = {},
   ) {
+    checkPolicy(options.policy, options.collection);
     this.#options = options;
+    this.policy = options.policy;
+    this.collection = options.collection;
     this.#owned = owned;
-    this.#tools = withComplainTool(options.tools ?? [], this.#complainTool);
+    this.#releaseTool = options.collection?.tools.find(
+      (tool) => tool.name === "release",
+    );
+    this.#tools = withRequiredTools(
+      options.tools ?? [],
+      this.#complainTool,
+      this.#releaseTool,
+    );
     this.#resources = options.resources ?? {};
     if (options.prompt !== undefined) {
       this.#staged = {
@@ -633,6 +724,8 @@ export class JuncoAgent<
         ...(options.images === undefined ? {} : { images: options.images }),
       };
     }
+    // The single borrowing site: every agent over a collection acts as its own owner.
+    owned.binding ??= options.collection?.bind();
   }
 
   /** Complete the asynchronous native acquisition before any caller uses the agent. */
@@ -647,13 +740,16 @@ export class JuncoAgent<
       images: _images,
       tools: _tools,
       resources: _resources,
+      policy: _policy,
+      collection: _collection,
+      contract: _contract,
       activeToolNames,
       ...native
     } = this.#options;
     const requested =
       activeToolNames === undefined
         ? undefined
-        : withComplainName(activeToolNames);
+        : withRequiredNames(activeToolNames, this.#releaseTool);
     try {
       validateActiveTools(
         this.#tools,
@@ -679,22 +775,23 @@ export class JuncoAgent<
       }
       this.#lane = await harness.lane("main", BACKGROUND_CONTEXT);
       // A reopened idle lane retains its persisted selection, with no initial config_update event.
-      const restored = await this.nativeLane.getActiveTools(BACKGROUND_CONTEXT);
-      this.#activeNames = withComplainName(restored);
+      const restored =
+        await this.#nativeLane.getActiveTools(BACKGROUND_CONTEXT);
+      this.#activeNames = withRequiredNames(restored, this.#releaseTool);
       validateActiveTools(this.#tools, this.#activeNames);
       if (this.#activeNames.length !== restored.length)
-        await this.nativeLane.setActiveTools(
+        await this.#nativeLane.setActiveTools(
           this.#activeNames,
           BACKGROUND_CONTEXT,
         );
       harness.events.on("entry_added", (event) => this.#onEntryAdded(event));
       harness.events.on("turn_end", (event) => this.#onTurnEnd(event));
       harness.events.on("run_end", ({ lane, runId }) => {
-        if (lane === "main") this.#readyYield(this.#runsByOperation.get(runId));
+        if (lane === "main") this.#readyYield(this.#runForOperation(runId));
       });
       harness.hooks.on("before_request", async ({ lane, runId }) => {
         if (lane !== "main") return undefined;
-        const run = this.#runsByOperation.get(runId);
+        const run = this.#runForOperation(runId);
         this.#readyYield(run);
         if (run?.held !== undefined) await run.held.gate!.promise;
         return undefined;
@@ -736,11 +833,23 @@ export class JuncoAgent<
   }
 
   /**
-   * `models` with `streamSimple` snapshotting each request of the current run, after every native
-   * context hook and provider conversion, before delegating unchanged. Other members pass through.
+   * `models` with `streamSimple` giving each request's system prompt {@link RELEASE_INSTRUCTION}
+   * (once; the supplied context is never mutated) and snapshotting that outgoing request of the
+   * current run, after every native context hook and provider conversion. Other members pass
+   * through.
    */
   #captureRequests(models: Models): Models {
-    const streamSimple: Models["streamSimple"] = (model, context, options) => {
+    const streamSimple: Models["streamSimple"] = (model, supplied, options) => {
+      const prompt = supplied.systemPrompt ?? "";
+      const context = prompt.includes(RELEASE_INSTRUCTION)
+        ? supplied
+        : {
+            ...supplied,
+            systemPrompt:
+              prompt === ""
+                ? RELEASE_INSTRUCTION
+                : `${prompt}\n\n${RELEASE_INSTRUCTION}`,
+          };
       const run = this.#currentRun;
       if (run !== undefined) {
         try {
@@ -784,7 +893,7 @@ export class JuncoAgent<
         invocation,
         context,
       ) => {
-        const run = this.#runsByOperation.get(invocation.operationId);
+        const run = this.#runForOperation(invocation.operationId);
         const signal = context.abortSignal;
         if (run === undefined || signal === undefined) {
           throw new JuncoAgentError(
@@ -795,10 +904,11 @@ export class JuncoAgent<
         this.#runsByToolSignal.set(signal, run);
         if (isYieldTool(tool)) run.batch?.executedYields.set(id, tool);
         try {
-          const host = this.#taskHost;
+          const node = this.#nodeContext;
+          const host = node?.task;
           if (host !== undefined && isTaskTool(tool)) {
             const assigned = isAssignedTaskTool(tool);
-            const result = await invokeTaskTool(
+            return await invokeTaskTool(
               tool,
               async (toolCallId, input, admission) => {
                 if ("action" in input)
@@ -818,12 +928,34 @@ export class JuncoAgent<
               params as TaskCall,
               signal,
             );
-            if (result.details.tasks.length > 0)
-              run.batch?.admissions.set(id, {
+          }
+          const messaging = node?.messaging;
+          if (messaging !== undefined) {
+            // Each agent's own bound node, whatever host a shared tool was constructed with.
+            if (RecvTool.is(tool))
+              return await RecvTool.invoke(
                 tool,
-                count: result.details.tasks.length,
-              });
-            return result;
+                messaging,
+                id,
+                params as Parameters<typeof RecvTool.invoke>[3],
+                signal,
+              );
+            if (SendTool.is(tool))
+              return await SendTool.invoke(
+                tool,
+                messaging,
+                id,
+                params as Parameters<typeof SendTool.invoke>[3],
+                signal,
+              );
+            if (InfoTool.is(tool))
+              return await InfoTool.invoke(
+                tool,
+                messaging,
+                id,
+                params as Parameters<typeof InfoTool.invoke>[3],
+                signal,
+              );
           }
           if (isComplainTool(tool)) {
             if (run.prompt === undefined)
@@ -832,7 +964,7 @@ export class JuncoAgent<
                 "Cannot record complaint: model request snapshot unavailable",
                 { cause: run.promptCaptureError },
               );
-            const bound = this.#complaintContext ?? {
+            const bound = node?.complaint ?? {
               nodeId: this.nodeId,
               messages: [],
             };
@@ -845,9 +977,10 @@ export class JuncoAgent<
               signal,
             );
           }
-          return await tool.execute(id, params, signal, (update) =>
-            onUpdate(update),
-          );
+          // This agent's own owner-bound counterpart of a collection tool.
+          return await (
+            this.#owned.binding?.tools.get(tool) ?? tool
+          ).execute(id, params, signal, (update) => onUpdate(update));
         } catch (error) {
           if (isMarshPolicyDenied(error)) {
             run.batch?.reasons.set(id, {
@@ -877,17 +1010,13 @@ export class JuncoAgent<
       (item): item is AgentToolCall => item.type === "toolCall",
     );
     if (calls.length === 0) return;
-    run.batch = {
-      reasons: new Map(),
-      executedYields: new Map(),
-      admissions: new Map(),
-    };
+    run.batch = { reasons: new Map(), executedYields: new Map() };
     this.observeToolBatch?.(run, message, calls);
   }
 
   #onTurnEnd(event: Extract<HarnessEvent, { type: "turn_end" }>): void {
     if (event.lane !== "main") return;
-    const run = this.#runsByOperation.get(event.runId);
+    const run = this.#runForOperation(event.runId);
     if (run === undefined) return;
     run.lastMessage = event.message;
     const batch = run.batch;
@@ -918,19 +1047,10 @@ export class JuncoAgent<
       });
     }
     const reasons: AgenticYieldReason[] = [];
-    // Source order; an admitted task pauses even if a later hook rewrote its result.
+    // Source order: one boundary per completed native tool batch.
     for (const result of event.toolResults) {
       const reason = batch.reasons.get(result.toolCallId);
       if (reason !== undefined) reasons.push(reason);
-      const admission = batch.admissions.get(result.toolCallId);
-      if (admission !== undefined) {
-        reasons.push({
-          kind: "tool",
-          toolCallId: result.toolCallId,
-          toolName: admission.tool.name,
-          reason: `Scheduled ${admission.count} subagents`,
-        });
-      }
     }
     if (reasons.length === 0) return;
     const boundary: Boundary = {
@@ -941,6 +1061,12 @@ export class JuncoAgent<
     };
     run.held = boundary;
     this.#publish(boundary);
+  }
+
+  /** The admitted run whose native operation is `operationId`, if it is still current. */
+  #runForOperation(operationId: string): RunRecord | undefined {
+    const run = this.#currentRun;
+    return run?.operationId === operationId ? run : undefined;
   }
 
   #readyYield(run: RunRecord | undefined): void {
@@ -977,13 +1103,11 @@ export class JuncoAgent<
       );
     return run;
   }
-  protected requestYield(
-    reason: AgenticYieldReason,
-    signal: AbortSignal,
-  ): void {
-    const run = this.runForSignal(signal) as RunRecord;
-    if (!run.stopping) run.batch?.reasons.set(reason.toolCallId, reason);
-  }
+  /**
+   * Called immediately before every native admission (runs, compaction, navigation); throwing
+   * fails that operation before any provider work.
+   */
+  protected beforeAdmission?(): void;
 
   // Run admission --------------------------------------------------------------------------------
   prompt(
@@ -1025,8 +1149,7 @@ export class JuncoAgent<
     if (
       this.#staged !== undefined ||
       this.#aborting ||
-      this.#pendingAdmission ||
-      this.#activeRuns.size > 0
+      this.#currentRun !== undefined
     ) {
       return Promise.reject(
         new JuncoAgentError(
@@ -1038,9 +1161,7 @@ export class JuncoAgent<
     return this.#admit(request);
   }
   #admit(request: RunRequest): Promise<AssistantMessage> {
-    this.#pendingAdmission = true;
     const run = new RunRecord(request.kind);
-    this.#activeRuns.add(run);
     this.#currentRun = run;
     const settlement = track(
       this.#operations,
@@ -1056,70 +1177,62 @@ export class JuncoAgent<
     run: RunRecord,
     request: RunRequest,
   ): Promise<AssistantMessage> {
-    try {
-      const admitted = valueOrThrow(
-        await this.nativeLane.accept(request, run.context),
+    this.beforeAdmission?.();
+    const admitted = valueOrThrow(
+      await this.#nativeLane.accept(request, run.context),
+    );
+    run.operationId = admitted.operationId;
+    if (run.stopping || this.#closing) {
+      // An abort might have seen an idle lane while accept was still pending.
+      const repeat = track(
+        this.#operations,
+        this.#nativeLane.abort(BACKGROUND_CONTEXT),
       );
-      run.operationId = admitted.operationId;
-      this.#runsByOperation.set(admitted.operationId, run);
-      this.#pendingAdmission = false;
-      if (run.stopping || this.#closing) {
-        // An abort might have seen an idle lane while accept was still pending.
-        const repeat = track(
-          this.#operations,
-          this.nativeLane.abort(BACKGROUND_CONTEXT),
-        );
-        const outcome = await repeat;
-        if (!outcome.ok && outcome.error._tag !== "NoActiveOperation")
-          throw outcome.error;
-      }
-      let result: Awaited<ReturnType<AgentLane["drive"]>>;
-      try {
-        result = await this.nativeLane.drive(
-          { operationId: admitted.operationId, waitForRetry: true },
-          run.context,
-        );
-      } catch (error) {
-        if (!run.stopping && !this.#closing) throw error;
-        // The caller's cancelled drive waiter does not stop Pi's uncancelled native drive.
-        result = await this.nativeLane.drive(
-          { operationId: admitted.operationId, waitForRetry: true },
-          BACKGROUND_CONTEXT,
-        );
-      }
-      const outcome = valueOrThrow(result);
-      if (outcome.kind === "waiting") {
-        if (outcome.reason === "deferred") {
-          const error = new JuncoAgentError(
-            "invalid_state",
-            "Provider-deferred runs are not supported by Agentic",
-          );
-          valueOrThrow(await this.nativeLane.abort(BACKGROUND_CONTEXT));
-          throw error;
-        }
-        throw new JuncoAgentError(
-          "invalid_state",
-          "Native retry wait was not driven to settlement",
-        );
-      }
-      if (run.lastMessage === undefined) {
-        if (this.#closing) throw closedError();
-        throw new JuncoAgentError(
-          "invalid_state",
-          outcome.outcome.error?.message ??
-            `Native run ${outcome.outcome.status} without an assistant message`,
-          { cause: outcome.outcome.error },
-        );
-      }
-      return this.validateSettlement?.(run, run.lastMessage) ?? run.lastMessage;
-    } finally {
-      this.#pendingAdmission = false;
-      if (run.operationId !== undefined)
-        this.#runsByOperation.delete(run.operationId);
+      const outcome = await repeat;
+      if (!outcome.ok && outcome.error._tag !== "NoActiveOperation")
+        throw outcome.error;
     }
+    let result: Awaited<ReturnType<AgentLane["drive"]>>;
+    try {
+      result = await this.#nativeLane.drive(
+        { operationId: admitted.operationId, waitForRetry: true },
+        run.context,
+      );
+    } catch (error) {
+      if (!run.stopping && !this.#closing) throw error;
+      // The caller's cancelled drive waiter does not stop Pi's uncancelled native drive.
+      result = await this.#nativeLane.drive(
+        { operationId: admitted.operationId, waitForRetry: true },
+        BACKGROUND_CONTEXT,
+      );
+    }
+    const outcome = valueOrThrow(result);
+    if (outcome.kind === "waiting") {
+      if (outcome.reason === "deferred") {
+        const error = new JuncoAgentError(
+          "invalid_state",
+          "Provider-deferred runs are not supported by Agentic",
+        );
+        valueOrThrow(await this.#nativeLane.abort(BACKGROUND_CONTEXT));
+        throw error;
+      }
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Native retry wait was not driven to settlement",
+      );
+    }
+    if (run.lastMessage === undefined) {
+      if (this.#closing) throw closedError();
+      throw new JuncoAgentError(
+        "invalid_state",
+        outcome.outcome.error?.message ??
+          `Native run ${outcome.outcome.status} without an assistant message`,
+        { cause: outcome.outcome.error },
+      );
+    }
+    return this.validateSettlement?.(run, run.lastMessage) ?? run.lastMessage;
   }
   #settle(run: RunRecord, step: AgenticStep): void {
-    this.#activeRuns.delete(run);
     this.#readyYield(run);
     if (this.#currentRun === run) this.#currentRun = undefined;
     run.prompt = undefined;
@@ -1180,29 +1293,34 @@ export class JuncoAgent<
     tools: (T | ComplainTool)[],
     activeToolNames?: string[],
   ): Promise<void> {
-    const nextTools = withComplainTool(tools, this.#complainTool);
-    const names = withComplainName(
+    const nextTools = withRequiredTools(
+      tools,
+      this.#complainTool,
+      this.#releaseTool,
+    );
+    const names = withRequiredNames(
       activeToolNames ?? nextTools.map((tool) => tool.name),
+      this.#releaseTool,
     );
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(nextTools, names);
       const previousTools = await this.#harness!.getTools(BACKGROUND_CONTEXT);
       const previousActive =
-        await this.nativeLane.getActiveTools(BACKGROUND_CONTEXT);
+        await this.#nativeLane.getActiveTools(BACKGROUND_CONTEXT);
       try {
         await this.#harness!.setTools(
           nextTools.map((tool) => this.#adaptTool(tool)),
           BACKGROUND_CONTEXT,
         );
-        await this.nativeLane.setActiveTools(names, BACKGROUND_CONTEXT);
+        await this.#nativeLane.setActiveTools(names, BACKGROUND_CONTEXT);
       } catch (error) {
         if (this.#closing) throw error;
         const failures: unknown[] = [];
         for (const restore of [
           () => this.#harness!.setTools(previousTools, BACKGROUND_CONTEXT),
           () =>
-            this.nativeLane.setActiveTools(previousActive, BACKGROUND_CONTEXT),
+            this.#nativeLane.setActiveTools(previousActive, BACKGROUND_CONTEXT),
         ]) {
           try {
             await restore();
@@ -1221,32 +1339,49 @@ export class JuncoAgent<
     });
   }
   setActiveTools(names: string[]): Promise<void> {
-    const selection = withComplainName(names);
+    const selection = withRequiredNames(names, this.#releaseTool);
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(this.#tools, selection);
-      await this.nativeLane.setActiveTools(selection, BACKGROUND_CONTEXT);
+      await this.#nativeLane.setActiveTools(selection, BACKGROUND_CONTEXT);
       this.#activeNames = selection;
     });
   }
 
   // Subagents ------------------------------------------------------------------------------------
   /**
-   * Run `work` with `host` admitting this agent's `task` calls. Binding neither prompts nor resumes
-   * the agent; it ends when `work` settles. Only one host can be bound at a time.
+   * Run `work` with one graph activation bound: `messaging` serves this agent's recv/send/info
+   * calls, `task` admits its `task` calls, and `complaint` attributes its complaints (each adds the
+   * model request it arose in). Outside a binding, complaints use this agent's own {@link nodeId}
+   * and no delivered messages, and graph tools fall back to their own hosts. Binding neither
+   * prompts nor resumes the agent; it ends when `work` settles. Only one context binds at a time.
    */
-  async runWithTaskHost<R>(
-    host: TaskToolHost,
+  async runWithNodeContext<N, T, R>(
+    context: JuncoAgentNodeContext<N, T>,
     work: () => Promise<R>,
   ): Promise<R> {
-    if (this.#taskHost !== undefined)
-      throw new JuncoAgentError("busy", "A task host is already bound");
-    this.#taskHost = host;
+    if (this.#nodeContext !== undefined)
+      throw new JuncoAgentError("busy", "A node context is already bound");
+    this.#nodeContext = context;
     try {
       return await work();
     } finally {
-      this.#taskHost = undefined;
+      this.#nodeContext = undefined;
     }
+  }
+
+  /**
+   * What this agent expects on its incoming graph edge `edgeId`, from its `contract` option. A
+   * metadata query: it never starts or resumes a run. Subclasses may override it.
+   */
+  contract(edgeId: EdgeIdType): Contract {
+    const contract = this.#options.contract;
+    if (contract === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        `No contract for edge "${edgeId}"`,
+      );
+    return contract(edgeId);
   }
 
   /**
@@ -1340,25 +1475,6 @@ export class JuncoAgent<
     this.#subagentObserver = observer;
   }
 
-  /**
-   * Run `work` with this agent's complaints attributed to the graph node `context` describes; each
-   * complaint adds the model request it arose in. Outside a binding, complaints use this agent's
-   * own {@link nodeId} and no delivered messages. Only one context can be bound at a time.
-   */
-  async runWithComplaintContext<N, R>(
-    context: Omit<ComplaintContext<N>, "prompt">,
-    work: () => Promise<R>,
-  ): Promise<R> {
-    if (this.#complaintContext !== undefined)
-      throw new JuncoAgentError("busy", "A complaint context is already bound");
-    this.#complaintContext = context;
-    try {
-      return await work();
-    } finally {
-      this.#complaintContext = undefined;
-    }
-  }
-
   /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
   complain<N>(
     issue: Issue<N>,
@@ -1378,8 +1494,8 @@ export class JuncoAgent<
    * session. They inherit this agent's current model, thinking level, active tools, resources and
    * harness settings unless overridden; a tool subset can only narrow the active tools. Ordinary
    * tools are shared; each MCP definition this agent registered is reconnected for every child,
-   * which exposes only the selected original tools. A local ToolCollection stays open until its
-   * last borrower closes. Everything is validated before any child is created; on failure or
+   * which exposes only the selected original tools, on this agent's collection and policy. Each
+   * child holds its own collection lease. Everything is validated before any child is created; on failure or
    * `signal` abort every created child is closed again.
    */
   createSubagents(
@@ -1399,7 +1515,7 @@ export class JuncoAgent<
       live();
       const observer = this.#subagentObserver;
       observer?.acquiring?.(requests);
-      const lane = this.nativeLane;
+      const lane = this.#nativeLane;
       const harness = this.#harness!;
       const models = this.#options.models;
       const active: AgentTool[] = this.getActiveTools();
@@ -1493,18 +1609,16 @@ export class JuncoAgent<
       try {
         for (const { model, selection } of plans) {
           live();
-          const owned: OwnedResources = { repo: new MemorySessionRepo() };
-          const shared = this.#owned.sharedCollection;
-          if (shared !== undefined) {
-            owned.sharedCollection = shared;
-            owned.collection = shared.lease();
-          }
+          const owned: OwnedResources = {
+            repo: new MemorySessionRepo(),
+            toolCollection: this.collection,
+          };
           let session: Session | undefined;
           let child: JuncoAgent<S, P, AgentTool>;
           try {
             session = await owned.repo!.create({}, BACKGROUND_CONTEXT);
             for (const { source, cwd } of registrations)
-              await resolveToolSources(source, cwd, owned, signal);
+              await resolveToolSources(source, cwd, owned, this.policy, signal);
             live();
             // Rebind each selected MCP tool to the one fresh wrapper of the same operation; an
             // assigned batch belongs to this agent, so a child gets an ordinary task tool.
@@ -1535,6 +1649,8 @@ export class JuncoAgent<
                 session,
                 models,
                 model,
+                policy: this.policy,
+                collection: owned.toolCollection,
                 thinkingLevel,
                 systemPrompt: this.#options.systemPrompt,
                 toProviderMessages: this.#options.toProviderMessages,
@@ -1589,14 +1705,14 @@ export class JuncoAgent<
   steer(text: string, options?: { images?: ImageContent[] }): Promise<void> {
     return this.#operation(async () => {
       valueOrThrow(
-        await this.nativeLane.steer(text, options?.images, BACKGROUND_CONTEXT),
+        await this.#nativeLane.steer(text, options?.images, BACKGROUND_CONTEXT),
       );
     });
   }
   followUp(text: string, options?: { images?: ImageContent[] }): Promise<void> {
     return this.#operation(async () => {
       valueOrThrow(
-        await this.nativeLane.followUp(
+        await this.#nativeLane.followUp(
           text,
           options?.images,
           BACKGROUND_CONTEXT,
@@ -1607,7 +1723,7 @@ export class JuncoAgent<
   nextTurn(text: string, options?: { images?: ImageContent[] }): Promise<void> {
     return this.#operation(async () => {
       valueOrThrow(
-        await this.nativeLane.nextRun(
+        await this.#nativeLane.nextRun(
           text,
           options?.images,
           BACKGROUND_CONTEXT,
@@ -1617,25 +1733,25 @@ export class JuncoAgent<
   }
   appendMessage(message: AgentMessage): Promise<void> {
     return this.#operation(async () => {
-      await this.nativeLane.appendMessage(message, BACKGROUND_CONTEXT);
+      await this.#nativeLane.appendMessage(message, BACKGROUND_CONTEXT);
     });
   }
   setModel(model: ModelIdentity): Promise<void> {
     return this.#operation(() =>
-      this.nativeLane.setModel(model, BACKGROUND_CONTEXT),
+      this.#nativeLane.setModel(model, BACKGROUND_CONTEXT),
     );
   }
   getModel(): Promise<Model<Api> | undefined> {
-    return this.#operation(() => this.nativeLane.getModel(BACKGROUND_CONTEXT));
+    return this.#operation(() => this.#nativeLane.getModel(BACKGROUND_CONTEXT));
   }
   setThinkingLevel(level: ThinkingLevel): Promise<void> {
     return this.#operation(() =>
-      this.nativeLane.setThinkingLevel(level, BACKGROUND_CONTEXT),
+      this.#nativeLane.setThinkingLevel(level, BACKGROUND_CONTEXT),
     );
   }
   getThinkingLevel(): Promise<ThinkingLevel> {
     return this.#operation(() =>
-      this.nativeLane.getThinkingLevel(BACKGROUND_CONTEXT),
+      this.#nativeLane.getThinkingLevel(BACKGROUND_CONTEXT),
     );
   }
   setStreamOptions(options: AgentHarnessStreamOptions): Promise<void> {
@@ -1656,7 +1772,7 @@ export class JuncoAgent<
   context_size(): Promise<number> {
     return this.#operation(async () => {
       // Newest-first stops at the latest compaction; reversed, it is the context's chronology.
-      const entries = await this.nativeLane.findEntries(
+      const entries = await this.#nativeLane.findEntries(
         { stopAtType: "compaction", order: "newestFirst" },
         BACKGROUND_CONTEXT,
       );
@@ -1737,10 +1853,11 @@ export class JuncoAgent<
     // Runs admitted before this request finish first; new runs are busy while it is pending.
     await Promise.allSettled([...this.#drives]);
     if (this.#closing) throw closedError();
-    await this.nativeLane.waitForIdle(BACKGROUND_CONTEXT);
+    await this.#nativeLane.waitForIdle(BACKGROUND_CONTEXT);
     if (this.#closing) throw closedError();
     // Structural admission and drive only: Pi's compact() wrapper would also start queued input.
-    const admission = await this.nativeLane.accept(
+    this.beforeAdmission?.();
+    const admission = await this.#nativeLane.accept(
       {
         kind: "compaction",
         ...(customInstructions === undefined ? {} : { customInstructions }),
@@ -1778,11 +1895,11 @@ export class JuncoAgent<
   ): Promise<Awaited<ReturnType<AgentLane["drive"]>>> {
     if (this.#closing) {
       // Close's native abort might have seen an idle lane while accept was still pending.
-      const repeat = await this.nativeLane.abort(BACKGROUND_CONTEXT);
+      const repeat = await this.#nativeLane.abort(BACKGROUND_CONTEXT);
       if (!repeat.ok && repeat.error._tag !== "NoActiveOperation")
         throw repeat.error;
     }
-    return this.nativeLane.drive(
+    return this.#nativeLane.drive(
       { operationId, waitForRetry: true },
       BACKGROUND_CONTEXT,
     );
@@ -1799,7 +1916,8 @@ export class JuncoAgent<
       if (this.#pendingCompactions > 0)
         throw new JuncoAgentError("busy", "JuncoAgent compaction is pending");
       // Structural admission and drive only: Pi's navigateTree() would also start queued input.
-      const admission = await this.nativeLane.accept(
+      this.beforeAdmission?.();
+      const admission = await this.#nativeLane.accept(
         {
           kind: "navigation",
           targetId,
@@ -1846,19 +1964,17 @@ export class JuncoAgent<
     held.gate!.resolve();
   }
   #markStopping(): void {
-    for (const run of this.#activeRuns) {
-      run.stopping = true;
-      this.#suppressGates(run);
-    }
+    const run = this.#currentRun;
+    if (run === undefined) return;
+    run.stopping = true;
+    this.#suppressGates(run);
   }
   #cancelRuns(): void {
-    for (const run of this.#activeRuns) {
-      run.cancel(
-        this.#closing
-          ? closedError()
-          : new JuncoAgentError("invalid_state", "JuncoAgent run was aborted"),
-      );
-    }
+    this.#currentRun?.cancel(
+      this.#closing
+        ? closedError()
+        : new JuncoAgentError("invalid_state", "JuncoAgent run was aborted"),
+    );
     this.#pump();
   }
   #startDependents(kind: "abort" | "close"): Promise<void> {
@@ -1884,7 +2000,7 @@ export class JuncoAgent<
       );
     this.#aborting = true;
     this.#markStopping();
-    const aborting = this.nativeLane.abort(BACKGROUND_CONTEXT);
+    const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
     const dependents = this.#startDependents("abort");
     this.#cancelRuns();
     const joined = (async () => {
@@ -1897,12 +2013,12 @@ export class JuncoAgent<
           clearedSteer = result.value.steer;
           clearedFollowUp = result.value.followUp;
         } else if (result.error._tag === "NoActiveOperation") {
-          const watch = await this.nativeLane.watch(BACKGROUND_CONTEXT);
+          const watch = await this.#nativeLane.watch(BACKGROUND_CONTEXT);
           try {
             for (const item of watch.snapshot.queues) {
               if (item.kind !== "steer" && item.kind !== "followUp") continue;
               const cancelled = valueOrThrow(
-                await this.nativeLane.cancelQueued(
+                await this.#nativeLane.cancelQueued(
                   item.entryId,
                   BACKGROUND_CONTEXT,
                 ),
@@ -1989,7 +2105,7 @@ export class JuncoAgent<
         const { text, images } = this.#staged;
         this.#staged = undefined;
         // An already-pending operation rejects this staged request through the same iterator.
-        if (this.#pendingAdmission || this.#activeRuns.size > 0) {
+        if (this.#currentRun !== undefined) {
           this.#publish({
             step: {
               kind: "failed",
@@ -2043,7 +2159,7 @@ export class JuncoAgent<
     this.#closing = true;
     this.#staged = undefined;
     this.#markStopping();
-    const aborting = this.nativeLane.abort(BACKGROUND_CONTEXT);
+    const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
     const dependents = this.#startDependents("close");
     this.#cancelRuns();
     for (const boundary of this.#held.splice(0)) boundary.gate!.resolve();

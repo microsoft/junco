@@ -5,8 +5,7 @@ import {
 import { ToolCollection } from "./collection.js";
 
 export default function extension(pi: ExtensionAPI): void {
-  // The collection holds a lease on the process's one ShellMux; session shutdown closes only
-  // the collection. The containing process owns the final shutdownShellMux().
+  // Each session's collection owns its own ShellMux; session shutdown closes it.
   let collection: ToolCollection | undefined;
   pi.on("session_start", async (_event, ctx) => {
     await collection?.close();
@@ -16,6 +15,7 @@ export default function extension(pi: ExtensionAPI): void {
     // Same-name definitions (read, bash, edit, grep, find) replace the
     // built-ins; write, ls, and user_bash stay untouched.
     collection = await ToolCollection.create(ctx.cwd, {
+      policy: "LockPolicy",
       principal: `pi-${ctx.sessionManager.getSessionId()}`,
       bash: { commandPrefix },
     });

@@ -10,6 +10,7 @@ export {
   JuncoAgent,
   type JuncoAgentCreateOptions,
   JuncoAgentError,
+  type JuncoAgentNodeContext,
   type JuncoAgentResolvedOptions,
   type JuncoAgentTools,
   type SubagentObserver,

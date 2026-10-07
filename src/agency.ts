@@ -18,7 +18,9 @@ import { nodeInputs, nodePolicies } from "./node-policy.js";
  * ```ts
  * let graph: JuncoGraph<…, PiScheduler<…>> | undefined;
  * const scheduler = await createAgencyScheduler(() => graph, options);
- * const constructed = new JuncoGraph(scheduler, window, threads, tracer.createTracer());
+ * const constructed = new JuncoGraph(
+ *   scheduler, window, threads, tracer.createTracer(), options.policy, options.collection,
+ * );
  * graph = constructed;
  * ```
  *
@@ -40,7 +42,7 @@ export async function createAgencyScheduler<
   T = AssistantMessage,
 >(
   getGraph: () => JuncoGraph<N, T> | undefined,
-  options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> = {},
+  options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter">,
 ): Promise<PiScheduler<N, T, S, P>> {
   let scheduler: PiScheduler<N, T, S, P> | undefined;
   /** The graph this scheduler drives, if it is constructed and bound to this scheduler. */

@@ -2,26 +2,17 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 
-// StdoutTracer and tracer selection, observed through real subprocesses: each script drives real
-// graphs and the real renderer, so stdout and Bun feature state stay isolated from this runner.
+// StdoutTracer and the default tracer, observed through real subprocesses: each script drives real
+// graphs and the real renderer, so stdout stays isolated from this runner.
 
 const root = join(import.meta.dir, "..");
 
 async function script(
   source: string,
-  {
-    features = [],
-    env = {},
-  }: { features?: string[]; env?: Record<string, string> } = {},
+  { env = {} }: { env?: Record<string, string> } = {},
 ): Promise<{ stdout: string; stderr: string }> {
   const child = Bun.spawn(
-    [
-      process.execPath,
-      "--no-install",
-      ...features.map((name) => `--feature=${name}`),
-      "--eval",
-      source,
-    ],
+    [process.execPath, "--no-install", "--eval", source],
     {
       cwd: root,
       // Explicit, so an inherited developer setting cannot change the case.
@@ -69,7 +60,7 @@ import { tracer } from "junco-agency";
 const newGraph = (observer) =>
   new DataflowGraph(createParallelScheduler(), Width(1), UNBOUNDED, observer);
 const add = (graph, id, state = undefined) =>
-  graph.addNode({ id: NodeId(id), state, trigger: always(), step: emitOnce(() => [], "done") });
+  graph.addNode({ id: NodeId(id), state, policy: "LockPolicy", trigger: always(), step: emitOnce(() => [], "done") });
 `;
 
 test("the graph section draws every engine Mermaid form as Unicode before any interaction", async () => {
@@ -198,7 +189,7 @@ import { graph, schedulers, tracer } from "junco-agency";
 let hooks = 0;
 function build(observer) {
   const workflow = new graph.JuncoGraph(
-    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer,
+    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer, "LockPolicy",
   );
   const feed = graph.messageEdge("feed");
   const payload = {
@@ -214,8 +205,8 @@ function build(observer) {
     new graph.nodes.Deterministic(async function* () {
       yield [graph.msg(feed, payload)];
       return "sent";
-    }),
-    { id: graph.NodeId("source"), trigger: graph.trigger.always() },
+    }, "LockPolicy"),
+    { id: graph.NodeId("source"), trigger: graph.trigger.always(), policy: "LockPolicy" },
   ));
   const sink = workflow.addNode(graph.nodes.deterministicNode(
     new graph.nodes.Deterministic(async function* () {
@@ -223,8 +214,8 @@ function build(observer) {
       const [received] = graph.from(inputs, feed);
       received.marker = "after";
       return received;
-    }),
-    { id: graph.NodeId("sink"), trigger: graph.trigger.when(feed) },
+    }, "LockPolicy"),
+    { id: graph.NodeId("sink"), trigger: graph.trigger.when(feed), policy: "LockPolicy" },
   ));
   workflow.addEdge(source, sink, feed);
   return workflow;
@@ -264,6 +255,7 @@ observer.complain(NodeId(""), "no run is active");
 const graph = newGraph(observer);
 graph.addNode({
   id: NodeId("busy"), state: undefined, trigger: always(),
+  policy: "LockPolicy",
   step: async function* () { observer.complain(NodeId("busy"), "during the run"); return "done"; },
 });
 await graph.run();
@@ -380,6 +372,7 @@ function failing(observer, handled) {
     id: NodeId("source"),
     state: undefined,
     trigger: always(),
+    policy: "LockPolicy",
     async *step() { throw cause; },
     ...(handled ? { on_error: () => [msg(notice, 5)] } : {}),
   });
@@ -387,6 +380,7 @@ function failing(observer, handled) {
     id: NodeId("sink"),
     state: undefined,
     trigger: when(notice),
+    policy: "LockPolicy",
     async *step() { yield []; return "sink"; },
   });
   graph.addEdge(source, sink, notice);
@@ -472,12 +466,14 @@ const source = graph.addNode({
   id: NodeId("source"),
   state: undefined,
   trigger: always(),
+  policy: "LockPolicy",
   async *step() { primes++; yield [msg(feed, 1)]; return 7; },
 });
 const sink = graph.addNode({
   id: NodeId("sink"),
   state: undefined,
   trigger: when(feed),
+  policy: "LockPolicy",
   async *step() { const view = yield []; return view.messages.get(feed.id).length; },
 });
 graph.addEdge(source, sink, feed);
@@ -496,6 +492,7 @@ const gated = (name) => {
     id: NodeId(name),
     state: undefined,
     trigger: always(),
+    policy: "LockPolicy",
     async *step() { await gates[name].promise; return name + "-result"; },
   });
   return g;
@@ -551,13 +548,13 @@ import { DummyTracer } from "dataflow-engine";
 import { graph, schedulers, tracer } from "junco-agency";
 async function deterministic(observer) {
   const workflow = new graph.JuncoGraph(
-    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer,
+    schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), observer, "LockPolicy",
   );
   workflow.addNode(graph.nodes.deterministicNode(
-    new graph.nodes.Deterministic(async function* () { return 3; }),
-    { id: graph.NodeId("only"), trigger: graph.trigger.always() },
+    new graph.nodes.Deterministic(async function* () { return 3; }, "LockPolicy"),
+    { id: graph.NodeId("only"), trigger: graph.trigger.always(), policy: "LockPolicy" },
   ));
-  const factory = graph.createParallelAgentGraph(observer);
+  const factory = graph.createParallelAgentGraph("LockPolicy", observer);
   assert.equal(factory.tracer, observer);
   try {
     assert.deepEqual([...await workflow.run()], [["only", 3]]);
@@ -568,7 +565,7 @@ async function deterministic(observer) {
 }
 `;
 
-test("JuncoGraph requires a tracer; the factory default is the shared StdoutTracer without features", async () => {
+test("JuncoGraph requires a tracer; the factory default is the shared StdoutTracer", async () => {
   const { stdout } = await script(`${AGENCY}
 import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
@@ -578,10 +575,10 @@ const selected = tracer.createTracer();
 assert.ok(selected instanceof tracer.StdoutTracer);
 assert.equal(tracer.createTracer(), selected);
 const direct = new graph.JuncoGraph(
-  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(),
+  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(), "LockPolicy",
 );
 assert.equal(direct.tracer, selected);
-const factory = graph.createParallelAgentGraph();
+const factory = graph.createParallelAgentGraph("LockPolicy");
 assert.equal(factory.tracer, selected);
 
 const scheduler = schedulers.createRoundRobinScheduler();
@@ -604,9 +601,10 @@ const agent = await agentApi.JuncoAgent.fromResolved({
   models,
   model: faux.getModel(),
   tools: [],
+  policy: "LockPolicy",
 });
-const parent = graph.createParallelAgentGraph(new tracer.StdoutTracer("parent"));
-const id = ralph(parent, agent, { input: graph.messageEdge("in"), output: graph.messageEdge("out") });
+const parent = graph.createParallelAgentGraph("LockPolicy", new tracer.StdoutTracer("parent"));
+const id = ralph(parent, agent, { input: graph.messageEdge("in"), output: graph.messageEdge("out"), policy: "LockPolicy" });
 assert.equal(parent.getNode(id).state.tracer, parent.tracer);
 await parent.close();
 await Promise.all([direct.close(), factory.close()]);
@@ -614,54 +612,4 @@ console.log("SELECTED");
 await deterministic(new DummyTracer());
 `);
   assert.equal(stdout, "SELECTED\n");
-});
-
-test("an explicit tracer bypasses Opik selection; createTracer selects one shared Opik tracer under the feature", async () => {
-  const quiet = await script(
-    `${AGENCY}
-await deterministic(new DummyTracer());
-`,
-    { features: ["opik"] },
-  );
-  assert.equal(quiet.stdout, "");
-
-  const loud = await script(
-    `${AGENCY}
-await deterministic(new tracer.StdoutTracer("explicit"));
-`,
-    { features: ["opik"] },
-  );
-  assert.ok(lines(loud.stdout, "[run 1] explicit").length === 1);
-  assert.ok(
-    lines(loud.stdout, '[run 1] node="only" #1 return { value: 3 }').length ===
-      1,
-  );
-
-  const opik = await script(
-    `
-import assert from "node:assert/strict";
-import { OpikDataflowTracer } from "dataflow-engine-opik";
-import { graph, schedulers, tracer } from "junco-agency";
-const selected = tracer.createTracer();
-assert.ok(selected instanceof OpikDataflowTracer);
-assert.equal(tracer.createTracer(), selected);
-const direct = new graph.JuncoGraph(
-  schedulers.createRoundRobinScheduler(), graph.Width(1), graph.Width(1), tracer.createTracer(),
-);
-assert.equal(direct.tracer, selected);
-assert.equal(graph.createParallelAgentGraph().tracer, selected);
-console.log("OPIK");
-process.exit(0);
-`,
-    {
-      features: ["opik"],
-      env: {
-        OPIK_URL_OVERRIDE: "http://127.0.0.1:1/api",
-        OPIK_PROJECT_NAME: "stdout-tracer-test",
-        OPIK_WORKSPACE: "stdout-tracer-test",
-        OPIK_API_KEY: "local-test",
-      },
-    },
-  );
-  assert.equal(opik.stdout, "OPIK\n");
 });

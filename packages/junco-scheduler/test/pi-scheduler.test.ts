@@ -44,13 +44,13 @@ import {
   type SchedulerInfo,
 } from "../src/agent.ts";
 import {
-  drive,
   nativeOptions,
   newScheduler,
   runAvailable,
   type Script,
   scheduleCall,
   schedulerInfoOf,
+  settle,
   settledText,
   toolErrors,
   toolTurn,
@@ -118,9 +118,7 @@ test("the empty node id primes, resumes and completes through real schedule tool
   });
   const errors = toolErrors(scheduler);
   try {
-    const { yields, last } = await drive(scheduler);
-    assert.equal(settledText(last), "done");
-    assert.equal(yields, 3);
+    assert.equal(settledText(await settle(scheduler)), "done");
     assert.deepEqual(errors, [false, false, false]);
     assert.deepEqual(log, ["prime", "resume", "complete"]);
     assert.deepEqual(graph.result(NodeId("")), {
@@ -230,7 +228,7 @@ test("direct complaints record while unbound and reject after scheduler close", 
   }
 });
 
-test("each schedule call runs one real graph window and pauses until the next resume", async () => {
+test("consecutive schedule calls each run one real graph window within a single next", async () => {
   const { scheduler, graph, faux, log } = await singleNode(
     [
       toolTurn(
@@ -247,15 +245,17 @@ test("each schedule call runs one real graph window and pauses until the next re
     "actual node result",
   );
   const completed: SchedulerInfo[] = [];
+  const statusAtResult: string[] = [];
   scheduler.events.on("tool_end", ({ toolName, result, isError }) => {
-    if (toolName === "schedule" && !isError)
+    if (toolName === "schedule" && !isError) {
       completed.push(result.details as SchedulerInfo);
+      statusAtResult.push(graph.getNode(NodeId("0"))!.status);
+    }
   });
   const before = issueLog.length;
   try {
-    const first = await scheduler.next();
-    assert.ok(first.done === false && first.value.kind === "yield");
-    assert.equal(completed.length, 1);
+    assert.equal(settledText(await settle(scheduler)), "finished");
+    assert.equal(completed.length, 2);
     const issues = issueLog.snapshot().slice(before);
     assert.equal(issues.length, 1);
     assert.equal(issues[0]!.complaint, "The plan is underspecified.");
@@ -268,21 +268,14 @@ test("each schedule call runs one real graph window and pauses until the next re
     assert.ok(issues[0]!.prompt.tools!.some((t) => t.name === "schedule"));
     assert.ok(issues[0]!.prompt.tools!.some((t) => t.name === "complain"));
     assert.deepEqual(completed[0]!.nodes, [{ id: "0", status: "running" }]);
-    assert.equal(graph.getNode(NodeId("0"))!.status, "running");
-    await new Promise<void>((resolve) => setImmediate(resolve)); // nothing progresses while paused
-    assert.equal(faux.state.callCount, 2);
-
-    const second = await scheduler.next();
-    assert.ok(second.done === false && second.value.kind === "yield");
     assert.deepEqual(completed[1], {
       window: null,
       threads: null,
       quiescent: true,
       nodes: [],
     });
-    assert.equal(graph.getNode(NodeId("0"))!.status, "done");
-    assert.equal(faux.state.callCount, 3);
-    assert.equal(settledText((await drive(scheduler)).last), "finished");
+    // Each result is delivered only after its window completed.
+    assert.deepEqual(statusAtResult, ["running", "done"]);
     assert.equal(faux.state.callCount, 4);
     assert.deepEqual(log, ["prime", "resume"]);
     assert.deepEqual(graph.result(NodeId("0")), {
@@ -327,13 +320,12 @@ test("schedule calls added by a later after_response hook are rejected before an
   );
   const errors = toolErrors(scheduler);
 
-  const { yields, last } = await drive(scheduler);
+  const last = await settle(scheduler);
 
   assert.deepEqual(errors, [true, true, false, false]);
   assert.deepEqual(statusAtRetry, ["ready"]);
   assert.deepEqual(stepsAtRetry, [0]);
   assert.equal(graphSteps, 2);
-  assert.equal(yields, 2);
   assert.equal(settledText(last), "finished");
   assert.deepEqual(log, ["prime", "resume"]);
   await scheduler.return();
@@ -352,7 +344,7 @@ test("an invalid plan is an ordinary tool error that activates nothing", async (
   ]);
   const errors = toolErrors(scheduler);
 
-  assert.equal(settledText((await drive(scheduler)).last), "finished");
+  assert.equal(settledText(await settle(scheduler)), "finished");
   assert.deepEqual(errors, [true, false, false]);
   assert.deepEqual(statusAfter, ["ready"]);
   assert.deepEqual(log, ["prime", "resume"]);
@@ -382,8 +374,7 @@ test("with nothing available a plan is rejected, while an empty one returns Sche
     if (!isError) results.push(result.details as SchedulerInfo);
   });
 
-  const { yields, last } = await drive(scheduler);
-  assert.equal(yields, 0);
+  const last = await settle(scheduler);
   assert.equal(settledText(last), "nothing to do");
   assert.deepEqual(errors, [true, false]);
   assert.deepEqual(results, [
@@ -395,7 +386,7 @@ test("with nothing available a plan is rejected, while an empty one returns Sche
 
 test("finishing while work is available fails the run, before or after a window", async () => {
   const early = await singleNode([fauxAssistantMessage("done already")]);
-  const skipped = (await drive(early.scheduler)).last;
+  const skipped = await settle(early.scheduler);
   assert.ok(
     skipped.kind === "failed" && skipped.error instanceof JuncoAgentError,
   );
@@ -405,8 +396,7 @@ test("finishing while work is available fails the run, before or after a window"
     toolTurn(scheduleCall([["0"]], "prime")),
     fauxAssistantMessage("done"),
   ]);
-  const { yields, last } = await drive(primedOnly.scheduler);
-  assert.equal(yields, 1);
+  const last = await settle(primedOnly.scheduler);
   assert.ok(
     last.kind === "failed" &&
       last.error instanceof JuncoAgentError &&
@@ -437,7 +427,7 @@ test("a node failure remains fatal even after the scheduler's final answer", asy
     },
   });
 
-  const { last } = await drive(scheduler);
+  const last = await settle(scheduler);
   assert.ok(last.kind === "failed" && last.error instanceof DataflowNodeError);
   assert.equal(last.error.nodeId, NodeId("0"));
   assert.equal(last.error.error, cause);
@@ -591,7 +581,7 @@ test("SchedulerInfo shows only candidates: no unavailable node, finished node or
   });
 
   try {
-    assert.equal(settledText((await drive(scheduler)).last), "graph quiescent");
+    assert.equal(settledText(await settle(scheduler)), "graph quiescent");
 
     const shown = (info: SchedulerInfo) =>
       info.nodes.map((node) => [node.id, node.status, node.details]);
@@ -667,6 +657,7 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
       provider: "conflicting",
     });
     const shared: PiSchedulerOptions = {
+      policy: "LockPolicy",
       models,
       session,
       model: conflicting.getModel(),
@@ -685,7 +676,11 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
     });
     const transferred = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models: missing, session: transferred }),
+      PiScheduler.opus({
+        policy: "LockPolicy",
+        models: missing,
+        session: transferred,
+      }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_state");
@@ -712,9 +707,9 @@ test("make validates required shared options before adopting resources", async (
       { models, session },
       { model, session },
       { model, models },
-    ] satisfies PiSchedulerOptions[]) {
+    ] satisfies Omit<PiSchedulerOptions, "policy">[]) {
       await assert.rejects(
-        PiScheduler.make({ ...partial, prompt: "go" }),
+        PiScheduler.make({ ...partial, policy: "LockPolicy", prompt: "go" }),
         (error: unknown) => {
           assert.ok(error instanceof JuncoAgentError);
           assert.equal(error.code, "invalid_argument");
@@ -758,7 +753,12 @@ test("opus never falls back to a supplied model when the fixed model is missing"
   try {
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models, session, model: copilot.getModel() }),
+      PiScheduler.opus({
+        policy: "LockPolicy",
+        models,
+        session,
+        model: copilot.getModel(),
+      }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_argument");
@@ -788,7 +788,7 @@ test("opus over a native model collection without saved logins fails its login c
   try {
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ models, session, prompt: "go" }),
+      PiScheduler.opus({ policy: "LockPolicy", models, session, prompt: "go" }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_state");
@@ -830,7 +830,10 @@ test("an unbound scheduler fails its first request before any provider call, thr
   const resolved = await nativeOptions([fauxAssistantMessage("never")]);
 
   for (const [faux, make] of [
-    [copilot, () => PiScheduler.opus({ models, prompt: "go" })],
+    [
+      copilot,
+      () => PiScheduler.opus({ policy: "LockPolicy", models, prompt: "go" }),
+    ],
     [
       resolved.faux,
       () => PiScheduler.make({ ...resolved.options, prompt: "go" }),
@@ -899,9 +902,7 @@ test("adapter reads plan every occurrence and re-resolve a running node's live i
     if (!isError) details.push(result.details as SchedulerInfo);
   });
   try {
-    const { yields, last } = await drive(scheduler);
-    assert.equal(settledText(last), "drained");
-    assert.equal(yields, 2);
+    assert.equal(settledText(await settle(scheduler)), "drained");
     assert.deepEqual(seen, [[1, 2], [3, 4], [5]]);
     assert.equal(graph.getNode(NodeId("sink"))!.status, "running");
     assert.equal(details.at(-1)!.quiescent, true);
@@ -970,8 +971,7 @@ test("the beforeSchedule guard fails admission, rejects a schedule call and drop
     guarded = false;
     const errors = toolErrors(scheduler);
     const settled = scheduler.prompt("schedule it");
-    const { last } = await drive(scheduler);
-    assert.equal(settledText(last), "finished");
+    assert.equal(settledText(await settle(scheduler)), "finished");
     assert.equal((await settled).stopReason, "stop");
     assert.deepEqual(errors, [true, false, false]);
     assert.deepEqual(informed, [true, false, true]);

@@ -18,7 +18,13 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import type { ComplainToolHost } from "junco-tools";
+import type { EdgeIdType } from "dataflow-engine";
+import type {
+  ComplainToolHost,
+  Contract,
+  ToolCollection,
+  ToolCollectionOptions,
+} from "junco-tools";
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -128,6 +134,11 @@ export interface Agentic<
       customInstructions?: string;
     },
   ): Promise<NavigationResult>;
+  /**
+   * What this agent, as a graph receiver, expects on its incoming edge `edgeId`. A metadata query:
+   * it never starts or resumes a run.
+   */
+  contract(edgeId: EdgeIdType): Contract;
 }
 
 /** Native harness options plus an optional initial prompt staged until the first `next()`. */
@@ -143,4 +154,13 @@ export type AgenticOptions<
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string;
   readonly images?: ImageContent[];
+  /** Authorization policy of the agent's native ShellMux; must equal `collection.policy`. */
+  readonly policy: ToolCollectionOptions["policy"];
+  /**
+   * Borrowed collection binding the agent's policy and native lifetime: the agent holds a lease
+   * until closed, and closes only that lease, never the collection. Grants no tools by itself.
+   */
+  readonly collection?: ToolCollection;
+  /** This agent's receiver contract per incoming graph edge; see {@link Agentic.contract}. */
+  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };

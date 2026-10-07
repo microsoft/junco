@@ -19,7 +19,7 @@ import { always, NodeId, type NodeOptions, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import type { SchedulerInfo } from "junco-scheduler/agent";
-import { createYieldTool } from "junco-tools";
+import { createYieldTool, type ToolCollectionOptions } from "junco-tools";
 import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph, tracer } from "../src/index.ts";
 
 let providers = 0;
@@ -57,7 +57,12 @@ type Decision = { readonly lanes: string[][] } | { readonly text: string };
 const runAvailable = (name: string) => (info: SchedulerInfo): Decision =>
   info.nodes.length > 0 ? { lanes: info.nodes.map((node) => [node.id]) } : { text: `${name} complete` };
 
-async function agency(name: string, members: readonly (JuncoAgent | JuncoGraph)[], decide: (info: SchedulerInfo, request: number) => Decision) {
+async function agency(
+  name: string,
+  policy: ToolCollectionOptions["policy"],
+  members: readonly (JuncoAgent | JuncoGraph)[],
+  decide: (info: SchedulerInfo, request: number) => Decision,
+) {
   let requests = 0;
   const respond: FauxResponseFactory = (context) => {
     faux.appendResponses([respond]);
@@ -73,12 +78,17 @@ async function agency(name: string, members: readonly (JuncoAgent | JuncoGraph)[
   const scheduler = await createAgencyScheduler(() => current, {
     ...options,
     systemPrompt: `You schedule ${name}.`,
+    policy,
     prompt: `Run ${name}.`,
   });
-  const graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer());
+  const graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer(), policy);
   current = graph;
   for (const [index, member] of members.entries()) {
-    const options: NodeOptions<AgenticInput, AssistantMessage> = { description: `${name} member ${index}`, trigger: always() };
+    const options: NodeOptions<AgenticInput, AssistantMessage> & Pick<ToolCollectionOptions, "policy"> = {
+      description: `${name} member ${index}`,
+      policy,
+      trigger: always(),
+    };
     graph.addNode(
       member instanceof JuncoGraph
         ? graphNode(member, options, { result: NodeId("0") })
@@ -88,14 +98,19 @@ async function agency(name: string, members: readonly (JuncoAgent | JuncoGraph)[
   return { graph, scheduler };
 }
 
-async function leafAgent(responses: readonly FauxResponseStep[], tools: readonly AgentTool[] = []) {
+async function leafAgent(
+  policy: ToolCollectionOptions["policy"],
+  responses: readonly FauxResponseStep[],
+  tools: readonly AgentTool[] = [],
+) {
   const { faux, options } = await nativeOptions(responses);
-  const agent = await JuncoAgent.fromResolved({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part." });
+  const agent = await JuncoAgent.fromResolved({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part.", policy });
   return { faux, agent };
 }
 
 const log: string[] = [];
 const leaf = await leafAgent(
+  "LockPolicy",
   [
     fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
       stopReason: "toolUse",
@@ -104,61 +119,52 @@ const leaf = await leafAgent(
   ],
   [createYieldTool()],
 );
-const sibling = await leafAgent([fauxAssistantMessage("sibling-result")]);
+const sibling = await leafAgent("LockPolicy", [fauxAssistantMessage("sibling-result")]);
 sibling.agent.events.on("run_end", (event) => {
   if (event.status === "completed") log.push("sibling done");
 });
 
-const grandchild = await agency("grandchild", [leaf.agent], runAvailable("grandchild"));
-const child = await agency("child", [grandchild.graph], runAvailable("child"));
+const grandchild = await agency("grandchild", "LockPolicy", [leaf.agent], runAvailable("grandchild"));
+const child = await agency("child", "LockPolicy", [grandchild.graph], runAvailable("child"));
 child.scheduler.events.on("tool_start", (event) => {
   if (event.toolName === "schedule") log.push("child window");
 });
-// The root primes both members, runs one child window, then the sibling, then the rest.
+// The root primes both members, runs the child (all its windows), then the sibling, then the rest.
 const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
-const root = await agency("root", [child.graph, sibling.agent], (info, request) =>
+const root = await agency("root", "LockPolicy", [child.graph, sibling.agent], (info, request) =>
   request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
 );
 // Every nested graph shares the automatically selected tracer.
+let windows = 0;
+let settled: string | undefined;
 try {
-  const publicTools: string[] = [];
-  root.scheduler.events.on("tool_start", (event) => {
-    if (event.toolName === "schedule") publicTools.push(event.toolName);
+  root.scheduler.events.on("tool_end", (event) => {
+    if (event.toolName === "schedule" && !event.isError) windows++;
   });
-
-  let windows = 0;
-  let settled: string | undefined;
-  for await (const step of root.scheduler) {
-    if (step.kind === "yield") {
-      windows++;
-      continue;
-    }
-    assert.equal(step.kind, "settled");
-    if (step.kind !== "settled") break;
-    settled = textOf(step.message);
-    break;
-  }
-  await root.graph.close();
-
-  const resultOf = (graph: JuncoGraph, id: string) => {
-    const result = graph.result(NodeId(id));
-    return O.isSome(result) ? textOf(result.value) : undefined;
-  };
-  const leafResult = resultOf(grandchild.graph, "0");
-  const siblingResult = resultOf(root.graph, "1");
-  assert.equal(settled, "root complete");
-  assert.equal(leafResult, "leaf-result");
-  assert.equal(siblingResult, "sibling-result");
-  assert.equal(windows, 8);
-  assert.ok(publicTools.length === windows && publicTools.every((name) => name === "schedule"));
-  const siblingDone = log.indexOf("sibling done");
-  assert.ok(log.indexOf("child window") < siblingDone && log.lastIndexOf("child window") > siblingDone, log.join(", "));
-  assert.equal(leaf.faux.state.callCount, 2);
-  assert.equal(sibling.faux.state.callCount, 1);
-  for (const actor of [root.scheduler, child.scheduler, grandchild.scheduler, leaf.agent, sibling.agent]) {
-    assert.equal(actor.status, "closed");
-  }
-  console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);
+  // Schedule windows run inside one public next(); only settlement ends it.
+  const step = await root.scheduler.next();
+  assert.ok(!step.done && step.value.kind === "settled", "root scheduler settled in one next()");
+  settled = textOf(step.value.message);
 } finally {
+  await root.graph.close();
   await root.graph.tracer.flush();
 }
+
+const resultOf = (graph: JuncoGraph, id: string) => {
+  const result = graph.result(NodeId(id));
+  return O.isSome(result) ? textOf(result.value) : undefined;
+};
+const leafResult = resultOf(grandchild.graph, "0");
+const siblingResult = resultOf(root.graph, "1");
+assert.equal(settled, "root complete");
+assert.equal(leafResult, "leaf-result");
+assert.equal(siblingResult, "sibling-result");
+assert.equal(windows, 3);
+const siblingDone = log.indexOf("sibling done");
+assert.ok(siblingDone > 0 && log.lastIndexOf("child window") < siblingDone, log.join(", "));
+assert.equal(leaf.faux.state.callCount, 2);
+assert.equal(sibling.faux.state.callCount, 1);
+for (const actor of [root.scheduler, child.scheduler, grandchild.scheduler, leaf.agent, sibling.agent]) {
+  assert.equal(actor.status, "closed");
+}
+console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);

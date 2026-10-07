@@ -461,10 +461,22 @@ export async function scriptedLane(
     Array.from({ length: 200 }, () => dispatch),
   );
   const judgeOptions = await nativeOptions([
-    (context: Context) => {
+    () => {
       log.judgeCalls++;
-      log.judgeInputs.push(userTexts(context));
       script.onJudge?.();
+      return toolUse(call("recv", {}));
+    },
+    (context: Context) => {
+      // The judge's input is what recv actually delivered, not its start prompt.
+      const result = context.messages.at(-1);
+      const received = JSON.parse(
+        result?.role === "toolResult" ? contentText(result.content) : "{}",
+      ) as {
+        messages?: { payload?: { text?: string } }[];
+      };
+      log.judgeInputs.push(
+        (received.messages ?? []).map((message) => message.payload?.text ?? ""),
+      );
       return toolUse(call("judge_refactor", script.verdict ?? allPass));
     },
     fauxAssistantMessage("verdict recorded"),
@@ -486,7 +498,7 @@ export async function scriptedLane(
   const judge = await agentApi.JuncoAgent.fromResolved({
     ...judgeOptions.options,
     systemPrompt: "judge",
-    tools: [read, verdict.tool],
+    tools: [read, toolsApi.RecvTool(), toolsApi.InfoTool(), verdict.tool],
   });
   return { lane: { work, proposer, judge, proposal, verdict }, log };
 }

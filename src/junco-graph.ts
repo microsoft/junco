@@ -4,18 +4,29 @@ import {
   type DataflowRunOptions,
   type DataflowScheduler,
   type DataflowTracer,
+  type Message,
   type NodeIdType,
   type NodeSpec,
   type Width,
 } from "dataflow-engine";
-import { type JuncoAgent, JuncoAgentError } from "junco-agent";
+import * as E from "fp-ts/lib/Either.js";
+import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
-import { issueLog } from "junco-tools";
+import {
+  issueLog,
+  ToolCollection,
+  type ToolCollectionOptions,
+} from "junco-tools";
 import { settleAll } from "./agent-operations.js";
-import type { Agentic, AgenticInput } from "./agentic.js";
+import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import { Deterministic } from "./deterministic.js";
 import type { MockAgent } from "./mock-agent.js";
-import { nodePolicies, registeredNodeTracers } from "./node-policy.js";
+import {
+  checkPolicy,
+  type NodeRegistration,
+  nodePolicies,
+  registeredNodeContexts,
+} from "./node-policy.js";
 
 /**
  * Internal entrypoint of an agency scheduler's abort and close callbacks: abort or close this
@@ -41,6 +52,9 @@ type Kind = "abort" | "close";
 const closedGraph = (): JuncoAgentError =>
   new JuncoAgentError("closed", "Graph is closed");
 
+/** One hold on a collection, released once. */
+type Hold = { close(): Promise<void> };
+
 /**
  * A dataflow graph of {@link Agentic} node states that owns its members' lifecycle.
  *
@@ -48,6 +62,10 @@ const closedGraph = (): JuncoAgentError =>
  * the graph keeps an abort signal that every `step`/`run` observes automatically, and recursive
  * {@link abort}/{@link close} cascades over its members: nested graphs, their `PiScheduler`s,
  * prompt agents and deterministic coroutines. Cancellation inside a running body stays cooperative.
+ *
+ * The graph has a `policy` and may borrow a `collection`, holding its own lease from construction
+ * until close. A close first settles every member's close, then releases the visited graphs'
+ * leases and owned creator holds.
  */
 export class JuncoGraph<
   N = AgenticInput,
@@ -69,24 +87,87 @@ export class JuncoGraph<
   #close: Cascade | undefined;
   /** A root `close()` joining a close its own scheduler started. */
   #rootClose: Promise<void> | undefined;
+  #collection: ToolCollection | undefined;
+  #lease: Hold | undefined;
+  /** The creator hold this graph owns, when {@link create} built it. */
+  #owned: Hold | undefined;
 
   /** The execution observer every `run()`/`step()` of this graph reports to. */
   declare readonly tracer: DataflowTracer;
+  /** Authorization policy of this graph; equals `collection.policy` when one is bound. */
+  readonly policy: ToolCollectionOptions["policy"];
 
   /**
-   * @param tracer Required execution observer; use `createTracer()` for the feature-selected one.
-   * @throws {TypeError} when `tracer` is missing.
+   * @param tracer Required execution observer; `createTracer()` returns the shared default.
+   * @param policy Required authorization policy of this graph.
+   * @param collection Borrowed; the graph holds its own lease until close and never closes it.
+   * @throws {TypeError} when `tracer` is missing, `policy` is missing or unknown, or `collection`
+   *   has another policy.
    */
   constructor(
     scheduler: Q,
     window: Width,
     threads: Width,
     tracer: DataflowTracer,
+    policy: ToolCollectionOptions["policy"],
+    collection?: ToolCollection,
   ) {
     if (tracer == null) {
       throw new TypeError("JuncoGraph requires a tracer");
     }
+    checkPolicy(policy, collection);
     super(scheduler, window, threads, tracer);
+    this.policy = policy;
+    this.#collection = collection;
+    this.#lease = collection?.lease();
+  }
+
+  /**
+   * Open one collection under `options`, then build a graph whose members all use it. `build`
+   * receives the collection borrowed: pass it to every agent factory, scheduler, coroutine and
+   * child-graph constructor, but never close it; members take their own leases. Every real agent
+   * and scheduler of the returned graphs must use this collection, and the root its policy; the
+   * root is bound to it if unbound and owns the creator hold, released by its close.
+   *
+   * A thrown `build` releases the creator hold. A rejected graph is closed, then the hold
+   * released; cleanup failures aggregate with the original.
+   *
+   * @throws {TypeError} for an invalid policy or a member bound to another collection or policy.
+   */
+  static async create<N, T, EH, Q extends DataflowScheduler<N, T>>(
+    cwd: string,
+    options: ToolCollectionOptions,
+    build: (
+      collection: ToolCollection,
+    ) => JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>,
+  ): Promise<JuncoGraph<N, T, EH, Q>> {
+    const collection = await ToolCollection.create(cwd, options);
+    const failures: unknown[] = [];
+    let graph: JuncoGraph<N, T, EH, Q> | undefined;
+    try {
+      graph = await build(collection);
+      graph.#adopt(collection);
+      return graph;
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await graph?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await collection.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    throw new AggregateError(failures, "Graph construction failed");
+  }
+
+  /** The borrowed collection this graph holds a lease on, if any. */
+  get collection(): ToolCollection | undefined {
+    return this.#collection;
   }
 
   /** Aborted by {@link abort} (then replaced once that settles) and, terminally, by {@link close}. */
@@ -99,11 +180,117 @@ export class JuncoGraph<
     return issueLog;
   }
 
-  /** Register a node as natively, recording this graph's tracer for that registration's complaints. */
-  override addNode(spec: NodeSpec<Agentic<N, T>, N, T>): NodeIdType {
+  /**
+   * Register a node as natively, recording for that registration this graph's tracer, its
+   * outgoing routes and topology (what `send` and `info` reach) and the spec's receiver contract.
+   *
+   * @throws {TypeError} when a real agent's, coroutine's or child graph's policy is not the spec's.
+   */
+  override addNode(spec: AgenticNode<N, T>): NodeIdType {
+    checkPolicy(spec.policy, undefined);
+    const state = spec.state;
+    if (
+      (state instanceof JuncoAgent ||
+        state instanceof Deterministic ||
+        state instanceof JuncoGraph) &&
+      state.policy !== spec.policy
+    )
+      throw new TypeError("Node policy does not match its state");
     const id = super.addNode(spec);
-    registeredNodeTracers.set(this.getNode(id)!, this.tracer);
+    const current = (): AbortSignal => this.signal;
+    const { contract } = spec;
+    registeredNodeContexts.set(this.getNode(id)!, {
+      tracer: this.tracer,
+      get signal() {
+        return current();
+      },
+      send: (message) => {
+        this.signal.throwIfAborted();
+        this.emit(id, message as Message<N>);
+      },
+      info: () => this.#nodeInfo(id),
+      ...(contract === undefined ? {} : { contract }),
+    });
     return id;
+  }
+
+  /**
+   * Node `id`'s parent and child routes, one entry per actual edge, each with the contract its
+   * receiving node in this graph declares for it. Fails rather than omit or invent a contract.
+   */
+  #nodeInfo(id: NodeIdType): ReturnType<NodeRegistration["info"]> {
+    this.signal.throwIfAborted();
+    const parents: ReturnType<NodeRegistration["info"]>["parents"][number][] =
+      [];
+    const children: typeof parents = [];
+    // ponytail: info scans graph links; add an adjacency index only if large graphs make this hot.
+    this.forEachLink((from, to, edge) => {
+      if (from !== id && to !== id) return;
+      const receiver = registeredNodeContexts.get(this.getNode(to)!)?.contract;
+      if (receiver === undefined)
+        throw new JuncoAgentError(
+          "invalid_state",
+          `No contract for edge "${edge.id}" at node "${to}"`,
+        );
+      const contract: unknown = receiver(edge.id);
+      const expect =
+        typeof contract === "object" &&
+        contract !== null &&
+        "expect" in contract
+          ? contract.expect
+          : undefined;
+      if (
+        typeof expect !== "string" ||
+        expect.trim() === "" ||
+        /[\r\n\u2028\u2029]/u.test(expect)
+      )
+        throw new JuncoAgentError(
+          "invalid_state",
+          `Invalid contract for edge "${edge.id}" at node "${to}"`,
+        );
+      const kind = E.isLeft(edge.transport) ? "message" : "value";
+      if (to === id) parents.push({ id: from, edgeId: edge.id, kind, expect });
+      if (from === id) children.push({ id: to, edgeId: edge.id, kind, expect });
+    });
+    this.signal.throwIfAborted();
+    return { parents, children };
+  }
+
+  /**
+   * Validate {@link create}'s returned graph against `collection`, then bind it and take the
+   * creator hold.
+   */
+  #adopt(collection: ToolCollection): void {
+    if (this.#close !== undefined) throw closedGraph();
+    if (this.policy !== collection.policy)
+      throw new TypeError(
+        "Collection policy does not match the selected policy",
+      );
+    const seen = new Set<object>();
+    const stack: unknown[] = [this];
+    while (stack.length > 0) {
+      const member = stack.pop();
+      if (member instanceof JuncoGraph) {
+        if (seen.has(member)) continue;
+        seen.add(member);
+        stack.push(member.scheduler);
+        member.forEachNode((_, node) => stack.push(node.state));
+      }
+      if (
+        member instanceof JuncoAgent
+          ? member.collection !== collection ||
+            member.policy !== collection.policy
+          : (member instanceof JuncoGraph || member instanceof Deterministic) &&
+            member.collection !== undefined &&
+            member.collection !== collection
+      )
+        throw new TypeError("Graph member does not use the graph's collection");
+    }
+    if (this.#collection === undefined) {
+      this.#lease = collection.lease();
+      this.#collection = collection;
+    }
+    this.#owned = collection;
   }
 
   /**
@@ -306,6 +493,26 @@ export class JuncoGraph<
       }
     } finally {
       JuncoGraph.#dispatch[kind] = previous;
+    }
+    if (kind === "close") {
+      // Second phase, after every member settled: release the visited graphs' collection holds.
+      const members = settled;
+      settled = (async () => {
+        const failures: unknown[] = [];
+        await members.catch((error: AggregateError) =>
+          failures.push(...error.errors),
+        );
+        const holds = new Set(
+          graphs
+            .flatMap((graph) => [graph.#lease, graph.#owned])
+            .filter((hold) => hold !== undefined),
+        );
+        await settleAll([...holds], (hold) => hold.close(), "").catch(
+          (error: AggregateError) => failures.push(...error.errors),
+        );
+        if (failures.length > 0)
+          throw new AggregateError(failures, "Graph close failed");
+      })();
     }
 
     const finish = (): void => {

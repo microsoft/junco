@@ -146,6 +146,7 @@ test("complaint-only configurations still offer and execute exactly one genuine 
         models.registerNativeProvider(faux.provider);
         const agent = await JuncoAgent.create({
           models,
+          policy: "LockPolicy",
           provider: "faux",
           model: "faux-1",
           tools: [],
@@ -229,6 +230,7 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
       JuncoAgent.fromResolved({
         session: await repo.create({}, BACKGROUND_CONTEXT),
         models,
+        policy: "LockPolicy",
         model,
         tools,
       }),
@@ -315,6 +317,7 @@ test("a legacy persisted selection is repaired with complain on reopen without r
   const agent = await JuncoAgent.fromResolved({
     session: reopened,
     models,
+    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -379,6 +382,7 @@ test("agents sharing one Models registry keep their request snapshots isolated",
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
+      policy: "LockPolicy",
       model,
       tools: [],
     });
@@ -440,7 +444,10 @@ test("the saved prompt is the final converted request, unaffected by later reque
     assert.equal(requestCount, 2);
     const [issue] = issueLog.snapshot().slice(before);
     assert.ok(issue);
-    assert.equal(issue.prompt.systemPrompt, "hooked system 1");
+    assert.equal(
+      issue.prompt.systemPrompt,
+      "hooked system 1\n\nAfter you write to a file use release to relinquish ownership",
+    );
     assert.deepEqual(issue.prompt.messages, [converted]);
     const tools = issue.prompt.tools ?? [];
     assert.deepEqual(
@@ -476,17 +483,24 @@ test("a bound complaint context is cleared after normal and thrown work", async 
       { id: EdgeId("source->worker"), payload: { kind: "prompt" } },
     ];
     const before = issueLog.length;
-    await agent.runWithComplaintContext({ nodeId, messages, tracer }, () =>
-      promptSettles(agent, "bound"),
+    await agent.runWithNodeContext(
+      { complaint: { nodeId, messages, tracer } },
+      () => promptSettles(agent, "bound"),
     );
     await assert.rejects(
-      agent.runWithComplaintContext({ nodeId, messages }, async () => {
-        await assert.rejects(
-          agent.runWithComplaintContext({ nodeId, messages }, async () => {}),
-          isCode("busy"),
-        );
-        throw new Error("work failed");
-      }),
+      agent.runWithNodeContext(
+        { complaint: { nodeId, messages } },
+        async () => {
+          await assert.rejects(
+            agent.runWithNodeContext(
+              { complaint: { nodeId, messages } },
+              async () => {},
+            ),
+            isCode("busy"),
+          );
+          throw new Error("work failed");
+        },
+      ),
       /work failed/,
     );
     await promptSettles(agent, "standalone");

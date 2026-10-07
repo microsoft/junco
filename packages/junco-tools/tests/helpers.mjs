@@ -5,7 +5,6 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { shutdownShellMux } from "../dist/index.js";
 
 const fixturePrefix = fileURLToPath(
   new URL("../target/bash-test-", import.meta.url),
@@ -52,7 +51,7 @@ export async function settleAgent(agent) {
 /**
  * A CopyTree seed with optional seed-relative `files` (strings or Buffers), defaulting to
  * `src/file0.txt` ("zero\n") and `src/file1.txt` ("one\n"), inside a fresh temporary root.
- * Nothing is opened: automatic-acquisition tests let the first consumer open the singleton.
+ * Nothing is opened: automatic-acquisition tests let their consumer open its own mux.
  */
 export async function seedFixture(options = {}) {
   const root = await mkdtemp(fixturePrefix);
@@ -88,8 +87,7 @@ let copyTreeAdapter;
 
 /**
  * The test addon with `NativeMux.open` delegating to its real `openCopyTree`, so automatic
- * acquisition opens a CopyTree seed. One stable object per process: the singleton compares
- * native modules by identity. Each opened mux is appended to {@link copyTreeOpens}.
+ * acquisition opens a CopyTree seed. Each opened mux is appended to {@link copyTreeOpens}.
  */
 export function copyTreeNative() {
   copyTreeAdapter ??= testNative().then((native) => ({
@@ -112,8 +110,8 @@ export function copyTreeNative() {
 /**
  * {@link seedFixture} plus one raw test-addon mux over it. `sandbox` defaults to "always",
  * which keeps every shell command on the managed route the suites were written against;
- * `native` is the addon that created `mux`. Passing `mux` to an operations owner or a
- * collection adopts it as the application singleton; {@link closeFixture} shuts that down.
+ * `native` is the addon that created `mux`. Operations owners borrow `mux`; {@link closeFixture}
+ * closes it.
  */
 export async function fixture(options = {}) {
   const { root, seed } = await seedFixture(options);
@@ -129,14 +127,9 @@ export async function fixture(options = {}) {
   }
 }
 
-/**
- * Application shutdown — which closes the fixture's mux if a consumer adopted it — then the
- * raw close (idempotent) for a mux nothing adopted, then the tree. Either way the addon's one
- * mux slot is free again before the next raw generation.
- */
+/** Closes the fixture's own mux (idempotent), then removes its tree. */
 export async function closeFixture({ root, mux }, outputFiles = []) {
   await cleanup(
-    () => shutdownShellMux(),
     () => mux.close(),
     // Deliberately nonrecursive: an output-file entry that is not a file is a real failure,
     // and it must not stop the remaining files or the root from being attempted.

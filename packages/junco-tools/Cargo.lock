@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
+source = "git+https://github.com/junco-org/marsh.git?rev=99f6605f54ddcc82275dca47866ed0f929135325#99f6605f54ddcc82275dca47866ed0f929135325"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "brush-interactive"
 version = "0.4.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
+source = "git+https://github.com/junco-org/marsh.git?rev=99f6605f54ddcc82275dca47866ed0f929135325#99f6605f54ddcc82275dca47866ed0f929135325"
 dependencies = [
  "bon",
  "brush-core",
@@ -1532,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "junco-policy"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/junco-policy.git#d46ea94f0fdc41669d528b6ef1e5619a3cab4657"
+source = "git+https://github.com/junco-org/junco-policy.git?rev=8d3150b7ce657dbb53de23b6f74095711ad78e07#8d3150b7ce657dbb53de23b6f74095711ad78e07"
 dependencies = [
  "bumpalo",
  "hashbrown 0.16.1",
@@ -1712,7 +1712,6 @@ dependencies = [
 [[package]]
 name = "marsh-btrfs"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "btrfsutil",
  "hex",
@@ -1726,7 +1725,6 @@ dependencies = [
 [[package]]
 name = "marsh-core"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "brush-builtins",
  "brush-core",
@@ -1754,7 +1752,6 @@ dependencies = [
 [[package]]
 name = "marsh-instrument"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "libc",
  "lurk-cli",
@@ -1767,7 +1764,6 @@ dependencies = [
 [[package]]
 name = "marsh-lib"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "tokio",
 ]
@@ -1775,7 +1771,6 @@ dependencies = [
 [[package]]
 name = "marsh-wal"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git#48b328a8bb8f7760001e9631b04767da5e373f67"
 dependencies = [
  "hex",
  "marsh-lib",
@@ -4314,3 +4309,11 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "brush-core"
+version = "0.5.0"
+
+[[patch.unused]]
+name = "brush-interactive"
+version = "0.4.0"

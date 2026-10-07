@@ -930,17 +930,17 @@ describe("admission", () => {
       /removed outcome for admitted fx\/C1/,
     ],
     [
-      "applied without staged paths",
+      "applied without released paths",
       (batch) => [appliedOutcome(batch[0]!, []), ...batch.slice(1).map(none)],
-      /nonempty, deduplicated staged-path list/,
+      /nonempty, deduplicated released-path list/,
     ],
     [
-      "applied with duplicate staged paths",
+      "applied with duplicate released paths",
       (batch) => [
         appliedOutcome(batch[0]!, ["fx/a.ts", "fx/a.ts"]),
         ...batch.slice(1).map(none),
       ],
-      /nonempty, deduplicated staged-path list/,
+      /nonempty, deduplicated released-path list/,
     ],
     [
       "applied against a failed gate",

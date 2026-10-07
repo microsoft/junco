@@ -1,6 +1,5 @@
 // `tracer`: the execution observer. A direct `JuncoGraph` takes one explicitly; `createTracer()`
-// selects the shared automatic one (the Opik adapter under the `opik` Bun feature, otherwise
-// `StdoutTracer`). `DummyTracer` is the shipped no-op.
+// returns the shared default `StdoutTracer`. `DummyTracer` is the shipped no-op.
 
 export {
   type DataflowRunTrace,

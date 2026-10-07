@@ -17,29 +17,35 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { NodeId } from "dataflow-engine";
+import {
+  DummyTracer,
+  NodeId,
+  type NodeIdType,
+  UNBOUNDED,
+} from "dataflow-engine";
+import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { JuncoMcpTools } from "junco-mcp";
-import {
-  acquireShellMux,
-  createTaskTool,
-  type NativeModule,
-  type ShellMuxLease,
-  shutdownShellMux,
-} from "junco-tools";
+import { createTaskTool, type NativeModule, ToolCollection } from "junco-tools";
 import {
   agentNode,
+  createAgencyScheduler,
   createParallelAgentGraph,
   graphNode,
-  type JuncoGraph,
+  JuncoGraph,
 } from "../src/index.ts";
 import { always } from "../src/std/trigger.ts";
 import { withNativeCleanup } from "./native-support.ts";
-import { nativeOptions } from "./support.ts";
+import {
+  drive,
+  nativeOptions,
+  type PiGraph,
+  schedulerModel,
+} from "./support.ts";
 
-// Agents with real MCP stdio servers in a root graph, a nested graph and a separate graph, all on
-// the one ShellMux of junco-tools' CopyTree test addon. Build it once in packages/junco-tools with
-// `bun run build:native:test`.
+// Agents with real MCP stdio servers in a shared root graph, its nested graph and an independent
+// graph, each collection on its own ShellMux of junco-tools' CopyTree test addon. Build it once in
+// packages/junco-tools with `bun run build:native:test`.
 const testAddon = await import(
   fileURLToPath(
     new URL(
@@ -52,20 +58,16 @@ const SERVER = fileURLToPath(
   new URL("../packages/junco-mcp/test/stdio-server.ts", import.meta.url),
 );
 
-const opens: string[] = [];
 const copyTree = {
   ...testAddon,
   NativeMux: {
-    async open(...args: Parameters<NativeModule["NativeMux"]["open"]>) {
-      opens.push(args[0]);
-      return testAddon.NativeMux.openCopyTree(...args);
-    },
+    open: (...args: Parameters<NativeModule["NativeMux"]["open"]>) =>
+      testAddon.NativeMux.openCopyTree(...args),
   },
 } as NativeModule;
 
 let root: string;
 let seed: string;
-let observer: ShellMuxLease;
 
 beforeAll(async () => {
   root = await mkdtemp(
@@ -75,17 +77,15 @@ beforeAll(async () => {
   );
   seed = join(root, "seed");
   await mkdir(seed, { recursive: true });
-  observer = await acquireShellMux(seed, { native: copyTree });
 });
 
 afterAll(async () => {
-  observer?.release();
-  try {
-    await shutdownShellMux();
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  await rm(root, { recursive: true, force: true });
 });
+
+/** A fresh Git-policy collection over the fixture seed. */
+const openCollection = () =>
+  ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
 
 const fixture = JuncoMcpTools.add({
   name: "fx",
@@ -111,24 +111,28 @@ const readPid: FauxResponseStep[] = [
   },
 ];
 
-async function member(): Promise<JuncoAgent> {
+async function member(collection: ToolCollection): Promise<JuncoAgent> {
   const { options } = await nativeOptions(readPid);
   return JuncoAgent.fromResolved({
     ...options,
     cwd: seed,
     tools: [fixture],
+    collection,
   });
 }
 
-function single(agent: JuncoAgent): {
+function single(
+  agent: JuncoAgent,
+  collection: ToolCollection,
+): {
   graph: JuncoGraph;
-  id: ReturnType<typeof NodeId>;
+  id: NodeIdType;
 } {
-  const graph = createParallelAgentGraph();
+  const graph = createParallelAgentGraph("LockPolicy", undefined, collection);
   const id = graph.addNode(
     agentNode(
       agent,
-      { id: NodeId("member"), trigger: always() },
+      { id: NodeId("member"), policy: "LockPolicy", trigger: always() },
       { prompt: "go" },
     ),
   );
@@ -141,48 +145,73 @@ function pidOf(message: AssistantMessage | undefined): number {
 }
 
 test(
-  "root, nested and separate graphs share one ShellMux; closing one graph leaves the others' servers working",
+  "a shared root graph and its nested graph run on one collection; closing the root closes only its mux",
   () =>
     withNativeCleanup(async (defer) => {
-      // Each member is the test's until a graph owns it; each graph is the test's until closed.
-      const separateMember = await member();
+      // The independent collection and its graph: an unrelated owner on the same seed.
+      const independent = await openCollection();
+      defer(() => independent.close());
+      const separateMember = await member(independent);
       const forgetSeparateMember = defer(() => separateMember.return());
-      const separate = single(separateMember);
+      const separate = single(separateMember, independent);
       const forgetSeparate = defer(() => separate.graph.close());
       forgetSeparateMember();
 
-      const nestedMember = await member();
-      const forgetNestedMember = defer(() => nestedMember.return());
-      const nested = single(nestedMember);
-      const forgetNested = defer(() => nested.graph.close());
-      forgetNestedMember();
-
-      const rootMember = await member();
-      const forgetRootMember = defer(() => rootMember.return());
-      const rootGraph = createParallelAgentGraph();
+      // Each actor is the test's until a graph owns it; `create` owns the returned root.
+      let shared: ToolCollection | undefined;
+      let rootId: NodeIdType | undefined;
+      let nestedId: NodeIdType | undefined;
+      const rootGraph = await JuncoGraph.create(
+        seed,
+        { native: copyTree, policy: "LockPolicy" },
+        async (collection) => {
+          shared = collection;
+          const rootMember = await member(collection);
+          const forgetRootMember = defer(() => rootMember.return());
+          const nestedMember = await member(collection);
+          const forgetNestedMember = defer(() => nestedMember.return());
+          const nested = single(nestedMember, collection);
+          forgetNestedMember();
+          const forgetNested = defer(() => nested.graph.close());
+          const graph = createParallelAgentGraph(
+            "LockPolicy",
+            undefined,
+            collection,
+          );
+          const forgetGraph = defer(() => graph.close());
+          rootId = graph.addNode(
+            agentNode(
+              rootMember,
+              { id: NodeId("root"), policy: "LockPolicy", trigger: always() },
+              { prompt: "go" },
+            ),
+          );
+          forgetRootMember();
+          nestedId = graph.addNode(
+            graphNode(
+              nested.graph,
+              { id: NodeId("nested"), policy: "LockPolicy", trigger: always() },
+              { result: nested.id },
+            ),
+          );
+          forgetNested();
+          forgetGraph();
+          return graph;
+        },
+      );
       const forgetRoot = defer(() => rootGraph.close());
-      const rootId = rootGraph.addNode(
-        agentNode(
-          rootMember,
-          { id: NodeId("root"), trigger: always() },
-          { prompt: "go" },
-        ),
-      );
-      forgetRootMember();
-      const nestedId = rootGraph.addNode(
-        graphNode(
-          nested.graph,
-          { id: NodeId("nested"), trigger: always() },
-          { result: nested.id },
-        ),
-      );
-      forgetNested();
+      assert.ok(shared && rootId && nestedId);
+      expect(rootGraph.collection).toBe(shared);
+      expect(shared.mux).not.toBe(independent.mux);
+      expect(shared.mux.policy).toBe("LockPolicy");
 
-      // The separate graph runs and closes first, closing its agent and that agent's server.
+      // The independent graph runs and closes first, closing its agent and that agent's server.
       const separatePid = pidOf((await separate.graph.run()).get(separate.id));
       await separate.graph.close().finally(forgetSeparate);
+      // Its collection is still the test's: the graph released only its own lease.
+      await independent.mux.validateCwd(seed);
 
-      // The root and nested agents' servers started before that close and still answer.
+      // The shared root and nested agents' servers started before that close and still answer.
       const results = await rootGraph.run();
       const rootPid = pidOf(results.get(rootId));
       const nestedPid = pidOf(results.get(nestedId));
@@ -190,13 +219,21 @@ test(
       for (const pid of [separatePid, rootPid, nestedPid]) {
         expect(Number.isInteger(pid) && pid > 0).toBe(true);
       }
-      await rootGraph.close().finally(forgetRoot);
 
-      // Every agent in every graph acquired the observer's one raw open; no close shut it down.
-      expect(opens).toEqual([seed]);
-      const again = await acquireShellMux(seed);
-      defer(() => again.release());
-      expect(again.mux).toBe(observer.mux);
+      // Closing the root releases the last hold on the shared collection and closes its mux.
+      await rootGraph.close().finally(forgetRoot);
+      await assert.rejects(shared.mux.validateCwd(seed));
+
+      // The independent collection still serves a fresh graph and server.
+      const lateMember = await member(independent);
+      const forgetLateMember = defer(() => lateMember.return());
+      const late = single(lateMember, independent);
+      const forgetLate = defer(() => late.graph.close());
+      forgetLateMember();
+      const latePid = pidOf((await late.graph.run()).get(late.id));
+      expect(latePid).not.toBe(rootPid);
+      await late.graph.close().finally(forgetLate);
+      await independent.mux.validateCwd(seed);
     }),
   60_000,
 );
@@ -273,7 +310,7 @@ function mcpScript(label: string, delegate?: string): FauxResponseStep[] {
 }
 
 test(
-  "a task child and grandchild call the inherited MCP tool on their own servers; reports finish the original node",
+  "a task child and grandchild call the inherited MCP tool on the shared collection; the scheduler's close releases its mux last",
   () =>
     withNativeCleanup(async (defer) => {
       const models = createModels();
@@ -291,29 +328,76 @@ test(
         faux.setResponses(responses);
         models.setProvider(faux.provider);
       }
-      const caller = await JuncoAgent.fromResolved({
-        session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-        models,
-        model: models.getModels("caller")[0]!,
-        systemPrompt: "sys",
-        cwd: seed,
-        tools: [createTaskTool(), fixture],
-      });
-      const forgetCaller = defer(() => caller.return());
-      const outer = createParallelAgentGraph();
-      const forgetOuter = defer(() => outer.close());
-      const id = outer.addNode(
-        agentNode(
-          caller,
-          { id: NodeId("caller"), trigger: always() },
-          { prompt: "go" },
-        ),
-      );
-      forgetCaller();
 
-      const final = (await outer.run()).get(id);
-      assert.ok(final, "the caller's node produced a message");
-      const parts = contentText(final.content).split("|");
+      let shared: ToolCollection | undefined;
+      let caller: JuncoAgent | undefined;
+      let id: NodeIdType | undefined;
+      const outer: PiGraph = await JuncoGraph.create(
+        seed,
+        { native: copyTree, policy: "LockPolicy" },
+        async (collection) => {
+          shared = collection;
+          const decider = schedulerModel();
+          let current: PiGraph | undefined;
+          const scheduler = await createAgencyScheduler(() => current, {
+            session: await new MemorySessionRepo().create(
+              {},
+              BACKGROUND_CONTEXT,
+            ),
+            models: decider.models,
+            model: decider.model,
+            prompt: "Run the caller.",
+            policy: "LockPolicy",
+            collection,
+          });
+          const forgetScheduler = defer(() => scheduler.return());
+          const graph: PiGraph = new JuncoGraph(
+            scheduler,
+            UNBOUNDED,
+            UNBOUNDED,
+            new DummyTracer(),
+            "LockPolicy",
+            collection,
+          );
+          current = graph;
+          // The graph's close cascades to its scheduler from here on.
+          const forgetGraph = defer(() => graph.close());
+          forgetScheduler();
+          caller = await JuncoAgent.fromResolved({
+            session: await new MemorySessionRepo().create(
+              {},
+              BACKGROUND_CONTEXT,
+            ),
+            models,
+            model: models.getModels("caller")[0]!,
+            systemPrompt: "sys",
+            cwd: seed,
+            tools: [createTaskTool(), fixture],
+            policy: "LockPolicy",
+            collection,
+          });
+          const callerAgent = caller;
+          const forgetCaller = defer(() => callerAgent.return());
+          id = graph.addNode(
+            agentNode(
+              caller,
+              { id: NodeId("caller"), policy: "LockPolicy", trigger: always() },
+              { prompt: "go" },
+            ),
+          );
+          forgetCaller();
+          forgetGraph();
+          return graph;
+        },
+      );
+      const forgetOuter = defer(() => outer.close());
+      assert.ok(shared && caller && id);
+      expect(caller.collection).toBe(shared);
+
+      expect((await drive(outer.scheduler)).kind).toBe("settled");
+      const final = outer.result(id);
+      assert.ok(O.isSome(final), "the caller's node produced a message");
+      const parts = contentText(final.value.content).split("|");
       expect(parts.map((part) => part.split(":")[0])).toEqual([
         "caller",
         "worker",
@@ -324,8 +408,11 @@ test(
       for (const pid of pids)
         expect(Number.isInteger(pid) && pid > 0).toBe(true);
 
-      await outer.close().finally(forgetOuter);
+      // A scheduler-originated close closes the graph and its members, then the last hold.
+      await outer.scheduler.return().finally(forgetOuter);
       expect(caller.status).toBe("closed");
+      expect(outer.scheduler.status).toBe("closed");
+      await assert.rejects(shared.mux.validateCwd(seed));
     }),
   60_000,
 );

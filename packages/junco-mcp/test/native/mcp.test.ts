@@ -11,13 +11,11 @@ import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { McpAbortError } from "@earendil-works/pi-mcp";
 import {
-  acquireShellMux,
   createShellMuxOperations,
   type NativeModule,
   type NativeMux,
   type NativeProcess,
-  type ShellMuxLease,
-  shutdownShellMux,
+  ToolCollection,
 } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
@@ -33,21 +31,15 @@ import { withNativeCleanup } from "../../../../test/native-support.ts";
 const SERVER = fileURLToPath(new URL("../stdio-server.ts", import.meta.url));
 const TIMEOUT = 60_000;
 
-/** The real test addon whose `NativeMux.open` opens a CopyTree seed, counting raw opens. */
-const opens: string[] = [];
+/** The real test addon whose `NativeMux.open` opens a CopyTree seed. */
 const copyTree = {
   ...testAddon,
-  NativeMux: {
-    async open(...args: Parameters<NativeModule["NativeMux"]["open"]>) {
-      opens.push(args[0]);
-      return testAddon.NativeMux.openCopyTree(...args);
-    },
-  },
+  NativeMux: { open: testAddon.NativeMux.openCopyTree.bind(testAddon.NativeMux) },
 } as unknown as NativeModule;
 
 let root: string;
 let seed: string;
-let observer: ShellMuxLease;
+let collection: ToolCollection;
 
 beforeAll(async () => {
   root = await mkdtemp(
@@ -55,14 +47,12 @@ beforeAll(async () => {
   );
   seed = join(root, "seed");
   await mkdir(join(seed, "sub"), { recursive: true });
-  // The first acquisition selects the CopyTree addon; every connection inherits it.
-  observer = await acquireShellMux(seed, { native: copyTree });
+  collection = await ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
 });
 
 afterAll(async () => {
-  observer?.release();
   try {
-    await shutdownShellMux();
+    await collection?.close();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -189,7 +179,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
   test("servers share the one mux, run concurrently under distinct principals, and keep ordinary work available", async () => {
     const connection = await JuncoMcpTools.add(server("one"))
       .add(server("two", { cwd: "sub", env: { JUNCO_MCP_FIXTURE_MARKER: "second" } }))
-      .connect({ cwd: seed });
+      .connect({ cwd: seed, collection });
     try {
       const [first, second] = await Promise.all([
         state(connection, "one"),
@@ -206,8 +196,8 @@ describe("native MCP stdio on the shared ShellMux", () => {
       expect(counts.map((item) => item.pid)).toEqual([first.pid, first.pid, first.pid]);
       expect(new Set(counts.map((item) => item.calls)).size).toBe(3);
 
-      // Ordinary bash on the same singleton while both servers are live.
-      const operations = createShellMuxOperations();
+      // Ordinary bash on the same collection mux while both servers are live.
+      const operations = createShellMuxOperations({ native: copyTree, mux: collection.mux });
       try {
         const chunks: Buffer[] = [];
         const result = await operations.exec("printf ordinary", seed, {
@@ -221,14 +211,6 @@ describe("native MCP stdio on the shared ShellMux", () => {
       }
     } finally {
       await connection.close();
-    }
-    // Every acquisition shared the observer's one raw open.
-    expect(opens).toEqual([seed]);
-    const again = await acquireShellMux(seed);
-    try {
-      expect(again.mux).toBe(observer.mux);
-    } finally {
-      again.release();
     }
   }, TIMEOUT);
 
@@ -248,7 +230,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
         args: literal,
         env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
       }),
-    ).connect({ cwd: seed });
+    ).connect({ cwd: seed, collection });
     try {
       expect((await state(connection, "git")).argv).toEqual(literal);
     } finally {
@@ -266,7 +248,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
           JUNCO_MCP_FIXTURE_MARKER: "replaced",
         },
       }),
-    ).connect({ cwd: seed });
+    ).connect({ cwd: seed, collection });
     try {
       const observed = await state(connection, "env", {
         env: ["JUNCO_MCP_FIXTURE_MARKER", "BUN_INSTALL_CACHE_DIR", "HOME"],
@@ -290,7 +272,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
     )
       .add(server("coalesce", { env: { JUNCO_MCP_FIXTURE_MODE: "coalesce" } }))
       .add(server("crlf", { env: { JUNCO_MCP_FIXTURE_MODE: "crlf" } }))
-      .connect({ cwd: seed });
+      .connect({ cwd: seed, collection });
     try {
       for (const name of ["split", "coalesce", "crlf"]) {
         const replies = await Promise.all(
@@ -307,7 +289,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
   }, TIMEOUT);
 
   test("a final reply written just before exit reaches its pending call", async () => {
-    const connection = await JuncoMcpTools.add(server("final")).connect({ cwd: seed });
+    const connection = await JuncoMcpTools.add(server("final")).connect({ cwd: seed, collection });
     try {
       const reply = await call(connection, "mcp__final__misbehave", {
         kind: "reply-then-exit",
@@ -328,7 +310,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
     ] as const) {
       const connection = await JuncoMcpTools.add(
         server(kind, { maxMessageBytes: 2048 }),
-      ).connect({ cwd: seed });
+      ).connect({ cwd: seed, collection });
       await expect(
         call(connection, `mcp__${kind}__misbehave`, { kind, ...extra }),
       ).rejects.toThrow();
@@ -337,15 +319,15 @@ describe("native MCP stdio on the shared ShellMux", () => {
     }
   }, TIMEOUT);
 
-  test("early exit and list failure reject initialization and leave the singleton usable", async () => {
+  test("early exit and list failure reject initialization and leave the collection usable", async () => {
     await expect(
       JuncoMcpTools.add(
         server("early", { env: { JUNCO_MCP_FIXTURE_MODE: "exit-on-start" } }),
-      ).connect({ cwd: seed }),
+      ).connect({ cwd: seed, collection }),
     ).rejects.toThrow('JuncoMcpTools: failed to initialize server "early"');
     const failed = await JuncoMcpTools.add(server("good"))
       .add(server("listing", { env: { JUNCO_MCP_FIXTURE_MODE: "list-failure" } }))
-      .connect({ cwd: seed })
+      .connect({ cwd: seed, collection })
       .then(
         () => undefined,
         (error: unknown) => error,
@@ -353,7 +335,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
     assert.ok(failed instanceof Error);
     expect(failed.message).toContain('failed to initialize server "listing"');
     expect(String((failed.cause as Error).message)).toContain("fixture list failure");
-    const after = await JuncoMcpTools.add(server("after")).connect({ cwd: seed });
+    const after = await JuncoMcpTools.add(server("after")).connect({ cwd: seed, collection });
     try {
       expect((await call(after, "mcp__after__echo", { text: "ok" })).text).toBe("ok");
     } finally {
@@ -363,13 +345,13 @@ describe("native MCP stdio on the shared ShellMux", () => {
 
   test("invalid definitions and NUL arguments fail before anything launches", async () => {
     await expect(
-      JuncoMcpTools.add(server("timeout", { closeTimeoutMs: -1 })).connect({ cwd: seed }),
+      JuncoMcpTools.add(server("timeout", { closeTimeoutMs: -1 })).connect({ cwd: seed, collection }),
     ).rejects.toThrow("JuncoMcpTools: closeTimeoutMs must be finite and non-negative");
     await expect(
-      JuncoMcpTools.add(server("missing", { cwd: "absent" })).connect({ cwd: seed }),
+      JuncoMcpTools.add(server("missing", { cwd: "absent" })).connect({ cwd: seed, collection }),
     ).rejects.toThrow('JuncoMcpTools: failed to initialize server "missing"');
     const nul = await JuncoMcpTools.add(server("nul", { args: [SERVER, "a\0b"] }))
-      .connect({ cwd: seed })
+      .connect({ cwd: seed, collection })
       .then(
         () => undefined,
         (error: unknown) => error,
@@ -379,8 +361,8 @@ describe("native MCP stdio on the shared ShellMux", () => {
   }, TIMEOUT);
 
   test("held RPCs on one connection survive another connection's close", async () => {
-    const holder = await JuncoMcpTools.add(server("holder")).connect({ cwd: seed });
-    const other = await JuncoMcpTools.add(server("other")).connect({ cwd: seed });
+    const holder = await JuncoMcpTools.add(server("holder")).connect({ cwd: seed, collection });
+    const other = await JuncoMcpTools.add(server("other")).connect({ cwd: seed, collection });
     try {
       const progress: string[] = [];
       const held = tool(holder, "mcp__holder__hold").execute(
@@ -404,7 +386,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
   }, TIMEOUT);
 
   test("cancellation through the tool signal never becomes success", async () => {
-    const connection = await JuncoMcpTools.add(server("cancel")).connect({ cwd: seed });
+    const connection = await JuncoMcpTools.add(server("cancel")).connect({ cwd: seed, collection });
     try {
       const controller = new AbortController();
       const held = tool(connection, "mcp__cancel__hold").execute(
@@ -433,7 +415,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
           env: { JUNCO_MCP_FIXTURE_MODE: "ignore-term" },
           closeTimeoutMs: 200,
         }),
-      ).connect({ cwd: seed });
+      ).connect({ cwd: seed, collection });
       const forgetStubborn = defer(() => stubborn.close());
       await call(stubborn, "mcp__stubborn__echo");
       // Forced cancellation discards the command: an unpublished close, never a success.
@@ -441,7 +423,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
 
       const stalled = await JuncoMcpTools.add(
         server("stalled", { closeTimeoutMs: 200 }),
-      ).connect({ cwd: seed });
+      ).connect({ cwd: seed, collection });
       const forgetStalled = defer(() => stalled.close());
       await call(stalled, "mcp__stalled__misbehave", { kind: "stall-stdin" });
       // Queue more than a pipe buffer behind the stopped reader.
@@ -459,9 +441,9 @@ describe("native MCP stdio on the shared ShellMux", () => {
     }), TIMEOUT);
 
   test("close during start still stops the admitted process", async () => {
-    const lease = await acquireShellMux(seed);
+    const lease = collection.lease();
     try {
-      const transport = new ShellMuxStdioTransport(lease.mux, {
+      const transport = new ShellMuxStdioTransport(collection.mux, {
         command: process.execPath,
         args: [SERVER],
         cwd: seed,
@@ -475,13 +457,13 @@ describe("native MCP stdio on the shared ShellMux", () => {
       await closing;
       await transport.closed;
     } finally {
-      lease.release();
+      await lease.close();
     }
   }, TIMEOUT);
 
   test("Marsh authority: a lone server's unauthorized overwrite is denied at finalization", () =>
     withNativeCleanup(async (defer) => {
-      const owner = await JuncoMcpTools.add(server("owner")).connect({ cwd: seed });
+      const owner = await JuncoMcpTools.add(server("owner")).connect({ cwd: seed, collection });
       const forgetOwner = defer(() => owner.close());
       await call(owner, "mcp__owner__write_file", {
         path: "owned.txt",
@@ -494,6 +476,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
       for (const via of ["write_file", "descendant_write"] as const) {
         const intruder = await JuncoMcpTools.add(server(`intruder_${via}`)).connect({
           cwd: seed,
+          collection,
         });
         const forgetIntruder = defer(() => intruder.close());
         const reply = await call(intruder, `mcp__intruder_${via}__${via}`, {
@@ -517,9 +500,9 @@ describe("native MCP stdio on the shared ShellMux", () => {
 
   test("overlapping snapshots do not merge: the later publication is refused", () =>
     withNativeCleanup(async (defer) => {
-      const first = await JuncoMcpTools.add(server("left")).connect({ cwd: seed });
+      const first = await JuncoMcpTools.add(server("left")).connect({ cwd: seed, collection });
       const forgetFirst = defer(() => first.close());
-      const second = await JuncoMcpTools.add(server("right")).connect({ cwd: seed });
+      const second = await JuncoMcpTools.add(server("right")).connect({ cwd: seed, collection });
       const forgetSecond = defer(() => second.close());
       await call(first, "mcp__left__write_file", { path: "race.txt", content: "left\n" });
       await call(second, "mcp__right__write_file", { path: "race.txt", content: "right\n" });
@@ -533,6 +516,7 @@ describe("discard-only MCP connections", () => {
   test("a discarded server's file and cache writes never reach the seed; a default one publishes", async () => {
     const discarded = await JuncoMcpTools.add(server("discard")).connect({
       cwd: seed,
+      collection,
       discardOnClose: true,
     });
     try {
@@ -556,7 +540,7 @@ describe("discard-only MCP connections", () => {
     expect(await absent(join(seed, "discarded.txt"))).toBe(true);
     expect(await absent(join(seed, "sub/discard-cache.json"))).toBe(true);
 
-    const published = await JuncoMcpTools.add(server("publish")).connect({ cwd: seed });
+    const published = await JuncoMcpTools.add(server("publish")).connect({ cwd: seed, collection });
     try {
       await call(published, "mcp__publish__write_file", {
         path: "published.txt",
@@ -571,6 +555,7 @@ describe("discard-only MCP connections", () => {
   test("a discarded server that exits on its own fails close instead of claiming a discard", async () => {
     const connection = await JuncoMcpTools.add(server("exits")).connect({
       cwd: seed,
+      collection,
       discardOnClose: true,
     });
     // The pending call fails only once the transport has the native verdict, so the exit
@@ -584,6 +569,7 @@ describe("discard-only MCP connections", () => {
   test("fatal frames still fail a discarded connection", async () => {
     const connection = await JuncoMcpTools.add(server("broken")).connect({
       cwd: seed,
+      collection,
       discardOnClose: true,
     });
     await expect(
@@ -602,7 +588,7 @@ describe("discard-only MCP connections", () => {
         env: { JUNCO_MCP_FIXTURE_MODE: "hold-initialize" },
         onStderr: watch.onStderr,
       }),
-    ).connect({ cwd: seed, signal: controller.signal, discardOnClose: true });
+    ).connect({ cwd: seed, collection, signal: controller.signal, discardOnClose: true });
     await Promise.race([
       watch.ready,
       connecting.then(() => assert.fail("connected without holding")),
@@ -614,7 +600,7 @@ describe("discard-only MCP connections", () => {
   }, TIMEOUT);
 
   test("direct transport: close discards, external cancellation and early exit stay failures", async () => {
-    const lease = await acquireShellMux(seed);
+    const lease = collection.lease();
     try {
       const options = {
         command: process.execPath,
@@ -624,7 +610,7 @@ describe("discard-only MCP connections", () => {
       };
 
       // Requested discard: cancellation is the successful outcome.
-      const requested = new ShellMuxStdioTransport(lease.mux, options);
+      const requested = new ShellMuxStdioTransport(collection.mux, options);
       await requested.start();
       await requested.close();
       await requested.closed;
@@ -634,7 +620,7 @@ describe("discard-only MCP connections", () => {
       let spawned: NativeProcess | undefined;
       const observed = {
         async spawn(...args: Parameters<NativeMux["spawn"]>) {
-          spawned = await lease.mux.spawn(...args);
+          spawned = await collection.mux.spawn(...args);
           return spawned;
         },
       } as unknown as NativeMux;
@@ -646,7 +632,7 @@ describe("discard-only MCP connections", () => {
       await external.close().catch(() => {});
 
       // A natural exit may have published: it fails even though it exited with code 3.
-      const early = new ShellMuxStdioTransport(lease.mux, {
+      const early = new ShellMuxStdioTransport(collection.mux, {
         ...options,
         env: { JUNCO_MCP_FIXTURE_MODE: "exit-on-start" },
       });
@@ -655,7 +641,7 @@ describe("discard-only MCP connections", () => {
       expect(early.terminalError?.message).toContain("MCP stdio server exited with code 3");
       await early.close().catch(() => {});
     } finally {
-      lease.release();
+      await lease.close();
     }
   }, TIMEOUT);
 });
@@ -668,6 +654,7 @@ describe("MCP acquisition cancellation", () => {
     await expect(
       JuncoMcpTools.add(server("aborted", { onStderr: watch.onStderr })).connect({
         cwd: seed,
+        collection,
         signal: controller.signal,
       }),
     ).rejects.toBeInstanceOf(McpAbortError);
@@ -675,7 +662,7 @@ describe("MCP acquisition cancellation", () => {
   }, TIMEOUT);
 
   test("abort during initialize or tool listing stops the server; the mux and other connections stay usable", async () => {
-    const existing = await JuncoMcpTools.add(server("existing")).connect({ cwd: seed });
+    const existing = await JuncoMcpTools.add(server("existing")).connect({ cwd: seed, collection });
     try {
       for (const phase of ["initialize", "list"] as const) {
         const watch = watchStderr(`hold-${phase}-ready`);
@@ -685,7 +672,7 @@ describe("MCP acquisition cancellation", () => {
             env: { JUNCO_MCP_FIXTURE_MODE: `hold-${phase}` },
             onStderr: watch.onStderr,
           }),
-        ).connect({ cwd: seed, signal: controller.signal });
+        ).connect({ cwd: seed, collection, signal: controller.signal });
         // A connection settling before the cue fails the test instead of hanging it.
         await Promise.race([
           watch.ready,
@@ -701,7 +688,7 @@ describe("MCP acquisition cancellation", () => {
       expect((await call(existing, "mcp__existing__echo", { text: "still" })).text).toBe(
         "still",
       );
-      const fresh = await JuncoMcpTools.add(server("fresh")).connect({ cwd: seed });
+      const fresh = await JuncoMcpTools.add(server("fresh")).connect({ cwd: seed, collection });
       try {
         expect((await call(fresh, "mcp__fresh__echo", { text: "fresh" })).text).toBe("fresh");
       } finally {
@@ -723,7 +710,7 @@ describe("MCP acquisition cancellation", () => {
           onStderr: second.onStderr,
         }),
       )
-      .connect({ cwd: seed, signal: controller.signal });
+      .connect({ cwd: seed, collection, signal: controller.signal });
     await Promise.race([
       second.ready,
       connecting.then(() => assert.fail("connected without holding")),
@@ -739,6 +726,7 @@ describe("MCP acquisition cancellation", () => {
     const controller = new AbortController();
     const connection = await JuncoMcpTools.add(server("kept")).connect({
       cwd: seed,
+      collection,
       signal: controller.signal,
     });
     try {
@@ -775,7 +763,7 @@ describe("MCP definitions and tool identity over real servers", () => {
     roots.push({ uri: "file:///later", name: "later" });
     original.add(server("added"));
 
-    const connection = await copy.connect({ cwd: seed });
+    const connection = await copy.connect({ cwd: seed, collection });
     try {
       expect(connection.tools.some((item) => item.name.startsWith("mcp__added__"))).toBe(false);
       const observed = await state(connection, "statics");
@@ -794,7 +782,7 @@ describe("MCP definitions and tool identity over real servers", () => {
       await connection.close();
     }
 
-    const later = await original.connect({ cwd: seed });
+    const later = await original.connect({ cwd: seed, collection });
     try {
       const observed = await state(later, "statics");
       expect(observed.argv).toEqual(["admitted", "later"]);
@@ -808,7 +796,7 @@ describe("MCP definitions and tool identity over real servers", () => {
   test("colliding originals a-b and a_b publish distinct names and dispatch their own operation", async () => {
     const connection = await JuncoMcpTools.add(
       server("alias", { env: { JUNCO_MCP_FIXTURE_MODE: "alias-both" } }),
-    ).connect({ cwd: seed });
+    ).connect({ cwd: seed, collection });
     try {
       const aliases = connection.tools.filter((item) =>
         ["a-b", "a_b"].includes(getJuncoMcpToolIdentity(item)?.originalToolName ?? ""),

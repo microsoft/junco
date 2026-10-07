@@ -1,7 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Message, NodeGenerator, ParentView } from "dataflow-engine";
 import { JuncoAgentError } from "junco-agent";
+import type { ToolCollection, ToolCollectionOptions } from "junco-tools";
 import type { AgenticInput } from "./agentic.js";
+import { checkPolicy } from "./node-policy.js";
 
 type Advance<N, T> = IteratorResult<Message<N>[], T>;
 
@@ -9,14 +11,19 @@ type Advance<N, T> = IteratorResult<Message<N>[], T>;
  * A deterministic graph node body: one async generator speaking the engine's own
  * yield/view/result protocol, plus a cooperative abort signal and close.
  *
- * `body(signal)` is invoked exactly once, by the constructor; its closure holds any domain state.
+ * `body(signal, collection)` is invoked exactly once, by the constructor; its closure holds any
+ * domain state. `collection` is the constructor's, borrowed: the coroutine holds its own lease on
+ * it from construction until {@link close} finishes. The body may use its tools and mux but must
+ * never close it; take `collection.lease()` to keep it beyond the coroutine. A pure coroutine
+ * passes none and allocates no collection.
+ *
  * The coroutine has a single consumer: {@link step} hands out this instance once, and every
  * advance delegates to the one underlying generator without changing its yields or terminal value.
  * A dependent body normally begins with `let view = yield []`; a source may emit immediately.
  *
  * {@link abort} signals `signal` and joins the advance in flight. {@link close} additionally drains
- * the generator through `return()`, discarding any cleanup batches, and rejects every later advance.
- * Neither can preempt a body that ignores its signal.
+ * the generator through `return()`, discarding any cleanup batches, then releases its collection
+ * lease, and rejects every later advance. Neither can preempt a body that ignores its signal.
  */
 export class Deterministic<N = AgenticInput, T = AssistantMessage>
   implements NodeGenerator<N, T>
@@ -30,12 +37,31 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage>
   /** The latest advance still in flight. */
   #pending: Promise<Advance<N, T>> | undefined;
   #close: Promise<void> | undefined;
+  readonly #lease: { close(): Promise<void> } | undefined;
 
   /** Aborted by {@link abort} or {@link close}; never replaced. */
   readonly signal: AbortSignal = this.#controller.signal;
+  /** Authorization policy of this node; equals `collection.policy` when one is supplied. */
+  readonly policy: ToolCollectionOptions["policy"];
+  /** The borrowed collection handed to the body; never closed by the coroutine. */
+  readonly collection: ToolCollection | undefined;
 
-  constructor(body: (signal: AbortSignal) => NodeGenerator<N, T>) {
-    this.#generator = body(this.signal);
+  /**
+   * @throws {TypeError} for a missing or unknown policy, or a collection with another policy.
+   */
+  constructor(
+    body: (
+      signal: AbortSignal,
+      collection?: ToolCollection,
+    ) => NodeGenerator<N, T>,
+    policy: ToolCollectionOptions["policy"],
+    collection?: ToolCollection,
+  ) {
+    checkPolicy(policy, collection);
+    this.policy = policy;
+    this.collection = collection;
+    this.#generator = body(this.signal, collection);
+    this.#lease = collection?.lease();
   }
 
   /**
@@ -179,6 +205,11 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage>
       errors.push(error);
     }
     this.#finished = true;
+    try {
+      await this.#lease?.close();
+    } catch (error) {
+      errors.push(error);
+    }
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1)
       throw new AggregateError(errors, "Deterministic close failed");

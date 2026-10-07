@@ -7,7 +7,8 @@ import { createParallelAgentGraph } from "./parallel-agent-graph.js";
 /**
  * A parallel graph holding `root` and one child per element of `inputs`, built by `spawn` in
  * order. Each child gets two fresh message edges: `${rootId}->${childId}` from the root and
- * `${childId}->${rootId}` back to it; children are never linked to each other.
+ * `${childId}->${rootId}` back to it; children are never linked to each other. The graph takes
+ * `root.policy` and borrows no collection.
  *
  * Construction only registers nodes and queues: it never steps a member, sends `inputs` as
  * messages, or forwards results. Members exchange messages through their own triggers and yields.
@@ -20,7 +21,7 @@ export function Spawn<T, N = AgenticInput, R = AssistantMessage>(
   inputs: readonly T[],
   spawn: (input: T) => AgenticNode<N, R>,
 ): JuncoGraph<N, R> {
-  const graph = createParallelAgentGraph<N, R>();
+  const graph = createParallelAgentGraph<N, R>(root.policy);
   appendSpawnChildren(graph, graph.addNode(root), inputs, spawn);
   return graph;
 }

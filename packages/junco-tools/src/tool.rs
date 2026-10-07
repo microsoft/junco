@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use marsh_core::builtins::BuiltinContext;
-use marsh_core::{Action, MarshTool, SandboxPolicy};
+use marsh_core::{Action, MarshTool, Principal, SandboxPolicy};
 use napi::bindgen_prelude::{Buffer, PromiseRaw};
 use napi::{Env, Error, Result};
 use napi_derive::napi;
@@ -49,6 +49,8 @@ pub(crate) enum JuncoTool {
     AstEdit { root: PathBuf, apply: bool },
     /// A hashline `edit` resolved against `cwd`.
     Edit { cwd: PathBuf },
+    /// `release` of one file's ownership.
+    Release { path: PathBuf },
 }
 
 /// The one classification of a call: it may write exactly when it applies an edit, whatever the
@@ -62,6 +64,7 @@ impl From<&JuncoTool> for Action {
             | JuncoTool::AstGrep { .. }
             | JuncoTool::AstEdit { apply: false, .. } => Self::Read,
             JuncoTool::Edit { .. } | JuncoTool::AstEdit { apply: true, .. } => Self::Edit,
+            JuncoTool::Release { .. } => Self::Release,
         }
     }
 }
@@ -83,6 +86,7 @@ impl MarshTool for JuncoTool {
                 format!("junco ast_edit --apply {}", root.display())
             }
             Self::Edit { cwd } => format!("junco edit {}", cwd.display()),
+            Self::Release { path } => format!("junco release {}", path.display()),
         })
     }
 }
@@ -107,18 +111,24 @@ impl SandboxMode {
 }
 
 /// `mode`'s marsh operand conjoined with junco's: a file tool takes the managed route only when it
-/// may write. Shell commands and any other call are routed by the marsh operand alone.
+/// may write. Shell commands and any other call are routed by the marsh operand alone. A release
+/// always takes the managed route: only there is it recorded and published.
 pub(crate) fn sandbox_policy(mode: SandboxMode) -> SandboxPolicy {
     let marsh = match mode {
         SandboxMode::Shared => SandboxPolicy::SharedSource,
         SandboxMode::Always => SandboxPolicy::allow(),
     };
-    SandboxPolicy::and(
-        marsh,
+    SandboxPolicy::or(
         SandboxPolicy::Base(|ctx| {
-            ctx.tool_as::<JuncoTool>()
-                .is_none_or(|_| ctx.action.is_write())
+            matches!(ctx.tool_as::<JuncoTool>(), Some(JuncoTool::Release { .. }))
         }),
+        SandboxPolicy::and(
+            marsh,
+            SandboxPolicy::Base(|ctx| {
+                ctx.tool_as::<JuncoTool>()
+                    .is_none_or(|_| ctx.action.is_write())
+            }),
+        ),
     )
 }
 
@@ -196,15 +206,17 @@ fn utf8(path: &Path) -> Outcome<&str> {
         .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
 }
 
-/// Route one call, preserving publication denials while classifying operation errors as ordinary.
+/// Route one call as `owner`, preserving publication denials while classifying operation errors
+/// as ordinary.
 async fn routed<T: Send + 'static>(
     session: Arc<Session>,
+    owner: Option<Principal>,
     cwd: String,
     tool: JuncoTool,
     operation: impl FnOnce(&BuiltinContext) -> Outcome<T> + Send + 'static,
 ) -> napi::Result<std::result::Result<T, RoutedError>> {
     Ok(session
-        .run_tool(cwd, tool, operation)
+        .run_tool(cwd, owner, tool, operation)
         .await
         .and_then(|value| value.map_err(RoutedError::Other)))
 }
@@ -260,7 +272,7 @@ impl NativeMux {
         };
         let session = Arc::clone(&self.session);
         env.spawn_future_with_callback(
-            routed(session, cwd, tool, move |ctx| {
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let physical = ctx
                     .physical_path(Path::new(&path))
                     .map_err(|error| error.to_string())?;
@@ -283,7 +295,7 @@ impl NativeMux {
         };
         let session = Arc::clone(&self.session);
         env.spawn_future_with_callback(
-            routed(session, cwd, tool, move |ctx| {
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let physical = ctx
                     .physical_path(Path::new(&path))
                     .map_err(|error| error.to_string())?;
@@ -308,7 +320,7 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            routed(session, cwd, tool, move |ctx| {
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let view = View::new(ctx, &seed)?;
                 let root = view.physical(Path::new(spec.path()))?;
                 let mut result = spec
@@ -337,12 +349,13 @@ impl NativeMux {
         let root = PathBuf::from(&config.path);
         let tool = JuncoTool::Grep { root: root.clone() };
         let session = Arc::clone(&self.session);
+        let owner = self.owner.clone();
         let snapshots = store.inner.clone();
         let keys = Arc::clone(&store.keys);
         let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
             async move {
-                let outcome = routed(session, cwd, tool, move |ctx| {
+                let outcome = routed(session, owner, cwd, tool, move |ctx| {
                     let view = View::new(ctx, &seed)?;
                     let root = view.physical(&root)?;
                     utf8(&root)?.clone_into(&mut config.path);
@@ -412,7 +425,7 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            routed(session, cwd, tool, move |ctx| {
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let view = View::new(ctx, &seed)?;
                 spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
                 let mut result = spec.run(ct).map_err(|error| view.error(error))?;
@@ -448,7 +461,7 @@ impl NativeMux {
         let session = Arc::clone(&self.session);
         let seed = session.seed().to_path_buf();
         env.spawn_future_with_callback(
-            routed(session, cwd, tool, move |ctx| {
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let view = View::new(ctx, &seed)?;
                 spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
                 let mut persist =
@@ -489,6 +502,7 @@ impl NativeMux {
             cwd: PathBuf::from(&cwd),
         };
         let session = Arc::clone(&self.session);
+        let owner = self.owner.clone();
         let touched = Arc::new(Mutex::new(Vec::new()));
         let edit = HashlineEdit {
             config: policy.into_config()?,
@@ -503,7 +517,7 @@ impl NativeMux {
         env.spawn_future_with_callback(
             async move {
                 let outcome = session
-                    .run_tool(cwd, tool, move |ctx| edit.apply(ctx))
+                    .run_tool(cwd, owner, tool, move |ctx| edit.apply(ctx))
                     .await;
                 let touched =
                     std::mem::take(&mut *touched.lock().unwrap_or_else(PoisonError::into_inner));
@@ -523,6 +537,30 @@ impl NativeMux {
                 }
                 Ok(outcome)
             },
+            resolve,
+        )
+    }
+
+    /// Relinquishes this mux owner's ownership of `file` (absolute, or relative to `cwd`) as a
+    /// routed, always-managed `release`, resolving once Marsh published it. Nothing is read or
+    /// written; releasing a file another owner holds rejects as a policy denial.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn release<'env>(
+        &self,
+        env: &'env Env,
+        cwd: String,
+        file: String,
+    ) -> Result<PromiseRaw<'env, ()>> {
+        let path = PathBuf::from(&file);
+        let tool = JuncoTool::Release { path: path.clone() };
+        env.spawn_future_with_callback(
+            routed(
+                Arc::clone(&self.session),
+                self.owner.clone(),
+                cwd,
+                tool,
+                move |ctx| ctx.release(&path).map_err(|error| error.to_string()),
+            ),
             resolve,
         )
     }
@@ -801,6 +839,7 @@ mod tests {
                 Action::Edit,
             ),
             (JuncoTool::Edit { cwd: root() }, Action::Edit),
+            (JuncoTool::Release { path: root() }, Action::Release),
         ];
         for (tool, expected) in cases {
             let actual: Action = (&tool).into();

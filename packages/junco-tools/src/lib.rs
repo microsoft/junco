@@ -20,7 +20,7 @@ mod utils;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
 use marsh_core::shellmux::ShellMux;
@@ -33,56 +33,6 @@ use mux::{RunState, Session};
 use process::{CloseTimeout, ProcessState};
 use tool::SandboxMode;
 
-/// The addon's one ShellMux. Every raw open passes this gate: a second mux is refused while one
-/// is opening, open, or closing, however its JavaScript handle is retained or abandoned. The slot
-/// is reusable only once that session's close has completed — every task joined, the mux shut
-/// down and its backend dropped — even when that teardown reported a failure.
-enum MuxSlot {
-    Empty,
-    Opening,
-    Open(Arc<Session>),
-}
-
-static MUX_SLOT: Mutex<MuxSlot> = Mutex::new(MuxSlot::Empty);
-
-/// A held opening of [`MUX_SLOT`]. Dropped uncommitted — a failed or abandoned open — it
-/// returns the slot to empty.
-struct MuxReservation {
-    committed: bool,
-}
-
-impl MuxReservation {
-    fn acquire() -> Result<Self> {
-        let mut slot = MUX_SLOT.lock().unwrap_or_else(PoisonError::into_inner);
-        let available = match &*slot {
-            MuxSlot::Empty => true,
-            MuxSlot::Opening => false,
-            MuxSlot::Open(session) => session.is_closed(),
-        };
-        if !available {
-            return Err(Error::from_reason(
-                "A Junco ShellMux is already open or closing",
-            ));
-        }
-        *slot = MuxSlot::Opening;
-        Ok(Self { committed: false })
-    }
-
-    fn commit(mut self, session: &Arc<Session>) {
-        *MUX_SLOT.lock().unwrap_or_else(PoisonError::into_inner) =
-            MuxSlot::Open(Arc::clone(session));
-        self.committed = true;
-    }
-}
-
-impl Drop for MuxReservation {
-    fn drop(&mut self) {
-        if !self.committed {
-            *MUX_SLOT.lock().unwrap_or_else(PoisonError::into_inner) = MuxSlot::Empty;
-        }
-    }
-}
-
 /// Options of a mux the caller opens.
 #[napi(object)]
 pub struct NativeMuxOptions {
@@ -90,6 +40,10 @@ pub struct NativeMuxOptions {
     /// while another live shell shares the seed, `"always"` sandboxes every one. A read-only file
     /// tool always runs directly.
     pub sandbox: Option<String>,
+    /// The authorization policy every managed command of this mux is checked against:
+    /// `"LockPolicy"` (the default) or `"EmptyPolicy"`, which grants every capability.
+    #[napi(ts_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
+    pub policy: Option<String>,
     /// Also deliver granted capabilities to `onPolicyDecision`; violations always are.
     pub policy_debug: Option<bool>,
 }
@@ -100,9 +54,7 @@ pub struct NativeMuxOptions {
 pub struct NativePolicyDecision {
     pub granted: bool,
     pub principal: String,
-    #[napi(
-        ts_type = "\"Read\" | \"Edit\" | \"Stage\" | \"Unstage\" | \"Commit\" | \"Checkout\" | \"Stash\" | \"Delete\" | \"Clean\" | \"Diff\" | \"History\""
-    )]
+    #[napi(ts_type = "\"Read\" | \"Edit\" | \"Release\" | \"Remove\"")]
     pub action: String,
     /// Seed-relative path segments; `[]` is the root.
     pub resource: Vec<String>,
@@ -110,14 +62,19 @@ pub struct NativePolicyDecision {
     pub allowed_fixes: Option<Vec<String>>,
 }
 
-/// The routing mode `options` select, refused before anything is discovered, and the policy log
-/// a supplied callback receives decisions through.
+/// The routing mode and authorization policy `options` select, refused before anything is
+/// discovered, and the policy log a supplied callback receives decisions through.
 fn mux_options(
     options: Option<NativeMuxOptions>,
     on_policy_decision: Option<PolicyCallback>,
-) -> Result<(SandboxMode, Option<Arc<frontend::PolicyLog>>)> {
-    let (sandbox, debug) = options.map_or((None, None), |options| {
-        (options.sandbox, options.policy_debug)
+) -> Result<(
+    SandboxMode,
+    &'static str,
+    Arc<dyn marsh_core::Policy>,
+    Option<Arc<frontend::PolicyLog>>,
+)> {
+    let (sandbox, policy, debug) = options.map_or((None, None, None), |options| {
+        (options.sandbox, options.policy, options.policy_debug)
     });
     let mode = match sandbox.as_deref() {
         None | Some("shared") => SandboxMode::Shared,
@@ -128,9 +85,18 @@ fn mux_options(
             )));
         }
     };
+    let (name, policy): (&'static str, Arc<dyn marsh_core::Policy>) = match policy.as_deref() {
+        None | Some("LockPolicy") => ("LockPolicy", Arc::new(marsh_core::LockPolicy)),
+        Some("EmptyPolicy") => ("EmptyPolicy", Arc::new(marsh_core::EmptyPolicy)),
+        Some(_) => {
+            return Err(Error::from_reason(
+                "policy must be \"LockPolicy\" or \"EmptyPolicy\"",
+            ));
+        }
+    };
     let log = on_policy_decision
         .map(|callback| frontend::PolicyLog::new(callback, debug.unwrap_or(false)));
-    Ok((mode, log))
+    Ok((mode, name, policy, log))
 }
 
 #[napi(object)]
@@ -249,23 +215,19 @@ impl NativeProcess {
     }
 }
 
+/// One handle on a mux session. Every handle acts as its own policy owner: `open` handles as
+/// each call's fresh shell, `forkOwner` handles as one stable owner minted for it.
 #[napi]
 pub struct NativeMux {
     session: Arc<Session>,
     sandbox: SandboxMode,
-}
-
-impl NativeMux {
-    /// Commits the addon's one mux.
-    fn committed(session: Arc<Session>, sandbox: SandboxMode, reservation: MuxReservation) -> Self {
-        reservation.commit(&session);
-        Self { session, sandbox }
-    }
+    policy: &'static str,
+    owner: Option<marsh_core::Principal>,
 }
 
 #[napi]
 impl NativeMux {
-    /// Opens the addon's one mux; refused while another is opening, open, or closing.
+    /// Opens one mux, independent of every other.
     #[napi(factory)]
     pub async fn open(
         cwd: String,
@@ -273,9 +235,7 @@ impl NativeMux {
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
     ) -> Result<Self> {
-        let (sandbox, policy_log) = mux_options(options, on_policy_decision)?;
-        let reservation = MuxReservation::acquire()?;
-        let policy = tool::sandbox_policy(sandbox);
+        let (sandbox, policy, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let filesystem: Arc<dyn Subvolumes> = Arc::new(LibBtrfs);
             // Discovery only. Materialization, the seed's exclusive lease, its log recovery
@@ -287,15 +247,48 @@ impl NativeMux {
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        let session = Session::new(seed, filesystem, policy, policy_log, ShellMux::new)
-            .map_err(Error::from_reason)?;
-        Ok(Self::committed(session, sandbox, reservation))
+        let session = Session::new(
+            seed,
+            filesystem,
+            tool::sandbox_policy(sandbox),
+            shell_policy,
+            policy_log,
+            ShellMux::new,
+        )
+        .map_err(Error::from_reason)?;
+        Ok(Self {
+            session,
+            sandbox,
+            policy,
+            owner: None,
+        })
+    }
+
+    /// A handle over this same session whose every call, command and process acts as one fresh
+    /// policy owner. It shares this mux's admission and close: closing either closes both.
+    #[napi]
+    pub fn fork_owner(&self) -> Result<NativeMux> {
+        Ok(Self {
+            session: Arc::clone(&self.session),
+            sandbox: self.sandbox,
+            policy: self.policy,
+            owner: Some(
+                marsh_core::fresh_principal()
+                    .map_err(|error| Error::from_reason(error.to_string()))?,
+            ),
+        })
     }
 
     /// The routing mode this mux was opened with.
     #[napi(getter, ts_return_type = "\"shared\" | \"always\"")]
     pub fn sandbox(&self) -> &'static str {
         self.sandbox.name()
+    }
+
+    /// The authorization policy this mux was opened with.
+    #[napi(getter, ts_return_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
+    pub fn policy(&self) -> &'static str {
+        self.policy
     }
 
     /// Resolves once `cwd` is a directory of exactly this mux's seed, as every operation at it
@@ -324,7 +317,9 @@ impl NativeMux {
     ) -> Result<PromiseRaw<'env, NativeProcess>> {
         // Registered in the session's task table now, not when the promise is polled; a refusal
         // (closed mux, NUL in the command line) rejects the returned promise.
-        let spawned = self.session.spawn(options, on_stdout, on_stderr);
+        let spawned = self
+            .session
+            .spawn(options, self.owner.clone(), on_stdout, on_stderr);
         env.spawn_future_with_callback(
             async move {
                 Ok(match spawned {
@@ -355,7 +350,7 @@ impl NativeMux {
         Ok(NativeRun {
             state: self
                 .session
-                .start(options, on_data)
+                .start(options, self.owner.clone(), on_data)
                 .map_err(Error::from_reason)?,
         })
     }
@@ -383,10 +378,17 @@ impl NativeMux {
     }
 }
 
+/// The CopyTree backend every fixture mux shares, so muxes over one fixture source share
+/// marsh's source authority as production muxes do over one real filesystem.
+#[cfg(feature = "test-fs")]
+static COPY_TREE: std::sync::LazyLock<Arc<marsh_btrfs::fake::CopyTree>> =
+    std::sync::LazyLock::new(|| Arc::new(marsh_btrfs::fake::CopyTree::new()));
+
 #[cfg(feature = "test-fs")]
 #[napi]
 impl NativeMux {
-    /// Opens the addon's one mux over a CopyTree fixture; gated exactly like `open`.
+    /// Opens one mux over a CopyTree fixture, registering `seed` unless a registered root
+    /// already covers it.
     #[napi(factory)]
     pub async fn open_copy_tree(
         seed: String,
@@ -394,9 +396,7 @@ impl NativeMux {
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
     ) -> Result<Self> {
-        let (sandbox, policy_log) = mux_options(options, on_policy_decision)?;
-        let reservation = MuxReservation::acquire()?;
-        let policy = tool::sandbox_policy(sandbox);
+        let (sandbox, policy, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let seed = Path::new(&seed)
                 .canonicalize()
@@ -410,22 +410,39 @@ impl NativeMux {
                     seed.display()
                 )));
             }
-            let fake = Arc::new(marsh_btrfs::fake::CopyTree::new());
-            fake.register(&seed);
-            // One instance for discovery and for the session: a second CopyTree would know
-            // none of this one's registered roots.
-            let filesystem: Arc<dyn Subvolumes> = fake;
-            let (layer, _) = PersistenceLayer::discover(&seed, filesystem.as_ref())
-                .map_err(|error| Error::from_reason(error.to_string()))?;
+            let fake = Arc::clone(&COPY_TREE);
+            let filesystem: Arc<dyn Subvolumes> = fake.clone();
+            let layer = match PersistenceLayer::discover(&seed, filesystem.as_ref()) {
+                Ok((layer, _)) => layer,
+                Err(marsh_btrfs::Error::NoSubvolume(_)) => {
+                    fake.register(&seed);
+                    PersistenceLayer::discover(&seed, filesystem.as_ref())
+                        .map_err(|error| Error::from_reason(error.to_string()))?
+                        .0
+                }
+                Err(error) => return Err(Error::from_reason(error.to_string())),
+            };
             Ok::<_, Error>((layer.seed, filesystem))
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
         let execution_filesystem = Arc::clone(&filesystem);
-        let session = Session::new(seed, filesystem, policy, policy_log, move |profile, frontend| {
-            marsh_core::test_support::mux(profile, frontend, execution_filesystem)
-        })
+        let session = Session::new(
+            seed,
+            filesystem,
+            tool::sandbox_policy(sandbox),
+            shell_policy,
+            policy_log,
+            move |profile, frontend| {
+                marsh_core::test_support::mux(profile, frontend, execution_filesystem)
+            },
+        )
         .map_err(Error::from_reason)?;
-        Ok(Self::committed(session, sandbox, reservation))
+        Ok(Self {
+            session,
+            sandbox,
+            policy,
+            owner: None,
+        })
     }
 }

@@ -13,7 +13,11 @@ export type {
 } from "../native/index.js";
 export { createAstEditTool, createAstGrepTool } from "./ast.js";
 export { createBashTool } from "./bash.js";
-export { ToolCollection, type ToolCollectionOptions } from "./collection.js";
+export {
+  type ToolBinding,
+  ToolCollection,
+  type ToolCollectionOptions,
+} from "./collection.js";
 export {
   type ComplainTool,
   type ComplainToolHost,
@@ -41,17 +45,15 @@ export {
   type LspToolInput,
   type LspToolOptions,
 } from "./lsp.js";
+export { type Contract, InfoTool, RecvTool, SendTool } from "./messaging.js";
 export type { NativeModule } from "./native.js";
 export {
   createShellMuxOperations,
   type ShellMuxOperations,
 } from "./operations.js";
 export { createReadTool } from "./read.js";
-export {
-  acquireShellMux,
-  type ShellMuxLease,
-  shutdownShellMux,
-} from "./shell-mux.js";
+export { createReleaseTool } from "./release.js";
+export { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
 export {
   type AssignedTaskTool,
   createAssignedTaskTool,
