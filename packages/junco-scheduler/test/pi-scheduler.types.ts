@@ -27,7 +27,7 @@ export function bothFactoriesShareOneOptionsShape<
   const opus: Promise<PiScheduler<N, T, S, P>> = PiScheduler.opus(shared);
   const resolved: PiSchedulerOptions<N, T, S, P> = {
     ...native,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     collection,
     prompt: "Run available work.",
   };
@@ -37,7 +37,7 @@ export function bothFactoriesShareOneOptionsShape<
   const opusWithModel: Promise<PiScheduler<N, T, S, P>> =
     PiScheduler.opus(resolved);
   const unchecked: Promise<PiScheduler> = PiScheduler.make({
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   });
   // @ts-expect-error The policy is required; there is no default.
   const missingPolicy: PiSchedulerOptions = {};

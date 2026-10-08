@@ -420,7 +420,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session,
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["first", "first"],
@@ -431,7 +431,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["missing"],
@@ -471,7 +471,7 @@ test("an idle reopened session restores its selected tool without advertising ot
   const first = await JuncoAgent.fromResolved({
     session,
     models,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -511,7 +511,7 @@ test("an idle reopened session restores its selected tool without advertising ot
   const second = await JuncoAgent.fromResolved({
     session: reopened,
     models,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -602,7 +602,7 @@ test(
       session,
       models,
       model,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
@@ -721,7 +721,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   models.registerNativeProvider(faux.provider);
   const agent = await JuncoAgent.create({
     models,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     provider: "faux",
     model: "faux-1",
     tools: [],
@@ -736,7 +736,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [duplicate, countingTool("same").tool],
@@ -756,7 +756,7 @@ test("create rejects an unsupported thinking level before reading credentials", 
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [],
@@ -786,7 +786,7 @@ test("create requires the selected provider's saved Pi login and closes a transf
       await assert.rejects(
         JuncoAgent.create({
           models,
-          policy: "GitPolicy",
+          policy: "LockPolicy",
           provider: "github-copilot",
           model: "claude-opus-5.5",
           session,
@@ -831,7 +831,7 @@ test("create reuses Pi's saved OAuth login without starting a login flow", async
     });
     agent = await JuncoAgent.create({
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -878,7 +878,7 @@ test("an unrefreshable Pi login fails with login guidance before creating an age
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -1962,7 +1962,7 @@ test(
     const agent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       model: faux.getModel("plain")!,
       systemPrompt: "sys",
     });
@@ -2181,6 +2181,123 @@ test(
       assert.equal(faux.state.callCount, 1);
     } finally {
       await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "every model request carries the release instruction exactly once, never persisted",
+  async () => {
+    const RELEASE =
+      "After you write to a file use release to relinquish ownership";
+    const prompts: string[] = [];
+    // The provider sees the system prompt as the transcript's system message text.
+    const record = (context: Context) => {
+      prompts.push(
+        context.messages
+          .flatMap((message) =>
+            message.role === "system" &&
+            typeof message.content === "string" &&
+            message.content !== ""
+              ? [message.content]
+              : [],
+          )
+          .join("\n---\n"),
+      );
+    };
+    const one = countingTool("one");
+    const repo = new MemorySessionRepo();
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const { faux, models, model } = scripted([
+      (context) => {
+        record(context);
+        return toolTurn(fauxToolCall("one", {}, { id: "o1" }));
+      },
+      (context) => {
+        record(context);
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "overloaded",
+        });
+      },
+      (context) => {
+        record(context);
+        return fauxAssistantMessage("done");
+      },
+      (context) => {
+        record(context);
+        return fauxAssistantMessage("summary");
+      },
+    ]);
+    const agent = await JuncoAgent.fromResolved({
+      session,
+      models,
+      model,
+      policy: "LockPolicy",
+      systemPrompt: "sys",
+      tools: [one.tool],
+      compaction: COMPACTION,
+      retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+    });
+    // A context hook replacing the system prompt still gets the instruction appended.
+    agent.hooks.on("transform_context", () => ({ systemPrompt: "hooked" }));
+    try {
+      // Initial request, tool continuation and retry.
+      assert.equal((await agent.prompt("go")).stopReason, "stop");
+      assert.equal(settledText(await agent.next()), "done");
+      assert.equal(one.state.executions, 1);
+      assert.deepEqual(prompts, [
+        `hooked\n\n${RELEASE}`,
+        `hooked\n\n${RELEASE}`,
+        `hooked\n\n${RELEASE}`,
+      ]);
+      await seedLargeHistory(agent);
+      assert.equal(await agent.compact(), undefined);
+      assert.equal(faux.state.callCount, 4);
+      assert.equal(prompts.length, 4);
+      assert.equal(prompts[3]!.split(RELEASE).length, 2);
+      assert.ok(prompts[3]!.endsWith(RELEASE));
+    } finally {
+      await agent.return();
+    }
+
+    // A restored session and a child of it: each request carries one copy, the stored history none.
+    const reopened = await repo.open(session.metadata, BACKGROUND_CONTEXT);
+    faux.setResponses([
+      (context) => {
+        record(context);
+        return fauxAssistantMessage("restored");
+      },
+      (context) => {
+        record(context);
+        return fauxAssistantMessage("child");
+      },
+    ]);
+    const restored = await JuncoAgent.fromResolved({
+      session: reopened,
+      models,
+      model,
+      policy: "LockPolicy",
+      systemPrompt: "sys",
+      tools: [one.tool],
+    });
+    try {
+      assert.equal((await restored.prompt("again")).stopReason, "stop");
+      assert.equal(settledText(await restored.next()), "restored");
+      const [child] = await restored.createSubagents([{ tools: [] }]);
+      try {
+        assert.equal((await child!.prompt("child task")).stopReason, "stop");
+        assert.equal(settledText(await child!.next()), "child");
+      } finally {
+        await child!.return();
+      }
+      assert.deepEqual(prompts.slice(4), [
+        `sys\n\n${RELEASE}`,
+        `sys\n\n${RELEASE}`,
+      ]);
+    } finally {
+      await restored.return();
     }
   },
   TIMEOUT,

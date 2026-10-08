@@ -87,7 +87,7 @@ async function assertPublicYieldBoundary(): Promise<void> {
       models: yieldModels,
       model: yieldFaux.getModel(),
       tools: [toolsApi.createYieldTool()],
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       prompt: "handoff",
     });
     const turns: { ids: string[]; errors: boolean[] }[] = [];
@@ -159,11 +159,11 @@ try {
     models,
     model: faux.getModel(),
     tools: [],
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   });
   // Explicitly untraced, so this smoke prints only its JSON summary; the Ralph child inherits it.
   const graph = graphApi.createParallelAgentGraph(
-    "GitPolicy",
+    "LockPolicy",
     new tracerApi.DummyTracer(),
   );
   parent = graph;
@@ -183,12 +183,12 @@ try {
         > {
           while (true) yield [];
         },
-        "GitPolicy",
+        "LockPolicy",
       ),
       {
         trigger: trigger.always(),
         is_available: () => false,
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       },
     ),
   );
@@ -205,15 +205,15 @@ try {
             delivered.push(value.kind === "appendMessage" ? "" : value.text);
           return fauxAssistantMessage("received");
         },
-        "GitPolicy",
+        "LockPolicy",
       ),
-      { trigger: trigger.when(output), policy: "GitPolicy" },
+      { trigger: trigger.when(output), policy: "LockPolicy" },
     ),
   );
   const id: graphApi.NodeIdType = ralph(graph, agent, {
     input,
     output,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     rounds: 3,
   });
   owned = true;

@@ -91,7 +91,7 @@ function member(
 const node = (agent: MockAgent, id: string) =>
   agentNode(agent, {
     id: NodeId(id),
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     description: id,
     trigger: always(),
   });
@@ -144,7 +144,7 @@ async function policyGraph() {
   ids.c = graph.addNode(
     agentNode(agents.c, {
       id: NodeId("c"),
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       description: "c",
       trigger: when(never),
     }),
@@ -431,19 +431,19 @@ describe("policy boundaries", () => {
           yield [];
           return assistant("coroutine done");
         },
-        "GitPolicy",
+        "LockPolicy",
       );
       const childId = graph.addNode(
         graphNode(
           child,
-          { id: NodeId("child"), policy: "GitPolicy", trigger: always() },
+          { id: NodeId("child"), policy: "LockPolicy", trigger: always() },
           { result: innerId },
         ),
       );
       const coroutineId = graph.addNode(
         deterministicNode(coroutine, {
           id: NodeId("coroutine"),
-          policy: "GitPolicy",
+          policy: "LockPolicy",
           trigger: always(),
         }),
       );

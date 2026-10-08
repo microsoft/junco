@@ -24,14 +24,6 @@
         "dataflow-engine-opik": "workspace:*",
         "typescript": "7.0.2",
       },
-      "peerDependencies": {
-        "dataflow-engine-opik": "^0.1.0",
-        "opik": "^2.2.86",
-      },
-      "optionalPeers": [
-        "dataflow-engine-opik",
-        "opik",
-      ],
     },
     "packages/dataflow-engine": {
       "name": "dataflow-engine",
@@ -149,6 +141,9 @@
       "dependencies": {
         "@oh-my-pi/pi-coding-agent": "18.2.11",
         "dataflow-engine": "workspace:*",
+        "fp-ts": "^2.16.11",
+        "monocle-ts": "2.3.13",
+        "newtype-ts": "0.3.5",
         "tslog": "4.11.0",
         "typebox": "1.3.34",
       },
@@ -1039,11 +1034,15 @@
 
     "modern-tar": ["modern-tar@0.7.7", "", {}, "sha512-t9VmxaqrmANnEOBhpSDI6HD192Ge48k8vmWqQQL7hSFEqHEYwZbbsu49+aKLWZeRvFs3j1pMhXOqqF4kPlvjkQ=="],
 
+    "monocle-ts": ["monocle-ts@2.3.13", "", { "peerDependencies": { "fp-ts": "^2.5.0" } }, "sha512-D5Ygd3oulEoAm3KuGO0eeJIrhFf1jlQIoEVV2DYsZUMz42j4tGxgct97Aq68+F8w4w4geEnwFa8HayTS/7lpKQ=="],
+
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 
     "mustache": ["mustache@4.2.0", "", { "bin": { "mustache": "bin/mustache" } }, "sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ=="],
 
     "mute-stream": ["mute-stream@3.0.0", "", {}, "sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw=="],
+
+    "newtype-ts": ["newtype-ts@0.3.5", "", { "peerDependencies": { "fp-ts": "^2.0.0", "monocle-ts": "^2.0.0" } }, "sha512-v83UEQMlVR75yf1OUdoSFssjitxzjZlqBAjiGQ4WJaML8Jdc68LJ+BaSAXUmKY4bNzp7hygkKLYTsDi14PxI2g=="],
 
     "ngraph.events": ["ngraph.events@1.4.0", "", {}, "sha512-NeDGI4DSyjBNBRtA86222JoYietsmCXbs8CEB0dZ51Xeh4lhVl1y3wpWLumczvnha8sFQIW4E0vvVWwgmX2mGw=="],
 

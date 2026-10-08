@@ -11,7 +11,7 @@ use marsh_core::shellmux::{
     CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell,
     ShellFrontend, ShellId, ShellMux, SpawnOptions, WaitError,
 };
-use marsh_core::{PolicyObserver, SandboxPolicy, ShellError, ShellErrorKind};
+use marsh_core::{PolicyObserver, Principal, SandboxPolicy, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
@@ -210,6 +210,7 @@ impl Session {
     pub(crate) fn start(
         self: &Arc<Self>,
         options: NativeRunOptions,
+        owner: Option<Principal>,
         callback: OutputCallback,
     ) -> Result<Arc<RunState>, String> {
         let timeout = native_timeout(options.timeout_ms)?;
@@ -225,6 +226,7 @@ impl Session {
                 runtime,
                 seed,
                 options,
+                owner,
                 state: run_state,
                 route,
                 timeout,
@@ -240,6 +242,7 @@ impl Session {
     pub(crate) fn spawn(
         self: &Arc<Self>,
         options: NativeProcessOptions,
+        owner: Option<Principal>,
         stdout: OutputCallback,
         stderr: OutputCallback,
     ) -> Result<(Arc<ProcessState>, Admitted), String> {
@@ -266,6 +269,7 @@ impl Session {
                 seed,
                 cwd,
                 principal: shell,
+                owner,
                 env,
                 line,
                 state: task_state,
@@ -339,12 +343,13 @@ impl Session {
         Ok(())
     }
 
-    /// Runs `operation` as one call of `tool` in a transient shell at `cwd`, routed by the mux's
-    /// policy. A call already accepted when the session begins closing still completes: close
-    /// joins it before the mux shuts down.
+    /// Runs `operation` as one call of `tool`, acting as `owner`, in a transient shell at `cwd`,
+    /// routed by the mux's policy. A call already accepted when the session begins closing still
+    /// completes: close joins it before the mux shuts down.
     pub(crate) async fn run_tool<R: Send + 'static>(
         self: &Arc<Self>,
         cwd: String,
+        owner: Option<Principal>,
         tool: JuncoTool,
         operation: impl FnOnce(&BuiltinContext) -> R + Send + 'static,
     ) -> Result<R, RoutedError> {
@@ -358,7 +363,7 @@ impl Session {
                 .clone();
             let runtime = self.runtime.clone();
             let seed = self.seed.clone();
-            let owner = Arc::downgrade(self);
+            let this = Arc::downgrade(self);
             let (sender, receipt) = oneshot::channel();
             let task = self.runtime.spawn(async move {
                 let filesystem = Arc::clone(&backend.filesystem);
@@ -368,7 +373,7 @@ impl Session {
                 {
                     Ok(Ok(directory)) => backend
                         .mux
-                        .run_tool(&directory, tool, operation)
+                        .run_tool(&directory, owner, tool, operation)
                         .await
                         .map_err(tool_error),
                     Ok(Err(error)) => Err(error.into()),
@@ -376,8 +381,8 @@ impl Session {
                 };
                 drop(backend);
                 let _ = sender.send(result);
-                if let Some(owner) = owner.upgrade() {
-                    owner
+                if let Some(this) = this.upgrade() {
+                    this
                         .state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -451,6 +456,7 @@ struct RunTask {
     runtime: Handle,
     seed: PathBuf,
     options: NativeRunOptions,
+    owner: Option<Principal>,
     state: Arc<RunState>,
     route: Arc<OutputRoute>,
     timeout: Option<Duration>,
@@ -463,6 +469,7 @@ impl RunTask {
             runtime,
             seed,
             options,
+            owner,
             state,
             route,
             timeout,
@@ -501,6 +508,7 @@ impl RunTask {
                 SpawnOptions {
                     io: JobIo::Pipes,
                     environment: Some(environment),
+                    policy_owner: owner,
                     ..Default::default()
                 },
             )

@@ -41,8 +41,8 @@ pub struct NativeMuxOptions {
     /// tool always runs directly.
     pub sandbox: Option<String>,
     /// The authorization policy every managed command of this mux is checked against:
-    /// `"GitPolicy"` (the default) or `"EmptyPolicy"`, which grants every capability.
-    #[napi(ts_type = "\"GitPolicy\" | \"EmptyPolicy\"")]
+    /// `"LockPolicy"` (the default) or `"EmptyPolicy"`, which grants every capability.
+    #[napi(ts_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
     pub policy: Option<String>,
     /// Also deliver granted capabilities to `onPolicyDecision`; violations always are.
     pub policy_debug: Option<bool>,
@@ -54,9 +54,7 @@ pub struct NativeMuxOptions {
 pub struct NativePolicyDecision {
     pub granted: bool,
     pub principal: String,
-    #[napi(
-        ts_type = "\"Read\" | \"Edit\" | \"Stage\" | \"Unstage\" | \"Commit\" | \"Checkout\" | \"Stash\" | \"Delete\" | \"Clean\" | \"Diff\" | \"History\""
-    )]
+    #[napi(ts_type = "\"Read\" | \"Edit\" | \"Release\" | \"Remove\"")]
     pub action: String,
     /// Seed-relative path segments; `[]` is the root.
     pub resource: Vec<String>,
@@ -88,11 +86,11 @@ fn mux_options(
         }
     };
     let (name, policy): (&'static str, Arc<dyn marsh_core::Policy>) = match policy.as_deref() {
-        None | Some("GitPolicy") => ("GitPolicy", Arc::new(marsh_core::GitPolicy)),
+        None | Some("LockPolicy") => ("LockPolicy", Arc::new(marsh_core::LockPolicy)),
         Some("EmptyPolicy") => ("EmptyPolicy", Arc::new(marsh_core::EmptyPolicy)),
         Some(_) => {
             return Err(Error::from_reason(
-                "policy must be \"GitPolicy\" or \"EmptyPolicy\"",
+                "policy must be \"LockPolicy\" or \"EmptyPolicy\"",
             ));
         }
     };
@@ -217,11 +215,14 @@ impl NativeProcess {
     }
 }
 
+/// One handle on a mux session. Every handle acts as its own policy owner: `open` handles as
+/// each call's fresh shell, `forkOwner` handles as one stable owner minted for it.
 #[napi]
 pub struct NativeMux {
     session: Arc<Session>,
     sandbox: SandboxMode,
     policy: &'static str,
+    owner: Option<marsh_core::Principal>,
 }
 
 #[napi]
@@ -259,6 +260,22 @@ impl NativeMux {
             session,
             sandbox,
             policy,
+            owner: None,
+        })
+    }
+
+    /// A handle over this same session whose every call, command and process acts as one fresh
+    /// policy owner. It shares this mux's admission and close: closing either closes both.
+    #[napi]
+    pub fn fork_owner(&self) -> Result<NativeMux> {
+        Ok(Self {
+            session: Arc::clone(&self.session),
+            sandbox: self.sandbox,
+            policy: self.policy,
+            owner: Some(
+                marsh_core::fresh_principal()
+                    .map_err(|error| Error::from_reason(error.to_string()))?,
+            ),
         })
     }
 
@@ -269,7 +286,7 @@ impl NativeMux {
     }
 
     /// The authorization policy this mux was opened with.
-    #[napi(getter, ts_return_type = "\"GitPolicy\" | \"EmptyPolicy\"")]
+    #[napi(getter, ts_return_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
     pub fn policy(&self) -> &'static str {
         self.policy
     }
@@ -300,7 +317,9 @@ impl NativeMux {
     ) -> Result<PromiseRaw<'env, NativeProcess>> {
         // Registered in the session's task table now, not when the promise is polled; a refusal
         // (closed mux, NUL in the command line) rejects the returned promise.
-        let spawned = self.session.spawn(options, on_stdout, on_stderr);
+        let spawned = self
+            .session
+            .spawn(options, self.owner.clone(), on_stdout, on_stderr);
         env.spawn_future_with_callback(
             async move {
                 Ok(match spawned {
@@ -331,7 +350,7 @@ impl NativeMux {
         Ok(NativeRun {
             state: self
                 .session
-                .start(options, on_data)
+                .start(options, self.owner.clone(), on_data)
                 .map_err(Error::from_reason)?,
         })
     }
@@ -423,6 +442,7 @@ impl NativeMux {
             session,
             sandbox,
             policy,
+            owner: None,
         })
     }
 }

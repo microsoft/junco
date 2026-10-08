@@ -235,7 +235,7 @@ async function policyLogScenario(level, failAfterGrant = false) {
     let shutdownError;
     let snapshot;
     try {
-      lease = await acquireShellMux(seed, { native, sandbox: "always", policy: "GitPolicy" });
+      lease = await acquireShellMux(seed, { native, sandbox: "always", policy: "LockPolicy" });
       // A closed handle stays reachable; the child must still exit on its own.
       globalThis.retainedLease = lease;
       const tool = (principal) => {

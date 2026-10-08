@@ -13,7 +13,7 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
-import type { ToolCollectionOptions } from "junco-tools";
+import type { Contract, ToolCollectionOptions } from "junco-tools";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import { nodePolicies, unseenValues } from "./node-policy.js";
@@ -29,6 +29,11 @@ export type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
   readonly receive?: (view: ParentView<N, T>) => void | Promise<void>;
   /** Called after each successful child advance, before completion is tested. */
   readonly afterStep?: () => void | Promise<void>;
+  /**
+   * What this wrapper, as a receiver, expects on its own incoming edge `edgeId` (it owns `receive`;
+   * the selected inner result node's edges are unrelated).
+   */
+  readonly contract?: (edgeId: EdgeId) => Contract;
 };
 
 /**
@@ -60,7 +65,7 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
   options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
   binding: GraphNodeBinding<N, T>,
 ): AgenticNode<N, T> {
-  const { result, receive, afterStep } = binding;
+  const { result, receive, afterStep, contract } = binding;
   if (graph.getNode(result) === undefined) {
     throw new DataflowDefinitionError(`Unknown graph result node "${result}"`);
   }
@@ -162,6 +167,7 @@ export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
     ...options,
     state: graph,
     step,
+    ...(contract === undefined ? {} : { contract }),
     is_available:
       options.is_available ?? ((_view, triggered) => started || triggered),
   };

@@ -1,5 +1,4 @@
 import {
-  type AgentLane,
   type AgentTool,
   type AgentToolCall,
   type AgentToolResult,
@@ -189,7 +188,7 @@ type RunState = {
  * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
  * import { PiScheduler } from "junco-scheduler/agent";
  *
- * const scheduler = await PiScheduler.opus({ policy: "GitPolicy", prompt: "Run available work." });
+ * const scheduler = await PiScheduler.opus({ policy: "LockPolicy", prompt: "Run available work." });
  * try {
  *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
  *   // ...graph.addNode(...) / graph.addEdge(...)
@@ -222,8 +221,6 @@ export class PiScheduler<
     | undefined;
   #step: ((signal?: AbortSignal) => Promise<void>) | undefined;
   #staged: readonly (readonly string[])[] | undefined;
-  /** The native lane with guarded run admission, once the harness exists. */
-  #lane: AgentLane | undefined;
 
   /**
    * A scheduler over an already resolved native model and session, such as an offline provider.
@@ -256,7 +253,7 @@ export class PiScheduler<
    * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
    * import { PiScheduler } from "junco-scheduler/agent";
    *
-   * const scheduler = await PiScheduler.opus({ policy: "GitPolicy", prompt: "Run available work." });
+   * const scheduler = await PiScheduler.opus({ policy: "LockPolicy", prompt: "Run available work." });
    * try {
    *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
    *   // ...graph.addNode(...) / graph.addEdge(...)
@@ -405,25 +402,9 @@ export class PiScheduler<
     this.#adapter = adapter;
   }
 
-  /** Guard run admission and install the request-local SchedulerInfo once the native harness exists. */
+  /** Install the request-local SchedulerInfo once the native harness exists. */
   protected override async initialize(): Promise<void> {
     await super.initialize();
-    // JuncoAgent admits every run through `accept`. Guarding it fails the run with the guard's own
-    // error before native admission, so an unbound scheduler, or a graph its owner rejects, never
-    // reaches the provider. Pi's request hooks fail open, and its fail-closed `before_drive` hook
-    // faults the whole harness instead.
-    const lane = super.nativeLane;
-    const accept: AgentLane["accept"] = async (request, context) => {
-      this.#guard();
-      return lane.accept(request, context);
-    };
-    this.#lane = new Proxy(lane, {
-      get: (target, key) => {
-        if (key === "accept") return accept;
-        const value: unknown = Reflect.get(target, key, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
     // A request-local context transform: SchedulerInfo is neither stored nor emitted as a session entry.
     this.hooks.on("transform_context", ({ messages }) => ({
       messages: [
@@ -437,8 +418,13 @@ export class PiScheduler<
     }));
   }
 
-  protected override get nativeLane(): AgentLane {
-    return this.#lane ?? super.nativeLane;
+  /**
+   * Guard every native admission: an unbound scheduler, or a graph its owner rejects, fails the
+   * operation with the guard's own error before it reaches the provider. Pi's request hooks fail
+   * open, and its fail-closed `before_drive` hook faults the whole harness instead.
+   */
+  protected override beforeAdmission(): void {
+    this.#guard();
   }
 
   // DataflowScheduler ------------------------------------------------------------------------------
@@ -583,15 +569,6 @@ export class PiScheduler<
       this.#staged = undefined;
     }
     state.windows++;
-    this.requestYield(
-      {
-        kind: "tool",
-        toolCallId,
-        toolName: "schedule",
-        reason: "Scheduled graph window completed",
-      },
-      signal,
-    );
     return this.#result();
   }
 

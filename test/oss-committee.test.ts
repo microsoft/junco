@@ -33,82 +33,94 @@ const approved: ScriptedReview = {
   approved: true,
   feedback: "Minimal, clean, and backed by well-trusted OSS.",
 };
-const normalRound = [
-  "Librarian",
-  "Librarian",
-  "Architect",
-  "Reducer",
-  "Reducer",
-] as const;
-
 test("a round gates each member on the previous member's complete report", async () => {
   await using committee = await scriptedCommittee();
   const { graph } = reviewRound(request, committee.members, committee.search);
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   await graph.step(); // prime the Librarian without starting its prompt
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
-  await graph.step(); // the Librarian searches and finishes; both outgoing value edges resolve
+  await graph.step(); // the Librarian searches and finishes; its outgoing value edges resolve
   const librarian = graph.result(NodeId("Librarian"));
   assert.ok(O.isSome(librarian));
   const librarianReport = textOf(librarian.value);
   assert.ok(librarianReport.includes(repositoryUrl));
   assert.ok(librarianReport.includes("GitHub-reported stars: 10000"));
-  assert.deepEqual([...graph.available().keys()], ["Architect"]);
+  assert.deepEqual([...graph.available().keys()], ["ArchitectInput"]);
   assert.equal(committee.searchQueries.length, 1);
   assert.ok(!committee.searchQueries[0]!.includes(request));
   assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
-
-  await graph.step(); // prime the Architect
-  await graph.step(); // deliver the complete Librarian report
-  assert.equal(committee.memberInputs.Architect.length, 1);
-  assert.ok(committee.memberInputs.Architect[0]!.includes(librarianReport));
-  assert.deepEqual([...graph.available().keys()], ["Reducer"]);
+  assert.ok(!committee.modelRequests.includes("Architect"));
 
   await graph.run();
   const architect = graph.result(NodeId("Architect"));
   assert.ok(O.isSome(architect));
+  assert.equal(committee.memberInputs.Architect.length, 1);
+  assert.ok(committee.memberInputs.Architect[0]!.includes(librarianReport));
   assert.equal(committee.memberInputs.Reducer.length, 1);
   assert.ok(committee.memberInputs.Reducer[0]!.includes(librarianReport));
   assert.ok(
     committee.memberInputs.Reducer[0]!.includes(textOf(architect.value)),
   );
+  assert.ok(
+    committee.modelRequests.indexOf("Reducer") >
+      committee.modelRequests.indexOf("Architect"),
+  );
   assert.deepEqual(committee.review.takeVerdict(), approved);
 }, 5_000);
 
-test("a failed lookup yields to the Architect before the Librarian resumes", async () => {
+test("a failed lookup sends partial research to the Architect before the Librarian resumes", async () => {
   await using committee = await scriptedCommittee({
     lookups: [[rateLimited()]],
   });
   const { graph } = reviewRound(request, committee.members, committee.search);
   await graph.step(); // prime the Librarian
-  await graph.step(); // failed lookup, followed by the real yield tool
+  await graph.step(); // failed lookup, then info, send and the real yield tool
   assert.equal(committee.search.searches(), 0);
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
   assert.ok(O.isNone(graph.result(NodeId("Librarian"))));
-  assert.deepEqual([...graph.available().keys()], ["Architect"]);
-  assert.deepEqual(committee.modelRequests, ["Librarian", "Librarian"]);
+  assert.deepEqual([...graph.available().keys()], ["ArchitectInput"]);
+  assert.ok(!committee.modelRequests.includes("Architect"));
 
-  await graph.step(); // prime the Architect without resuming the Librarian
-  await graph.step(); // the Architect receives the yielded snapshot and returns
+  // The Librarian stays paused until the Architect returns from the partial research.
+  for (let steps = 0; O.isNone(graph.result(NodeId("Architect"))); steps++) {
+    assert.ok(steps < 10, "the Architect never finished");
+    assert.equal(committee.members.Librarian.status, "suspended");
+    assert.ok(!graph.available().has(NodeId("Librarian")));
+    await graph.step();
+  }
   assert.equal(committee.members.Librarian.status, "suspended");
-  assert.ok(O.isSome(graph.result(NodeId("Architect"))));
-  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+  assert.ok(graph.available().has(NodeId("Librarian")));
+  assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
   await graph.run();
-  assert.deepEqual(committee.modelRequests, [
-    "Librarian",
-    "Librarian",
-    "Architect",
-    "Librarian",
-    "Reducer",
-    "Reducer",
-  ]);
+  assert.ok(
+    committee.modelRequests.lastIndexOf("Librarian") >
+      committee.modelRequests.indexOf("Architect"),
+  );
   assert.ok(committee.memberInputs.Reducer[0]?.includes("HTTP 403"));
 }, 5_000);
 
-test("a later failed lookup yields even after an earlier search succeeded", async () => {
+test("a policy pause before any partial send leaves the Librarian resumable", async () => {
+  await using committee = await scriptedCommittee({
+    lookups: [[rateLimited()]],
+    policyPauseBeforeSend: true,
+  });
+  const { graph } = reviewRound(request, committee.members, committee.search);
+  await graph.step(); // prime the Librarian
+  await graph.step(); // failed lookup, then a policy denial pauses the run
+  assert.equal(committee.search.failures(), 1);
+  assert.equal(committee.members.Librarian.status, "suspended");
+  assert.deepEqual([...graph.available().keys()], ["Librarian"]);
+
+  await graph.run();
+  assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
+  assert.ok(committee.memberInputs.Reducer[0]?.includes("HTTP 403"));
+  assert.deepEqual(committee.review.takeVerdict(), approved);
+}, 5_000);
+
+test("a later failed lookup sends partial research even after an earlier search succeeded", async () => {
   await using committee = await scriptedCommittee({
     lookups: [[emptySearch(), rateLimited()]],
   });
@@ -120,15 +132,6 @@ test("a later failed lookup yields even after an earlier search succeeded", asyn
   );
   assert.equal(committee.search.searches(), 1);
   assert.equal(committee.search.failures(), 1);
-  assert.deepEqual(committee.modelRequests, [
-    "Librarian",
-    "Librarian",
-    "Librarian",
-    "Architect",
-    "Librarian",
-    "Reducer",
-    "Reducer",
-  ]);
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
   assert.ok(plan.includes("HTTP 403"));
 }, 5_000);
@@ -140,19 +143,14 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
   });
   const { graph } = reviewRound(request, committee.members, committee.search);
   const error = await graph.run().catch((thrown: unknown) => thrown);
-  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
+  assert.ok(
+    error instanceof DataflowNodeError && error.nodeId === "ReducerInput",
+  );
   const librarian = graph.result(NodeId("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
   assert.ok(O.isSome(graph.result(NodeId("Architect"))));
   assert.deepEqual(committee.memberInputs.Reducer, []);
-  // Pi treats a "length" stop as a context overflow and retries once before failing the run.
-  assert.deepEqual(committee.modelRequests, [
-    "Librarian",
-    "Librarian",
-    "Architect",
-    "Librarian",
-    "Librarian",
-  ]);
+  assert.ok(!committee.modelRequests.includes("Reducer"));
 }, 5_000);
 
 test("a truncated research report never reaches the Architect", async () => {
@@ -161,11 +159,13 @@ test("a truncated research report never reaches the Architect", async () => {
   });
   const { graph } = reviewRound(request, committee.members, committee.search);
   const error = await graph.run().catch((thrown: unknown) => thrown);
-  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
+  assert.ok(
+    error instanceof DataflowNodeError && error.nodeId === "ArchitectInput",
+  );
   const librarian = graph.result(NodeId("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
-  assert.deepEqual(committee.memberInputs.Architect, []);
-  assert.deepEqual(committee.memberInputs.Reducer, []);
+  assert.ok(!committee.modelRequests.includes("Architect"));
+  assert.ok(!committee.modelRequests.includes("Reducer"));
 }, 5_000);
 
 test("a valid empty search is reported without inventing a candidate", async () => {
@@ -347,11 +347,6 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
   );
   assert.ok(plan.includes("Review round: 3"));
   assert.ok(!plan.includes("Review round: 1"));
-  assert.deepEqual(committee.modelRequests, [
-    ...normalRound,
-    ...normalRound,
-    ...normalRound,
-  ]);
   assert.equal(committee.searchQueries.length, 3);
   const { Librarian, Architect, Reducer } = committee.memberInputs;
   assert.ok(!Librarian[0]!.includes("Review feedback:"));
@@ -367,12 +362,7 @@ test("a round without a review verdict publishes nothing", async () => {
   await assert.rejects(
     convene(request, committee.members, committee.search, committee.review),
   );
-  assert.deepEqual(committee.modelRequests, [
-    "Librarian",
-    "Librarian",
-    "Architect",
-    "Reducer",
-  ]);
+  assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);
 
 test("a failed lookup in one round does not block a later normal round", async () => {
@@ -389,13 +379,4 @@ test("a failed lookup in one round does not block a later normal round", async (
   assert.ok(plan.includes("Review round: 2"));
   assert.ok(plan.includes(repositoryUrl));
   assert.equal(committee.search.failures(), 1);
-  assert.deepEqual(committee.modelRequests, [
-    "Librarian",
-    "Librarian",
-    "Architect",
-    "Librarian",
-    "Reducer",
-    "Reducer",
-    ...normalRound,
-  ]);
 }, 5_000);

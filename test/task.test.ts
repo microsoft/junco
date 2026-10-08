@@ -91,6 +91,7 @@ async function newCaller(
   models: ReturnType<typeof registry>["models"],
   provider: string,
   tools: AgentTool[],
+  contract?: (edgeId: graph.EdgeIdType) => toolsApi.Contract,
 ): Promise<Agent> {
   const model = models.getModels(provider)[0];
   assert.ok(model);
@@ -100,7 +101,8 @@ async function newCaller(
     model,
     systemPrompt: "sys",
     tools,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
+    ...(contract === undefined ? {} : { contract }),
   });
   closers.push(() => agent.return());
   return agent;
@@ -204,6 +206,8 @@ async function driveObservingReports(
   id = graph.NodeId("caller"),
 ): Promise<QueuedReport[]> {
   const queued: QueuedReport[] = [];
+  // A report may stay queued across windows; record each queued input once.
+  const seen = new Set<AgenticInput>();
   while (outer.available().size > 0) {
     await outer.step();
     const state = outer.getNode(id)?.state;
@@ -211,6 +215,8 @@ async function driveObservingReports(
     const messages = state.available().get(graph.NodeId("root"))?.view.messages;
     for (const edge of messages?.keys() ?? []) {
       for (const input of messages?.get(edge) ?? []) {
+        if (seen.has(input)) continue;
+        seen.add(input);
         if ("text" in input && input.text.startsWith('{"type":"task_result"'))
           queued.push({ kind: input.kind, report: JSON.parse(input.text) });
       }
@@ -269,7 +275,7 @@ function callerNode(caller: Agent, prompt = "Start") {
     {
       id: graph.NodeId("caller"),
       trigger: trigger.always(),
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     },
     { prompt },
   );
@@ -387,7 +393,7 @@ async function failingCaller(
     toolsApi.createTaskTool(),
   ]);
   caller.setTaskFailurePolicy(policy);
-  const outer = createParallelAgentGraph("GitPolicy");
+  const outer = createParallelAgentGraph("LockPolicy");
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
   return { caller, outer, id };
@@ -470,7 +476,7 @@ describe("task tool through agentNode", () => {
       if (lane === "main") runIds.add(runId);
     });
 
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     const id = outer.addNode(callerNode(caller, "Start the workers"));
     closers.push(() => outer.close());
     const node = outer.getNode(id);
@@ -538,79 +544,163 @@ describe("task tool through agentNode", () => {
     }
   });
 
-  test("external edges keep their contract: a value once, messages in order, yields routed out, only the final result downstream", async () => {
-    const r = registry("caller", "alpha");
+  test("external edges keep their contract: recv postponed across Yield, values once, messages in order, info/send pinned to the original node, only the final result downstream", async () => {
+    const r = registry("caller", "alpha", "beta");
     type Edge = graph.Edge<AgenticInput, AssistantMessage>;
+    type Route = { id: string; edgeId: string; kind: string; expect: string };
+    type Info = { parents: Route[]; children: Route[] };
+    type Received = {
+      messages: { id: string; payload: AgenticInput }[];
+      values: { id: string; payload: AssistantMessage }[];
+    };
     const sourceEdge: Edge = graph.valueEdge("source=>caller");
     const notesEdge: Edge = graph.messageEdge("notes->caller");
     const outboundEdge: Edge = graph.messageEdge("caller->down");
     const resultEdge: Edge = graph.valueEdge("caller=>down");
-    const [source, notes, outbound, result] = [
-      sourceEdge.id,
-      notesEdge.id,
-      outboundEdge.id,
-      resultEdge.id,
-    ];
+    const expects: Record<string, string> = {
+      [sourceEdge.id]: "caller takes the upstream value",
+      [notesEdge.id]: "caller takes ordered notes",
+      [outboundEdge.id]: "down records follow-up texts",
+      [resultEdge.id]: "down returns the final caller answer",
+    };
+    const contract = (edgeId: graph.EdgeIdType) => {
+      const expect = expects[edgeId];
+      assert.ok(expect, `contract for ${edgeId}`);
+      return { expect };
+    };
+    /** Parsed JSON results of every `name` tool call in `context`, in order. */
+    const results = <R>(context: Context, name: string): R[] =>
+      context.messages.flatMap((message) =>
+        message.role === "toolResult" && message.toolName === name
+          ? [JSON.parse(contentText(message.content)) as R]
+          : [],
+      );
+    const called = (context: Context, name: string) =>
+      context.messages.some(
+        (message) => message.role === "toolResult" && message.toolName === name,
+      );
     let alphaStarted = false;
     let finalContext: Context | undefined;
-    r.script("caller", [
-      toolUse(
-        taskCall([
-          {
-            name: "alpha",
-            task: "work",
-            model: r.model("alpha"),
-            tools: ["yield"],
-          },
-        ]),
-      ),
-      toolUse(yieldCall("checkpoint")),
-      fauxAssistantMessage("interim"),
-      (context) => {
-        finalContext = context;
-        return fauxAssistantMessage("final answer");
-      },
-    ]);
+    const callerInfos: Info[] = [];
+    const childInfos: Info[] = [];
+    const turn = (context: Context): AssistantMessage => {
+      const tasks = context.messages.filter(
+        (message) =>
+          message.role === "toolResult" && message.toolName === "task",
+      ).length;
+      if (tasks === 0)
+        return toolUse(
+          taskCall([
+            {
+              name: "alpha",
+              task: "work",
+              model: r.model("alpha"),
+              tools: ["yield", "info"],
+            },
+          ]),
+        );
+      if (!called(context, "yield")) return toolUse(yieldCall("checkpoint"));
+      const infos = results<Info>(context, "info");
+      if (infos.length === 0)
+        return toolUse(fauxToolCall("info", {}, { id: "info-1" }));
+      const received = results<Received>(context, "recv");
+      const messages = received.flatMap((batch) => batch.messages);
+      if (messages.length < 2) {
+        const last = context.messages.at(-1);
+        return toolUse(
+          last?.role === "toolResult" && last.toolName === "recv"
+            ? yieldCall("waiting for notes", `wait-${received.length}`)
+            : fauxToolCall("recv", {}, { id: `recv-${received.length}` }),
+        );
+      }
+      // A later admission joins the already promoted Spawn graph.
+      if (tasks === 1)
+        return toolUse(
+          taskCall(
+            [{ name: "beta", task: "more", model: r.model("beta"), tools: [] }],
+            "task-2",
+          ),
+        );
+      if (infos.length === 1)
+        return toolUse(fauxToolCall("info", {}, { id: "info-2" }));
+      if (!called(context, "send")) {
+        callerInfos.push(...infos);
+        const route = infos
+          .at(-1)
+          ?.children.find((child) => child.kind === "message");
+        assert.ok(route, "info names an outgoing message route");
+        return toolUse(
+          fauxToolCall(
+            "send",
+            {
+              id: route.edgeId,
+              payload: { kind: "followUp", text: "checkpoint" },
+            },
+            { id: "send-1" },
+          ),
+        );
+      }
+      if (reportsIn(context).length < 2) return fauxAssistantMessage("interim");
+      finalContext = context;
+      return fauxAssistantMessage("final answer");
+    };
+    r.script(
+      "caller",
+      Array.from({ length: 24 }, () => turn),
+    );
     r.script("alpha", [
       () => {
         alphaStarted = true;
+        return toolUse(fauxToolCall("info", {}, { id: "alpha-info" }));
+      },
+      (context) => {
+        childInfos.push(...results<Info>(context, "info"));
         return toolUse(yieldCall("alpha pause"));
       },
       fauxAssistantMessage("alpha-report"),
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
-      toolsApi.createYieldTool(),
-    ]);
+    r.script("beta", [fauxAssistantMessage("beta-report")]);
+    const caller = await newCaller(
+      r.models,
+      "caller",
+      [
+        toolsApi.createTaskTool(),
+        toolsApi.createYieldTool(),
+        toolsApi.RecvTool(),
+        toolsApi.SendTool(),
+        toolsApi.InfoTool(),
+      ],
+      contract,
+    );
     const upstreamValue = fauxAssistantMessage("upstream value");
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const sourceId = outer.addNode(
       deterministicNode(
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           yield [];
           return upstreamValue;
-        }, "GitPolicy"),
-        { trigger: trigger.always(), policy: "GitPolicy" },
+        }, "LockPolicy"),
+        { trigger: trigger.always(), policy: "LockPolicy" },
       ),
     );
     const notesId = outer.addNode(
       deterministicNode(
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           yield [
-            { id: notes, payload: { kind: "followUp", text: "note-1" } },
-            { id: notes, payload: { kind: "followUp", text: "note-2" } },
+            { id: notesEdge.id, payload: { kind: "followUp", text: "note-1" } },
+            { id: notesEdge.id, payload: { kind: "followUp", text: "note-2" } },
           ];
           return fauxAssistantMessage("notes done");
-        }, "GitPolicy"),
-        // Emits once the worker is running, while the caller's node is expanded.
+        }, "LockPolicy"),
+        // Emits once the worker is running, while the caller's node is expanded and suspended.
         {
           trigger: trigger.always(),
           is_available: () => alphaStarted,
-          policy: "GitPolicy",
+          policy: "LockPolicy",
         },
       ),
     );
@@ -619,32 +709,10 @@ describe("task tool through agentNode", () => {
         caller,
         {
           id: graph.NodeId("caller"),
-          policy: "GitPolicy",
+          policy: "LockPolicy",
           trigger: trigger.anyOf(trigger.on(notesEdge), trigger.on(sourceEdge)),
         },
-        {
-          prompt: "Start",
-          receive: (view): AgenticInput[] => [
-            ...(view.values.has(source)
-              ? [
-                  {
-                    kind: "appendMessage" as const,
-                    message: {
-                      role: "user" as const,
-                      content: "upstream value: seen",
-                      timestamp: 0,
-                    },
-                  },
-                ]
-              : []),
-            ...(view.messages.get(notes) ?? []),
-          ],
-          emit: (step) =>
-            step.reasons.map(({ reason }) => ({
-              id: outbound,
-              payload: { kind: "followUp" as const, text: reason },
-            })),
-        },
+        { prompt: "Start" },
       ),
     );
     const downId = outer.addNode(
@@ -652,22 +720,23 @@ describe("task tool through agentNode", () => {
         new Deterministic<AgenticInput, AssistantMessage>(async function* () {
           let view = yield [];
           while (true) {
-            for (const input of view.messages.get(outbound) ?? [])
+            for (const input of view.messages.get(outboundEdge.id) ?? [])
               if (input.kind === "followUp") received.push(input.text);
-            const value = view.values.get(result);
+            const value = view.values.get(resultEdge.id);
             if (value !== undefined) {
               downstreamValue = value;
               return value;
             }
             view = yield [];
           }
-        }, "GitPolicy"),
+        }, "LockPolicy"),
         {
-          policy: "GitPolicy",
+          policy: "LockPolicy",
           trigger: trigger.anyOf(
             trigger.on(outboundEdge),
             trigger.on(resultEdge),
           ),
+          contract,
         },
       ),
     );
@@ -679,26 +748,92 @@ describe("task tool through agentNode", () => {
     const node = outer.getNode(callerId);
     const links = linksOf(outer);
 
-    const results = await outer.run();
-    const final = results.get(callerId);
+    const results_ = await outer.run();
+    const final = results_.get(callerId);
     assert.ok(final);
     assert.equal(contentText(final.content), "final answer");
     assert.equal(outer.getNode(callerId), node);
     assert.deepEqual(linksOf(outer), links, "external edges are unchanged");
     assert.ok(finalContext);
-    const texts = userTexts(finalContext);
-    assert.equal(
-      texts.filter((text) => text === "upstream value: seen").length,
-      1,
-    );
-    const [first, second] = [texts.indexOf("note-1"), texts.indexOf("note-2")];
-    assert.ok(first !== -1 && first < second, "messages arrive once, in order");
-    assert.equal(texts.lastIndexOf("note-1"), first);
+
+    // Postponed recv: every retained note once, in FIFO order, and the stale value exactly once.
+    const batches = results<Received>(finalContext, "recv");
     assert.deepEqual(
-      reportsIn(finalContext).map(({ output }) => output),
-      ["alpha-report"],
+      batches.flatMap((batch) =>
+        batch.messages.map(({ id, payload }) => [
+          id,
+          "text" in payload ? payload.text : "",
+        ]),
+      ),
+      [
+        [notesEdge.id, "note-1"],
+        [notesEdge.id, "note-2"],
+      ],
     );
-    assert.deepEqual(received, ["Scheduled 1 subagents", "checkpoint"]);
+    assert.deepEqual(
+      batches.flatMap((batch) =>
+        batch.values.map(({ id, payload }) => [
+          id,
+          contentText(payload.content),
+        ]),
+      ),
+      [[sourceEdge.id, "upstream value"]],
+    );
+    assert.equal(
+      userTexts(finalContext).includes("note-1"),
+      false,
+      "notes are data, not prompts",
+    );
+    assert.deepEqual(
+      reportsIn(finalContext)
+        .map(({ output }) => output)
+        .sort(),
+      ["alpha-report", "beta-report"],
+    );
+
+    // The promoted caller, before and after a later admission, still reports its outer node.
+    const route = (id: string, edge: Edge, kind: string) => ({
+      id,
+      edgeId: edge.id,
+      kind,
+      expect: expects[edge.id],
+    });
+    const byEdge = (a: Route, b: Route) => a.edgeId.localeCompare(b.edgeId);
+    const outerInfo = {
+      parents: [
+        route(sourceId, sourceEdge, "value"),
+        route(notesId, notesEdge, "message"),
+      ].sort(byEdge),
+      children: [
+        route(downId, outboundEdge, "message"),
+        route(downId, resultEdge, "value"),
+      ].sort(byEdge),
+    };
+    assert.equal(callerInfos.length, 2);
+    for (const info of callerInfos)
+      assert.deepEqual(
+        {
+          parents: [...info.parents].sort(byEdge),
+          children: [...info.children].sort(byEdge),
+        },
+        outerInfo,
+      );
+    // The child shares the caller's info carrier yet reports its own inner-graph registration.
+    const [childInfo] = childInfos;
+    assert.ok(childInfo);
+    for (const entry of [...childInfo.parents, ...childInfo.children]) {
+      assert.equal(entry.id, "root");
+      assert.equal(entry.kind, "message");
+      assert.ok(entry.expect.length > 0);
+    }
+    assert.equal(childInfo.parents.length, 1);
+    assert.equal(childInfo.children.length, 1);
+
+    assert.deepEqual(
+      received,
+      ["checkpoint"],
+      "only the explicit send reaches down",
+    );
     assert.equal(
       downstreamValue,
       final,
@@ -741,7 +876,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -812,7 +947,7 @@ describe("task tool through agentNode", () => {
       toolsApi.createTaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -878,7 +1013,7 @@ describe("task tool through agentNode", () => {
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -920,7 +1055,7 @@ describe("task tool through agentNode", () => {
       toolsApi.createTaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -948,7 +1083,7 @@ describe("task tool through agentNode", () => {
       if (toolCallId === "t1") void caller.abort();
       return undefined;
     });
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -965,7 +1100,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     const id = outer.addNode(callerNode(caller));
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
@@ -1010,7 +1145,7 @@ describe("task tool through agentNode", () => {
       hold.tool,
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     const id = outer.addNode(callerNode(caller));
     const running = outer.run();
     await hold.started;
@@ -1046,7 +1181,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1115,7 +1250,7 @@ describe("task tool through agentNode", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1224,6 +1359,8 @@ describe("task tool through agentNode", () => {
     r.script("fast", [fauxAssistantMessage("fast-report")]);
     r.script("slow", [
       toolUse(yieldCall("let fast report")),
+      // The child's root takes the delivered report in the next window.
+      toolUse(yieldCall("let the child take the report", "yield-2")),
       toolUse(fauxToolCall("wait", {}, { id: "w1" })),
       fauxAssistantMessage("slow-report"),
     ]);
@@ -1243,7 +1380,7 @@ describe("task tool through agentNode", () => {
         throw new Error("nested worker exploded");
       });
     });
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1310,7 +1447,7 @@ describe("task tool through agentNode", () => {
     const caller = await newCaller(r.models, "caller", [
       toolsApi.createTaskTool(),
     ]);
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
@@ -1324,12 +1461,9 @@ describe("task tool through agentNode", () => {
     assert.equal(issues.length, 4);
     assert.equal(byText.get("before expansion")?.nodeId, id);
     assert.deepEqual(byText.get("before expansion")?.messages, []);
-    assert.equal(byText.get("after expansion")?.nodeId, "root");
-    assert.deepEqual(
-      byText.get("after expansion")?.messages,
-      [],
-      "the Spawn root's prime activation delivers no batch",
-    );
+    // Task admission no longer pauses: the same run complains before its node is promoted.
+    assert.equal(byText.get("after expansion")?.nodeId, id);
+    assert.deepEqual(byText.get("after expansion")?.messages, []);
     const reports = byText.get("with reports");
     assert.equal(reports?.nodeId, "root");
     assert.deepEqual(
@@ -1349,12 +1483,8 @@ describe("task tool through agentNode", () => {
     });
     const childIssue = byText.get("child blocked");
     assert.equal(childIssue?.nodeId, child.id);
-    assert.deepEqual(childIssue?.messages, [
-      {
-        id: `root->${child.id}`,
-        payload: { kind: "prompt", text: childPrompt("do w") },
-      },
-    ]);
+    // The child starts from its bound task prompt, not a delivered message.
+    assert.deepEqual(childIssue?.messages, []);
     assert.ok(
       childIssue?.prompt.messages.some(
         (message) =>
@@ -1390,7 +1520,7 @@ describe("task tool through agentNode", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const outer = createParallelAgentGraph("GitPolicy");
+    const outer = createParallelAgentGraph("LockPolicy");
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1688,6 +1818,42 @@ describe("task tool through agentNode", () => {
       ),
     );
     assert.equal(children("a").length, 1);
+
+    // A refused explicit retry restores the pending decision; settling without one still fails.
+    {
+      const r = registry("caller", "a");
+      worker(r, "a", 1);
+      let acquisitions = 0;
+      let rejections = 0;
+      const { caller, outer } = await failingCaller(
+        r,
+        ["a"],
+        { retries: 0 },
+        answering(
+          (report) => [decision("retry", report, "retry")],
+          () => assert.fail("no marker"),
+        ),
+      );
+      const children = childrenOf(caller, undefined, () => {
+        if (++acquisitions === 1) return;
+        rejections += 1;
+        throw new Error("no capacity");
+      });
+      const failure = await outer.run().then(
+        () => assert.fail("the graph failed"),
+        (error: unknown) => error,
+      );
+      assert.equal(rejections, 1);
+      assert.ok(
+        causesOf(failure).some(
+          (cause) =>
+            cause instanceof agentApi.JuncoAgentError &&
+            cause.code === "invalid_state" &&
+            /^Task failure decisions required:/.test(cause.message),
+        ),
+      );
+      assert.equal(children("a").length, 1);
+    }
   });
 
   test("a rejected retry allocation consumes a retry and creates no attempt; exhaustion asks the caller", async () => {

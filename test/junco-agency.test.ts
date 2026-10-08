@@ -31,6 +31,7 @@ import {
   type PiGraph,
   runAvailable,
   type Script,
+  scheduleCall,
   settledText,
   waitingTool,
 } from "./support.ts";
@@ -44,11 +45,11 @@ const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
   agent instanceof JuncoGraph
     ? graphNode(
         agent,
-        { policy: "GitPolicy", description, trigger: always() },
+        { policy: "LockPolicy", description, trigger: always() },
         { result: MEMBER },
       )
     : agentNode(agent, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         description,
         trigger: always(),
       });
@@ -125,7 +126,7 @@ test(
     }
     const root = levels.at(-1)!;
 
-    const { last } = await drive(root.scheduler);
+    const last = await drive(root.scheduler);
     assert.equal(settledText(last), "graph quiescent");
     assert.ok(levels.every(({ graph }) => resultText(graph) === "deep"));
     assert.equal(innermost.faux.state.callCount, 1);
@@ -188,16 +189,16 @@ test(
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
     const { scheduler: root } = await agency(
       [child.graph, sibling.agent],
-      plan([["0"], ["1"]], [["0"]], [["0"], ["1"]]),
+      plan([["0"], ["1"]], [["0"], ["1"]]),
     );
     let finalTurn: AssistantMessage | undefined;
     root.events.on("turn_end", ({ message }) => {
       finalTurn = message;
     });
 
-    assert.equal((await root.next()).value?.kind, "yield"); // primes both members
-    assert.equal((await root.next()).value?.kind, "yield"); // the child primes the grandchild
-    const running = root.next(); // the child runs the grandchild while the sibling runs
+    // One run: the first window primes both members, the second runs the child (which primes and
+    // runs the grandchild within its own run) beside the sibling.
+    const running = root.next();
     await Promise.all([grandchildTool.started, siblingTool.started]);
 
     let aborted = false;
@@ -257,8 +258,7 @@ test(
       finalTurn = message;
     });
 
-    assert.equal((await root.next()).value?.kind, "yield");
-    const running = root.next();
+    const running = root.next(); // primes both members, then runs the sibling
     await siblingTool.started;
 
     const error = await root.abort().catch((thrown: unknown) => thrown);
@@ -274,7 +274,7 @@ test(
 );
 
 test(
-  "closing a suspended root scheduler closes each member once, without aborting it, and its graph joins",
+  "closing a running root scheduler closes each member once, without aborting it, and its graph joins",
   async () => {
     const calls: string[] = [];
     const counted = await counting(calls, (await nativeOptions([])).options);
@@ -286,18 +286,36 @@ test(
       { prompt: "go" },
     );
     const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
+    // Two windows (prime, then the child's whole nested run), then a request held until close.
+    const held = Promise.withResolvers<void>();
+    const schedule = (id: string) =>
+      fauxAssistantMessage([scheduleCall([["0"]], id)], {
+        stopReason: "toolUse",
+      });
     const { graph, scheduler: root } = await agency(
       [child.graph, counted],
-      plan([["0"]], [["0"]], [["0"]]),
+      [
+        schedule("s1"),
+        schedule("s2"),
+        async (_context, options) => {
+          held.resolve();
+          const closed = Promise.withResolvers<void>();
+          options?.signal?.addEventListener("abort", () => closed.resolve(), {
+            once: true,
+          });
+          await closed.promise;
+          return fauxAssistantMessage("aborted", { stopReason: "aborted" });
+        },
+      ],
     );
 
-    assert.equal((await root.next()).value?.kind, "yield");
-    assert.equal((await root.next()).value?.kind, "yield");
-    assert.equal((await root.next()).value?.kind, "yield");
-    assert.equal(grandchild.agent.status, "suspended");
-    assert.equal(root.status, "suspended");
+    const running = root.next().catch(() => undefined);
+    await held.promise;
+    assert.equal(root.status, "running");
+    assert.equal(grandchild.faux.state.callCount, 2);
 
     assert.deepEqual(await root.return(), { value: undefined, done: true });
+    await running;
     assert.deepEqual(calls, ["return"]);
     for (const agentic of [root, child.scheduler, grandchild.agent, counted])
       assert.equal(agentic.status, "closed");
@@ -350,7 +368,7 @@ test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared a
     UNBOUNDED,
     UNBOUNDED,
     new DummyTracer(),
-    "GitPolicy",
+    "LockPolicy",
   );
   root.addNode(member(counted));
   const child = await agency([counted, root], runAvailable, { idle: true });
@@ -416,7 +434,7 @@ test(
           },
         );
         try {
-          const { last } = await drive(agent);
+          const last = await drive(agent);
 
           assert.ok(status && failure);
           assert.equal(status.toolName, "lsp");

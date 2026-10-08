@@ -23,11 +23,11 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 }
 
 /**
- * A principal names and orders one agent's commands; it is not a policy identity. Every
- * command runs in a fresh marsh shell with an opaque owner, so no grant carries over between
- * commands. A supplied `mux` is borrowed and never closed; an explicit `policy`/`sandbox` must
- * match it. Without one, the first command opens an owned mux (`policy` defaults to
- * `"GitPolicy"`), which `close()` closes after aborting and draining this owner's commands.
+ * A principal names and orders one agent's commands; it is not a policy identity. Commands act
+ * as the mux's policy owner: a supplied `mux` is borrowed, with whatever owner it carries, and
+ * never closed; an explicit `policy`/`sandbox` must match it. Without one, the first command
+ * opens an owned mux (`policy` defaults to `"LockPolicy"`) bound to one fresh owner every later
+ * command shares, which `close()` closes after aborting and draining this owner's commands.
  * ShellMux snapshots are not OS confinement. Cancellation waits for owned cleanup and
  * can be delayed by external commands racing the backend's stop scan.
  */
@@ -60,7 +60,7 @@ export function createShellMuxOperations(options?: {
   const acquisition = {
     native: options?.native,
     sandbox: options?.sandbox,
-    policy: options?.policy ?? "GitPolicy",
+    policy: options?.policy ?? "LockPolicy",
   } as const;
   let mux: NativeMux | undefined;
   let owned: ShellMuxLease | undefined;
@@ -95,8 +95,8 @@ export function createShellMuxOperations(options?: {
             throw closedError();
           }
           owned = lease;
-          mux = lease.mux;
-          return lease.mux;
+          mux = lease.mux.forkOwner();
+          return mux;
         })(),
       );
       acquiring = attempt;

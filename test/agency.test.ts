@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
+  type FauxResponseFactory,
   fauxAssistantMessage,
   fauxProvider,
   InMemoryCredentialStore,
@@ -54,6 +55,8 @@ import {
   newScheduler,
   type PiGraph,
   runAvailable,
+  scheduleCall,
+  schedulerInfoOf,
   settledText,
 } from "./support.ts";
 
@@ -89,7 +92,7 @@ const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
 const member = (agent: MockAgent, description: string, id?: string) =>
   agentNode(agent, {
     ...(id === undefined ? {} : { id: NodeId(id) }),
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     description,
     trigger: always(),
   });
@@ -118,7 +121,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   const w = graph.addNode(member(worker, "the worker"));
   const i = graph.addNode(member(idle, IDLE));
   const raw = graph.addNode({
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     description: "",
     trigger: always(),
     state: new Deterministic<AgenticInput, AssistantMessage>(
@@ -126,7 +129,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
       async function* () {
         return fauxAssistantMessage("unused");
       },
-      "GitPolicy",
+      "LockPolicy",
     ),
     step: async function* () {
       yield [];
@@ -138,8 +141,8 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
       new Deterministic<AgenticInput, AssistantMessage>(async function* () {
         yield [];
         return fauxAssistantMessage("quiet done");
-      }, "GitPolicy"),
-      { trigger: always(), policy: "GitPolicy" },
+      }, "LockPolicy"),
+      { trigger: always(), policy: "LockPolicy" },
     ),
   );
   scheduler.hooks.on("transform_context", ({ messages }) => {
@@ -148,7 +151,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   });
 
   try {
-    assert.equal(settledText((await drive(scheduler)).last), "graph quiescent");
+    assert.equal(settledText(await drive(scheduler)), "graph quiescent");
 
     /** The agency's description fields, as the scheduler serialized them. */
     type Details =
@@ -209,106 +212,11 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   }
 });
 
-test("an any trigger reads a newer message although a delivered result stays satisfied", async () => {
-  const source = new MockAgent({
-    prompt: "value",
-    runs: [yieldsThen(0, "the value")],
-  });
-  const messenger = new MockAgent({
-    runs: [yieldsThen(1, "messenger done")],
-  });
-  const drainFollowUp = { drain: ["followUp"] } as const;
-  const reader = new MockAgent({
-    prompt: "read",
-    runs: [
-      run([
-        pause([reason("ask for more", "r1")]),
-        pause([reason("waiting", "r2")], drainFollowUp),
-        pause([reason("waiting", "r3")], drainFollowUp),
-        pause([reason("waiting", "r4")], drainFollowUp),
-        settle(assistant("reader after more"), drainFollowUp),
-      ]),
-    ],
-  });
-  const { graph, scheduler } = await agencyGraph(runAvailable, {
-    prompt: "go",
-  });
-  const value = valueEdge<AgenticInput, AssistantMessage>("a->c");
-  const ask = messageEdge<AgenticInput, AssistantMessage>("c->b");
-  const more = messageEdge<AgenticInput, AssistantMessage>("b->c");
-  const a = graph.addNode(member(source, "source", "a"));
-  const b = graph.addNode(
-    agentNode(
-      messenger,
-      {
-        id: NodeId("b"),
-        policy: "GitPolicy",
-        description: "messenger",
-        trigger: when(ask),
-      },
-      {
-        receive: (view) => view.messages.get(ask.id) ?? [],
-        emit: () => [msg(more, { kind: "followUp", text: "more" })],
-      },
-    ),
-  );
-  const c = graph.addNode(
-    agentNode(
-      reader,
-      {
-        id: NodeId("c"),
-        policy: "GitPolicy",
-        description: "reader",
-        trigger: anyOf(on(value), on(more)),
-      },
-      {
-        receive: (view) => [
-          ...[...view.values.keys()].map(
-            (id): AgenticInput => ({
-              kind: "nextTurn",
-              text: `got ${textOf(view.values.get(id)!)}`,
-            }),
-          ),
-          ...(view.messages.get(more.id) ?? []),
-        ],
-        emit: (step) =>
-          step.reasons[0]?.reason === "ask for more"
-            ? [msg(ask, { kind: "prompt", text: "help" })]
-            : [],
-      },
-    ),
-  );
-  graph.addEdge(a, c, value).addEdge(c, b, ask).addEdge(b, c, more);
-
-  try {
-    assert.equal(settledText((await drive(scheduler)).last), "graph quiescent");
-    assert.deepEqual(
-      [a, b, c].map((id) => resultText(graph, id)),
-      ["the value", "messenger done", "reader after more"],
-    );
-    assert.deepEqual(userTexts(reader.history), [
-      "got the value",
-      "read",
-      "more",
-    ]);
-    assert.deepEqual(
-      reader.calls.map(({ method, args }) => [method, args[0]]),
-      [
-        ["nextTurn", "got the value"],
-        ["followUp", "more"],
-      ],
-    );
-    assert.deepEqual(queued(more), []);
-  } finally {
-    await graph.close();
-  }
-});
-
 test("a missing or foreign graph getter fails before provider work and touches no unrelated members", async () => {
   const missing = await newScheduler(() => undefined, runAvailable, {
     prompt: "go",
   });
-  assert.ok(invalidState(failureOf((await drive(missing.scheduler)).last)));
+  assert.ok(invalidState(failureOf(await drive(missing.scheduler))));
   assert.equal(missing.faux.state.callCount, 0);
   await missing.scheduler.abort();
   await missing.scheduler.return();
@@ -324,7 +232,7 @@ test("a missing or foreign graph getter fails before provider work and touches n
     const foreign = await newScheduler(() => other.graph, runAvailable, {
       prompt: "go",
     });
-    assert.ok(invalidState(failureOf((await drive(foreign.scheduler)).last)));
+    assert.ok(invalidState(failureOf(await drive(foreign.scheduler))));
     assert.equal(foreign.faux.state.callCount, 0);
 
     const abortError = await foreign.scheduler.abort().then(
@@ -386,7 +294,7 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
     let replaced = 0;
     // An untyped caller's adapter: the factory's own adapter must still own the members.
     const callerOptions = {
-      policy: "GitPolicy" as const,
+      policy: "LockPolicy" as const,
       models,
       session,
       adapter: {
@@ -407,7 +315,7 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
       UNBOUNDED,
       UNBOUNDED,
       new DummyTracer(),
-      "GitPolicy",
+      "LockPolicy",
     );
     graph = constructed;
     constructed.addNode(member(ready, "member"));
@@ -443,7 +351,7 @@ test("a graph constructed on the scheduler but not yet published fails admission
     UNBOUNDED,
     UNBOUNDED,
     new DummyTracer(),
-    "GitPolicy",
+    "LockPolicy",
   );
   const ready = new MockAgent({
     prompt: "go",
@@ -453,7 +361,7 @@ test("a graph constructed on the scheduler but not yet published fails admission
     constructed.addNode(member(ready, "member"));
 
     // The engine binding is in place, so this failure is the agency's own guard.
-    assert.ok(invalidState(failureOf((await drive(scheduler)).last)));
+    assert.ok(invalidState(failureOf(await drive(scheduler))));
     assert.equal(faux.state.callCount, 0);
     assert.equal(ready.status, "ready");
     assert.deepEqual(ready.requests, []);
@@ -487,23 +395,42 @@ test("a direct scheduler abort cascades to its members, and its return waits for
     prompt: "work",
     runs: [yieldsThen(1, "unused")],
   });
-  const { graph, scheduler } = await agencyGraph(runAvailable, {
-    prompt: "go",
-  });
+  // The priming window and the member's first activation run within one public next; the third
+  // scheduler request then holds until aborted.
+  const reached = Promise.withResolvers<void>();
+  const scheduleAll: FauxResponseFactory = (context) =>
+    fauxAssistantMessage(
+      [
+        scheduleCall(
+          schedulerInfoOf(context).nodes.map((node) => [node.id]),
+          `s${context.messages.length}`,
+        ),
+      ],
+      { stopReason: "toolUse" },
+    );
+  const { graph, scheduler } = await agencyGraph(
+    [
+      scheduleAll,
+      scheduleAll,
+      async (_context, options) => {
+        reached.resolve();
+        await new Promise((resolve) =>
+          options?.signal?.addEventListener("abort", resolve, { once: true }),
+        );
+        return fauxAssistantMessage("aborted", { stopReason: "aborted" });
+      },
+    ],
+    { prompt: "go" },
+  );
   try {
     graph.addNode(member(worker, "worker"));
-    // The priming window, then the member's first activation.
-    for (let window = 0; window < 2; window++) {
-      const step = await scheduler.next();
-      assert.ok(
-        step.done === false && step.value.kind === "yield",
-        JSON.stringify(step),
-      );
-    }
+    const pending = scheduler.next().catch(() => undefined);
+    await reached.promise;
     assert.equal(worker.status, "suspended");
 
     const signal = graph.signal;
     await scheduler.abort();
+    await pending;
     assert.deepEqual(worker.lifecycle, ["abort"]);
     assert.equal(signal.aborted, true);
     assert.notEqual(graph.signal, signal);

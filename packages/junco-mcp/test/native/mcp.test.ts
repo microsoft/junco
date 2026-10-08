@@ -47,7 +47,7 @@ beforeAll(async () => {
   );
   seed = join(root, "seed");
   await mkdir(join(seed, "sub"), { recursive: true });
-  collection = await ToolCollection.create(seed, { native: copyTree, policy: "GitPolicy" });
+  collection = await ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
 });
 
 afterAll(async () => {

@@ -1,15 +1,16 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import type { NodeSpec } from "dataflow-engine";
+import type { EdgeIdType, NodeSpec } from "dataflow-engine";
 import type { JuncoAgent } from "junco-agent";
-import type { ToolCollectionOptions } from "junco-tools";
+import type { Contract, ToolCollectionOptions } from "junco-tools";
 import type { Deterministic } from "./deterministic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 
 /**
- * One input for a prompt-agent member, dispatched through the native method of the same name. An
- * `error` is a failure notification, delivered through the native follow-up queue.
+ * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
+ * its model's `recv`; it never dispatches them as native commands. Task subagent reports use
+ * `followUp` (completed) and `error` (failed) on their private return edges.
  */
 export type AgenticInput =
   | {
@@ -29,9 +30,16 @@ export type Agentic<N = AgenticInput, T = AssistantMessage> =
   | MockAgent
   | Deterministic<N, T>;
 
-/** A native node spec whose state is {@link Agentic}, registered under an authorization policy. */
+/**
+ * A native node spec whose state is {@link Agentic}, registered under an authorization policy.
+ * `contract` is the receiver's own description of what it expects on each incoming edge, which
+ * graph-aware agents read through `info`; graphs never require it.
+ */
 export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<
   Agentic<N, T>,
   N,
   T
-> & { readonly policy: ToolCollectionOptions["policy"] };
+> & {
+  readonly policy: ToolCollectionOptions["policy"];
+  readonly contract?: (edgeId: EdgeIdType) => Contract;
+};

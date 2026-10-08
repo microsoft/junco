@@ -83,7 +83,7 @@ async function withClaimedSeed(
 test(
   "a real Marsh denial pauses the run as a policy yield and publishes nothing",
   () =>
-    withClaimedSeed("GitPolicy", async (seed, collection) => {
+    withClaimedSeed("LockPolicy", async (seed, collection) => {
       const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
       const read = await byName
         .get("read")!
@@ -237,7 +237,7 @@ test(
 test(
   "a mismatched collection is rejected before any MCP server starts and stays usable",
   () =>
-    withClaimedSeed("GitPolicy", async (seed, collection) => {
+    withClaimedSeed("LockPolicy", async (seed, collection) => {
       const marker = join(seed, "started");
       const { options } = await nativeOptions();
       await assert.rejects(

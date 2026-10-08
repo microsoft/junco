@@ -13,6 +13,7 @@ import {
   type ShellMuxOperations,
 } from "./operations.js";
 import { createReadTool } from "./read.js";
+import { createReleaseTool } from "./release.js";
 import { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
 import { resolveToolPath } from "./tool-support.js";
 
@@ -23,10 +24,27 @@ export interface ToolCollectionOptions {
   /** Routing mode of this collection's mux (default "shared"). */
   sandbox?: "shared" | "always";
   /** Authorization policy of this collection's mux. */
-  policy: "GitPolicy" | "EmptyPolicy";
-  /** Principal for the default bash operations. */
+  policy: "LockPolicy" | "EmptyPolicy";
+  /** Display/ordering label for the default bash operations; never a policy identity. */
   principal?: string;
 }
+
+/**
+ * One owner's view of a collection: each of its tools mapped, by identity, to a counterpart over
+ * the same `EditStore` and mux session whose every call acts as this binding's own policy owner.
+ * `close()` (idempotent) aborts and drains only this binding's invocations and bash commands, then
+ * drops its hold on the collection. Neither clears an ownership Marsh already committed.
+ */
+export interface ToolBinding {
+  readonly tools: ReadonlyMap<AgentTool<any>, AgentTool<any>>;
+  close(): Promise<void>;
+}
+
+/** A collection's tool set over `mux`, with `operations` backing its bash tool. */
+type BuildTools = (
+  mux: NativeMux,
+  operations: NonNullable<BashToolOptions["operations"]>,
+) => AgentTool<any>[];
 
 /**
  * A complete set of junco AgentTools backed by its native engines and its own marsh mux.
@@ -36,16 +54,19 @@ export interface ToolCollectionOptions {
  * registers. Every file tool is a routed marsh call through that mux, and `bash` runs on the
  * same mux unless its operations are supplied: a read-only call runs directly against the
  * seed, while a writing call may run in a private snapshot whose changes publish only when
- * the collection's `policy` authorizes them.
+ * the collection's `policy` authorizes them. Writes take ownership; `release` relinquishes it.
+ *
+ * `tools` and `mux` act as this collection's own policy owner, distinct from every other
+ * collection's; {@link bind} gives each further owner (an agent) its own counterparts.
  *
  * The returned `tools` come from the same factories exported standalone and
  * are directly usable as a bare Agent's tools, SDK `customTools`, or with
  * `pi.registerTool`. `cwd` must lie inside a btrfs seed.
  *
  * Lifetime is reference-counted: the creator holds one hold, released by `close()`; each
- * borrower takes another with `lease()` and releases it with the returned handle's `close()`,
- * never the collection's. The final release aborts and joins this collection's invocations
- * and default bash commands, then closes its mux.
+ * borrower takes another with `lease()` or `bind()` and releases it with the returned handle's
+ * `close()`, never the collection's. The final release aborts and joins this collection's
+ * invocations and default bash commands, then closes its mux.
  */
 export class ToolCollection {
   readonly tools: AgentTool<any>[];
@@ -54,6 +75,9 @@ export class ToolCollection {
   readonly native: NativeModule;
   readonly #lease: ShellMuxLease;
   readonly #operations: ShellMuxOperations | undefined;
+  readonly #build: BuildTools;
+  /** Caller-supplied bash operations every owner shares, or `undefined` for owner-bound ones. */
+  readonly #customOperations: NonNullable<BashToolOptions["operations"]> | undefined;
   readonly #abort = new AbortController();
   readonly #invocations = new Set<Promise<unknown>>();
   #holders = 1;
@@ -62,35 +86,55 @@ export class ToolCollection {
   #closing: Promise<void> | undefined;
 
   private constructor(
-    tools: AgentTool<any>[],
+    mux: NativeMux,
+    build: BuildTools,
     policy: ToolCollectionOptions["policy"],
     lease: ShellMuxLease,
     operations: ShellMuxOperations | undefined,
+    customOperations: NonNullable<BashToolOptions["operations"]> | undefined,
   ) {
     this.policy = policy;
-    this.mux = lease.mux;
+    this.mux = mux;
     this.native = lease.native;
     this.#lease = lease;
     this.#operations = operations;
+    this.#build = build;
+    this.#customOperations = customOperations;
+    const tools = build(mux, customOperations ?? operations!);
     for (const tool of tools) {
-      const execute = tool.execute;
-      // Every Pi and junco tool takes its AbortSignal third; definitions add a trailing context.
-      tool.execute = (...args: Parameters<typeof execute>) => {
-        if (this.#closing !== undefined) {
-          return Promise.reject(new Error("ToolCollection is closed"));
-        }
-        const signal = args[2];
-        args[2] = signal
-          ? AbortSignal.any([signal, this.#abort.signal])
-          : this.#abort.signal;
-        const invocation = execute.apply(tool, args);
-        this.#invocations.add(invocation);
-        const settled = () => this.#invocations.delete(invocation);
-        invocation.then(settled, settled);
-        return invocation;
-      };
+      this.#fence(tool, this.#abort.signal, () => undefined, new Set());
     }
     this.tools = tools;
+  }
+
+  /**
+   * Routes `tool`'s executions through this collection's fence: refused once teardown began or
+   * `closed()` reports an error, aborted by `abort`, and tracked in `own` and the collection.
+   */
+  #fence(
+    tool: AgentTool<any>,
+    abort: AbortSignal,
+    closed: () => Error | undefined,
+    own: Set<Promise<unknown>>,
+  ): void {
+    const execute = tool.execute;
+    // Every Pi and junco tool takes its AbortSignal third; definitions add a trailing context.
+    tool.execute = (...args: Parameters<typeof execute>) => {
+      if (this.#closing !== undefined) {
+        return Promise.reject(new Error("ToolCollection is closed"));
+      }
+      const refusal = closed();
+      if (refusal !== undefined) return Promise.reject(refusal);
+      const signal = args[2];
+      args[2] = signal ? AbortSignal.any([signal, abort]) : abort;
+      const invocation = execute.apply(tool, args);
+      for (const set of [this.#invocations, own]) {
+        set.add(invocation);
+        const settled = () => set.delete(invocation);
+        invocation.then(settled, settled);
+      }
+      return invocation;
+    };
   }
 
   static async create(
@@ -98,8 +142,8 @@ export class ToolCollection {
     options: ToolCollectionOptions,
   ): Promise<ToolCollection> {
     const policy = options?.policy;
-    if (policy !== "GitPolicy" && policy !== "EmptyPolicy") {
-      throw new TypeError('policy must be "GitPolicy" or "EmptyPolicy"');
+    if (policy !== "LockPolicy" && policy !== "EmptyPolicy") {
+      throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
     }
     const root = resolveToolPath(process.cwd(), cwd);
     // Rejects outside a seed: every file tool needs one.
@@ -108,9 +152,11 @@ export class ToolCollection {
       sandbox: options.sandbox,
       policy,
     });
-    const { native, mux } = lease;
+    const { native } = lease;
     let operations: ShellMuxOperations | undefined;
     try {
+      // This collection's own owner: no other collection over the same seed shares it.
+      const mux = lease.mux.forkOwner();
       const store = new native.EditStore();
       operations = options.bash?.operations
         ? undefined
@@ -119,23 +165,24 @@ export class ToolCollection {
             mux,
             principal: options.principal,
           });
+      const build: BuildTools = (mux, operations) => [
+        createReadTool(root, store, native, mux),
+        createBashTool(root, { ...options.bash, operations }),
+        createEditTool(root, store, native, mux),
+        createReleaseTool(root, mux),
+        createGrepTool(root, store, native, mux),
+        createFindTool(root, native, mux),
+        createAstGrepTool(root, native, mux),
+        createAstEditTool(root, native, mux),
+        createDiffTool(native),
+      ];
       return new ToolCollection(
-        [
-          createReadTool(root, store, native, mux),
-          createBashTool(root, {
-            ...options.bash,
-            operations: options.bash?.operations ?? operations!,
-          }),
-          createEditTool(root, store, native, mux),
-          createGrepTool(root, store, native, mux),
-          createFindTool(root, native, mux),
-          createAstGrepTool(root, native, mux),
-          createAstEditTool(root, native, mux),
-          createDiffTool(native),
-        ],
+        mux,
+        build,
         policy,
         lease,
         operations,
+        options.bash?.operations,
       );
     } catch (error) {
       const failures: unknown[] = [];
@@ -174,6 +221,51 @@ export class ToolCollection {
       close: () => {
         released ??= this.#release();
         return released;
+      },
+    };
+  }
+
+  /**
+   * One fresh policy owner's counterparts of {@link tools}, holding this collection until the
+   * binding's `close()`. They share this collection's `EditStore`, mux session and invocation
+   * fence; their bash commands run on owner-bound operations of their own, except that supplied
+   * custom bash operations are shared as they are. Throws once final teardown has started.
+   */
+  bind(): ToolBinding {
+    const mux = this.mux.forkOwner();
+    const hold = this.lease();
+    const stop = new AbortController();
+    const signal = AbortSignal.any([this.#abort.signal, stop.signal]);
+    const invocations = new Set<Promise<unknown>>();
+    const operations = this.#customOperations
+      ? undefined
+      : createShellMuxOperations({ native: this.native, mux });
+    let closing: Promise<void> | undefined;
+    const bound = this.#build(mux, this.#customOperations ?? operations!);
+    const tools = new Map<AgentTool<any>, AgentTool<any>>();
+    bound.forEach((tool, index) => {
+      this.#fence(
+        tool,
+        signal,
+        () =>
+          closing === undefined ? undefined : new Error("ToolBinding is closed"),
+        invocations,
+      );
+      tools.set(this.tools[index]!, tool);
+    });
+    return {
+      tools,
+      close: () => {
+        closing ??= (async () => {
+          stop.abort(new Error("ToolBinding is closed"));
+          await Promise.allSettled([...invocations]);
+          try {
+            await operations?.close();
+          } finally {
+            await hold.close();
+          }
+        })();
+        return closing;
       },
     };
   }

@@ -4,10 +4,12 @@ import {
   type DataflowRunOptions,
   type DataflowScheduler,
   type DataflowTracer,
+  type Message,
   type NodeIdType,
   type NodeSpec,
   type Width,
 } from "dataflow-engine";
+import * as E from "fp-ts/lib/Either.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
 import {
@@ -21,8 +23,9 @@ import { Deterministic } from "./deterministic.js";
 import type { MockAgent } from "./mock-agent.js";
 import {
   checkPolicy,
+  type NodeRegistration,
   nodePolicies,
-  registeredNodeTracers,
+  registeredNodeContexts,
 } from "./node-policy.js";
 
 /**
@@ -95,7 +98,7 @@ export class JuncoGraph<
   readonly policy: ToolCollectionOptions["policy"];
 
   /**
-   * @param tracer Required execution observer; use `createTracer()` for the feature-selected one.
+   * @param tracer Required execution observer; `createTracer()` returns the shared default.
    * @param policy Required authorization policy of this graph.
    * @param collection Borrowed; the graph holds its own lease until close and never closes it.
    * @throws {TypeError} when `tracer` is missing, `policy` is missing or unknown, or `collection`
@@ -178,7 +181,8 @@ export class JuncoGraph<
   }
 
   /**
-   * Register a node as natively, recording this graph's tracer for that registration's complaints.
+   * Register a node as natively, recording for that registration this graph's tracer, its
+   * outgoing routes and topology (what `send` and `info` reach) and the spec's receiver contract.
    *
    * @throws {TypeError} when a real agent's, coroutine's or child graph's policy is not the spec's.
    */
@@ -193,8 +197,63 @@ export class JuncoGraph<
     )
       throw new TypeError("Node policy does not match its state");
     const id = super.addNode(spec);
-    registeredNodeTracers.set(this.getNode(id)!, this.tracer);
+    const current = (): AbortSignal => this.signal;
+    const { contract } = spec;
+    registeredNodeContexts.set(this.getNode(id)!, {
+      tracer: this.tracer,
+      get signal() {
+        return current();
+      },
+      send: (message) => {
+        this.signal.throwIfAborted();
+        this.emit(id, message as Message<N>);
+      },
+      info: () => this.#nodeInfo(id),
+      ...(contract === undefined ? {} : { contract }),
+    });
     return id;
+  }
+
+  /**
+   * Node `id`'s parent and child routes, one entry per actual edge, each with the contract its
+   * receiving node in this graph declares for it. Fails rather than omit or invent a contract.
+   */
+  #nodeInfo(id: NodeIdType): ReturnType<NodeRegistration["info"]> {
+    this.signal.throwIfAborted();
+    const parents: ReturnType<NodeRegistration["info"]>["parents"][number][] =
+      [];
+    const children: typeof parents = [];
+    // ponytail: info scans graph links; add an adjacency index only if large graphs make this hot.
+    this.forEachLink((from, to, edge) => {
+      if (from !== id && to !== id) return;
+      const receiver = registeredNodeContexts.get(this.getNode(to)!)?.contract;
+      if (receiver === undefined)
+        throw new JuncoAgentError(
+          "invalid_state",
+          `No contract for edge "${edge.id}" at node "${to}"`,
+        );
+      const contract: unknown = receiver(edge.id);
+      const expect =
+        typeof contract === "object" &&
+        contract !== null &&
+        "expect" in contract
+          ? contract.expect
+          : undefined;
+      if (
+        typeof expect !== "string" ||
+        expect.trim() === "" ||
+        /[\r\n\u2028\u2029]/u.test(expect)
+      )
+        throw new JuncoAgentError(
+          "invalid_state",
+          `Invalid contract for edge "${edge.id}" at node "${to}"`,
+        );
+      const kind = E.isLeft(edge.transport) ? "message" : "value";
+      if (to === id) parents.push({ id: from, edgeId: edge.id, kind, expect });
+      if (from === id) children.push({ id: to, edgeId: edge.id, kind, expect });
+    });
+    this.signal.throwIfAborted();
+    return { parents, children };
   }
 
   /**

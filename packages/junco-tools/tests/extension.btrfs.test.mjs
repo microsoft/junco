@@ -179,7 +179,7 @@ async function packagedSession(sessionManager) {
 async function assertSeedUsable(seed) {
   const probe = createShellMuxOperations({
     principal: "seed-probe",
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   });
   try {
     const chunks = [];
@@ -199,7 +199,7 @@ async function assertSeedUsable(seed) {
  * prints `ready`, then exits on its own once the host creates `gate`.
  */
 async function managedHold(t, { gate, ready, done }) {
-  const lease = await acquireShellMux(state.seed, { policy: "GitPolicy" });
+  const lease = await acquireShellMux(state.seed, { policy: "LockPolicy" });
   const seen = deferred(t.signal, `${ready} readiness`);
   const hold = { lease, output: "" };
   try {
@@ -494,7 +494,7 @@ test("a new session cannot inherit the previous principal's grants", {
 test("a nested btrfs seed is refused without disturbing an open mux", {
   timeout: 120_000,
 }, async () => {
-  const options = { policy: "GitPolicy" };
+  const options = { policy: "LockPolicy" };
   const lease = await acquireShellMux(state.seed, options);
   const nested = join(state.seed, "nested-seed");
   try {

@@ -56,7 +56,7 @@ const utf16 = (text: string) =>
 
 type Fixture = {
   readonly seed: string;
-  /** The protected `GitPolicy` mux: the applier's. */
+  /** The protected `LockPolicy` mux: the applier's. */
   readonly mux: NativeMux;
   /** The trusted-build `EmptyPolicy` mux: index refresh's. */
   readonly buildMux: NativeMux;
@@ -95,7 +95,7 @@ async function withRepository(
     );
     const protectedTools = await ToolCollection.create(seed, {
       native: copyTree,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       sandbox: "always",
     });
     defer(() => protectedTools.close());
@@ -213,7 +213,7 @@ const blobOf = (fixture: Fixture, path: string) =>
 
 const QUOTED = 'dir with space/it\'s "q".ts';
 
-test("applies a multi-file refactor in place and stages exactly its paths", async () => {
+test("applies a multi-file refactor in place and releases exactly its paths", async () => {
   await withRepository(
     {
       "lf.ts": "a\nb\nc\n",
@@ -231,7 +231,7 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
       git("add", "lf.ts");
       await writeFile(join(seed, "staged.txt"), "staged change\n");
       git("add", "staged.txt");
-      const stagedBefore = indexBlob(fixture, "staged.txt");
+      const indexBefore = git("ls-files", "--stage");
 
       const paths = await apply(fixture, 1, [
         {
@@ -291,27 +291,16 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
       };
       for (const [path, bytes] of Object.entries(expected)) {
         assert.deepEqual(await readFile(join(seed, path)), bytes, path);
-        assert.equal(
-          indexBlob(fixture, path),
-          blobOf(fixture, path),
-          `${path} is staged`,
-        );
       }
       assert.equal((await stat(join(seed, "lf.ts"))).mode & 0o777, 0o755);
-      assert.match(git("ls-files", "--stage", "--", "lf.ts"), /^100755 /);
-      assert.equal(indexBlob(fixture, "staged.txt"), stagedBefore);
       assert.equal(
         await readFile(join(seed, "untouched.ts"), "utf8"),
         "keep\n",
       );
       assert.equal(git("status", "--porcelain=v1", "--", "untouched.ts"), "");
-      assert.equal(
-        git("diff", "--name-only"),
-        "",
-        "nothing touched is left unstaged",
-      );
+      assert.equal(git("ls-files", "--stage"), indexBefore, "release stages nothing");
 
-      // A fresh owner edits and stages the same file: the first owner's Stage released it.
+      // A fresh owner edits the same file: the first owner's release relinquished it.
       assert.deepEqual(
         await apply(fixture, 2, [replace("lf.ts", 1, ["top"], ["TOP"])]),
         ["lf.ts"],
@@ -320,7 +309,7 @@ test("applies a multi-file refactor in place and stages exactly its paths", asyn
         await readFile(join(seed, "lf.ts"), "utf8"),
         "TOP\na\nB1\nB2\n",
       );
-      assert.equal(indexBlob(fixture, "lf.ts"), blobOf(fixture, "lf.ts"));
+      assert.equal(git("ls-files", "--stage"), indexBefore);
     },
   );
 }, 120_000);
@@ -501,32 +490,9 @@ test("refused proposals change neither source nor index", async () => {
   );
 }, 180_000);
 
-test("a failed git add aborts the command and publishes neither private edit", async () => {
-  await withRepository(
-    { ".gitignore": "ignored/\n", "tracked.ts": "one\n" },
-    async (fixture) => {
-      const before = await state(fixture);
-      await assert.rejects(
-        apply(fixture, 3, [
-          replace("tracked.ts", 1, ["one"], ["ONE"]),
-          {
-            kind: "create",
-            path: "ignored/new.ts",
-            startLine: 1,
-            beforeLines: [],
-            afterLines: ["x"],
-          },
-        ]),
-        /git add exited 1; its changes were discarded[\s\S]*ignored/,
-      );
-      assert.deepEqual(await state(fixture), before);
-    },
-  );
-}, 60_000);
-
-test("a trusted-build owner's lock denies the Git-policy applier despite a fresh read", async () => {
+test("a trusted-build owner's lock denies the LockPolicy applier despite a fresh read", async () => {
   await withRepository({ "claimed.ts": "seed\n" }, async (fixture) => {
-    // The EmptyPolicy mux grants its own write; the GitPolicy applier must still respect it.
+    // The EmptyPolicy mux grants its own write; the LockPolicy applier must still respect it.
     const claim = fixture.buildMux.start(
       {
         command: "cat claimed.ts > /dev/null; printf 'owned\\n' > claimed.ts",

@@ -15,7 +15,7 @@ export default function extension(pi: ExtensionAPI): void {
     // Same-name definitions (read, bash, edit, grep, find) replace the
     // built-ins; write, ls, and user_bash stay untouched.
     collection = await ToolCollection.create(ctx.cwd, {
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       principal: `pi-${ctx.sessionManager.getSessionId()}`,
       bash: { commandPrefix },
     });

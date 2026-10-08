@@ -6,8 +6,13 @@ import type {
   NodeAvailability,
 } from "dataflow-engine";
 import { triggerInputs } from "dataflow-engine";
-import type { AgenticYieldReason, JuncoAgent } from "junco-agent";
+import type {
+  AgenticYieldReason,
+  JuncoAgent,
+  JuncoAgentNodeContext,
+} from "junco-agent";
 import type { ToolCollection, ToolCollectionOptions } from "junco-tools";
+import type { AgenticNode } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 
 // Internal execution bookkeeping of adapter-built node bodies; not part of the public surface.
@@ -35,19 +40,31 @@ export type NodePolicy = {
 /** Keyed by the generated body, so node state itself stays the original instance. */
 export const nodePolicies = new WeakMap<object, NodePolicy>();
 
+/** What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes. */
+export type NodeRegistration = Pick<
+  NonNullable<JuncoAgentNodeContext["messaging"]>,
+  "send" | "info"
+> & {
+  readonly tracer: DataflowTracer;
+  /** The owning graph's current signal. */
+  readonly signal: AbortSignal;
+  /** The registered spec's receiver contract, captured because engine nodes drop it. */
+  readonly contract?: AgenticNode["contract"];
+};
+
 /**
- * The tracer of the graph each node record was registered in, keyed by that registration's own
- * Node record: a reused spec or body registered in several graphs keeps each graph's tracer.
+ * Each node record's registration, keyed by that registration's own Node record: a reused spec or
+ * body registered in several graphs keeps each graph's tracer, routes and contract.
  */
-export const registeredNodeTracers = new WeakMap<object, DataflowTracer>();
+export const registeredNodeContexts = new WeakMap<object, NodeRegistration>();
 
 /** Rejects a missing or unknown policy, or a collection opened under another policy. */
 export function checkPolicy(
   policy: ToolCollectionOptions["policy"],
   collection: ToolCollection | undefined,
 ): void {
-  if (policy !== "GitPolicy" && policy !== "EmptyPolicy")
-    throw new TypeError('policy must be "GitPolicy" or "EmptyPolicy"');
+  if (policy !== "LockPolicy" && policy !== "EmptyPolicy")
+    throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
   if (collection !== undefined && collection.policy !== policy)
     throw new TypeError("Collection policy does not match the selected policy");
 }

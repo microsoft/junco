@@ -65,7 +65,7 @@ test("two collections over one seed keep their own policies and lifetimes", {
     const [git, empty] = await Promise.all([
       ToolCollection.create(seed, {
         native,
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         sandbox: "always",
         principal: "git",
       }),
@@ -78,7 +78,7 @@ test("two collections over one seed keep their own policies and lifetimes", {
     ]);
     collections.push(git, empty);
     assert.notEqual(git.mux, empty.mux);
-    assert.equal(git.mux.policy, "GitPolicy");
+    assert.equal(git.mux.policy, "LockPolicy");
     assert.equal(empty.mux.policy, "EmptyPolicy");
     const bash = (collection, command, signal) =>
       tool(collection, "bash").execute("bash", { command }, signal);
@@ -159,7 +159,7 @@ test("a mux opened at seed/src shares authority with one opened at seed", {
   const leases = [];
   const owners = [];
   try {
-    const options = { native, policy: "GitPolicy", sandbox: "always" };
+    const options = { native, policy: "LockPolicy", sandbox: "always" };
     const outer = await acquireShellMux(seed, options);
     leases.push(outer);
     const inner = await acquireShellMux(src, options);
@@ -213,8 +213,8 @@ test("a separately loaded module copy opens and releases its own mux", {
   let original;
   let copied;
   try {
-    original = await acquireShellMux(seed, { native, policy: "GitPolicy" });
-    copied = await copy.acquireShellMux(seed, { native, policy: "GitPolicy" });
+    original = await acquireShellMux(seed, { native, policy: "LockPolicy" });
+    copied = await copy.acquireShellMux(seed, { native, policy: "LockPolicy" });
     await copied.release();
     assert.equal(copied.closed, true);
     await assert.rejects(copied.mux.exists(seed, "src/file0.txt"), /closed/);
@@ -240,7 +240,7 @@ test("refused cwds and policies close only what they opened", {
   try {
     lease = await acquireShellMux(seed, {
       native,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       sandbox: "always",
     });
     for (const cwd of [
@@ -249,7 +249,7 @@ test("refused cwds and policies close only what they opened", {
       join(root, "no-such-seed"),
     ]) {
       await assert.rejects(
-        acquireShellMux(cwd, { native, policy: "GitPolicy" }),
+        acquireShellMux(cwd, { native, policy: "LockPolicy" }),
         Error,
         cwd,
       );
@@ -262,7 +262,7 @@ test("refused cwds and policies close only what they opened", {
     await assert.rejects(
       ToolCollection.create(join(root, "no-such-seed"), {
         native,
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       }),
     );
     for (const policy of [undefined, "gitpolicy"]) {

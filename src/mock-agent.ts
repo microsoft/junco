@@ -27,14 +27,14 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import type { DataflowTracer } from "dataflow-engine";
+import type { DataflowTracer, EdgeIdType } from "dataflow-engine";
 import {
   type AgenticStatus,
   type AgenticStep,
   JuncoAgentError,
   type Agentic as JuncoAgentProtocol,
 } from "junco-agent";
-import { type Issue, issueLog } from "junco-tools";
+import { type Contract, type Issue, issueLog } from "junco-tools";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
 // Hook outcomes and maintenance results come from typed records; the iterator, admission, queue,
@@ -109,6 +109,8 @@ export type MockTranscript<
   readonly followUpMode?: QueueMode;
   readonly runs: readonly MockRun[];
   readonly maintenance?: readonly MockMaintenance[];
+  /** This agent's receiver contract per incoming graph edge; see {@link MockAgent.contract}. */
+  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
 
 /** What one frame's request would have sent, captured after its queue drains and hooks. */
@@ -652,6 +654,20 @@ export class MockAgent<
   /** The process-wide complaint history every agent and graph shares. */
   get issueLog(): typeof issueLog {
     return issueLog;
+  }
+
+  /**
+   * What this agent expects on its incoming graph edge `edgeId`, from the transcript's `contract`.
+   * Metadata only: it consumes no scripted run and records no request.
+   */
+  contract(edgeId: EdgeIdType): Contract {
+    const contract = this.#transcript.contract;
+    if (contract === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        `No contract for edge "${edgeId}"`,
+      );
+    return contract(edgeId);
   }
 
   // Configuration ----------------------------------------------------------------------------------

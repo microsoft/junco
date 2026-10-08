@@ -262,14 +262,13 @@ export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<Agent
 
 export type AgentNodeBinding = {
   readonly prompt?: string;
-  readonly receive?: (view: ParentView<AgenticInput, AssistantMessage>) => readonly AgenticInput[];
-  readonly emit?: (step: Extract<AgenticStep, { kind: "yield" }>) => Message<AgenticInput>[];
 };
 
 export type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
   readonly result: NodeIdType;
   readonly receive?: (view: ParentView<N, T>) => void | Promise<void>;
   readonly afterStep?: () => void | Promise<void>;
+  readonly contract?: (edgeId: EdgeId) => Contract;
 };
 
 export function agentNode(
@@ -281,7 +280,9 @@ export function agentNode(
 
 export function deterministicNode<N, T>(
   state: Deterministic<N, T>,
-  options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
+  options: NodeOptions<N, T> &
+    Pick<ToolCollectionOptions, "policy"> &
+    Pick<AgenticNode<N, T>, "contract">, // contract?: (edgeId: EdgeIdType) => Contract
 ): AgenticNode<N, T>
 
 export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
@@ -303,7 +304,9 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
   close(): Promise<void>
 ```
 
-- `agentNode` runs **one prompt** per node and returns when that run settles, so a source node with `trigger: always()` and `binding.prompt` runs exactly once. Start an idle agent with `binding.prompt` or a `{ kind: "prompt" }` input from `receive`. While the run is in progress, each resume activation calls `receive` again with only new data (`values` hold parent results not delivered before), so return `[]` when nothing new arrived. `emit` receives a `yield` boundary carrying `reasons`, not an assistant message; it is called only when the agent pauses. A settled run becomes the node's `AssistantMessage` result; a failed run throws its native error.
+- `agentNode` runs **one prompt** per node and returns when that run settles, so a source node with `trigger: always()` and `binding.prompt` runs exactly once. Start an idle agent with `binding.prompt` (or its staged prompt); delivered messages and unseen parent values are **data**, retained per edge in the node's inbox until the model calls `recv` — they never start, steer or prompt the agent. An idle agent with input but no prompt stays quiescent. The model sends on outgoing message edges with `send({ id: edgeId, payload })` and discovers routes and receivers' expectations with `info({})`; value edges carry only the final result. Only `yield` and a Marsh policy denial pause a run. A settled run becomes the node's `AssistantMessage` result; a failed run throws its native error.
+- **Contracts.** `info` reports, for every parent and child edge, the *receiving* node's `Contract.expect`. Supply it beside the receiver: `JuncoAgent.create({ contract: (edgeId) => ... })`, `deterministicNode(..., { contract })`, `graphNode(..., { contract })`. A finite receiver throws `JuncoAgentError("invalid_state", \`No contract for edge "${edgeId}"\`)` for an unknown edge; `info` fails rather than omitting it.
+- **Validated handoffs.** When a consumer's assignment must be built from a checked upstream result, insert a deterministic input-preparer node (`Deterministic` + `deterministicNode`, one-shot `published` availability) that validates the value, sends one `{ kind: "prompt", text }` message, and give the consumer `recv`/`info` and the start prompt "Call recv once and carry out the prompt in the single received message." (`examples/mcp.ts` `DependenciesInput`).
 - Never separately iterate an agent the graph is driving.
 - `deterministicNode` registers a `Deterministic` coroutine whose `body(signal)` speaks the same generator protocol; a coroutine has one consumer, so register it once. Honor `signal` in long loops.
 - `graphNode` requires `binding.result` to name an **already registered** child node; a child that quiesces without that result fails. Use `receive` to feed the child (for example by queuing an input on a source the child exposes) and select only the deliberate final node, so intermediate drafts never escape.
@@ -459,7 +462,8 @@ export class JuncoAgent<
   compact(options?: { customInstructions?: string }): Promise<void>
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
   // JuncoAgent only, not Agentic:
-  runWithTaskHost<R>(host: TaskToolHost, work: () => Promise<R>): Promise<R>
+  runWithNodeContext<N, T, R>(context: JuncoAgentNodeContext<N, T>, work: () => Promise<R>): Promise<R> // { messaging?, task?, complaint? }; overlapping binding rejects busy; agentNode does this
+  contract(edgeId: EdgeIdType): Contract // from the `contract` option; else invalid_state; never starts a run
   setTaskPolicy(policy: TaskPolicy | undefined): void // throw to reject a hosted task launch (not a decision) as a tool error
   setTaskBatch(input: TaskInput): Promise<void> // idle only; model launches the stored batch once with task({}); children get an ordinary task tool
   setTaskFailurePolicy(policy: TaskFailurePolicy): void // default { retries: 0 }; snapshotted per admitted task; not inherited
@@ -488,7 +492,7 @@ export class JuncoAgentError extends Error
 The voluntary-suspension tool lives under **`tools`** (see below), not `agent`.
 
 - **Construct with the static factories.** The constructor is protected: `await agent.JuncoAgent.create(...)`, never `new agent.JuncoAgent(...)`.
-- **Policy and collection:** every factory requires `policy: "GitPolicy" | "EmptyPolicy"`; an optional `collection` (same policy, else `invalid_argument`) is borrowed through the agent's own lease and binds its native lifetime, not its tools. Every node spec (`agentNode`, `deterministicNode`, `graphNode`, raw specs) also requires `policy`, equal to its state's.
+- **Policy and collection:** every factory requires `policy: "LockPolicy" | "EmptyPolicy"`; an optional `collection` (same policy, else `invalid_argument`) is borrowed through the agent's own lease and binds its native lifetime, not its tools. Every node spec (`agentNode`, `deterministicNode`, `graphNode`, raw specs) also requires `policy`, equal to its state's.
 - **Normal construction:** `create({ models, provider, model, policy, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
 - **Pre-resolved construction:** `fromResolved({ models, model, policy, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
 - **MCP tool sources:** both factories accept `mcp.JuncoMcpTools` definitions in `tools`, alone or mixed with concrete tools (`tools: [servers, lsp, ...collection.tools]`), connected from `cwd`. Each agent gets fresh MCP clients and server processes, closed with it; discovered names are `mcp__<server>__<tool>`. A definition is a factory-only source: `setTools` takes concrete tools only.
@@ -505,7 +509,7 @@ export interface ToolCollectionOptions {
   bash?: BashToolOptions;
   native?: NativeModule;
   sandbox?: "shared" | "always";
-  policy: "GitPolicy" | "EmptyPolicy";
+  policy: "LockPolicy" | "EmptyPolicy";
   principal?: string;
 }
 
@@ -562,6 +566,12 @@ export type YieldToolDetails = { readonly reason: string };
 export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
 export function createYieldTool(): YieldTool
 export function isYieldTool(tool: object): boolean
+
+export type Contract = { readonly expect: string };
+export function RecvTool<N = unknown, T = unknown>(host?): RecvTool<N, T> // recv({}): drains retained { messages, values }
+export function SendTool<N = unknown>(host?): SendTool                     // send({ id: edgeId, payload }): one message on an outgoing message edge
+export function InfoTool(host?): InfoTool                                  // info({}): { parents, children: { id, edgeId, kind, expect }[] }
+// Each has companions: RecvTool.is(tool) / RecvTool.invoke(tool, host, toolCallId, input, signal), likewise SendTool/InfoTool.
 
 export type TaskToolDetails = {
   readonly tasks: readonly { readonly id: string; readonly name?: string }[];
@@ -646,9 +656,9 @@ Prefer `tools.ToolCollection.create(cwd, { policy })` over assembling these fact
 
 Tool selection and ownership:
 
-- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task` and `yield`. Explicit arrays replace defaults.
-- **Voluntary suspension** needs the real `tools.createYieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues.
-- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately; at the following pause the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
+- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task`, `yield`, `recv`, `send` and `info`. Explicit arrays replace defaults: a graph agent that consumes inputs needs `tools.RecvTool()`, one that sends needs `tools.SendTool()` and usually `tools.InfoTool()`.
+- **Voluntary suspension** needs the real `tools.createYieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues. It is the only voluntary pause: `task`, `recv`, `send`, `info` and `schedule` never pause.
+- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately and the run continues; the children start when the caller next calls `yield` (or hits a policy pause) or finishes its run, so instruct a caller that needs reports before continuing to `yield`. At that point the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true })` for read-only roles; enable mutating LSP only for a role that edits. Requires Bun and caller-installed language-server binaries. LSP uses host filesystem/process access, not the native sandbox.
 - **Native coding tools** need the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). `ToolCollection.create` and omitted agent `tools` both require it, with no ordinary-filesystem fallback. Do not silently swap in other tools when prerequisites are missing; report them.
 - **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Each `ToolCollection` owns its own ShellMux and policy; agents, graphs, coroutines and MCP connections given that collection borrow it through their own `lease()` and release only that hold. The final release (usually the creator's `close()` or the root graph of `graph.JuncoGraph.create`) closes the mux. Borrowers never close the collection itself. Keep these resources outside multi-round loops when agents persist.
@@ -974,9 +984,9 @@ close(context: Context): Promise<void>;
 
 **Feedback recurrence.** A source (`emitOnce`, trigger `always()`) seeds the recurrence; the recurrence node's trigger `anyOf(on(seed), on(loop))` takes seed or feedback; a self-edge (`addEdge(id, id, loop)`) carries the next state; the task's finite count ends production with a `return`. A generator cannot emit and return in one activation, so the activation that emits the last value still sends feedback; the next activation checks the count and returns. Assert the recurrence's result in the `run()` map to prove completion. A `stepNode` sink drains the output and quiesces without returning. Read the delivered pair with `graph.from` and check its length/types before use instead of non-null assertions. Ten Fibonacci values from seeds `0, 1` are `[0,1,1,2,3,5,8,13,21,34]`.
 
-**Research/review committee.** Agents and their sessions persist; each round builds a fresh `createParallelAgentGraph(policy)`. Value edges fan final reports out, and an `allOf` reviewer fans them in. An optional message edge carries a real `yield` reason (via `agentNode`'s `emit`) as a partial handoff. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
+**Research/review committee.** Agents and their sessions persist; each round builds a fresh `createParallelAgentGraph(policy)`. Value edges fan final reports into deterministic input-preparer nodes, which validate them and send one prepared prompt to each consumer (`recv`). An optional partial handoff is a real message: the producer calls `info`, picks the child entry with `kind === "message"`, `send`s on its `edgeId`, then calls `yield`. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
 
-**Mixed nested work.** A deterministic source (`Deterministic` + `deterministicNode`, `is_available: () => !published`) publishes one `{ kind: "prompt", text }` to an agent and to a nested graph. The nested `JuncoGraph` is registered with `graph.nodes.graphNode(child, options, { result: finalId, receive })`, exposing only its deliberately selected final node, so intermediate drafts never escape. A reviewer joins the required finals with `allOf`. Close the root (recursive) and flush separately.
+**Mixed nested work.** A deterministic source (`Deterministic` + `deterministicNode`, `is_available: () => !published`) publishes one `{ kind: "prompt", text }` to an agent (which `recv`s it from its start prompt) and to a nested graph. The nested `JuncoGraph` is registered with `graph.nodes.graphNode(child, options, { result: finalId, receive, contract })`, exposing only its deliberately selected final node, so intermediate drafts never escape. A deterministic input-preparer joins the required finals with `allOf` and sends the reviewer its prepared prompt. Close the root (recursive) and flush separately.
 
 ## Executable example
 

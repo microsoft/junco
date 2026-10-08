@@ -127,6 +127,9 @@ const neverAborted = new AbortController().signal;
 const DECISION_HELP =
   'A failed report marked decisionRequired waits for you: call task({ action: "retry" | ' +
   '"ignore", id, attempt }) with its handle ID and attempt before finishing.';
+const START_HELP =
+  "Subagents start when you explicitly call yield or finish your current run; call yield when " +
+  "you need their reports before continuing.";
 
 /**
  * A fresh `task` tool. Executing it admits subagents through `host`, or through the host a
@@ -139,8 +142,8 @@ export function createTaskTool(host?: TaskToolHost): TaskTool {
     description:
       "Start one or more subagents. Each runs in a fresh session with only the instructions you " +
       "give it (plus the shared context prepended to each), so be complete. This returns one handle per task " +
-      "immediately; keep working. Each subagent's final report later arrives as a message " +
-      "carrying its handle ID. Optionally choose a registered model ({ provider, modelId }) or a " +
+      "immediately. Each subagent's final report later arrives as a message carrying its handle ID. " +
+      `${START_HELP} Optionally choose a registered model ({ provider, modelId }) or a ` +
       `subset of your active tool names per task; omitted values inherit yours. ${DECISION_HELP}`,
     parameters: taskParameters,
     executionMode: "sequential",
@@ -166,7 +169,7 @@ export function createAssignedTaskTool(input: TaskInput): AssignedTaskTool {
     description:
       `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
       "assignments are fixed. This returns one handle per task immediately; each subagent's " +
-      `final report later arrives as a message carrying its handle ID. ${DECISION_HELP}`,
+      `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`,
     parameters: assignedParameters,
     executionMode: "sequential",
     execute: () => {
@@ -262,15 +265,15 @@ async function admit(
       );
     text =
       `Scheduled ${tasks.length} subagent${tasks.length === 1 ? "" : "s"}; their reports ` +
-      `arrive later as messages carrying these IDs.\n${JSON.stringify({ tasks })}`;
+      `arrive later as messages carrying these IDs. ${START_HELP}\n${JSON.stringify({ tasks })}`;
   } else if (request.action === "retry") {
     if (tasks.length !== 1 || tasks[0]?.id !== request.id)
       throw new Error(
         `task host returned ${JSON.stringify(tasks)} for a retry of ${request.id}`,
       );
     text =
-      `Retrying task ${request.id}; its report arrives later as a message carrying this ID.` +
-      `\n${JSON.stringify({ tasks })}`;
+      `Retrying task ${request.id}; its report arrives later as a message carrying this ID. ` +
+      `${START_HELP}\n${JSON.stringify({ tasks })}`;
   } else {
     if (tasks.length !== 0)
       throw new Error(`task host returned handles for ignoring ${request.id}`);

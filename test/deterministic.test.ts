@@ -80,7 +80,7 @@ function consumer<T>(result: T) {
     state.ran = true;
     yield [];
     return result;
-  }, "GitPolicy");
+  }, "LockPolicy");
   return {
     coroutine,
     get ran() {
@@ -91,7 +91,7 @@ function consumer<T>(result: T) {
 
 describe("abort", () => {
   test("joins a gated finally, cleans up once and starts no downstream work", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const result = valueEdge<string, string>("waiting-result");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
@@ -108,14 +108,14 @@ describe("abort", () => {
         cleaned++;
       }
       return "never";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const waitingId = graph.addNode(
-      deterministicNode(waiting, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
       deterministicNode(downstream.coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: when(result),
       }),
     );
@@ -149,7 +149,7 @@ describe("abort", () => {
   });
 
   test("preserves an unrelated cleanup error, which a later close does not report again", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
     const failing = new Deterministic<string, string>(async function* (signal) {
@@ -161,9 +161,9 @@ describe("abort", () => {
         throw unrelated;
       }
       return "never";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const id = graph.addNode(
-      deterministicNode(failing, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(failing, { policy: "LockPolicy", trigger: always() }),
     );
 
     const drive = failureOf(graph.run());
@@ -183,7 +183,7 @@ describe("abort", () => {
   });
 
   test("a run failure already delivered to its drive is not reported again by close", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const broken = new Error("body failed");
     let cleaned = 0;
     const failing = new Deterministic<string, string>(async function* () {
@@ -193,9 +193,9 @@ describe("abort", () => {
       } finally {
         cleaned++;
       }
-    }, "GitPolicy");
+    }, "LockPolicy");
     const id = graph.addNode(
-      deterministicNode(failing, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(failing, { policy: "LockPolicy", trigger: always() }),
     );
 
     const failure = await failureOf(graph.run());
@@ -217,7 +217,7 @@ describe("abort", () => {
 
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const input = messageEdge<string, string>("input");
     const suspendedCleanup = messageEdge<string, string>("suspended-cleanup");
     const waitingCleanup = messageEdge<string, string>("waiting-cleanup");
@@ -236,7 +236,7 @@ describe("close", () => {
         cleaned.suspended++;
       }
       return "suspended result";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const waiting = new Deterministic<string, string>(async function* (signal) {
       yield [];
       entered.resolve();
@@ -249,20 +249,20 @@ describe("close", () => {
         yield [msg(waitingCleanup, "waiting cleanup")];
       }
       return "waiting result";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const suspendedId = graph.addNode(
       deterministicNode(suspended, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: when(input),
       }),
     );
     const waitingId = graph.addNode(
-      deterministicNode(waiting, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
       deterministicNode(downstream.coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: anyOf(on(suspendedCleanup), on(waitingCleanup)),
       }),
     );
@@ -309,7 +309,7 @@ describe("close", () => {
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
-    const graph = createParallelAgentGraph("GitPolicy");
+    const graph = createParallelAgentGraph("LockPolicy");
     const failure = new Error("finally failed");
     const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
       async function* () {
@@ -320,18 +320,18 @@ describe("close", () => {
           throw failure;
         }
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     const sibling = new MockAgent({ runs: [] });
     graph.addNode(
       deterministicNode(coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: always(),
       }),
     );
     graph.addNode(
       agentNode(sibling, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: always(),
         is_available: () => false,
       }),
@@ -356,7 +356,7 @@ describe("close", () => {
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -372,9 +372,9 @@ describe("close", () => {
         cleaned++;
       }
       return "never";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const id = graph.addNode(
-      deterministicNode(waiting, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(waiting, { policy: "LockPolicy", trigger: always() }),
     );
 
     const drive = failureOf(graph.run());
@@ -422,18 +422,18 @@ describe("close", () => {
         counts.cleanup++;
       }
       return "never published";
-    }, "GitPolicy");
-    const child = createParallelAgentGraph<string, string>("GitPolicy");
+    }, "LockPolicy");
+    const child = createParallelAgentGraph<string, string>("LockPolicy");
     const result = child.addNode(
       deterministicNode(coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: always(),
       }),
     );
-    const parent = createParallelAgentGraph<string, string>("GitPolicy");
+    const parent = createParallelAgentGraph<string, string>("LockPolicy");
     parent.addNode(
       deterministicNode(coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: always(),
         is_available: () => false,
       }),
@@ -442,7 +442,7 @@ describe("close", () => {
       graphNode(
         child,
         {
-          policy: "GitPolicy",
+          policy: "LockPolicy",
           trigger: always(),
           is_available: () => false,
         },
@@ -482,26 +482,26 @@ describe("close", () => {
 
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
-    const first = createParallelAgentGraph<string, string>("GitPolicy");
+    const first = createParallelAgentGraph<string, string>("LockPolicy");
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
       return "first";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const firstId = first.addNode(
-      deterministicNode(shared, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(shared, { policy: "LockPolicy", trigger: always() }),
     );
     await first.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
-    const second = createParallelAgentGraph<string, string>("GitPolicy");
+    const second = createParallelAgentGraph<string, string>("LockPolicy");
     const value = valueEdge<string, string>("shared-result");
     const downstream = consumer("downstream");
     const againId = second.addNode(
-      deterministicNode(shared, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(shared, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = second.addNode(
       deterministicNode(downstream.coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: when(value),
       }),
     );
@@ -525,21 +525,21 @@ describe("single consumer", () => {
   });
 
   test("a coroutine closed before priming fails on activation without resolving its value edge", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const value = valueEdge<string, string>("closed-result");
     let bodyRan = false;
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const closed = new Deterministic<string, string>(async function* () {
       bodyRan = true;
       return "never";
-    }, "GitPolicy");
+    }, "LockPolicy");
     const downstream = consumer("downstream");
     const closedId = graph.addNode(
-      deterministicNode(closed, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(closed, { policy: "LockPolicy", trigger: always() }),
     );
     const downstreamId = graph.addNode(
       deterministicNode(downstream.coroutine, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: when(value),
       }),
     );
@@ -564,7 +564,7 @@ describe("single consumer", () => {
 
   test("a body genuinely returning undefined resolves its value edge", async () => {
     const graph = createParallelAgentGraph<string, string | undefined>(
-      "GitPolicy",
+      "LockPolicy",
     );
     const value = valueEdge<string, string | undefined>("undefined-result");
     const source = new Deterministic<string, string | undefined>(
@@ -572,7 +572,7 @@ describe("single consumer", () => {
       async function* () {
         return undefined;
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     let observed:
       | { readonly has: boolean; readonly value: string | undefined }
@@ -586,14 +586,14 @@ describe("single consumer", () => {
         };
         return "consumed";
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     const sourceId = graph.addNode(
-      deterministicNode(source, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(source, { policy: "LockPolicy", trigger: always() }),
     );
     const dependentId = graph.addNode(
       deterministicNode(dependent, {
-        policy: "GitPolicy",
+        policy: "LockPolicy",
         trigger: when(value),
       }),
     );
@@ -626,7 +626,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     assert.deepEqual(await coroutine.next(), { done: false, value: [] });
     assert.deepEqual(await coroutine.return("forced"), {
@@ -659,7 +659,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     await coroutine.next();
     assert.deepEqual(await coroutine.throw(sentinel), {
@@ -685,7 +685,7 @@ describe("direct protocol", () => {
           cleaned += 1;
         }
       },
-      "GitPolicy",
+      "LockPolicy",
     );
     const payloads: number[] = [];
     for await (const batch of coroutine)
@@ -698,7 +698,7 @@ describe("direct protocol", () => {
 
 /** A collection double counting holds; only `policy`, `lease()` and `close()` are exercised. */
 function countedCollection(
-  policy: "GitPolicy" | "EmptyPolicy",
+  policy: "LockPolicy" | "EmptyPolicy",
   events: string[],
 ) {
   let holds = 1;
@@ -731,14 +731,14 @@ describe("policy and borrowed collections", () => {
       () => new Deterministic<string, string>(body, "gitpolicy" as never),
       (error) =>
         error instanceof TypeError &&
-        error.message === 'policy must be "GitPolicy" or "EmptyPolicy"',
+        error.message === 'policy must be "LockPolicy" or "EmptyPolicy"',
     );
     assert.throws(
-      () => new Deterministic<string, string>(body, "GitPolicy", empty),
+      () => new Deterministic<string, string>(body, "LockPolicy", empty),
       TypeError,
     );
     assert.throws(
-      () => createParallelAgentGraph("GitPolicy", undefined, empty),
+      () => createParallelAgentGraph("LockPolicy", undefined, empty),
       TypeError,
     );
     assert.throws(
@@ -748,11 +748,11 @@ describe("policy and borrowed collections", () => {
   });
 
   test("addNode requires a real state's policy to equal its spec's; a mock takes the spec's", async () => {
-    const graph = createParallelAgentGraph<string, string>("GitPolicy");
+    const graph = createParallelAgentGraph<string, string>("LockPolicy");
     const coroutine = new Deterministic<string, string>(async function* () {
       yield [];
       return "x";
-    }, "GitPolicy");
+    }, "LockPolicy");
     assert.throws(
       () =>
         graph.addNode(
@@ -780,7 +780,7 @@ describe("policy and borrowed collections", () => {
         graph.addNode(
           graphNode(
             child,
-            { policy: "GitPolicy", trigger: always() },
+            { policy: "LockPolicy", trigger: always() },
             { result: childId },
           ),
         ),
@@ -793,7 +793,7 @@ describe("policy and borrowed collections", () => {
         { result: childId },
       ),
     );
-    const agents = createParallelAgentGraph("GitPolicy");
+    const agents = createParallelAgentGraph("LockPolicy");
     agents.addNode(
       agentNode(new MockAgent({ runs: [] }), {
         policy: "EmptyPolicy",
@@ -831,14 +831,14 @@ describe("policy and borrowed collections", () => {
 
   test("graph close settles members before releasing every visited graph's lease; abort releases none", async () => {
     const events: string[] = [];
-    const collection = countedCollection("GitPolicy", events);
+    const collection = countedCollection("LockPolicy", events);
     const root = createParallelAgentGraph<string, string>(
-      "GitPolicy",
+      "LockPolicy",
       undefined,
       collection,
     );
     const child = createParallelAgentGraph<string, string>(
-      "GitPolicy",
+      "LockPolicy",
       undefined,
       collection,
     );
@@ -851,16 +851,16 @@ describe("policy and borrowed collections", () => {
           events.push("finally");
         }
       },
-      "GitPolicy",
+      "LockPolicy",
       collection,
     );
     const childId = child.addNode(
-      deterministicNode(coroutine, { policy: "GitPolicy", trigger: always() }),
+      deterministicNode(coroutine, { policy: "LockPolicy", trigger: always() }),
     );
     root.addNode(
       graphNode(
         child,
-        { policy: "GitPolicy", trigger: always() },
+        { policy: "LockPolicy", trigger: always() },
         { result: childId },
       ),
     );

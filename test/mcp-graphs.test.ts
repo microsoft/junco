@@ -85,7 +85,7 @@ afterAll(async () => {
 
 /** A fresh Git-policy collection over the fixture seed. */
 const openCollection = () =>
-  ToolCollection.create(seed, { native: copyTree, policy: "GitPolicy" });
+  ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
 
 const fixture = JuncoMcpTools.add({
   name: "fx",
@@ -128,11 +128,11 @@ function single(
   graph: JuncoGraph;
   id: NodeIdType;
 } {
-  const graph = createParallelAgentGraph("GitPolicy", undefined, collection);
+  const graph = createParallelAgentGraph("LockPolicy", undefined, collection);
   const id = graph.addNode(
     agentNode(
       agent,
-      { id: NodeId("member"), policy: "GitPolicy", trigger: always() },
+      { id: NodeId("member"), policy: "LockPolicy", trigger: always() },
       { prompt: "go" },
     ),
   );
@@ -163,7 +163,7 @@ test(
       let nestedId: NodeIdType | undefined;
       const rootGraph = await JuncoGraph.create(
         seed,
-        { native: copyTree, policy: "GitPolicy" },
+        { native: copyTree, policy: "LockPolicy" },
         async (collection) => {
           shared = collection;
           const rootMember = await member(collection);
@@ -174,7 +174,7 @@ test(
           forgetNestedMember();
           const forgetNested = defer(() => nested.graph.close());
           const graph = createParallelAgentGraph(
-            "GitPolicy",
+            "LockPolicy",
             undefined,
             collection,
           );
@@ -182,7 +182,7 @@ test(
           rootId = graph.addNode(
             agentNode(
               rootMember,
-              { id: NodeId("root"), policy: "GitPolicy", trigger: always() },
+              { id: NodeId("root"), policy: "LockPolicy", trigger: always() },
               { prompt: "go" },
             ),
           );
@@ -190,7 +190,7 @@ test(
           nestedId = graph.addNode(
             graphNode(
               nested.graph,
-              { id: NodeId("nested"), policy: "GitPolicy", trigger: always() },
+              { id: NodeId("nested"), policy: "LockPolicy", trigger: always() },
               { result: nested.id },
             ),
           );
@@ -203,7 +203,7 @@ test(
       assert.ok(shared && rootId && nestedId);
       expect(rootGraph.collection).toBe(shared);
       expect(shared.mux).not.toBe(independent.mux);
-      expect(shared.mux.policy).toBe("GitPolicy");
+      expect(shared.mux.policy).toBe("LockPolicy");
 
       // The independent graph runs and closes first, closing its agent and that agent's server.
       const separatePid = pidOf((await separate.graph.run()).get(separate.id));
@@ -334,7 +334,7 @@ test(
       let id: NodeIdType | undefined;
       const outer: PiGraph = await JuncoGraph.create(
         seed,
-        { native: copyTree, policy: "GitPolicy" },
+        { native: copyTree, policy: "LockPolicy" },
         async (collection) => {
           shared = collection;
           const decider = schedulerModel();
@@ -347,7 +347,7 @@ test(
             models: decider.models,
             model: decider.model,
             prompt: "Run the caller.",
-            policy: "GitPolicy",
+            policy: "LockPolicy",
             collection,
           });
           const forgetScheduler = defer(() => scheduler.return());
@@ -356,7 +356,7 @@ test(
             UNBOUNDED,
             UNBOUNDED,
             new DummyTracer(),
-            "GitPolicy",
+            "LockPolicy",
             collection,
           );
           current = graph;
@@ -373,7 +373,7 @@ test(
             systemPrompt: "sys",
             cwd: seed,
             tools: [createTaskTool(), fixture],
-            policy: "GitPolicy",
+            policy: "LockPolicy",
             collection,
           });
           const callerAgent = caller;
@@ -381,7 +381,7 @@ test(
           id = graph.addNode(
             agentNode(
               caller,
-              { id: NodeId("caller"), policy: "GitPolicy", trigger: always() },
+              { id: NodeId("caller"), policy: "LockPolicy", trigger: always() },
               { prompt: "go" },
             ),
           );
@@ -394,7 +394,7 @@ test(
       assert.ok(shared && caller && id);
       expect(caller.collection).toBe(shared);
 
-      expect((await drive(outer.scheduler)).last.kind).toBe("settled");
+      expect((await drive(outer.scheduler)).kind).toBe("settled");
       const final = outer.result(id);
       assert.ok(O.isSome(final), "the caller's node produced a message");
       const parts = contentText(final.value.content).split("|");

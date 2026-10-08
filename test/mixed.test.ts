@@ -5,10 +5,12 @@ import {
   type Context,
   type FauxResponseStep,
   fauxAssistantMessage,
+  fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
+import { InfoTool, RecvTool } from "junco-tools";
 import { createMixedGraph, goalsPrompt } from "../examples/mixed.ts";
 import { Deterministic } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
@@ -30,7 +32,7 @@ function latestUserText(context: Context): string {
 }
 
 /**
- * Real toolless agents over faux models. Ralph's run r returns `draft-r`; with `failSecond` its
+ * Real agents over faux models; Direct and Reviewer read their prompt through recv. Ralph's run r returns `draft-r`; with `failSecond` its
  * second request throws instead. Dispose it to close the graph and every agent.
  */
 async function mixedWorkflow(failSecond = false) {
@@ -55,24 +57,48 @@ async function mixedWorkflow(failSecond = false) {
     }),
   ];
 
+  /** Call recv, then record the one received prompt `role` was given and answer with `answer`. */
+  const receiving = (role: Role, answer: string): FauxResponseStep[] => [
+    () =>
+      fauxAssistantMessage([fauxToolCall("recv", {}, { id: `${role}-recv` })], {
+        stopReason: "toolUse",
+      }),
+    (context) => {
+      const result = context.messages.at(-1);
+      assert.ok(
+        result?.role === "toolResult" && result.content[0]?.type === "text",
+      );
+      const { messages } = JSON.parse(result.content[0].text) as {
+        messages: { payload: { kind: string; text: string } }[];
+      };
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0]!.payload.kind, "prompt");
+      prompts[role].push(messages[0]!.payload.text);
+      return fauxAssistantMessage(answer);
+    },
+  ];
+
   const agents: JuncoAgent[] = [];
-  const agent = async (responses: readonly FauxResponseStep[]) => {
+  const agent = async (
+    responses: readonly FauxResponseStep[],
+    receives = false,
+  ) => {
     const { options } = await nativeOptions(responses);
-    const created = await JuncoAgent.fromResolved({ ...options, tools: [] });
+    const created = await JuncoAgent.fromResolved({
+      ...options,
+      tools: receives ? [RecvTool(), InfoTool()] : [],
+    });
     agents.push(created);
     return created;
   };
   try {
     const members = {
       Ralph: await agent(ralphResponses),
-      Direct: await agent([
-        recording("Direct", () => fauxAssistantMessage("direct-answer")),
-      ]),
-      Reviewer: await agent([
-        recording("Reviewer", () =>
-          fauxAssistantMessage("Ralph: clearer coverage."),
-        ),
-      ]),
+      Direct: await agent(receiving("Direct", "direct-answer"), true),
+      Reviewer: await agent(
+        receiving("Reviewer", "Ralph: clearer coverage."),
+        true,
+      ),
     };
     const { graph, reviewerId } = createMixedGraph(members);
     return {

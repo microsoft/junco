@@ -1,4 +1,5 @@
 import {
+  type AgentTool,
   BACKGROUND_CONTEXT,
   MemorySessionRepo,
 } from "@earendil-works/pi-agent-core";
@@ -9,7 +10,14 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { JuncoAgent } from "junco-agent";
-import { createYieldTool } from "junco-tools";
+import {
+  createYieldTool,
+  InfoTool,
+  MARSH_POLICY_DENIED,
+  RecvTool,
+  SendTool,
+} from "junco-tools";
+import { Type } from "typebox";
 import {
   convene,
   createOssSearchTool,
@@ -62,6 +70,51 @@ function latestUserText(context: Context): string {
   throw new Error("Scripted actor request has no user message");
 }
 
+/** The text of the request's latest message, which must be a result of tool `name`. */
+function toolResultText(context: Context, name: string): string {
+  const last = context.messages.at(-1);
+  if (last?.role !== "toolResult" || last.toolName !== name)
+    throw new Error(`Scripted actor expected a ${name} result`);
+  return last.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("");
+}
+
+/** The single prepared prompt delivered by the latest `recv`. */
+function receivedPrompt(context: Context): string {
+  const { messages, values } = JSON.parse(toolResultText(context, "recv")) as {
+    messages: { id: string; payload: { kind: string; text?: string } }[];
+    values: unknown[];
+  };
+  const [message, ...extra] = messages;
+  if (
+    message?.payload.kind !== "prompt" ||
+    message.payload.text === undefined ||
+    extra.length > 0 ||
+    values.length > 0
+  )
+    throw new Error("recv did not deliver exactly one prepared prompt");
+  return message.payload.text;
+}
+
+const recvCall = (id: string) =>
+  fauxAssistantMessage([fauxToolCall("recv", {}, { id })], {
+    stopReason: "toolUse",
+  });
+
+/** A Librarian tool whose only effect is a Marsh policy denial, which pauses the run. */
+const guardedTool: AgentTool = {
+  name: "guarded",
+  label: "guarded",
+  description: "A lookup the policy denies.",
+  parameters: Type.Object({}, { additionalProperties: false }),
+  execute: async () => {
+    throw Object.assign(new Error("Policy denied the guarded lookup"), {
+      code: MARSH_POLICY_DENIED,
+    });
+  },
+};
+
 /** Split only the graph's structured prompt; reports remain the actual delivered payloads. */
 function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
   const parts: string[] = [];
@@ -87,8 +140,10 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
 }
 
 /**
- * Real search and review tools with scripted members. Round r makes `lookups[r]` GitHub lookups
- * (default: one Terminal.Gui result) and ends with `reviews[r]`; `"skip"` omits the review call.
+ * Real search, review and graph tools with scripted members. Round r makes `lookups[r]` GitHub
+ * lookups (default: one Terminal.Gui result) and ends with `reviews[r]`; `"skip"` omits the review
+ * call. After a failed lookup the Librarian discovers the partial-research route with `info`,
+ * `send`s there and yields; with `policyPauseBeforeSend` it is first paused by a policy denial.
  * Dispose it to close every member.
  */
 export async function scriptedCommittee(
@@ -96,6 +151,7 @@ export async function scriptedCommittee(
     readonly lookups?: readonly (readonly Response[])[];
     readonly reviews?: readonly ScriptedReview[];
     readonly librarianStopReason?: "stop" | "length";
+    readonly policyPauseBeforeSend?: boolean;
   } = {},
 ) {
   const reviews = script.reviews ?? [approve];
@@ -139,6 +195,56 @@ export async function scriptedCommittee(
       return fauxAssistantMessage(librarianReport, {
         stopReason: librarianStopReason,
       });
+    }
+    if (last?.role === "toolResult" && last.toolName === "guarded") {
+      return fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "info",
+            {},
+            { id: `librarian-info-${librarianRound + 1}` },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      );
+    }
+    if (last?.role === "toolResult" && last.toolName === "info") {
+      const { children } = JSON.parse(toolResultText(context, "info")) as {
+        children: { edgeId: string; kind: string; expect: string }[];
+      };
+      const route = children.find(
+        (child) =>
+          child.kind === "message" && /partial research/i.test(child.expect),
+      );
+      if (route === undefined)
+        throw new Error("info shows no partial-research message route");
+      return fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "send",
+            {
+              id: route.edgeId,
+              payload: { kind: "prompt", text: librarianReport },
+            },
+            { id: `librarian-send-${librarianRound + 1}` },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      );
+    }
+    if (last?.role === "toolResult" && last.toolName === "send") {
+      return fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "yield",
+            {
+              reason: "Waiting for the Architect to use the partial research.",
+            },
+            { id: `librarian-yield-${librarianRound + 1}` },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      );
     }
     if (last?.role === "user") {
       librarianRound++;
@@ -216,26 +322,34 @@ export async function scriptedCommittee(
     if (reports.length === 0)
       throw new Error("Librarian did not receive its search result");
     librarianReport = reports.join("\n\n");
-    return failed
-      ? fauxAssistantMessage(
-          [
-            fauxToolCall(
-              "yield",
-              { reason: librarianReport },
-              { id: `librarian-yield-${librarianRound + 1}` },
+    if (!failed)
+      return fauxAssistantMessage(librarianReport, {
+        stopReason: librarianStopReason,
+      });
+    return fauxAssistantMessage(
+      [
+        script.policyPauseBeforeSend
+          ? fauxToolCall(
+              "guarded",
+              {},
+              { id: `librarian-guarded-${librarianRound + 1}` },
+            )
+          : fauxToolCall(
+              "info",
+              {},
+              { id: `librarian-info-${librarianRound + 1}` },
             ),
-          ],
-          { stopReason: "toolUse" },
-        )
-      : fauxAssistantMessage(librarianReport, {
-          stopReason: librarianStopReason,
-        });
+      ],
+      { stopReason: "toolUse" },
+    );
   };
 
   const architect: FauxResponseFactory = (context) => {
-    const input = latestUserText(context);
-    memberInputs.Architect.push(input);
     modelRequests.push("Architect");
+    if (context.messages.at(-1)?.role === "user")
+      return recvCall(`architect-recv-${memberInputs.Architect.length + 1}`);
+    const input = receivedPrompt(context);
+    memberInputs.Architect.push(input);
     const labels = input.includes("\n\nReview feedback:\n")
       ? ["Original request", "Review feedback", "Librarian report"]
       : ["Original request", "Librarian report"];
@@ -313,9 +427,12 @@ export async function scriptedCommittee(
   let reducerInput = "";
   const reducer: FauxResponseFactory = (context) => {
     modelRequests.push("Reducer");
-    if (context.messages.at(-1)?.role === "user") {
+    const last = context.messages.at(-1);
+    if (last?.role === "user")
+      return recvCall(`reducer-recv-${reducerRound + 2}`);
+    if (last?.role === "toolResult" && last.toolName === "recv") {
       reducerRound++;
-      reducerInput = latestUserText(context);
+      reducerInput = receivedPrompt(context);
       memberInputs.Reducer.push(reducerInput);
       const verdict = reviews[reducerRound];
       if (verdict === undefined) throw new Error("No scripted review remains");
@@ -348,7 +465,7 @@ export async function scriptedCommittee(
       model,
       systemPrompt: `You are the ${id} of a three-member design committee.`,
       tools,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
     created.push(agent);
     return agent;
@@ -359,9 +476,16 @@ export async function scriptedCommittee(
       Librarian: await member("Librarian", librarian, [
         search.tool,
         createYieldTool(),
+        guardedTool,
+        InfoTool(),
+        SendTool(),
       ]),
-      Architect: await member("Architect", architect, []),
-      Reducer: await member("Reducer", reducer, [review.tool]),
+      Architect: await member("Architect", architect, [RecvTool(), InfoTool()]),
+      Reducer: await member("Reducer", reducer, [
+        review.tool,
+        RecvTool(),
+        InfoTool(),
+      ]),
     };
   } catch (error) {
     await Promise.allSettled(created.map((agent) => agent.return()));

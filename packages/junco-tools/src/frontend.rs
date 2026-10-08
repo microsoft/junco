@@ -234,15 +234,8 @@ const fn action_name(action: &Action) -> &'static str {
     match action {
         Action::Read => "Read",
         Action::Edit => "Edit",
-        Action::Stage => "Stage",
-        Action::Unstage => "Unstage",
-        Action::Commit { .. } => "Commit",
-        Action::Checkout => "Checkout",
-        Action::Stash => "Stash",
-        Action::Delete => "Delete",
-        Action::Clean => "Clean",
-        Action::Diff => "Diff",
-        Action::History => "History",
+        Action::Release => "Release",
+        Action::Remove => "Remove",
     }
 }
 

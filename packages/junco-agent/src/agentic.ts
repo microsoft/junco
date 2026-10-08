@@ -18,8 +18,10 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
+import type { EdgeIdType } from "dataflow-engine";
 import type {
   ComplainToolHost,
+  Contract,
   ToolCollection,
   ToolCollectionOptions,
 } from "junco-tools";
@@ -132,6 +134,11 @@ export interface Agentic<
       customInstructions?: string;
     },
   ): Promise<NavigationResult>;
+  /**
+   * What this agent, as a graph receiver, expects on its incoming edge `edgeId`. A metadata query:
+   * it never starts or resumes a run.
+   */
+  contract(edgeId: EdgeIdType): Contract;
 }
 
 /** Native harness options plus an optional initial prompt staged until the first `next()`. */
@@ -154,4 +161,6 @@ export type AgenticOptions<
    * until closed, and closes only that lease, never the collection. Grants no tools by itself.
    */
   readonly collection?: ToolCollection;
+  /** This agent's receiver contract per incoming graph edge; see {@link Agentic.contract}. */
+  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };

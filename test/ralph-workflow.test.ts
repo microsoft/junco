@@ -141,12 +141,12 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
         async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
           while (true) yield [];
         },
-        "GitPolicy",
+        "LockPolicy",
       ),
       {
         trigger: always(),
         is_available: () => false,
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       },
     ),
   );
@@ -162,9 +162,9 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
             delivered.push(value.kind === "appendMessage" ? "" : value.text);
           return fauxAssistantMessage("received");
         },
-        "GitPolicy",
+        "LockPolicy",
       ),
-      { trigger: when(output), policy: "GitPolicy" },
+      { trigger: when(output), policy: "LockPolicy" },
     ),
   );
   let id: NodeIdType;
@@ -172,7 +172,7 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     id = ralph(parent, agent, {
       input,
       output,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       ...(rounds === undefined ? {} : { rounds }),
     });
   } catch (error) {
@@ -199,7 +199,7 @@ describe("ralph workflow", () => {
   test(
     "runs two rounds by default and queues only the final draft on its completing step",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const { agent, requests } = await member(["draft-1", "draft-2"]);
       const flow = attach(parent, agent);
 
@@ -246,7 +246,7 @@ describe("ralph workflow", () => {
     test(
       `rounds: ${rounds} runs exactly ${rounds} full rounds and publishes only the last`,
       async () => {
-        await using parent = createParallelAgentGraph("GitPolicy");
+        await using parent = createParallelAgentGraph("LockPolicy");
         const drafts = Array.from(
           { length: rounds },
           (_, index) => `draft-${index + 1}`,
@@ -292,7 +292,7 @@ describe("ralph workflow", () => {
   test(
     "an invalid round count throws before registering anything",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const input = messageEdge<AgenticInput, AssistantMessage>("in");
       const output = messageEdge<AgenticInput, AssistantMessage>("out");
       const nodes = () => {
@@ -317,7 +317,7 @@ describe("ralph workflow", () => {
                 input,
                 output,
                 rounds,
-                policy: "GitPolicy",
+                policy: "LockPolicy",
               }),
             RangeError,
           );
@@ -351,7 +351,7 @@ describe("ralph workflow", () => {
     test(
       `rejects ${name} before any model work`,
       async () => {
-        await using parent = createParallelAgentGraph("GitPolicy");
+        await using parent = createParallelAgentGraph("LockPolicy");
         const { agent, requests } = await member(["draft-1", "draft-2"]);
         const flow = attach(parent, agent);
 
@@ -368,7 +368,7 @@ describe("ralph workflow", () => {
   test(
     "a second assignment after the first round is rejected, not restarted",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const { agent, requests } = await member([
         "draft-1",
         "draft-2",
@@ -410,7 +410,7 @@ describe("ralph workflow", () => {
     test(
       `${name} rejects without publishing an earlier draft`,
       async () => {
-        await using parent = createParallelAgentGraph("GitPolicy");
+        await using parent = createParallelAgentGraph("LockPolicy");
         const { agent, requests } = await member(replies);
         const flow = attach(parent, agent);
 
@@ -431,7 +431,7 @@ describe("ralph workflow", () => {
   test(
     "native yields resume within a round and never count as one",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const { agent, requests } = await member(
         [
           fauxAssistantMessage(
@@ -461,7 +461,7 @@ describe("ralph workflow", () => {
   test(
     "a staged agent is not idle and is rejected before its staged prompt runs",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const { agent, requests } = await member(["staged answer"], {
         staged: "staged",
       });
@@ -486,7 +486,7 @@ describe("ralph workflow", () => {
   test(
     "aborting the parent mid-round cancels Ralph with the abort reason",
     async () => {
-      await using parent = createParallelAgentGraph("GitPolicy");
+      await using parent = createParallelAgentGraph("LockPolicy");
       const hold = waitingTool("hold", { endOnAbort: true });
       const { agent, requests } = await member(
         [
@@ -521,7 +521,7 @@ describe("ralph workflow", () => {
   test(
     "independent Ralphs in one parent share nothing and close with it",
     async () => {
-      const parent = createParallelAgentGraph("GitPolicy");
+      const parent = createParallelAgentGraph("LockPolicy");
       let children: unknown[] = [];
       let agents: JuncoAgent[] = [];
       try {

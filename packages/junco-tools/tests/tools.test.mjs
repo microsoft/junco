@@ -64,7 +64,7 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
     const collection = await ToolCollection.create(root, {
       native,
       sandbox,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
@@ -350,7 +350,7 @@ test("named registers live in the collection that cut them", {
     // A second collection with its own mux over the same seed.
     other = await ToolCollection.create(owner.root, {
       native: owner.native,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
     const otherCall = (name, input) =>
       other.tools
@@ -686,7 +686,7 @@ async function collectionSession(instance, principal) {
   const collection = await ToolCollection.create(instance.seed, {
     native: await copyTreeNative(),
     sandbox: "always",
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     bash: {
       operations: createShellMuxOperations({
         mux: instance.mux,
@@ -1019,7 +1019,7 @@ test("a collection needs a marsh seed", { timeout: 30_000 }, async () => {
   // a btrfs subvolume, which is a seed.
   const plain = await mkdtemp(join(tmpdir(), "junco-tools-plain-"));
   try {
-    await assert.rejects(ToolCollection.create(plain, { policy: "GitPolicy" }));
+    await assert.rejects(ToolCollection.create(plain, { policy: "LockPolicy" }));
   } finally {
     await rm(plain, { recursive: true, force: true });
   }
@@ -1040,12 +1040,12 @@ test("closing a collection is local: its own calls stop, another collection serv
       ToolCollection.create(seed, {
         native,
         sandbox: "always",
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       }),
       ToolCollection.create(seed, {
         native,
         sandbox: "always",
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       }),
     ]);
     const tool = (collection, name) =>
@@ -1141,7 +1141,7 @@ test("failed construction releases only its own lease", {
   let collection;
   try {
     await assert.rejects(
-      ToolCollection.create(seed, { native, policy: "GitPolicy" }),
+      ToolCollection.create(seed, { native, policy: "LockPolicy" }),
       (error) => error === failure,
     );
     assert.equal(opened.length, 1);
@@ -1150,7 +1150,7 @@ test("failed construction releases only its own lease", {
 
     collection = await ToolCollection.create(seed, {
       native,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
     const read = collection.tools.find((tool) => tool.name === "read");
     assert.match(

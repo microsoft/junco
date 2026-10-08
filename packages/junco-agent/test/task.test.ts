@@ -139,7 +139,7 @@ async function isClosed(session: Session): Promise<boolean> {
 // Tool boundary -----------------------------------------------------------------------------------
 
 test(
-  "a hosted task call yields a task boundary, gates the next request, and resumes the same run",
+  "a hosted task call returns handles and the same run continues without a pause",
   async () => {
     const { host, calls } = recordingHost();
     const capture: { context?: Context } = {};
@@ -167,28 +167,12 @@ test(
       if (event.lane === "main") turns.push(event.runId);
     });
     try {
-      const paused = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      const settled = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
-      assert.deepEqual(paused, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "t1",
-            toolName: "task",
-            reason: "Scheduled 2 subagents",
-          },
-        ],
-      });
+      assert.equal(settledText(settled), "after handles");
       assert.equal(calls.length, 1);
       assert.equal(calls[0]!.toolCallId, "t1");
-      await tick();
-      await tick();
-      assert.equal(faux.state.callCount, 1);
-      assert.equal(agent.status, "suspended");
-
-      assert.equal(settledText(await agent.next()), "after handles");
       assert.equal(faux.state.callCount, 2);
       const result = toolResultOf(capture.context!.messages, "t1");
       assert.equal(result.isError, false);
@@ -197,7 +181,7 @@ test(
       assert.deepEqual(result.details, {
         tasks: [{ id: "h-t1-0", name: "alpha" }, { id: "h-t1-1" }],
       });
-      // Resuming continued the admitted run rather than starting another.
+      // One native run carried both turns.
       assert.equal(runs.length, 1);
       assert.ok(turns.length >= 2);
       assert.ok(turns.every((runId) => runId === runs[0]));
@@ -209,7 +193,7 @@ test(
 );
 
 test(
-  "two task calls in one batch pause once with both admissions in source order",
+  "two task calls in one batch admit in source order without a pause",
   async () => {
     const { host, calls } = recordingHost();
     const { agent } = await newAgent(
@@ -226,31 +210,14 @@ test(
       { tools: [createTaskTool()], prompt: "go" },
     );
     try {
-      const paused = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      const settled = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
-      assert.deepEqual(paused, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "first",
-            toolName: "task",
-            reason: "Scheduled 1 subagents",
-          },
-          {
-            kind: "tool",
-            toolCallId: "second",
-            toolName: "task",
-            reason: "Scheduled 2 subagents",
-          },
-        ],
-      });
+      assert.equal(settledText(settled), "done");
       assert.deepEqual(
         calls.map(({ toolCallId }) => toolCallId),
         ["first", "second"],
       );
-      assert.equal(settledText(await agent.next()), "done");
     } finally {
       await agent.return();
     }
@@ -285,20 +252,10 @@ test(
         throw new Error("not the assigned batch");
     });
     try {
-      const paused = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      const settled = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
-      assert.deepEqual(paused, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "assigned",
-            toolName: "task",
-            reason: "Scheduled 1 subagents",
-          },
-        ],
-      });
+      assert.equal(settledText(settled), "done");
       const rejected = toolResultOf(capture.context!.messages, "narrowed");
       assert.equal(rejected.isError, true);
       assert.match(blockText(rejected.content), /not the assigned batch/);
@@ -307,7 +264,6 @@ test(
         calls.map(({ toolCallId }) => toolCallId),
         ["assigned"],
       );
-      assert.equal(settledText(await agent.next()), "done");
     } finally {
       await agent.return();
     }
@@ -424,7 +380,7 @@ test(
             };
       try {
         const result = item.bind
-          ? await agent.runWithTaskHost(host, () => agent.next())
+          ? await agent.runWithNodeContext({ task: host }, () => agent.next())
           : await agent.next();
         assert.equal(settledText(result), "continued", item.label);
         assert.equal(faux.state.callCount, 2, item.label);
@@ -465,16 +421,16 @@ test(
       { tools: [shared], prompt: "b" },
     );
     try {
-      const [pausedA, pausedB] = await Promise.all([
-        first.agent.runWithTaskHost(a.host, async () =>
-          step(await first.agent.next()),
+      const [settledA, settledB] = await Promise.all([
+        first.agent.runWithNodeContext({ task: a.host }, () =>
+          first.agent.next(),
         ),
-        second.agent.runWithTaskHost(b.host, async () =>
-          step(await second.agent.next()),
+        second.agent.runWithNodeContext({ task: b.host }, () =>
+          second.agent.next(),
         ),
       ]);
-      assert.equal(pausedA.kind, "yield");
-      assert.equal(pausedB.kind, "yield");
+      assert.equal(settledText(settledA), "a done");
+      assert.equal(settledText(settledB), "b done");
       assert.deepEqual(
         a.calls.map(({ toolCallId }) => toolCallId),
         ["from-a"],
@@ -483,8 +439,6 @@ test(
         b.calls.map(({ toolCallId }) => toolCallId),
         ["from-b"],
       );
-      assert.equal(settledText(await first.agent.next()), "a done");
-      assert.equal(settledText(await second.agent.next()), "b done");
     } finally {
       await Promise.all([first.agent.return(), second.agent.return()]);
     }
@@ -492,13 +446,13 @@ test(
   TIMEOUT,
 );
 
-test("binding a second task host while one is bound is busy", async () => {
+test("binding a second node context while one is bound is busy", async () => {
   const { agent } = await newAgent([], { tools: [createTaskTool()] });
   const { host } = recordingHost();
   try {
-    const inner = await agent.runWithTaskHost(host, async () => {
+    const inner = await agent.runWithNodeContext({ task: host }, async () => {
       await assert.rejects(
-        agent.runWithTaskHost(host, async () => "nested"),
+        agent.runWithNodeContext({ task: host }, async () => "nested"),
         isCode("busy"),
       );
       return "outer";
@@ -506,13 +460,13 @@ test("binding a second task host while one is bound is busy", async () => {
     assert.equal(inner, "outer");
     // The binding ends with its work, whether it resolves or rejects.
     await assert.rejects(
-      agent.runWithTaskHost(host, async () => {
+      agent.runWithNodeContext({ task: host }, async () => {
         throw new Error("work failed");
       }),
       /work failed/,
     );
     assert.equal(
-      await agent.runWithTaskHost(host, async () => "again"),
+      await agent.runWithNodeContext({ task: host }, async () => "again"),
       "again",
     );
     assert.equal(agent.status, "idle");
@@ -542,7 +496,9 @@ test(
       { tools: [createTaskTool()], prompt: "go" },
     );
     try {
-      const outcome = agent.runWithTaskHost(host, () => agent.next());
+      const outcome = agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
+      );
       const signal = await started.promise;
       assert.equal(signal.aborted, false);
       await agent.abort();
@@ -580,7 +536,7 @@ test(
     );
     try {
       await agent.setActiveTools(["other"]);
-      const first = await agent.runWithTaskHost(host, async () => {
+      const first = await agent.runWithNodeContext({ task: host }, async () => {
         const prompt = agent.prompt("one");
         const result = await agent.next();
         await prompt;
@@ -596,26 +552,18 @@ test(
       const replacement = createTaskTool();
       await agent.setTools([replacement, other.tool]);
       assertTools(agent.getActiveTools(), [replacement, other.tool]);
-      const paused = await agent.runWithTaskHost(host, async () => {
-        void agent.prompt("two");
-        return step(await agent.next());
-      });
-      assert.deepEqual(paused, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "replaced",
-            toolName: "task",
-            reason: "Scheduled 1 subagents",
-          },
-        ],
-      });
+      const second = await agent.runWithNodeContext(
+        { task: host },
+        async () => {
+          void agent.prompt("two");
+          return agent.next();
+        },
+      );
+      assert.equal(settledText(second), "replaced done");
       assert.deepEqual(
         calls.map(({ toolCallId }) => toolCallId),
         ["replaced"],
       );
-      assert.equal(settledText(await agent.next()), "replaced done");
     } finally {
       await agent.return();
     }
@@ -676,7 +624,14 @@ test(
   async () => {
     const none = await newAgent([], { tools: [countingTool("a").tool] });
     const spoofed = await newAgent([], { tools: [countingTool("task").tool] });
-    const { host } = recordingHost();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const { host: recording } = recordingHost();
+    const host: TaskToolHost = async (...args) => {
+      started.resolve();
+      await release.promise;
+      return recording(...args);
+    };
     const held = await newAgent(
       [
         toolTurn(taskCall("t1", { context: "c", tasks: [{ task: "x" }] })),
@@ -703,14 +658,15 @@ test(
         );
       assert.deepEqual(held.agent.getTools(), original);
 
-      const paused = await held.agent.runWithTaskHost(host, async () =>
-        step(await held.agent.next()),
+      // Gate the host so the run is in flight while the batch mutation is attempted.
+      const outcome = held.agent.runWithNodeContext({ task: host }, () =>
+        held.agent.next(),
       );
-      assert.equal(paused.kind, "yield");
-      assert.equal(held.agent.status, "suspended");
+      await started.promise;
       await assert.rejects(held.agent.setTaskBatch(batch()), isCode("busy"));
       assert.deepEqual(held.agent.getTools(), original);
-      assert.equal(settledText(await held.agent.next()), "done");
+      release.resolve();
+      assert.equal(settledText(await outcome), "done");
     } finally {
       await Promise.all(
         [none, spoofed, held].map(({ agent }) => agent.return()),
@@ -756,22 +712,9 @@ test(
     input.tasks[0]!.tools!.push("bash");
     (input.tasks as TaskInput["tasks"][number][]).push({ task: "late" });
     try {
-      const paused = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      const settled = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
-      assert.deepEqual(paused, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "t2",
-            toolName: "task",
-            reason: "Scheduled 2 subagents",
-          },
-        ],
-      });
-
-      const settled = await agent.runWithTaskHost(host, () => agent.next());
       assert.equal(settledText(settled), "done");
       const rejected = toolResultOf(contexts[0]!.messages, "t1");
       assert.equal(rejected.isError, true);
@@ -830,7 +773,9 @@ test(
     );
     await agent.setTaskBatch(batch());
     try {
-      const result = await agent.runWithTaskHost(host, () => agent.next());
+      const result = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
+      );
       assert.equal(settledText(result), "done");
       const malformed = toolResultOf(contexts[0]!.messages, "t1");
       assert.equal(malformed.isError, true);
@@ -872,25 +817,14 @@ test(
     );
     await agent.setTaskBatch(batch());
     try {
-      const outcome = agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      const outcome = agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
       await started.promise;
       for (let index = 0; index < 5; index += 1) await tick();
       assert.equal(calls, 1);
       release.resolve([{ id: "a", name: "alpha" }, { id: "b" }]);
-      assert.deepEqual(await outcome, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "first",
-            toolName: "task",
-            reason: "Scheduled 2 subagents",
-          },
-        ],
-      });
-      assert.equal(settledText(await agent.next()), "done");
+      assert.equal(settledText(await outcome), "done");
       const second = toolResultOf(capture.context!.messages, "second");
       assert.equal(second.isError, true);
       assert.match(blockText(second.content), /already admitted/);
@@ -903,9 +837,10 @@ test(
 );
 
 test(
-  "decisions bypass the launch guard and task policy; a retry pauses, an ignore does not",
+  "decisions bypass the launch guard and task policy, and no decision pauses",
   async () => {
-    const { host, calls } = recordingHost();
+    const recorder = recordingHost();
+    const calls = recorder.calls;
     const launches: TaskInput[] = [];
     const { agent } = await newAgent(
       [
@@ -933,31 +868,18 @@ test(
     agent.setTaskPolicy((input) => {
       launches.push(input);
     });
-    try {
-      const launched = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
-      );
-      assert.equal(launched.kind, "yield");
-      // Decisions are not launches: the policy now refuses everything, the batch is admitted.
+    // Once the launch is admitted the policy refuses everything; decisions are not launches.
+    const host: TaskToolHost = async (...args) => {
+      const handles = await recorder.host(...args);
       agent.setTaskPolicy(() => {
         throw new Error("no launches");
       });
-      const retried = await agent.runWithTaskHost(host, async () =>
-        step(await agent.next()),
+      return handles;
+    };
+    try {
+      const settled = await agent.runWithNodeContext({ task: host }, () =>
+        agent.next(),
       );
-      assert.deepEqual(retried, {
-        kind: "yield",
-        reasons: [
-          {
-            kind: "tool",
-            toolCallId: "retry",
-            toolName: "task",
-            reason: "Scheduled 1 subagents",
-          },
-        ],
-      });
-      // An ignore alone admits nothing, so the run continues to its answer without a pause.
-      const settled = await agent.runWithTaskHost(host, () => agent.next());
       assert.equal(settledText(settled), "done");
       assert.deepEqual(launches, [canonical]);
       assert.deepEqual(
@@ -993,24 +915,18 @@ test(
       for (const { agent } of agents) await agent.setTaskBatch(batch());
       const [a, b] = agents.map(({ agent }) => agent);
       assert.equal(
-        (
-          await a!.runWithTaskHost(first.host, async () =>
-            step(await a!.next()),
-          )
-        ).kind,
-        "yield",
+        await a!.runWithNodeContext({ task: first.host }, async () =>
+          settledText(await a!.next()),
+        ),
+        "done",
       );
-      assert.equal(settledText(await a!.next()), "done");
       // The first agent's admission does not consume the second's.
       assert.equal(
-        (
-          await b!.runWithTaskHost(second.host, async () =>
-            step(await b!.next()),
-          )
-        ).kind,
-        "yield",
+        await b!.runWithNodeContext({ task: second.host }, async () =>
+          settledText(await b!.next()),
+        ),
+        "done",
       );
-      assert.equal(settledText(await b!.next()), "done");
       assert.deepEqual(
         [first.calls, second.calls].map((calls) =>
           calls.map(({ input }) => input),
@@ -1090,7 +1006,7 @@ async function twoProviderParent(
   const agent = await JuncoAgent.fromResolved({
     session,
     models,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     model: main.getModel("main")!,
     thinkingLevel: "high",
     systemPrompt: "sys",
@@ -1269,7 +1185,7 @@ test(
     const parent = await JuncoAgent.fromResolved({
       session,
       models: withAuth,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       model,
     });
     const spy = spySessions();
@@ -1397,12 +1313,14 @@ test(
         },
         fauxAssistantMessage("child done"),
       ]);
-      const paused = await child.runWithTaskHost(host, async () => {
-        void child.prompt("delegate");
-        return step(await child.next());
-      });
-      assert.equal(paused.kind, "yield");
-      assert.equal(settledText(await child.next()), "child done");
+      const settled = await child.runWithNodeContext(
+        { task: host },
+        async () => {
+          void child.prompt("delegate");
+          return child.next();
+        },
+      );
+      assert.equal(settledText(settled), "child done");
       assert.equal(toolResultOf(contexts[0]!.messages, "empty").isError, true);
       assert.deepEqual(calls, [
         { toolCallId: "own", input: { context: "c", tasks: [{ task: "x" }] } },

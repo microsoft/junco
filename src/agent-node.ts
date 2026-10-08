@@ -12,13 +12,14 @@ import {
   type StepFn,
 } from "dataflow-engine";
 import {
-  type AgenticStep,
   JuncoAgent,
   JuncoAgentError,
+  type JuncoAgentNodeContext,
   type TaskAgentOptions,
   type TaskFailurePolicy,
 } from "junco-agent";
 import type {
+  Contract,
   TaskDecision,
   TaskInput,
   TaskToolDetails,
@@ -31,8 +32,9 @@ import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 import {
   type NodePolicy,
+  type NodeRegistration,
   nodePolicies,
-  registeredNodeTracers,
+  registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
 import { appendSpawnChildren, Spawn } from "./spawn.js";
@@ -40,22 +42,10 @@ import { appendSpawnChildren, Spawn } from "./spawn.js";
 /** How a prompt-agent node executes; carries no registration options. */
 export type AgentNodeBinding = {
   /**
-   * Starts an idle agent without a staged prompt: dispatched once, after `receive`'s inputs, on the
-   * node's first delivery. One agent can run in successive graphs, each node with its own prompt.
+   * Starts an idle agent without a staged prompt, once, on the node's first activation. One agent
+   * can run in successive graphs, each node with its own prompt.
    */
   readonly prompt?: string;
-  /**
-   * Map one delivery to native inputs, dispatched in order. `messages` is the consumed batch;
-   * `values` holds only parent results not delivered before, each presented once. Omitted,
-   * deliveries dispatch nothing.
-   */
-  readonly receive?: (
-    view: ParentView<AgenticInput, AssistantMessage>,
-  ) => readonly AgenticInput[];
-  /** Messages to route when the agent pauses at a `yield` step; omitted, it routes nothing. */
-  readonly emit?: (
-    step: Extract<AgenticStep, { kind: "yield" }>,
-  ) => Message<AgenticInput>[];
 };
 
 /** The final report a subagent sends back to the agent that started it, as JSON follow-up text. */
@@ -104,15 +94,10 @@ type TaskRecord = {
   node: string;
   state: "running" | "retrying" | "awaiting-decision" | "terminal";
   readonly batch: TaskBatch;
-  /** The queued decision request, while one is pending. */
-  question?: string;
 };
 
 /** The node-internal binding: the public one, plus what a task subagent's node adds. */
-type DriverBinding = {
-  readonly prompt?: string;
-  readonly receive: NonNullable<AgentNodeBinding["receive"]>;
-  readonly emit: NonNullable<AgentNodeBinding["emit"]>;
+type DriverBinding = AgentNodeBinding & {
   /** Messages routed once the final result is ready, one activation before it is returned. */
   readonly complete?: (
     this: Node<Agentic, AgenticInput, AssistantMessage>,
@@ -123,6 +108,16 @@ type DriverBinding = {
 
 const ROOT = NodeId("root");
 const PROCESS_REPORTS = "Process the queued task reports.";
+/** The unused paired route from the root to a task child. */
+const TASK_EDGE_CONTRACT: Contract = {
+  expect:
+    "No messages are expected on this reserved task edge; the child starts from its bound task prompt.",
+};
+/** Every report route into an expanded root, current or retained. */
+const TASK_REPORT_CONTRACT: Contract = {
+  expect:
+    "Harness-owned followUp/error containing a JSON task_result for a known task and attempt; current reports resolve or retry tasks, stale reports are ignored; do not send manually.",
+};
 
 const closedNode = (): JuncoAgentError =>
   new JuncoAgentError("closed", "Agentic node closed before prompt settlement");
@@ -270,10 +265,20 @@ class AgentDriver {
   started = false;
   /** A native run was admitted and its settlement has not been read. */
   active = false;
-  /** Mapped native inputs, dispatched by the next activation. */
-  readonly inputs: AgenticInput[] = [];
-  /** Messages the agent's yields routed, emitted by the original node's body. */
-  readonly outbox: Message<AgenticInput>[] = [];
+  /** Delivered message batches per edge, retained in FIFO order until the model's `recv`. */
+  readonly messages = new Map<EdgeIdType, AgenticInput[]>();
+  /** Delivered parent results, each staged once, retained until the model's `recv`. */
+  readonly values = new Map<EdgeIdType, AssistantMessage>();
+  /**
+   * The outer node's own graph registration, captured when its body was primed: `send` and `info`
+   * keep using it after promotion makes the agent an inner Spawn root.
+   */
+  registration: NodeRegistration | undefined;
+  #messageHost:
+    | NonNullable<
+        JuncoAgentNodeContext<AgenticInput, AssistantMessage>["messaging"]
+      >
+    | undefined;
   /** Subagents accepted by task calls or retries and not yet registered in a graph. */
   staged: StagedChild[] = [];
   /** Every admitted task by its stable handle ID. */
@@ -407,7 +412,6 @@ class AgentDriver {
       record.state = "awaiting-decision";
       throw error;
     }
-    record.question = undefined;
     return [record.name === undefined ? { id } : { id, name: record.name }];
   }
 
@@ -437,7 +441,6 @@ class AgentDriver {
   /** Ends `record` as completed or ignored; its batch's last resolution queues its completion. */
   #resolve(record: TaskRecord): void {
     record.state = "terminal";
-    record.question = undefined;
     this.outstanding.delete(record.id);
     record.batch.open -= 1;
     if (record.batch.open === 0)
@@ -450,7 +453,7 @@ class AgentDriver {
    * Consume one report from a task node: only the current attempt's first report on its own
    * return edge counts; duplicate or stale deliveries change nothing.
    */
-  async #receive(
+  async #receiveTaskReport(
     { id: edge, payload }: Message<AgenticInput>,
     signal: AbortSignal,
   ): Promise<void> {
@@ -490,12 +493,12 @@ class AgentDriver {
       }
     }
     record.state = "awaiting-decision";
-    record.question = JSON.stringify({
+    const question = JSON.stringify({
       ...report,
       ...(error === undefined ? {} : { error }),
       decisionRequired: true,
     } satisfies TaskReport);
-    this.notices.push(record.question);
+    this.notices.push(question);
   }
 
   /** Queue every pending notice natively, in order. */
@@ -507,24 +510,60 @@ class AgentDriver {
   }
 
   /**
-   * One activation: dispatch pending inputs, consume task reports, then advance the run at most
-   * once. A real agent does this with its task host bound, observing which reports enter its
-   * context, and with its complaints attributed to the registered `node`'s id, its delivered
-   * `messages` and the tracer of the graph `node` was registered in, if any. `reports` are an
-   * expanded root's deliveries, with the signal of the graph that owns their tasks.
+   * The node's messaging host, created once: its retained inbox for `recv`, and its original
+   * registration's routes and topology for `send` and `info`. Every access reads the current
+   * registration and checks its current signal.
+   */
+  #messaging(): NonNullable<
+    JuncoAgentNodeContext<AgenticInput, AssistantMessage>["messaging"]
+  > {
+    if (this.#messageHost !== undefined) return this.#messageHost;
+    const driver = this;
+    const view = { messages: this.messages, values: this.values };
+    this.#messageHost = {
+      get view() {
+        driver.registration?.signal.throwIfAborted();
+        return view;
+      },
+      consume: () => {
+        this.registration?.signal.throwIfAborted();
+        this.messages.clear();
+        this.values.clear();
+      },
+      send: (message) => {
+        const registration = this.registration;
+        if (registration === undefined)
+          throw new Error("send requires an agentNode graph host");
+        registration.send(message);
+      },
+      info: () => {
+        const registration = this.registration;
+        if (registration === undefined)
+          throw new Error("info requires an agentNode graph host");
+        return registration.info();
+      },
+    };
+    return this.#messageHost;
+  }
+
+  /**
+   * One activation: consume task reports, then advance the run at most once. A real agent does
+   * this with one node context bound: its messaging host, its task host (observing which reports
+   * enter its context), and complaints attributed to the executing `node`'s id, its delivered
+   * `messages` and the tracer of the graph `node` was registered in, if any. A `reportSignal`
+   * marks an expanded root's deliveries as task reports, owned by the graph with that signal.
    */
   async activate(
     node: Node<Agentic, AgenticInput, AssistantMessage>,
     messages: readonly Message<AgenticInput>[],
-    emit: DriverBinding["emit"],
-    reports?: { readonly signal: AbortSignal },
+    reportSignal?: AbortSignal,
   ): Promise<void> {
     const agent = this.agent;
     const advance = async () => {
-      if (reports !== undefined)
+      if (reportSignal !== undefined)
         for (const message of messages)
-          await this.#receive(message, reports.signal);
-      return this.#advance(emit);
+          await this.#receiveTaskReport(message, reportSignal);
+      return this.#advance();
     };
     if (!(agent instanceof JuncoAgent)) return advance();
     const unsubscribe = agent.events.on("message_end", ({ lane, message }) => {
@@ -537,31 +576,42 @@ class AgentDriver {
       }
     });
     try {
-      const tracer = registeredNodeTracers.get(node);
-      await agent.runWithComplaintContext(
+      const tracer = registeredNodeContexts.get(node)?.tracer;
+      await agent.runWithNodeContext(
         {
-          nodeId: node.id,
-          messages,
-          ...(tracer === undefined ? {} : { tracer }),
+          messaging: this.#messaging(),
+          task: this.host,
+          complaint: {
+            nodeId: node.id,
+            messages,
+            ...(tracer === undefined ? {} : { tracer }),
+          },
         },
-        () => agent.runWithTaskHost(this.host, advance),
+        advance,
       );
     } finally {
       unsubscribe();
     }
   }
 
-  async #advance(emit: DriverBinding["emit"]): Promise<void> {
+  async #advance(): Promise<void> {
     const agent = this.agent;
-    for (const input of this.inputs.splice(0)) await this.#dispatch(input);
     if (this.#prompt !== undefined) {
       const text = this.#prompt;
       this.#prompt = undefined;
-      await this.#dispatch({ kind: "prompt", text });
+      if (this.started || agent.status !== "idle")
+        throw new JuncoAgentError(
+          "invalid_state",
+          "Agentic node runs one prompt, and its agent must be idle",
+        );
+      this.started = true;
+      this.active = true;
+      // Its settlement, success or failure, arrives through agent.next().
+      agent.prompt(text).catch(() => undefined);
     }
     await this.#flush();
     if (!this.started) {
-      // A control-only delivery to an idle agent has nothing to await.
+      // Delivered data waits in the inbox; an idle agent without a prompt has nothing to await.
       if (agent.status !== "ready") return;
       this.started = true;
       this.active = true;
@@ -577,7 +627,6 @@ class AgentDriver {
     const boundary = result.value;
     if (boundary.kind === "yield") {
       this.policy.lastYield = boundary.reasons;
-      this.outbox.push(...emit(boundary));
       return;
     }
     this.active = false;
@@ -586,7 +635,7 @@ class AgentDriver {
     await this.#flush();
     if (this.unread.size > 0 || !this.answered) return;
     const undecided = [...this.tasks.values()].filter(
-      ({ question }) => question !== undefined,
+      ({ state }) => state === "awaiting-decision",
     );
     if (undecided.length > 0)
       throw new JuncoAgentError(
@@ -595,34 +644,6 @@ class AgentDriver {
       );
     // An earlier answer is interim until every accepted report was answered.
     if (this.outstanding.size === 0) this.result = boundary.message;
-  }
-
-  async #dispatch(input: AgenticInput): Promise<void> {
-    const agent = this.agent;
-    const kind = input.kind;
-    if (kind === "appendMessage") return agent.appendMessage(input.message);
-    const native =
-      input.images === undefined ? undefined : { images: input.images };
-    switch (kind) {
-      case "prompt":
-        if (this.started || agent.status !== "idle") {
-          throw new JuncoAgentError(
-            "invalid_state",
-            "Agentic node runs one prompt, and its agent must be idle",
-          );
-        }
-        this.started = true;
-        this.active = true;
-        // Its settlement, success or failure, arrives through agent.next().
-        agent.prompt(input.text, native).catch(() => undefined);
-        return;
-      case "steer":
-      case "followUp":
-      case "nextTurn":
-        return agent[kind](input.text, native);
-      case "error":
-        return agent.followUp(input.text, native);
-    }
   }
 }
 
@@ -650,7 +671,7 @@ function driverNode(
     Pick<ToolCollectionOptions, "policy">,
   binding: DriverBinding,
 ): AgenticNode {
-  const { prompt, receive, emit, complete, inputMode } = binding;
+  const { prompt, complete, inputMode } = binding;
   const seenValues = new Set<EdgeIdType>();
   const policy: NodePolicy = {
     agent,
@@ -689,7 +710,7 @@ function driverNode(
   };
 
   /**
-   * A task subagent's node: started by its queued prompt, reporting its final message. An
+   * A task subagent's node: started by its bound prompt, reporting its final message. An
    * unsuccessful settlement or a thrown failure closes the subagent and reports the failure as an
    * `error` input; cancellation of the owning graph propagates instead.
    */
@@ -703,11 +724,7 @@ function driverNode(
         ...(child.name === undefined ? {} : { description: child.name }),
       },
       {
-        receive: (view) =>
-          [...view.messages.keys()].flatMap(
-            (id) => view.messages.get(id) ?? [],
-          ),
-        emit: () => [],
+        prompt: child.prompt,
         async complete(message) {
           const output = contentText(message.content);
           const error =
@@ -750,9 +767,13 @@ function driverNode(
       signal?.throwIfAborted();
       return notification;
     },
+    contract: (edgeId) =>
+      edgeId === EdgeId(`${ROOT}->${child.id}`)
+        ? TASK_EDGE_CONTRACT
+        : child.agent.contract(edgeId),
   });
 
-  /** Register staged children under the root and send each its prompt through its queue. */
+  /** Register staged children under the root; each starts from its bound prompt. */
   const commit = async (graph: JuncoGraph): Promise<void> => {
     const staged = driver.staged;
     if (staged.length === 0) return;
@@ -770,12 +791,6 @@ function driverNode(
         error,
       );
     }
-    for (const { id, prompt } of staged) {
-      graph.emit(ROOT, {
-        id: EdgeId(`${ROOT}->${id}`),
-        payload: { kind: "prompt", text: prompt },
-      });
-    }
   };
 
   /**
@@ -792,7 +807,7 @@ function driverNode(
       async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
         let messages: Message<AgenticInput>[] = [];
         while (true) {
-          await driver.activate(this, messages, emit, { signal: graph.signal });
+          await driver.activate(this, messages, graph.signal);
           if (driver.result !== undefined) return driver.result;
           messages = deliveredMessages(yield []);
         }
@@ -809,11 +824,12 @@ function driverNode(
           step: rootStep,
           is_available: (view) =>
             driver.result === undefined &&
-            (driver.inputs.length > 0 ||
-              hasMessages(view) ||
+            (hasMessages(view) ||
               driver.active ||
               driver.unread.size > 0 ||
               !driver.answered),
+          // Every report route, current or retained, carries the same harness protocol.
+          contract: () => TASK_REPORT_CONTRACT,
           // A failing task's root unblocks its descendants so the failure reaches the task node.
           ...(node.on_error === undefined
             ? {}
@@ -844,12 +860,6 @@ function driverNode(
     if (aborted !== undefined) return disposeStaged(staged, aborted.reason);
     if (agent.status === "closed") return disposeStaged(staged, closedNode());
     node.state = graph;
-    for (const { id, prompt } of staged) {
-      graph.emit(ROOT, {
-        id: EdgeId(`${ROOT}->${id}`),
-        payload: { kind: "prompt", text: prompt },
-      });
-    }
     // The root drives the agent from now on; this body keeps only its external reads.
     nodePolicies.set(step, {
       seenValues,
@@ -882,30 +892,32 @@ function driverNode(
 
   const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
     async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+      // Captured once, at priming: a promoted agent keeps this node's routes and topology.
+      driver.registration = registeredNodeContexts.get(this);
       let view = yield [];
       /** The result already reported; a failed attempt's state is closed by then. */
       let reported: AssistantMessage | undefined;
       try {
         while (true) {
           if (reported !== undefined) return reported;
+          // Retain the delivery for recv; values are seen once staged, so a postponed recv
+          // never lets a permanent result starve a newer message.
           const messages = deliveredMessages(view);
-          for (const input of receive({
-            messages: view.messages,
-            values: unseenValues(view.values, seenValues),
-          }))
-            driver.inputs.push(input);
-          if (driver.outbox.length === 0 && finished() === undefined) {
+          for (const { id, payload } of messages) {
+            const retained = driver.messages.get(id);
+            if (retained === undefined) driver.messages.set(id, [payload]);
+            else retained.push(payload);
+          }
+          const values = unseenValues(view.values, seenValues);
+          for (const id of values.keys())
+            driver.values.set(id, values.get(id) as AssistantMessage);
+          if (finished() === undefined) {
             if (spawned === undefined) {
-              await driver.activate(this, messages, emit);
+              await driver.activate(this, messages);
               if (driver.staged.length > 0) spawned = await expand(this);
             } else {
               await advanceGraph(spawned);
             }
-          }
-          // Output first; a result ready at the same time returns on the next activation.
-          if (driver.outbox.length > 0) {
-            view = yield driver.outbox.splice(0);
-            continue;
           }
           const result = finished();
           if (result !== undefined) {
@@ -936,6 +948,7 @@ function driverNode(
     ...options,
     state: agent,
     step,
+    contract: (edgeId) => agent.contract(edgeId),
     is_available:
       options.is_available ??
       ((view, triggered) => {
@@ -943,7 +956,6 @@ function driverNode(
           return (
             driver.result !== undefined ||
             spawned.available().size > 0 ||
-            driver.outbox.length > 0 ||
             (triggered && hasFreshInput(view))
           );
         return (
@@ -960,23 +972,26 @@ function driverNode(
 /**
  * A graph node driving one prompt agent through a single run.
  *
- * The body first yields `[]` so the engine's priming consumes nothing. Each later activation hands
- * `receive` the delivered batch and any parent result it has not seen, dispatches the returned
- * inputs through their native methods — starting a `prompt` without awaiting it and awaiting every
- * queue or session mutation — then, once the run has started, calls `agent.next()` exactly once:
- * a `yield` step routes `emit`'s messages and leaves the agent suspended, a settled step returns
- * the native final message, and a failed step throws the native error. A node runs at most one
- * prompt. Unless `options.is_available` replaces it, the node is available before it starts only
- * when its trigger fires with a staged prompt, its own `prompt` for an idle agent, or fresh inbound
- * data, and once started it stays resumable until its run settles.
+ * The body first yields `[]` so the engine's priming consumes nothing. Each later activation
+ * retains the delivered batch and any parent result it has not seen in the node's inbox, which the
+ * model drains through `recv`; payloads are data, never native commands. The node starts an idle
+ * agent once with `binding.prompt` (or demands its staged prompt), then calls `agent.next()` at most
+ * once per activation: a `yield` step leaves the agent suspended, a settled step returns the native
+ * final message, and a failed step throws the native error. While it drives a `JuncoAgent`, the
+ * agent's `send` admits messages on this node's outgoing message edges and `info` describes this
+ * node's routes with each receiver's contract. A node runs at most one prompt. Unless
+ * `options.is_available` replaces it, the node is available before it starts only when its trigger
+ * fires with a staged prompt, its own `prompt` for an idle agent, or fresh inbound data, and once
+ * started it stays resumable until its run settles. Its receiver contract is the agent's.
  *
- * A `JuncoAgent`'s `task` calls are admitted while the node drives it. At the resulting pause the
- * node's state becomes a `Spawn` graph whose root is the same running agent and whose children run
- * one fresh subagent per task, linked by paired message queues; the node keeps its id, trigger and
- * edges, and later drives that graph one step per activation. Each subagent starts from its queued
- * prompt and sends its final report back through its queue; the agent receives reports as
- * follow-ups, and the node returns its answer only after every report entered its context and was
- * answered. Later task calls add siblings under the same root.
+ * A `JuncoAgent`'s `task` calls are admitted while the node drives it; the run continues. At its
+ * next pause or settlement the node's state becomes a `Spawn` graph whose root is the same running
+ * agent and whose children run one fresh subagent per task, linked by paired message queues; the
+ * node keeps its id, trigger, edges and inbox, and later drives that graph one step per
+ * activation. Each subagent starts from its task prompt and sends its final report back through
+ * its queue; the agent receives reports as follow-ups, and the node returns its answer only after
+ * every report entered its context and was answered. Later task calls add siblings under the same
+ * root.
  */
 export function agentNode(
   agent: JuncoAgent | MockAgent,
@@ -984,10 +999,5 @@ export function agentNode(
     Pick<ToolCollectionOptions, "policy">,
   binding: AgentNodeBinding = {},
 ): AgenticNode {
-  const { prompt, receive = () => [], emit = () => [] } = binding;
-  return driverNode(agent, options, {
-    ...(prompt === undefined ? {} : { prompt }),
-    receive,
-    emit,
-  });
+  return driverNode(agent, options, binding);
 }

@@ -213,13 +213,13 @@ export function spawnBuildsTypedStars(
   const defaults: graph.JuncoGraph = graph.Spawn(
     graph.nodes.agentNode(lead, {
       trigger: trigger.never(),
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     }),
     tasks,
     () =>
       graph.nodes.agentNode(worker, {
         trigger: trigger.never(),
-        policy: "GitPolicy",
+        policy: "LockPolicy",
       }),
   );
   // @ts-expect-error the root must be an adapted node, not a bare state
@@ -385,7 +385,7 @@ export async function tracerHandlesRetainPayloadTypes(
   );
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await graph.createParallelAgentGraph("GitPolicy").tracer.flush();
+  await graph.createParallelAgentGraph("LockPolicy").tracer.flush();
   return traced;
 }
 
@@ -525,14 +525,14 @@ export async function piSchedulerTypesFixTheScheduleTool(
     TaggedTemplate
   > = await schedulers.createAgencyScheduler<TaggedSkill, TaggedTemplate>(
     () => agency,
-    { prompt: "Run the agency.", policy: "GitPolicy" },
+    { prompt: "Run the agency.", policy: "LockPolicy" },
   );
   agency = new graph.JuncoGraph(
     agencyScheduler,
     graph.Width(1),
     graph.UNBOUNDED,
     tracer.createTracer(),
-    "GitPolicy",
+    "LockPolicy",
   );
   // @ts-expect-error an agency scheduler requires its policy
   void schedulers.createAgencyScheduler(() => agency, { prompt: "x" });
@@ -562,7 +562,7 @@ export async function piSchedulerTypesFixTheScheduleTool(
   // @ts-expect-error the scheduler's tool set is fixed to `schedule` and `complain`
   await scheduler.setTools([plainTool]);
   const replaced: schedulers.PiSchedulerOptions<number, string> = {
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     // @ts-expect-error construction cannot replace the fixed tool set
     tools: [plainTool],
   };
@@ -738,7 +738,7 @@ export async function agentFactoriesKeepSpecializations(
     model: "plain",
     tools: [yieldTool],
     thinkingLevel: "high",
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   };
   const explicit: agent.JuncoAgent<Skill, PromptTemplate, tools.YieldTool> =
     await agent.JuncoAgent.create(createOptions);
@@ -761,7 +761,7 @@ export async function agentFactoriesKeepSpecializations(
   // @ts-expect-error create requires a provider
   const noProvider: agent.JuncoAgentCreateOptions = {
     model: "plain",
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   };
   // @ts-expect-error create requires a policy
   const noPolicy: agent.JuncoAgentCreateOptions = {
@@ -837,12 +837,12 @@ export async function toolFactoriesAreConsumerAgentTools(
     {
       bash: bashOptions,
       native,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
       principal: "typed",
     },
   );
   const borrowed: { close(): Promise<void> } = collection.lease();
-  const muxPolicy: "GitPolicy" | "EmptyPolicy" = collection.mux.policy;
+  const muxPolicy: "LockPolicy" | "EmptyPolicy" = collection.mux.policy;
   const collectionOptions: tools.ToolCollectionOptions = {
     sandbox: "always",
     policy: "EmptyPolicy",
@@ -851,7 +851,7 @@ export async function toolFactoriesAreConsumerAgentTools(
   // @ts-expect-error a collection requires its policy
   const unselected: tools.ToolCollectionOptions = { sandbox: "always" };
   // @ts-expect-error a collection opens its own mux
-  await tools.ToolCollection.create(cwd, { policy: "GitPolicy", mux });
+  await tools.ToolCollection.create(cwd, { policy: "LockPolicy", mux });
   // @ts-expect-error a collection requires options
   await tools.ToolCollection.create(cwd);
   const agentTools: AgentTool[] = [
@@ -889,7 +889,7 @@ export async function toolFactoriesAreConsumerAgentTools(
   // @ts-expect-error a command prefix is a string
   const numericPrefix: tools.BashToolOptions = { commandPrefix: 1 };
   const invalidSandbox: tools.ToolCollectionOptions = {
-    policy: "GitPolicy",
+    policy: "LockPolicy",
     // @ts-expect-error a collection sandbox is "shared" or "always"
     sandbox: "never",
   };
@@ -975,7 +975,7 @@ export async function independentShellMuxLeases(
 ) {
   const lease: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
     native,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   });
   const other: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
     native,
@@ -1003,11 +1003,11 @@ export async function independentShellMuxLeases(
   await other.release();
 
   // @ts-expect-error a lease's sandbox is "shared" or "always"
-  await tools.acquireShellMux(cwd, { sandbox: "never", policy: "GitPolicy" });
+  await tools.acquireShellMux(cwd, { sandbox: "never", policy: "LockPolicy" });
   // @ts-expect-error a lease requires its policy
   await tools.acquireShellMux(cwd, { native });
   // @ts-expect-error a lease opens its own mux
-  await tools.acquireShellMux(cwd, { policy: "GitPolicy", mux: other.mux });
+  await tools.acquireShellMux(cwd, { policy: "LockPolicy", mux: other.mux });
   // @ts-expect-error a lease is released, not closed
   await lease.close();
   return [independent, mode, finished, processOptions];
@@ -1050,7 +1050,7 @@ export async function mcpDefinitionsComposeWithAgentFactories(
       model: "plain",
       cwd,
       tools: graft,
-      policy: "GitPolicy",
+      policy: "LockPolicy",
     });
   const mixed: agent.JuncoAgent = await agent.JuncoAgent.create({
     provider: "faux",
@@ -1134,7 +1134,10 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   // Children carry dynamically discovered MCP tools, so they are broad AgentTool agents.
   const children: agent.JuncoAgent<TaggedSkill, TaggedTemplate, AgentTool>[] =
     await specialized.createSubagents(overrides, signal);
-  const hosted: number = await specialized.runWithTaskHost(host, async () => 1);
+  const hosted: number = await specialized.runWithNodeContext(
+    { task: host },
+    async () => 1,
+  );
   const batch: tools.TaskInput = { context: "c", tasks: [{ task: "x" }] };
   const assigned: tools.AssignedTaskTool = tools.createAssignedTaskTool(batch);
   const launched = await tools.invokeTaskTool(
@@ -1213,5 +1216,98 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
     cancellable,
     badHandles,
     narrowedChildren,
+  ];
+}
+
+export async function messagingToolsAreNominalAgentTools(
+  specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
+  view: graph.ParentView<number, string>,
+  signal: AbortSignal,
+) {
+  const contract: tools.Contract = { expect: "One number to add." };
+  const host = {
+    view,
+    consume: () => {},
+    send: (_message: graph.Message<number>) => {},
+    info: () => ({
+      parents: [
+        {
+          id: graph.NodeId("source"),
+          edgeId: graph.EdgeId("numbers"),
+          kind: "message" as const,
+          ...contract,
+        },
+      ],
+      children: [],
+    }),
+  };
+  const recv: tools.RecvTool<number, string> = tools.RecvTool(host);
+  const send: tools.SendTool = tools.SendTool(host);
+  const info: tools.InfoTool = tools.InfoTool(host);
+  const unhosted: tools.RecvTool = tools.RecvTool();
+  // Constructed values are AgentTools without unwrapping.
+  const loadout: AgentTool[] = [recv, send, info, unhosted];
+  const recognized: boolean[] = [
+    tools.RecvTool.is(loadout[0]!),
+    tools.SendTool.is(loadout[1]!),
+    tools.InfoTool.is(loadout[2]!),
+  ];
+  const received = await tools.RecvTool.invoke<number, string>(
+    recv,
+    host,
+    "recv-1",
+    {},
+    signal,
+  );
+  const messages: readonly graph.Message<number>[] = received.details.messages;
+  const values: readonly graph.Message<string>[] = received.details.values;
+  await tools.SendTool.invoke(
+    send,
+    host,
+    "send-1",
+    { id: "numbers", payload: 1 },
+    signal,
+  );
+  const described = await tools.InfoTool.invoke(
+    info,
+    host,
+    "info-1",
+    {},
+    signal,
+  );
+  const route = described.details.parents[0];
+  const routeId: graph.NodeIdType | undefined = route?.id;
+  const routeEdge: graph.EdgeIdType | undefined = route?.edgeId;
+  const routeKind: "message" | "value" | undefined = route?.kind;
+  const expected: string | undefined = route?.expect;
+  const agreed: tools.Contract = specialized.contract(graph.EdgeId("numbers"));
+
+  // @ts-expect-error an unwrapped carrier is not a nominal recv tool
+  const plainRecv: tools.RecvTool = {} as tools.RecvTool["_A"];
+  // @ts-expect-error an unwrapped carrier is not a nominal send tool
+  const plainSend: tools.SendTool = {} as tools.SendTool["_A"];
+  // @ts-expect-error an unwrapped carrier is not a nominal info tool
+  const plainInfo: tools.InfoTool = {} as tools.InfoTool["_A"];
+  // @ts-expect-error the constructors are called, not instantiated
+  void new tools.RecvTool();
+  // @ts-expect-error send names its edge
+  await tools.SendTool.invoke(send, host, "send-2", { payload: 1 }, signal);
+  // @ts-expect-error a contract is queried by edge, not node
+  void specialized.contract(graph.NodeId("source"));
+  // @ts-expect-error a contract states its expectation
+  const vague: tools.Contract = {};
+  return [
+    recognized,
+    messages,
+    values,
+    routeId,
+    routeEdge,
+    routeKind,
+    expected,
+    agreed,
+    plainRecv,
+    plainSend,
+    plainInfo,
+    vague,
   ];
 }

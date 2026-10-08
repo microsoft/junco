@@ -204,6 +204,8 @@ pub(crate) struct ProcessTask {
     pub(crate) seed: PathBuf,
     pub(crate) cwd: String,
     pub(crate) principal: ShellId,
+    /// The trusted policy owner; `None` acts as the shell's own uid.
+    pub(crate) owner: Option<marsh_core::Principal>,
     pub(crate) env: HashMap<String, String>,
     pub(crate) line: ExecLine,
     pub(crate) state: Arc<RunState>,
@@ -231,6 +233,7 @@ impl ProcessTask {
             seed,
             cwd,
             principal,
+            owner,
             env,
             line,
             state,
@@ -259,6 +262,7 @@ impl ProcessTask {
                     io: JobIo::Pipes,
                     environment: Some(environment),
                     force_sandbox: true,
+                    policy_owner: owner,
                     ..Default::default()
                 },
             )

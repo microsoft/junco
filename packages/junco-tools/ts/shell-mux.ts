@@ -66,8 +66,8 @@ export async function acquireShellMux(
   },
 ): Promise<ShellMuxLease> {
   const { policy, sandbox = "shared" } = options;
-  if (policy !== "GitPolicy" && policy !== "EmptyPolicy") {
-    throw new TypeError('policy must be "GitPolicy" or "EmptyPolicy"');
+  if (policy !== "LockPolicy" && policy !== "EmptyPolicy") {
+    throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
   }
   // Dynamic by design: importing junco-tools must not load the addon.
   const native = options.native ?? (await import("junco-tools/native"));

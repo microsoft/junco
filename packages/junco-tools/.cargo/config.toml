@@ -1,2 +1,8 @@
 [net]
 git-fetch-with-cli = true
+
+[patch."https://github.com/junco-org/marsh.git"]
+marsh-core = { path = "/home/eioannidis/git/marsh/crates/marsh-core" }
+marsh-btrfs = { path = "/home/eioannidis/git/marsh/crates/marsh-btrfs" }
+brush-core = { path = "/home/eioannidis/git/marsh/crates/brush-core" }
+brush-interactive = { path = "/home/eioannidis/git/marsh/crates/brush-interactive" }

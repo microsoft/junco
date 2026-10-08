@@ -209,6 +209,17 @@ export function ralph<
             msg(output, { kind: "prompt", text: finalText(retained.value) }),
           );
         },
+        contract: (edgeId) => {
+          if (edgeId !== input.id)
+            throw new JuncoAgentError(
+              "invalid_state",
+              `No contract for edge "${edgeId}"`,
+            );
+          return {
+            expect:
+              "Exactly one image-free prompt containing the complete assignment; duplicate assignments are rejected, and the final revised draft is emitted after all rounds.",
+          };
+        },
       },
     ),
   );

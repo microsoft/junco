@@ -18,7 +18,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `src/tool.rs` | Routed file tools: the `JuncoTool` classification, the mux's sandbox policy, and the `NativeMux` file-tool methods that run the engines inside marsh calls. |
 | `src/frontend.rs` | Snapshot-UID output routing, JS callback receipts, errors, and closure fences. |
 | `ts/shell-mux.ts` | `acquireShellMux`: opens one fresh, owned ShellMux per call with its required policy, validates cwd, logs policy decisions, and returns a lease whose `release()` closes the mux and flushes the policy log. |
-| `ts/operations.ts` | Pi `BashOperations` adapter: borrows a supplied mux or lazily owns one (default `GitPolicy`), its own runs, timeout/abort handling, and local `close()`. |
+| `ts/operations.ts` | Pi `BashOperations` adapter: borrows a supplied mux or lazily owns one (default `LockPolicy`), its own runs, timeout/abort handling, and local `close()`. |
 | `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted from the pinned revision (see `LICENSE.oh-my-pi`), verbatim except for the routing seams: filesystem exports split into a JS-thread `prepare` and an engine run `src/tool.rs` calls, `ast_edit` writing through a host writer, and `EditStore`'s tracked keys. `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
 | `src/task.rs`, `src/testing.rs`, `src/utils.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
 | `ts/tool-support.ts` | Shared adapter primitives: path resolution/display, editable-text normalization, bounded output, u32 validation, and `withNativeSignal`. |

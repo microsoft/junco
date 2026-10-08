@@ -38,7 +38,7 @@ export function ralphKeepsTypes(
     input,
     output,
     rounds: 2,
-    policy: "GitPolicy",
+    policy: "LockPolicy",
   };
   const id: NodeIdType = ralph(parent, agent, options);
   const anonymous: NodeIdType = ralph(parent, agent, {
@@ -64,15 +64,15 @@ export function ralphRejectsMistypedOptions(
   numericParent: JuncoGraph<number, string>,
 ) {
   // @ts-expect-error rounds is a number
-  ralph(parent, agent, { input, output, rounds: "2", policy: "GitPolicy" });
+  ralph(parent, agent, { input, output, rounds: "2", policy: "LockPolicy" });
   // @ts-expect-error ids are branded NodeIds
-  ralph(parent, agent, { id: "Ralph", input, output, policy: "GitPolicy" });
+  ralph(parent, agent, { id: "Ralph", input, output, policy: "LockPolicy" });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input: numeric, output, policy: "GitPolicy" });
+  ralph(parent, agent, { input: numeric, output, policy: "LockPolicy" });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input, output: numeric, policy: "GitPolicy" });
+  ralph(parent, agent, { input, output: numeric, policy: "LockPolicy" });
   // @ts-expect-error Ralph registers only in AgenticInput/AssistantMessage graphs
-  ralph(numericParent, agent, { input, output, policy: "GitPolicy" });
+  ralph(numericParent, agent, { input, output, policy: "LockPolicy" });
   // @ts-expect-error Ralph requires a policy
   ralph(parent, agent, { input, output });
   // @ts-expect-error policies are the two case-sensitive literals
