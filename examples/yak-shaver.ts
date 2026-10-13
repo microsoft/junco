@@ -56,6 +56,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { agent, graph, mcp, tools, tracer } from "junco-agency";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Constants
 
@@ -1420,10 +1421,6 @@ function completedAnalysis(
  */
 export async function runCandidateBatch(options: CandidateBatchRunOptions, signal?: AbortSignal): Promise<readonly CandidateOutcome[]> {
   const built = await createCandidateBatch(options);
-  // A caller signal only stops new windows; aborting the graph interrupts in-flight agents and
-  // their research children. A failed abort resurfaces through the close below.
-  const interrupt = () => void built.workflow.abort(signal?.reason).catch(() => undefined);
-  signal?.addEventListener("abort", interrupt, { once: true });
   const outcomes = new Map<number, CandidateOutcome>();
   try {
     signal?.throwIfAborted();
@@ -1470,8 +1467,6 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     }
   } catch (error) {
     return disposeAll(error, [() => built.workflow.close()], "Candidate batch failed and did not close cleanly");
-  } finally {
-    signal?.removeEventListener("abort", interrupt);
   }
   await built.workflow.close();
   signal?.throwIfAborted();
@@ -2365,12 +2360,13 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
 }
 
 if (import.meta.main) {
+  using cancellation = ctrlC();
   try {
     const args = process.argv.slice(2);
     if (args.length > 1) throw new Error(USAGE);
-    await runYakShaver(args[0]);
+    await runYakShaver(args[0], cancellation.signal);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+    process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
 }

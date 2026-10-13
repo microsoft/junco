@@ -120,6 +120,7 @@ export class JuncoGraph<
   #controller = new AbortController();
   /** Default run options, replaced with the controller. */
   #options: DataflowRunOptions = { signal: this.#controller.signal };
+  #evaluating = false;
   #abort: Cascade | undefined;
   /** Terminal once set, even if it failed. */
   #close: Cascade | undefined;
@@ -773,20 +774,20 @@ export class JuncoGraph<
   }
 
   /**
-   * One window, observing {@link signal} and any caller `signal`. Caller cancellation affects only
-   * this invocation.
+   * One window, observing {@link signal}. Caller cancellation recursively aborts running members
+   * and joins their cleanup; it does not close the graph.
    */
   override step(
     options?: DataflowRunOptions,
   ): Promise<ReadonlyMap<NodeIdType, T>> {
-    return super.step(this.#runOptions(options));
+    return this.#evaluate(false, options);
   }
 
-  /** Windows until quiescent, observing {@link signal} and any caller `signal`. */
+  /** Windows until quiescent, with the same recursive caller cancellation as {@link step}. */
   override run(
     options?: DataflowRunOptions,
   ): Promise<ReadonlyMap<NodeIdType, T>> {
-    return super.run(this.#runOptions(options));
+    return this.#evaluate(true, options);
   }
 
   /**
@@ -838,6 +839,57 @@ export class JuncoGraph<
   #piScheduler(): PiScheduler<never, never> | undefined {
     const scheduler: unknown = this.scheduler;
     return scheduler instanceof PiScheduler ? scheduler : undefined;
+  }
+
+  /** Bind caller cancellation only while this single-flight evaluation is active. */
+  async #evaluate(
+    untilQuiescent: boolean,
+    options: DataflowRunOptions | undefined,
+  ): Promise<ReadonlyMap<NodeIdType, T>> {
+    if (this.#evaluating)
+      throw new DataflowDefinitionError(
+        "Dataflow execution is already in flight",
+      );
+    this.#evaluating = true;
+    const caller = options?.signal;
+    const runOptions = this.#runOptions(options);
+    let aborting: Promise<unknown> | undefined;
+    let abortFailed = false;
+    const interrupt = () => {
+      // A lifecycle cascade already owns these members; joining it here can wait on this drive.
+      if (this.#abort !== undefined || this.#close !== undefined) return;
+      // Pi windows run inside their scheduler's tool: never join that scheduler from its own drive.
+      aborting = this.#cascade(
+        "abort",
+        caller?.reason,
+        this.#piScheduler(),
+      ).catch((error: unknown) => {
+        abortFailed = true;
+        return error;
+      });
+    };
+    try {
+      caller?.throwIfAborted();
+      if (caller !== undefined && caller !== this.signal)
+        caller.addEventListener("abort", interrupt, { once: true });
+      const results = await (untilQuiescent
+        ? super.run(runOptions)
+        : super.step(runOptions));
+      caller?.throwIfAborted();
+      return results;
+    } catch (error) {
+      caller?.removeEventListener("abort", interrupt);
+      const abortError = await aborting;
+      if (abortFailed)
+        throw new AggregateError(
+          [error, abortError],
+          "Graph evaluation and abort failed",
+        );
+      throw error;
+    } finally {
+      caller?.removeEventListener("abort", interrupt);
+      this.#evaluating = false;
+    }
   }
 
   #runOptions(options: DataflowRunOptions | undefined): DataflowRunOptions {
