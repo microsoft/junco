@@ -21,6 +21,7 @@ import { JuncoAgent } from "junco-agent";
 import type { SchedulerInfo } from "junco-scheduler/agent";
 import { LockPolicy, type ToolCollection, YieldTool } from "junco-tools";
 import { type AgenticInput, JuncoGraph, tracer } from "../src/index.ts";
+import { ctrlC } from "./cancellation.ts";
 
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
@@ -104,62 +105,96 @@ async function leafAgent(responses: readonly FauxResponseStep[], tools: readonly
   return { faux, agent };
 }
 
-const log: string[] = [];
-const leaf = await leafAgent(
-  [
-    fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
-      stopReason: "toolUse",
-    }),
-    fauxAssistantMessage("leaf-result"),
-  ],
-  [new YieldTool()],
-);
-const sibling = await leafAgent([fauxAssistantMessage("sibling-result")]);
-sibling.agent.events.on("run_end", (event) => {
-  if (event.status === "completed") log.push("sibling done");
-});
-
-const grandchild = await agency("grandchild", LockPolicy, [leaf.agent], runAvailable("grandchild"));
-const child = await agency("child", LockPolicy, [grandchild.graph], runAvailable("child"));
-child.scheduler.events.on("tool_start", (event) => {
-  if (event.toolName === "schedule") log.push("child window");
-});
-// The root primes both members, runs the child (all its windows), then the sibling, then the rest.
-const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
-const root = await agency("root", LockPolicy, [child.graph, sibling.agent], (info, request) =>
-  request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
-);
-// Every nested graph shares the automatically selected tracer.
-let windows = 0;
-let settled: string | undefined;
-try {
-  root.scheduler.events.on("tool_end", (event) => {
-    if (event.toolName === "schedule" && !event.isError) windows++;
+async function main(signal: AbortSignal) {
+  const log: string[] = [];
+  const leaf = await leafAgent(
+    [
+      fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("leaf-result"),
+    ],
+    [new YieldTool()],
+  );
+  const sibling = await leafAgent([fauxAssistantMessage("sibling-result")]);
+  sibling.agent.events.on("run_end", (event) => {
+    if (event.status === "completed") log.push("sibling done");
   });
-  // Schedule windows run inside one public next(); only settlement ends it.
-  const step = await root.scheduler.next();
-  assert.ok(!step.done && step.value.kind === "settled", "root scheduler settled in one next()");
-  settled = textOf(step.value.message);
-} finally {
-  await root.graph.close();
-  await root.graph.tracer.flush();
+
+  const grandchild = await agency("grandchild", LockPolicy, [leaf.agent], runAvailable("grandchild"));
+  const child = await agency("child", LockPolicy, [grandchild.graph], runAvailable("child"));
+  child.scheduler.events.on("tool_start", (event) => {
+    if (event.toolName === "schedule") log.push("child window");
+  });
+  // The root primes both members, runs the child (all its windows), then the sibling, then the rest.
+  const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
+  const root = await agency("root", LockPolicy, [child.graph, sibling.agent], (info, request) =>
+    request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
+  );
+  // Every nested graph shares the automatically selected tracer.
+  let windows = 0;
+  let settled: string | undefined;
+  const failures: unknown[] = [];
+  let abortWork: Promise<void> | undefined;
+  const interrupt = () => {
+    abortWork = root.graph.abort(signal.reason).catch((error) => {
+      failures.push(error);
+    });
+  };
+  signal.addEventListener("abort", interrupt, { once: true });
+  if (signal.aborted) interrupt();
+  try {
+    root.scheduler.events.on("tool_end", (event) => {
+      if (event.toolName === "schedule" && !event.isError) windows++;
+    });
+    // Schedule windows run inside one public next(); only settlement ends it.
+    signal.throwIfAborted();
+    const step = await root.scheduler.next();
+    signal.throwIfAborted();
+    assert.ok(!step.done && step.value.kind === "settled", "root scheduler settled in one next()");
+    settled = textOf(step.value.message);
+  } catch (error) {
+    failures.push(error);
+  } finally {
+    signal.removeEventListener("abort", interrupt);
+    await abortWork;
+    for (const release of [() => root.graph.close(), () => root.graph.tracer.flush()]) {
+      try {
+        await release();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, "Recursive agency failed", { cause: failures[0] });
+  signal.throwIfAborted();
+
+  const resultOf = (graph: JuncoGraph, id: string) => {
+    const result = graph.result(NodeId.create(id));
+    return O.isSome(result) ? textOf(result.value) : undefined;
+  };
+  const leafResult = resultOf(grandchild.graph, "0");
+  const siblingResult = resultOf(root.graph, "1");
+  assert.equal(settled, "root complete");
+  assert.equal(leafResult, "leaf-result");
+  assert.equal(siblingResult, "sibling-result");
+  assert.equal(windows, 3);
+  const siblingDone = log.indexOf("sibling done");
+  assert.ok(siblingDone > 0 && log.lastIndexOf("child window") < siblingDone, log.join(", "));
+  assert.equal(leaf.faux.state.callCount, 2);
+  assert.equal(sibling.faux.state.callCount, 1);
+  for (const actor of [root.scheduler, child.scheduler, grandchild.scheduler, leaf.agent, sibling.agent]) {
+    assert.equal(actor.status, "closed");
+  }
+  console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);
 }
 
-const resultOf = (graph: JuncoGraph, id: string) => {
-  const result = graph.result(NodeId.create(id));
-  return O.isSome(result) ? textOf(result.value) : undefined;
-};
-const leafResult = resultOf(grandchild.graph, "0");
-const siblingResult = resultOf(root.graph, "1");
-assert.equal(settled, "root complete");
-assert.equal(leafResult, "leaf-result");
-assert.equal(siblingResult, "sibling-result");
-assert.equal(windows, 3);
-const siblingDone = log.indexOf("sibling done");
-assert.ok(siblingDone > 0 && log.lastIndexOf("child window") < siblingDone, log.join(", "));
-assert.equal(leaf.faux.state.callCount, 2);
-assert.equal(sibling.faux.state.callCount, 1);
-for (const actor of [root.scheduler, child.scheduler, grandchild.scheduler, leaf.agent, sibling.agent]) {
-  assert.equal(actor.status, "closed");
+if (import.meta.main) {
+  using cancellation = ctrlC();
+  try {
+    await main(cancellation.signal);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = cancellation.signal.aborted ? 130 : 1;
+  }
 }
-console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);

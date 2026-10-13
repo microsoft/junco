@@ -214,6 +214,61 @@ describe("abort", () => {
   });
 });
 
+test("caller cancellation interrupts nested work and joins its cleanup", async () => {
+  const parent = JuncoGraph.parallel<string, string>(LockPolicy);
+  const child = JuncoGraph.parallel<string, string>(LockPolicy);
+  const caller = new AbortController();
+  const reason = new Error("caller stopped");
+  const entered = Promise.withResolvers<void>();
+  const cleaning = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let cleaned = false;
+  const worker = new Deterministic<string, string>(async function* (signal) {
+    yield [];
+    entered.resolve();
+    try {
+      await untilAborted(signal);
+    } finally {
+      cleaning.resolve();
+      await release.promise;
+      cleaned = true;
+    }
+    return "never";
+  }, LockPolicy);
+  const result = child.addNode({
+    state: worker,
+    trigger: TriggerRule.always(),
+  });
+  parent.addNode({ state: child, result, trigger: TriggerRule.always() });
+  const drive = failureOf(parent.run({ signal: caller.signal }));
+  const state = settlement(drive);
+  try {
+    await entered.promise;
+    caller.abort(reason);
+    await flushMacrotask();
+    assert.equal(
+      worker.signal.aborted,
+      true,
+      "running child received cancellation",
+    );
+    await cleaning.promise;
+    assert.equal(state.settled, false, "drive waits for cleanup");
+    release.resolve();
+    assert.ok(cancelledBy(await drive, reason));
+    assert.equal(cleaned, true);
+    assert.ok(O.isNone(child.result(result)));
+    assert.equal(
+      parent.signal.aborted,
+      false,
+      "abort leaves graph nonterminal",
+    );
+  } finally {
+    release.resolve();
+    await parent.close();
+    await drive;
+  }
+});
+
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
     const graph = JuncoGraph.parallel<string, string>(LockPolicy);

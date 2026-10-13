@@ -38,6 +38,7 @@ import { type Contract, InfoTool, LockPolicy, SendTool, YieldTool } from "junco-
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { type AgenticInput, JuncoGraph } from "../src/index.ts";
+import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Tools
 //
@@ -352,15 +353,18 @@ export async function convene(
   members: Members,
   search: SearchCounts,
   review: Pick<ReviewTool, "takeVerdict">,
+  signal?: AbortSignal,
 ): Promise<string> {
   let feedback: string | undefined;
   // Rounds share the automatically selected tracer: flush it once, however the committee ends.
   let tracer: DataflowTracer | undefined;
   try {
     for (;;) {
+      signal?.throwIfAborted();
       const { graph, reducerId } = ReviewRound.create(request, members, search, feedback);
       tracer = graph.tracer;
-      const plan = (await graph.run()).get(reducerId);
+      const plan = (await graph.run({ signal })).get(reducerId);
+      signal?.throwIfAborted();
       const verdict = review.takeVerdict();
       if (verdict === undefined) throw new Error("Reducer did not record a review verdict");
       if (verdict.approved) return approvedPlan(plan);
@@ -389,15 +393,19 @@ async function occupied(path: string): Promise<boolean> {
   }
 }
 
-async function main([requestPath, namedOutput, ...extra]: readonly string[]): Promise<void> {
+async function main([requestPath, namedOutput, ...extra]: readonly string[], signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (!requestPath || extra.length > 0) throw new Error(usage);
   const outputPath = namedOutput ?? join(process.cwd(), "plan.md");
   if (await occupied(outputPath)) throw new Error(`Output already exists: ${outputPath}`);
+  signal?.throwIfAborted();
   const request = await readFile(requestPath, "utf8");
+  signal?.throwIfAborted();
   if (!request.trim()) throw new Error("Request must contain non-whitespace text");
 
   // One Pi runtime, holding the saved login, is shared by every member.
   const models = await ModelRuntime.create();
+  signal?.throwIfAborted();
   // Each round's registrations describe what the Architect and the Reducer expect on every incoming
   // edge; the Librarian has no incoming edge.
   const member = (id: MemberId, tools: AgentTool[]) => JuncoAgent.create({
@@ -413,19 +421,25 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[]): Pr
   let plan: string;
   {
     await using Librarian = await member("Librarian", [search.tool, new YieldTool(), new InfoTool(), new SendTool()]);
+    signal?.throwIfAborted();
     await using Architect = await member("Architect", [new InfoTool()]);
+    signal?.throwIfAborted();
     await using Reducer = await member("Reducer", [review.tool]);
-    plan = await convene(request, { Librarian, Architect, Reducer }, search, review);
+    signal?.throwIfAborted();
+    plan = await convene(request, { Librarian, Architect, Reducer }, search, review, signal);
   }
+  signal?.throwIfAborted();
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });
   console.log(outputPath);
 }
 
 if (import.meta.main) {
+  using cancellation = ctrlC();
   try {
-    await main(process.argv.slice(2));
+    await main(process.argv.slice(2), cancellation.signal);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+    process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
+  if (cancellation.signal.aborted) process.exitCode = 130;
 }

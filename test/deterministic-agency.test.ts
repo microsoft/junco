@@ -802,7 +802,7 @@ for (const strategy of STRATEGIES) {
       await root.close();
     });
 
-    test("a caller signal cancels only its own drive after the active column drains", async () => {
+    test("a caller signal aborts the active member and waits for its column to drain", async () => {
       const gate = barrier();
       const worker = gated(
         new MockAgent({ prompt: "go", runs: [gatedRun("resumed", 1)] }),
@@ -819,20 +819,17 @@ for (const strategy of STRATEGIES) {
 
       await gate.started;
       controller.abort(cancelled);
+      await gate.aborted;
       await flushMacrotask();
       assert.equal(settled, false);
       gate.release();
       await assert.rejects(running, (error) => error === cancelled);
-      assert.equal(worker.requests.length, 1);
-      assert.equal(worker.status, "suspended");
-      assert.equal(graph.getNode(id)!.status, "running");
-      assert.ok(O.isNone(graph.result(id)));
+      assert.equal(stopReason(graph, id), "aborted");
+      assert.equal(graph.getNode(id)?.status, "done");
 
-      // The graph itself was neither aborted nor closed: a plain drive resumes the member.
+      // Caller cancellation is nonterminal.
       assert.equal(graph.signal.aborted, false);
       await graph.run();
-      assert.equal(resultText(graph, id), "resumed");
-      assert.equal(worker.requests.length, 2);
       await graph.close();
     });
 

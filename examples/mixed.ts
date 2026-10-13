@@ -49,6 +49,7 @@ import {
 } from "junco-tools";
 import { type AgenticInput, Deterministic, JuncoGraph } from "../src/index.ts";
 import { Ralph } from "../src/workflows/index.ts";
+import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Goals
 //
@@ -222,8 +223,10 @@ export const MixedGraph = {
 // model choice. `await using` closes every created member, even after a failure; the graph's own
 // close also returns its members.
 
-async function main(): Promise<void> {
+async function main(signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const models = await ModelRuntime.create();
+  signal?.throwIfAborted();
   // Explicit tool lists (Direct reads its assignment with recv) skip creating a tool collection.
   const member = (id: keyof Members) => JuncoAgent.create({
     provider: "github-copilot",
@@ -233,11 +236,15 @@ async function main(): Promise<void> {
     ...memberOptions[id],
   });
   await using Ralph = await member("Ralph");
+  signal?.throwIfAborted();
   await using Direct = await member("Direct");
+  signal?.throwIfAborted();
   await using Reviewer = await member("Reviewer");
+  signal?.throwIfAborted();
   const { graph, reviewerId } = MixedGraph.create({ Ralph, Direct, Reviewer });
   try {
-    const results = await graph.run();
+    const results = await graph.run({ signal });
+    signal?.throwIfAborted();
     console.log(`Final review:\n${finalText(results.get(reviewerId), "Reviewer")}`);
   } finally {
     // Both graphs share the automatically selected tracer: flush it even when close fails.
@@ -250,10 +257,12 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
+  using cancellation = ctrlC();
   try {
-    await main();
+    await main(cancellation.signal);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+    process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
+  if (cancellation.signal.aborted) process.exitCode = 130;
 }

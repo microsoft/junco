@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { agent, graph, mcp, tools } from "junco-agency";
+import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Where the repository is
 //
@@ -203,18 +204,22 @@ async function modelRuntime(): Promise<ModelRuntime> {
 }
 
 /** The complete application: runs the graph once; closing it also closes its ShellMux. */
-export async function runMcpExample(): Promise<void> {
+export async function runMcpExample(signal?: AbortSignal): Promise<void> {
   const failures: unknown[] = [];
   let researchText: string | undefined;
   let dependencyText: string | undefined;
   let built: McpGraph | undefined;
   try {
+    signal?.throwIfAborted();
     const models = await modelRuntime();
+    signal?.throwIfAborted();
     let made: McpGraph | undefined;
     await graph.JuncoGraph.create(repositoryRoot, { policy: tools.LockPolicy }, async (collection) => {
+      signal?.throwIfAborted();
       const acquired: agent.JuncoAgent[] = [];
       try {
         const member = async (id: keyof Members) => {
+          signal?.throwIfAborted();
           const created = await agent.JuncoAgent.create({
             provider,
             model: modelId,
@@ -228,6 +233,7 @@ export async function runMcpExample(): Promise<void> {
             collection,
           });
           acquired.push(created);
+          signal?.throwIfAborted();
           const names = new Set(created.getTools().map((tool) => tool.name));
           const missing = requiredTools.filter((name) => !names.has(name));
           if (missing.length > 0) {
@@ -257,7 +263,9 @@ export async function runMcpExample(): Promise<void> {
     });
     // Owned only once `create` accepted it; a rejected graph was already closed.
     built = made!;
-    const results = await built.graph.run();
+    signal?.throwIfAborted();
+    const results = await built.graph.run({ signal });
+    signal?.throwIfAborted();
     researchText = finalText(results.get(built.researchId), "Research");
     dependencyText = finalText(results.get(built.dependencyId), "Dependencies");
   } catch (error) {
@@ -280,15 +288,18 @@ export async function runMcpExample(): Promise<void> {
   if (failures.length > 1) {
     throw new AggregateError(failures, "MCP example failed", { cause: failures[0] });
   }
+  signal?.throwIfAborted();
   console.log(`Central classes:\n${researchText}`);
   console.log(`Dependency chains:\n${dependencyText}`);
 }
 
 if (import.meta.main) {
+  using cancellation = ctrlC();
   try {
-    await runMcpExample();
+    await runMcpExample(cancellation.signal);
   } catch (error) {
     console.error(error);
-    process.exitCode = 1;
+    process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
+  if (cancellation.signal.aborted) process.exitCode = 130;
 }
