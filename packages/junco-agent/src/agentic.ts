@@ -18,13 +18,21 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import type { EdgeIdType } from "dataflow-engine";
-import type {
-  ComplainToolHost,
-  Contract,
-  ToolCollection,
-  ToolCollectionOptions,
-} from "junco-tools";
+import type { EdgeIdType, ParentView } from "dataflow-engine";
+import type { ComplainToolHost, Contract, ToolCollection } from "junco-tools";
+
+/**
+ * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
+ * its model's `recv`; it never dispatches them as native commands. Task subagent reports use
+ * `followUp` (completed) and `error` (failed) on their private return edges.
+ */
+export type AgenticInput =
+  | {
+      readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error";
+      readonly text: string;
+      readonly images?: ImageContent[];
+    }
+  | { readonly kind: "appendMessage"; readonly message: AgentMessage };
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -66,14 +74,19 @@ export type AgenticStep =
 /**
  * A cooperative iterator around one native Pi lane. The conversation/control surface delegates
  * without a Context argument; the native lane is deliberately not public because a subclass can
- * constrain tool configuration. `next()` is the scheduling plane and has no command payload.
+ * constrain tool configuration. `next(inputs?)` is the scheduling plane: its optional graph view
+ * only feeds a staged prompt function and is never a command payload.
  * `complain(issue, tracer?)` synchronously appends a complete issue to the shared `issueLog`.
  */
 export interface Agentic<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> extends AsyncGenerator<AgenticStep, void, void>,
+> extends AsyncGenerator<
+      AgenticStep,
+      void,
+      ParentView<AgenticInput, AssistantMessage> | undefined
+    >,
     ComplainToolHost {
   readonly status: AgenticStatus;
   readonly events: AgentHarness<undefined>["events"];
@@ -83,6 +96,14 @@ export interface Agentic<
     text: string,
     options?: { images?: ImageContent[] },
   ): Promise<AssistantMessage>;
+  /**
+   * Arm one prompt for the next `next()` without starting it. A function receives that `next`'s
+   * graph view and returns the prompt text; busy unless the agent is idle with no queued demand.
+   */
+  stagePrompt(
+    prompt: NonNullable<AgenticOptions<S, P, T>["prompt"]>,
+    options?: { images?: ImageContent[] },
+  ): void;
   skill(
     name: string,
     additionalInstructions?: string,
@@ -141,7 +162,10 @@ export interface Agentic<
   contract(edgeId: EdgeIdType): Contract;
 }
 
-/** Native harness options plus an optional initial prompt staged until the first `next()`. */
+/**
+ * Native harness options plus an optional initial prompt staged until the first `next()`. A prompt
+ * function runs once, synchronously, on that `next(inputs)`'s graph view.
+ */
 export type AgenticOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
@@ -152,13 +176,14 @@ export type AgenticOptions<
 > & {
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
-  readonly prompt?: string;
+  readonly prompt?:
+    | string
+    | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string);
   readonly images?: ImageContent[];
-  /** Authorization policy of the agent's native ShellMux; must equal `collection.policy`. */
-  readonly policy: ToolCollectionOptions["policy"];
   /**
-   * Borrowed collection binding the agent's policy and native lifetime: the agent holds a lease
-   * until closed, and closes only that lease, never the collection. Grants no tools by itself.
+   * Borrowed collection selecting the agent's authorization policy and native lifetime: the agent
+   * holds a lease until closed, and closes only that lease, never the collection. Grants no tools
+   * by itself.
    */
   readonly collection?: ToolCollection;
   /** This agent's receiver contract per incoming graph edge; see {@link Agentic.contract}. */

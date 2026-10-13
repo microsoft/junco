@@ -4,23 +4,19 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
-import type { Edge, Message } from "../src/index.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import {
-  allOf,
-  always,
-  anyOf,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  on,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 type KV = {
@@ -44,16 +40,18 @@ type Count = {
 type Msg = KV | Grouped | Count;
 
 test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
-  const emailEdge = messageEdge<Msg, string>("email");
-  const phoneEdge = messageEdge<Msg, string>("phone");
-  const snailmailEdge = messageEdge<Msg, string>("snailmail");
-  const groupedForTsvEdge = messageEdge<Msg, string>("groupedForTsv");
-  const groupedForLudditesEdge = messageEdge<Msg, string>("groupedForLuddites");
-  const groupedForWritersEdge = messageEdge<Msg, string>("groupedForWriters");
-  const groupedForNomadsEdge = messageEdge<Msg, string>("groupedForNomads");
-  const ludditesCountEdge = messageEdge<Msg, string>("ludditesCount");
-  const writersCountEdge = messageEdge<Msg, string>("writersCount");
-  const nomadsCountEdge = messageEdge<Msg, string>("nomadsCount");
+  const emailEdge = Edge.message<Msg, string>("email");
+  const phoneEdge = Edge.message<Msg, string>("phone");
+  const snailmailEdge = Edge.message<Msg, string>("snailmail");
+  const groupedForTsvEdge = Edge.message<Msg, string>("groupedForTsv");
+  const groupedForLudditesEdge = Edge.message<Msg, string>(
+    "groupedForLuddites",
+  );
+  const groupedForWritersEdge = Edge.message<Msg, string>("groupedForWriters");
+  const groupedForNomadsEdge = Edge.message<Msg, string>("groupedForNomads");
+  const ludditesCountEdge = Edge.message<Msg, string>("ludditesCount");
+  const writersCountEdge = Edge.message<Msg, string>("writersCount");
+  const nomadsCountEdge = Edge.message<Msg, string>("nomadsCount");
 
   const emailInputs: [string, string][] = [
     ["Nathan Nomad", "nathan@example.com"],
@@ -77,10 +75,10 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
   const tsvRows: Grouped[] = [];
   const stats: Count[] = [];
 
-  const tracer = createExampleTracer("cookbook/mergecontacts");
+  const tracer = ExampleTracer.create("cookbook/mergecontacts");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
@@ -91,17 +89,19 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
     rows: readonly [string, string][],
     label: string,
   ) => {
-    const id = graph.addNode({
-      state: undefined,
-      trigger: always(),
-      step: emitOnce<void, Msg, string>(
+    const id = graph.addNode(
+      new EmitOnce<void, Msg, string>(
         () =>
           rows.map(([name, value]) =>
-            msg(edge, { kind: "kv", source, name, value }),
+            Message.create(edge, { kind: "kv", source, name, value }),
           ),
         `${label} done`,
+        {
+          state: undefined,
+          trigger: TriggerRule.always(),
+        },
       ),
-    });
+    );
     return id;
   };
 
@@ -114,63 +114,75 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
     "snailmail",
   );
 
-  const groupByNameId = graph.addNode({
-    state: undefined,
-    trigger: allOf(on(emailEdge), on(phoneEdge), on(snailmailEdge)),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const kvs = <Src extends KV["source"]>(
-        edge: Edge<Msg, string>,
-        src: Src,
-      ): readonly KV[] =>
-        from(view, edge).filter(
-          (m): m is KV => m.kind === "kv" && m.source === src,
-        );
-      const allKvs: readonly KV[] = [
-        ...kvs(emailEdge, "email"),
-        ...kvs(phoneEdge, "phone"),
-        ...kvs(snailmailEdge, "snailmail"),
-      ];
-      const groups = pipe(
-        allKvs,
-        RNEA.groupBy((kv) => kv.name),
-      );
-      const events: Message<Msg>[] = [];
-      for (const name of Object.keys(groups).sort(S.Ord.compare)) {
-        const group = groups[name]!;
-        const bySource = (src: KV["source"]): readonly string[] =>
-          pipe(
-            group,
-            RA.filter((kv) => kv.source === src),
-            RA.map((kv) => kv.value),
+  const groupByNameId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const kvs = <Src extends KV["source"]>(
+          edge: Edge<Msg, string>,
+          src: Src,
+        ): readonly KV[] =>
+          from(view, edge).filter(
+            (m): m is KV => m.kind === "kv" && m.source === src,
           );
-        const grouped: Grouped = {
-          kind: "grouped",
-          name,
-          emails: bySource("email"),
-          phones: bySource("phone"),
-          snailmails: bySource("snailmail"),
-        };
-        events.push(
-          msg(groupedForTsvEdge, grouped),
-          msg(groupedForLudditesEdge, grouped),
-          msg(groupedForWritersEdge, grouped),
-          msg(groupedForNomadsEdge, grouped),
+        const allKvs: readonly KV[] = [
+          ...kvs(emailEdge, "email"),
+          ...kvs(phoneEdge, "phone"),
+          ...kvs(snailmailEdge, "snailmail"),
+        ];
+        const groups = pipe(
+          allKvs,
+          RNEA.groupBy((kv) => kv.name),
         );
-      }
-      return events;
-    }),
-  });
+        const events: Message<Msg>[] = [];
+        for (const name of Object.keys(groups).sort(S.Ord.compare)) {
+          const group = groups[name]!;
+          const bySource = (src: KV["source"]): readonly string[] =>
+            pipe(
+              group,
+              RA.filter((kv) => kv.source === src),
+              RA.map((kv) => kv.value),
+            );
+          const grouped: Grouped = {
+            kind: "grouped",
+            name,
+            emails: bySource("email"),
+            phones: bySource("phone"),
+            snailmails: bySource("snailmail"),
+          };
+          events.push(
+            Message.create(groupedForTsvEdge, grouped),
+            Message.create(groupedForLudditesEdge, grouped),
+            Message.create(groupedForWritersEdge, grouped),
+            Message.create(groupedForNomadsEdge, grouped),
+          );
+        }
+        return events;
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(emailEdge),
+          TriggerEntry.on(phoneEdge),
+          TriggerEntry.on(snailmailEdge),
+        ),
+      },
+    ),
+  );
 
-  const tsvSinkId = graph.addNode({
-    state: undefined,
-    trigger: when(groupedForTsvEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, groupedForTsvEdge)) {
-        if (m.kind === "grouped") tsvRows.push(m);
-      }
-      return [];
-    }),
-  });
+  const tsvSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, groupedForTsvEdge)) {
+          if (m.kind === "grouped") tsvRows.push(m);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(groupedForTsvEdge),
+      },
+    ),
+  );
 
   const makeFilterCount = (
     inputEdge: Edge<Msg, string>,
@@ -178,17 +190,23 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
     label: string,
     predicate: (g: Grouped) => boolean,
   ) => {
-    const id = graph.addNode({
-      state: undefined,
-      trigger: when(inputEdge),
-      step: stepNode<void, Msg, string>((_state, view) => {
-        const groups = from(view, inputEdge).filter(
-          (m): m is Grouped => m.kind === "grouped",
-        );
-        const count = groups.filter(predicate).length;
-        return [msg(outputEdge, { kind: "count", label, value: count })];
-      }),
-    });
+    const id = graph.addNode(
+      new StepNode<void, Msg, string>(
+        (_state, view) => {
+          const groups = from(view, inputEdge).filter(
+            (m): m is Grouped => m.kind === "grouped",
+          );
+          const count = groups.filter(predicate).length;
+          return [
+            Message.create(outputEdge, { kind: "count", label, value: count }),
+          ];
+        },
+        {
+          state: undefined,
+          trigger: TriggerRule.when(inputEdge),
+        },
+      ),
+    );
     return id;
   };
 
@@ -211,26 +229,30 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
     (g) => g.snailmails.length === 0,
   );
 
-  const statsSinkId = graph.addNode({
-    state: undefined,
-    trigger: anyOf(
-      on(ludditesCountEdge),
-      on(writersCountEdge),
-      on(nomadsCountEdge),
-    ),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const edge of [
-        ludditesCountEdge,
-        writersCountEdge,
-        nomadsCountEdge,
-      ]) {
-        for (const m of from(view, edge)) {
-          if (m.kind === "count") stats.push(m);
+  const statsSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const edge of [
+          ludditesCountEdge,
+          writersCountEdge,
+          nomadsCountEdge,
+        ]) {
+          for (const m of from(view, edge)) {
+            if (m.kind === "count") stats.push(m);
+          }
         }
-      }
-      return [];
-    }),
-  });
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.anyOf(
+          TriggerEntry.on(ludditesCountEdge),
+          TriggerEntry.on(writersCountEdge),
+          TriggerEntry.on(nomadsCountEdge),
+        ),
+      },
+    ),
+  );
 
   graph.addEdge(emailSourceId, groupByNameId, emailEdge);
   graph.addEdge(phoneSourceId, groupByNameId, phoneEdge);

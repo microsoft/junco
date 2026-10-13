@@ -15,18 +15,20 @@ import {
  * so the same object serves a bare Agent and Pi registration. Both factories
  * receive one options object, so they share a single operations owner.
  */
-export function createBashTool(
-  cwd: string,
-  options: BashToolOptions & {
-    operations: NonNullable<BashToolOptions["operations"]>;
+export const BashTool = {
+  create(
+    cwd: string,
+    options: BashToolOptions & {
+      operations: NonNullable<BashToolOptions["operations"]>;
+    },
+  ): AgentTool<any> {
+    // Guards JavaScript callers the type cannot.
+    if (options?.operations === undefined) {
+      throw new TypeError("BashTool.create: options.operations is required");
+    }
+    return Object.assign(
+      createPiBashToolDefinition(cwd, options),
+      createPiBashTool(cwd, options),
+    );
   },
-): AgentTool<any> {
-  // Guards JavaScript callers the type cannot.
-  if (options?.operations === undefined) {
-    throw new TypeError("createBashTool: options.operations is required");
-  }
-  return Object.assign(
-    createPiBashToolDefinition(cwd, options),
-    createPiBashTool(cwd, options),
-  );
-}
+};

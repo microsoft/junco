@@ -5,6 +5,8 @@ import type { DataflowTracer } from "../src/index.ts";
 /** One SDK client per example process, configured from the standard Opik environment/config. */
 const client = new Opik();
 
-export function createExampleTracer(name: string): DataflowTracer {
-  return new OpikDataflowTracer(client, name);
-}
+export const ExampleTracer = {
+  create(name: string): DataflowTracer {
+    return new OpikDataflowTracer(client, name);
+  },
+};

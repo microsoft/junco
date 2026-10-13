@@ -5,17 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { JuncoAgent, JuncoAgentError } from "junco-agent";
-import { JuncoMcpTools } from "junco-mcp";
 import {
-  createBashTool,
-  createShellMuxOperations,
+  contentText,
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import { DummyTracer, NodeId, TriggerRule } from "dataflow-engine";
+import { JuncoAgent } from "junco-agent";
+import {
+  BashTool,
+  EmptyPolicy,
   isMarshPolicyDenied,
+  LockPolicy,
   type NativeModule,
+  ShellMuxOperations,
   ToolCollection,
   type ToolCollectionOptions,
 } from "junco-tools";
+import { JuncoGraph } from "../src/index.ts";
 import { flushMacrotasks, nativeOptions } from "./support.ts";
 
 // Real Marsh policy through junco-tools' test addon: a CopyTree fixture filesystem with the sandbox
@@ -42,7 +49,7 @@ const OWNED = "const value = owned;\n";
  * with that collection, which is closed before the seed is removed.
  */
 async function withClaimedSeed(
-  policy: ToolCollectionOptions["policy"],
+  policy: ToolCollection["policy"],
   body: (seed: string, collection: ToolCollection) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "junco-agency-policy-"));
@@ -56,13 +63,13 @@ async function withClaimedSeed(
       sandbox: "always",
     });
     try {
-      const operations = createShellMuxOperations({
+      const operations = new ShellMuxOperations({
         mux: collection.mux,
         native: copyTree,
         principal: "other-owner",
       });
       try {
-        await createBashTool(seed, { operations }).execute(
+        await BashTool.create(seed, { operations }).execute(
           "claim",
           { command: `printf 'const value = owned;\\n' > ${SOURCE}` },
           undefined,
@@ -83,7 +90,7 @@ async function withClaimedSeed(
 test(
   "a real Marsh denial pauses the run as a policy yield and publishes nothing",
   () =>
-    withClaimedSeed("LockPolicy", async (seed, collection) => {
+    withClaimedSeed(LockPolicy, async (seed, collection) => {
       const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
       const read = await byName
         .get("read")!
@@ -94,23 +101,26 @@ test(
       const tag = /#([0-9A-Fa-f]{4})\]/.exec(readText)?.[1];
       assert.ok(tag, readText);
 
-      // Observe each tool's raw rejection before Pi reduces it to a text tool result.
+      // Observe each tool's raw rejection before Pi reduces it to a text tool result. The agent
+      // adds the collection's genuine release itself; a same-named wrapper would be refused.
       const raw: unknown[] = [];
       const attempts = new Map<string, number>();
-      const observed = collection.tools.map(
-        (tool): AgentTool => ({
-          ...tool,
-          execute: async (...args) => {
-            attempts.set(tool.name, (attempts.get(tool.name) ?? 0) + 1);
-            try {
-              return await tool.execute(...args);
-            } catch (error) {
-              raw.push(error);
-              throw error;
-            }
-          },
-        }),
-      );
+      const observed = collection.tools
+        .filter((tool) => tool.name !== "release")
+        .map(
+          (tool): AgentTool => ({
+            ...tool,
+            execute: async (...args) => {
+              attempts.set(tool.name, (attempts.get(tool.name) ?? 0) + 1);
+              try {
+                return await tool.execute(...args);
+              } catch (error) {
+                raw.push(error);
+                throw error;
+              }
+            },
+          }),
+        );
       const { faux, options } = await nativeOptions([
         fauxAssistantMessage(
           [
@@ -200,7 +210,7 @@ test(
 test(
   "an empty-policy agent publishes over a foreign claim without a policy yield",
   () =>
-    withClaimedSeed("EmptyPolicy", async (seed, collection) => {
+    withClaimedSeed(EmptyPolicy, async (seed, collection) => {
       const { faux, options } = await nativeOptions([
         fauxAssistantMessage(
           fauxToolCall(
@@ -214,7 +224,6 @@ test(
       ]);
       const agent = await JuncoAgent.fromResolved({
         ...options,
-        policy: "EmptyPolicy",
         collection,
         tools: collection.tools.filter((tool) => tool.name === "bash"),
         prompt: "take the file",
@@ -235,41 +244,42 @@ test(
 );
 
 test(
-  "a mismatched collection is rejected before any MCP server starts and stays usable",
+  "node policy validates the agent's collection",
   () =>
-    withClaimedSeed("LockPolicy", async (seed, collection) => {
-      const marker = join(seed, "started");
-      const { options } = await nativeOptions();
-      await assert.rejects(
-        JuncoAgent.fromResolved({
-          ...options,
-          policy: "EmptyPolicy",
-          collection,
-          cwd: seed,
-          tools: JuncoMcpTools.add({
-            name: "never",
-            type: "stdio",
-            command: "sh",
-            args: ["-c", `touch ${marker}`],
-          }),
-        }),
-        (error: unknown) =>
-          error instanceof JuncoAgentError &&
-          error.code === "invalid_argument" &&
-          error.message === "Collection policy does not match agent policy",
-      );
-      await assert.rejects(readFile(marker));
-      const bash = collection.tools.find((tool) => tool.name === "bash")!;
-      const result = await bash.execute(
-        "after",
-        { command: "printf usable" },
-        undefined,
-      );
-      assert.ok(
-        result.content.some(
-          (part) => part.type === "text" && part.text.includes("usable"),
-        ),
-      );
+    withClaimedSeed(LockPolicy, async (_seed, collection) => {
+      const { options } = await nativeOptions([
+        fauxAssistantMessage("registered"),
+      ]);
+      const agent = await JuncoAgent.fromResolved({
+        ...options,
+        collection,
+        tools: [],
+      });
+      const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer());
+      try {
+        const id = NodeId.create("bound");
+        assert.throws(
+          () =>
+            graph.addNode({
+              id,
+              policy: EmptyPolicy,
+              trigger: TriggerRule.always(),
+              state: agent,
+            }),
+          TypeError,
+        );
+        agent.stagePrompt("go");
+        graph.addNode({
+          id,
+          policy: LockPolicy,
+          trigger: TriggerRule.always(),
+          state: agent,
+        });
+        const result = await graph.run();
+        assert.equal(contentText(result.get(id)!.content), "registered");
+      } finally {
+        await graph.close();
+      }
     }),
   60_000,
 );

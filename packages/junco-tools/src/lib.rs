@@ -10,6 +10,7 @@ mod grep;
 mod iofs;
 mod js;
 mod mux;
+mod policy;
 mod process;
 mod routed_error;
 mod task;
@@ -30,20 +31,21 @@ use napi_derive::napi;
 
 use frontend::{OutputCallback, PolicyCallback};
 use mux::{RunState, Session};
+use policy::NativePolicy;
 use process::{CloseTimeout, ProcessState};
 use tool::SandboxMode;
 
 /// Options of a mux the caller opens.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct NativeMuxOptions {
     /// How calls route: `"shared"` (the default) sandboxes a shell command or writing file tool
     /// while another live shell shares the seed, `"always"` sandboxes every one. A read-only file
     /// tool always runs directly.
     pub sandbox: Option<String>,
-    /// The authorization policy every managed command of this mux is checked against:
-    /// `"LockPolicy"` (the default) or `"EmptyPolicy"`, which grants every capability.
-    #[napi(ts_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
-    pub policy: Option<String>,
+    /// The authorization policy every managed command of this mux is checked against; the
+    /// ownership-lock policy when omitted.
+    #[napi(ts_type = "NativePolicy")]
+    pub policy: Option<policy::PolicyArg>,
     /// Also deliver granted capabilities to `onPolicyDecision`; violations always are.
     pub policy_debug: Option<bool>,
 }
@@ -69,7 +71,6 @@ fn mux_options(
     on_policy_decision: Option<PolicyCallback>,
 ) -> Result<(
     SandboxMode,
-    &'static str,
     Arc<dyn marsh_core::Policy>,
     Option<Arc<frontend::PolicyLog>>,
 )> {
@@ -85,18 +86,10 @@ fn mux_options(
             )));
         }
     };
-    let (name, policy): (&'static str, Arc<dyn marsh_core::Policy>) = match policy.as_deref() {
-        None | Some("LockPolicy") => ("LockPolicy", Arc::new(marsh_core::LockPolicy)),
-        Some("EmptyPolicy") => ("EmptyPolicy", Arc::new(marsh_core::EmptyPolicy)),
-        Some(_) => {
-            return Err(Error::from_reason(
-                "policy must be \"LockPolicy\" or \"EmptyPolicy\"",
-            ));
-        }
-    };
+    let policy = policy.map_or_else(|| NativePolicy::lock().0, |policy| policy.0);
     let log = on_policy_decision
         .map(|callback| frontend::PolicyLog::new(callback, debug.unwrap_or(false)));
-    Ok((mode, name, policy, log))
+    Ok((mode, policy, log))
 }
 
 #[napi(object)]
@@ -221,7 +214,6 @@ impl NativeProcess {
 pub struct NativeMux {
     session: Arc<Session>,
     sandbox: SandboxMode,
-    policy: &'static str,
     owner: Option<marsh_core::Principal>,
 }
 
@@ -235,7 +227,7 @@ impl NativeMux {
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
     ) -> Result<Self> {
-        let (sandbox, policy, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
+        let (sandbox, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let filesystem: Arc<dyn Subvolumes> = Arc::new(LibBtrfs);
             // Discovery only. Materialization, the seed's exclusive lease, its log recovery
@@ -259,7 +251,6 @@ impl NativeMux {
         Ok(Self {
             session,
             sandbox,
-            policy,
             owner: None,
         })
     }
@@ -271,7 +262,6 @@ impl NativeMux {
         Ok(Self {
             session: Arc::clone(&self.session),
             sandbox: self.sandbox,
-            policy: self.policy,
             owner: Some(
                 marsh_core::fresh_principal()
                     .map_err(|error| Error::from_reason(error.to_string()))?,
@@ -283,12 +273,6 @@ impl NativeMux {
     #[napi(getter, ts_return_type = "\"shared\" | \"always\"")]
     pub fn sandbox(&self) -> &'static str {
         self.sandbox.name()
-    }
-
-    /// The authorization policy this mux was opened with.
-    #[napi(getter, ts_return_type = "\"LockPolicy\" | \"EmptyPolicy\"")]
-    pub fn policy(&self) -> &'static str {
-        self.policy
     }
 
     /// Resolves once `cwd` is a directory of exactly this mux's seed, as every operation at it
@@ -396,7 +380,7 @@ impl NativeMux {
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
     ) -> Result<Self> {
-        let (sandbox, policy, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
+        let (sandbox, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let seed = Path::new(&seed)
                 .canonicalize()
@@ -441,7 +425,6 @@ impl NativeMux {
         Ok(Self {
             session,
             sandbox,
-            policy,
             owner: None,
         })
     }

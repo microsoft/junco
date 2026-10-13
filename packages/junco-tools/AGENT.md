@@ -13,11 +13,12 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 | Path | Responsibility |
 | --- | --- |
-| `src/lib.rs` | Exported napi classes/objects, the `sandbox` mux option, and production/test-only opening factories. |
-| `src/mux.rs` | Session ownership, principal admission, execution, routed tool calls, cancellation, verdicts, and shutdown. |
-| `src/tool.rs` | Routed file tools: the `JuncoTool` classification, the mux's sandbox policy, and the `NativeMux` file-tool methods that run the engines inside marsh calls. |
+| `src/lib.rs` | Exported napi classes/objects, the `sandbox` mux option, owner-bound handles (`forkOwner`), and production/test-only opening factories. |
+| `src/mux.rs` | Session ownership, principal admission, execution, routed tool calls (each acting as its handle's policy owner), cancellation, verdicts, and shutdown. |
+| `src/tool.rs` | Routed file tools: the `JuncoTool` classification, the mux's sandbox policy (`release` always managed), and the `NativeMux` file-tool and `release` methods that run inside marsh calls. |
 | `src/frontend.rs` | Snapshot-UID output routing, JS callback receipts, errors, and closure fences. |
-| `ts/shell-mux.ts` | `acquireShellMux`: opens one fresh, owned ShellMux per call with its required policy, validates cwd, logs policy decisions, and returns a lease whose `release()` closes the mux and flushes the policy log. |
+| `src/policy.rs`, `ts/policy.ts` | `NativePolicy` (lock, empty) and its `and`/`or`/`not` combinators as open `marsh_core::Policy` implementations; the open TS `Policy` interface, whose `toNative(native)` builds it per addon, with `LockPolicy`, `EmptyPolicy` and the same combinators. A new policy adds one native factory and one `Policy` object; nothing enumerates them. |
+| `ts/shell-mux.ts` | `ShellMuxLease.create`: opens one fresh, owned ShellMux per call with its policy (default `LockPolicy`), validates cwd, logs policy decisions, and returns a lease whose `release()` closes the mux and flushes the policy log. |
 | `ts/operations.ts` | Pi `BashOperations` adapter: borrows a supplied mux or lazily owns one (default `LockPolicy`), its own runs, timeout/abort handling, and local `close()`. |
 | `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted from the pinned revision (see `LICENSE.oh-my-pi`), verbatim except for the routing seams: filesystem exports split into a JS-thread `prepare` and an engine run `src/tool.rs` calls, `ast_edit` writing through a host writer, and `EditStore`'s tracked keys. `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
 | `src/task.rs`, `src/testing.rs`, `src/utils.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
@@ -25,8 +26,9 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
 | `ts/mime.ts` | Pi's image type sniffing, ported verbatim because Pi does not export it. |
 | `ts/edit.ts` | The hashline edit tool: one routed `mux.edit` call per edit. |
+| `ts/release.ts` | The `release` tool: one routed, always-managed `mux.release` call per file. |
 | `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
-| `ts/collection.ts` | `ToolCollection`: one `EditStore`, its own mux and policy, the complete ordered tool list, creator/borrower holds (`close()`/`lease()`), and final teardown that drains its invocations and closes its mux. |
+| `ts/collection.ts` | `ToolCollection`: one `EditStore`, its own mux owner and policy, the complete ordered tool list, per-owner `bind()` sets, creator/borrower holds (`close()`/`lease()`), and final teardown that drains its invocations and closes its mux. |
 | `ts/yield.ts` | The native-free `yield` tool and the module-private registry behind `isYieldTool`: only its own tool objects are scheduling primitives for `junco-agent`. Keep factory and registry in this one module. |
 | `ts/bash.ts`, `ts/index.ts` | Thin upstream factory wrappers and public exports. |
 | `ts/extension.ts` | Pi session hooks and same-name collection registration. |
@@ -34,13 +36,13 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `scripts/rustc-bootstrap-shim.sh` | `RUSTC_WRAPPER` exporting `RUSTC_BOOTSTRAP` for `xutf` only; every other crate compiles as plain stable. |
 | `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane. |
 | `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree seeds (`seedFixture`) and raw test muxes (`fixture`/`closeFixture`), the stable `copyTreeNative()` adapter for automatic acquisition, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
-| `tests/shell-mux.test.mjs` | Resource-local mux lifecycle on the CopyTree addon: independent muxes and policies over one seed, refused configurations/cwds, failed opens, close/release idempotence, and persistent `NativeProcess` basics. |
+| `tests/shell-mux.test.mjs` | Resource-local mux lifecycle on the CopyTree addon: independent muxes and policies over one seed, refused configurations/cwds, failed opens, close/release idempotence, persistent `NativeProcess` basics, and forked owners/`release` in both sandbox modes. |
 | `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
 | `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, the native-free `yield` tool in a bare Agent, and SDK `customTools` registration, with scripted model responses. |
 | `tests/tools.test.mjs` | Collection file tools over a CopyTree seed: hashline provenance, snapshot fidelity, staging, search boundaries, publication gating, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
 | `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
-| `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, and nested-seed refusal on a real btrfs seed. |
+| `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, ownership release without a live peer and removal-triggered release (both across reopening the seed), and nested-seed refusal on a real btrfs seed. |
 
 `dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco-agency workspace root's `bun.lock`.
 
@@ -99,11 +101,11 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 
 - Import supported APIs from the **root** Pi packages, not their unexported `dist/...` subpaths. Keep the bash wrapper's type exactly `typeof` the upstream factory and re-export Pi's existing tool types.
 - Preserve caller-supplied operations, `commandPrefix`, `spawnHook`, and option types. Selecting operations intentionally supersedes `shellPath`.
-- Every public factory returns one Pi `AgentTool` (four-argument `execute`) that still carries Pi's prompt metadata and renderers. File tools are built as `satisfies ToolDefinition` and returned as `AgentTool`; bash merges upstream's `createBashTool` onto upstream's definition, both given one resolved options object. The same object serves a bare `Agent`, SDK `customTools`, and `pi.registerTool`; do not add `defineTool` wrapping, casts, or a parallel definition-producing API. An optional runtime context stays optional: `read` forwards it to Pi's fallback when present and uses Pi's context-free reader otherwise. `createAgentSession`'s `tools` option contains names.
+- Every public factory returns one Pi `AgentTool` (four-argument `execute`) that still carries Pi's prompt metadata and renderers. File tools are built as `satisfies ToolDefinition` and returned as `AgentTool`; bash merges upstream's `BashTool` onto upstream's definition, both given one resolved options object. The same object serves a bare `Agent`, SDK `customTools`, and `pi.registerTool`; do not add `defineTool` wrapping, casts, or a parallel definition-producing API. An optional runtime context stays optional: `read` forwards it to Pi's fallback when present and uses Pi's context-free reader otherwise. `createAgentSession`'s `tools` option contains names.
 - Timeouts are seconds, optional with no default deadline. Match Pi's validation and abort/timeout sentinels before opening/starting work. Keep the abort listener for the whole operation, including pending opens and principal admission.
 - Omit undefined environment values; never stringify them or mutate `process.env`. Forward Buffer chunks directly. Pi owns streaming UTF-8 decoding, truncation, and full-output persistence.
 - An operations owner borrows a supplied `mux` (never closing it; an explicit policy/sandbox must match) or lazily opens one owned lease, assigned before awaiting. Clear a failed acquisition so a later invocation retries; once closed it never acquires, even when close races the first open.
-- There is no process-wide ShellMux. Each collection, `acquireShellMux` lease, and owning operations instance has its own mux and policy. Borrowers (agents, graphs, coroutines, MCP connections) take `collection.lease()` holds; only the final release fences execution, drains, and closes the mux. Tests close their own leases/collections in `finally`. Do not rely on asynchronous GC finalizers.
+- There is no process-wide ShellMux. Each collection, `ShellMuxLease.create` lease, and owning operations instance has its own mux and policy. Borrowers (agents, graphs, coroutines, MCP connections) take `collection.lease()` holds; only the final release fences execution, drains, and closes the mux. Tests close their own leases/collections in `finally`. Do not rely on asynchronous GC finalizers.
 - Register the whole `ToolCollection` on `session_start`, using the Pi session ID as bash's stable principal and Pi's public settings API for the persisted prefix. Close the collection on `session_shutdown`. Do not intercept `user_bash`, replace `write`/`ls`, or instruct users to disable built-in tools.
 
 ## File-tool invariants

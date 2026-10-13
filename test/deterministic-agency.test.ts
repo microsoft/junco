@@ -3,38 +3,30 @@ import assert from "node:assert/strict";
 import type { Context } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
-  allOf,
-  always,
-  anyOf,
   DataflowDefinitionError,
   DataflowNodeError,
   DummyTracer,
-  type Edge,
+  Edge,
   from,
-  type Message,
-  messageEdge,
-  msg,
+  Message,
   NodeId,
   type NodeOptions,
   type NodeSchedule,
-  on,
+  TriggerEntry,
+  TriggerRule,
   triggerInputs,
   UNBOUNDED,
-  valueEdge,
   Width,
-  when,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
-import { createParallelScheduler, createScheduler } from "junco-scheduler";
+import { ParallelScheduler, Scheduler } from "junco-scheduler";
+import { LockPolicy, type Policy } from "junco-tools";
 import {
   type AgenticInput,
-  agentNode,
   Deterministic,
-  deterministicNode,
   graph as graphApi,
-  graphNode,
   JuncoGraph,
   MockAgent,
   type MockHook,
@@ -166,26 +158,26 @@ const failingAbort = (failure: Error): MockAgent =>
     }
   })({ runs: [] });
 
-const member = (agent: MockAgent, description = "member", id?: string) =>
-  agentNode(agent, {
-    ...(id === undefined ? {} : { id: NodeId(id) }),
-    description,
-    policy: "LockPolicy",
-    trigger: always(),
-  });
+const member = (agent: MockAgent, description = "member", id?: string) => ({
+  ...(id === undefined ? {} : { id: NodeId.create(id) }),
+  state: agent,
+  description,
+  policy: LockPolicy,
+  trigger: TriggerRule.always(),
+});
 
 /** A nested-graph node its parent never runs: the test drives `child` itself. */
-const detached = (child: PolicyGraph, result: NodeId, description = "nested") =>
-  graphNode(
-    child,
-    {
-      description,
-      policy: "LockPolicy",
-      trigger: always(),
-      is_available: () => false,
-    },
-    { result },
-  );
+const detached = (
+  child: PolicyGraph,
+  result: NodeId,
+  description = "nested",
+) => ({
+  description,
+  trigger: TriggerRule.always(),
+  is_available: () => false,
+  state: child,
+  result,
+});
 
 /** The messages currently queued on message edge `edge`. */
 const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
@@ -250,33 +242,33 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "child done")],
       });
       const graph = policyGraph(strategy);
-      const work = messageEdge<AgenticInput, AssistantMessage>(
+      const work = Edge.message<AgenticInput, AssistantMessage>(
         "sender->worker",
       );
-      const result = valueEdge<AgenticInput, AssistantMessage>("worker->child");
-      const s = graph.addNode(
-        agentNode(sender, {
-          description: "sender",
-          policy: "LockPolicy",
-          trigger: always(),
-        }),
+      const result = Edge.value<AgenticInput, AssistantMessage>(
+        "worker->child",
       );
-      const w = graph.addNode(
-        agentNode(
-          worker,
-          { description: "worker", policy: "LockPolicy", trigger: when(work) },
-          { prompt: "work" },
-        ),
-      );
-      const c = graph.addNode(
-        agentNode(child, {
-          description: "child",
-          policy: "LockPolicy",
-          trigger: when(result),
-        }),
-      );
+      const s = graph.addNode({
+        state: sender,
+        description: "sender",
+        policy: LockPolicy,
+        trigger: TriggerRule.always(),
+      });
+      worker.stagePrompt("work");
+      const w = graph.addNode({
+        state: worker,
+        description: "worker",
+        policy: LockPolicy,
+        trigger: TriggerRule.when(work),
+      });
+      const c = graph.addNode({
+        state: child,
+        description: "child",
+        policy: LockPolicy,
+        trigger: TriggerRule.when(result),
+      });
       graph.addEdge(s, w, work).addEdge(w, c, result);
-      graph.emit(s, msg(work, { kind: "prompt", text: "work" }));
+      graph.emit(s, Message.create(work, { kind: "prompt", text: "work" }));
 
       await stepUntil(graph, () => worker.requests.length === 1);
       assert.deepEqual(queued(work), []);
@@ -321,47 +313,48 @@ for (const strategy of STRATEGIES) {
         ],
       });
       const graph = policyGraph(strategy);
-      const left = messageEdge<AgenticInput, AssistantMessage>("left");
-      const right = messageEdge<AgenticInput, AssistantMessage>("right");
-      const s = graph.addNode(
-        agentNode(sender, {
-          id: NodeId("s"),
-          description: "sender",
-          policy: "LockPolicy",
-          trigger: always(),
-        }),
-      );
-      const m = graph.addNode(
-        agentNode(gatedMember, {
-          id: NodeId("m"),
-          description: "gated",
-          policy: "LockPolicy",
-          trigger: allOf(on(left), on(right)),
-        }),
-      );
+      const left = Edge.message<AgenticInput, AssistantMessage>("left");
+      const right = Edge.message<AgenticInput, AssistantMessage>("right");
+      const s = graph.addNode({
+        id: NodeId.create("s"),
+        state: sender,
+        description: "sender",
+        policy: LockPolicy,
+        trigger: TriggerRule.always(),
+      });
+      const m = graph.addNode({
+        id: NodeId.create("m"),
+        state: gatedMember,
+        description: "gated",
+        policy: LockPolicy,
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(left),
+          TriggerEntry.on(right),
+        ),
+      });
       graph.addEdge(s, m, left).addEdge(s, m, right);
       const followUp = (text: string): AgenticInput => ({
         kind: "followUp",
         text,
       });
-      graph.emit(s, msg(left, followUp("x1")));
+      graph.emit(s, Message.create(left, followUp("x1")));
       await stepUntil(graph, () => queued(left).length === 1);
       assert.ok(!graph.available().has(m));
       assert.equal(gatedMember.status, "ready");
       assert.deepEqual(gatedMember.requests, []);
 
-      graph.emit(s, msg(right, followUp("y1")));
+      graph.emit(s, Message.create(right, followUp("y1")));
       await stepUntil(graph, () => gatedMember.requests.length === 1);
       assert.deepEqual([queued(left), queued(right)], [[], []]);
       assert.deepEqual(requestTexts(gatedMember.requests), [["start"]]);
 
-      graph.emit(s, msg(left, followUp("x2")));
+      graph.emit(s, Message.create(left, followUp("x2")));
       await stepUntil(graph, () => queued(left).length === 1);
       const before = gatedMember.requests.length;
       await stepUntil(graph, () => gatedMember.requests.length > before);
       assert.deepEqual([queued(left), queued(right)], [[followUp("x2")], []]);
 
-      graph.emit(s, msg(right, followUp("y2")));
+      graph.emit(s, Message.create(right, followUp("y2")));
       await stepUntil(
         graph,
         () => queued(left).length === 0 && queued(right).length === 0,
@@ -387,29 +380,29 @@ for (const strategy of STRATEGIES) {
       const child = policyGraph(strategy);
       const innerId = child.addNode(member(inner, "inner"));
       const graph = policyGraph(strategy);
-      const go = messageEdge<AgenticInput, AssistantMessage>("source->nested");
-      const selected = valueEdge<AgenticInput, AssistantMessage>(
+      const go = Edge.message<AgenticInput, AssistantMessage>("source->nested");
+      const selected = Edge.value<AgenticInput, AssistantMessage>(
         "nested=>consumer",
       );
-      const s = graph.addNode(
-        agentNode(source, { policy: "LockPolicy", trigger: always() }),
-      );
-      const n = graph.addNode(
-        graphNode(
-          child,
-          { id: NodeId("nested"), policy: "LockPolicy", trigger: when(go) },
-          { result: innerId },
-        ),
-      );
-      const c = graph.addNode(
-        agentNode(
-          consumer,
-          { policy: "LockPolicy", trigger: when(selected) },
-          { prompt: "review" },
-        ),
-      );
+      const s = graph.addNode({
+        state: source,
+        policy: LockPolicy,
+        trigger: TriggerRule.always(),
+      });
+      const n = graph.addNode({
+        id: NodeId.create("nested"),
+        trigger: TriggerRule.when(go),
+        state: child,
+        result: innerId,
+      });
+      consumer.stagePrompt("review");
+      const c = graph.addNode({
+        state: consumer,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(selected),
+      });
       graph.addEdge(s, n, go).addEdge(n, c, selected);
-      graph.emit(s, msg(go, { kind: "prompt", text: "go" }));
+      graph.emit(s, Message.create(go, { kind: "prompt", text: "go" }));
 
       await stepUntil(graph, () => inner.requests.length === 1);
       // The one trigger message is consumed, yet the started nested graph keeps running.
@@ -438,20 +431,20 @@ for (const strategy of STRATEGIES) {
           : assert.fail("expected a prompt input");
       for (const kind of ["all", "any"] as const) {
         const parent = policyGraph(strategy);
-        const left = messageEdge<AgenticInput, AssistantMessage>(
+        const left = Edge.message<AgenticInput, AssistantMessage>(
           "left->nested",
         );
-        const right = messageEdge<AgenticInput, AssistantMessage>(
+        const right = Edge.message<AgenticInput, AssistantMessage>(
           "right->nested",
         );
-        const toN3 = messageEdge<AgenticInput, AssistantMessage>("nested->n3");
-        const toN4 = messageEdge<AgenticInput, AssistantMessage>("nested->n4");
+        const toN3 = Edge.message<AgenticInput, AssistantMessage>("nested->n3");
+        const toN4 = Edge.message<AgenticInput, AssistantMessage>("nested->n4");
         const prompt = (text: string): AgenticInput => ({
           kind: "prompt",
           text,
         });
 
-        const childScheduler = createScheduler<
+        const childScheduler = new Scheduler<
           { readonly texts: string[] },
           AgenticInput,
           AssistantMessage
@@ -466,92 +459,87 @@ for (const strategy of STRATEGIES) {
         });
         const child = new JuncoGraph(
           childScheduler,
-          Width(1),
+          Width.create(1),
           UNBOUNDED,
           new DummyTracer(),
-          "LockPolicy",
+          LockPolicy,
         );
-        const innerId = child.addNode(
-          deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(
-              async function* () {
-                yield [];
-                while (childScheduler.state.texts.length < 2) yield [];
-                return assistant(childScheduler.state.texts.join("+"));
-              },
-              "LockPolicy",
-            ),
-            { id: NodeId("inner"), policy: "LockPolicy", trigger: always() },
+        const innerId = child.addNode({
+          id: NodeId.create("inner"),
+          trigger: TriggerRule.always(),
+          state: new Deterministic<AgenticInput, AssistantMessage>(
+            async function* () {
+              yield [];
+              while (childScheduler.state.texts.length < 2) yield [];
+              return assistant(childScheduler.state.texts.join("+"));
+            },
+            LockPolicy,
           ),
-        );
+        });
 
         const source = (
           edge: Edge<AgenticInput, AssistantMessage>,
           text: string,
           delay: number,
-        ) =>
-          deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(
-              async function* () {
-                for (let index = 0; index < delay; index++) yield [];
-                yield [msg(edge, prompt(text))];
-                return assistant(`${text} sent`);
-              },
-              "LockPolicy",
-            ),
-            { id: NodeId(text), policy: "LockPolicy", trigger: always() },
-          );
+        ) => ({
+          id: NodeId.create(text),
+          trigger: TriggerRule.always(),
+          state: new Deterministic<AgenticInput, AssistantMessage>(
+            async function* () {
+              for (let index = 0; index < delay; index++) yield [];
+              yield [Message.create(edge, prompt(text))];
+              return assistant(`${text} sent`);
+            },
+            LockPolicy,
+          ),
+        });
         const observed = { n3: [] as string[][], n4: [] as string[][] };
         const consumer = (
           edge: Edge<AgenticInput, AssistantMessage>,
           name: "n3" | "n4",
-        ) =>
-          deterministicNode(
-            new Deterministic<AgenticInput, AssistantMessage>(
-              async function* () {
-                const view = yield [];
-                observed[name].push(from(view, edge).map(inputText));
-                return assistant(`${name} done`);
-              },
-              "LockPolicy",
-            ),
-            { id: NodeId(name), policy: "LockPolicy", trigger: when(edge) },
-          );
+        ) => ({
+          id: NodeId.create(name),
+          trigger: TriggerRule.when(edge),
+          state: new Deterministic<AgenticInput, AssistantMessage>(
+            async function* () {
+              const view = yield [];
+              observed[name].push(from(view, edge).map(inputText));
+              return assistant(`${name} done`);
+            },
+            LockPolicy,
+          ),
+        });
 
         const deliveries: string[][] = [];
         const l = parent.addNode(source(left, "left", 0));
         const r = parent.addNode(source(right, "right", 1));
-        const n: NodeId = parent.addNode(
-          graphApi.nodes.graphNode(
-            child,
-            {
-              id: NodeId("nested"),
-              policy: "LockPolicy",
-              trigger:
-                kind === "all"
-                  ? allOf(on(left), on(right))
-                  : anyOf(on(left), on(right)),
-            },
-            {
-              result: innerId,
-              receive: (view) => {
-                const batch = [...from(view, left), ...from(view, right)].map(
-                  inputText,
-                );
-                if (batch.length === 0) return;
-                deliveries.push(batch);
-                childScheduler.state.texts.push(...batch);
-              },
-              afterStep: () => {
-                const retained = child.result(innerId);
-                if (O.isNone(retained)) return;
-                const answer = textOf(retained.value);
-                parent.emit(n, msg(toN3, prompt(`n3: ${answer}`)));
-                parent.emit(n, msg(toN4, prompt(`n4: ${answer}`)));
-              },
-            },
-          ),
-        );
+        const n: NodeId = parent.addNode({
+          id: NodeId.create("nested"),
+          trigger:
+            kind === "all"
+              ? TriggerRule.allOf(TriggerEntry.on(left), TriggerEntry.on(right))
+              : TriggerRule.anyOf(
+                  TriggerEntry.on(left),
+                  TriggerEntry.on(right),
+                ),
+          state: child,
+          result: innerId,
+          receive: (view) => {
+            const batch = [...from(view, left), ...from(view, right)].map(
+              inputText,
+            );
+            if (batch.length === 0) return;
+            deliveries.push(batch);
+            childScheduler.state.texts.push(...batch);
+          },
+          afterStep: () => {
+            const retained = child.result(innerId);
+            if (O.isNone(retained)) return;
+            const answer = textOf(retained.value);
+            parent.emit(n, Message.create(toN3, prompt(`n3: ${answer}`)));
+            parent.emit(n, Message.create(toN4, prompt(`n4: ${answer}`)));
+          },
+        });
         const n3 = parent.addNode(consumer(toN3, "n3"));
         const n4 = parent.addNode(consumer(toN4, "n4"));
         parent
@@ -622,27 +610,26 @@ for (const strategy of STRATEGIES) {
       const child = policyGraph(strategy);
       const idleId = child.addNode(member(idle, "idle"));
       const graph = policyGraph(strategy);
-      const selected = valueEdge<AgenticInput, AssistantMessage>(
+      const selected = Edge.value<AgenticInput, AssistantMessage>(
         "nested=>dependent",
       );
       let ran = false;
-      const n = graph.addNode(
-        graphNode(
-          child,
-          { policy: "LockPolicy", trigger: always() },
-          { result: idleId },
-        ),
-      );
-      const d = graph.addNode(
-        deterministicNode(
-          new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+      const n = graph.addNode({
+        trigger: TriggerRule.always(),
+        state: child,
+        result: idleId,
+      });
+      const d = graph.addNode({
+        trigger: TriggerRule.when(selected),
+        state: new Deterministic<AgenticInput, AssistantMessage>(
+          async function* () {
             yield [];
             ran = true;
             return assistant("unused");
-          }, "LockPolicy"),
-          { policy: "LockPolicy", trigger: when(selected) },
+          },
+          LockPolicy,
         ),
-      );
+      });
       graph.addEdge(n, d, selected);
 
       const error = await outcome(graph.run());
@@ -658,25 +645,27 @@ for (const strategy of STRATEGIES) {
     test("an empty graph runs to an empty result map; a nested node must select a registered result", async () => {
       const empty = policyGraph(strategy);
       assert.equal((await empty.run()).size, 0);
+      const parent = policyGraph(strategy);
       assert.throws(
         () =>
-          graphNode(
-            empty,
-            { policy: "LockPolicy", trigger: always() },
-            { result: NodeId("missing") },
-          ),
+          parent.addNode({
+            trigger: TriggerRule.always(),
+            state: empty,
+            result: NodeId.create("missing"),
+          }),
         (error) => error instanceof DataflowDefinitionError,
       );
+      let registered = 0;
+      parent.forEachNode(() => registered++);
+      assert.equal(registered, 0);
+      await parent.close();
       await empty.close();
     });
 
     test("one shared availability predicate holds agent, coroutine and graph nodes until released", async () => {
       let admitted = false;
-      const shared: NodeOptions<AgenticInput, AssistantMessage> & {
-        readonly policy: "LockPolicy";
-      } = {
-        trigger: always(),
-        policy: "LockPolicy",
+      const shared: NodeOptions<AgenticInput, AssistantMessage> = {
+        trigger: TriggerRule.always(),
         is_available: (_view, triggered) => admitted && triggered,
       };
       const agent = new MockAgent({
@@ -688,7 +677,7 @@ for (const strategy of STRATEGIES) {
           yield [];
           return assistant("coroutine done");
         },
-        "LockPolicy",
+        LockPolicy,
       );
       const inner = new MockAgent({
         prompt: "inner",
@@ -697,19 +686,23 @@ for (const strategy of STRATEGIES) {
       const child = policyGraph(strategy);
       const innerId = child.addNode(member(inner, "inner"));
       const graph = policyGraph(strategy);
-      const a = graph.addNode(
-        agentNode(agent, { ...shared, id: NodeId("agent") }),
-      );
-      const d = graph.addNode(
-        deterministicNode(coroutine, { ...shared, id: NodeId("coroutine") }),
-      );
-      const n = graph.addNode(
-        graphNode(
-          child,
-          { ...shared, id: NodeId("nested") },
-          { result: innerId },
-        ),
-      );
+      const a = graph.addNode({
+        ...shared,
+        id: NodeId.create("agent"),
+        state: agent,
+        policy: LockPolicy,
+      });
+      const d = graph.addNode({
+        ...shared,
+        id: NodeId.create("coroutine"),
+        state: coroutine,
+      });
+      const n = graph.addNode({
+        ...shared,
+        id: NodeId.create("nested"),
+        state: child,
+        result: innerId,
+      });
 
       assert.equal((await graph.run()).size, 0);
       assert.equal(graph.available().size, 0);
@@ -1101,52 +1094,46 @@ describe("nested graphs", () => {
   test("a selected undefined result is a present parent value", async () => {
     type Maybe = AssistantMessage | undefined;
     const child = new JuncoGraph<AgenticInput, Maybe>(
-      createParallelScheduler(),
-      Width(1),
+      new ParallelScheduler(),
+      Width.create(1),
       UNBOUNDED,
       new DummyTracer(),
-      "LockPolicy",
+      LockPolicy,
     );
-    const empty = child.addNode(
-      deterministicNode(
-        // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-        new Deterministic<AgenticInput, Maybe>(async function* () {
-          return undefined;
-        }, "LockPolicy"),
-        { policy: "LockPolicy", trigger: always() },
-      ),
-    );
+    const empty = child.addNode({
+      trigger: TriggerRule.always(),
+      // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
+      state: new Deterministic<AgenticInput, Maybe>(async function* () {
+        return undefined;
+      }, LockPolicy),
+    });
     const parent = new JuncoGraph<AgenticInput, Maybe>(
-      createParallelScheduler(),
-      Width(1),
+      new ParallelScheduler(),
+      Width.create(1),
       UNBOUNDED,
       new DummyTracer(),
-      "LockPolicy",
+      LockPolicy,
     );
-    const selected = valueEdge<AgenticInput, Maybe>("nested=>reader");
+    const selected = Edge.value<AgenticInput, Maybe>("nested=>reader");
     let observed:
       | { readonly delivered: boolean; readonly value: Maybe }
       | undefined;
-    const n = parent.addNode(
-      graphNode(
-        child,
-        { policy: "LockPolicy", trigger: always() },
-        { result: empty },
-      ),
-    );
-    const r = parent.addNode(
-      deterministicNode(
-        new Deterministic<AgenticInput, Maybe>(async function* () {
-          const view = yield [];
-          observed = {
-            delivered: view.values.has(selected.id),
-            value: view.values.get(selected.id),
-          };
-          return assistant("read");
-        }, "LockPolicy"),
-        { policy: "LockPolicy", trigger: when(selected) },
-      ),
-    );
+    const n = parent.addNode({
+      trigger: TriggerRule.always(),
+      state: child,
+      result: empty,
+    });
+    const r = parent.addNode({
+      trigger: TriggerRule.when(selected),
+      state: new Deterministic<AgenticInput, Maybe>(async function* () {
+        const view = yield [];
+        observed = {
+          delivered: view.values.has(selected.id),
+          value: view.values.get(selected.id),
+        };
+        return assistant("read");
+      }, LockPolicy),
+    });
     parent.addEdge(n, r, selected);
 
     await parent.run();
@@ -1157,44 +1144,41 @@ describe("nested graphs", () => {
 
   test("cancellation uses the activation's captured child signal after abort resets it", async () => {
     const child = new JuncoGraph<AgenticInput, AssistantMessage>(
-      createParallelScheduler(),
-      Width(1),
+      new ParallelScheduler(),
+      Width.create(1),
       UNBOUNDED,
       new DummyTracer(),
-      "LockPolicy",
+      LockPolicy,
     );
-    const source = child.addNode(
-      deterministicNode(
+    const source = child.addNode({
+      trigger: TriggerRule.always(),
+      state: new Deterministic<AgenticInput, AssistantMessage>(
         // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-        new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        async function* () {
           return assistant("child-result");
-        }, "LockPolicy"),
-        { policy: "LockPolicy", trigger: always() },
+        },
+        LockPolicy,
       ),
-    );
+    });
     const parent = new JuncoGraph<AgenticInput, AssistantMessage>(
-      createParallelScheduler(),
-      Width(1),
+      new ParallelScheduler(),
+      Width.create(1),
       UNBOUNDED,
       new DummyTracer(),
-      "LockPolicy",
+      LockPolicy,
     );
     const cancelled = new Error("child cancelled");
     let captured: AbortSignal | undefined;
-    const nested = parent.addNode(
-      graphNode(
-        child,
-        { policy: "LockPolicy", trigger: always() },
-        {
-          result: source,
-          // Fully settle the child's abort, which gives it a fresh signal, before completion is tested.
-          afterStep: async () => {
-            captured = child.signal;
-            await child.abort(cancelled);
-          },
-        },
-      ),
-    );
+    const nested = parent.addNode({
+      trigger: TriggerRule.always(),
+      state: child,
+      result: source,
+      // Fully settle the child's abort, which gives it a fresh signal, before completion is tested.
+      afterStep: async () => {
+        captured = child.signal;
+        await child.abort(cancelled);
+      },
+    });
 
     const failure = await parent.run().then(
       () => assert.fail("the cancelled nested graph published its result"),
@@ -1231,7 +1215,7 @@ describe("round-robin", () => {
       [...agents].map(([id, agent]) => [
         id,
         agent.status,
-        graph.getNode(NodeId(id))!.status,
+        graph.getNode(NodeId.create(id))!.status,
       ]);
 
     for (let window = 0; window < 4; window++) await graph.step();
@@ -1249,7 +1233,7 @@ describe("round-robin", () => {
 
     await graph.run();
     for (const id of agents.keys())
-      assert.equal(resultText(graph, NodeId(id)), `done ${id}`);
+      assert.equal(resultText(graph, NodeId.create(id)), `done ${id}`);
     assert.deepEqual(
       [...agents.values()].map((agent) => agent.requests.length),
       [2, 2, 2],
@@ -1311,7 +1295,7 @@ describe("parallel", () => {
           runs: [yieldsThen(0, `done ${index}`)],
         }),
     );
-    const graph = policyGraph("parallel", { threads: Width(2) });
+    const graph = policyGraph("parallel", { threads: Width.create(2) });
     const ids = agents.map((agent, index) =>
       graph.addNode(member(agent, `member ${index}`)),
     );

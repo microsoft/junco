@@ -17,24 +17,18 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import {
-  DummyTracer,
-  NodeId,
-  type NodeIdType,
-  UNBOUNDED,
-} from "dataflow-engine";
+import { DummyTracer, NodeId, type NodeIdType } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { JuncoMcpTools } from "junco-mcp";
-import { createTaskTool, type NativeModule, ToolCollection } from "junco-tools";
 import {
-  agentNode,
-  createAgencyScheduler,
-  createParallelAgentGraph,
-  graphNode,
-  JuncoGraph,
-} from "../src/index.ts";
-import { always } from "../src/std/trigger.ts";
+  LockPolicy,
+  type NativeModule,
+  TaskTool,
+  ToolCollection,
+} from "junco-tools";
+import { JuncoGraph } from "../src/index.ts";
+import { TriggerRule } from "../src/std/trigger.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import {
   drive,
@@ -85,7 +79,7 @@ afterAll(async () => {
 
 /** A fresh Git-policy collection over the fixture seed. */
 const openCollection = () =>
-  ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
+  ToolCollection.create(seed, { native: copyTree, policy: LockPolicy });
 
 const fixture = JuncoMcpTools.add({
   name: "fx",
@@ -128,14 +122,14 @@ function single(
   graph: JuncoGraph;
   id: NodeIdType;
 } {
-  const graph = createParallelAgentGraph("LockPolicy", undefined, collection);
-  const id = graph.addNode(
-    agentNode(
-      agent,
-      { id: NodeId("member"), policy: "LockPolicy", trigger: always() },
-      { prompt: "go" },
-    ),
-  );
+  const graph = JuncoGraph.parallel(LockPolicy, undefined, collection);
+  agent.stagePrompt("go");
+  const id = graph.addNode({
+    id: NodeId.create("member"),
+    policy: LockPolicy,
+    trigger: TriggerRule.always(),
+    state: agent,
+  });
   return { graph, id };
 }
 
@@ -163,7 +157,7 @@ test(
       let nestedId: NodeIdType | undefined;
       const rootGraph = await JuncoGraph.create(
         seed,
-        { native: copyTree, policy: "LockPolicy" },
+        { native: copyTree, policy: LockPolicy },
         async (collection) => {
           shared = collection;
           const rootMember = await member(collection);
@@ -173,27 +167,22 @@ test(
           const nested = single(nestedMember, collection);
           forgetNestedMember();
           const forgetNested = defer(() => nested.graph.close());
-          const graph = createParallelAgentGraph(
-            "LockPolicy",
-            undefined,
-            collection,
-          );
+          const graph = JuncoGraph.parallel(LockPolicy, undefined, collection);
           const forgetGraph = defer(() => graph.close());
-          rootId = graph.addNode(
-            agentNode(
-              rootMember,
-              { id: NodeId("root"), policy: "LockPolicy", trigger: always() },
-              { prompt: "go" },
-            ),
-          );
+          rootMember.stagePrompt("go");
+          rootId = graph.addNode({
+            id: NodeId.create("root"),
+            policy: LockPolicy,
+            trigger: TriggerRule.always(),
+            state: rootMember,
+          });
           forgetRootMember();
-          nestedId = graph.addNode(
-            graphNode(
-              nested.graph,
-              { id: NodeId("nested"), policy: "LockPolicy", trigger: always() },
-              { result: nested.id },
-            ),
-          );
+          nestedId = graph.addNode({
+            id: NodeId.create("nested"),
+            trigger: TriggerRule.always(),
+            state: nested.graph,
+            result: nested.id,
+          });
           forgetNested();
           forgetGraph();
           return graph;
@@ -203,7 +192,7 @@ test(
       assert.ok(shared && rootId && nestedId);
       expect(rootGraph.collection).toBe(shared);
       expect(shared.mux).not.toBe(independent.mux);
-      expect(shared.mux.policy).toBe("LockPolicy");
+      expect(shared.policy).toBe(LockPolicy);
 
       // The independent graph runs and closes first, closing its agent and that agent's server.
       const separatePid = pidOf((await separate.graph.run()).get(separate.id));
@@ -334,12 +323,11 @@ test(
       let id: NodeIdType | undefined;
       const outer: PiGraph = await JuncoGraph.create(
         seed,
-        { native: copyTree, policy: "LockPolicy" },
+        { native: copyTree, policy: LockPolicy },
         async (collection) => {
           shared = collection;
           const decider = schedulerModel();
-          let current: PiGraph | undefined;
-          const scheduler = await createAgencyScheduler(() => current, {
+          const graph: PiGraph = await JuncoGraph.pi({
             session: await new MemorySessionRepo().create(
               {},
               BACKGROUND_CONTEXT,
@@ -347,22 +335,12 @@ test(
             models: decider.models,
             model: decider.model,
             prompt: "Run the caller.",
-            policy: "LockPolicy",
             collection,
+            policy: LockPolicy,
+            tracer: new DummyTracer(),
           });
-          const forgetScheduler = defer(() => scheduler.return());
-          const graph: PiGraph = new JuncoGraph(
-            scheduler,
-            UNBOUNDED,
-            UNBOUNDED,
-            new DummyTracer(),
-            "LockPolicy",
-            collection,
-          );
-          current = graph;
-          // The graph's close cascades to its scheduler from here on.
+          // The graph's close cascades to its scheduler.
           const forgetGraph = defer(() => graph.close());
-          forgetScheduler();
           caller = await JuncoAgent.fromResolved({
             session: await new MemorySessionRepo().create(
               {},
@@ -372,19 +350,18 @@ test(
             model: models.getModels("caller")[0]!,
             systemPrompt: "sys",
             cwd: seed,
-            tools: [createTaskTool(), fixture],
-            policy: "LockPolicy",
+            tools: [new TaskTool(), fixture],
             collection,
           });
           const callerAgent = caller;
           const forgetCaller = defer(() => callerAgent.return());
-          id = graph.addNode(
-            agentNode(
-              caller,
-              { id: NodeId("caller"), policy: "LockPolicy", trigger: always() },
-              { prompt: "go" },
-            ),
-          );
+          caller.stagePrompt("go");
+          id = graph.addNode({
+            id: NodeId.create("caller"),
+            policy: LockPolicy,
+            trigger: TriggerRule.always(),
+            state: caller,
+          });
           forgetCaller();
           forgetGraph();
           return graph;

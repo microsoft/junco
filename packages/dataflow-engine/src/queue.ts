@@ -8,8 +8,10 @@ import type { Newtype } from "./newtype.js";
  */
 export type Queue<X> = Newtype<X[], "Queue">;
 
-/** Wrap an array as a `Queue<X>`. Does NOT copy. */
-export const Queue = <X>(items: X[]): Queue<X> => items as Queue<X>;
-
-/** Empty `Queue<X>`. Freshly allocated per call. */
-export const emptyQueue = <X>(): Queue<X> => [] as X[] as Queue<X>;
+/** Construction of {@link Queue}s. */
+export const Queue = {
+  /** Wrap an array as a `Queue<X>`. Does NOT copy. */
+  from: <X>(items: X[]): Queue<X> => items as Queue<X>,
+  /** Empty `Queue<X>`. Freshly allocated per call. */
+  empty: <X>(): Queue<X> => [] as X[] as Queue<X>,
+};

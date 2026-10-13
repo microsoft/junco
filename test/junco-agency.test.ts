@@ -10,18 +10,12 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { always, DummyTracer, NodeId, UNBOUNDED } from "dataflow-engine";
+import { DummyTracer, NodeId, TriggerRule, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
 import { PiScheduler } from "junco-scheduler/agent";
-import {
-  type AgenticInput,
-  agentNode,
-  graphNode,
-  JuncoGraph,
-  LspTool,
-  tools,
-} from "../src/index.ts";
+import { LockPolicy } from "junco-tools";
+import { type AgenticInput, JuncoGraph, LspTool, tools } from "../src/index.ts";
 import {
   agencyGraph,
   drive,
@@ -37,22 +31,24 @@ import {
 } from "./support.ts";
 
 const TIMEOUT_MS = 30_000;
-const MEMBER = NodeId("0");
+const MEMBER = NodeId.create("0");
 const toolTurn = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
 /** A prompt agent, or a nested graph forwarding its member `0`'s result. */
 const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
   agent instanceof JuncoGraph
-    ? graphNode(
-        agent,
-        { policy: "LockPolicy", description, trigger: always() },
-        { result: MEMBER },
-      )
-    : agentNode(agent, {
-        policy: "LockPolicy",
+    ? {
         description,
-        trigger: always(),
-      });
+        trigger: TriggerRule.always(),
+        state: agent,
+        result: MEMBER,
+      }
+    : {
+        state: agent,
+        policy: LockPolicy,
+        description,
+        trigger: TriggerRule.always(),
+      };
 
 /** An agency over `members`, planned by `script`, staged with a prompt unless `idle`. */
 async function agency(
@@ -77,7 +73,7 @@ const plan =
 
 /** The text of member `id`'s result in `graph`. */
 function resultText(graph: JuncoGraph, id = "0"): string | undefined {
-  const result = graph.result(NodeId(id));
+  const result = graph.result(NodeId.create(id));
   return O.isSome(result)
     ? result.value.content
         .map((block) => (block.type === "text" ? block.text : ""))
@@ -368,7 +364,7 @@ test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared a
     UNBOUNDED,
     UNBOUNDED,
     new DummyTracer(),
-    "LockPolicy",
+    LockPolicy,
   );
   root.addNode(member(counted));
   const child = await agency([counted, root], runAvailable, { idle: true });

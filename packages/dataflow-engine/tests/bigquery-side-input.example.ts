@@ -1,21 +1,18 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
-import type { Edge } from "../src/index.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import {
-  allOf,
-  always,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  on,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 type StringMsg = { readonly kind: "str"; readonly value: string };
@@ -28,12 +25,12 @@ type GroupMsg = {
 type Msg = StringMsg | GroupMsg;
 
 test("cookbook: bigquery side inputs attach corpus and word", async () => {
-  const groupIdsEdge = messageEdge<Msg, string>("groupIds");
-  const corpusEdge = messageEdge<Msg, string>("corpus");
-  const wordEdge = messageEdge<Msg, string>("word");
-  const ignoreCorpusEdge = messageEdge<Msg, string>("ignoreCorpus");
-  const ignoreWordEdge = messageEdge<Msg, string>("ignoreWord");
-  const resultsEdge = messageEdge<Msg, string>("results");
+  const groupIdsEdge = Edge.message<Msg, string>("groupIds");
+  const corpusEdge = Edge.message<Msg, string>("corpus");
+  const wordEdge = Edge.message<Msg, string>("word");
+  const ignoreCorpusEdge = Edge.message<Msg, string>("ignoreCorpus");
+  const ignoreWordEdge = Edge.message<Msg, string>("ignoreWord");
+  const resultsEdge = Edge.message<Msg, string>("results");
 
   const groupIds = ["A", "B", "C"];
   const corpus = ["corpus1", "corpus2", "corpus3"];
@@ -42,10 +39,10 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   const ignoreWord = "word1";
 
   const groups: GroupMsg[] = [];
-  const tracer = createExampleTracer("cookbook/bigquery-side-input");
+  const tracer = ExampleTracer.create("cookbook/bigquery-side-input");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
@@ -55,14 +52,17 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
     values: readonly string[],
     label: string,
   ) =>
-    graph.addNode({
-      state: undefined,
-      trigger: always(),
-      step: emitOnce<void, Msg, string>(
-        () => values.map((value) => msg(edge, { kind: "str", value })),
+    graph.addNode(
+      new EmitOnce<void, Msg, string>(
+        () =>
+          values.map((value) => Message.create(edge, { kind: "str", value })),
         `${label} done`,
+        {
+          state: undefined,
+          trigger: TriggerRule.always(),
+        },
       ),
-    });
+    );
 
   const groupIdsSourceId = makeStringSource(groupIdsEdge, groupIds, "groupIds");
   const corpusSourceId = makeStringSource(corpusEdge, corpus, "corpus");
@@ -78,51 +78,59 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
     "ignoreWord",
   );
 
-  const attachId = graph.addNode({
-    state: undefined,
-    trigger: allOf(
-      on(groupIdsEdge),
-      on(corpusEdge),
-      on(wordEdge),
-      on(ignoreCorpusEdge),
-      on(ignoreWordEdge),
+  const attachId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const strings = (edge: Edge<Msg, string>): string[] =>
+          from(view, edge)
+            .filter((m): m is StringMsg => m.kind === "str")
+            .map((m) => m.value);
+        const ids = strings(groupIdsEdge);
+        const corpusBatch = strings(corpusEdge);
+        const wordBatch = strings(wordEdge);
+        const ignoreCorpusBatch = strings(ignoreCorpusEdge);
+        const ignoreWordBatch = strings(ignoreWordEdge);
+        const ignoreCorpusValue = ignoreCorpusBatch[0];
+        const ignoreWordValue = ignoreWordBatch[0];
+        const firstCorpus = corpusBatch.find((c) => c !== ignoreCorpusValue);
+        const firstWord = wordBatch.find((w) => w !== ignoreWordValue);
+        if (firstCorpus === undefined || firstWord === undefined) return [];
+        return ids.map((id) =>
+          Message.create(resultsEdge, {
+            kind: "group",
+            id,
+            corpus: firstCorpus,
+            word: firstWord,
+          }),
+        );
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(groupIdsEdge),
+          TriggerEntry.on(corpusEdge),
+          TriggerEntry.on(wordEdge),
+          TriggerEntry.on(ignoreCorpusEdge),
+          TriggerEntry.on(ignoreWordEdge),
+        ),
+      },
     ),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const strings = (edge: Edge<Msg, string>): string[] =>
-        from(view, edge)
-          .filter((m): m is StringMsg => m.kind === "str")
-          .map((m) => m.value);
-      const ids = strings(groupIdsEdge);
-      const corpusBatch = strings(corpusEdge);
-      const wordBatch = strings(wordEdge);
-      const ignoreCorpusBatch = strings(ignoreCorpusEdge);
-      const ignoreWordBatch = strings(ignoreWordEdge);
-      const ignoreCorpusValue = ignoreCorpusBatch[0];
-      const ignoreWordValue = ignoreWordBatch[0];
-      const firstCorpus = corpusBatch.find((c) => c !== ignoreCorpusValue);
-      const firstWord = wordBatch.find((w) => w !== ignoreWordValue);
-      if (firstCorpus === undefined || firstWord === undefined) return [];
-      return ids.map((id) =>
-        msg(resultsEdge, {
-          kind: "group",
-          id,
-          corpus: firstCorpus,
-          word: firstWord,
-        }),
-      );
-    }),
-  });
+  );
 
-  const sinkId = graph.addNode({
-    state: undefined,
-    trigger: when(resultsEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, resultsEdge)) {
-        if (m.kind === "group") groups.push(m);
-      }
-      return [];
-    }),
-  });
+  const sinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, resultsEdge)) {
+          if (m.kind === "group") groups.push(m);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(resultsEdge),
+      },
+    ),
+  );
 
   graph.addEdge(groupIdsSourceId, attachId, groupIdsEdge);
   graph.addEdge(corpusSourceId, attachId, corpusEdge);

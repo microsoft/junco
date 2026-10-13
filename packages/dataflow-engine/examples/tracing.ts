@@ -1,1 +1,1 @@
-export { createExampleTracer } from "#example-tracer";
+export { ExampleTracer } from "#example-tracer";

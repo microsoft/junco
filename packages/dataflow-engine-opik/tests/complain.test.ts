@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { NodeId } from "dataflow-engine";
 import { Opik } from "opik";
+import { NodeId } from "dataflow-engine";
 import { OpikDataflowTracer } from "../src/index.ts";
 
 // The real Opik SDK exporting over HTTP to a local receiver: no credentials, no recording fake.
@@ -45,7 +45,7 @@ test("each complaint exports one distinct completed trace carrying only node and
       }),
       name,
     );
-    const node = NodeId("worker");
+    const node = NodeId.create("worker");
     const complaint = "I cannot reach the coordinator.\nRetries exhausted.";
     tracer.complain(node, complaint);
     tracer.complain(node, complaint);

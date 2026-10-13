@@ -25,17 +25,13 @@ import type {
   JuncoAgent,
   Agentic as JuncoAgentProtocol,
 } from "junco-agent";
-import type {
-  PiScheduler,
-  PiSchedulerOptions,
-  SchedulerInfo,
-} from "junco-scheduler/agent";
+import type { PiScheduler, SchedulerInfo } from "junco-scheduler/agent";
+import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
 import {
   type AgenticInput,
   agent as agentApi,
   JuncoGraph,
-  schedulers,
   tools as toolsApi,
 } from "../src/index.ts";
 
@@ -77,7 +73,6 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
-      policy: "LockPolicy" as const,
     },
   };
 }
@@ -101,7 +96,7 @@ export async function leaf(
     agent: await agentApi.JuncoAgent.fromResolved({
       ...options,
       systemPrompt: "leaf",
-      tools: [toolsApi.createYieldTool(), ...tools],
+      tools: [new toolsApi.YieldTool(), ...tools],
       ...(prompt === undefined ? {} : { prompt }),
       ...(contract === undefined ? {} : { contract }),
     }),
@@ -208,35 +203,9 @@ export type Script =
   | ((info: SchedulerInfo, request: number) => Decision)
   | readonly FauxResponseStep[];
 
-/** An agency scheduler over `script` for the graph `getGraph()` returns, staged with `prompt` when given. */
-export async function newScheduler(
-  getGraph: () => JuncoGraph | undefined,
-  script: Script = runAvailable,
-  {
-    prompt,
-    systemPrompt,
-  }: {
-    readonly prompt?: string;
-    readonly systemPrompt?: PiSchedulerOptions["systemPrompt"];
-  } = {},
-) {
-  const { faux, models, model } =
-    typeof script === "function" ? schedulerModel(script) : scripted(script);
-  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
-  const scheduler = await schedulers.createAgencyScheduler(getGraph, {
-    session,
-    models,
-    model,
-    policy: "LockPolicy",
-    ...(prompt === undefined ? {} : { prompt }),
-    ...(systemPrompt === undefined ? {} : { systemPrompt }),
-  });
-  return { scheduler, faux, session };
-}
-
-/** An agency graph over a fresh scheduler, ready for wiring. */
+/** An agency graph over a fresh scheduler for `script`, staged with `prompt` when given. */
 export async function agencyGraph(
-  script?: Script,
+  script: Script = runAvailable,
   {
     prompt,
     window = UNBOUNDED,
@@ -247,27 +216,24 @@ export async function agencyGraph(
     readonly threads?: WidthType;
   } = {},
 ) {
-  let current: PiGraph | undefined;
-  const { scheduler, faux, session } = await newScheduler(
-    () => current,
-    script,
-    { prompt },
-  );
-  const graph: PiGraph = new JuncoGraph(
-    scheduler,
+  const { faux, models, model } =
+    typeof script === "function" ? schedulerModel(script) : scripted(script);
+  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
+  const graph: PiGraph = await JuncoGraph.pi({
+    session,
+    models,
+    model,
+    ...(prompt === undefined ? {} : { prompt }),
+    policy: LockPolicy,
+    tracer: new DummyTracer(),
     window,
     threads,
-    new DummyTracer(),
-    "LockPolicy",
-  );
-  current = graph;
-  return { graph, scheduler, faux, session };
+  });
+  return { graph, scheduler: graph.scheduler, faux, session };
 }
 
 /** Resume through every pause until the current run settles or fails; returns that step. */
-export async function drive(
-  agentic: JuncoAgentProtocol,
-): Promise<AgenticStep> {
+export async function drive(agentic: JuncoAgentProtocol): Promise<AgenticStep> {
   while (true) {
     const result = await agentic.next();
     if (result.done)

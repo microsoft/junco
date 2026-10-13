@@ -1,5 +1,5 @@
-// `tracer`: the execution observer. A direct `JuncoGraph` takes one explicitly; `createTracer()`
-// returns the shared default `StdoutTracer`. `DummyTracer` is the shipped no-op.
+// `tracer`: the execution observer. A direct `JuncoGraph` takes one explicitly;
+// `StdoutTracer.shared()` returns the shared default. `DummyTracer` is the shipped no-op.
 
 export {
   type DataflowRunTrace,
@@ -7,5 +7,4 @@ export {
   type DataflowTracer,
   DummyTracer,
 } from "dataflow-engine";
-export { createTracer } from "../create-tracer.js";
 export { StdoutTracer } from "../stdout-tracer.js";

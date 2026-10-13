@@ -9,38 +9,46 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
   type Payload = number | number[];
   const observer = new tracer.DummyTracer();
   const g = new graph.DataflowGraph<void, Payload, string, never>(
-    schedulers.createRoundRobinScheduler(),
-    graph.Width(1),
-    graph.Width(1),
+    new schedulers.RoundRobinScheduler(),
+    graph.Width.create(1),
+    graph.Width.create(1),
     observer,
   );
-  const a = graph.messageEdge<number, string>("a");
-  const b = graph.messageEdge<number, string>("b");
-  const list = graph.messageEdge<number[], string>("list");
+  const a = graph.Edge.message<number, string>("a");
+  const b = graph.Edge.message<number, string>("b");
+  const list = graph.Edge.message<number[], string>("list");
 
   const left = g.addNode(
-    graph.nodes.ConstFanout(1, [a], { state: undefined, ret: "left" }),
+    new graph.nodes.ConstFanout(1, [a], { state: undefined, ret: "left" }),
   );
   const right = g.addNode(
-    graph.nodes.ConstFanout(2, [b], { state: undefined, ret: "right" }),
+    new graph.nodes.ConstFanout(2, [b], { state: undefined, ret: "right" }),
   );
   const join = g.addNode(
-    graph.nodes.ConstFanin([b, a], list, { state: undefined, ret: "joined" }),
+    new graph.nodes.ConstFanin([b, a], list, {
+      state: undefined,
+      ret: "joined",
+    }),
   );
   const seen: Payload[] = [];
-  const sink = g.addNode({
-    state: undefined,
-    trigger: trigger.when(list),
-    step: graph.nodes.stepNode((_state, view) => {
-      seen.push(...graph.from(view, list));
-      return [];
+  const sink = g.addNode(
+    new graph.nodes.StepNode<void, Payload, string>(
+      (_state, view) => {
+        seen.push(...graph.from(view, list));
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: trigger.TriggerRule.when(list),
+      },
+    ),
+  );
+  const marker = g.addNode(
+    new graph.nodes.EmitOnce<void, Payload, string>(() => [], "marker", {
+      state: undefined,
+      trigger: graph.trigger.TriggerRule.always(),
     }),
-  });
-  const marker = g.addNode({
-    state: undefined,
-    trigger: graph.trigger.always(),
-    step: graph.nodes.emitOnce(() => [], "marker"),
-  });
+  );
   g.addEdge(left, join, a).addEdge(right, join, b).addEdge(join, sink, list);
 
   const results = await g.run();

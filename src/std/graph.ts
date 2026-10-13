@@ -7,17 +7,14 @@ export {
   DataflowGraph,
   DataflowNodeError,
   type DataflowRunOptions,
-  type Edge,
+  Edge,
   EdgeId,
   type EdgeIdType,
   type ErrorFn,
-  emptyQueue,
   from,
   type Identifiable,
   type Lookup,
-  type Message,
-  messageEdge,
-  msg,
+  Message,
   type Node,
   type NodeGenerator,
   NodeId,
@@ -32,12 +29,9 @@ export {
   type StepFn,
   UNBOUNDED,
   type ValidWidth,
-  valueEdge,
   Width,
   type WidthType,
 } from "dataflow-engine";
 export { JuncoGraph } from "../junco-graph.js";
-export { createParallelAgentGraph } from "../parallel-agent-graph.js";
-export { Spawn } from "../spawn.js";
 export * as nodes from "./nodes.js";
 export * as trigger from "./trigger.js";

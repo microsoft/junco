@@ -24,57 +24,59 @@ import {
  * probe and the walk are routed marsh reads through `mux`, which `native`
  * created.
  */
-export function createFindTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<
-  ReturnType<typeof createPiFindTool>["parameters"],
-  FindToolDetails | undefined
-> {
-  const base = createPiFindToolDefinition(cwd);
-  const tool = {
-    ...base,
-    async execute(toolCallId, params, signal, onUpdate) {
-      throwIfAborted(signal);
-      if (params.limit !== undefined) requireU32("limit", params.limit, 1);
-      // Built per call so concurrent invocations never share a mutable signal.
-      const scoped = createPiFindTool(cwd, {
-        operations: {
-          async exists(absolutePath) {
-            throwIfAborted(signal);
-            return mux.exists(cwd, absolutePath);
-          },
-          async glob(pattern, root, options) {
-            throwIfAborted(signal);
-            const result = await withNativeSignal(signal, (nativeSignal) =>
-              mux.glob(cwd, {
-                pattern,
-                path: root,
-                recursive: true,
-                hidden: true,
-                gitignore: true,
-                cache: false,
-                includeNodeModules: false,
-                maxResults: options.limit,
-                signal: nativeSignal,
-              }),
-            );
-            // Pi's adapter relativizes against the search root, so hand it
-            // absolute paths rather than the walker's root-relative ones.
-            return result.matches.map((match) =>
-              resolveNodePath(root, match.path),
-            );
-          },
-        },
-      });
-      // No signal for the inner factory: its immediate-abort wrapper would
-      // otherwise settle the call while a native worker is still draining.
-      return scoped.execute(toolCallId, params, undefined, onUpdate);
-    },
-  } satisfies ToolDefinition<
+export const FindTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
     ReturnType<typeof createPiFindTool>["parameters"],
     FindToolDetails | undefined
-  >;
-  return tool;
-}
+  > {
+    const base = createPiFindToolDefinition(cwd);
+    const tool = {
+      ...base,
+      async execute(toolCallId, params, signal, onUpdate) {
+        throwIfAborted(signal);
+        if (params.limit !== undefined) requireU32("limit", params.limit, 1);
+        // Built per call so concurrent invocations never share a mutable signal.
+        const scoped = createPiFindTool(cwd, {
+          operations: {
+            async exists(absolutePath) {
+              throwIfAborted(signal);
+              return mux.exists(cwd, absolutePath);
+            },
+            async glob(pattern, root, options) {
+              throwIfAborted(signal);
+              const result = await withNativeSignal(signal, (nativeSignal) =>
+                mux.glob(cwd, {
+                  pattern,
+                  path: root,
+                  recursive: true,
+                  hidden: true,
+                  gitignore: true,
+                  cache: false,
+                  includeNodeModules: false,
+                  maxResults: options.limit,
+                  signal: nativeSignal,
+                }),
+              );
+              // Pi's adapter relativizes against the search root, so hand it
+              // absolute paths rather than the walker's root-relative ones.
+              return result.matches.map((match) =>
+                resolveNodePath(root, match.path),
+              );
+            },
+          },
+        });
+        // No signal for the inner factory: its immediate-abort wrapper would
+        // otherwise settle the call while a native worker is still draining.
+        return scoped.execute(toolCallId, params, undefined, onUpdate);
+      },
+    } satisfies ToolDefinition<
+      ReturnType<typeof createPiFindTool>["parameters"],
+      FindToolDetails | undefined
+    >;
+    return tool;
+  },
+};

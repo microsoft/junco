@@ -4,20 +4,18 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
-import type { Message } from "../src/index.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import {
-  always,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 type Line = { readonly kind: "line"; readonly text: string };
@@ -26,15 +24,15 @@ type LenMsg = { readonly kind: "len"; readonly total: number };
 type Msg = Line | KV | LenMsg;
 
 test("cookbook: bigshuffle with input and output checksums", async () => {
-  const linesForMainEdge = messageEdge<Msg, string>("linesForMain");
-  const linesForInputCsumEdge = messageEdge<Msg, string>("linesForInputCsum");
-  const kvEdge = messageEdge<Msg, string>("kv");
-  const formattedForSinkEdge = messageEdge<Msg, string>("formattedForSink");
-  const formattedForOutputCsumEdge = messageEdge<Msg, string>(
+  const linesForMainEdge = Edge.message<Msg, string>("linesForMain");
+  const linesForInputCsumEdge = Edge.message<Msg, string>("linesForInputCsum");
+  const kvEdge = Edge.message<Msg, string>("kv");
+  const formattedForSinkEdge = Edge.message<Msg, string>("formattedForSink");
+  const formattedForOutputCsumEdge = Edge.message<Msg, string>(
     "formattedForOutputCsum",
   );
-  const inputCsumEdge = messageEdge<Msg, string>("inputCsum");
-  const outputCsumEdge = messageEdge<Msg, string>("outputCsum");
+  const inputCsumEdge = Edge.message<Msg, string>("inputCsum");
+  const outputCsumEdge = Edge.message<Msg, string>("outputCsum");
 
   const inputLines = [
     "AAAAAAAAAAvalue-1a",
@@ -47,124 +45,157 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   const inputSum: number[] = [];
   const outputSum: number[] = [];
 
-  const tracer = createExampleTracer("cookbook/bigshuffle");
+  const tracer = ExampleTracer.create("cookbook/bigshuffle");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
 
-  const sourceId = graph.addNode({
-    state: undefined,
-    trigger: always(),
-    step: emitOnce<void, Msg, string>(() => {
-      const events: Message<Msg>[] = [];
-      for (const text of inputLines) {
-        const line: Line = { kind: "line", text };
-        events.push(msg(linesForMainEdge, line));
-        events.push(msg(linesForInputCsumEdge, line));
-      }
-      return events;
-    }, "source done"),
-  });
-
-  const splitId = graph.addNode({
-    state: undefined,
-    trigger: when(linesForMainEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesForMainEdge).filter(
-        (m): m is Line => m.kind === "line",
-      );
-      return lines.map((l) =>
-        msg(kvEdge, {
-          kind: "kv",
-          key: l.text.slice(0, 10),
-          value: l.text.slice(10, 99),
-        }),
-      );
-    }),
-  });
-
-  const groupAndFlattenId = graph.addNode({
-    state: undefined,
-    trigger: when(kvEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const groups = pipe(
-        from(view, kvEdge),
-        RA.filter((m): m is KV => m.kind === "kv"),
-        RNEA.groupBy((kv) => kv.key),
-      );
-      const events: Message<Msg>[] = [];
-      for (const key of Object.keys(groups).sort(S.Ord.compare)) {
-        for (const kv of groups[key]!) {
-          const line: Line = { kind: "line", text: key + kv.value };
-          events.push(
-            msg(formattedForSinkEdge, line),
-            msg(formattedForOutputCsumEdge, line),
-          );
+  const sourceId = graph.addNode(
+    new EmitOnce<void, Msg, string>(
+      () => {
+        const events: Message<Msg>[] = [];
+        for (const text of inputLines) {
+          const line: Line = { kind: "line", text };
+          events.push(Message.create(linesForMainEdge, line));
+          events.push(Message.create(linesForInputCsumEdge, line));
         }
-      }
-      return events;
-    }),
-  });
+        return events;
+      },
+      "source done",
+      {
+        state: undefined,
+        trigger: TriggerRule.always(),
+      },
+    ),
+  );
 
-  const inputCsumId = graph.addNode({
-    state: undefined,
-    trigger: when(linesForInputCsumEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, linesForInputCsumEdge).filter(
-        (m): m is Line => m.kind === "line",
-      );
-      const total = lines.reduce((acc, l) => acc + l.text.length, 0);
-      return [msg(inputCsumEdge, { kind: "len", total })];
-    }),
-  });
+  const splitId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const lines = from(view, linesForMainEdge).filter(
+          (m): m is Line => m.kind === "line",
+        );
+        return lines.map((l) =>
+          Message.create(kvEdge, {
+            kind: "kv",
+            key: l.text.slice(0, 10),
+            value: l.text.slice(10, 99),
+          }),
+        );
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(linesForMainEdge),
+      },
+    ),
+  );
 
-  const outputCsumId = graph.addNode({
-    state: undefined,
-    trigger: when(formattedForOutputCsumEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const lines = from(view, formattedForOutputCsumEdge).filter(
-        (m): m is Line => m.kind === "line",
-      );
-      const total = lines.reduce((acc, l) => acc + l.text.length, 0);
-      return [msg(outputCsumEdge, { kind: "len", total })];
-    }),
-  });
+  const groupAndFlattenId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const groups = pipe(
+          from(view, kvEdge),
+          RA.filter((m): m is KV => m.kind === "kv"),
+          RNEA.groupBy((kv) => kv.key),
+        );
+        const events: Message<Msg>[] = [];
+        for (const key of Object.keys(groups).sort(S.Ord.compare)) {
+          for (const kv of groups[key]!) {
+            const line: Line = { kind: "line", text: key + kv.value };
+            events.push(
+              Message.create(formattedForSinkEdge, line),
+              Message.create(formattedForOutputCsumEdge, line),
+            );
+          }
+        }
+        return events;
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(kvEdge),
+      },
+    ),
+  );
 
-  const mainSinkId = graph.addNode({
-    state: undefined,
-    trigger: when(formattedForSinkEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, formattedForSinkEdge)) {
-        if (m.kind === "line") mainOutput.push(m.text);
-      }
-      return [];
-    }),
-  });
+  const inputCsumId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const lines = from(view, linesForInputCsumEdge).filter(
+          (m): m is Line => m.kind === "line",
+        );
+        const total = lines.reduce((acc, l) => acc + l.text.length, 0);
+        return [Message.create(inputCsumEdge, { kind: "len", total })];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(linesForInputCsumEdge),
+      },
+    ),
+  );
 
-  const inputCsumSinkId = graph.addNode({
-    state: undefined,
-    trigger: when(inputCsumEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, inputCsumEdge)) {
-        if (m.kind === "len") inputSum.push(m.total);
-      }
-      return [];
-    }),
-  });
+  const outputCsumId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const lines = from(view, formattedForOutputCsumEdge).filter(
+          (m): m is Line => m.kind === "line",
+        );
+        const total = lines.reduce((acc, l) => acc + l.text.length, 0);
+        return [Message.create(outputCsumEdge, { kind: "len", total })];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(formattedForOutputCsumEdge),
+      },
+    ),
+  );
 
-  const outputCsumSinkId = graph.addNode({
-    state: undefined,
-    trigger: when(outputCsumEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, outputCsumEdge)) {
-        if (m.kind === "len") outputSum.push(m.total);
-      }
-      return [];
-    }),
-  });
+  const mainSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, formattedForSinkEdge)) {
+          if (m.kind === "line") mainOutput.push(m.text);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(formattedForSinkEdge),
+      },
+    ),
+  );
+
+  const inputCsumSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, inputCsumEdge)) {
+          if (m.kind === "len") inputSum.push(m.total);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(inputCsumEdge),
+      },
+    ),
+  );
+
+  const outputCsumSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, outputCsumEdge)) {
+          if (m.kind === "len") outputSum.push(m.total);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(outputCsumEdge),
+      },
+    ),
+  );
 
   graph.addEdge(sourceId, splitId, linesForMainEdge);
   graph.addEdge(sourceId, inputCsumId, linesForInputCsumEdge);

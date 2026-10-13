@@ -10,13 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { McpAbortError } from "@earendil-works/pi-mcp";
-import {
-  createShellMuxOperations,
-  type NativeModule,
-  type NativeMux,
-  type NativeProcess,
-  ToolCollection,
-} from "junco-tools";
+import { LockPolicy, type NativeModule, type NativeMux, type NativeProcess, ToolCollection, ShellMuxOperations } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import {
@@ -47,7 +41,7 @@ beforeAll(async () => {
   );
   seed = join(root, "seed");
   await mkdir(join(seed, "sub"), { recursive: true });
-  collection = await ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
+  collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy });
 });
 
 afterAll(async () => {
@@ -197,7 +191,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
       expect(new Set(counts.map((item) => item.calls)).size).toBe(3);
 
       // Ordinary bash on the same collection mux while both servers are live.
-      const operations = createShellMuxOperations({ native: copyTree, mux: collection.mux });
+      const operations = new ShellMuxOperations({ native: copyTree, mux: collection.mux });
       try {
         const chunks: Buffer[] = [];
         const result = await operations.exec("printf ordinary", seed, {

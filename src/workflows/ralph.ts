@@ -1,30 +1,28 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import {
-  always,
   type DataflowScheduler,
   type Edge,
   from,
-  msg,
+  Message,
   type NodeGenerator,
   NodeId,
   type NodeIdType,
   type NodeOptions,
   type NodeSchedule,
   type ParentView,
+  TriggerRule,
   triggerInputs,
   UNBOUNDED,
   Width,
-  when,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type JuncoAgent, JuncoAgentError } from "junco-agent";
-import { createScheduler } from "junco-scheduler";
-import type { ToolCollectionOptions } from "junco-tools";
+import { Scheduler } from "junco-scheduler";
+import type { ToolCollection } from "junco-tools";
 import type { AgenticInput } from "../agentic.js";
-import { graphNode } from "../graph-node.js";
 import { JuncoGraph } from "../junco-graph.js";
 
-/** Registration options for {@link ralph}; trigger and availability are owned by the workflow. */
+/** Registration options for `Ralph.register`; trigger and availability are owned by the workflow. */
 export type RalphOptions = Pick<
   NodeOptions<AgenticInput, AssistantMessage>,
   "id" | "description"
@@ -35,8 +33,11 @@ export type RalphOptions = Pick<
   readonly output: Edge<AgenticInput, AssistantMessage>;
   /** Full-assignment rounds to run; a positive safe integer, two when omitted. */
   readonly rounds?: number;
-  /** Policy of the worker and outer node; must equal `agent.policy`. */
-  readonly policy: ToolCollectionOptions["policy"];
+  /**
+   * Policy of the child graph and its worker node (the outer node is authorized by the child
+   * graph's policy); must equal `agent.collection.policy` when the agent has a collection.
+   */
+  readonly policy: ToolCollection["policy"];
 };
 
 const assignmentError = () =>
@@ -91,137 +92,131 @@ class RalphState {
   }
 }
 
-/**
- * Register a Ralph workflow in `parent`: a nested one-worker `JuncoGraph` that runs `agent` over the
- * full assignment `rounds` times (default two), each later round revising the previous complete
- * draft in the same session, then emits only the final answer on `output`.
- *
- * The registered node's state is the child graph, whose sole worker's state is `agent`, so closing
- * `parent` closes both. The child graph borrows `agent.collection`. `agent` must be idle and is
- * lent exclusively to the workflow while it runs.
- * Wire `input` into and `output` out of the returned id before driving `parent`; the final
- * `AssistantMessage` is `parent.result(id)`. Registration makes no model request.
- *
- * @throws {RangeError} before registering anything when `rounds` is not a positive safe integer.
- * @throws {TypeError} before registering anything when `agent.policy` is not `options.policy`.
- */
-export function ralph<
-  EH,
-  Q extends DataflowScheduler<AgenticInput, AssistantMessage>,
->(
-  parent: JuncoGraph<AgenticInput, AssistantMessage, EH, Q>,
-  agent: JuncoAgent,
-  options: RalphOptions,
-): NodeIdType {
-  const { input, output } = options;
-  const rounds = options.rounds === undefined ? 2 : options.rounds;
-  if (!(Number.isSafeInteger(rounds) && rounds >= 1)) {
-    throw new RangeError("Ralph rounds must be a positive safe integer");
-  }
-  if (agent.policy !== options.policy) {
-    throw new TypeError("Node policy does not match its state");
-  }
+/** The Ralph workflow: repeated full-assignment revision rounds of one agent in a nested graph. */
+export const Ralph = {
+  /**
+   * Register a Ralph workflow in `parent`: a nested one-worker `JuncoGraph` that runs `agent` over
+   * the full assignment `rounds` times (default two), each later round revising the previous
+   * complete draft in the same session, then emits only the final answer on `output`.
+   *
+   * The registered node's state is the child graph, whose sole worker's state is `agent`, so
+   * closing `parent` closes both. The child graph borrows `agent.collection`. `agent` must be idle
+   * and is lent exclusively to the workflow while it runs.
+   * Wire `input` into and `output` out of the returned id before driving `parent`; the final
+   * `AssistantMessage` is `parent.result(id)`. Registration makes no model request.
+   *
+   * @throws {RangeError} before registering anything when `rounds` is not a positive safe integer.
+   * @throws {TypeError} before registering anything when `agent.collection` has another policy
+   *   than `options.policy`.
+   */
+  register<EH, Q extends DataflowScheduler<AgenticInput, AssistantMessage>>(
+    parent: JuncoGraph<AgenticInput, AssistantMessage, EH, Q>,
+    agent: JuncoAgent,
+    options: RalphOptions,
+  ): NodeIdType {
+    const { input, output } = options;
+    const rounds = options.rounds === undefined ? 2 : options.rounds;
+    if (!(Number.isSafeInteger(rounds) && rounds >= 1)) {
+      throw new RangeError("Ralph rounds must be a positive safe integer");
+    }
 
-  const scheduler = createScheduler<RalphState, AgenticInput, AssistantMessage>(
-    {
-      state: new RalphState(input, rounds),
-      schedule: (available) => {
-        const lanes: NodeSchedule[][] = [];
-        for (const [id, candidate] of available)
-          lanes.push([{ id, inputs: triggerInputs(candidate) }]);
-        return lanes;
+    const scheduler = new Scheduler<RalphState, AgenticInput, AssistantMessage>(
+      {
+        state: new RalphState(input, rounds),
+        schedule: (available) => {
+          const lanes: NodeSchedule[][] = [];
+          for (const [id, candidate] of available)
+            lanes.push([{ id, inputs: triggerInputs(candidate) }]);
+          return lanes;
+        },
       },
-    },
-  );
-  const child = new JuncoGraph(
-    scheduler,
-    Width(1),
-    UNBOUNDED,
-    parent.tracer,
-    options.policy,
-    agent.collection,
-  );
+    );
+    const child = new JuncoGraph(
+      scheduler,
+      Width.create(1),
+      UNBOUNDED,
+      parent.tracer,
+      options.policy,
+      agent.collection,
+    );
 
-  /** One full native run of `text`, resuming through native yields, and its settled final message. */
-  const runOnce = async (text: string): Promise<AssistantMessage> => {
-    const signal = child.signal;
-    signal.throwIfAborted();
-    if (agent.status !== "idle")
-      throw new JuncoAgentError(
-        "invalid_state",
-        "Ralph requires an idle agent",
-      );
-    // Its settlement, success or failure, arrives through agent.next().
-    agent.prompt(text).catch(() => undefined);
-    while (true) {
-      const result = await agent.next();
+    /** One full native run of `text`, resuming through native yields, and its settled final message. */
+    const runOnce = async (text: string): Promise<AssistantMessage> => {
+      const signal = child.signal;
       signal.throwIfAborted();
-      if (result.done === true)
+      if (agent.status !== "idle")
         throw new JuncoAgentError(
-          "closed",
-          "Ralph closed before prompt settlement",
+          "invalid_state",
+          "Ralph requires an idle agent",
         );
-      const boundary = result.value;
-      if (boundary.kind === "failed") throw boundary.error;
-      if (boundary.kind === "settled") return boundary.message;
-    }
-  };
-
-  async function* step(): NodeGenerator<AgenticInput, AssistantMessage> {
-    yield [];
-    const state = scheduler.state;
-    while (true) {
-      const message = await runOnce(state.nextPrompt());
-      finalText(message);
-      state.draft = message;
-      state.round++;
-      if (state.round === state.rounds) return message;
-      yield [];
-    }
-  }
-
-  const workerId = child.addNode({
-    id: NodeId("RalphStep"),
-    state: agent,
-    policy: options.policy,
-    trigger: always(),
-    step,
-    is_available: () => scheduler.state.assignment !== undefined,
-  });
-
-  const nodeId: NodeIdType = parent.addNode(
-    graphNode(
-      child,
-      {
-        id: options.id,
-        description: options.description,
-        policy: options.policy,
-        trigger: when(input),
-      },
-      {
-        result: workerId,
-        receive: (view) => scheduler.state.receive(view),
-        afterStep: () => {
-          const retained = child.result(workerId);
-          if (O.isNone(retained)) return;
-          parent.emit(
-            nodeId,
-            msg(output, { kind: "prompt", text: finalText(retained.value) }),
+      // Its settlement, success or failure, arrives through agent.next().
+      agent.prompt(text).catch(() => undefined);
+      while (true) {
+        const result = await agent.next();
+        signal.throwIfAborted();
+        if (result.done === true)
+          throw new JuncoAgentError(
+            "closed",
+            "Ralph closed before prompt settlement",
           );
-        },
-        contract: (edgeId) => {
-          if (edgeId !== input.id)
-            throw new JuncoAgentError(
-              "invalid_state",
-              `No contract for edge "${edgeId}"`,
-            );
-          return {
-            expect:
-              "Exactly one image-free prompt containing the complete assignment; duplicate assignments are rejected, and the final revised draft is emitted after all rounds.",
-          };
-        },
+        const boundary = result.value;
+        if (boundary.kind === "failed") throw boundary.error;
+        if (boundary.kind === "settled") return boundary.message;
+      }
+    };
+
+    async function* step(): NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const state = scheduler.state;
+      while (true) {
+        const message = await runOnce(state.nextPrompt());
+        finalText(message);
+        state.draft = message;
+        state.round++;
+        if (state.round === state.rounds) return message;
+        yield [];
+      }
+    }
+
+    const workerId = child.addNode({
+      id: NodeId.create("RalphStep"),
+      state: agent,
+      policy: options.policy,
+      trigger: TriggerRule.always(),
+      step,
+      is_available: () => scheduler.state.assignment !== undefined,
+    });
+
+    const nodeId: NodeIdType = parent.addNode({
+      id: options.id,
+      description: options.description,
+      trigger: TriggerRule.when(input),
+      state: child,
+      result: workerId,
+      receive: (view) => scheduler.state.receive(view),
+      afterStep: () => {
+        const retained = child.result(workerId);
+        if (O.isNone(retained)) return;
+        parent.emit(
+          nodeId,
+          Message.create(output, {
+            kind: "prompt",
+            text: finalText(retained.value),
+          }),
+        );
       },
-    ),
-  );
-  return nodeId;
-}
+      contract: (edgeId) => {
+        if (edgeId !== input.id)
+          throw new JuncoAgentError(
+            "invalid_state",
+            `No contract for edge "${edgeId}"`,
+          );
+        return {
+          expect:
+            "Exactly one image-free prompt containing the complete assignment; duplicate assignments are rejected, and the final revised draft is emitted after all rounds.",
+        };
+      },
+    });
+    return nodeId;
+  },
+};

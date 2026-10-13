@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { EdgeId, NodeId } from "dataflow-engine";
-import { createComplainTool, isComplainTool, issueLog } from "junco-tools";
+import { ComplainTool, isComplainTool, issueLog } from "junco-tools";
 import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
 import { countingTool, newAgent, scripted } from "./harness.ts";
 
@@ -146,7 +146,6 @@ test("complaint-only configurations still offer and execute exactly one genuine 
         models.registerNativeProvider(faux.provider);
         const agent = await JuncoAgent.create({
           models,
-          policy: "LockPolicy",
           provider: "faux",
           model: "faux-1",
           tools: [],
@@ -222,15 +221,11 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
   const impostor = { ...countingTool("complain").tool };
   const { models, model } = scripted([]);
   const repo = new MemorySessionRepo();
-  for (const tools of [
-    [impostor],
-    [createComplainTool(), createComplainTool()],
-  ]) {
+  for (const tools of [[impostor], [new ComplainTool(), new ComplainTool()]]) {
     await assert.rejects(
       JuncoAgent.fromResolved({
         session: await repo.create({}, BACKGROUND_CONTEXT),
         models,
-        policy: "LockPolicy",
         model,
         tools,
       }),
@@ -250,7 +245,7 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
     for (const tools of [
       [one.tool, impostor],
       [one.tool, copied],
-      [one.tool, createComplainTool(), createComplainTool()],
+      [one.tool, new ComplainTool(), new ComplainTool()],
     ])
       await assert.rejects(agent.setTools(tools), isCode("invalid_argument"));
     for (const names of [
@@ -317,7 +312,6 @@ test("a legacy persisted selection is repaired with complain on reopen without r
   const agent = await JuncoAgent.fromResolved({
     session: reopened,
     models,
-    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -382,7 +376,6 @@ test("agents sharing one Models registry keep their request snapshots isolated",
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
-      policy: "LockPolicy",
       model,
       tools: [],
     });
@@ -478,9 +471,9 @@ test("a bound complaint context is cleared after normal and thrown work", async 
     { tools: [] },
   );
   try {
-    const nodeId = NodeId("bound-node");
+    const nodeId = NodeId.create("bound-node");
     const messages = [
-      { id: EdgeId("source->worker"), payload: { kind: "prompt" } },
+      { id: EdgeId.create("source->worker"), payload: { kind: "prompt" } },
     ];
     const before = issueLog.length;
     await agent.runWithNodeContext(

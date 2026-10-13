@@ -1,13 +1,15 @@
 import { DefaultLogLevels } from "tslog";
 import type { NativeMux } from "../native/index.js";
-import type { ToolCollectionOptions } from "./collection.js";
 import { flushLog, log, logPolicyDecision } from "./log.js";
 import type { NativeModule } from "./native.js";
+import { LockPolicy, type Policy } from "./policy.js";
 
 /** One owner's ShellMux. Releasing it closes that mux; no other owner shares it. */
 export interface ShellMuxLease {
   readonly mux: NativeMux;
   readonly native: NativeModule;
+  /** The authorization policy the mux was opened with. */
+  readonly policy: Policy;
   /** True once release began. */
   readonly closed: boolean;
   /**
@@ -23,6 +25,7 @@ class Lease implements ShellMuxLease {
   constructor(
     readonly mux: NativeMux,
     readonly native: NativeModule,
+    readonly policy: Policy,
   ) {}
 
   get closed(): boolean {
@@ -53,46 +56,51 @@ class Lease implements ShellMuxLease {
   }
 }
 
-/**
- * Opens one fresh ShellMux at `cwd` (default sandbox `"shared"`) with `policy`, owned by the
- * returned lease alone. A failed open closes only what it acquired.
- */
-export async function acquireShellMux(
-  cwd: string,
-  options: {
-    readonly native?: NativeModule;
-    readonly sandbox?: "shared" | "always";
-    readonly policy: ToolCollectionOptions["policy"];
-  },
-): Promise<ShellMuxLease> {
-  const { policy, sandbox = "shared" } = options;
-  if (policy !== "LockPolicy" && policy !== "EmptyPolicy") {
-    throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
-  }
-  // Dynamic by design: importing junco-tools must not load the addon.
-  const native = options.native ?? (await import("junco-tools/native"));
-  // The native producer's filter is fixed here: grants at DEBUG or below, violations at INFO
-  // or below, no observer at all above INFO.
-  const level = log.settings.minLevel;
-  const mux = await native.NativeMux.open(
-    cwd,
-    { sandbox, policy, policyDebug: level <= DefaultLogLevels.DEBUG },
-    level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
-  );
-  const lease = new Lease(mux, native);
-  try {
-    await mux.validateCwd(cwd);
-  } catch (error) {
+/** Opens owned {@link ShellMuxLease}s. */
+export const ShellMuxLease = {
+  /**
+   * Opens one fresh ShellMux at `cwd` (default sandbox `"shared"`) with `policy` (default
+   * {@link LockPolicy}), owned by the returned lease alone. A failed open closes only what it
+   * acquired.
+   */
+  async create(
+    cwd: string,
+    options: {
+      readonly native?: NativeModule;
+      readonly sandbox?: "shared" | "always";
+      readonly policy?: Policy;
+    } = {},
+  ): Promise<ShellMuxLease> {
+    const { policy = LockPolicy, sandbox = "shared" } = options;
+    // Dynamic by design: importing junco-tools must not load the addon.
+    const native = options.native ?? (await import("junco-tools/native"));
+    // The native producer's filter is fixed here: grants at DEBUG or below, violations at INFO
+    // or below, no observer at all above INFO.
+    const level = log.settings.minLevel;
+    const mux = await native.NativeMux.open(
+      cwd,
+      {
+        sandbox,
+        policy: policy.toNative(native),
+        policyDebug: level <= DefaultLogLevels.DEBUG,
+      },
+      level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
+    );
+    const lease = new Lease(mux, native, policy);
     try {
-      await lease.release();
-    } catch (closeError) {
-      throw new AggregateError(
-        [error, closeError],
-        "acquireShellMux: cwd validation failed and closing the mux failed",
-        { cause: error },
-      );
+      await mux.validateCwd(cwd);
+    } catch (error) {
+      try {
+        await lease.release();
+      } catch (closeError) {
+        throw new AggregateError(
+          [error, closeError],
+          "ShellMuxLease.create: cwd validation failed and closing the mux failed",
+          { cause: error },
+        );
+      }
+      throw error;
     }
-    throw error;
-  }
-  return lease;
-}
+    return lease;
+  },
+};

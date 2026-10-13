@@ -1,30 +1,30 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { createParallelScheduler } from "junco-scheduler";
+import { ParallelScheduler } from "junco-scheduler";
 import {
-  always,
   DataflowGraph,
-  emitOnce,
-  messageEdge,
+  Edge,
+  EmitOnce,
   NodeId,
   renderPretty,
+  TriggerRule,
   UNBOUNDED,
-  valueEdge,
   Width,
 } from "../src/index.ts";
 
 type Graph = DataflowGraph<unknown, number, string, never>;
 
 const newGraph = (): Graph =>
-  new DataflowGraph(createParallelScheduler(), Width(1), UNBOUNDED);
+  new DataflowGraph(new ParallelScheduler(), Width.create(1), UNBOUNDED);
 
 const add = (graph: Graph, id: string, state: unknown = undefined): NodeId =>
-  graph.addNode({
-    id: NodeId(id),
-    state,
-    trigger: always(),
-    step: emitOnce(() => [], "done"),
-  });
+  graph.addNode(
+    new EmitOnce(() => [], "done", {
+      id: NodeId.create(id),
+      state,
+      trigger: TriggerRule.always(),
+    }),
+  );
 
 type Topology = {
   /** `group:` or `leaf:` followed by the declaration's label path from the root. */
@@ -87,8 +87,8 @@ test("renderPretty renders flat topology with escaped labels and transports", ()
 
   const first = add(graph, 'A"#\n');
   const second = add(graph, "B&|");
-  graph.addEdge(first, second, messageEdge<number, string>("m%"));
-  graph.addEdge(first, second, valueEdge<number, string>("v|"));
+  graph.addEdge(first, second, Edge.message<number, string>("m%"));
+  graph.addEdge(first, second, Edge.value<number, string>("v|"));
 
   const edges = [
     ": A#34;#35;#10; -> B#38;#124; m#37; (message)",
@@ -111,20 +111,20 @@ test("renderPretty expands graph-valued nodes as nested subgraphs", () => {
   inner.addEdge(
     add(inner, "A"),
     add(inner, "B"),
-    messageEdge<number, string>("ab"),
+    Edge.message<number, string>("ab"),
   );
   const group = newGraph();
   group.addEdge(
     add(group, "A"),
     add(group, "Inner", inner),
-    valueEdge<number, string>("inner"),
+    Edge.value<number, string>("inner"),
   );
   const root = newGraph();
   const source = add(root, "Source");
   const middle = add(root, 'Group"#\n', group);
   const sink = add(root, "Sink");
-  root.addEdge(source, middle, messageEdge<number, string>("in"));
-  root.addEdge(middle, sink, valueEdge<number, string>("out"));
+  root.addEdge(source, middle, Edge.message<number, string>("in"));
+  root.addEdge(middle, sink, Edge.value<number, string>("out"));
 
   const outer = "Group#34;#35;#10;";
   assert.deepEqual(topology(renderPretty(root)), {
@@ -151,13 +151,13 @@ test("renderPretty expands every occurrence of a shared child graph", () => {
   child.addEdge(
     add(child, "A"),
     add(child, "B"),
-    valueEdge<number, string>("ab"),
+    Edge.value<number, string>("ab"),
   );
   const root = newGraph();
   root.addEdge(
     add(root, "Left", child),
     add(root, "Right", child),
-    messageEdge<number, string>("between"),
+    Edge.message<number, string>("between"),
   );
 
   assert.deepEqual(topology(renderPretty(root)), {
@@ -182,7 +182,7 @@ test("renderPretty stops at a graph already on the containment path", () => {
   const child = newGraph();
   add(child, "Back", root);
   const node = add(root, "Child", child);
-  root.addEdge(node, node, messageEdge<number, string>("again"));
+  root.addEdge(node, node, Edge.message<number, string>("again"));
 
   assert.deepEqual(topology(renderPretty(root)), {
     nodes: [
@@ -200,8 +200,8 @@ test("renderPretty keeps an empty child graph grouped and reads it live", () => 
   const source = add(root, "Source");
   const empty = add(root, "Empty", child);
   const sink = add(root, "Sink");
-  root.addEdge(source, empty, messageEdge<number, string>("in"));
-  root.addEdge(empty, sink, valueEdge<number, string>("out"));
+  root.addEdge(source, empty, Edge.message<number, string>("in"));
+  root.addEdge(empty, sink, Edge.value<number, string>("out"));
   const edges = [
     ": Source -> Empty in (message)",
     ": Empty -> Sink out (value)",
@@ -220,7 +220,7 @@ test("renderPretty keeps an empty child graph grouped and reads it live", () => 
   child.addEdge(
     add(child, "A"),
     add(child, "B"),
-    valueEdge<number, string>("ab"),
+    Edge.value<number, string>("ab"),
   );
   assert.deepEqual(topology(renderPretty(root)), {
     nodes: [

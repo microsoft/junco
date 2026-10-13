@@ -13,29 +13,19 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  always,
-  anyOf,
   DummyTracer,
   type Edge,
-  messageEdge,
-  msg,
   NodeId,
   type NodeIdType,
-  on,
-  UNBOUNDED,
-  valueEdge,
-  when,
+  TriggerRule,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import type { PiScheduler, SchedulerInfo } from "junco-scheduler/agent";
+import { LockPolicy } from "junco-tools";
 import {
   type AgenticInput,
-  agentNode,
-  createAgencyScheduler,
   Deterministic,
-  deterministicNode,
   JuncoGraph,
   MockAgent,
 } from "../src/index.ts";
@@ -52,33 +42,17 @@ import {
 import {
   agencyGraph,
   drive,
-  newScheduler,
   type PiGraph,
   runAvailable,
   scheduleCall,
   schedulerInfoOf,
+  schedulerModel,
   settledText,
 } from "./support.ts";
 
 // The agency scheduler adapter over real PiSchedulers and JuncoGraphs: candidate metadata, input
 // selection, graph binding and member lifecycle. Members are mock agents; the scheduler's own model
 // is a faux provider.
-
-const invalidState = (error: unknown) =>
-  error instanceof JuncoAgentError && error.code === "invalid_state";
-
-/** The failure of a failed step, unwrapped from node-error causes. */
-function failureOf(step: AgenticStep): unknown {
-  assert.equal(step.kind, "failed");
-  let error: unknown = step.kind === "failed" ? step.error : undefined;
-  while (
-    error instanceof Error &&
-    !(error instanceof JuncoAgentError) &&
-    error.cause !== undefined
-  )
-    error = error.cause;
-  return error;
-}
 
 const resultText = (graph: JuncoGraph, id: NodeIdType) => {
   const result = graph.result(id);
@@ -89,13 +63,13 @@ const resultText = (graph: JuncoGraph, id: NodeIdType) => {
 const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
   E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
-const member = (agent: MockAgent, description: string, id?: string) =>
-  agentNode(agent, {
-    ...(id === undefined ? {} : { id: NodeId(id) }),
-    policy: "LockPolicy",
-    description,
-    trigger: always(),
-  });
+const member = (agent: MockAgent, description: string, id?: string) => ({
+  ...(id === undefined ? {} : { id: NodeId.create(id) }),
+  state: agent,
+  policy: LockPolicy,
+  description,
+  trigger: TriggerRule.always(),
+});
 
 test("SchedulerInfo describes only candidate members: native description, Agentic status and latest pause reasons", async () => {
   const IDLE = "IDLE-DESCRIPTION-91f";
@@ -121,30 +95,31 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   const w = graph.addNode(member(worker, "the worker"));
   const i = graph.addNode(member(idle, IDLE));
   const raw = graph.addNode({
-    policy: "LockPolicy",
+    policy: LockPolicy,
     description: "",
-    trigger: always(),
+    trigger: TriggerRule.always(),
     state: new Deterministic<AgenticInput, AssistantMessage>(
       // biome-ignore lint/correctness/useYield: an inert state; the node's own step runs instead.
       async function* () {
         return fauxAssistantMessage("unused");
       },
-      "LockPolicy",
+      LockPolicy,
     ),
     step: async function* () {
       yield [];
       return fauxAssistantMessage("raw done");
     },
   });
-  const quiet = graph.addNode(
-    deterministicNode(
-      new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+  const quiet = graph.addNode({
+    trigger: TriggerRule.always(),
+    state: new Deterministic<AgenticInput, AssistantMessage>(
+      async function* () {
         yield [];
         return fauxAssistantMessage("quiet done");
-      }, "LockPolicy"),
-      { trigger: always(), policy: "LockPolicy" },
+      },
+      LockPolicy,
     ),
-  );
+  });
   scheduler.hooks.on("transform_context", ({ messages }) => {
     transcripts.push(JSON.stringify(messages));
     return undefined;
@@ -212,53 +187,7 @@ test("SchedulerInfo describes only candidate members: native description, Agenti
   }
 });
 
-test("a missing or foreign graph getter fails before provider work and touches no unrelated members", async () => {
-  const missing = await newScheduler(() => undefined, runAvailable, {
-    prompt: "go",
-  });
-  assert.ok(invalidState(failureOf(await drive(missing.scheduler))));
-  assert.equal(missing.faux.state.callCount, 0);
-  await missing.scheduler.abort();
-  await missing.scheduler.return();
-  assert.equal(missing.scheduler.status, "closed");
-
-  const bystander = new MockAgent({
-    prompt: "go",
-    runs: [yieldsThen(0, "never")],
-  });
-  const other = await agencyGraph(runAvailable, { prompt: "other" });
-  try {
-    other.graph.addNode(member(bystander, "bystander"));
-    const foreign = await newScheduler(() => other.graph, runAvailable, {
-      prompt: "go",
-    });
-    assert.ok(invalidState(failureOf(await drive(foreign.scheduler))));
-    assert.equal(foreign.faux.state.callCount, 0);
-
-    const abortError = await foreign.scheduler.abort().then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-    const closeError = await foreign.scheduler.return().then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-    for (const error of [abortError, closeError]) {
-      const errors = error instanceof AggregateError ? error.errors : [error];
-      assert.ok(errors.length > 0 && errors.every(invalidState));
-    }
-    assert.equal(foreign.scheduler.status, "closed");
-    assert.equal(other.graph.signal.aborted, false);
-    assert.equal(bystander.status, "ready");
-    assert.deepEqual(bystander.requests, []);
-    assert.equal(other.scheduler.status, "ready");
-  } finally {
-    await other.graph.close();
-  }
-  assert.equal(bystander.status, "closed");
-});
-
-test("an Opus agency scheduler owns its session and members, even if a caller passes an adapter", async () => {
+test("an Opus agency graph's scheduler owns its session and members, even if a caller passes an adapter", async () => {
   const repo = new MemorySessionRepo();
   let session: Awaited<ReturnType<MemorySessionRepo["create"]>> | undefined;
   let scheduler: PiScheduler<AgenticInput, AssistantMessage> | undefined;
@@ -294,7 +223,6 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
     let replaced = 0;
     // An untyped caller's adapter: the factory's own adapter must still own the members.
     const callerOptions = {
-      policy: "LockPolicy" as const,
       models,
       session,
       adapter: {
@@ -308,16 +236,12 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
         },
       },
     };
-    let graph: PiGraph | undefined;
-    scheduler = await createAgencyScheduler(() => graph, callerOptions);
-    constructed = new JuncoGraph(
-      scheduler,
-      UNBOUNDED,
-      UNBOUNDED,
-      new DummyTracer(),
-      "LockPolicy",
-    );
-    graph = constructed;
+    constructed = await JuncoGraph.pi({
+      ...callerOptions,
+      policy: LockPolicy,
+      tracer: new DummyTracer(),
+    });
+    scheduler = constructed.scheduler;
     constructed.addNode(member(ready, "member"));
     const selected = await scheduler.getModel();
     assert.equal(
@@ -341,35 +265,29 @@ test("an Opus agency scheduler owns its session and members, even if a caller pa
   }
 });
 
-test("a graph constructed on the scheduler but not yet published fails admission before provider work", async () => {
-  let current: PiGraph | undefined;
-  const { scheduler, faux } = await newScheduler(() => current, runAvailable, {
-    prompt: "go",
-  });
-  const constructed: PiGraph = new JuncoGraph(
-    scheduler,
-    UNBOUNDED,
-    UNBOUNDED,
-    new DummyTracer(),
-    "LockPolicy",
-  );
-  const ready = new MockAgent({
-    prompt: "go",
-    runs: [yieldsThen(0, "never")],
-  });
+test("a graph construction failure after Pi acquisition returns the scheduler and closes its session", async () => {
+  const repo = new MemorySessionRepo();
   try {
-    constructed.addNode(member(ready, "member"));
-
-    // The engine binding is in place, so this failure is the agency's own guard.
-    assert.ok(invalidState(failureOf(await drive(scheduler))));
+    const { faux, models, model } = schedulerModel(runAvailable);
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    await assert.rejects(
+      JuncoGraph.pi({
+        session,
+        models,
+        model,
+        prompt: "go",
+        policy: LockPolicy,
+        tracer: null as never,
+      }),
+      (error: unknown) =>
+        error instanceof TypeError &&
+        error.message === "JuncoGraph requires a tracer",
+    );
     assert.equal(faux.state.callCount, 0);
-    assert.equal(ready.status, "ready");
-    assert.deepEqual(ready.requests, []);
+    await assert.rejects(session.getEntries([], BACKGROUND_CONTEXT));
   } finally {
-    current = constructed;
-    await constructed.close();
+    await repo.close(BACKGROUND_CONTEXT);
   }
-  assert.equal(ready.status, "closed");
 });
 
 test("a direct scheduler abort cascades to its members, and its return waits for their close", async () => {

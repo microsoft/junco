@@ -12,7 +12,8 @@ const releaseSchema = Type.Object(
   {
     file: Type.String({
       minLength: 1,
-      description: "The one file (or directory entry) to relinquish ownership of.",
+      description:
+        "The one file (or directory entry) to relinquish ownership of.",
     }),
   },
   { additionalProperties: false },
@@ -23,32 +24,34 @@ const releaseSchema = Type.Object(
  * through `mux`. Nothing is read or written; success means Marsh published the release. Releasing
  * a file another owner holds rejects as a policy denial; releasing an unowned file succeeds.
  */
-export function createReleaseTool(
-  cwd: string,
-  mux: NativeMux,
-): AgentTool<typeof releaseSchema, undefined> {
-  const tool = {
-    name: "release",
-    label: "Release",
-    description:
-      "Relinquish your ownership of one file you wrote, so other agents may edit it. Writing a file takes ownership; deleting it releases ownership automatically.",
-    promptSnippet: "Relinquish ownership of a file you wrote",
-    parameters: releaseSchema,
-    executionMode: "sequential",
-    async execute(_toolCallId, { file }, signal) {
-      throwIfAborted(signal);
-      const absolutePath = resolveToolPath(cwd, file);
-      await mux.release(cwd, absolutePath);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Released ${displayToolPath(cwd, absolutePath)}`,
-          },
-        ],
-        details: undefined,
-      };
-    },
-  } satisfies ToolDefinition<typeof releaseSchema, undefined>;
-  return tool;
-}
+export const ReleaseTool = {
+  create(
+    cwd: string,
+    mux: NativeMux,
+  ): AgentTool<typeof releaseSchema, undefined> {
+    const tool = {
+      name: "release",
+      label: "Release",
+      description:
+        "Relinquish your ownership of one file you wrote, so other agents may edit it. Writing a file takes ownership; deleting it releases ownership automatically.",
+      promptSnippet: "Relinquish ownership of a file you wrote",
+      parameters: releaseSchema,
+      executionMode: "sequential",
+      async execute(_toolCallId, { file }, signal) {
+        throwIfAborted(signal);
+        const absolutePath = resolveToolPath(cwd, file);
+        await mux.release(cwd, absolutePath);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Released ${displayToolPath(cwd, absolutePath)}`,
+            },
+          ],
+          details: undefined,
+        };
+      },
+    } satisfies ToolDefinition<typeof releaseSchema, undefined>;
+    return tool;
+  },
+};

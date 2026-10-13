@@ -5,22 +5,12 @@ import {
   fauxAssistantMessage,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import {
-  always,
-  NodeId,
-  type NodeIdType,
-  valueEdge,
-  when,
-} from "dataflow-engine";
+import { Edge, NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticStep, JuncoAgentError } from "junco-agent";
 import type { PiScheduler, SchedulerInfo } from "junco-scheduler/agent";
-import {
-  type AgenticInput,
-  agentNode,
-  graphNode,
-  type JuncoGraph,
-} from "../src/index.ts";
+import { LockPolicy } from "junco-tools";
+import { type AgenticInput, type JuncoGraph } from "../src/index.ts";
 import {
   agencyGraph,
   drive,
@@ -41,7 +31,7 @@ const textOf = (message: AssistantMessage) =>
     .join("");
 const toolTurn = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
-const MEMBER = NodeId("0");
+const MEMBER = NodeId.create("0");
 const resultOf = (graph: JuncoGraph, id: NodeIdType) => {
   const result = graph.result(id);
   return O.isSome(result) ? textOf(result.value) : undefined;
@@ -55,13 +45,12 @@ async function singleMember(script: Script, reply = "member done") {
   const { graph, scheduler, session, faux } = await agencyGraph(script, {
     prompt: "schedule it",
   });
-  graph.addNode(
-    agentNode(member.agent, {
-      description: "the member",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
+  graph.addNode({
+    description: "the member",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: member.agent,
+  });
   return { scheduler, graph, session, faux };
 }
 
@@ -116,23 +105,21 @@ test("only ids available when the window starts may be planned", async () => {
       request < plans.length ? { lanes: plans[request]! } : runAvailable(info),
     { prompt: "go" },
   );
-  const edge = valueEdge<AgenticInput, AssistantMessage>("producer->consumer");
-  const p = graph.addNode(
-    agentNode(producer.agent, {
-      id: NodeId("producer"),
-      description: "producer",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
-  const c = graph.addNode(
-    agentNode(consumer.agent, {
-      id: NodeId("consumer"),
-      description: "consumer",
-      trigger: when(edge),
-      policy: "LockPolicy",
-    }),
-  );
+  const edge = Edge.value<AgenticInput, AssistantMessage>("producer->consumer");
+  const p = graph.addNode({
+    id: NodeId.create("producer"),
+    description: "producer",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: producer.agent,
+  });
+  const c = graph.addNode({
+    id: NodeId.create("consumer"),
+    description: "consumer",
+    trigger: TriggerRule.when(edge),
+    policy: LockPolicy,
+    state: consumer.agent,
+  });
   graph.addEdge(p, c, edge);
   const errors = toolErrors(scheduler);
 
@@ -159,26 +146,24 @@ test("a node added between completed windows is described and executed", async (
     (info) => {
       infos.push(info);
       if (infos.length === 2) {
-        lateId = graph.addNode(
-          agentNode(late.agent, {
-            id: NodeId("late"),
-            description: "late member",
-            trigger: always(),
-            policy: "LockPolicy",
-          }),
-        );
+        lateId = graph.addNode({
+          id: NodeId.create("late"),
+          description: "late member",
+          trigger: TriggerRule.always(),
+          policy: LockPolicy,
+          state: late.agent,
+        });
       }
       return runAvailable(info);
     },
     { prompt: "go" },
   );
-  graph.addNode(
-    agentNode(first.agent, {
-      description: "first member",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
+  graph.addNode({
+    description: "first member",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: first.agent,
+  });
 
   assert.equal(settledText(await drive(scheduler)), "graph quiescent");
   assert.ok(lateId !== undefined);
@@ -202,15 +187,14 @@ test("a nested Pi graph consumes its completion response before its parent publi
     prompt: "work",
   });
   const child = await agencyGraph(runAvailable, { prompt: "run child" });
-  const leafId = child.graph.addNode(
-    agentNode(member.agent, {
-      description: "leaf",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
+  const leafId = child.graph.addNode({
+    description: "leaf",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: member.agent,
+  });
   const parent = await agencyGraph(runAvailable, { prompt: "run parent" });
-  const edge = valueEdge<AgenticInput, AssistantMessage>("child->consumer");
+  const edge = Edge.value<AgenticInput, AssistantMessage>("child->consumer");
   let childRequestsAtDelivery: number | undefined;
   const consumer = await leaf([
     () => {
@@ -218,30 +202,22 @@ test("a nested Pi graph consumes its completion response before its parent publi
       return fauxAssistantMessage("consumed");
     },
   ]);
-  const nested = parent.graph.addNode(
-    graphNode(
-      child.graph,
-      { description: "child", trigger: always(), policy: "LockPolicy" },
-      { result: leafId },
-    ),
-  );
-  const c = parent.graph.addNode(
-    agentNode(
-      consumer.agent,
-      {
-        description: "consumer",
-        trigger: when(edge),
-        policy: "LockPolicy",
-      },
-      { prompt: "consume" },
-    ),
-  );
+  const nested = parent.graph.addNode({
+    description: "child",
+    trigger: TriggerRule.always(),
+    state: child.graph,
+    result: leafId,
+  });
+  consumer.agent.stagePrompt("consume");
+  const c = parent.graph.addNode({
+    description: "consumer",
+    trigger: TriggerRule.when(edge),
+    policy: LockPolicy,
+    state: consumer.agent,
+  });
   parent.graph.addEdge(nested, c, edge);
 
-  assert.equal(
-    settledText(await drive(parent.scheduler)),
-    "graph quiescent",
-  );
+  assert.equal(settledText(await drive(parent.scheduler)), "graph quiescent");
   assert.equal(childRequestsAtDelivery, child.faux.state.callCount);
   assert.equal(child.scheduler.status, "idle");
   assert.deepEqual(
@@ -257,31 +233,23 @@ test("an already settled idle Pi child returns its retained result without anoth
     prompt: "work",
   });
   const child = await agencyGraph(runAvailable, { prompt: "run child" });
-  const leafId = child.graph.addNode(
-    agentNode(member.agent, {
-      description: "leaf",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
-  assert.equal(
-    settledText(await drive(child.scheduler)),
-    "graph quiescent",
-  );
+  const leafId = child.graph.addNode({
+    description: "leaf",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: member.agent,
+  });
+  assert.equal(settledText(await drive(child.scheduler)), "graph quiescent");
   const childRequests = child.faux.state.callCount;
 
   const parent = await agencyGraph(runAvailable, { prompt: "run parent" });
-  const nested = parent.graph.addNode(
-    graphNode(
-      child.graph,
-      { description: "child", trigger: always(), policy: "LockPolicy" },
-      { result: leafId },
-    ),
-  );
-  assert.equal(
-    settledText(await drive(parent.scheduler)),
-    "graph quiescent",
-  );
+  const nested = parent.graph.addNode({
+    description: "child",
+    trigger: TriggerRule.always(),
+    state: child.graph,
+    result: leafId,
+  });
+  assert.equal(settledText(await drive(parent.scheduler)), "graph quiescent");
 
   assert.equal(resultOf(parent.graph, nested), "leaf result");
   assert.equal(child.faux.state.callCount, childRequests);
@@ -292,21 +260,19 @@ test("an already settled idle Pi child returns its retained result without anoth
 test("a triggered idle Pi child without a result or staged prompt fails instead of hanging", async () => {
   const member = await leaf([fauxAssistantMessage("never")]);
   const child = await agencyGraph(runAvailable);
-  const leafId = child.graph.addNode(
-    agentNode(member.agent, {
-      description: "leaf",
-      trigger: always(),
-      policy: "LockPolicy",
-    }),
-  );
+  const leafId = child.graph.addNode({
+    description: "leaf",
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    state: member.agent,
+  });
   const parent = await agencyGraph(runAvailable, { prompt: "run parent" });
-  const nested = parent.graph.addNode(
-    graphNode(
-      child.graph,
-      { description: "child", trigger: always(), policy: "LockPolicy" },
-      { result: leafId },
-    ),
-  );
+  const nested = parent.graph.addNode({
+    description: "child",
+    trigger: TriggerRule.always(),
+    state: child.graph,
+    result: leafId,
+  });
 
   const error = failureOf(await drive(parent.scheduler));
   assert.ok(invalidState(error) && error instanceof JuncoAgentError);

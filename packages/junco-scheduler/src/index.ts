@@ -1,3 +1,3 @@
-export { createParallelScheduler } from "./parallel.js";
-export { createRoundRobinScheduler } from "./round-robin.js";
-export { createScheduler, type SchedulerOptions } from "./scheduler.js";
+export { ParallelScheduler } from "./parallel.js";
+export { RoundRobinScheduler } from "./round-robin.js";
+export { Scheduler, type SchedulerOptions } from "./scheduler.js";

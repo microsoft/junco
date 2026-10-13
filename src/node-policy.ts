@@ -11,7 +11,7 @@ import type {
   JuncoAgent,
   JuncoAgentNodeContext,
 } from "junco-agent";
-import type { ToolCollection, ToolCollectionOptions } from "junco-tools";
+import type { ToolCollection } from "junco-tools";
 import type { AgenticNode } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 
@@ -58,13 +58,19 @@ export type NodeRegistration = Pick<
  */
 export const registeredNodeContexts = new WeakMap<object, NodeRegistration>();
 
-/** Rejects a missing or unknown policy, or a collection opened under another policy. */
+/**
+ * Rejects a missing policy (anything without a `toNative` method), or a collection opened under
+ * another policy (policies compare by identity).
+ */
 export function checkPolicy(
-  policy: ToolCollectionOptions["policy"],
+  policy: ToolCollection["policy"] | undefined,
   collection: ToolCollection | undefined,
-): void {
-  if (policy !== "LockPolicy" && policy !== "EmptyPolicy")
-    throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
+): asserts policy is ToolCollection["policy"] {
+  if (
+    typeof (policy as Partial<typeof policy> | undefined)?.toNative !==
+    "function"
+  )
+    throw new TypeError("A policy is required");
   if (collection !== undefined && collection.policy !== policy)
     throw new TypeError("Collection policy does not match the selected policy");
 }

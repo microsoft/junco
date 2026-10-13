@@ -163,191 +163,196 @@ function renderRow(
  * provenance; anything native shortened, could not verify, or that did not
  * survive the output cap does not.
  */
-export function createGrepTool(
-  cwd: string,
-  store: EditStore,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<
-  ReturnType<typeof createPiGrepToolDefinition>["parameters"],
-  NativeGrepToolDetails
-> {
-  const base = createPiGrepToolDefinition(cwd);
-  const tool = {
-    ...base,
-    description: DESCRIPTION,
-    async execute(_toolCallId, params, signal) {
-      throwIfAborted(signal);
-      const limit =
-        params.limit === undefined
-          ? DEFAULT_LIMIT
-          : requireU32("limit", params.limit, 1);
-      const context =
-        params.context === undefined
-          ? undefined
-          : requireU32("context", params.context, 0);
-      const root = resolveToolPath(cwd, params.path ?? ".");
-      const pattern = params.literal
-        ? params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-        : params.pattern;
-
-      const { result, snapshots } = await withNativeSignal(
-        signal,
-        (nativeSignal) =>
-          mux.grep(
-            cwd,
-            {
-              pattern,
-              path: root,
-              glob: params.glob,
-              ignoreCase: params.ignoreCase,
-              mode: native.GrepOutputMode.Content,
-              hidden: true,
-              gitignore: true,
-              maxColumns: NATIVE_MAX_COLUMNS,
-              maxCount: limit,
-              context,
-              signal: nativeSignal,
-            },
-            store,
-          ),
-      );
-      throwIfAborted(signal);
-      const tags = new Map<string, string | undefined>(
-        snapshots.map((snapshot) => [snapshot.path, snapshot.tag]),
-      );
-
-      const details: NativeGrepToolDetails = {
-        totalMatches: result.totalMatches,
-        filesWithMatches: result.filesWithMatches,
-        filesSearched: result.filesSearched,
-      };
-      if (result.skippedOversized != null)
-        details.skippedOversized = result.skippedOversized;
-      if (result.limitReached) details.matchLimitReached = limit;
-      if (result.matches.length === 0) {
-        return {
-          content: [{ type: "text", text: "No matches found" }],
-          details,
-        };
-      }
-
-      const byPath = new Map<string, GrepMatch[]>();
-      for (const match of result.matches) {
-        const existing = byPath.get(match.path);
-        if (existing) existing.push(match);
-        else byPath.set(match.path, [match]);
-      }
-
-      const entries: Entry[] = [];
-      const sections: Section[] = [];
-      let linesTruncated = false;
-      for (const [nativePath, matches] of byPath) {
-        const absolutePath = isAbsolute(nativePath)
-          ? nativePath
-          : resolveNodePath(root, nativePath);
-        const section: Section = {
-          displayPath: displayToolPath(cwd, absolutePath),
-          absolutePath,
-          eligible: [],
-        };
-        // Native omits notebooks from snapshots: raw JSON cannot anchor decoded cells.
-        const tag = tags.get(nativePath) ?? null;
-        const snapshot = tag ? store.byHashText(absolutePath, tag) : null;
-        let snapshotLines =
-          snapshot !== null && !snapshot.includes("\0")
-            ? snapshot.split("\n")
-            : undefined;
-        if (snapshotLines) section.tag = tag ?? undefined;
-
-        const rows = collectRows(matches);
-        let rendered = rows.map((row) => renderRow(row, snapshotLines));
-        if (rendered.some((row) => row === undefined)) {
-          // A row the snapshot claims is complete did not match what native
-          // read: the file changed under us, so no anchor from this section.
-          section.tag = undefined;
-          snapshotLines = undefined;
-          rendered = rows.map((row) => renderRow(row, undefined));
-        }
-
-        if (entries.length > 0) entries.push({ kind: "blank", text: "" });
-        entries.push({
-          kind: "header",
-          text: headerText(section, native),
-          section,
-        });
-        if (!snapshotLines && tag)
-          entries.push({ kind: "notice", text: SNAPSHOT_MISMATCH });
-        let previousLine: number | undefined;
-        rows.forEach((row, index) => {
-          const view = rendered[index];
-          if (!view) return;
-          if (previousLine !== undefined && row.lineNumber > previousLine + 1) {
-            entries.push({ kind: "gap", text: "..." });
-          }
-          previousLine = row.lineNumber;
-          if (view.shortened) linesTruncated = true;
-          entries.push({
-            kind: "row",
-            text: view.text,
-            section,
-            eligibleLine: view.eligible ? row.lineNumber : undefined,
-          });
-        });
-        sections.push(section);
-      }
-
-      const truncation = truncateHead(
-        entries.map((entry) => entry.text).join("\n"),
-        {
-          maxLines: Number.MAX_SAFE_INTEGER,
-          maxBytes: DEFAULT_MAX_BYTES,
-        },
-      );
-      // One entry is exactly one output line: native rows are line-based and
-      // snapshot lines never contain a newline.
-      const survivors = entries.slice(0, truncation.outputLines);
-      for (const entry of survivors) {
-        if (entry.kind === "row" && entry.eligibleLine !== undefined) {
-          entry.section.eligible.push(entry.eligibleLine);
-        }
-      }
-      // A tagged header whose anchorable rows all fell past the cap would
-      // advertise provenance the model never received.
-      for (const section of sections) {
-        if (section.eligible.length === 0) section.tag = undefined;
-        else if (section.tag) {
-          store.recordSeenLines(
-            section.absolutePath,
-            section.tag,
-            section.eligible,
-          );
-        }
-      }
-
-      let text = survivors
-        .map((entry) =>
-          entry.kind === "header"
-            ? headerText(entry.section, native)
-            : entry.text,
-        )
-        .join("\n");
-      const notices: string[] = [];
-      if (result.limitReached) notices.push(`${limit} match limit reached`);
-      if (truncation.truncated) {
-        notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-        details.truncation = truncation;
-      }
-      if (linesTruncated) details.linesTruncated = true;
-      if (notices.length > 0) text += `\n\n[${notices.join(". ")}]`;
-      return { content: [{ type: "text", text }], details };
-    },
-  } satisfies ToolDefinition<
+export const GrepTool = {
+  create(
+    cwd: string,
+    store: EditStore,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
     ReturnType<typeof createPiGrepToolDefinition>["parameters"],
     NativeGrepToolDetails
-  >;
-  return tool;
-}
+  > {
+    const base = createPiGrepToolDefinition(cwd);
+    const tool = {
+      ...base,
+      description: DESCRIPTION,
+      async execute(_toolCallId, params, signal) {
+        throwIfAborted(signal);
+        const limit =
+          params.limit === undefined
+            ? DEFAULT_LIMIT
+            : requireU32("limit", params.limit, 1);
+        const context =
+          params.context === undefined
+            ? undefined
+            : requireU32("context", params.context, 0);
+        const root = resolveToolPath(cwd, params.path ?? ".");
+        const pattern = params.literal
+          ? params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          : params.pattern;
+
+        const { result, snapshots } = await withNativeSignal(
+          signal,
+          (nativeSignal) =>
+            mux.grep(
+              cwd,
+              {
+                pattern,
+                path: root,
+                glob: params.glob,
+                ignoreCase: params.ignoreCase,
+                mode: native.GrepOutputMode.Content,
+                hidden: true,
+                gitignore: true,
+                maxColumns: NATIVE_MAX_COLUMNS,
+                maxCount: limit,
+                context,
+                signal: nativeSignal,
+              },
+              store,
+            ),
+        );
+        throwIfAborted(signal);
+        const tags = new Map<string, string | undefined>(
+          snapshots.map((snapshot) => [snapshot.path, snapshot.tag]),
+        );
+
+        const details: NativeGrepToolDetails = {
+          totalMatches: result.totalMatches,
+          filesWithMatches: result.filesWithMatches,
+          filesSearched: result.filesSearched,
+        };
+        if (result.skippedOversized != null)
+          details.skippedOversized = result.skippedOversized;
+        if (result.limitReached) details.matchLimitReached = limit;
+        if (result.matches.length === 0) {
+          return {
+            content: [{ type: "text", text: "No matches found" }],
+            details,
+          };
+        }
+
+        const byPath = new Map<string, GrepMatch[]>();
+        for (const match of result.matches) {
+          const existing = byPath.get(match.path);
+          if (existing) existing.push(match);
+          else byPath.set(match.path, [match]);
+        }
+
+        const entries: Entry[] = [];
+        const sections: Section[] = [];
+        let linesTruncated = false;
+        for (const [nativePath, matches] of byPath) {
+          const absolutePath = isAbsolute(nativePath)
+            ? nativePath
+            : resolveNodePath(root, nativePath);
+          const section: Section = {
+            displayPath: displayToolPath(cwd, absolutePath),
+            absolutePath,
+            eligible: [],
+          };
+          // Native omits notebooks from snapshots: raw JSON cannot anchor decoded cells.
+          const tag = tags.get(nativePath) ?? null;
+          const snapshot = tag ? store.byHashText(absolutePath, tag) : null;
+          let snapshotLines =
+            snapshot !== null && !snapshot.includes("\0")
+              ? snapshot.split("\n")
+              : undefined;
+          if (snapshotLines) section.tag = tag ?? undefined;
+
+          const rows = collectRows(matches);
+          let rendered = rows.map((row) => renderRow(row, snapshotLines));
+          if (rendered.some((row) => row === undefined)) {
+            // A row the snapshot claims is complete did not match what native
+            // read: the file changed under us, so no anchor from this section.
+            section.tag = undefined;
+            snapshotLines = undefined;
+            rendered = rows.map((row) => renderRow(row, undefined));
+          }
+
+          if (entries.length > 0) entries.push({ kind: "blank", text: "" });
+          entries.push({
+            kind: "header",
+            text: headerText(section, native),
+            section,
+          });
+          if (!snapshotLines && tag)
+            entries.push({ kind: "notice", text: SNAPSHOT_MISMATCH });
+          let previousLine: number | undefined;
+          rows.forEach((row, index) => {
+            const view = rendered[index];
+            if (!view) return;
+            if (
+              previousLine !== undefined &&
+              row.lineNumber > previousLine + 1
+            ) {
+              entries.push({ kind: "gap", text: "..." });
+            }
+            previousLine = row.lineNumber;
+            if (view.shortened) linesTruncated = true;
+            entries.push({
+              kind: "row",
+              text: view.text,
+              section,
+              eligibleLine: view.eligible ? row.lineNumber : undefined,
+            });
+          });
+          sections.push(section);
+        }
+
+        const truncation = truncateHead(
+          entries.map((entry) => entry.text).join("\n"),
+          {
+            maxLines: Number.MAX_SAFE_INTEGER,
+            maxBytes: DEFAULT_MAX_BYTES,
+          },
+        );
+        // One entry is exactly one output line: native rows are line-based and
+        // snapshot lines never contain a newline.
+        const survivors = entries.slice(0, truncation.outputLines);
+        for (const entry of survivors) {
+          if (entry.kind === "row" && entry.eligibleLine !== undefined) {
+            entry.section.eligible.push(entry.eligibleLine);
+          }
+        }
+        // A tagged header whose anchorable rows all fell past the cap would
+        // advertise provenance the model never received.
+        for (const section of sections) {
+          if (section.eligible.length === 0) section.tag = undefined;
+          else if (section.tag) {
+            store.recordSeenLines(
+              section.absolutePath,
+              section.tag,
+              section.eligible,
+            );
+          }
+        }
+
+        let text = survivors
+          .map((entry) =>
+            entry.kind === "header"
+              ? headerText(entry.section, native)
+              : entry.text,
+          )
+          .join("\n");
+        const notices: string[] = [];
+        if (result.limitReached) notices.push(`${limit} match limit reached`);
+        if (truncation.truncated) {
+          notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+          details.truncation = truncation;
+        }
+        if (linesTruncated) details.linesTruncated = true;
+        if (notices.length > 0) text += `\n\n[${notices.join(". ")}]`;
+        return { content: [{ type: "text", text }], details };
+      },
+    } satisfies ToolDefinition<
+      ReturnType<typeof createPiGrepToolDefinition>["parameters"],
+      NativeGrepToolDetails
+    >;
+    return tool;
+  },
+};
 
 function headerText(section: Section, native: NativeModule): string {
   return section.tag

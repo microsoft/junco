@@ -17,7 +17,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  EmptyPolicy,
   isMarshPolicyDenied,
+  LockPolicy,
   type NativeModule,
   type NativeMux,
   ToolCollection,
@@ -95,13 +97,13 @@ async function withRepository(
     );
     const protectedTools = await ToolCollection.create(seed, {
       native: copyTree,
-      policy: "LockPolicy",
+      policy: LockPolicy,
       sandbox: "always",
     });
     defer(() => protectedTools.close());
     const buildTools = await ToolCollection.create(seed, {
       native: copyTree,
-      policy: "EmptyPolicy",
+      policy: EmptyPolicy,
       sandbox: "always",
     });
     defer(() => buildTools.close());
@@ -298,7 +300,11 @@ test("applies a multi-file refactor in place and releases exactly its paths", as
         "keep\n",
       );
       assert.equal(git("status", "--porcelain=v1", "--", "untouched.ts"), "");
-      assert.equal(git("ls-files", "--stage"), indexBefore, "release stages nothing");
+      assert.equal(
+        git("ls-files", "--stage"),
+        indexBefore,
+        "release stages nothing",
+      );
 
       // A fresh owner edits the same file: the first owner's release relinquished it.
       assert.deepEqual(

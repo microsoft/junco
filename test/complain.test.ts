@@ -7,16 +7,13 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { DummyTracer, type NodeIdType } from "dataflow-engine";
+import { LockPolicy } from "junco-tools";
 import {
   type AgenticInput,
   agent as agentApi,
-  agentNode,
-  createParallelAgentGraph,
   Deterministic,
-  deterministicNode,
   graph,
-  graphNode,
-  type JuncoGraph,
+  JuncoGraph,
   MockAgent,
   tools,
   trigger,
@@ -69,7 +66,7 @@ async function worker(
   const member = await agentApi.JuncoAgent.fromResolved({
     ...options,
     systemPrompt,
-    tools: [tools.RecvTool()],
+    tools: [new tools.RecvTool()],
   });
   closers.push(() => member.return());
   return member;
@@ -94,40 +91,34 @@ function wire(
   id?: NodeIdType,
   delivered: AgenticInput = input,
 ) {
-  const edge = graph.messageEdge<AgenticInput, AssistantMessage>(
+  const edge = graph.Edge.message<AgenticInput, AssistantMessage>(
     "source->worker",
   );
   const source = new Deterministic<AgenticInput, AssistantMessage>(
     async function* () {
-      yield [graph.msg(edge, delivered)];
+      yield [graph.Message.create(edge, delivered)];
       return fauxAssistantMessage("seeded");
     },
-    "LockPolicy",
+    LockPolicy,
   );
-  const sourceId = flow.addNode(
-    deterministicNode(source, {
-      id: graph.NodeId(`source-${crypto.randomUUID()}`),
-      policy: "LockPolicy",
-      trigger: trigger.always(),
-    }),
-  );
-  const workerId = flow.addNode(
-    agentNode(
-      member,
-      {
-        ...(id === undefined ? {} : { id }),
-        policy: "LockPolicy",
-        trigger: trigger.when(edge),
-      },
-      { prompt: "Call recv and follow the delivered request." },
-    ),
-  );
+  const sourceId = flow.addNode({
+    id: graph.NodeId.create(`source-${crypto.randomUUID()}`),
+    trigger: trigger.TriggerRule.always(),
+    state: source,
+  });
+  member.stagePrompt("Call recv and follow the delivered request.");
+  const workerId = flow.addNode({
+    ...(id === undefined ? {} : { id }),
+    state: member,
+    policy: LockPolicy,
+    trigger: trigger.TriggerRule.when(edge),
+  });
   flow.addEdge(sourceId, workerId, edge);
   return { edge, workerId };
 }
 
 function newGraph(tracer: DummyTracer = new RecordingTracer()) {
-  const flow = createParallelAgentGraph("LockPolicy", tracer);
+  const flow = JuncoGraph.parallel(LockPolicy, tracer);
   closers.push(() => flow.close());
   return flow;
 }
@@ -142,7 +133,11 @@ describe("complaints through real graphs", () => {
     const tracer = new RecordingTracer();
     const flow = newGraph(tracer);
     const member = await worker("I cannot reach the coordinator.");
-    const { edge, workerId } = wire(flow, member, graph.NodeId("worker"));
+    const { edge, workerId } = wire(
+      flow,
+      member,
+      graph.NodeId.create("worker"),
+    );
     const before = tools.issueLog.length;
 
     const results = await flow.run();
@@ -199,7 +194,11 @@ describe("complaints through real graphs", () => {
     const auto = newGraph();
     const empty = newGraph();
     const autoWorker = wire(auto, await worker("auto"));
-    const emptyWorker = wire(empty, await worker("empty"), graph.NodeId(""));
+    const emptyWorker = wire(
+      empty,
+      await worker("empty"),
+      graph.NodeId.create(""),
+    );
     const before = tools.issueLog.length;
     await auto.run();
     await empty.run();
@@ -219,7 +218,7 @@ describe("complaints through real graphs", () => {
     const tracerB = new RecordingTracer();
     const a = newGraph(tracerA);
     const b = newGraph(tracerB);
-    const id = graph.NodeId("worker");
+    const id = graph.NodeId.create("worker");
     const inputA = {
       kind: "prompt",
       text: "Contact coordinator A.",
@@ -284,24 +283,19 @@ describe("complaints through real graphs", () => {
   test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
     const innerTracer = new RecordingTracer();
     const outerTracer = new RecordingTracer();
-    const inner = createParallelAgentGraph("LockPolicy", innerTracer);
+    const inner = JuncoGraph.parallel(LockPolicy, innerTracer);
     const { workerId } = wire(
       inner,
       await worker("nested"),
-      graph.NodeId("inner-worker"),
+      graph.NodeId.create("inner-worker"),
     );
     const outer = newGraph(outerTracer);
-    const wrapper = outer.addNode(
-      graphNode(
-        inner,
-        {
-          id: graph.NodeId("wrapper"),
-          policy: "LockPolicy",
-          trigger: trigger.always(),
-        },
-        { result: workerId },
-      ),
-    );
+    const wrapper = outer.addNode({
+      id: graph.NodeId.create("wrapper"),
+      trigger: trigger.TriggerRule.always(),
+      state: inner,
+      result: workerId,
+    });
     const before = tools.issueLog.length;
     const results = await outer.run();
     assert.equal(resultText(results, wrapper), "continued");
@@ -320,15 +314,13 @@ describe("complaints through real graphs", () => {
     const tracerA = new RecordingTracer();
     const tracerB = new RecordingTracer();
     const member = await worker("shared spec");
-    const spec = agentNode(
-      member,
-      {
-        id: graph.NodeId("shared"),
-        policy: "LockPolicy",
-        trigger: trigger.always(),
-      },
-      { prompt: "go" },
-    );
+    member.stagePrompt("go");
+    const spec = {
+      id: graph.NodeId.create("shared"),
+      state: member,
+      policy: LockPolicy,
+      trigger: trigger.TriggerRule.always(),
+    };
     const a = newGraph(tracerA);
     const b = newGraph(tracerB);
     const id = a.addNode(spec);
@@ -352,10 +344,14 @@ describe("direct Agentic.complain", () => {
     for (const owner of [real, mock, ...graphs])
       assert.equal(owner.issueLog, tools.issueLog);
 
-    const nodeId = graph.NodeId("supplied-node");
+    const nodeId = graph.NodeId.create("supplied-node");
     assert.notEqual(nodeId, real.nodeId);
-    const edgeId = graph.messageEdge<AgenticInput, AssistantMessage>("edge").id;
-    const lateId = graph.messageEdge<AgenticInput, AssistantMessage>("late").id;
+    const edgeId = graph.Edge.message<AgenticInput, AssistantMessage>(
+      "edge",
+    ).id;
+    const lateId = graph.Edge.message<AgenticInput, AssistantMessage>(
+      "late",
+    ).id;
     const messages = [{ id: edgeId, payload: input }];
     const original = {
       role: "user" as const,

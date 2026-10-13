@@ -1,1 +1,1 @@
-export { type RalphOptions, ralph } from "./ralph.js";
+export { Ralph, type RalphOptions } from "./ralph.js";

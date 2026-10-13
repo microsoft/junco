@@ -6,15 +6,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   type AcceptedRefactor,
-  type BatchRunner,
   type Candidate,
   type CandidateOutcome,
   type CandidateWork,
   type CheckedProposal,
-  createProposalTool,
-  createVerdictTool,
-  createYakShaverGraph,
   type GraftSnapshot,
+  ProposalRecorder,
   parseSnapshot,
   partitionSearch,
   type RefactorApplier,
@@ -25,6 +22,7 @@ import {
   type SearchReport,
   type SnapshotRefresher,
   type SourceEdit,
+  VerdictRecorder,
 } from "../examples/yak-shaver.ts";
 import { tracer } from "../src/index.ts";
 import { flushMacrotasks, waitingTool } from "./support.ts";
@@ -374,7 +372,7 @@ function keysProposal(overrides: Record<string, unknown> = {}) {
 
 /** A recorder whose researchers have delivered one complete report per shard. */
 function researched(work: CandidateWork = keysWork) {
-  const recorder = createProposalTool({
+  const recorder = new ProposalRecorder({
     snapshot: keysSnapshot,
     work,
     readSource: async (path) => keysSources.get(path),
@@ -597,7 +595,7 @@ describe("proposal evidence", () => {
       /already recorded/,
     );
     assert.equal(recorder.peek(), first);
-    const verdict = createVerdictTool();
+    const verdict = new VerdictRecorder();
     await verdict.tool.execute("a", allPass);
     await assert.rejects(
       verdict.tool.execute("b", {
@@ -818,7 +816,6 @@ describe("admission", () => {
     const first = Promise.withResolvers<readonly CandidateOutcome[]>();
     const running = refactorCandidates(
       nine,
-      rankCandidates(nine),
       async (snapshot, batch) => {
         works.push(batch);
         snapshots.push(snapshot);
@@ -970,7 +967,6 @@ describe("admission", () => {
       await assert.rejects(
         refactorCandidates(
           nine,
-          rankCandidates(nine),
           async (_snapshot, batch) => {
             calls++;
             return outcomes(batch);
@@ -986,8 +982,7 @@ describe("admission", () => {
   test("empty input runs nothing; the last group never refreshes", async () => {
     let calls = 0;
     const empty = await refactorCandidates(
-      nine,
-      [],
+      snapshotOf([]),
       async () => {
         calls++;
         return [];
@@ -1005,9 +1000,10 @@ describe("admission", () => {
         netLinesRemoved: 0,
       },
     });
-    const four = rankCandidates(nine).slice(0, 4);
+    const four = snapshotOf(
+      [1, 2, 3, 4].map((n) => ({ id: `fx/C${n}.ts#C${n}` })),
+    );
     const run = await refactorCandidates(
-      nine,
       four,
       async (_snapshot, batch) => batch.map((work) => appliedOutcome(work)),
       noRefresh,
@@ -1021,7 +1017,6 @@ describe("admission", () => {
     await assert.rejects(
       refactorCandidates(
         nine,
-        rankCandidates(nine),
         async (_snapshot, batch) => {
           groups.push(batch.length);
           if (groups.length === 2) throw new Error("stage failed");
@@ -1379,7 +1374,6 @@ describe("candidate batch graph", () => {
     await assert.rejects(
       refactorCandidates(
         five,
-        rankCandidates(five),
         async (snapshot, batch, signal) => {
           calls++;
           const lanes = await Promise.all(
@@ -1487,106 +1481,10 @@ describe("candidate batch graph", () => {
   }, 30_000);
 });
 
-// ## The controller
+// ## Cancellation through admission
 
-describe("controller", () => {
-  test("ranks, refactors every batch, and returns the structured run", async () => {
-    const five = snapshotOf(
-      [1, 2, 3, 4, 5].map((n) => ({ id: `fx/C${n}.ts#C${n}` })),
-    );
-    const seen: number[] = [];
-    const runBatch: BatchRunner = async (_snapshot, batch) => {
-      seen.push(batch.length);
-      return batch.map(none);
-    };
-    let builds = 0;
-    const { workflow, buildId, rankId, resultId } = createYakShaverGraph({
-      buildSnapshot: async () => {
-        builds++;
-        return five;
-      },
-      runBatch,
-      refreshSnapshot: noRefresh,
-      observer: quiet(),
-    });
-    try {
-      const results = await workflow.run();
-      assert.equal(builds, 1);
-      assert.equal(results.get(buildId)?.kind, "snapshot");
-      assert.equal(results.get(rankId)?.kind, "ranking");
-      const result = results.get(resultId);
-      assert.equal(result?.kind, "run");
-      if (result?.kind !== "run") return;
-      assert.deepEqual(seen, [4, 1]);
-      assert.deepEqual(
-        result.run.outcomes.map((outcome) => outcome.status),
-        Array(5).fill("no-proposal"),
-      );
-      assert.deepEqual(result.run.applied, []);
-      assert.deepEqual(result.run.totals, {
-        applied: 0,
-        addedCallSites: 0,
-        addedCallerDefinitions: 0,
-        netLinesRemoved: 0,
-      });
-    } finally {
-      await workflow.close();
-    }
-  });
-
-  test("a failed graft build stops the run before ranking or any batch", async () => {
-    let calls = 0;
-    const { workflow, rankId } = createYakShaverGraph({
-      buildSnapshot: async () => {
-        throw new Error("graft build failed");
-      },
-      runBatch: async () => {
-        calls++;
-        return [];
-      },
-      refreshSnapshot: noRefresh,
-      observer: quiet(),
-    });
-    try {
-      await assert.rejects(
-        workflow.run(),
-        (error: unknown) =>
-          error instanceof Error &&
-          "nodeId" in error &&
-          error.nodeId === "GraftBuild",
-      );
-      assert.equal(workflow.result(rankId)._tag, "None");
-      assert.equal(calls, 0);
-    } finally {
-      await workflow.close();
-    }
-  });
-
-  test("an empty ranking completes a run without any batch", async () => {
-    const empty = snapshotOf([
-      { id: "src/f.ts#f", kind: "function", exported: true },
-    ]);
-    let calls = 0;
-    const { workflow, resultId } = createYakShaverGraph({
-      buildSnapshot: async () => empty,
-      runBatch: async () => {
-        calls++;
-        return [];
-      },
-      refreshSnapshot: noRefresh,
-      observer: quiet(),
-    });
-    try {
-      const result = (await workflow.run()).get(resultId);
-      assert.equal(result?.kind, "run");
-      assert.equal(calls, 0);
-      assert.ok(result?.kind === "run" && result.run.outcomes.length === 0);
-    } finally {
-      await workflow.close();
-    }
-  });
-
-  test("cancellation reaches a blocked researcher, applies nothing, and produces no run", async () => {
+describe("admission cancellation", () => {
+  test("cancellation reaches a blocked researcher, applies nothing, and closes every lane", async () => {
     const five = snapshotOf(
       [1, 2, 3, 4, 5].map((n) => ({ id: `fx/C${n}.ts#C${n}` })),
     );
@@ -1596,13 +1494,11 @@ describe("controller", () => {
     const hang = waitingTool("hang", { endOnAbort: true });
     const controller = new AbortController();
     const recorder = recordingApplier();
+    const created: ScriptedLane[] = [];
     let calls = 0;
-    const { workflow, resultId } = createYakShaverGraph({
-      buildSnapshot: async () => five,
-      signal: controller.signal,
-      observer: quiet(),
-      refreshSnapshot: noRefresh,
-      runBatch: async (snapshot, batch, signal) => {
+    const running = refactorCandidates(
+      five,
+      async (snapshot, batch, signal) => {
         calls++;
         const lanes = await Promise.all(
           batch.map((work) =>
@@ -1617,6 +1513,7 @@ describe("controller", () => {
             ),
           ),
         );
+        created.push(...lanes);
         return runCandidateBatch(
           {
             snapshot,
@@ -1627,19 +1524,16 @@ describe("controller", () => {
           signal,
         );
       },
-    });
-    try {
-      const running = workflow.run({ signal: controller.signal });
-      await hang.started;
-      controller.abort(new DOMException("stop", "AbortError"));
-      await assert.rejects(running);
-      await hang.aborted;
-      assert.equal(calls, 1);
-      assert.equal(recorder.applied.length, 0);
-      assert.equal(workflow.result(resultId)._tag, "None");
-    } finally {
-      await workflow.close();
-    }
+      noRefresh,
+      controller.signal,
+    );
+    await hang.started;
+    controller.abort(new DOMException("stop", "AbortError"));
+    await assert.rejects(running);
+    await hang.aborted;
+    assert.equal(calls, 1);
+    assert.equal(recorder.applied.length, 0);
+    assertClosed(created);
   }, 30_000);
 });
 

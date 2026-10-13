@@ -8,10 +8,8 @@ import {
   type WidthType,
 } from "dataflow-engine";
 import type { AgenticYieldReason } from "junco-agent";
-import {
-  createParallelScheduler,
-  createRoundRobinScheduler,
-} from "junco-scheduler";
+import { ParallelScheduler, RoundRobinScheduler } from "junco-scheduler";
+import { LockPolicy } from "junco-tools";
 import {
   type AgenticInput,
   graph as graphApi,
@@ -41,8 +39,8 @@ export type PolicyScheduler = DataflowScheduler<
 /** The real junco-scheduler policy for `strategy`. */
 export function policy(strategy: Strategy): PolicyScheduler {
   return strategy === "round-robin"
-    ? createRoundRobinScheduler<AgenticInput, AssistantMessage>()
-    : createParallelScheduler<AgenticInput, AssistantMessage>();
+    ? new RoundRobinScheduler<AgenticInput, AssistantMessage>()
+    : new ParallelScheduler<AgenticInput, AssistantMessage>();
 }
 
 /** The graph bounds each policy is documented for: one entry per lane, one or every lane. */
@@ -51,8 +49,8 @@ function bounds(
   threads: WidthType | undefined,
 ): readonly [WidthType, WidthType] {
   return [
-    Width(1),
-    threads ?? (strategy === "round-robin" ? Width(1) : UNBOUNDED),
+    Width.create(1),
+    threads ?? (strategy === "round-robin" ? Width.create(1) : UNBOUNDED),
   ];
 }
 
@@ -66,7 +64,7 @@ export function plainGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(policy(strategy), window, threads, quiet, "LockPolicy");
+  >(policy(strategy), window, threads, quiet, LockPolicy);
 }
 
 /**
@@ -79,8 +77,8 @@ export function policyGraph(
   { threads }: { readonly threads?: WidthType } = {},
 ): JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler> {
   if (strategy === "parallel" && threads === undefined) {
-    return graphApi.createParallelAgentGraph<AgenticInput, AssistantMessage>(
-      "LockPolicy",
+    return graphApi.JuncoGraph.parallel<AgenticInput, AssistantMessage>(
+      LockPolicy,
       quiet,
     );
   }
@@ -96,7 +94,7 @@ export function policyGraph(
     AssistantMessage,
     unknown,
     PolicyScheduler
-  >(scheduler, window, width, quiet, "LockPolicy");
+  >(scheduler, window, width, quiet, LockPolicy);
   graph = constructed;
   return constructed;
 }

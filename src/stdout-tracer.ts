@@ -41,6 +41,17 @@ function format(record: unknown): string {
  * outcome with full payloads, then the run's outcome. Every line is written as its event happens.
  */
 export class StdoutTracer implements DataflowTracer {
+  static #shared: StdoutTracer | undefined;
+
+  /**
+   * The shared default tracer: one `StdoutTracer` named `JuncoGraph.run` per process, built on
+   * first use. Pass any other {@link DataflowTracer} explicitly instead.
+   */
+  static shared(): StdoutTracer {
+    StdoutTracer.#shared ??= new StdoutTracer("JuncoGraph.run");
+    return StdoutTracer.#shared;
+  }
+
   readonly #name: string;
 
   constructor(name: string = "DataflowGraph.run") {

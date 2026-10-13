@@ -22,10 +22,10 @@ export const wire = (
   sink: NodeIdType,
 ): void => {
   const source = graph.addNode(
-    ConstFanout({ value: 1 }, [a, b], { state: undefined, ret: "source" }),
+    new ConstFanout({ value: 1 }, [a, b], { state: undefined, ret: "source" }),
   );
   const join = graph.addNode(
-    ConstFanin([b, a], list, { state: undefined, ret: "join" }),
+    new ConstFanin([b, a], list, { state: undefined, ret: "join" }),
   );
   graph
     .addEdge(source, join, a)
@@ -40,10 +40,10 @@ export const wireWider = (
   list: Edge<Constant[], string>,
 ): void => {
   const source = graph.addNode(
-    ConstFanout({ value: 1 }, [a], { state: undefined, ret: "source" }),
+    new ConstFanout({ value: 1 }, [a], { state: undefined, ret: "source" }),
   );
   const join = graph.addNode(
-    ConstFanin([a], list, { state: undefined, ret: "join" }),
+    new ConstFanin([a], list, { state: undefined, ret: "join" }),
   );
   graph.addEdge(source, join, a).addEdge(join, source, list);
 };
@@ -54,7 +54,7 @@ export const scalarOutput = (
   scalar: Edge<Constant, string>,
 ) =>
   // @ts-expect-error the output edge must be `Edge<Constant[], string>`.
-  ConstFanin([a], scalar, { state: undefined, ret: "join" });
+  new ConstFanin([a], scalar, { state: undefined, ret: "join" });
 
 /** A graph whose messages cannot carry the aggregate list rejects the collector. */
 export const scalarGraph = (
@@ -63,4 +63,4 @@ export const scalarGraph = (
   list: Edge<Constant[], string>,
 ): NodeIdType =>
   // @ts-expect-error `Constant[]` is not one of the graph's messages.
-  graph.addNode(ConstFanin([a], list, { state: undefined, ret: "join" }));
+  graph.addNode(new ConstFanin([a], list, { state: undefined, ret: "join" }));

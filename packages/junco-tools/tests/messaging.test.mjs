@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DataflowGraph,
+  Edge,
   EdgeId,
-  messageEdge,
   NodeId,
   UNBOUNDED,
-  valueEdge,
   Width,
 } from "dataflow-engine";
 import { InfoTool, RecvTool, SendTool } from "../dist/messaging.js";
@@ -33,15 +32,15 @@ const call = (tool, input = {}, signal) =>
 test("recv flattens per-edge FIFO messages and value envelopes, then drains", async () => {
   const host = inbox(
     [
-      [EdgeId("b"), ["b1", "b2"]],
-      [EdgeId("a"), ["a1"]],
+      [EdgeId.create("b"), ["b1", "b2"]],
+      [EdgeId.create("a"), ["a1"]],
     ],
     [
-      [EdgeId("v"), { text: "parent" }],
-      [EdgeId("u"), undefined],
+      [EdgeId.create("v"), { text: "parent" }],
+      [EdgeId.create("u"), undefined],
     ],
   );
-  const tool = RecvTool(host);
+  const tool = new RecvTool(host);
   const first = await call(tool);
   assert.deepEqual(first.details, {
     messages: [
@@ -67,46 +66,43 @@ test("recv leaves the inbox intact when rendering, cancellation, validation or h
   const cyclic = {};
   cyclic.self = cyclic;
   for (const payload of [cyclic, 1n]) {
-    const host = inbox([[EdgeId("m"), [payload]]]);
-    await assert.rejects(call(RecvTool(host)), TypeError);
+    const host = inbox([[EdgeId.create("m"), [payload]]]);
+    await assert.rejects(call(new RecvTool(host)), TypeError);
     assert.equal(host.consumed, 0);
     assert.equal(host.view.messages.get("m")[0], payload);
   }
 
-  const host = inbox([[EdgeId("m"), ["kept"]]]);
+  const host = inbox([[EdgeId.create("m"), ["kept"]]]);
   const aborted = AbortSignal.abort(new Error("stop"));
-  await assert.rejects(call(RecvTool(host), {}, aborted), /stop/);
+  await assert.rejects(call(new RecvTool(host), {}, aborted), /stop/);
   await assert.rejects(
-    call(RecvTool(host), { extra: 1 }),
+    call(new RecvTool(host), { extra: 1 }),
     /^Error: Invalid recv input/,
   );
-  await assert.rejects(
-    call(RecvTool()),
-    /recv requires an agentNode graph host/,
-  );
+  await assert.rejects(call(new RecvTool()));
   assert.equal(host.consumed, 0);
   assert.deepEqual(host.view.messages.get("m"), ["kept"]);
 });
 
 function wiredGraph() {
   // Admission only: emit never consults the scheduler, so it is never driven.
-  const graph = new DataflowGraph({ create() {} }, Width(1), UNBOUNDED);
+  const graph = new DataflowGraph({ create() {} }, Width.create(1), UNBOUNDED);
   const step = async function* () {
     yield [];
   };
-  const a = graph.addNode({ id: NodeId("a"), state: undefined, step });
-  const b = graph.addNode({ id: NodeId("b"), state: undefined, step });
-  const out = messageEdge("a->b");
+  const a = graph.addNode({ id: NodeId.create("a"), state: undefined, step });
+  const b = graph.addNode({ id: NodeId.create("b"), state: undefined, step });
+  const out = Edge.message("a->b");
   graph.addEdge(a, b, out);
-  graph.addEdge(a, b, valueEdge("a=>b"));
-  graph.addEdge(b, a, messageEdge("b->a"));
+  graph.addEdge(a, b, Edge.value("a=>b"));
+  graph.addEdge(b, a, Edge.message("b->a"));
   return { graph, out, host: { send: (message) => graph.emit(a, message) } };
 }
 
 test("send admits one message on a real outgoing message edge, keeping the payload reference", async () => {
   const { out, host } = wiredGraph();
   const payload = { kind: "prompt", text: "go" };
-  const result = await call(SendTool(host), { id: "a->b", payload });
+  const result = await call(new SendTool(host), { id: "a->b", payload });
   assert.equal(result.content[0].text, "Message sent.");
   assert.equal(result.details, undefined);
   assert.equal(out.transport.left.length, 1);
@@ -115,7 +111,7 @@ test("send admits one message on a real outgoing message edge, keeping the paylo
 
 test("send propagates admission errors for unwired, incoming-only and value edges", async () => {
   const { out, host } = wiredGraph();
-  const tool = SendTool(host);
+  const tool = new SendTool(host);
   for (const id of ["nowhere", "b->a"])
     await assert.rejects(call(tool, { id, payload: 1 }), /unwired edge/);
   await assert.rejects(call(tool, { id: "a=>b", payload: 1 }), /value edge/);
@@ -125,19 +121,16 @@ test("send propagates admission errors for unwired, incoming-only and value edge
 test("send rejects invalid, unhosted and cancelled calls without emitting", async () => {
   const { out, host } = wiredGraph();
   await assert.rejects(
-    call(SendTool(host), { id: "a->b" }),
+    call(new SendTool(host), { id: "a->b" }),
     /^Error: Invalid send input/,
   );
   await assert.rejects(
-    call(SendTool(host), { id: "a->b", payload: 1, to: "b" }),
+    call(new SendTool(host), { id: "a->b", payload: 1, to: "b" }),
     /^Error: Invalid send input/,
   );
+  await assert.rejects(call(new SendTool(), { id: "a->b", payload: 1 }));
   await assert.rejects(
-    call(SendTool(), { id: "a->b", payload: 1 }),
-    /send requires an agentNode graph host/,
-  );
-  await assert.rejects(
-    call(SendTool(host), { id: "a->b", payload: 1 }, AbortSignal.abort()),
+    call(new SendTool(host), { id: "a->b", payload: 1 }, AbortSignal.abort()),
     { name: "AbortError" },
   );
   assert.equal(out.transport.left.length, 0);
@@ -146,7 +139,7 @@ test("send rejects invalid, unhosted and cancelled calls without emitting", asyn
 test("info rejects model-supplied identity and absent hosts, and preserves host errors", async () => {
   let calls = 0;
   const details = { parents: [], children: [] };
-  const tool = InfoTool({
+  const tool = new InfoTool({
     info() {
       calls++;
       return details;
@@ -160,14 +153,11 @@ test("info rejects model-supplied identity and absent hosts, and preserves host 
   const result = await call(tool);
   assert.equal(result.details, details);
   assert.equal(result.content[0].text, '{"parents":[],"children":[]}');
-  await assert.rejects(
-    call(InfoTool()),
-    /info requires an agentNode graph host/,
-  );
+  await assert.rejects(call(new InfoTool()));
   const failure = new Error("no contract");
   await assert.rejects(
     call(
-      InfoTool({
+      new InfoTool({
         info() {
           throw failure;
         },
@@ -181,8 +171,8 @@ test("info rejects model-supplied identity and absent hosts, and preserves host 
 });
 
 test("a copied tool cannot acquire graph authority through companion invoke", async () => {
-  const host = inbox([[EdgeId("m"), ["kept"]]]);
-  const recv = RecvTool();
+  const host = inbox([[EdgeId.create("m"), ["kept"]]]);
+  const recv = new RecvTool();
   assert.equal(RecvTool.is(recv), true);
   const copy = { ...recv };
   assert.equal(RecvTool.is(copy), false);
@@ -203,7 +193,7 @@ test("a copied tool cannot acquire graph authority through companion invoke", as
   const { out, host: sendHost } = wiredGraph();
   await assert.rejects(
     SendTool.invoke(
-      { ...SendTool() },
+      { ...new SendTool() },
       sendHost,
       "c",
       { id: "a->b", payload: 1 },
@@ -214,7 +204,7 @@ test("a copied tool cannot acquire graph authority through companion invoke", as
   assert.equal(out.transport.left.length, 0);
   await assert.rejects(
     InfoTool.invoke(
-      { ...InfoTool() },
+      { ...new InfoTool() },
       { info: () => assert.fail("host reached") },
       "c",
       {},

@@ -14,13 +14,13 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  createBashTool,
-  createEditTool,
-  createGrepTool,
-  createReadTool,
-  createShellMuxOperations,
-  createYieldTool,
+  BashTool,
+  EditTool,
+  GrepTool,
   isYieldTool,
+  ReadTool,
+  ShellMuxOperations,
+  YieldTool,
 } from "../dist/index.js";
 import {
   cleanup,
@@ -43,8 +43,8 @@ import {
 
 function bashAgent(instance, { principal, toolExecution = "sequential" }) {
   const { faux, model, streamFn } = scriptedModel();
-  const tool = createBashTool(instance.seed, {
-    operations: createShellMuxOperations({
+  const tool = BashTool.create(instance.seed, {
+    operations: new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal,
@@ -171,8 +171,8 @@ test("a conflicting zero-exit publication becomes a model-visible policy error",
   const instance = await fixture();
   let agent;
   try {
-    const owner = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const owner = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "file-owner",
@@ -410,7 +410,7 @@ for (const toolExecution of ["parallel", "sequential"]) {
 test("a tools-owned yield continues in a bare Pi agent without a scheduler", {
   timeout: 30_000,
 }, async () => {
-  const tool = createYieldTool();
+  const tool = new YieldTool();
   assert.equal(isYieldTool(tool), true);
   assert.equal(isYieldTool({ ...tool }), false);
   assert.equal(isYieldTool({ name: "yield" }), false);
@@ -464,9 +464,9 @@ test("standalone AgentTools preserve shared hashline provenance", {
         model,
         systemPrompt: "Test the standalone file tools.",
         tools: [
-          createReadTool(instance.seed, store, native, mux),
-          createGrepTool(instance.seed, store, native, mux),
-          createEditTool(instance.seed, store, native, mux),
+          ReadTool.create(instance.seed, store, native, mux),
+          GrepTool.create(instance.seed, store, native, mux),
+          EditTool.create(instance.seed, store, native, mux),
         ],
       },
       streamFn,
@@ -585,7 +585,7 @@ test("an SDK-registered bash override executes through marsh", {
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
 
     const { faux, model, streamFn } = scriptedModel();
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal: "sdk-agent",
@@ -603,7 +603,7 @@ test("an SDK-registered bash override executes through marsh", {
       resourceLoader,
       model,
       // `tools` is omitted so read/edit/write stay enabled beside the override.
-      customTools: [createBashTool(instance.seed, { operations })],
+      customTools: [BashTool.create(instance.seed, { operations })],
     }));
     await session.bindExtensions({ onError: (error) => errors.push(error) });
     assert.deepEqual(errors, []);
@@ -635,8 +635,8 @@ test("an SDK-registered bash override executes through marsh", {
     assert.equal(text(registered), "agent-ok\n");
 
     // Registration alone cannot distinguish the override from Pi's local backend.
-    const other = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const other = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "other-owner",

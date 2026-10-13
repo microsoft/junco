@@ -3,9 +3,12 @@ import { mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  acquireShellMux,
-  createShellMuxOperations,
+  EmptyPolicy,
   isMarshPolicyDenied,
+  LockPolicy,
+  Policy,
+  ShellMuxLease,
+  ShellMuxOperations,
   ToolCollection,
 } from "../dist/index.js";
 import {
@@ -65,21 +68,21 @@ test("two collections over one seed keep their own policies and lifetimes", {
     const [git, empty] = await Promise.all([
       ToolCollection.create(seed, {
         native,
-        policy: "LockPolicy",
+        policy: LockPolicy,
         sandbox: "always",
         principal: "git",
       }),
       ToolCollection.create(seed, {
         native,
-        policy: "EmptyPolicy",
+        policy: EmptyPolicy,
         sandbox: "always",
         principal: "empty",
       }),
     ]);
     collections.push(git, empty);
     assert.notEqual(git.mux, empty.mux);
-    assert.equal(git.mux.policy, "LockPolicy");
-    assert.equal(empty.mux.policy, "EmptyPolicy");
+    assert.equal(git.policy, LockPolicy);
+    assert.equal(empty.policy, EmptyPolicy);
     const bash = (collection, command, signal) =>
       tool(collection, "bash").execute("bash", { command }, signal);
     const file = join(seed, "src/file0.txt");
@@ -150,6 +153,65 @@ test("two collections over one seed keep their own policies and lifetimes", {
   }
 });
 
+test("policies compose under and, or and not", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const native = await copyTreeNative();
+  const collections = [];
+  const open = async (policy) => {
+    const collection = await ToolCollection.create(seed, {
+      native,
+      policy,
+      sandbox: "always",
+    });
+    collections.push(collection);
+    return (command) =>
+      tool(collection, "bash").execute("bash", { command }, undefined);
+  };
+  try {
+    // Another owner claims file0; file1 stays unclaimed.
+    const owner = await open(EmptyPolicy);
+    await owner("cat src/file0.txt > /dev/null; printf owned > src/file0.txt");
+    const file0 = join(seed, "src/file0.txt");
+    const file1 = join(seed, "src/file1.txt");
+    const before1 = await readFile(file1, "utf8");
+
+    const both = await open(Policy.and(LockPolicy, EmptyPolicy));
+    await assert.rejects(
+      both("printf and > src/file0.txt"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(await readFile(file0, "utf8"), "owned");
+
+    const either = await open(Policy.or(LockPolicy, EmptyPolicy));
+    await either("printf or > src/file0.txt");
+    assert.equal(await readFile(file0, "utf8"), "or");
+
+    // Policy.not(LockPolicy) grants exactly the steal LockPolicy refuses, and refuses a free write.
+    const inverted = await open(Policy.not(LockPolicy));
+    await assert.rejects(
+      inverted("printf free > src/file1.txt"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(await readFile(file1, "utf8"), before1);
+    await inverted("printf not > src/file0.txt");
+    assert.equal(await readFile(file0, "utf8"), "not");
+
+    const nothing = await open(Policy.not(EmptyPolicy));
+    await assert.rejects(
+      nothing("printf none > src/file1.txt"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(await readFile(file1, "utf8"), before1);
+  } finally {
+    await cleanup(
+      ...collections.map((collection) => () => collection.close()),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
 test("a mux opened at seed/src shares authority with one opened at seed", {
   timeout: 30_000,
 }, async () => {
@@ -159,14 +221,14 @@ test("a mux opened at seed/src shares authority with one opened at seed", {
   const leases = [];
   const owners = [];
   try {
-    const options = { native, policy: "LockPolicy", sandbox: "always" };
-    const outer = await acquireShellMux(seed, options);
+    const options = { native, policy: LockPolicy, sandbox: "always" };
+    const outer = await ShellMuxLease.create(seed, options);
     leases.push(outer);
-    const inner = await acquireShellMux(src, options);
+    const inner = await ShellMuxLease.create(src, options);
     leases.push(inner);
     await outer.mux.validateCwd(src);
     const borrow = (lease, principal) => {
-      const owner = createShellMuxOperations({
+      const owner = new ShellMuxOperations({
         native,
         mux: lease.mux,
         principal,
@@ -209,12 +271,15 @@ test("a separately loaded module copy opens and releases its own mux", {
   const copy = await import(
     new URL("../dist/shell-mux.js?copy", import.meta.url).href
   );
-  assert.notEqual(copy.acquireShellMux, acquireShellMux);
+  assert.notEqual(copy.ShellMuxLease, ShellMuxLease);
   let original;
   let copied;
   try {
-    original = await acquireShellMux(seed, { native, policy: "LockPolicy" });
-    copied = await copy.acquireShellMux(seed, { native, policy: "LockPolicy" });
+    original = await ShellMuxLease.create(seed, { native, policy: LockPolicy });
+    copied = await copy.ShellMuxLease.create(seed, {
+      native,
+      policy: LockPolicy,
+    });
     await copied.release();
     assert.equal(copied.closed, true);
     await assert.rejects(copied.mux.exists(seed, "src/file0.txt"), /closed/);
@@ -238,9 +303,9 @@ test("refused cwds and policies close only what they opened", {
   await symlink(outside, join(seed, "escape"));
   let lease;
   try {
-    lease = await acquireShellMux(seed, {
+    lease = await ShellMuxLease.create(seed, {
       native,
-      policy: "LockPolicy",
+      policy: LockPolicy,
       sandbox: "always",
     });
     for (const cwd of [
@@ -249,7 +314,7 @@ test("refused cwds and policies close only what they opened", {
       join(root, "no-such-seed"),
     ]) {
       await assert.rejects(
-        acquireShellMux(cwd, { native, policy: "LockPolicy" }),
+        ShellMuxLease.create(cwd, { native, policy: LockPolicy }),
         Error,
         cwd,
       );
@@ -262,30 +327,27 @@ test("refused cwds and policies close only what they opened", {
     await assert.rejects(
       ToolCollection.create(join(root, "no-such-seed"), {
         native,
-        policy: "LockPolicy",
+        policy: LockPolicy,
       }),
     );
-    for (const policy of [undefined, "gitpolicy"]) {
-      await assert.rejects(
-        acquireShellMux(seed, { native, policy }),
-        TypeError,
-      );
-      await assert.rejects(
-        ToolCollection.create(seed, { native, policy }),
-        TypeError,
-      );
+    // An omitted policy is LockPolicy.
+    const defaulted = await ToolCollection.create(seed, { native });
+    try {
+      assert.equal(defaulted.policy, LockPolicy);
+    } finally {
+      await defaulted.close();
     }
     const { mux } = lease;
     assert.throws(
-      () => createShellMuxOperations({ mux }),
+      () => new ShellMuxOperations({ mux }),
       /requires the native module/,
     );
     assert.throws(
-      () => createShellMuxOperations({ native, mux, policy: "EmptyPolicy" }),
-      /conflicts/,
+      () => new ShellMuxOperations({ native, mux, policy: EmptyPolicy }),
+      /keeps the policy/,
     );
     assert.throws(
-      () => createShellMuxOperations({ native, mux, sandbox: "shared" }),
+      () => new ShellMuxOperations({ native, mux, sandbox: "shared" }),
       /conflicts/,
     );
     assert.equal(lease.closed, false);
@@ -321,7 +383,7 @@ test("a lazy owner closed during its open never admits or reopens", {
       },
     },
   };
-  const owner = createShellMuxOperations({
+  const owner = new ShellMuxOperations({
     native: barrier,
     principal: "lazy",
   });
@@ -519,5 +581,164 @@ test("persistent processes reject NUL and a missing cwd, abort as cancelled, and
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   } finally {
     await closeFixture(instance);
+  }
+});
+
+/** Runs `command` at `seed` on `mux` under display label `label`; resolves its exit code. */
+async function managed(mux, seed, command, label) {
+  const result = await mux
+    .start(
+      { command, cwd: seed, principal: label, env: nativeEnv(seed) },
+      () => {},
+    )
+    .wait();
+  return result.exitCode;
+}
+
+test("forked owners: one owner across calls, distinct siblings, labels and other muxes grant nothing", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const native = await testNative();
+  const decisions = [];
+  const mux = await native.NativeMux.openCopyTree(
+    seed,
+    { sandbox: "always", policyDebug: true },
+    (error, decision) => {
+      if (error === null) decisions.push(decision);
+    },
+  );
+  try {
+    const owner = mux.forkOwner();
+    const sibling = mux.forkOwner();
+    // Repeated transient calls and commands of one fork act as one owner; each unforked call
+    // acts as its own fresh shell. Distinct resources tell the calls apart in the log.
+    assert.equal(
+      await managed(owner, seed, "cat src/file0.txt", "shared-label"),
+      0,
+    );
+    assert.equal(
+      await managed(owner, seed, "printf a > src/owned.txt", "shared-label"),
+      0,
+    );
+    await owner.release(seed, "src/owner-call.txt");
+    await mux.release(seed, "src/fresh-1.txt");
+    await mux.release(seed, "src/fresh-2.txt");
+
+    // The same display label grants a sibling nothing, and it cannot release the owner's file.
+    await assert.rejects(
+      managed(sibling, seed, "printf b > src/owned.txt", "shared-label"),
+      isMarshPolicyDenied,
+    );
+    await assert.rejects(
+      sibling.release(seed, "src/owned.txt"),
+      isMarshPolicyDenied,
+    );
+
+    // Opening and closing a second mux over the seed clears no lock.
+    const other = await native.NativeMux.openCopyTree(seed, {
+      sandbox: "always",
+    });
+    await other.readFile(seed, "src/file0.txt");
+    await other.close();
+    await assert.rejects(
+      managed(sibling, seed, "printf b > src/owned.txt", "sibling"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(await readFile(join(seed, "src/owned.txt"), "utf8"), "a");
+
+    // The owner's later release lets the sibling take the file.
+    await owner.release(seed, "src/owned.txt");
+    assert.equal(
+      await managed(sibling, seed, "printf b > src/owned.txt", "sibling"),
+      0,
+    );
+    assert.equal(await readFile(join(seed, "src/owned.txt"), "utf8"), "b");
+
+    // Close drains the policy log.
+    await mux.close();
+    const principalsOf = (path, granted = true) =>
+      new Set(
+        decisions
+          .filter(
+            (decision) =>
+              decision.resource.join("/") === path &&
+              decision.granted === granted,
+          )
+          .map(({ principal }) => principal),
+      );
+    const [ownerPrincipal, ...extra] = [
+      ...principalsOf("src/file0.txt"),
+      ...principalsOf("src/owner-call.txt"),
+    ];
+    assert.deepEqual(extra, [ownerPrincipal]);
+    assert.ok(principalsOf("src/owned.txt").has(ownerPrincipal));
+    const fresh = [
+      ...principalsOf("src/fresh-1.txt"),
+      ...principalsOf("src/fresh-2.txt"),
+    ];
+    assert.equal(new Set(fresh).size, 2);
+    assert.ok(!fresh.includes(ownerPrincipal));
+    const denied = principalsOf("src/owned.txt", false);
+    assert.equal(denied.size, 1);
+    assert.ok(!denied.has(ownerPrincipal));
+    assert.ok(decisions.some(({ action }) => action === "Release"));
+  } finally {
+    await cleanup(
+      () => mux.close(),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("a release in shared mode publishes without a live peer", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const native = await testNative();
+  const mux = await native.NativeMux.openCopyTree(seed);
+  assert.equal(mux.sandbox, "shared");
+  const env = nativeEnv(seed);
+  /** A live persistent shell sharing the seed, making shared-mode commands managed. */
+  const peer = () =>
+    mux.spawn(
+      { command: "cat", cwd: seed, principal: "peer", env },
+      () => {},
+      () => {},
+    );
+  try {
+    const owner = mux.forkOwner();
+    const challenger = mux.forkOwner();
+    let live = await peer();
+    assert.equal(
+      await managed(owner, seed, "printf a > src/shared.txt", "owner"),
+      0,
+    );
+    await assert.rejects(
+      managed(challenger, seed, "printf b > src/shared.txt", "challenger"),
+      isMarshPolicyDenied,
+    );
+    assert.equal((await live.finish()).exitCode, 0);
+
+    // No peer is alive: the release still takes the managed route and publishes.
+    await owner.release(seed, "src/shared.txt");
+
+    live = await peer();
+    assert.equal(
+      await managed(
+        challenger,
+        seed,
+        "printf b > src/shared.txt",
+        "challenger",
+      ),
+      0,
+    );
+    assert.equal((await live.finish()).exitCode, 0);
+    assert.equal(await readFile(join(seed, "src/shared.txt"), "utf8"), "b");
+  } finally {
+    await cleanup(
+      () => mux.close(),
+      () => rm(root, { recursive: true, force: true }),
+    );
   }
 });

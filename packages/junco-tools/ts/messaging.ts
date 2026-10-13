@@ -6,7 +6,6 @@ import {
   type NodeIdType,
   type ParentView,
 } from "dataflow-engine";
-import { iso, type Newtype } from "newtype-ts";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -34,39 +33,15 @@ type UncheckedExecute<A extends AgentTool<TSchema, unknown>> =
     ? (toolCallId: string, params: unknown, ...rest: R) => O
     : never;
 
-/** `recv`: drains the delivered messages and parent results retained for the current graph node. */
-export interface RecvTool<N = unknown, T = unknown>
-  extends Newtype<
-    { readonly RecvTool: unique symbol },
-    AgentTool<
-      typeof recvParameters,
-      {
-        readonly messages: readonly Message<N>[];
-        readonly values: readonly Message<T>[];
-      }
-    >
-  > {
-  readonly name: "recv";
-  readonly label: "recv";
-  readonly description: string;
-  readonly parameters: typeof recvParameters;
-  readonly executionMode: "sequential";
-  execute: UncheckedExecute<RecvTool<N, T>["_A"]>;
-}
+type RecvToolStruct<N, T> = AgentTool<
+  typeof recvParameters,
+  {
+    readonly messages: readonly Message<N>[];
+    readonly values: readonly Message<T>[];
+  }
+>;
 
-/** `send`: admits one message on an existing outgoing message edge of the current graph node. */
-export interface SendTool
-  extends Newtype<
-    { readonly SendTool: unique symbol },
-    AgentTool<typeof sendParameters, undefined>
-  > {
-  readonly name: "send";
-  readonly label: "send";
-  readonly description: string;
-  readonly parameters: typeof sendParameters;
-  readonly executionMode: "sequential";
-  execute: UncheckedExecute<SendTool["_A"]>;
-}
+type SendToolStruct = AgentTool<typeof sendParameters, undefined>;
 
 type InfoToolStruct = AgentTool<
   typeof infoParameters,
@@ -81,13 +56,6 @@ type InfoToolStruct = AgentTool<
     >
   >
 >;
-
-/** `info`: the current graph node's parent and child routes with their receivers' contracts. */
-export interface InfoTool
-  extends InfoToolStruct,
-    Newtype<{ readonly InfoTool: unique symbol }, InfoToolStruct> {
-  execute: UncheckedExecute<InfoToolStruct>;
-}
 
 /** Carriers each constructor built. Only these are graph primitives; a copied or cast object is not. */
 const recvTools = new WeakSet<object>();
@@ -107,14 +75,15 @@ function check<S extends TSchema>(
 }
 
 async function receive<N, T>(
-  host: NonNullable<Parameters<typeof RecvTool<N, T>>[0]> | undefined,
+  host:
+    | NonNullable<ConstructorParameters<typeof RecvTool<N, T>>[0]>
+    | undefined,
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<RecvTool<N, T>["execute"]> {
   check("recv", recvParameters, input);
   signal?.throwIfAborted();
-  if (host === undefined)
-    throw new Error("recv requires an agentNode graph host");
+  if (host === undefined) throw new Error("recv requires a JuncoGraph host");
   const { view } = host;
   const messages: Message<N>[] = [];
   for (const id of view.messages.keys())
@@ -132,15 +101,14 @@ async function receive<N, T>(
 }
 
 async function emit<N>(
-  host: NonNullable<Parameters<typeof SendTool<N>>[0]> | undefined,
+  host: NonNullable<ConstructorParameters<typeof SendTool<N>>[0]> | undefined,
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<SendTool["execute"]> {
   const { id, payload } = check("send", sendParameters, input);
   signal?.throwIfAborted();
-  if (host === undefined)
-    throw new Error("send requires an agentNode graph host");
-  host.send({ id: EdgeId(id), payload: payload as N });
+  if (host === undefined) throw new Error("send requires a JuncoGraph host");
+  host.send({ id: EdgeId.create(id), payload: payload as N });
   return {
     content: [{ type: "text", text: "Message sent." }],
     details: undefined,
@@ -148,14 +116,13 @@ async function emit<N>(
 }
 
 async function describe(
-  host: NonNullable<Parameters<typeof InfoTool>[0]> | undefined,
+  host: NonNullable<ConstructorParameters<typeof InfoTool>[0]> | undefined,
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<InfoTool["execute"]> {
   check("info", infoParameters, input);
   signal?.throwIfAborted();
-  if (host === undefined)
-    throw new Error("info requires an agentNode graph host");
+  if (host === undefined) throw new Error("info requires a JuncoGraph host");
   const details = host.info();
   signal?.throwIfAborted();
   return {
@@ -165,121 +132,120 @@ async function describe(
 }
 
 /**
- * A fresh `recv` tool reading `host`, or the host a `JuncoAgent` binds to its graph activation;
- * without either it fails rather than pretend the inbox is empty.
+ * `recv`: drains the delivered messages and parent results retained for the current graph node,
+ * reading `host`, or the host a `JuncoAgent` binds to its graph activation; without either it
+ * fails rather than pretend the inbox is empty.
  */
-export function RecvTool<N = unknown, T = unknown>(host?: {
-  readonly view: ParentView<N, T>;
-  consume(): void;
-}): RecvTool<N, T> {
-  const tool: RecvTool<N, T>["_A"] = {
-    name: "recv",
-    label: "recv",
-    description: "Consumes messages from ParentView of agent",
-    parameters: recvParameters,
-    executionMode: "sequential",
-    execute: (_toolCallId, input, signal) => receive(host, input, signal),
-  };
-  recvTools.add(tool);
-  return iso<RecvTool<N, T>>().wrap(tool);
-}
+export class RecvTool<N = unknown, T = unknown> {
+  declare private readonly brand: "RecvTool";
+  readonly name = "recv";
+  readonly label = "recv";
+  readonly description: string = "Consumes messages from ParentView of agent";
+  readonly parameters = recvParameters;
+  readonly executionMode = "sequential";
+  execute: UncheckedExecute<RecvToolStruct<N, T>>;
 
-export namespace RecvTool {
+  constructor(host?: { readonly view: ParentView<N, T>; consume(): void }) {
+    this.execute = (_toolCallId, input, signal) => receive(host, input, signal);
+    recvTools.add(this);
+  }
+
   /** Whether {@link RecvTool} built `tool`; a copied or same-named object is not a recv tool. */
-  export function is(tool: object): tool is RecvTool {
+  static is(tool: object): tool is RecvTool {
     return recvTools.has(tool);
   }
 
   /** Executes a genuine recv tool against `host`, ignoring any host it was built with. */
-  export async function invoke<N, T>(
+  static async invoke<N, T>(
     tool: RecvTool,
-    host: NonNullable<Parameters<typeof RecvTool<N, T>>[0]>,
+    host: NonNullable<ConstructorParameters<typeof RecvTool<N, T>>[0]>,
     _toolCallId: string,
     input: Static<typeof recvParameters>,
     signal: AbortSignal,
   ): ReturnType<RecvTool<N, T>["execute"]> {
-    if (!is(tool))
+    if (!RecvTool.is(tool))
       throw new TypeError("Not a recv tool constructed by RecvTool");
     return receive(host, input, signal);
   }
 }
 
 /**
- * A fresh `send` tool admitting through `host`, or the host a `JuncoAgent` binds to its graph
- * activation; without either it fails rather than drop the message.
+ * `send`: admits one message on an existing outgoing message edge of the current graph node,
+ * through `host`, or the host a `JuncoAgent` binds to its graph activation; without either it
+ * fails rather than drop the message.
  */
-export function SendTool<N = unknown>(host?: {
-  send(message: Message<N>): void;
-}): SendTool {
-  const tool: SendTool["_A"] = {
-    name: "send",
-    label: "send",
-    description:
-      "Sends a message to downstream node along an existing graph edge",
-    parameters: sendParameters,
-    executionMode: "sequential",
-    execute: (_toolCallId, input, signal) => emit(host, input, signal),
-  };
-  sendTools.add(tool);
-  return iso<SendTool>().wrap(tool);
-}
+export class SendTool<N = unknown> {
+  declare private readonly brand: "SendTool";
+  readonly name = "send";
+  readonly label = "send";
+  readonly description: string =
+    "Sends a message to downstream node along an existing graph edge";
+  readonly parameters = sendParameters;
+  readonly executionMode = "sequential";
+  execute: UncheckedExecute<SendToolStruct>;
 
-export namespace SendTool {
+  constructor(host?: { send(message: Message<N>): void }) {
+    this.execute = (_toolCallId, input, signal) => emit(host, input, signal);
+    sendTools.add(this);
+  }
+
   /** Whether {@link SendTool} built `tool`; a copied or same-named object is not a send tool. */
-  export function is(tool: object): tool is SendTool {
+  static is(tool: object): tool is SendTool {
     return sendTools.has(tool);
   }
 
   /** Executes a genuine send tool through `host`, ignoring any host it was built with. */
-  export async function invoke<N>(
+  static async invoke<N>(
     tool: SendTool,
-    host: NonNullable<Parameters<typeof SendTool<N>>[0]>,
+    host: NonNullable<ConstructorParameters<typeof SendTool<N>>[0]>,
     _toolCallId: string,
     input: Static<typeof sendParameters>,
     signal: AbortSignal,
   ): ReturnType<SendTool["execute"]> {
-    if (!is(tool))
+    if (!SendTool.is(tool))
       throw new TypeError("Not a send tool constructed by SendTool");
     return emit(host, input, signal);
   }
 }
 
 /**
- * A fresh `info` tool describing `host`'s node, or the node a `JuncoAgent` binds to its graph
- * activation; without either it fails rather than report an empty topology.
+ * `info`: the current graph node's parent and child routes with their receivers' contracts,
+ * describing `host`'s node, or the node a `JuncoAgent` binds to its graph activation; without
+ * either it fails rather than report an empty topology.
  */
-export function InfoTool(host?: {
-  info(): Awaited<ReturnType<InfoTool["execute"]>>["details"];
-}): InfoTool {
-  const tool: InfoToolStruct = {
-    name: "info",
-    label: "info",
-    description:
-      "Shows parent and child nodes, edge routes, and receiver expectations for the current " +
-      "graph node. Send only on message edges; value edges carry final results.",
-    parameters: infoParameters,
-    executionMode: "sequential",
-    execute: (_toolCallId, input, signal) => describe(host, input, signal),
-  };
-  infoTools.add(tool);
-  return iso<InfoTool>().wrap(tool);
-}
+export class InfoTool {
+  declare private readonly brand: "InfoTool";
+  readonly name = "info";
+  readonly label = "info";
+  readonly description: string =
+    "Shows parent and child nodes, edge routes, and receiver expectations for the current " +
+    "graph node. Send only on message edges; value edges carry final results.";
+  readonly parameters = infoParameters;
+  readonly executionMode = "sequential";
+  execute: UncheckedExecute<InfoToolStruct>;
 
-export namespace InfoTool {
+  constructor(host?: {
+    info(): Awaited<ReturnType<InfoTool["execute"]>>["details"];
+  }) {
+    this.execute = (_toolCallId, input, signal) =>
+      describe(host, input, signal);
+    infoTools.add(this);
+  }
+
   /** Whether {@link InfoTool} built `tool`; a copied or same-named object is not an info tool. */
-  export function is(tool: object): tool is InfoTool {
+  static is(tool: object): tool is InfoTool {
     return infoTools.has(tool);
   }
 
   /** Executes a genuine info tool through `host`, ignoring any host it was built with. */
-  export async function invoke(
+  static async invoke(
     tool: InfoTool,
-    host: NonNullable<Parameters<typeof InfoTool>[0]>,
+    host: NonNullable<ConstructorParameters<typeof InfoTool>[0]>,
     _toolCallId: string,
     input: Static<typeof infoParameters>,
     signal: AbortSignal,
   ): ReturnType<InfoTool["execute"]> {
-    if (!is(tool))
+    if (!InfoTool.is(tool))
       throw new TypeError("Not an info tool constructed by InfoTool");
     return describe(host, input, signal);
   }

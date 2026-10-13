@@ -18,20 +18,18 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  always,
-  anyOf,
   DataflowDefinitionError,
   DataflowGraph,
   DataflowNodeError,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
+  Message,
   type NodeGenerator,
   NodeId,
-  never,
-  on,
-  stepNode,
+  StepNode,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
@@ -83,9 +81,9 @@ async function singleNode(script: Script, result = "node result") {
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, result),
   });
   return { scheduler, graph, faux, session, log };
@@ -101,12 +99,12 @@ test("the empty node id primes, resumes and completes through real schedule tool
     ],
     { prompt: "run it" },
   );
-  const graph: Graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
+  const graph: Graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId(""),
+    id: NodeId.create(""),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: async function* () {
       log.push("prime");
       yield [];
@@ -121,7 +119,7 @@ test("the empty node id primes, resumes and completes through real schedule tool
     assert.equal(settledText(await settle(scheduler)), "done");
     assert.deepEqual(errors, [false, false, false]);
     assert.deepEqual(log, ["prime", "resume", "complete"]);
-    assert.deepEqual(graph.result(NodeId("")), {
+    assert.deepEqual(graph.result(NodeId.create("")), {
       _tag: "Some",
       value: "empty-id result",
     });
@@ -249,7 +247,7 @@ test("consecutive schedule calls each run one real graph window within a single 
   scheduler.events.on("tool_end", ({ toolName, result, isError }) => {
     if (toolName === "schedule" && !isError) {
       completed.push(result.details as SchedulerInfo);
-      statusAtResult.push(graph.getNode(NodeId("0"))!.status);
+      statusAtResult.push(graph.getNode(NodeId.create("0"))!.status);
     }
   });
   const before = issueLog.length;
@@ -278,7 +276,7 @@ test("consecutive schedule calls each run one real graph window within a single 
     assert.deepEqual(statusAtResult, ["running", "done"]);
     assert.equal(faux.state.callCount, 4);
     assert.deepEqual(log, ["prime", "resume"]);
-    assert.deepEqual(graph.result(NodeId("0")), {
+    assert.deepEqual(graph.result(NodeId.create("0")), {
       _tag: "Some",
       value: "actual node result",
     });
@@ -363,9 +361,9 @@ test("with nothing available a plan is rejected, while an empty one returns Sche
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: never(),
+    trigger: TriggerRule.never(),
     step: twoStep(log, "never"),
   });
   const errors = toolErrors(scheduler);
@@ -418,9 +416,9 @@ test("a node failure remains fatal even after the scheduler's final answer", asy
   );
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   graph.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: async function* () {
       yield [];
       throw cause;
@@ -429,7 +427,7 @@ test("a node failure remains fatal even after the scheduler's final answer", asy
 
   const last = await settle(scheduler);
   assert.ok(last.kind === "failed" && last.error instanceof DataflowNodeError);
-  assert.equal(last.error.nodeId, NodeId("0"));
+  assert.equal(last.error.nodeId, NodeId.create("0"));
   assert.equal(last.error.error, cause);
   await scheduler.return();
 });
@@ -447,14 +445,14 @@ test("a scheduler binds one graph, and an unstaged step fails only while work is
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, "never"),
   });
 
   await assert.rejects(graph.step(), DataflowDefinitionError);
-  assert.equal(graph.getNode(NodeId("0"))!.status, "ready");
+  assert.equal(graph.getNode(NodeId.create("0"))!.status, "ready");
   assert.deepEqual(log, []);
   assert.throws(
     () => new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED),
@@ -472,9 +470,9 @@ test("a scheduler binds one graph, and an unstaged step fails only while work is
   const idle = await newScheduler<string, string>([]);
   const quiet: Graph = new DataflowGraph(idle.scheduler, UNBOUNDED, UNBOUNDED);
   quiet.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: never(),
+    trigger: TriggerRule.never(),
     step: twoStep(log, "never"),
   });
   assert.equal((await quiet.step()).size, 0);
@@ -495,9 +493,9 @@ test("closing the scheduler mid-window lets the running column drain and starts 
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId("A"),
+    id: NodeId.create("A"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: async function* (): NodeGenerator<string, string> {
       started.resolve();
       await gate.promise;
@@ -507,9 +505,9 @@ test("closing the scheduler mid-window lets the running column drain and starts 
     },
   });
   graph.addNode({
-    id: NodeId("B"),
+    id: NodeId.create("B"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, "never"),
   });
 
@@ -522,8 +520,8 @@ test("closing the scheduler mid-window lets the running column drain and starts 
 
   assert.equal(scheduler.status, "closed");
   assert.deepEqual(log, ["A primed"]);
-  assert.equal(graph.getNode(NodeId("A"))!.status, "running");
-  assert.equal(graph.getNode(NodeId("B"))!.status, "ready");
+  assert.equal(graph.getNode(NodeId.create("A"))!.status, "running");
+  assert.equal(graph.getNode(NodeId.create("B"))!.status, "ready");
 });
 
 test("SchedulerInfo shows only candidates: no unavailable node, finished node or result reaches the model", async () => {
@@ -565,18 +563,18 @@ test("SchedulerInfo shows only candidates: no unavailable node, finished node or
   scheduler.events.on("message_end", ({ message }) => {
     emitted.push(JSON.stringify(message));
   });
-  const graph: Graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
+  const graph: Graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
   const log: string[] = [];
   const worker = graph.addNode({
-    id: NodeId("worker"),
+    id: NodeId.create("worker"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, RESULT),
   });
   graph.addNode({
-    id: NodeId(HIDDEN),
+    id: NodeId.create(HIDDEN),
     state: undefined,
-    trigger: never(),
+    trigger: TriggerRule.never(),
     step: twoStep(log, "never"),
   });
 
@@ -657,7 +655,6 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
       provider: "conflicting",
     });
     const shared: PiSchedulerOptions = {
-      policy: "LockPolicy",
       models,
       session,
       model: conflicting.getModel(),
@@ -677,7 +674,6 @@ test("opus selects GitHub Copilot claude-opus-5.5 from a saved login and owns th
     const transferred = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
       PiScheduler.opus({
-        policy: "LockPolicy",
         models: missing,
         session: transferred,
       }),
@@ -707,9 +703,9 @@ test("make validates required shared options before adopting resources", async (
       { models, session },
       { model, session },
       { model, models },
-    ] satisfies Omit<PiSchedulerOptions, "policy">[]) {
+    ] satisfies PiSchedulerOptions[]) {
       await assert.rejects(
-        PiScheduler.make({ ...partial, policy: "LockPolicy", prompt: "go" }),
+        PiScheduler.make({ ...partial, prompt: "go" }),
         (error: unknown) => {
           assert.ok(error instanceof JuncoAgentError);
           assert.equal(error.code, "invalid_argument");
@@ -754,7 +750,6 @@ test("opus never falls back to a supplied model when the fixed model is missing"
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
       PiScheduler.opus({
-        policy: "LockPolicy",
         models,
         session,
         model: copilot.getModel(),
@@ -788,7 +783,7 @@ test("opus over a native model collection without saved logins fails its login c
   try {
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     await assert.rejects(
-      PiScheduler.opus({ policy: "LockPolicy", models, session, prompt: "go" }),
+      PiScheduler.opus({ models, session, prompt: "go" }),
       (error: unknown) => {
         assert.ok(error instanceof JuncoAgentError);
         assert.equal(error.code, "invalid_state");
@@ -830,10 +825,7 @@ test("an unbound scheduler fails its first request before any provider call, thr
   const resolved = await nativeOptions([fauxAssistantMessage("never")]);
 
   for (const [faux, make] of [
-    [
-      copilot,
-      () => PiScheduler.opus({ policy: "LockPolicy", models, prompt: "go" }),
-    ],
+    [copilot, () => PiScheduler.opus({ models, prompt: "go" })],
     [
       resolved.faux,
       () => PiScheduler.make({ ...resolved.options, prompt: "go" }),
@@ -856,7 +848,7 @@ test("an unbound scheduler fails its first request before any provider call, thr
 });
 
 test("adapter reads plan every occurrence and re-resolve a running node's live inputs", async () => {
-  const inbound = messageEdge<number, string>("inbound");
+  const inbound = Edge.message<number, string>("inbound");
   const details: SchedulerInfo[] = [];
   const { scheduler } = await newScheduler<number, string>(
     [
@@ -880,31 +872,36 @@ test("adapter reads plan every occurrence and re-resolve a running node's live i
     PiScheduler<number, string>
   >(scheduler, UNBOUNDED, UNBOUNDED);
   const seen: number[][] = [];
-  graph.addNode({
-    id: NodeId("source"),
-    state: undefined,
-    trigger: never(),
-    step: emitOnce(() => [], "never"),
-  });
-  graph.addNode({
-    id: NodeId("sink"),
-    state: undefined,
-    trigger: anyOf(on(inbound)),
-    step: stepNode((_state, view) => {
-      seen.push([...from(view, inbound)]);
-      return [];
+  graph.addNode(
+    new EmitOnce<void, number, string>(() => [], "never", {
+      id: NodeId.create("source"),
+      state: undefined,
+      trigger: TriggerRule.never(),
     }),
-  });
-  graph.addEdge(NodeId("source"), NodeId("sink"), inbound);
+  );
+  graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) => {
+        seen.push([...from(view, inbound)]);
+        return [];
+      },
+      {
+        id: NodeId.create("sink"),
+        state: undefined,
+        trigger: TriggerRule.anyOf(TriggerEntry.on(inbound)),
+      },
+    ),
+  );
+  graph.addEdge(NodeId.create("source"), NodeId.create("sink"), inbound);
   for (const value of [1, 2, 3, 4, 5])
-    graph.emit(NodeId("source"), msg(inbound, value));
+    graph.emit(NodeId.create("source"), Message.create(inbound, value));
   scheduler.events.on("tool_end", ({ result, isError }) => {
     if (!isError) details.push(result.details as SchedulerInfo);
   });
   try {
     assert.equal(settledText(await settle(scheduler)), "drained");
     assert.deepEqual(seen, [[1, 2], [3, 4], [5]]);
-    assert.equal(graph.getNode(NodeId("sink"))!.status, "running");
+    assert.equal(graph.getNode(NodeId.create("sink"))!.status, "running");
     assert.equal(details.at(-1)!.quiescent, true);
   } finally {
     await scheduler.return();
@@ -951,9 +948,9 @@ test("the beforeSchedule guard fails admission, rejects a schedule call and drop
   );
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   graph.addNode({
-    id: NodeId("0"),
+    id: NodeId.create("0"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, "guarded result"),
   });
   try {
@@ -963,7 +960,7 @@ test("the beforeSchedule guard fails admission, rejects a schedule call and drop
     );
     assert.equal(faux.state.callCount, 0);
     assert.deepEqual(log, []);
-    assert.equal(graph.getNode(NodeId("0"))!.status, "ready");
+    assert.equal(graph.getNode(NodeId.create("0"))!.status, "ready");
     const rejected = await scheduler.next();
     assert.ok(rejected.done === false && rejected.value.kind === "failed");
     assert.equal(rejected.value.error, sentinel);
@@ -977,7 +974,7 @@ test("the beforeSchedule guard fails admission, rejects a schedule call and drop
     assert.deepEqual(informed, [true, false, true]);
     assert.deepEqual(advancedAtRequest, [0, 0, 1]);
     assert.deepEqual(log, ["prime", "resume"]);
-    assert.deepEqual(graph.result(NodeId("0")), {
+    assert.deepEqual(graph.result(NodeId.create("0")), {
       _tag: "Some",
       value: "guarded result",
     });
@@ -1018,9 +1015,9 @@ test("abort and close join deferred dependent cleanup during a real window and k
   const graph: Graph = new DataflowGraph(scheduler, UNBOUNDED, UNBOUNDED);
   const log: string[] = [];
   graph.addNode({
-    id: NodeId("A"),
+    id: NodeId.create("A"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: async function* (): NodeGenerator<string, string> {
       firstStarted.resolve();
       await firstGate.promise;
@@ -1033,9 +1030,9 @@ test("abort and close join deferred dependent cleanup during a real window and k
     },
   });
   graph.addNode({
-    id: NodeId("B"),
+    id: NodeId.create("B"),
     state: undefined,
-    trigger: always(),
+    trigger: TriggerRule.always(),
     step: twoStep(log, "b"),
   });
   const pending = (promise: Promise<unknown>) => {
@@ -1060,7 +1057,7 @@ test("abort and close join deferred dependent cleanup during a real window and k
     await assert.rejects(aborting, (error) => error === abortSentinel);
     await running.catch(() => undefined);
     assert.deepEqual(log, ["A primed"]);
-    assert.equal(graph.getNode(NodeId("B"))!.status, "ready");
+    assert.equal(graph.getNode(NodeId.create("B"))!.status, "ready");
     assert.notEqual(scheduler.status, "closed");
 
     // Reusable: a new run starts a real window.

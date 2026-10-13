@@ -1,33 +1,31 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import {
-  always,
-  anyOf,
   DataflowDefinitionError,
   DataflowGraph,
+  Edge,
   type EdgeIdType,
-  emitOnce,
+  EmitOnce,
   from,
+  Message,
   type MessageSchedule,
-  messageEdge,
-  msg,
   type NodeAvailability,
   NodeId,
   type NodeIdType,
-  on,
   type Schedule,
   type StepFn,
-  stepNode,
+  StepNode,
+  TriggerEntry,
+  TriggerRule,
   triggerInputs,
   UNBOUNDED,
   Width,
   type WidthType,
-  when,
 } from "dataflow-engine";
 import {
-  createParallelScheduler,
-  createRoundRobinScheduler,
-  createScheduler,
+  ParallelScheduler,
+  RoundRobinScheduler,
+  Scheduler,
 } from "../src/index.ts";
 
 type Graph = DataflowGraph<void, number, string, never>;
@@ -48,7 +46,7 @@ function actors(
   >[0],
   ids: readonly string[],
   {
-    window = Width(1),
+    window = Width.create(1),
     threads = UNBOUNDED,
   }: { readonly window?: WidthType; readonly threads?: WidthType } = {},
 ) {
@@ -56,9 +54,9 @@ function actors(
   const graph: Graph = new DataflowGraph(scheduler, window, threads);
   for (const id of ids)
     graph.addNode({
-      id: NodeId(id),
+      id: NodeId.create(id),
       state: undefined,
-      trigger: always(),
+      trigger: TriggerRule.always(),
       step: actor(ran),
     });
   return { graph, ran };
@@ -70,10 +68,10 @@ const candidates = (
 ): ReadonlyMap<NodeIdType, NodeAvailability<number, string>> =>
   new Map(
     ids.map((id) => [
-      NodeId(id),
+      NodeId.create(id),
       {
         view: { messages: new Map(), values: new Map() },
-        trigger: always(),
+        trigger: TriggerRule.always(),
         satisfied: [],
         status: "running",
       },
@@ -105,17 +103,17 @@ const prefer = (
 };
 
 test("mutating a class state steers later cycles, and fresh states stay independent", async () => {
-  const initial = new Preference(NodeId("a"));
-  const first = createScheduler({ state: initial, schedule: prefer });
-  const second = createScheduler({
-    state: new Preference(NodeId("a")),
+  const initial = new Preference(NodeId.create("a"));
+  const first = new Scheduler({ state: initial, schedule: prefer });
+  const second = new Scheduler({
+    state: new Preference(NodeId.create("a")),
     schedule: prefer,
   });
   const one = actors(first, ["a", "b"]);
   const two = actors(second, ["a", "b"]);
 
   await one.graph.step();
-  first.state.favorite = NodeId("b");
+  first.state.favorite = NodeId.create("b");
   await one.graph.step();
   await two.graph.step();
   await two.graph.step();
@@ -136,10 +134,10 @@ test("mutating a class state steers later cycles, and fresh states stay independ
 
 test("a replaced state drives both selection and live reads: explicit pairs deliver [1,2], [3,4], [5]", async () => {
   type Reads = { readonly target: NodeIdType; readonly size: number };
-  const feed = messageEdge<number, string>("feed");
+  const feed = Edge.message<number, string>("feed");
   const seen: Reads[] = [];
-  const scheduler = createScheduler<Reads, number, string>({
-    state: { target: NodeId("P"), size: 1 },
+  const scheduler = new Scheduler<Reads, number, string>({
+    state: { target: NodeId.create("P"), size: 1 },
     schedule(available, state) {
       seen.push(state);
       // Plans whole-queue reads; only the live resolver sizes a running occurrence.
@@ -159,33 +157,42 @@ test("a replaced state drives both selection and live reads: explicit pairs deli
       );
     },
   });
-  const graph: Graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
-  const p = graph.addNode({
-    id: NodeId("P"),
-    state: undefined,
-    trigger: always(),
-    step: emitOnce(() => [1, 2, 3, 4, 5].map((n) => msg(feed, n)), "p"),
-  });
+  const graph: Graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
+  const p = graph.addNode(
+    new EmitOnce<void, number, string>(
+      () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)),
+      "p",
+      {
+        id: NodeId.create("P"),
+        state: undefined,
+        trigger: TriggerRule.always(),
+      },
+    ),
+  );
   const batches: number[][] = [];
-  const c = graph.addNode({
-    id: NodeId("C"),
-    state: undefined,
-    trigger: when(feed),
-    step: stepNode((_state, view) => {
-      batches.push([...from(view, feed)]);
-      return [];
-    }),
-  });
+  const c = graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) => {
+        batches.push([...from(view, feed)]);
+        return [];
+      },
+      {
+        id: NodeId.create("C"),
+        state: undefined,
+        trigger: TriggerRule.when(feed),
+      },
+    ),
+  );
   graph.addEdge(p, c, feed);
 
   await graph.step(); // primes P, which emits the whole feed
-  const replacement: Reads = { target: NodeId("C"), size: 2 };
+  const replacement: Reads = { target: NodeId.create("C"), size: 2 };
   scheduler.state = replacement;
   for (let window = 0; window < 4; window++) await graph.step(); // primes C, then three reads
 
   assert.deepEqual(batches, [[1, 2], [3, 4], [5]]);
   assert.equal(graph.getNode(p)!.status, "running");
-  assert.equal(seen[0]!.target, NodeId("P"));
+  assert.equal(seen[0]!.target, NodeId.create("P"));
   assert.ok(seen.slice(1).every((state) => state === replacement));
   // Window 1 planned P; windows 2-5 each planned C, and every running occurrence was re-read live.
   assert.equal(seen.length, 1 + 4 + 3);
@@ -197,15 +204,15 @@ test("full parallel starts every candidate in one column and advances each exact
   const started: string[] = [];
   const advanced = new Map<string, number>();
   const graph: Graph = new DataflowGraph(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
   );
   for (const id of ["a", "b", "c"]) {
     graph.addNode({
-      id: NodeId(id),
+      id: NodeId.create(id),
       state: undefined,
-      trigger: always(),
+      trigger: TriggerRule.always(),
       step: async function* () {
         started.push(id);
         if (started.length === 3) allStarted.resolve();
@@ -232,11 +239,11 @@ test("full parallel starts every candidate in one column and advances each exact
     ],
   );
   for (const id of ["a", "b", "c"])
-    assert.equal(graph.getNode(NodeId(id))!.status, "running");
+    assert.equal(graph.getNode(NodeId.create(id))!.status, "running");
 });
 
 test("full parallel plans nothing for no candidates and never throttles finite threads", async () => {
-  const empty = createParallelScheduler<number, string>();
+  const empty = new ParallelScheduler<number, string>();
   empty.create(1, Number.POSITIVE_INFINITY);
   assert.deepEqual(empty.schedule(candidates()), []);
   assert.deepEqual(planned(empty.schedule(candidates("x", "y"))), [
@@ -244,47 +251,47 @@ test("full parallel plans nothing for no candidates and never throttles finite t
     ["y"],
   ]);
 
-  const { graph, ran } = actors(createParallelScheduler(), ["a", "b", "c"], {
-    threads: Width(2),
+  const { graph, ran } = actors(new ParallelScheduler(), ["a", "b", "c"], {
+    threads: Width.create(2),
   });
   await assert.rejects(graph.step(), DataflowDefinitionError);
   assert.deepEqual(ran, []);
   for (const id of ["a", "b", "c"])
-    assert.equal(graph.getNode(NodeId(id))!.status, "ready");
+    assert.equal(graph.getNode(NodeId.create(id))!.status, "ready");
 });
 
 test("round robin runs one occurrence per window in string order: 1, 10, 2, 1", async () => {
-  const scheduler = createRoundRobinScheduler<number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   const { graph, ran } = actors(scheduler, ["2", "1", "10"], {
-    window: Width(8),
-    threads: Width(8),
+    window: Width.create(8),
+    threads: Width.create(8),
   });
 
   for (let window = 0; window < 4; window++) await graph.step();
 
   assert.deepEqual(ran, ["1", "10", "2", "1"]);
-  assert.equal(scheduler.state, NodeId("1"));
+  assert.equal(scheduler.state, NodeId.create("1"));
 });
 
 test("round robin resumes after its cursor, wraps only past the largest id, and keeps the cursor when idle", () => {
-  const scheduler = createRoundRobinScheduler<number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   scheduler.create(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
   const plan = (...ids: string[]) =>
     planned(scheduler.schedule(candidates(...ids)));
 
-  scheduler.state = NodeId("b"); // the previous id vanished: its smallest successor runs
+  scheduler.state = NodeId.create("b"); // the previous id vanished: its smallest successor runs
   assert.deepEqual(plan("a", "c"), [["c"]]);
-  scheduler.state = NodeId("z");
+  scheduler.state = NodeId.create("z");
   assert.deepEqual(plan("a", "c"), [["a"]]);
 
   assert.deepEqual(plan(), []);
-  assert.equal(scheduler.state, NodeId("a"));
+  assert.equal(scheduler.state, NodeId.create("a"));
 
   assert.deepEqual(plan("b", "c"), [["b"]]);
   assert.deepEqual(plan("a", "b", "c"), [["c"]]); // a new smaller candidate waits for the wrap
   assert.deepEqual(plan("a", "b", "c"), [["a"]]);
 
-  scheduler.state = NodeId("");
+  scheduler.state = NodeId.create("");
   assert.deepEqual(plan("", "a"), [["a"]]); // "" is a cursor, not "uninitialized"
   assert.deepEqual(plan("", "a"), [[""]]);
   scheduler.state = undefined;
@@ -292,7 +299,7 @@ test("round robin resumes after its cursor, wraps only past the largest id, and 
 });
 
 test("a scheduler configures exactly one graph and refuses to plan unconfigured", () => {
-  const unconfigured = createScheduler({
+  const unconfigured = new Scheduler({
     state: undefined,
     schedule: () => [],
   });
@@ -301,38 +308,47 @@ test("a scheduler configures exactly one graph and refuses to plan unconfigured"
     DataflowDefinitionError,
   );
 
-  const scheduler = createRoundRobinScheduler<number, string>();
+  const scheduler = new RoundRobinScheduler<number, string>();
   actors(scheduler, ["a"]);
   assert.throws(
-    () => new DataflowGraph(scheduler, Width(1), UNBOUNDED),
+    () => new DataflowGraph(scheduler, Width.create(1), UNBOUNDED),
     DataflowDefinitionError,
   );
 });
 
 for (const [name, make] of [
-  ["parallel", () => createParallelScheduler<number, string>()],
-  ["round robin", () => createRoundRobinScheduler<number, string>()],
+  ["parallel", () => new ParallelScheduler<number, string>()],
+  ["round robin", () => new RoundRobinScheduler<number, string>()],
 ] as const) {
   test(`${name}: an anyOf sink consumes only the first satisfied edge per step, leaving the other queued`, async () => {
-    const a = messageEdge<number, string>("a");
-    const b = messageEdge<number, string>("b");
-    const graph: Graph = new DataflowGraph(make(), Width(1), UNBOUNDED);
-    const source = graph.addNode({
-      id: NodeId("P"),
-      state: undefined,
-      trigger: always(),
-      step: emitOnce(() => [msg(a, 1), msg(b, 2)], "p"),
-    });
+    const a = Edge.message<number, string>("a");
+    const b = Edge.message<number, string>("b");
+    const graph: Graph = new DataflowGraph(make(), Width.create(1), UNBOUNDED);
+    const source = graph.addNode(
+      new EmitOnce<void, number, string>(
+        () => [Message.create(a, 1), Message.create(b, 2)],
+        "p",
+        {
+          id: NodeId.create("P"),
+          state: undefined,
+          trigger: TriggerRule.always(),
+        },
+      ),
+    );
     const seen: { a: number[]; b: number[] }[] = [];
-    const sink = graph.addNode({
-      id: NodeId("S"),
-      state: undefined,
-      trigger: anyOf(on(b), on(a)),
-      step: stepNode((_state, view) => {
-        seen.push({ a: [...from(view, a)], b: [...from(view, b)] });
-        return [];
-      }),
-    });
+    const sink = graph.addNode(
+      new StepNode<void, number, string>(
+        (_state, view) => {
+          seen.push({ a: [...from(view, a)], b: [...from(view, b)] });
+          return [];
+        },
+        {
+          id: NodeId.create("S"),
+          state: undefined,
+          trigger: TriggerRule.anyOf(TriggerEntry.on(b), TriggerEntry.on(a)),
+        },
+      ),
+    );
     graph.addEdge(source, sink, a);
     graph.addEdge(source, sink, b);
 
@@ -349,17 +365,17 @@ for (const [name, make] of [
 }
 
 test("a custom policy uses its window and threads: two actors advance twice in one step, the third not at all", async () => {
-  const scheduler = createScheduler<undefined, number, string>({
+  const scheduler = new Scheduler<undefined, number, string>({
     state: undefined,
     schedule: (available) =>
-      [NodeId("a"), NodeId("b")].map((id) => {
+      [NodeId.create("a"), NodeId.create("b")].map((id) => {
         const entry = { id, inputs: triggerInputs(available.get(id)!) };
         return [entry, entry];
       }),
   });
   const { graph, ran } = actors(scheduler, ["a", "b", "c"], {
-    window: Width(2),
-    threads: Width(2),
+    window: Width.create(2),
+    threads: Width.create(2),
   });
   await graph.step();
   const count = (id: string) => ran.filter((x) => x === id).length;

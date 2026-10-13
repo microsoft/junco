@@ -4,20 +4,18 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
-import type { Message } from "../src/index.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import {
-  always,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 type Row = {
@@ -39,15 +37,15 @@ type Result = {
 type Msg = Row | Pair | Result;
 
 test("cookbook: bigquery tornadoes count per month", async () => {
-  const rowsEdge = messageEdge<Msg, string>("rows");
-  const pairsEdge = messageEdge<Msg, string>("pairs");
-  const resultsEdge = messageEdge<Msg, string>("results");
+  const rowsEdge = Edge.message<Msg, string>("rows");
+  const pairsEdge = Edge.message<Msg, string>("pairs");
+  const resultsEdge = Edge.message<Msg, string>("results");
 
   const results: Result[] = [];
-  const tracer = createExampleTracer("cookbook/bigquery-tornadoes");
+  const tracer = ExampleTracer.create("cookbook/bigquery-tornadoes");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
@@ -59,65 +57,85 @@ test("cookbook: bigquery tornadoes count per month", async () => {
     { kind: "row", month: 2, day: 1, tornado: true },
   ];
 
-  const sourceId = graph.addNode({
-    state: undefined,
-    trigger: always(),
-    step: emitOnce<void, Msg, string>(
-      () => inputRows.map((row) => msg(rowsEdge, row)),
+  const sourceId = graph.addNode(
+    new EmitOnce<void, Msg, string>(
+      () => inputRows.map((row) => Message.create(rowsEdge, row)),
       "source done",
+      {
+        state: undefined,
+        trigger: TriggerRule.always(),
+      },
     ),
-  });
+  );
 
-  const filterAndPairId = graph.addNode({
-    state: undefined,
-    trigger: when(rowsEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const rows = from(view, rowsEdge).filter(
-        (m): m is Row => m.kind === "row",
-      );
-      return rows
-        .filter((r) => r.tornado)
-        .map((r) => msg(pairsEdge, { kind: "pair", month: r.month, count: 1 }));
-    }),
-  });
-
-  const combinePerKeyId = graph.addNode({
-    state: undefined,
-    trigger: when(pairsEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      const groups = pipe(
-        from(view, pairsEdge),
-        RA.filter((m): m is Pair => m.kind === "pair"),
-        RNEA.groupBy((p) => String(p.month)),
-      );
-      const events: Message<Msg>[] = [];
-      for (const month of Object.keys(groups).sort(S.Ord.compare)) {
-        const group = groups[month]!;
-        events.push(
-          msg(resultsEdge, {
-            kind: "result",
-            month: Number(month),
-            tornado_count: pipe(
-              group,
-              RA.reduce(0, (acc, p) => acc + p.count),
-            ),
-          }),
+  const filterAndPairId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const rows = from(view, rowsEdge).filter(
+          (m): m is Row => m.kind === "row",
         );
-      }
-      return events;
-    }),
-  });
+        return rows
+          .filter((r) => r.tornado)
+          .map((r) =>
+            Message.create(pairsEdge, {
+              kind: "pair",
+              month: r.month,
+              count: 1,
+            }),
+          );
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(rowsEdge),
+      },
+    ),
+  );
 
-  const sinkId = graph.addNode({
-    state: undefined,
-    trigger: when(resultsEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, resultsEdge)) {
-        if (m.kind === "result") results.push(m);
-      }
-      return [];
-    }),
-  });
+  const combinePerKeyId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        const groups = pipe(
+          from(view, pairsEdge),
+          RA.filter((m): m is Pair => m.kind === "pair"),
+          RNEA.groupBy((p) => String(p.month)),
+        );
+        const events: Message<Msg>[] = [];
+        for (const month of Object.keys(groups).sort(S.Ord.compare)) {
+          const group = groups[month]!;
+          events.push(
+            Message.create(resultsEdge, {
+              kind: "result",
+              month: Number(month),
+              tornado_count: pipe(
+                group,
+                RA.reduce(0, (acc, p) => acc + p.count),
+              ),
+            }),
+          );
+        }
+        return events;
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(pairsEdge),
+      },
+    ),
+  );
+
+  const sinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, resultsEdge)) {
+          if (m.kind === "result") results.push(m);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(resultsEdge),
+      },
+    ),
+  );
 
   graph.addEdge(sourceId, filterAndPairId, rowsEdge);
   graph.addEdge(filterAndPairId, combinePerKeyId, pairsEdge);

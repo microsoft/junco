@@ -1,19 +1,21 @@
 import type { ErrorFn, Message, NodeOptions, NodeSpec } from "../src/index.ts";
-import { always, EdgeId, NodeId } from "../src/index.ts";
+import { EdgeId, NodeId, TriggerRule } from "../src/index.ts";
 
 // Exported so `noUnusedLocals` does not report the fixtures as dead. Nothing imports this file; it
 // exists to be compiled.
 
 /** Trigger is the only required option; numeric messages and string results stay generic. */
-export const triggerOnly: NodeOptions<number, string> = { trigger: always() };
+export const triggerOnly: NodeOptions<number, string> = {
+  trigger: TriggerRule.always(),
+};
 
 /** Every common option at once, including an explicitly empty description. */
 export const fullySpecified: NodeOptions<number, string> = {
-  id: NodeId("fully-specified"),
+  id: NodeId.create("fully-specified"),
   description: "",
-  trigger: always(),
+  trigger: TriggerRule.always(),
   is_available: (view, triggered) =>
-    triggered && view.messages.get(EdgeId("in"))?.[0] !== 0,
+    triggered && view.messages.get(EdgeId.create("in"))?.[0] !== 0,
 };
 
 export const triggerOnlySpec: NodeSpec<null, number, string> = {
@@ -30,7 +32,7 @@ export const fullySpecifiedSpec: NodeSpec<{ count: number }, number, string> = {
   state: { count: 0 },
   step: async function* () {
     const view = yield [];
-    return String(view.values.get(EdgeId("in")));
+    return String(view.values.get(EdgeId.create("in")));
   },
 };
 
@@ -39,7 +41,7 @@ export const missingTrigger: NodeOptions<number, string> = {
   description: "no trigger",
 };
 
-const notice = EdgeId("notice");
+const notice = EdgeId.create("notice");
 
 /** A synchronous handler returning an ordinary empty batch. */
 export const syncEmptyHandler: ErrorFn<{ count: number }, number, string> =
@@ -62,7 +64,7 @@ export const asyncTupleHandler: ErrorFn<{ count: number }, number, string> =
 
 /** Method-form `on_error` sees the spec's typed state. */
 export const methodHandlerSpec: NodeSpec<{ count: number }, number, string> = {
-  trigger: always(),
+  trigger: TriggerRule.always(),
   state: { count: 0 },
   // biome-ignore lint/correctness/useYield: the body throws on its first activation.
   step: async function* () {

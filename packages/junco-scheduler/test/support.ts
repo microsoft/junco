@@ -43,7 +43,6 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model: faux.getModel(),
-      policy: "LockPolicy" as const,
     },
   };
 }
@@ -99,10 +98,7 @@ export type Script = Decide | readonly FauxResponseStep[];
 /** A PiScheduler over `script`, staged with `prompt` when given. */
 export async function newScheduler<N = unknown, T = unknown>(
   script: Script = runAvailable,
-  extra: Omit<
-    PiSchedulerOptions<N, T>,
-    "session" | "models" | "model" | "policy"
-  > = {},
+  extra: Omit<PiSchedulerOptions<N, T>, "session" | "models" | "model"> = {},
 ) {
   let requests = 0;
   const scripted = (decide: Decide): FauxResponseFactory => {
