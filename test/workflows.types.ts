@@ -8,18 +8,13 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import {
-  type Edge,
-  messageEdge,
-  NodeId,
-  type NodeIdType,
-} from "dataflow-engine";
+import { Edge, NodeId, type NodeIdType } from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import type { JuncoAgent } from "junco-agent";
 import type { PiScheduler } from "junco-scheduler/agent";
-import { isComplainTool } from "junco-tools";
+import { EmptyPolicy, isComplainTool, LockPolicy } from "junco-tools";
 import type { AgenticInput, JuncoGraph } from "../src/index.ts";
-import { type RalphOptions, ralph } from "../src/workflows/index.ts";
+import { Ralph, type RalphOptions } from "../src/workflows/index.ts";
 
 type TaggedSkill = Skill & { readonly tag: "skill" };
 type TaggedTemplate = PromptTemplate & { readonly tag: "template" };
@@ -30,21 +25,21 @@ export function ralphKeepsTypes(
   parent: JuncoGraph<AgenticInput, AssistantMessage, unknown, Scheduler>,
   agent: JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
 ) {
-  const input = messageEdge<AgenticInput, AssistantMessage>("in");
-  const output = messageEdge<AgenticInput, AssistantMessage>("out");
+  const input = Edge.message<AgenticInput, AssistantMessage>("in");
+  const output = Edge.message<AgenticInput, AssistantMessage>("out");
   const options: RalphOptions = {
-    id: NodeId("Ralph"),
+    id: NodeId.create("Ralph"),
     description: "two rounds",
     input,
     output,
     rounds: 2,
-    policy: "LockPolicy",
+    policy: LockPolicy,
   };
-  const id: NodeIdType = ralph(parent, agent, options);
-  const anonymous: NodeIdType = ralph(parent, agent, {
+  const id: NodeIdType = Ralph.register(parent, agent, options);
+  const anonymous: NodeIdType = Ralph.register(parent, agent, {
     input,
     output,
-    policy: "EmptyPolicy",
+    policy: EmptyPolicy,
   });
   const result: O.Option<AssistantMessage> = parent.result(id);
   // The caller's own variables keep their concrete types.
@@ -63,18 +58,28 @@ export function ralphRejectsMistypedOptions(
   numeric: Edge<number, string>,
   numericParent: JuncoGraph<number, string>,
 ) {
-  // @ts-expect-error rounds is a number
-  ralph(parent, agent, { input, output, rounds: "2", policy: "LockPolicy" });
-  // @ts-expect-error ids are branded NodeIds
-  ralph(parent, agent, { id: "Ralph", input, output, policy: "LockPolicy" });
+  Ralph.register(parent, agent, {
+    input,
+    output,
+    // @ts-expect-error rounds is a number
+    rounds: "2",
+    policy: LockPolicy,
+  });
+  Ralph.register(parent, agent, {
+    // @ts-expect-error ids are branded NodeIds
+    id: "Ralph",
+    input,
+    output,
+    policy: LockPolicy,
+  });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input: numeric, output, policy: "LockPolicy" });
+  Ralph.register(parent, agent, { input: numeric, output, policy: LockPolicy });
   // @ts-expect-error Ralph's edges carry AgenticInput messages and AssistantMessage results
-  ralph(parent, agent, { input, output: numeric, policy: "LockPolicy" });
+  Ralph.register(parent, agent, { input, output: numeric, policy: LockPolicy });
   // @ts-expect-error Ralph registers only in AgenticInput/AssistantMessage graphs
-  ralph(numericParent, agent, { input, output, policy: "LockPolicy" });
+  Ralph.register(numericParent, agent, { input, output, policy: LockPolicy });
   // @ts-expect-error Ralph requires a policy
-  ralph(parent, agent, { input, output });
+  Ralph.register(parent, agent, { input, output });
   // @ts-expect-error policies are the two case-sensitive literals
-  ralph(parent, agent, { input, output, policy: "Git" });
+  Ralph.register(parent, agent, { input, output, policy: "Git" });
 }

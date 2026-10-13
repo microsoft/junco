@@ -1,4 +1,4 @@
-import { createParallelScheduler } from "junco-scheduler";
+import { ParallelScheduler } from "junco-scheduler";
 import type { ValidWidth } from "../src/index.ts";
 import { DataflowGraph, UNBOUNDED, Width } from "../src/index.ts";
 
@@ -19,32 +19,32 @@ export type _runtimeNumberRejected = Expect<Equal<ValidWidth<number>, never>>;
 
 // Accepted: a positive integer literal, and the sanctioned spelling of Infinity.
 new DataflowGraph<void, number, string, never>(
-  createParallelScheduler(),
-  Width(1),
+  new ParallelScheduler(),
+  Width.create(1),
   UNBOUNDED,
 );
 new DataflowGraph<void, number, string, never>(
-  createParallelScheduler(),
-  Width(64),
-  Width(8),
+  new ParallelScheduler(),
+  Width.create(64),
+  Width.create(8),
 );
 
 declare const runtimeValue: number;
 
 // @ts-expect-error zero is not a positive width.
-Width(0);
+Width.create(0);
 // @ts-expect-error a fractional width is not an integer.
-Width(1.5);
+Width.create(1.5);
 // @ts-expect-error a negative width is not positive.
-Width(-3);
+Width.create(-3);
 // @ts-expect-error -Infinity is not a positive width.
 // biome-ignore lint/correctness/noPrecisionLoss: 1e999 is the only literal spelling of Infinity, which this negative case needs.
-Width(-1e999);
+Width.create(-1e999);
 // @ts-expect-error a width computed at runtime cannot be checked at compile time.
-Width(runtimeValue);
+Width.create(runtimeValue);
 new DataflowGraph<void, number, string, never>(
-  createParallelScheduler(),
-  // @ts-expect-error a bare number bypasses the check; widths must be minted by Width().
+  new ParallelScheduler(),
+  // @ts-expect-error a bare number bypasses the check; widths must be minted by Width.create().
   1,
   UNBOUNDED,
 );

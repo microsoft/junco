@@ -1,6 +1,7 @@
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
+import { LockPolicy } from "junco-tools";
 import { graph, trigger } from "../src/index.ts";
 
 // graph.Spawn over real Deterministic members on the real parallel policy: the star topology it
@@ -17,7 +18,7 @@ function idle(started: Set<Member>): Member {
       yield [];
       return "idle";
     },
-    "LockPolicy",
+    LockPolicy,
   );
   return state;
 }
@@ -41,27 +42,27 @@ function linkOf(links: Map<string, Link>, name: string): Link {
   return link;
 }
 
-describe("graph.Spawn", () => {
+describe("graph.JuncoGraph.spawn", () => {
   test("one child per input, each with its own queue in each direction", async () => {
     const inputs = Object.freeze(["repeat", "repeat"]);
     const calls: string[] = [];
     const started = new Set<Member>();
     const root = idle(started);
     const children: Member[] = [];
-    const g = graph.Spawn(
-      graph.nodes.deterministicNode(root, {
-        trigger: trigger.never(),
-        policy: "LockPolicy",
-      }),
+    const g = graph.JuncoGraph.spawn(
+      {
+        trigger: trigger.TriggerRule.never(),
+        state: root,
+      },
       inputs,
       (input) => {
         calls.push(input);
         const child = idle(started);
         children.push(child);
-        return graph.nodes.deterministicNode(child, {
-          trigger: trigger.never(),
-          policy: "LockPolicy",
-        });
+        return {
+          trigger: trigger.TriggerRule.never(),
+          state: child,
+        };
       },
     );
     try {
@@ -91,10 +92,10 @@ describe("graph.Spawn", () => {
       const up1 = linkOf(links, "1->0");
       const down2 = linkOf(links, "0->2");
       const up2 = linkOf(links, "2->0");
-      g.emit(graph.NodeId("0"), graph.msg(down1.edge, 10));
-      g.emit(graph.NodeId("0"), graph.msg(down1.edge, 11));
-      g.emit(graph.NodeId("1"), graph.msg(up1.edge, 20));
-      g.emit(graph.NodeId("2"), graph.msg(up2.edge, 30));
+      g.emit(graph.NodeId.create("0"), graph.Message.create(down1.edge, 10));
+      g.emit(graph.NodeId.create("0"), graph.Message.create(down1.edge, 11));
+      g.emit(graph.NodeId.create("1"), graph.Message.create(up1.edge, 20));
+      g.emit(graph.NodeId.create("2"), graph.Message.create(up2.edge, 30));
       assert.deepEqual([...down1.queue], [10, 11]);
       assert.deepEqual([...up1.queue], [20]);
       assert.deepEqual([...down2.queue], []);
@@ -110,16 +111,16 @@ describe("graph.Spawn", () => {
     const names = Object.freeze(["left", "right"] as const);
     type Name = (typeof names)[number];
     const request: Record<Name, Edge> = {
-      left: graph.messageEdge("root->left"),
-      right: graph.messageEdge("root->right"),
+      left: graph.Edge.message("root->left"),
+      right: graph.Edge.message("root->right"),
     };
     const reply: Record<Name, Edge> = {
-      left: graph.messageEdge("left->root"),
-      right: graph.messageEdge("right->root"),
+      left: graph.Edge.message("left->root"),
+      right: graph.Edge.message("right->root"),
     };
     const received: Record<Name, number[]> = { left: [], right: [] };
     const closed = { root: false, left: false, right: false };
-    const rootId = graph.NodeId("root");
+    const rootId = graph.NodeId.create("root");
     const root = new graph.nodes.Deterministic<number, string>(
       async function* () {
         try {
@@ -135,14 +136,17 @@ describe("graph.Spawn", () => {
           closed.root = true;
         }
       },
-      "LockPolicy",
+      LockPolicy,
     );
-    const g = graph.Spawn(
-      graph.nodes.deterministicNode(root, {
+    const g = graph.JuncoGraph.spawn(
+      {
         id: rootId,
-        trigger: trigger.anyOf(trigger.on(reply.left), trigger.on(reply.right)),
-        policy: "LockPolicy",
-      }),
+        trigger: trigger.TriggerRule.anyOf(
+          trigger.TriggerEntry.on(reply.left),
+          trigger.TriggerEntry.on(reply.right),
+        ),
+        state: root,
+      },
       names,
       (name) => {
         const child = new graph.nodes.Deterministic<number, string>(
@@ -152,19 +156,19 @@ describe("graph.Spawn", () => {
               while (true) {
                 view = yield graph
                   .from(view, request[name])
-                  .map((value) => graph.msg(reply[name], value + 1));
+                  .map((value) => graph.Message.create(reply[name], value + 1));
               }
             } finally {
               closed[name] = true;
             }
           },
-          "LockPolicy",
+          LockPolicy,
         );
-        return graph.nodes.deterministicNode(child, {
-          id: graph.NodeId(name),
-          trigger: trigger.when(request[name]),
-          policy: "LockPolicy",
-        });
+        return {
+          id: graph.NodeId.create(name),
+          trigger: trigger.TriggerRule.when(request[name]),
+          state: child,
+        };
       },
     );
     try {
@@ -175,10 +179,10 @@ describe("graph.Spawn", () => {
         "root->left",
         "root->right",
       ]);
-      g.emit(rootId, graph.msg(request.left, 10));
-      g.emit(rootId, graph.msg(request.left, 11));
-      g.emit(rootId, graph.msg(request.right, 20));
-      g.emit(rootId, graph.msg(request.right, 21));
+      g.emit(rootId, graph.Message.create(request.left, 10));
+      g.emit(rootId, graph.Message.create(request.left, 11));
+      g.emit(rootId, graph.Message.create(request.right, 20));
+      g.emit(rootId, graph.Message.create(request.right, 21));
       const results = await g.run({ signal: AbortSignal.timeout(5000) });
       assert.equal(results.get(rootId), "root-done");
       assert.deepEqual(received, { left: [11, 12], right: [21, 22] });
@@ -196,20 +200,20 @@ describe("graph.Spawn", () => {
         yield [];
         return "solo";
       },
-      "LockPolicy",
+      LockPolicy,
     );
-    const g = graph.Spawn(
-      graph.nodes.deterministicNode(root, {
-        trigger: trigger.always(),
-        policy: "LockPolicy",
-      }),
+    const g = graph.JuncoGraph.spawn(
+      {
+        trigger: trigger.TriggerRule.always(),
+        state: root,
+      },
       [] as readonly string[],
       (input) => {
         calls.push(input);
-        return graph.nodes.deterministicNode(idle(new Set()), {
-          trigger: trigger.never(),
-          policy: "LockPolicy",
-        });
+        return {
+          trigger: trigger.TriggerRule.never(),
+          state: idle(new Set()),
+        };
       },
     );
     try {
@@ -234,21 +238,21 @@ describe("graph.Spawn", () => {
     try {
       assert.throws(
         () =>
-          graph.Spawn(
-            graph.nodes.deterministicNode(root, {
-              trigger: trigger.never(),
-              policy: "LockPolicy",
-            }),
+          graph.JuncoGraph.spawn(
+            {
+              trigger: trigger.TriggerRule.never(),
+              state: root,
+            },
             ["a", "b", "c"],
             (input) => {
               visited.push(input);
               if (input === "b") throw failure;
               const child = idle(started);
               created.push(child);
-              return graph.nodes.deterministicNode(child, {
-                trigger: trigger.never(),
-                policy: "LockPolicy",
-              });
+              return {
+                trigger: trigger.TriggerRule.never(),
+                state: child,
+              };
             },
           ),
         (error) => error === failure,
@@ -263,29 +267,29 @@ describe("graph.Spawn", () => {
   });
 
   test("a child reusing the root's explicit id is a definition error", async () => {
-    const rootId = graph.NodeId("root");
+    const rootId = graph.NodeId.create("root");
     const visited: string[] = [];
     const root = idle(new Set());
     const created: Member[] = [];
     try {
       assert.throws(
         () =>
-          graph.Spawn(
-            graph.nodes.deterministicNode(root, {
+          graph.JuncoGraph.spawn(
+            {
               id: rootId,
-              trigger: trigger.never(),
-              policy: "LockPolicy",
-            }),
+              trigger: trigger.TriggerRule.never(),
+              state: root,
+            },
             ["a", "b"],
             (input) => {
               visited.push(input);
               const child = idle(new Set());
               created.push(child);
-              return graph.nodes.deterministicNode(child, {
+              return {
                 id: rootId,
-                trigger: trigger.never(),
-                policy: "LockPolicy",
-              });
+                trigger: trigger.TriggerRule.never(),
+                state: child,
+              };
             },
           ),
         graph.DataflowDefinitionError,

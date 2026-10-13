@@ -121,51 +121,53 @@ const astEditSchema = Type.Object({
  * Match slices are spans, not full-line reads, so they intentionally grant no
  * hashline provenance: the model still needs `read` or `grep` for edit anchors.
  */
-export function createAstGrepTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
-  const tool = {
-    name: "ast_grep",
-    label: "AST Grep",
-    description:
-      "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
-    promptSnippet: "Search code by AST structure instead of text",
-    parameters: astGrepSchema,
-    async execute(_toolCallId, params, signal) {
-      throwIfAborted(signal);
-      const patterns = params.patterns.filter(
-        (pattern) => pattern.trim() !== "",
-      );
-      if (patterns.length === 0)
-        throw new Error("patterns must contain at least one pattern");
-      if (params.limit !== undefined) requireU32("limit", params.limit, 1);
-      if (params.offset !== undefined) requireU32("offset", params.offset, 0);
+export const AstGrepTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
+    const tool = {
+      name: "ast_grep",
+      label: "AST Grep",
+      description:
+        "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
+      promptSnippet: "Search code by AST structure instead of text",
+      parameters: astGrepSchema,
+      async execute(_toolCallId, params, signal) {
+        throwIfAborted(signal);
+        const patterns = params.patterns.filter(
+          (pattern) => pattern.trim() !== "",
+        );
+        if (patterns.length === 0)
+          throw new Error("patterns must contain at least one pattern");
+        if (params.limit !== undefined) requireU32("limit", params.limit, 1);
+        if (params.offset !== undefined) requireU32("offset", params.offset, 0);
 
-      const result = await withNativeSignal(signal, (nativeSignal) =>
-        mux.astGrep(cwd, {
-          patterns,
-          path: resolveToolPath(cwd, params.path ?? "."),
-          glob: params.glob,
-          lang: params.lang,
-          selector: params.selector,
-          strictness: params.strictness as AstMatchStrictness | undefined,
-          limit: params.limit,
-          offset: params.offset,
-          includeMeta: params.includeMeta,
-          signal: nativeSignal,
-        }),
-      );
-      throwIfAborted(signal);
-      return boundedToolResult(JSON.stringify(result, null, 2), result);
-    },
-  } satisfies ToolDefinition<
-    typeof astGrepSchema,
-    BoundedToolDetails<AstFindResult>
-  >;
-  return tool;
-}
+        const result = await withNativeSignal(signal, (nativeSignal) =>
+          mux.astGrep(cwd, {
+            patterns,
+            path: resolveToolPath(cwd, params.path ?? "."),
+            glob: params.glob,
+            lang: params.lang,
+            selector: params.selector,
+            strictness: params.strictness as AstMatchStrictness | undefined,
+            limit: params.limit,
+            offset: params.offset,
+            includeMeta: params.includeMeta,
+            signal: nativeSignal,
+          }),
+        );
+        throwIfAborted(signal);
+        return boundedToolResult(JSON.stringify(result, null, 2), result);
+      },
+    } satisfies ToolDefinition<
+      typeof astGrepSchema,
+      BoundedToolDetails<AstFindResult>
+    >;
+    return tool;
+  },
+};
 
 /**
  * Structural rewrite of files with ast-grep patterns.
@@ -176,63 +178,65 @@ export function createAstGrepTool(
  * changes publish only when marsh authorizes them. Either way it invalidates
  * the walker's scan cache for the search root.
  */
-export function createAstEditTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
-  const tool = {
-    name: "ast_edit",
-    label: "AST Edit",
-    description:
-      "Preview structural rewrites by default; set dryRun to false to apply them.",
-    promptSnippet: "Rewrite code by AST structure",
-    parameters: astEditSchema,
-    executionMode: "sequential",
-    async execute(_toolCallId, params, signal) {
-      throwIfAborted(signal);
-      const rewrites: Record<string, string> = {};
-      for (const [pattern, replacement] of Object.entries(params.rewrites)) {
-        if (pattern.trim() !== "") rewrites[pattern] = replacement;
-      }
-      if (Object.keys(rewrites).length === 0) {
-        throw new Error("rewrites must contain at least one pattern");
-      }
-      if (params.maxReplacements !== undefined)
-        requireU32("maxReplacements", params.maxReplacements, 1);
-      if (params.maxFiles !== undefined)
-        requireU32("maxFiles", params.maxFiles, 1);
+export const AstEditTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
+    const tool = {
+      name: "ast_edit",
+      label: "AST Edit",
+      description:
+        "Preview structural rewrites by default; set dryRun to false to apply them.",
+      promptSnippet: "Rewrite code by AST structure",
+      parameters: astEditSchema,
+      executionMode: "sequential",
+      async execute(_toolCallId, params, signal) {
+        throwIfAborted(signal);
+        const rewrites: Record<string, string> = {};
+        for (const [pattern, replacement] of Object.entries(params.rewrites)) {
+          if (pattern.trim() !== "") rewrites[pattern] = replacement;
+        }
+        if (Object.keys(rewrites).length === 0) {
+          throw new Error("rewrites must contain at least one pattern");
+        }
+        if (params.maxReplacements !== undefined)
+          requireU32("maxReplacements", params.maxReplacements, 1);
+        if (params.maxFiles !== undefined)
+          requireU32("maxFiles", params.maxFiles, 1);
 
-      const root = resolveToolPath(cwd, params.path ?? ".");
-      const applying = params.dryRun === false;
-      let result: AstReplaceResult;
-      try {
-        result = await withNativeSignal(signal, (nativeSignal) =>
-          mux.astEdit(cwd, {
-            rewrites,
-            path: root,
-            glob: params.glob,
-            lang: params.lang,
-            selector: params.selector,
-            strictness: params.strictness as AstMatchStrictness | undefined,
-            dryRun: params.dryRun,
-            maxReplacements: params.maxReplacements,
-            maxFiles: params.maxFiles,
-            failOnParseError: params.failOnParseError,
-            signal: nativeSignal,
-          }),
-        );
-      } finally {
-        // Runs even on failure: a partially applied rewrite must not leave the
-        // walker cache advertising pre-edit bytes.
-        if (applying) native.invalidateFsScanCache(root);
-      }
-      throwIfAborted(signal);
-      return boundedToolResult(JSON.stringify(result, null, 2), result);
-    },
-  } satisfies ToolDefinition<
-    typeof astEditSchema,
-    BoundedToolDetails<AstReplaceResult>
-  >;
-  return tool;
-}
+        const root = resolveToolPath(cwd, params.path ?? ".");
+        const applying = params.dryRun === false;
+        let result: AstReplaceResult;
+        try {
+          result = await withNativeSignal(signal, (nativeSignal) =>
+            mux.astEdit(cwd, {
+              rewrites,
+              path: root,
+              glob: params.glob,
+              lang: params.lang,
+              selector: params.selector,
+              strictness: params.strictness as AstMatchStrictness | undefined,
+              dryRun: params.dryRun,
+              maxReplacements: params.maxReplacements,
+              maxFiles: params.maxFiles,
+              failOnParseError: params.failOnParseError,
+              signal: nativeSignal,
+            }),
+          );
+        } finally {
+          // Runs even on failure: a partially applied rewrite must not leave the
+          // walker cache advertising pre-edit bytes.
+          if (applying) native.invalidateFsScanCache(root);
+        }
+        throwIfAborted(signal);
+        return boundedToolResult(JSON.stringify(result, null, 2), result);
+      },
+    } satisfies ToolDefinition<
+      typeof astEditSchema,
+      BoundedToolDetails<AstReplaceResult>
+    >;
+    return tool;
+  },
+};

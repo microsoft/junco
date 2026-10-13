@@ -28,7 +28,7 @@ import {
   tracer as tracerApi,
   trigger,
 } from "junco-agency";
-import { ralph } from "junco-agency/workflows";
+import { Ralph } from "junco-agency/workflows";
 
 type AgenticInput = graphApi.nodes.AgenticInput;
 
@@ -86,8 +86,7 @@ async function assertPublicYieldBoundary(): Promise<void> {
       session: await sessions.create({}, BACKGROUND_CONTEXT),
       models: yieldModels,
       model: yieldFaux.getModel(),
-      tools: [toolsApi.createYieldTool()],
-      policy: "LockPolicy",
+      tools: [new toolsApi.YieldTool()],
       prompt: "handoff",
     });
     const turns: { ids: string[]; errors: boolean[] }[] = [];
@@ -159,61 +158,53 @@ try {
     models,
     model: faux.getModel(),
     tools: [],
-    policy: "LockPolicy",
   });
   // Explicitly untraced, so this smoke prints only its JSON summary; the Ralph child inherits it.
-  const graph = graphApi.createParallelAgentGraph(
-    "LockPolicy",
+  const graph = graphApi.JuncoGraph.parallel(
+    toolsApi.LockPolicy,
     new tracerApi.DummyTracer(),
   );
   parent = graph;
 
-  const input = graphApi.messageEdge<AgenticInput, AssistantMessage>(
+  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>(
     "source->ralph",
   );
-  const output = graphApi.messageEdge<AgenticInput, AssistantMessage>(
+  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>(
     "ralph->sink",
   );
-  const sourceId = graph.addNode(
-    graphApi.nodes.deterministicNode(
-      new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
-        async function* (): graphApi.NodeGenerator<
-          AgenticInput,
-          AssistantMessage
-        > {
-          while (true) yield [];
-        },
-        "LockPolicy",
-      ),
-      {
-        trigger: trigger.always(),
-        is_available: () => false,
-        policy: "LockPolicy",
+  const sourceId = graph.addNode({
+    trigger: trigger.TriggerRule.always(),
+    is_available: () => false,
+    state: new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
+      async function* (): graphApi.NodeGenerator<
+        AgenticInput,
+        AssistantMessage
+      > {
+        while (true) yield [];
       },
+      toolsApi.LockPolicy,
     ),
-  );
+  });
   const delivered: string[] = [];
-  const sinkId = graph.addNode(
-    graphApi.nodes.deterministicNode(
-      new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
-        async function* (): graphApi.NodeGenerator<
-          AgenticInput,
-          AssistantMessage
-        > {
-          const view = yield [];
-          for (const value of graphApi.from(view, output))
-            delivered.push(value.kind === "appendMessage" ? "" : value.text);
-          return fauxAssistantMessage("received");
-        },
-        "LockPolicy",
-      ),
-      { trigger: trigger.when(output), policy: "LockPolicy" },
+  const sinkId = graph.addNode({
+    trigger: trigger.TriggerRule.when(output),
+    state: new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
+      async function* (): graphApi.NodeGenerator<
+        AgenticInput,
+        AssistantMessage
+      > {
+        const view = yield [];
+        for (const value of graphApi.from(view, output))
+          delivered.push(value.kind === "appendMessage" ? "" : value.text);
+        return fauxAssistantMessage("received");
+      },
+      toolsApi.LockPolicy,
     ),
-  );
-  const id: graphApi.NodeIdType = ralph(graph, agent, {
+  });
+  const id: graphApi.NodeIdType = Ralph.register(graph, agent, {
     input,
     output,
-    policy: "LockPolicy",
+    policy: toolsApi.LockPolicy,
     rounds: 3,
   });
   owned = true;
@@ -227,7 +218,7 @@ try {
 
   graph.emit(
     sourceId,
-    graphApi.msg(input, { kind: "prompt", text: assignment }),
+    graphApi.Message.create(input, { kind: "prompt", text: assignment }),
   );
   for (let windows = 0; O.isNone(graph.result(id)); windows++) {
     assert.ok(windows < 64, "Ralph did not complete within 64 graph windows");

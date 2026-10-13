@@ -1,14 +1,16 @@
 import * as E from "fp-ts/lib/Either.js";
-import { emitOnce, from, msg } from "./builders.js";
+import { from } from "./builders.js";
 import type { Edge } from "./edges.js";
 import { DataflowDefinitionError } from "./errors.js";
+import type { NodeId } from "./identity.js";
 import type {
   AvailabilityFn,
   NodeGenerator,
   NodeOptions,
   NodeSpec,
 } from "./node.js";
-import { always, anyOf, on } from "./trigger.js";
+import { Message } from "./node.js";
+import { TriggerEntry, TriggerRule } from "./trigger.js";
 
 /** Registration options for a constant node: identity, prose, its graph state and return value. */
 type ConstNodeOptions<S, T> = Pick<
@@ -36,7 +38,7 @@ type ConstNodeSpec<S, N, T> = Omit<
  * A complete source spec that sends one constant `payload` once on every edge in `outputs`, then
  * finishes with `options.ret`.
  *
- * Register the returned spec with `graph.addNode`, then wire each output edge with
+ * Register the constructed spec with `graph.addNode`, then wire each output edge with
  * `graph.addEdge(source, target, edge)` as usual.
  *
  * Runs in two activations: the first emits one message per output edge, in `outputs` order; the
@@ -44,7 +46,7 @@ type ConstNodeSpec<S, N, T> = Omit<
  *
  * @param payload - Sent by reference on every output: each receiver sees the same object, neither
  *   cloned nor frozen.
- * @param outputs - Message edges to send on. Copied when called, so later changes to the caller's
+ * @param outputs - Message edges to send on. Copied on construction, so later changes to the caller's
  *   array do not affect the node.
  * @param options - `state` and `ret` are required (pass `undefined` when unused); `id` and
  *   `description` are optional, as for any node.
@@ -52,45 +54,51 @@ type ConstNodeSpec<S, N, T> = Omit<
  *
  * @example
  * ```ts
- * const a = messageEdge<number, string>("a");
- * const b = messageEdge<number, string>("b");
+ * const a = Edge.message<number, string>("a");
+ * const b = Edge.message<number, string>("b");
  * const source = graph.addNode(
- *   ConstFanout(7, [a, b], { state: undefined, ret: "source done" }),
+ *   new ConstFanout(7, [a, b], { state: undefined, ret: "source done" }),
  * );
  * graph.addEdge(source, left, a).addEdge(source, right, b);
  * ```
  */
-export const ConstFanout = <S, N, T>(
-  payload: N,
-  outputs: readonly Edge<N, T>[],
-  options: ConstNodeOptions<S, T>,
-): ConstNodeSpec<S, N, T> => {
-  const { ret, ...registration } = options;
-  const capturedOutputs = [...outputs];
-  for (let i = 0; i < capturedOutputs.length; i++) {
-    const edge = capturedOutputs[i]!;
-    if (E.isRight(edge.transport)) {
-      throw new DataflowDefinitionError(
-        `ConstFanout output edge "${edge.id}" must be a message edge`,
-      );
-    }
-    for (let j = 0; j < i; j++) {
-      if (capturedOutputs[j]!.id === edge.id) {
+export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T> {
+  declare readonly id?: NodeId;
+  declare readonly description?: string;
+  declare readonly state: S;
+  readonly trigger: TriggerRule<N, T>;
+  readonly step: () => NodeGenerator<N, T>;
+
+  constructor(
+    payload: N,
+    outputs: readonly Edge<N, T>[],
+    options: ConstNodeOptions<S, T>,
+  ) {
+    const { ret, ...registration } = options;
+    const capturedOutputs = [...outputs];
+    for (let i = 0; i < capturedOutputs.length; i++) {
+      const edge = capturedOutputs[i]!;
+      if (E.isRight(edge.transport)) {
         throw new DataflowDefinitionError(
-          `ConstFanout received edge "${edge.id}" twice`,
+          `ConstFanout output edge "${edge.id}" must be a message edge`,
         );
       }
+      for (let j = 0; j < i; j++) {
+        if (capturedOutputs[j]!.id === edge.id) {
+          throw new DataflowDefinitionError(
+            `ConstFanout received edge "${edge.id}" twice`,
+          );
+        }
+      }
     }
+    Object.assign(this, registration);
+    this.trigger = TriggerRule.always<N, T>();
+    this.step = async function* (): NodeGenerator<N, T> {
+      yield capturedOutputs.map((edge) => Message.create(edge, payload));
+      return ret;
+    };
   }
-  return {
-    ...registration,
-    trigger: always<N, T>(),
-    step: emitOnce<S, N, T>(
-      () => capturedOutputs.map((edge) => msg(edge, payload)),
-      ret,
-    ),
-  };
-};
+}
 
 /**
  * A complete collector spec that waits until every edge in `inputs` has delivered its constant,
@@ -98,7 +106,7 @@ export const ConstFanout = <S, N, T>(
  *
  * Each input carries one constant `C`; the output carries the list `C[]`. The graph's message type
  * must therefore admit both, e.g. `DataflowGraph<void, number | number[], string, never>`, and
- * may include unrelated variants besides. Register the returned spec with `graph.addNode`, then
+ * may include unrelated variants besides. Register the constructed spec with `graph.addNode`, then
  * wire every input and the output with `graph.addEdge` as usual.
  *
  * The list follows `inputs` order, not arrival order; payloads are kept by reference, and an
@@ -108,9 +116,9 @@ export const ConstFanout = <S, N, T>(
  * unfinished, resuming when the rest arrive. Once sent, the node returns `options.ret` on its next
  * activation; later input never produces another list. With no inputs it sends one `[]`.
  *
- * Each call holds its own collection progress: invoke the factory once per collector node.
+ * Each instance holds its own collection progress: construct one per collector node.
  *
- * @param inputs - Message edges to collect from. Copied when called, so later changes to the
+ * @param inputs - Message edges to collect from. Copied on construction, so later changes to the
  *   caller's array do not affect the node.
  * @param output - The message edge the list is sent on.
  * @param options - `state` and `ret` are required (pass `undefined` when unused); `id` and
@@ -120,77 +128,84 @@ export const ConstFanout = <S, N, T>(
  *
  * @example
  * ```ts
- * const a = messageEdge<number, string>("a");
- * const b = messageEdge<number, string>("b");
- * const list = messageEdge<number[], string>("list");
+ * const a = Edge.message<number, string>("a");
+ * const b = Edge.message<number, string>("b");
+ * const list = Edge.message<number[], string>("list");
  * const join = graph.addNode(
- *   ConstFanin([b, a], list, { state: undefined, ret: "fanin done" }),
+ *   new ConstFanin([b, a], list, { state: undefined, ret: "fanin done" }),
  * );
  * graph.addEdge(sourceA, join, a).addEdge(sourceB, join, b).addEdge(join, sink, list);
  * // `sink` receives one message: [constant from b, constant from a].
  * ```
  */
-export const ConstFanin = <S, C, T>(
-  inputs: readonly Edge<C, T>[],
-  output: Edge<C[], T>,
-  options: ConstNodeOptions<S, T>,
-): ConstNodeSpec<S, C | C[], T> => {
-  const { ret, ...registration } = options;
-  const capturedInputs = [...inputs];
-  for (const edge of capturedInputs) {
-    if (E.isRight(edge.transport)) {
+export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T> {
+  declare readonly id?: NodeId;
+  declare readonly description?: string;
+  declare readonly state: S;
+  readonly trigger: TriggerRule<C | C[], T>;
+  readonly is_available: AvailabilityFn<unknown, unknown>;
+  readonly step: () => NodeGenerator<C | C[], T>;
+
+  constructor(
+    inputs: readonly Edge<C, T>[],
+    output: Edge<C[], T>,
+    options: ConstNodeOptions<S, T>,
+  ) {
+    const { ret, ...registration } = options;
+    const capturedInputs = [...inputs];
+    for (const edge of capturedInputs) {
+      if (E.isRight(edge.transport)) {
+        throw new DataflowDefinitionError(
+          `ConstFanin input edge "${edge.id}" must be a message edge`,
+        );
+      }
+    }
+    if (E.isRight(output.transport)) {
       throw new DataflowDefinitionError(
-        `ConstFanin input edge "${edge.id}" must be a message edge`,
+        `ConstFanin output edge "${output.id}" must be a message edge`,
       );
     }
-  }
-  if (E.isRight(output.transport)) {
-    throw new DataflowDefinitionError(
-      `ConstFanin output edge "${output.id}" must be a message edge`,
-    );
-  }
-  const trigger =
-    capturedInputs.length === 0
-      ? always<C | C[], T>()
-      : anyOf(...capturedInputs.map(on));
-  // Once the list is out, stay available so the final return runs after the inputs have drained.
-  let emitted = false;
+    const trigger =
+      capturedInputs.length === 0
+        ? TriggerRule.always<C | C[], T>()
+        : TriggerRule.anyOf(...capturedInputs.map(TriggerEntry.on));
+    // Once the list is out, stay available so the final return runs after the inputs have drained.
+    let emitted = false;
 
-  async function* step(): NodeGenerator<C | C[], T> {
-    let view = yield [];
-    const chunks: (Array<readonly C[]> | undefined)[] = [];
-    let remaining = capturedInputs.length;
-    while (true) {
-      for (let i = 0; i < capturedInputs.length; i++) {
-        // The edge's declared `Edge<C, T>` contract narrows the graph-wide view.
-        const batch = from(view, capturedInputs[i]!) as readonly C[];
-        if (batch.length === 0) continue;
-        const inputChunks = chunks[i];
-        if (inputChunks === undefined) {
-          chunks[i] = [batch];
-          remaining--;
-        } else {
-          inputChunks.push(batch);
+    async function* step(): NodeGenerator<C | C[], T> {
+      let view = yield [];
+      const chunks: (Array<readonly C[]> | undefined)[] = [];
+      let remaining = capturedInputs.length;
+      while (true) {
+        for (let i = 0; i < capturedInputs.length; i++) {
+          // The edge's declared `Edge<C, T>` contract narrows the graph-wide view.
+          const batch = from(view, capturedInputs[i]!) as readonly C[];
+          if (batch.length === 0) continue;
+          const inputChunks = chunks[i];
+          if (inputChunks === undefined) {
+            chunks[i] = [batch];
+            remaining--;
+          } else {
+            inputChunks.push(batch);
+          }
+        }
+        if (remaining === 0) break;
+        view = yield [];
+      }
+      const collected: C[] = [];
+      for (const inputChunks of chunks) {
+        for (const batch of inputChunks!) {
+          for (const payload of batch) collected.push(payload);
         }
       }
-      if (remaining === 0) break;
-      view = yield [];
+      emitted = true;
+      yield [Message.create(output, collected)];
+      return ret;
     }
-    const collected: C[] = [];
-    for (const inputChunks of chunks) {
-      for (const batch of inputChunks!) {
-        for (const payload of batch) collected.push(payload);
-      }
-    }
-    emitted = true;
-    yield [msg(output, collected)];
-    return ret;
-  }
 
-  return {
-    ...registration,
-    trigger,
-    is_available: (_view, triggered) => triggered || emitted,
-    step,
-  };
-};
+    Object.assign(this, registration);
+    this.trigger = trigger;
+    this.is_available = (_view, triggered) => triggered || emitted;
+    this.step = step;
+  }
+}

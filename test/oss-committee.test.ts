@@ -10,8 +10,8 @@ import * as O from "fp-ts/lib/Option.js";
 import {
   approvedPlan,
   convene,
-  createOssSearchTool,
-  reviewRound,
+  OssSearchTool,
+  ReviewRound,
 } from "../examples/oss-committee.ts";
 import {
   request,
@@ -35,24 +35,28 @@ const approved: ScriptedReview = {
 };
 test("a round gates each member on the previous member's complete report", async () => {
   await using committee = await scriptedCommittee();
-  const { graph } = reviewRound(request, committee.members, committee.search);
+  const { graph } = ReviewRound.create(
+    request,
+    committee.members,
+    committee.search,
+  );
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   await graph.step(); // prime the Librarian without starting its prompt
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   await graph.step(); // the Librarian searches and finishes; its outgoing value edges resolve
-  const librarian = graph.result(NodeId("Librarian"));
+  const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian));
   const librarianReport = textOf(librarian.value);
   assert.ok(librarianReport.includes(repositoryUrl));
   assert.ok(librarianReport.includes("GitHub-reported stars: 10000"));
-  assert.deepEqual([...graph.available().keys()], ["ArchitectInput"]);
+  assert.deepEqual([...graph.available().keys()], ["Architect"]);
   assert.equal(committee.searchQueries.length, 1);
   assert.ok(!committee.searchQueries[0]!.includes(request));
   assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
   await graph.run();
-  const architect = graph.result(NodeId("Architect"));
+  const architect = graph.result(NodeId.create("Architect"));
   assert.ok(O.isSome(architect));
   assert.equal(committee.memberInputs.Architect.length, 1);
   assert.ok(committee.memberInputs.Architect[0]!.includes(librarianReport));
@@ -72,25 +76,33 @@ test("a failed lookup sends partial research to the Architect before the Librari
   await using committee = await scriptedCommittee({
     lookups: [[rateLimited()]],
   });
-  const { graph } = reviewRound(request, committee.members, committee.search);
+  const { graph } = ReviewRound.create(
+    request,
+    committee.members,
+    committee.search,
+  );
   await graph.step(); // prime the Librarian
   await graph.step(); // failed lookup, then info, send and the real yield tool
   assert.equal(committee.search.searches(), 0);
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
-  assert.ok(O.isNone(graph.result(NodeId("Librarian"))));
-  assert.deepEqual([...graph.available().keys()], ["ArchitectInput"]);
+  assert.ok(O.isNone(graph.result(NodeId.create("Librarian"))));
+  assert.deepEqual([...graph.available().keys()], ["Architect"]);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
   // The Librarian stays paused until the Architect returns from the partial research.
-  for (let steps = 0; O.isNone(graph.result(NodeId("Architect"))); steps++) {
+  for (
+    let steps = 0;
+    O.isNone(graph.result(NodeId.create("Architect")));
+    steps++
+  ) {
     assert.ok(steps < 10, "the Architect never finished");
     assert.equal(committee.members.Librarian.status, "suspended");
-    assert.ok(!graph.available().has(NodeId("Librarian")));
+    assert.ok(!graph.available().has(NodeId.create("Librarian")));
     await graph.step();
   }
   assert.equal(committee.members.Librarian.status, "suspended");
-  assert.ok(graph.available().has(NodeId("Librarian")));
+  assert.ok(graph.available().has(NodeId.create("Librarian")));
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
@@ -107,7 +119,11 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     lookups: [[rateLimited()]],
     policyPauseBeforeSend: true,
   });
-  const { graph } = reviewRound(request, committee.members, committee.search);
+  const { graph } = ReviewRound.create(
+    request,
+    committee.members,
+    committee.search,
+  );
   await graph.step(); // prime the Librarian
   await graph.step(); // failed lookup, then a policy denial pauses the run
   assert.equal(committee.search.failures(), 1);
@@ -141,14 +157,16 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     lookups: [[rateLimited()]],
     librarianStopReason: "length",
   });
-  const { graph } = reviewRound(request, committee.members, committee.search);
-  const error = await graph.run().catch((thrown: unknown) => thrown);
-  assert.ok(
-    error instanceof DataflowNodeError && error.nodeId === "ReducerInput",
+  const { graph } = ReviewRound.create(
+    request,
+    committee.members,
+    committee.search,
   );
-  const librarian = graph.result(NodeId("Librarian"));
+  const error = await graph.run().catch((thrown: unknown) => thrown);
+  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
+  const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
-  assert.ok(O.isSome(graph.result(NodeId("Architect"))));
+  assert.ok(O.isSome(graph.result(NodeId.create("Architect"))));
   assert.deepEqual(committee.memberInputs.Reducer, []);
   assert.ok(!committee.modelRequests.includes("Reducer"));
 }, 5_000);
@@ -157,12 +175,14 @@ test("a truncated research report never reaches the Architect", async () => {
   await using committee = await scriptedCommittee({
     librarianStopReason: "length",
   });
-  const { graph } = reviewRound(request, committee.members, committee.search);
-  const error = await graph.run().catch((thrown: unknown) => thrown);
-  assert.ok(
-    error instanceof DataflowNodeError && error.nodeId === "ArchitectInput",
+  const { graph } = ReviewRound.create(
+    request,
+    committee.members,
+    committee.search,
   );
-  const librarian = graph.result(NodeId("Librarian"));
+  const error = await graph.run().catch((thrown: unknown) => thrown);
+  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
+  const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
   assert.ok(!committee.modelRequests.includes("Architect"));
   assert.ok(!committee.modelRequests.includes("Reducer"));
@@ -206,7 +226,7 @@ test("only a complete titled plan can be approved", () => {
 
 test("repository search sends only the scoped GitHub request and rejects invalid metadata", async () => {
   const controller = new AbortController();
-  const { tool, searches } = createOssSearchTool(
+  const searcher = new OssSearchTool(
     Object.assign(
       async (
         input: Parameters<typeof fetch>[0],
@@ -231,8 +251,8 @@ test("repository search sends only the scoped GitHub request and rejects invalid
       { preconnect: fetch.preconnect },
     ),
   );
-  assert.equal(searches(), 0);
-  const search = await tool.execute(
+  assert.equal(searcher.searches(), 0);
+  const search = await searcher.tool.execute(
     "lookup",
     { query: "  terminal.gui library  " },
     controller.signal,
@@ -243,9 +263,9 @@ test("repository search sends only the scoped GitHub request and rejects invalid
     ),
     { incomplete_results: false, repositories: [] },
   );
-  assert.equal(searches(), 1);
+  assert.equal(searcher.searches(), 1);
 
-  const invalid = createOssSearchTool(
+  const invalid = new OssSearchTool(
     Object.assign(
       async () =>
         Response.json({
@@ -288,7 +308,7 @@ test("repository search reports GitHub trust signals and rejects results without
     stargazers_count: 10_000,
     pushed_at: "2026-09-15T00:00:00Z",
   };
-  const trusted = createOssSearchTool(
+  const trusted = new OssSearchTool(
     Object.assign(
       async () => Response.json({ incomplete_results: false, items: [item] }),
       { preconnect: fetch.preconnect },
@@ -317,7 +337,7 @@ test("repository search reports GitHub trust signals and rejects results without
   );
 
   const { pushed_at: _pushedAt, ...withoutPush } = item;
-  const untrusted = createOssSearchTool(
+  const untrusted = new OssSearchTool(
     Object.assign(
       async () =>
         Response.json({ incomplete_results: false, items: [withoutPush] }),

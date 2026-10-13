@@ -71,146 +71,151 @@ function visibleLineNumbers(body: string): number[] {
  * non-vision image notice), while a bare Agent calls with four arguments and
  * gets Pi's context-free reader behavior.
  */
-export function createReadTool(
-  cwd: string,
-  store: EditStore,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<
-  ReturnType<typeof createPiReadTool>["parameters"],
-  ReadToolDetails | undefined
-> {
-  const fallback = createPiReadToolDefinition(cwd);
-  const tool = {
-    ...fallback,
-    description: `${fallback.description} ${HASHLINE_NOTE}`,
-    async execute(
-      toolCallId,
-      params,
-      signal,
-      onUpdate,
-      ctx?: ExtensionToolContext,
-    ) {
-      throwIfAborted(signal);
-      // Pi probes, sniffs, and reads the same path: one routed read serves them all.
-      const loads = new Map<string, Promise<Buffer>>();
-      const load = (absolutePath: string): Promise<Buffer> => {
-        let loading = loads.get(absolutePath);
-        if (!loading) {
-          loading = mux.readFile(cwd, absolutePath);
-          loads.set(absolutePath, loading);
-        }
-        return loading;
-      };
-      const access = async (absolutePath: string): Promise<void> => {
+export const ReadTool = {
+  create(
+    cwd: string,
+    store: EditStore,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
+    ReturnType<typeof createPiReadTool>["parameters"],
+    ReadToolDetails | undefined
+  > {
+    const fallback = createPiReadToolDefinition(cwd);
+    const tool = {
+      ...fallback,
+      description: `${fallback.description} ${HASHLINE_NOTE}`,
+      async execute(
+        toolCallId,
+        params,
+        signal,
+        onUpdate,
+        ctx?: ExtensionToolContext,
+      ) {
         throwIfAborted(signal);
-        await load(absolutePath);
-      };
-      let captured: { absolutePath: string; view: string } | undefined;
-      // Built per call: the operations close over this call's signal and
-      // capture slot, so concurrent reads never observe each other's state.
-      const numbered = createPiReadTool(cwd, {
-        operations: {
-          access,
-          async readFile(absolutePath) {
-            throwIfAborted(signal);
-            const raw = await load(absolutePath);
-            throwIfAborted(signal);
-            if (
-              raw.byteLength > SNAPSHOT_MAX_BYTES ||
-              raw.includes(0) ||
-              !isUtf8(raw)
-            ) {
-              throw new Unsnapshottable();
-            }
-            const text = raw.toString("utf-8");
-            const view = /\.ipynb$/i.test(absolutePath)
-              ? native.notebookToEditableText(
-                  text,
-                  displayToolPath(cwd, absolutePath),
-                )
-              : normalizeEditableText(text);
-            captured = { absolutePath, view };
-            // A terminal LF closes the last line; numbering it would invent an
-            // addressable empty line the editable view does not have.
-            const display = view.endsWith("\n") ? view.slice(0, -1) : view;
-            return Buffer.from(
-              native.hashlineFormatNumberedLines(display, 1),
-              "utf-8",
-            );
-          },
-          // `detectImageMimeType` is intentionally absent: this branch only
-          // ever produces numbered text, and images go to the fallback.
-        },
-      });
-
-      let result: AgentToolResult<ReadToolDetails | undefined>;
-      try {
-        // The inner factory gets no signal: its immediate-abort wrapper could
-        // otherwise settle while this read is still capturing a snapshot.
-        result = await numbered.execute(
-          toolCallId,
-          params,
-          undefined,
-          onUpdate,
-        );
-      } catch (error) {
-        if (error instanceof Unsnapshottable) {
-          // Pi's unmodified reader, over the bytes this call already loaded.
-          const operations: ReadOperations = {
+        // Pi probes, sniffs, and reads the same path: one routed read serves them all.
+        const loads = new Map<string, Promise<Buffer>>();
+        const load = (absolutePath: string): Promise<Buffer> => {
+          let loading = loads.get(absolutePath);
+          if (!loading) {
+            loading = mux.readFile(cwd, absolutePath);
+            loads.set(absolutePath, loading);
+          }
+          return loading;
+        };
+        const access = async (absolutePath: string): Promise<void> => {
+          throwIfAborted(signal);
+          await load(absolutePath);
+        };
+        let captured: { absolutePath: string; view: string } | undefined;
+        // Built per call: the operations close over this call's signal and
+        // capture slot, so concurrent reads never observe each other's state.
+        const numbered = createPiReadTool(cwd, {
+          operations: {
             access,
-            readFile: load,
-            detectImageMimeType: async (absolutePath) =>
-              detectSupportedImageMimeType(
-                (await load(absolutePath)).subarray(0, IMAGE_TYPE_SNIFF_BYTES),
-              ),
-          };
-          if (ctx !== undefined) {
-            return createPiReadToolDefinition(cwd, { operations }).execute(
+            async readFile(absolutePath) {
+              throwIfAborted(signal);
+              const raw = await load(absolutePath);
+              throwIfAborted(signal);
+              if (
+                raw.byteLength > SNAPSHOT_MAX_BYTES ||
+                raw.includes(0) ||
+                !isUtf8(raw)
+              ) {
+                throw new Unsnapshottable();
+              }
+              const text = raw.toString("utf-8");
+              const view = /\.ipynb$/i.test(absolutePath)
+                ? native.notebookToEditableText(
+                    text,
+                    displayToolPath(cwd, absolutePath),
+                  )
+                : normalizeEditableText(text);
+              captured = { absolutePath, view };
+              // A terminal LF closes the last line; numbering it would invent an
+              // addressable empty line the editable view does not have.
+              const display = view.endsWith("\n") ? view.slice(0, -1) : view;
+              return Buffer.from(
+                native.hashlineFormatNumberedLines(display, 1),
+                "utf-8",
+              );
+            },
+            // `detectImageMimeType` is intentionally absent: this branch only
+            // ever produces numbered text, and images go to the fallback.
+          },
+        });
+
+        let result: AgentToolResult<ReadToolDetails | undefined>;
+        try {
+          // The inner factory gets no signal: its immediate-abort wrapper could
+          // otherwise settle while this read is still capturing a snapshot.
+          result = await numbered.execute(
+            toolCallId,
+            params,
+            undefined,
+            onUpdate,
+          );
+        } catch (error) {
+          if (error instanceof Unsnapshottable) {
+            // Pi's unmodified reader, over the bytes this call already loaded.
+            const operations: ReadOperations = {
+              access,
+              readFile: load,
+              detectImageMimeType: async (absolutePath) =>
+                detectSupportedImageMimeType(
+                  (await load(absolutePath)).subarray(
+                    0,
+                    IMAGE_TYPE_SNIFF_BYTES,
+                  ),
+                ),
+            };
+            if (ctx !== undefined) {
+              return createPiReadToolDefinition(cwd, { operations }).execute(
+                toolCallId,
+                params,
+                signal,
+                onUpdate,
+                ctx,
+              );
+            }
+            return createPiReadTool(cwd, { operations }).execute(
               toolCallId,
               params,
               signal,
               onUpdate,
-              ctx,
             );
           }
-          return createPiReadTool(cwd, { operations }).execute(
-            toolCallId,
-            params,
-            signal,
-            onUpdate,
-          );
+          throw error;
         }
-        throw error;
-      }
-      throwIfAborted(signal);
-      if (!captured) return result;
+        throwIfAborted(signal);
+        if (!captured) return result;
 
-      const body = result.content.find((part) => part.type === "text");
-      if (!body) return result;
-      const seen = visibleLineNumbers(body.text);
-      // No complete source row means nothing was displayed to anchor against.
-      if (seen.length === 0) return result;
+        const body = result.content.find((part) => part.type === "text");
+        if (!body) return result;
+        const seen = visibleLineNumbers(body.text);
+        // No complete source row means nothing was displayed to anchor against.
+        if (seen.length === 0) return result;
 
-      const tag = store.recordSnapshot(
-        captured.absolutePath,
-        captured.view,
-        seen,
-      );
-      const header = native.hashlineFormatHeader(
-        displayToolPath(cwd, captured.absolutePath),
-        tag,
-      );
-      return {
-        ...result,
-        content: result.content.map((part) =>
-          part === body ? { ...part, text: `${header}\n${part.text}` } : part,
-        ),
-      };
-    },
-  } satisfies ToolDefinition<
-    ReturnType<typeof createPiReadTool>["parameters"],
-    ReadToolDetails | undefined
-  >;
-  return tool;
-}
+        const tag = store.recordSnapshot(
+          captured.absolutePath,
+          captured.view,
+          seen,
+        );
+        const header = native.hashlineFormatHeader(
+          displayToolPath(cwd, captured.absolutePath),
+          tag,
+        );
+        return {
+          ...result,
+          content: result.content.map((part) =>
+            part === body ? { ...part, text: `${header}\n${part.text}` } : part,
+          ),
+        };
+      },
+    } satisfies ToolDefinition<
+      ReturnType<typeof createPiReadTool>["parameters"],
+      ReadToolDetails | undefined
+    >;
+    return tool;
+  },
+};

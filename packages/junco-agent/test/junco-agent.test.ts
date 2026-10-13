@@ -22,7 +22,7 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createYieldTool, isComplainTool, issueLog } from "junco-tools";
+import { isComplainTool, issueLog, YieldTool } from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
 import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
@@ -101,7 +101,7 @@ test("the caller's tools remain inspectable and active selection governs executi
 });
 
 test("the same yield tool is isolated between agents, and a later prompt retains session history", async () => {
-  const shared = createYieldTool();
+  const shared = new YieldTool();
   const history: string[][] = [];
   const first = await newAgent(
     [
@@ -162,10 +162,157 @@ test("a staged prompt starts only on demand and blocks an explicit overlapping p
   }
 });
 
+test("a callback prompt runs once on demand with the supplied view and static images", async () => {
+  const image = { type: "image" as const, data: "aW1n", mimeType: "image/png" };
+  const view = { messages: new Map(), values: new Map() };
+  const seen: unknown[] = [];
+  let sent: Context["messages"] = [];
+  const { faux, agent } = await newAgent(
+    [
+      (context) => {
+        sent = context.messages;
+        return fauxAssistantMessage("done");
+      },
+    ],
+    {
+      images: [image],
+      prompt: (inputs) => {
+        seen.push(inputs);
+        return "from view";
+      },
+    },
+  );
+  try {
+    assert.equal(agent.status, "ready");
+    await tick();
+    assert.equal(seen.length, 0);
+    assert.equal(faux.state.callCount, 0);
+    assert.equal(settledText(await agent.next(view)), "done");
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0], view);
+    assert.deepEqual(userTexts(sent), ["from view"]);
+    const user = sent.find((message) => message.role === "user");
+    assert.ok(user !== undefined && typeof user.content !== "string");
+    assert.deepEqual(
+      user.content.filter((block) => block.type === "image"),
+      [image],
+    );
+    assert.equal(agent.status, "idle");
+    let extra = false;
+    const waiting = agent.next(view).then((result) => {
+      extra = true;
+      return result;
+    });
+    await tick();
+    assert.equal(extra, false);
+    await agent.return();
+    assert.deepEqual(await waiting, { value: undefined, done: true });
+    assert.equal(seen.length, 1);
+    assert.equal(faux.state.callCount, 1);
+  } finally {
+    await agent.return();
+  }
+});
+
+test("a callback prompt without inputs fails invalid_state; a later string stage recovers", async () => {
+  let calls = 0;
+  const history: string[][] = [];
+  const { faux, agent } = await newAgent(
+    [
+      (context) => {
+        history.push(userTexts(context.messages));
+        return fauxAssistantMessage("recovered done");
+      },
+    ],
+    {
+      prompt: () => {
+        calls++;
+        return "unused";
+      },
+    },
+  );
+  try {
+    const failure = step(await agent.next());
+    assert.equal(failure.kind, "failed");
+    assert.ok(
+      isCode("invalid_state")(failure.kind === "failed" && failure.error),
+    );
+    assert.equal(calls, 0);
+    assert.equal(faux.state.callCount, 0);
+    assert.equal(agent.status, "idle");
+    agent.stagePrompt("recovered");
+    assert.equal(settledText(await agent.next()), "recovered done");
+    assert.deepEqual(history, [["recovered"]]);
+  } finally {
+    await agent.return();
+  }
+});
+
+test("callback throws and non-string returns fail before any request", async () => {
+  const view = { messages: new Map(), values: new Map() };
+  const cause = new Error("cause");
+  const { faux, agent } = await newAgent([fauxAssistantMessage("after")], {
+    prompt: () => {
+      throw cause;
+    },
+  });
+  try {
+    const thrown = step(await agent.next(view));
+    assert.ok(thrown.kind === "failed" && thrown.error === cause);
+    for (const bad of [() => 42, async () => "promised"]) {
+      agent.stagePrompt(bad as unknown as () => string);
+      const failure = step(await agent.next(view));
+      assert.ok(
+        failure.kind === "failed" && isCode("invalid_argument")(failure.error),
+      );
+    }
+    assert.equal(faux.state.callCount, 0);
+    agent.stagePrompt("works");
+    assert.equal(settledText(await agent.next()), "after");
+  } finally {
+    await agent.return();
+  }
+});
+
+test("stagePrompt is busy while staged, suspended or awaited, and closed after return", async () => {
+  let other = 0;
+  const otherCallback = () => {
+    other++;
+    return "other";
+  };
+  const { agent } = await newAgent(
+    [
+      toolTurn(yieldCall("hold", "y1")),
+      fauxAssistantMessage("first"),
+      fauxAssistantMessage("second"),
+    ],
+    { tools: [new YieldTool()], prompt: "original" },
+  );
+  try {
+    assert.throws(() => agent.stagePrompt(otherCallback), isCode("busy"));
+    await assert.rejects(agent.prompt("explicit"), isCode("busy"));
+    assert.equal(agent.status, "ready");
+    assert.equal(step(await agent.next()).kind, "yield");
+    assert.throws(() => agent.stagePrompt("suspended"), isCode("busy"));
+    assert.equal(settledText(await agent.next()), "first");
+    agent.stagePrompt("round two");
+    assert.equal(settledText(await agent.next()), "second");
+    assert.equal(other, 0);
+    const queued = agent.next();
+    await tick();
+    assert.throws(() => agent.stagePrompt("queued"), isCode("busy"));
+    await agent.return();
+    assert.deepEqual(await queued, { value: undefined, done: true });
+    assert.throws(() => agent.stagePrompt("closed"), isCode("closed"));
+  } finally {
+    await agent.return();
+  }
+});
+
 test("turn_end subscribers see the full successful yield result before the next request is gated", async () => {
   const { faux, agent } = await newAgent(
     [toolTurn(yieldCall("review", "y1")), fauxAssistantMessage("resumed")],
-    { tools: [createYieldTool()], prompt: "go" },
+    { tools: [new YieldTool()], prompt: "go" },
   );
   const turns: { ids: string[]; errors: boolean[] }[] = [];
   agent.events.on("turn_end", ({ toolResults }) => {
@@ -238,7 +385,7 @@ test(
         ),
         fauxAssistantMessage("after batch"),
       ],
-      { tools: [mutate, deny, createYieldTool()], prompt: "go" },
+      { tools: [mutate, deny, new YieldTool()], prompt: "go" },
     );
     const ended: string[][] = [];
     agent.events.on("turn_end", ({ toolResults }) =>
@@ -378,7 +525,7 @@ test("a failed or spoofed yield never pauses the provider", async () => {
   );
   const { agent: blocked } = await newAgent(
     [toolTurn(yieldCall("denied", "y2")), fauxAssistantMessage("continued")],
-    { tools: [createYieldTool()], prompt: "go" },
+    { tools: [new YieldTool()], prompt: "go" },
   );
   blocked.hooks.on("before_tool", ({ toolName }) =>
     toolName === "yield" ? { block: { reason: "denied" } } : undefined,
@@ -420,7 +567,6 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session,
       models,
-      policy: "LockPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["first", "first"],
@@ -431,7 +577,6 @@ test("duplicate and unknown active tools are rejected without changing the usabl
     JuncoAgent.fromResolved({
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
-      policy: "LockPolicy",
       model,
       tools: [first.tool],
       activeToolNames: ["missing"],
@@ -471,7 +616,6 @@ test("an idle reopened session restores its selected tool without advertising ot
   const first = await JuncoAgent.fromResolved({
     session,
     models,
-    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -511,7 +655,6 @@ test("an idle reopened session restores its selected tool without advertising ot
   const second = await JuncoAgent.fromResolved({
     session: reopened,
     models,
-    policy: "LockPolicy",
     model,
     tools: [one.tool, two.tool],
   });
@@ -546,7 +689,7 @@ test(
   async () => {
     const { agent } = await newAgent(
       [toolTurn(yieldCall("pause", "y1")), fauxAssistantMessage("next")],
-      { tools: [createYieldTool()], prompt: "go" },
+      { tools: [new YieldTool()], prompt: "go" },
     );
     try {
       assert.equal(step(await agent.next()).kind, "yield");
@@ -571,7 +714,7 @@ test(
   async () => {
     const { agent } = await newAgent(
       [toolTurn(yieldCall("pause", "y1")), fauxAssistantMessage("unused")],
-      { tools: [createYieldTool()] },
+      { tools: [new YieldTool()] },
     );
     try {
       const prompt = agent.prompt("go");
@@ -602,7 +745,6 @@ test(
       session,
       models,
       model,
-      policy: "LockPolicy",
     });
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
@@ -721,13 +863,13 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   models.registerNativeProvider(faux.provider);
   const agent = await JuncoAgent.create({
     models,
-    policy: "LockPolicy",
     provider: "faux",
     model: "faux-1",
     tools: [],
     prompt: "go",
   });
   try {
+    assert.equal(agent.collection, undefined);
     assert.equal(settledText(await agent.next()), "created");
   } finally {
     await agent.return();
@@ -736,7 +878,6 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "LockPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [duplicate, countingTool("same").tool],
@@ -756,7 +897,6 @@ test("create rejects an unsupported thinking level before reading credentials", 
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "LockPolicy",
       provider: "faux",
       model: "faux-1",
       tools: [],
@@ -786,7 +926,6 @@ test("create requires the selected provider's saved Pi login and closes a transf
       await assert.rejects(
         JuncoAgent.create({
           models,
-          policy: "LockPolicy",
           provider: "github-copilot",
           model: "claude-opus-5.5",
           session,
@@ -831,7 +970,6 @@ test("create reuses Pi's saved OAuth login without starting a login flow", async
     });
     agent = await JuncoAgent.create({
       models,
-      policy: "LockPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -878,7 +1016,6 @@ test("an unrefreshable Pi login fails with login guidance before creating an age
   await assert.rejects(
     JuncoAgent.create({
       models,
-      policy: "LockPolicy",
       provider: "github-copilot",
       model: "claude-opus-5.5",
       tools: [],
@@ -1041,7 +1178,7 @@ test(
         fauxAssistantMessage("short summary"),
       ],
       {
-        tools: [createYieldTool()],
+        tools: [new YieldTool()],
         prompt: "go ".repeat(64),
         compaction: COMPACTION,
       },
@@ -1236,7 +1373,7 @@ test(
         fauxAssistantMessage("unused"),
         fauxAssistantMessage("unused summary"),
       ],
-      { tools: [createYieldTool()], prompt: "go", compaction: COMPACTION },
+      { tools: [new YieldTool()], prompt: "go", compaction: COMPACTION },
     );
     try {
       assert.equal(step(await agent.next()).kind, "yield");
@@ -1487,7 +1624,7 @@ test(
     const agent = await JuncoAgent.fromResolved({
       ...native,
       session,
-      tools: [createYieldTool()],
+      tools: [new YieldTool()],
     });
     const ids = userEntryIds(agent);
     let runs = 0;
@@ -1560,7 +1697,7 @@ test(
     const agent = await JuncoAgent.fromResolved({
       ...native,
       session,
-      tools: [createYieldTool()],
+      tools: [new YieldTool()],
     });
     const ids = userEntryIds(agent);
     try {
@@ -1962,7 +2099,6 @@ test(
     const agent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
-      policy: "LockPolicy",
       model: faux.getModel("plain")!,
       systemPrompt: "sys",
     });
@@ -2104,7 +2240,7 @@ test(
         toolTurn(yieldCall("pause", "y1")),
         fauxAssistantMessage("must not be requested"),
       ],
-      { tools: [createYieldTool()] },
+      { tools: [new YieldTool()] },
     );
     try {
       const prompt = agent.prompt("go");
@@ -2158,7 +2294,7 @@ test(
         toolTurn(yieldCall("pause", "y1")),
         fauxAssistantMessage("must not be requested"),
       ],
-      { tools: [createYieldTool()] },
+      { tools: [new YieldTool()] },
     );
     try {
       let drained = false;
@@ -2234,7 +2370,6 @@ test(
       session,
       models,
       model,
-      policy: "LockPolicy",
       systemPrompt: "sys",
       tools: [one.tool],
       compaction: COMPACTION,
@@ -2278,7 +2413,6 @@ test(
       session: reopened,
       models,
       model,
-      policy: "LockPolicy",
       systemPrompt: "sys",
       tools: [one.tool],
     });

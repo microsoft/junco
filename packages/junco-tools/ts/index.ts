@@ -7,38 +7,38 @@ export type {
 export type {
   EditStore,
   NativeMux,
+  NativePolicy,
   NativeProcess,
   NativeProcessOptions,
   NativeRunResult,
 } from "../native/index.js";
-export { createAstEditTool, createAstGrepTool } from "./ast.js";
-export { createBashTool } from "./bash.js";
+export { AstEditTool, AstGrepTool } from "./ast.js";
+export { BashTool } from "./bash.js";
 export {
   type ToolBinding,
   ToolCollection,
   type ToolCollectionOptions,
 } from "./collection.js";
 export {
-  type ComplainTool,
+  ComplainTool,
   type ComplainToolHost,
   type Complaint,
   type ComplaintContext,
-  createComplainTool,
   type Issue,
   invokeComplainTool,
   isComplainTool,
   issueLog,
   type Prompt,
 } from "./complain.js";
-export { createDiffTool } from "./diff.js";
-export { createEditTool, type HashlineEditDetails } from "./edit.js";
+export { DiffTool } from "./diff.js";
+export { EditTool, type HashlineEditDetails } from "./edit.js";
 export {
   isMarshPolicyDenied,
   MARSH_POLICY_DENIED,
   type MarshPolicyDeniedError,
 } from "./errors.js";
-export { createFindTool } from "./find.js";
-export { createGrepTool } from "./grep.js";
+export { FindTool } from "./find.js";
+export { GrepTool } from "./grep.js";
 export {
   LspTool,
   type LspToolDetails,
@@ -47,17 +47,13 @@ export {
 } from "./lsp.js";
 export { type Contract, InfoTool, RecvTool, SendTool } from "./messaging.js";
 export type { NativeModule } from "./native.js";
+export { ShellMuxOperations } from "./operations.js";
+export { EmptyPolicy, LockPolicy, Policy } from "./policy.js";
+export { ReadTool } from "./read.js";
+export { ReleaseTool } from "./release.js";
+export { ShellMuxLease } from "./shell-mux.js";
 export {
-  createShellMuxOperations,
-  type ShellMuxOperations,
-} from "./operations.js";
-export { createReadTool } from "./read.js";
-export { createReleaseTool } from "./release.js";
-export { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
-export {
-  type AssignedTaskTool,
-  createAssignedTaskTool,
-  createTaskTool,
+  AssignedTaskTool,
   invokeTaskTool,
   isAssignedTaskTool,
   isTaskTool,
@@ -65,13 +61,12 @@ export {
   type TaskDecision,
   type TaskInput,
   type TaskRequest,
-  type TaskTool,
+  TaskTool,
   type TaskToolDetails,
   type TaskToolHost,
 } from "./task.js";
 export {
-  createYieldTool,
   isYieldTool,
-  type YieldTool,
+  YieldTool,
   type YieldToolDetails,
 } from "./yield.js";

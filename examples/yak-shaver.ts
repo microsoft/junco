@@ -2,44 +2,36 @@
  * # Yak shaver: apply generalizing refactors from the deepest types outward
  *
  * Researches, reviews, and applies refactors in one Git working tree indexed by Graft. Read it top
- * to bottom:
+ * to bottom; each step below names its `## N.` sections of this file (§1 holds constants):
  *
- * 1. **Inventory.** `parseSnapshot` reads Graft's v1 wiring graph (`graft/.graph/wiring.json`).
+ * 1. **Inventory (§2).** `parseSnapshot` reads Graft's v1 wiring graph (`graft/.graph/wiring.json`).
  *    Every indexed `class`, `interface`, `type`, `enum`, `struct`, and `trait` is a candidate;
  *    a type and the methods it owns form one dependency unit.
- * 2. **Ranking.** `rankCandidates` measures each candidate's *longest* dependency distance from the
+ * 2. **Ranking (§3–4).** `rankCandidates` measures each candidate's *longest* dependency distance from the
  *    public API (exported AST-origin symbols) or a unit test, counted in hops between strongly
  *    connected components, then orders deepest first and, within one depth, by ascending positive
  *    distinct-caller count (zero callers last). Unrooted candidates follow. Nothing is cut off.
- * 3. **Batches.** The deterministic controller admits four initially ranked candidates at a time,
+ * 3. **Batches (§5–8).** `refactorCandidates` admits four initially ranked candidates at a time,
  *    resolved against the current snapshot. One batch is one `JuncoGraph` of parallel lanes
- *    `Proposer:r ==proposal:r==> JudgeInput:r --judge-input:r--> Judge:r`; every proposer expands at runtime into a native Spawn
+ *    `Proposer:r ==proposal:r==> Judge:r`; every proposer expands at runtime into a native Spawn
  *    star of up to three read-only researchers (`Search1`–`Search3`) that split the whole indexed
  *    file list far-first. Each proposer's research batch is fixed by `setTaskBatch`; the model only
  *    launches it with `task({})`. Failed research follows `taskFailurePolicy` (default `"ignore"`:
  *    dropped silently and counted as missing coverage; `{ retries: 0 }` asks the proposer to retry
  *    or ignore at once). A proposer records one structured result through `submit_refactor`; an
  *    independent judge records four criteria through `judge_refactor`.
- * 4. **Application.** As soon as a lane's review completes with all four criteria, at least one new
+ * 4. **Application (§9).** As soon as a lane's review completes with all four criteria, at least one new
  *    caller definition, and a positive projected net of removed nonblank source lines, its edits
  *    are applied in place and exactly its paths are released (`release -- <path>`) inside one managed
  *    command, so the lane's owner both edits and releases its files. Completed applications drain
  *    one at a time; research and review stay parallel. After a batch that applied anything, a
  *    private, discarded `graft build` refreshes the in-memory snapshot for the next admission.
- * 5. **Output.** A structured run on stdout; no report file. Nothing is committed.
+ * 5. **Output (§10).** `runYakShaver` acquires everything, runs `graft build .` through the trusted
+ *    collection's sandboxed `bash` tool so every run starts from a current index, awaits
+ *    `refactorCandidates`, and prints a structured run on stdout; no report file. Nothing is committed.
  *
- * Controller topology (three deterministic nodes, no model nodes). `GraftBuild` is setup: it runs
- * `graft build .` through the tool collection's sandboxed `bash` tool, so every run starts from a
- * current index, and reads the published `graft/.graph/wiring.json`:
- *
- * ```text
- * [GraftBuild] ==snapshot==> [RankCandidates] ==ranking==> [RefactorBatches]
- *                                                                 | drives one stepwise batch graph at a time;
- *                                                                 | a completed lane: review → apply + release
- * ```
- *
- * Ownership: the runner owns two `sandbox: "always"` tool collections — the protected `LockPolicy`
- * one (agents, research, applier) and the trusted-build `EmptyPolicy` one (`graft build`, index
+ * Ownership: the runner owns two `sandbox: "always"` tool collections — the protected `tools.LockPolicy`
+ * one (agents, research, applier) and the trusted-build `tools.EmptyPolicy` one (`graft build`, index
  * refresh) — the shared model runtime, and the tracer. Every Graft MCP
  * connection is discard-only and lives for one call. Each batch graph owns its fresh lane agents and
  * their native research children and is closed before the next batch is admitted. Previously
@@ -67,16 +59,7 @@ import { Value } from "typebox/value";
 
 // ## 1. Constants
 
-/** Candidates admitted per batch: lanes, not a cap on agents or model requests. */
-export const CANDIDATE_BATCH_SIZE = 4;
-/** Research shards per candidate: one native task child each. */
-const SEARCH_SHARDS = 3;
-const GRAPH_FILE = "graft/.graph/wiring.json";
 const USAGE = "Usage: bun run yak-shaver.ts [repository-root]";
-
-const SUBMIT_TOOL = "submit_refactor";
-const JUDGE_TOOL = "judge_refactor";
-const TASK_TOOL = "task";
 
 /**
  * Models pinned 2026-10-04 from the authenticated GitHub Copilot catalog (both IDs present, saved
@@ -90,9 +73,20 @@ const PROVIDER = "github-copilot";
 const PROPOSER_MODEL = { model: "claude-sonnet-5.5", thinkingLevel: "medium" } as const;
 const JUDGE_MODEL = { model: "gpt-6.1-sol", thinkingLevel: "high" } as const;
 
-/** The Graft MCP tools researchers use; the index itself is rebuilt by the `GraftBuild` node. */
+/** The Graft MCP tools researchers use; the index itself is rebuilt by `graft build .` first. */
 const GRAFT_RESEARCH_TOOLS = ["graft_find_code", "graft_find_all", "graft_file_api", "graft_trace_calls"] as const;
 const FILE_RESEARCH_TOOLS = ["read", "grep"] as const;
+/** The proposer's and judge's only output channels, and the native research launcher. */
+const SUBMIT_TOOL = "submit_refactor";
+const JUDGE_TOOL = "judge_refactor";
+const TASK_TOOL = "task";
+
+/** Graft's published wiring graph, relative to the repository root. */
+const GRAPH_FILE = "graft/.graph/wiring.json";
+/** Research shards per candidate: one native task child each. */
+const SEARCH_SHARDS = 3;
+/** Candidates admitted per batch: lanes, not a cap on agents or model requests. */
+const CANDIDATE_BATCH_SIZE = 4;
 
 // ## 2. The Graft snapshot
 //
@@ -139,9 +133,9 @@ const wiringSchema = Type.Object({
   ),
 });
 
-export type GraftKind = Static<typeof kindSchema>;
-export type GraftRelation = Static<typeof relationSchema>;
-export type GraftConfidence = Static<typeof confidenceSchema>;
+type GraftKind = Static<typeof kindSchema>;
+type GraftRelation = Static<typeof relationSchema>;
+type GraftConfidence = Static<typeof confidenceSchema>;
 
 const CANDIDATE_KINDS: Partial<Record<GraftKind, true>> = { class: true, interface: true, type: true, enum: true, struct: true, trait: true };
 /** Graft's dependency relations (`src/graph/relations.ts`); `contains` is structure, not use. */
@@ -151,7 +145,7 @@ const EXTERNAL_TARGET_RELATIONS: Partial<Record<GraftRelation, true>> = { import
 /** Graft's own test-path predicate (`src/ask/ask.ts`). */
 const TEST_PATH = /(^|\/)(tests?|__tests__|spec)\/|(_test|\.test|\.spec)\.[a-z]+$|(^|\/)(test_[^/]+|conftest)\.py$/i;
 
-export type GraftNode = {
+type GraftNode = {
   readonly id: string;
   readonly name: string;
   readonly kind: GraftKind;
@@ -165,7 +159,7 @@ export type GraftNode = {
   readonly owner?: string;
 };
 
-export type GraftEdge = {
+type GraftEdge = {
   readonly source: string;
   readonly target: string;
   readonly relation: GraftRelation;
@@ -273,41 +267,24 @@ export type Candidate = {
   readonly callerEdges: readonly GraftEdge[];
 };
 
-/** Whole-graph facts behind the ranking, disclosed in the plan. */
-type DependencyModel = {
-  readonly candidates: readonly Candidate[];
-  readonly ownerOf: ReadonlyMap<string, string>;
-  readonly unresolvedMethods: readonly string[];
-  readonly publicRoots: number;
-  readonly testRoots: number;
-  readonly ignoredGenericExports: number;
-  readonly dependencyEdges: number;
-  readonly inferredEdges: number;
-  readonly externalEdges: number;
-  readonly cycles: number;
-};
+const rankings = new WeakMap<GraftSnapshot, readonly Candidate[]>();
 
-const dependencyModels = new WeakMap<GraftSnapshot, DependencyModel>();
-
-/** Every indexed type-like candidate, deepest first. */
+/** Every indexed type-like candidate, deepest first; computed once per snapshot. */
 export function rankCandidates(snapshot: GraftSnapshot): readonly Candidate[] {
-  return dependencyModel(snapshot).candidates;
+  let ranked = rankings.get(snapshot);
+  if (ranked === undefined) {
+    ranked = buildCandidates(snapshot);
+    rankings.set(snapshot, ranked);
+  }
+  return ranked;
 }
 
-function dependencyModel(snapshot: GraftSnapshot): DependencyModel {
-  const cached = dependencyModels.get(snapshot);
-  if (cached !== undefined) return cached;
-  const built = buildDependencyModel(snapshot);
-  dependencyModels.set(snapshot, built);
-  return built;
-}
-
-function buildDependencyModel(snapshot: GraftSnapshot): DependencyModel {
+function buildCandidates(snapshot: GraftSnapshot): readonly Candidate[] {
   const { nodes, edges, byId } = snapshot;
   const candidateIds = new Set(nodes.filter((node) => CANDIDATE_KINDS[node.kind]).map((node) => node.id));
 
   // A method belongs to the unique candidate that contains it, else to the unique same-file
-  // candidate its `owner` names. Anything else stays its own vertex and is disclosed.
+  // candidate its `owner` names. Anything else stays its own vertex.
   const containers = new Map<string, Set<string>>();
   for (const edge of edges) {
     if (edge.relation !== "contains" || !candidateIds.has(edge.source)) continue;
@@ -325,54 +302,34 @@ function buildDependencyModel(snapshot: GraftSnapshot): DependencyModel {
     else same.push(id);
   }
   const ownerOf = new Map<string, string>();
-  const unresolvedMethods: string[] = [];
   for (const node of nodes) {
     if (node.kind !== "method") continue;
     const owners = containers.get(node.id);
     if (owners !== undefined) {
       if (owners.size === 1) ownerOf.set(node.id, [...owners][0]!);
-      else unresolvedMethods.push(node.id);
       continue;
     }
     if (node.owner === undefined) continue;
     const named = candidatesByFileName.get(`${node.path}\0${node.owner}`) ?? [];
     if (named.length === 1) ownerOf.set(node.id, named[0]!);
-    else unresolvedMethods.push(node.id);
   }
   const project = (id: string): string => ownerOf.get(id) ?? id;
 
   const vertices = nodes.map((node) => node.id).filter((id) => !ownerOf.has(id)).sort(compareText);
   const indexOf = new Map(vertices.map((id, index) => [id, index]));
-  const vertex = (id: string): number => indexOf.get(project(id))!;
 
   const roots = new Set<number>();
-  const publicRootSet = new Set<number>();
-  const testRootSet = new Set<number>();
-  let ignoredGenericExports = 0;
   for (const node of nodes) {
-    if (node.kind !== "file" && node.exported) {
-      if (node.origin === "ast") publicRootSet.add(vertex(node.id));
-      else ignoredGenericExports++;
+    if ((node.kind !== "file" && node.exported && node.origin === "ast") || TEST_PATH.test(node.path)) {
+      roots.add(indexOf.get(project(node.id))!);
     }
-    if (TEST_PATH.test(node.path)) testRootSet.add(vertex(node.id));
   }
-  for (const root of publicRootSet) roots.add(root);
-  for (const root of testRootSet) roots.add(root);
 
   const adjacency: Set<number>[] = vertices.map(() => new Set<number>());
   const callers = new Map<string, Set<string>>();
   const callerEdges = new Map<string, GraftEdge[]>();
-  let dependencyEdges = 0;
-  let inferredEdges = 0;
-  let externalEdges = 0;
   for (const edge of edges) {
-    if (!DEPENDENCY_RELATIONS[edge.relation]) continue;
-    if (!byId.has(edge.target)) {
-      externalEdges++;
-      continue;
-    }
-    dependencyEdges++;
-    if (edge.confidence === "inferred") inferredEdges++;
+    if (!DEPENDENCY_RELATIONS[edge.relation] || !byId.has(edge.target)) continue;
     const from = project(edge.source);
     const to = project(edge.target);
     if (from === to) continue;
@@ -452,20 +409,7 @@ function buildDependencyModel(snapshot: GraftSnapshot): DependencyModel {
       callerEdges: callerEdges.get(id) ?? [],
     };
   });
-  candidates.sort(compareCandidates);
-
-  return {
-    candidates,
-    ownerOf,
-    unresolvedMethods: unresolvedMethods.sort(compareText),
-    publicRoots: publicRootSet.size,
-    testRoots: testRootSet.size,
-    ignoredGenericExports,
-    dependencyEdges,
-    inferredEdges,
-    externalEdges,
-    cycles: members.filter((list) => list.length > 1).length,
-  };
+  return candidates.sort(compareCandidates);
 }
 
 /** Reachable first; deeper first; then fewer positive callers, zero callers last; then literal ID. */
@@ -534,7 +478,7 @@ function stronglyConnected(adjacency: readonly (readonly number[])[]): { compone
 // from the candidate's callers come first, dealt round-robin into three researcher shards. This is
 // a search-order heuristic, not a similarity claim.
 
-export type SearchShard = { readonly name: string; readonly files: readonly string[] };
+type SearchShard = { readonly name: string; readonly files: readonly string[] };
 
 const directoryOf = (path: string): string[] => path.split("/").slice(0, -1);
 
@@ -565,18 +509,18 @@ export function partitionSearch(snapshot: GraftSnapshot, candidate: Candidate): 
   return shards.map((files, index) => ({ name: `Search${index + 1}`, files }));
 }
 
-// ## 5. Structured results
-//
-// A proposer's only output channel is `submit_refactor`; a judge's is `judge_refactor`. Each lane
-// gets fresh recorders. Numbers are computed here from validated source edits, never accepted from a
-// model, and the first successful call is final.
-
 /** One lane's admitted candidate: its 1-based global rank and its search shards. */
 export type CandidateWork = {
   readonly rank: number;
   readonly candidate: Candidate;
   readonly shards: readonly SearchShard[];
 };
+
+// ## 5. Structured results
+//
+// A proposer's only output channel is `submit_refactor`; a judge's is `judge_refactor`. Each lane
+// gets fresh recorders. Numbers are computed here from validated source edits, never accepted from a
+// model, and the first successful call is final.
 
 const MAX_LINE = 10_000_000;
 const MAX_INDEX = 100_000;
@@ -687,16 +631,8 @@ export type ProposalContext = {
   readonly readSource: (path: string) => Promise<string | undefined>;
 };
 
-export interface ProposalRecorder {
-  readonly tool: AgentTool<typeof submitParameters, undefined>;
-  /** Records the text of a message the proposer received; task reports become research evidence. */
-  noteTaskReport(text: string): void;
-  peek(): CheckedProposal | NoProposal | undefined;
-  takeProposal(): CheckedProposal | NoProposal | undefined;
-}
-
 /** Split decoded source into lines; a terminating newline adds no empty last line. */
-export function splitSourceLines(text: string): string[] {
+function splitSourceLines(text: string): string[] {
   const lines = text.split(/\r?\n/);
   if (lines.at(-1) === "") lines.pop();
   return lines;
@@ -751,48 +687,55 @@ function reject(message: string): never {
 }
 
 /** A lane's `submit_refactor` tool and its single-result slot. */
-export function createProposalTool(context: ProposalContext): ProposalRecorder {
-  let recorded: CheckedProposal | NoProposal | undefined;
-  let taken = false;
-  const delivered: SearchReport[] = [];
-  const tool: AgentTool<typeof submitParameters, undefined> = {
-    name: SUBMIT_TOOL,
-    label: SUBMIT_TOOL,
-    description:
-      "Record your single final result for the assigned candidate: one concrete generalization proposal grounded in exact current-source edits, or kind none with a reason. An approved proposal is applied and released automatically. Metrics are computed from your edits. Only the first successful call counts.",
-    parameters: submitParameters,
-    async execute(_toolCallId, input) {
-      if (recorded !== undefined || taken) reject("A result is already recorded for this candidate; it is final.");
-      if (!Value.Check(submitParameters, input)) {
-        const [error] = Value.Errors(submitParameters, input);
-        reject(`Invalid ${SUBMIT_TOOL} input${error ? `: ${error.instancePath} ${error.message}` : ""}`);
-      }
-      const result = await checkSubmission(context, input, delivered);
-      recorded = result;
-      const summary =
-        result.kind === "none"
-          ? "Recorded: no proposal."
-          : `Recorded proposal. Computed metrics: ${JSON.stringify(result.metrics)}.`;
-      return {
-        content: [{ type: "text", text: `${summary} Finish with a brief plain-text summary; do not call ${SUBMIT_TOOL} again.` }],
-        details: undefined,
-      };
-    },
-  };
-  return {
-    tool,
-    noteTaskReport: (text) => {
-      const report = deliveredSearchReport(text);
-      if (report !== undefined) delivered.push(report);
-    },
-    peek: () => recorded,
-    takeProposal: () => {
-      const result = recorded;
-      recorded = undefined;
-      taken = taken || result !== undefined;
-      return result;
-    },
-  };
+export class ProposalRecorder {
+  readonly tool: AgentTool<typeof submitParameters, undefined>;
+  #recorded: CheckedProposal | NoProposal | undefined;
+  #taken = false;
+  readonly #delivered: SearchReport[] = [];
+
+  constructor(context: ProposalContext) {
+    this.tool = {
+      name: SUBMIT_TOOL,
+      label: SUBMIT_TOOL,
+      description:
+        "Record your single final result for the assigned candidate: one concrete generalization proposal grounded in exact current-source edits, or kind none with a reason. An approved proposal is applied and released automatically. Metrics are computed from your edits. Only the first successful call counts.",
+      parameters: submitParameters,
+      execute: async (_toolCallId, input) => {
+        if (this.#recorded !== undefined || this.#taken) reject("A result is already recorded for this candidate; it is final.");
+        if (!Value.Check(submitParameters, input)) {
+          const [error] = Value.Errors(submitParameters, input);
+          reject(`Invalid ${SUBMIT_TOOL} input${error ? `: ${error.instancePath} ${error.message}` : ""}`);
+        }
+        const result = await checkSubmission(context, input, this.#delivered);
+        this.#recorded = result;
+        const summary =
+          result.kind === "none"
+            ? "Recorded: no proposal."
+            : `Recorded proposal. Computed metrics: ${JSON.stringify(result.metrics)}.`;
+        return {
+          content: [{ type: "text", text: `${summary} Finish with a brief plain-text summary; do not call ${SUBMIT_TOOL} again.` }],
+          details: undefined,
+        };
+      },
+    };
+  }
+
+  /** Records the text of a message the proposer received; task reports become research evidence. */
+  noteTaskReport(text: string): void {
+    const report = deliveredSearchReport(text);
+    if (report !== undefined) this.#delivered.push(report);
+  }
+
+  peek(): CheckedProposal | NoProposal | undefined {
+    return this.#recorded;
+  }
+
+  takeProposal(): CheckedProposal | NoProposal | undefined {
+    const result = this.#recorded;
+    this.#recorded = undefined;
+    this.#taken = this.#taken || result !== undefined;
+    return result;
+  }
 }
 
 /** Validate research coverage, then the proposal's source evidence, and compute its metrics. */
@@ -978,217 +921,45 @@ const verdictParameters = Type.Object(
 export type RefactorVerdict = Static<typeof verdictParameters>;
 const CRITERIA = ["minimalAugmentation", "preservesExistingCallers", "semanticCoherence", "dependencyImprovement"] as const;
 
-export interface VerdictRecorder {
-  readonly tool: AgentTool<typeof verdictParameters, undefined>;
-  takeVerdict(): RefactorVerdict | undefined;
-}
-
 /** A judge's `judge_refactor` tool and its single-verdict slot. */
-export function createVerdictTool(): VerdictRecorder {
-  let recorded: RefactorVerdict | undefined;
-  let taken = false;
-  const tool: AgentTool<typeof verdictParameters, undefined> = {
-    name: JUDGE_TOOL,
-    label: JUDGE_TOOL,
-    description:
-      "Record your one independent verdict on the proposal: pass/fail with source-anchored evidence for each of the four criteria. Only the first successful call counts.",
-    parameters: verdictParameters,
-    async execute(_toolCallId, input) {
-      if (recorded !== undefined || taken) throw new Error("A verdict is already recorded; it is final.");
-      if (!Value.Check(verdictParameters, input)) {
-        const [error] = Value.Errors(verdictParameters, input);
-        throw new Error(`Invalid ${JUDGE_TOOL} input${error ? `: ${error.instancePath} ${error.message}` : ""}`);
-      }
-      recorded = Object.fromEntries(
-        CRITERIA.map((name) => [name, { pass: input[name].pass, evidence: input[name].evidence.trim() }]),
-      ) as RefactorVerdict;
-      return {
-        content: [{ type: "text", text: "Verdict recorded. Finish with a brief plain-text summary." }],
-        details: undefined,
-      };
-    },
-  };
-  return {
-    tool,
-    takeVerdict: () => {
-      const verdict = recorded;
-      recorded = undefined;
-      taken = taken || verdict !== undefined;
-      return verdict;
-    },
-  };
+export class VerdictRecorder {
+  readonly tool: AgentTool<typeof verdictParameters, undefined>;
+  #recorded: RefactorVerdict | undefined;
+  #taken = false;
+
+  constructor() {
+    this.tool = {
+      name: JUDGE_TOOL,
+      label: JUDGE_TOOL,
+      description:
+        "Record your one independent verdict on the proposal: pass/fail with source-anchored evidence for each of the four criteria. Only the first successful call counts.",
+      parameters: verdictParameters,
+      execute: async (_toolCallId, input) => {
+        if (this.#recorded !== undefined || this.#taken) throw new Error("A verdict is already recorded; it is final.");
+        if (!Value.Check(verdictParameters, input)) {
+          const [error] = Value.Errors(verdictParameters, input);
+          throw new Error(`Invalid ${JUDGE_TOOL} input${error ? `: ${error.instancePath} ${error.message}` : ""}`);
+        }
+        this.#recorded = Object.fromEntries(
+          CRITERIA.map((name) => [name, { pass: input[name].pass, evidence: input[name].evidence.trim() }]),
+        ) as RefactorVerdict;
+        return {
+          content: [{ type: "text", text: "Verdict recorded. Finish with a brief plain-text summary." }],
+          details: undefined,
+        };
+      },
+    };
+  }
+
+  takeVerdict(): RefactorVerdict | undefined {
+    const verdict = this.#recorded;
+    this.#recorded = undefined;
+    this.#taken = this.#taken || verdict !== undefined;
+    return verdict;
+  }
 }
 
-// ## 6. Admission, outcomes, and totals
-//
-// The controller keeps the initial ranking and admits four candidates at a time, resolved against the
-// current snapshot. A lane applies its refactor as soon as its review completes and passes all four
-// criteria, a new caller definition, and a positive projected net line removal. Lanes never arbitrate
-// between each other: competing writes are decided by the native capability system.
-
-/** One completed lane's structured proposal and, for a proposal, its verdict. */
-export type CandidateAnalysis = {
-  readonly candidateId: string;
-  readonly proposal: CheckedProposal | NoProposal;
-  /** Required for a proposal, absent for none. */
-  readonly verdict?: RefactorVerdict;
-};
-
-/** A reviewed proposal that passed every gate; not proof that it was applied. */
-export type AcceptedRefactor = {
-  readonly rank: number;
-  readonly candidate: Candidate;
-  readonly proposal: CheckedProposal;
-  readonly verdict: RefactorVerdict;
-};
-
-/** An accepted refactor that was applied and released: `files` are the sorted released paths. */
-export type AppliedRefactor = AcceptedRefactor & { readonly files: readonly string[] };
-
-export type CandidateOutcome = {
-  readonly rank: number;
-  readonly candidateId: string;
-  readonly depth: number | null;
-  readonly callerCount: number;
-  readonly reason: string;
-} & (
-  | {
-      readonly status: "applied";
-      readonly proposal: CheckedProposal;
-      readonly verdict: RefactorVerdict;
-      readonly files: readonly string[];
-    }
-  | { readonly status: "rejected"; readonly proposal: CheckedProposal; readonly verdict: RefactorVerdict }
-  | { readonly status: "no-proposal"; readonly proposal: NoProposal }
-  | { readonly status: "removed" }
-);
-
-export type CandidateStatus = CandidateOutcome["status"];
-
-export type RefactorTotals = {
-  readonly applied: number;
-  readonly addedCallSites: number;
-  readonly addedCallerDefinitions: number;
-  readonly netLinesRemoved: number;
-};
-
-export type RefactorRun = {
-  readonly outcomes: readonly CandidateOutcome[];
-  readonly applied: readonly AppliedRefactor[];
-  readonly totals: RefactorTotals;
-};
-
-/** Runs one admitted batch against `snapshot`, applying each approved lane as it completes. */
-export type BatchRunner = (
-  snapshot: GraftSnapshot,
-  batch: readonly CandidateWork[],
-  signal?: AbortSignal,
-) => Promise<readonly CandidateOutcome[]>;
-
-/** A snapshot of the current source, for the next admission after an application. */
-export type SnapshotRefresher = (signal?: AbortSignal) => Promise<GraftSnapshot>;
-
-/**
- * Visit every initially ranked candidate in consecutive groups of four. Each group is resolved
- * against the current snapshot: a vanished (or re-kinded) candidate is `removed`, survivors are
- * admitted with current spans and search shards. A group that applied a refactor refreshes the
- * snapshot before the next group; new candidates are never admitted and nothing is reranked.
- */
-export async function refactorCandidates(
-  snapshot: GraftSnapshot,
-  candidates: readonly Candidate[],
-  runBatch: BatchRunner,
-  refreshSnapshot: SnapshotRefresher,
-  signal?: AbortSignal,
-): Promise<RefactorRun> {
-  const outcomes: CandidateOutcome[] = [];
-  const admitted = new Map<number, Candidate>();
-  let current = snapshot;
-  for (let offset = 0; offset < candidates.length; offset += CANDIDATE_BATCH_SIZE) {
-    signal?.throwIfAborted();
-    const byId = new Map(dependencyModel(current).candidates.map((candidate) => [candidate.definition.id, candidate]));
-    const batch: CandidateWork[] = [];
-    candidates.slice(offset, offset + CANDIDATE_BATCH_SIZE).forEach((initial, index) => {
-      const rank = offset + index + 1;
-      const id = initial.definition.id;
-      const candidate = byId.get(id);
-      if (candidate === undefined || candidate.definition.kind !== initial.definition.kind) {
-        outcomes.push({
-          rank,
-          candidateId: id,
-          depth: initial.depth,
-          callerCount: initial.callerIds.length,
-          status: "removed",
-          reason: "Candidate no longer exists after earlier refactors",
-        });
-        return;
-      }
-      admitted.set(rank, candidate);
-      batch.push({ rank, candidate, shards: partitionSearch(current, candidate) });
-    });
-    if (batch.length === 0) continue;
-    const results = checkedOutcomes(batch, await runBatch(current, batch, signal));
-    outcomes.push(...results);
-    if (results.some((outcome) => outcome.status === "applied") && offset + CANDIDATE_BATCH_SIZE < candidates.length) {
-      signal?.throwIfAborted();
-      current = await refreshSnapshot(signal);
-    }
-  }
-  outcomes.sort((a, b) => a.rank - b.rank);
-  const applied: AppliedRefactor[] = [];
-  for (const outcome of outcomes) {
-    if (outcome.status !== "applied") continue;
-    const { rank, proposal, verdict, files } = outcome;
-    applied.push({ rank, candidate: admitted.get(rank)!, proposal, verdict, files });
-  }
-  const sum = (metric: keyof ProposalMetrics) => applied.reduce((total, entry) => total + entry.proposal.metrics[metric], 0);
-  return {
-    outcomes,
-    applied,
-    totals: {
-      applied: applied.length,
-      addedCallSites: sum("addedCallSites"),
-      addedCallerDefinitions: sum("addedCallerDefinitions"),
-      netLinesRemoved: sum("netLinesRemoved"),
-    },
-  };
-}
-
-/** Exactly one well-formed outcome per admitted candidate, matched by ID, in batch order. */
-function checkedOutcomes(batch: readonly CandidateWork[], outcomes: readonly CandidateOutcome[]): CandidateOutcome[] {
-  const ranks = new Map(batch.map((work) => [work.candidate.definition.id, work.rank]));
-  const byId = new Map<string, CandidateOutcome>();
-  for (const outcome of outcomes) {
-    const id = outcome.candidateId;
-    const rank = ranks.get(id);
-    if (rank === undefined) throw new Error(`Batch runner returned foreign candidate ${id}`);
-    if (byId.has(id)) throw new Error(`Batch runner returned ${id} twice`);
-    if (outcome.rank !== rank) throw new Error(`Batch runner returned ${id} with rank ${outcome.rank}, not ${rank}`);
-    if (outcome.status === "removed") throw new Error(`Batch runner returned a removed outcome for admitted ${id}`);
-    if (outcome.proposal.candidateId !== id) throw new Error(`Outcome for ${id} carries a proposal for ${outcome.proposal.candidateId}`);
-    if (outcome.proposal.kind !== (outcome.status === "no-proposal" ? "none" : "proposal")) {
-      throw new Error(`A ${outcome.status} outcome for ${id} carries a ${outcome.proposal.kind} result`);
-    }
-    if (outcome.status !== "applied" && "files" in outcome) throw new Error(`Only an applied outcome carries files; ${id} is ${outcome.status}`);
-    if (outcome.status === "no-proposal") {
-      if ("verdict" in outcome) throw new Error(`No-proposal outcome for ${id} carries a verdict`);
-    } else if (outcome.verdict === undefined) {
-      throw new Error(`Proposal for ${id} has no verdict`);
-    }
-    if (outcome.status === "applied") {
-      if (outcome.files.length === 0 || new Set(outcome.files).size !== outcome.files.length) {
-        throw new Error(`Applied outcome for ${id} needs a nonempty, deduplicated released-path list`);
-      }
-      const failures = gateFailures(outcome.proposal, outcome.verdict);
-      if (failures.length > 0) throw new Error(`Applied outcome for ${id} fails its gates: ${failures.join("; ")}`);
-    }
-    byId.set(id, outcome);
-  }
-  const missing = batch.map((work) => work.candidate.definition.id).filter((id) => !byId.has(id));
-  if (missing.length > 0) throw new Error(`Batch runner returned no outcome for ${missing.join(", ")}`);
-  return batch.map((work) => byId.get(work.candidate.definition.id)!);
-}
-
+/** Every failed gate of a reviewed proposal: failed criteria, no new caller, or no net removal. */
 function gateFailures(proposal: CheckedProposal, verdict: RefactorVerdict): string[] {
   const failures = CRITERIA.filter((name) => !verdict[name].pass).map((name) => `${name} failed: ${verdict[name].evidence}`);
   if (proposal.metrics.addedCallerDefinitions <= 0) failures.push("no new caller definitions");
@@ -1196,7 +967,7 @@ function gateFailures(proposal: CheckedProposal, verdict: RefactorVerdict): stri
   return failures;
 }
 
-// ## 7. Prompts
+// ## 6. Prompts
 //
 // Proposers and their inherited researchers share one read-only system prompt; the proposer-only
 // workflow lives in its node prompt, and each researcher's role in its task prompt. Every prompt
@@ -1245,9 +1016,9 @@ function candidateContract(snapshot: GraftSnapshot, work: CandidateWork): string
 }
 
 /** A proposer's assigned research batch, stored on its `task` tool: one read-only researcher per shard. */
-function researchTasks(work: CandidateWork, contract: string, researchTools: readonly string[]): tools.TaskInput {
+function researchTasks(snapshot: GraftSnapshot, work: CandidateWork, researchTools: readonly string[]): tools.TaskInput {
   return {
-    context: `You are a read-only researcher for one refactor candidate.\n\n${contract}`,
+    context: `You are a read-only researcher for one refactor candidate.\n\n${candidateContract(snapshot, work)}`,
     tasks: work.shards.map((shard) => ({
       name: shard.name,
       tools: [...researchTools],
@@ -1289,13 +1060,8 @@ function proposerPrompt(snapshot: GraftSnapshot, work: CandidateWork, researchTo
 
 const COORDINATION_TOOLS: Record<string, true> = { [TASK_TOOL]: true, yield: true, recv: true, send: true, info: true, [SUBMIT_TOOL]: true };
 
-/** A finite receiver's contracts by incoming edge id; it expects nothing on any other edge. */
-function contracts(byEdge: Readonly<Record<string, tools.Contract>>): (edgeId: graph.EdgeIdType) => tools.Contract {
-  return (edgeId) => {
-    if (!Object.hasOwn(byEdge, edgeId)) throw new agent.JuncoAgentError("invalid_state", `No contract for edge "${edgeId}"`);
-    return byEdge[edgeId]!;
-  };
-}
+/** Whether a proposer's active tool is inherited by its researchers (not a coordination tool). */
+const isResearchTool = (name: string): boolean => !Object.hasOwn(COORDINATION_TOOLS, name);
 
 /** The judge's prompt: the lane's task, the checked proposal, and its computed metrics. */
 function judgePrompt(snapshot: GraftSnapshot, work: CandidateWork, proposal: CheckedProposal): string {
@@ -1315,12 +1081,176 @@ function judgePrompt(snapshot: GraftSnapshot, work: CandidateWork, proposal: Che
   ].join("\n\n");
 }
 
+// ## 7. Admission, outcomes, and totals
+//
+// Admission keeps the initial ranking and admits four candidates at a time, resolved against the
+// current snapshot. A lane applies its refactor as soon as its review completes and passes all four
+// criteria, a new caller definition, and a positive projected net line removal. Lanes never arbitrate
+// between each other: competing writes are decided by the native capability system.
+
+/** One completed lane's structured result: a `none` result, or a proposal with its verdict. */
+type CandidateAnalysis =
+  | { readonly proposal: NoProposal }
+  | { readonly proposal: CheckedProposal; readonly verdict: RefactorVerdict };
+
+/** A reviewed proposal that passed every gate; not proof that it was applied. */
+export type AcceptedRefactor = {
+  readonly rank: number;
+  readonly candidate: Candidate;
+  readonly proposal: CheckedProposal;
+  readonly verdict: RefactorVerdict;
+};
+
+/** An accepted refactor that was applied and released: `files` are the sorted released paths. */
+type AppliedRefactor = AcceptedRefactor & { readonly files: readonly string[] };
+
+export type CandidateOutcome = {
+  readonly rank: number;
+  readonly candidateId: string;
+  readonly depth: number | null;
+  readonly callerCount: number;
+  readonly reason: string;
+} & (
+  | {
+      readonly status: "applied";
+      readonly proposal: CheckedProposal;
+      readonly verdict: RefactorVerdict;
+      readonly files: readonly string[];
+    }
+  | { readonly status: "rejected"; readonly proposal: CheckedProposal; readonly verdict: RefactorVerdict }
+  | { readonly status: "no-proposal"; readonly proposal: NoProposal }
+  | { readonly status: "removed" }
+);
+
+export type RefactorRun = {
+  readonly outcomes: readonly CandidateOutcome[];
+  readonly applied: readonly AppliedRefactor[];
+  readonly totals: {
+    readonly applied: number;
+    readonly addedCallSites: number;
+    readonly addedCallerDefinitions: number;
+    readonly netLinesRemoved: number;
+  };
+};
+
+/** Runs one admitted batch against `snapshot`, applying each approved lane as it completes. */
+export type BatchRunner = (
+  snapshot: GraftSnapshot,
+  batch: readonly CandidateWork[],
+  signal?: AbortSignal,
+) => Promise<readonly CandidateOutcome[]>;
+
+/** A snapshot of the current source, for the next admission after an application. */
+export type SnapshotRefresher = (signal?: AbortSignal) => Promise<GraftSnapshot>;
+
+/**
+ * Rank `snapshot` once, then visit every candidate in consecutive groups of four. Each group is
+ * resolved against the current snapshot: a vanished (or re-kinded) candidate is `removed`, survivors
+ * are admitted with current spans and search shards. A group that applied a refactor refreshes the
+ * snapshot before the next group; new candidates are never admitted and nothing is reranked.
+ */
+export async function refactorCandidates(
+  snapshot: GraftSnapshot,
+  runBatch: BatchRunner,
+  refreshSnapshot: SnapshotRefresher,
+  signal?: AbortSignal,
+): Promise<RefactorRun> {
+  const candidates = rankCandidates(snapshot);
+  const outcomes: CandidateOutcome[] = [];
+  const admitted = new Map<number, Candidate>();
+  let current = snapshot;
+  for (let offset = 0; offset < candidates.length; offset += CANDIDATE_BATCH_SIZE) {
+    signal?.throwIfAborted();
+    const byId = new Map(rankCandidates(current).map((candidate) => [candidate.definition.id, candidate]));
+    const batch: CandidateWork[] = [];
+    candidates.slice(offset, offset + CANDIDATE_BATCH_SIZE).forEach((initial, index) => {
+      const rank = offset + index + 1;
+      const id = initial.definition.id;
+      const candidate = byId.get(id);
+      if (candidate === undefined || candidate.definition.kind !== initial.definition.kind) {
+        outcomes.push({
+          rank,
+          candidateId: id,
+          depth: initial.depth,
+          callerCount: initial.callerIds.length,
+          status: "removed",
+          reason: "Candidate no longer exists after earlier refactors",
+        });
+        return;
+      }
+      admitted.set(rank, candidate);
+      batch.push({ rank, candidate, shards: partitionSearch(current, candidate) });
+    });
+    if (batch.length === 0) continue;
+    const results = checkedOutcomes(batch, await runBatch(current, batch, signal));
+    outcomes.push(...results);
+    if (results.some((outcome) => outcome.status === "applied") && offset + CANDIDATE_BATCH_SIZE < candidates.length) {
+      signal?.throwIfAborted();
+      current = await refreshSnapshot(signal);
+    }
+  }
+  outcomes.sort((a, b) => a.rank - b.rank);
+  const applied: AppliedRefactor[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status !== "applied") continue;
+    const { rank, proposal, verdict, files } = outcome;
+    applied.push({ rank, candidate: admitted.get(rank)!, proposal, verdict, files });
+  }
+  const sum = (metric: keyof CheckedProposal["metrics"]) => applied.reduce((total, entry) => total + entry.proposal.metrics[metric], 0);
+  return {
+    outcomes,
+    applied,
+    totals: {
+      applied: applied.length,
+      addedCallSites: sum("addedCallSites"),
+      addedCallerDefinitions: sum("addedCallerDefinitions"),
+      netLinesRemoved: sum("netLinesRemoved"),
+    },
+  };
+}
+
+/** Exactly one well-formed outcome per admitted candidate, matched by ID, in batch order. */
+function checkedOutcomes(batch: readonly CandidateWork[], outcomes: readonly CandidateOutcome[]): CandidateOutcome[] {
+  const ranks = new Map(batch.map((work) => [work.candidate.definition.id, work.rank]));
+  const byId = new Map<string, CandidateOutcome>();
+  for (const outcome of outcomes) {
+    const id = outcome.candidateId;
+    const rank = ranks.get(id);
+    if (rank === undefined) throw new Error(`Batch runner returned foreign candidate ${id}`);
+    if (byId.has(id)) throw new Error(`Batch runner returned ${id} twice`);
+    if (outcome.rank !== rank) throw new Error(`Batch runner returned ${id} with rank ${outcome.rank}, not ${rank}`);
+    if (outcome.status === "removed") throw new Error(`Batch runner returned a removed outcome for admitted ${id}`);
+    if (outcome.proposal.candidateId !== id) throw new Error(`Outcome for ${id} carries a proposal for ${outcome.proposal.candidateId}`);
+    if (outcome.proposal.kind !== (outcome.status === "no-proposal" ? "none" : "proposal")) {
+      throw new Error(`A ${outcome.status} outcome for ${id} carries a ${outcome.proposal.kind} result`);
+    }
+    if (outcome.status !== "applied" && "files" in outcome) throw new Error(`Only an applied outcome carries files; ${id} is ${outcome.status}`);
+    if (outcome.status === "no-proposal") {
+      if ("verdict" in outcome) throw new Error(`No-proposal outcome for ${id} carries a verdict`);
+    } else if (outcome.verdict === undefined) {
+      throw new Error(`Proposal for ${id} has no verdict`);
+    }
+    if (outcome.status === "applied") {
+      if (outcome.files.length === 0 || new Set(outcome.files).size !== outcome.files.length) {
+        throw new Error(`Applied outcome for ${id} needs a nonempty, deduplicated released-path list`);
+      }
+      const failures = gateFailures(outcome.proposal, outcome.verdict);
+      if (failures.length > 0) throw new Error(`Applied outcome for ${id} fails its gates: ${failures.join("; ")}`);
+    }
+    byId.set(id, outcome);
+  }
+  const missing = batch.map((work) => work.candidate.definition.id).filter((id) => !byId.has(id));
+  if (missing.length > 0) throw new Error(`Batch runner returned no outcome for ${missing.join(", ")}`);
+  return batch.map((work) => byId.get(work.candidate.definition.id)!);
+}
+
 // ## 8. One candidate batch
 //
 // Up to four independent lanes in one parallel graph: `Proposer:r` returns its final message on the
-// value edge `proposal:r` to `Judge:r`. A proposer's `task` call turns its node into a native Spawn
-// star; the node returns only after every research report was answered. A judge runs only for a
-// recorded proposal.
+// value edge `proposal:r` to `Judge:r`, whose staged prompt callback validates it and the recorded
+// proposal before composing the judge's assignment. A proposer's `task` call turns its node into a
+// native Spawn star; the node returns only after every research report was answered. A judge runs
+// only for a recorded proposal.
 
 export type CandidateLane = {
   readonly work: CandidateWork;
@@ -1330,7 +1260,7 @@ export type CandidateLane = {
   readonly verdict: VerdictRecorder;
 };
 
-export type CandidateBatchGraphOptions = {
+type CandidateBatchGraphOptions = {
   readonly snapshot: GraftSnapshot;
   readonly lanes: readonly CandidateLane[];
   readonly observer?: tracer.DataflowTracer;
@@ -1338,16 +1268,16 @@ export type CandidateBatchGraphOptions = {
   readonly taskFailurePolicy?: agent.TaskFailurePolicy;
 };
 
-export type CandidateBatchRunOptions = CandidateBatchGraphOptions & {
+type CandidateBatchRunOptions = CandidateBatchGraphOptions & {
   readonly apply: RefactorApplier;
 };
 
-export type CandidateGraphLane = Omit<CandidateLane, "proposer" | "judge"> & {
+type CandidateGraphLane = Omit<CandidateLane, "proposer" | "judge"> & {
   readonly proposerId: graph.NodeIdType;
   readonly judgeId: graph.NodeIdType;
 };
 
-export type CandidateBatchGraph = {
+type CandidateBatchGraph = {
   readonly workflow: graph.JuncoGraph;
   readonly lanes: readonly CandidateGraphLane[];
 };
@@ -1363,6 +1293,7 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   return text;
 }
 
+/** Attempt every closer in order, then rethrow `primary`, aggregated with any close failures. */
 async function disposeAll(primary: unknown, closers: readonly (() => Promise<unknown>)[], message: string): Promise<never> {
   const failures: unknown[] = [];
   for (const close of closers) {
@@ -1381,9 +1312,9 @@ async function disposeAll(primary: unknown, closers: readonly (() => Promise<unk
  * on a construction failure it closes the graph (and the agents already registered) and disposes
  * the rest; once it returns, the graph owns them all.
  */
-export async function createCandidateBatchGraph(options: CandidateBatchGraphOptions): Promise<CandidateBatchGraph> {
+async function createCandidateBatch(options: CandidateBatchGraphOptions): Promise<CandidateBatchGraph> {
   const { snapshot, lanes } = options;
-  const workflow = graph.createParallelAgentGraph("LockPolicy", options.observer);
+  const workflow = graph.JuncoGraph.parallel(tools.LockPolicy, options.observer);
   const unregistered = new Set(lanes.flatMap((lane) => [lane.proposer, lane.judge]));
   try {
     if (lanes.length === 0 || lanes.length > CANDIDATE_BATCH_SIZE) {
@@ -1393,77 +1324,50 @@ export async function createCandidateBatchGraph(options: CandidateBatchGraphOpti
     const graphLanes: CandidateGraphLane[] = [];
     for (const lane of lanes) {
       const { work } = lane;
-      const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter((name) => !Object.hasOwn(COORDINATION_TOOLS, name));
-      await lane.proposer.setTaskBatch(researchTasks(work, candidateContract(snapshot, work), research));
+      const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter(isResearchTool);
+      await lane.proposer.setTaskBatch(researchTasks(snapshot, work, research));
       lane.proposer.setTaskFailurePolicy(options.taskFailurePolicy ?? "ignore");
       lane.proposer.events.on("message_end", ({ lane: channel, message }) => {
         if (channel === "main" && message.role === "user") lane.proposal.noteTaskReport(contentText(message.content));
       });
-      const proposalEdge = graph.valueEdge<graph.nodes.AgenticInput, AssistantMessage>(`proposal:${work.rank}`);
-      const judgeInputEdge = graph.messageEdge<graph.nodes.AgenticInput, AssistantMessage>(`judge-input:${work.rank}`);
-      const proposerId = workflow.addNode(
-        graph.nodes.agentNode(
-          lane.proposer,
-          {
-            id: graph.NodeId(`Proposer:${work.rank}`),
-            policy: "LockPolicy",
-            description: `Proposes one generalization of ${work.candidate.definition.id} from far-first research.`,
-            trigger: graph.trigger.always(),
-          },
-          { prompt: proposerPrompt(snapshot, work, research) },
-        ),
-      );
+      const proposalEdge = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>(`proposal:${work.rank}`);
+      lane.proposer.stagePrompt(proposerPrompt(snapshot, work, research));
+      const proposerId = workflow.addNode({
+        state: lane.proposer,
+        id: graph.NodeId.create(`Proposer:${work.rank}`),
+        policy: tools.LockPolicy,
+        description: `Proposes one generalization of ${work.candidate.definition.id} from far-first research.`,
+        trigger: graph.trigger.TriggerRule.always(),
+      });
       unregistered.delete(lane.proposer);
-      // JudgeInput:r validates the proposer's result and the recorded proposal once, then sends the
-      // prepared judge prompt; a `none` result never publishes, so the judge stays unrun.
-      let published = false;
-      const prepare = new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(
-        async function* (signal): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
-          let view = yield [];
-          while (true) {
-            signal.throwIfAborted();
-            finalText(view.values.get(proposalEdge.id), `Proposer:${work.rank}`);
-            const proposal = lane.proposal.peek();
-            if (proposal?.kind !== "proposal") throw new Error(`Judge:${work.rank} received no recorded proposal`);
-            published = true;
-            view = yield [graph.msg(judgeInputEdge, { kind: "prompt", text: judgePrompt(snapshot, work, proposal) })];
-          }
-        },
-        "EmptyPolicy",
-      );
-      const inputId = workflow.addNode(
-        graph.nodes.deterministicNode(prepare, {
-          id: graph.NodeId(`JudgeInput:${work.rank}`),
-          policy: "EmptyPolicy",
-          description: `Prepares the judge's assignment for ${work.candidate.definition.id}, once.`,
-          trigger: graph.trigger.when(proposalEdge),
-          is_available: (_view, triggered) => triggered && !published && lane.proposal.peek()?.kind === "proposal",
-          contract: contracts({
-            [proposalEdge.id]: {
-              expect:
-                "The proposer's normally completed, non-empty final message with a recorded checked proposal of kind proposal, used to prepare the judge's assignment.",
-            },
-          }),
-        }),
-      );
-      const judge = graph.nodes.agentNode(
-        lane.judge,
-        {
-          id: graph.NodeId(`Judge:${work.rank}`),
-          policy: "LockPolicy",
-          description: `Independently judges the proposal for ${work.candidate.definition.id}.`,
-          trigger: graph.trigger.when(judgeInputEdge),
-        },
-        { prompt: "Call recv once and carry out the prompt in the single received message." },
-      );
-      const judgeId = workflow.addNode({
-        ...judge,
+      // The judge's assignment is composed once, from the proposer's normal final message and the
+      // recorded proposal; a `none` result never primes the judge.
+      lane.judge.stagePrompt((inputs) => {
+        finalText(inputs.values.get(proposalEdge.id), `Proposer:${work.rank}`);
+        const proposal = lane.proposal.peek();
+        if (proposal?.kind !== "proposal") throw new Error(`Judge:${work.rank} received no recorded proposal`);
+        return judgePrompt(snapshot, work, proposal);
+      });
+      let judgeId: graph.NodeIdType;
+      judgeId = workflow.addNode({
+        state: lane.judge,
+        id: graph.NodeId.create(`Judge:${work.rank}`),
+        policy: tools.LockPolicy,
+        description: `Independently judges the proposal for ${work.candidate.definition.id}.`,
+        trigger: graph.trigger.TriggerRule.when(proposalEdge),
         // A `none` result needs no judgment: the judge stays unrun while other lanes continue.
-        is_available: (view, triggered) =>
-          lane.proposal.peek()?.kind === "proposal" && (judge.is_available?.(view, triggered) ?? triggered),
+        is_available: (_view, triggered) =>
+          lane.proposal.peek()?.kind === "proposal" && (triggered || workflow.getNode(judgeId)?.status === "running"),
+        contract: (edgeId) => {
+          if (edgeId !== proposalEdge.id) throw new agent.JuncoAgentError("invalid_state", `No contract for edge "${edgeId}"`);
+          return {
+            expect:
+              "The proposer's normally completed, non-empty final message with a recorded checked proposal of kind proposal, used to prepare the judge's assignment.",
+          };
+        },
       });
       unregistered.delete(lane.judge);
-      workflow.addEdge(proposerId, inputId, proposalEdge).addEdge(inputId, judgeId, judgeInputEdge);
+      workflow.addEdge(proposerId, judgeId, proposalEdge);
       graphLanes.push({ work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId });
     }
     return { workflow, lanes: graphLanes };
@@ -1487,24 +1391,23 @@ function completedAnalysis(
   quiescent: boolean,
 ): CandidateAnalysis | undefined {
   const rank = lane.work.rank;
-  const candidateId = lane.work.candidate.definition.id;
   const proposerMessage = results.get(lane.proposerId);
   if (proposerMessage === undefined && !quiescent) return undefined;
   finalText(proposerMessage, `Proposer:${rank}`);
   const recorded = lane.proposal.peek();
-  if (recorded === undefined) throw new Error(`Proposer:${rank} finished without recording ${SUBMIT_TOOL}`);
+  if (recorded === undefined) throw new Error(`Proposer:${rank} finished without recording ${lane.proposal.tool.name}`);
   if (recorded.kind === "none") {
     if (results.has(lane.judgeId) || lane.verdict.takeVerdict() !== undefined) throw new Error(`Judge:${rank} ran for a no-proposal result`);
     lane.proposal.takeProposal();
-    return { candidateId, proposal: recorded };
+    return { proposal: recorded };
   }
   const judgeMessage = results.get(lane.judgeId);
   if (judgeMessage === undefined && !quiescent) return undefined;
   finalText(judgeMessage, `Judge:${rank}`);
   const verdict = lane.verdict.takeVerdict();
-  if (verdict === undefined) throw new Error(`Judge:${rank} finished without recording ${JUDGE_TOOL}`);
+  if (verdict === undefined) throw new Error(`Judge:${rank} finished without recording ${lane.verdict.tool.name}`);
   lane.proposal.takeProposal();
-  return { candidateId, proposal: recorded, verdict };
+  return { proposal: recorded, verdict };
 }
 
 /**
@@ -1516,7 +1419,7 @@ function completedAnalysis(
  * application stops and earlier applications remain published.
  */
 export async function runCandidateBatch(options: CandidateBatchRunOptions, signal?: AbortSignal): Promise<readonly CandidateOutcome[]> {
-  const built = await createCandidateBatchGraph(options);
+  const built = await createCandidateBatch(options);
   // A caller signal only stops new windows; aborting the graph interrupts in-flight agents and
   // their research children. A failed abort resurfaces through the close below.
   const interrupt = () => void built.workflow.abort(signal?.reason).catch(() => undefined);
@@ -1536,13 +1439,13 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
       }
       for (const [work, analysis] of completed) {
         const { rank, candidate } = work;
-        const { candidateId, proposal } = analysis;
-        const base = { rank, candidateId, depth: candidate.depth, callerCount: candidate.callerIds.length };
-        if (proposal.kind === "none") {
+        const base = { rank, candidateId: candidate.definition.id, depth: candidate.depth, callerCount: candidate.callerIds.length };
+        if (!("verdict" in analysis)) {
+          const { proposal } = analysis;
           outcomes.set(rank, { ...base, status: "no-proposal", proposal, reason: proposal.reason });
           continue;
         }
-        const verdict = analysis.verdict!;
+        const { proposal, verdict } = analysis;
         const failures = gateFailures(proposal, verdict);
         if (failures.length > 0) {
           outcomes.set(rank, { ...base, status: "rejected", proposal, verdict, reason: failures.join("; ") });
@@ -1575,537 +1478,10 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
   return built.lanes.map((lane) => outcomes.get(lane.work.rank)!);
 }
 
-// ## 9. The controller
-//
-// Three deterministic nodes on two value edges. `GraftBuild` rebuilds the Graft index first;
-// `RefactorBatches` awaits one batch runner call per admission group inside its own coroutine; the
-// batch graphs are not members of the controller.
+/** Applies one reviewed refactor and releases exactly its paths; resolves their sorted unique list. */
+export type RefactorApplier = (refactor: AcceptedRefactor, signal?: AbortSignal) => Promise<readonly string[]>;
 
-export type RefactorValue =
-  | { readonly kind: "snapshot"; readonly snapshot: GraftSnapshot }
-  | { readonly kind: "ranking"; readonly snapshot: GraftSnapshot; readonly candidates: readonly Candidate[] }
-  | { readonly kind: "run"; readonly run: RefactorRun };
-
-/**
- * Rebuilds the Graft index in place and reads the fresh snapshot. `collection` is `GraftBuild`'s
- * borrowed trusted-build collection, when one was supplied.
- */
-export type SnapshotBuilder = (signal: AbortSignal, collection?: tools.ToolCollection) => Promise<GraftSnapshot>;
-
-/** The controller graph and its node IDs; `resultId` names `RefactorBatches`. */
-export type YakShaverGraph = {
-  readonly workflow: graph.JuncoGraph<never, RefactorValue>;
-  readonly buildId: graph.NodeIdType;
-  readonly rankId: graph.NodeIdType;
-  readonly resultId: graph.NodeIdType;
-};
-
-/**
- * The controller graph: build the index, rank once, then refactor every admission group.
- * `buildCollection` is borrowed by `GraftBuild`; `collection` by the graph and `RefactorBatches`.
- */
-export function createYakShaverGraph(options: {
-  readonly buildSnapshot: SnapshotBuilder;
-  readonly runBatch: BatchRunner;
-  readonly refreshSnapshot: SnapshotRefresher;
-  readonly signal?: AbortSignal;
-  readonly observer?: tracer.DataflowTracer;
-  readonly buildCollection?: tools.ToolCollection;
-  readonly collection?: tools.ToolCollection;
-}): YakShaverGraph {
-  const { buildSnapshot, runBatch, refreshSnapshot, signal } = options;
-  const combined = (own: AbortSignal) => (signal === undefined ? own : AbortSignal.any([signal, own]));
-  const built = graph.valueEdge<never, RefactorValue>("snapshot");
-  const ranking = graph.valueEdge<never, RefactorValue>("ranking");
-  const workflow = graph.createParallelAgentGraph<never, RefactorValue>("LockPolicy", options.observer, options.collection);
-
-  /** GraftBuild: trusted setup under `EmptyPolicy`; runs `graft build` so every later node sees a current index. */
-  const buildId = workflow.addNode(
-    graph.nodes.deterministicNode(
-      new graph.nodes.Deterministic<never, RefactorValue>(
-        async function* (own, collection): graph.NodeGenerator<never, RefactorValue> {
-          return { kind: "snapshot", snapshot: await buildSnapshot(combined(own), collection) };
-        },
-        "EmptyPolicy",
-        options.buildCollection,
-      ),
-      {
-        id: graph.NodeId("GraftBuild"),
-        policy: "EmptyPolicy",
-        description: "Rebuilds the Graft index with `graft build`.",
-        trigger: graph.trigger.always(),
-      },
-    ),
-  );
-
-  /** RankCandidates: inventory, longest-path depths, distinct callers, and order. */
-  const rankId = workflow.addNode(
-    graph.nodes.deterministicNode(
-      new graph.nodes.Deterministic<never, RefactorValue>(async function* (own): graph.NodeGenerator<never, RefactorValue> {
-        const view = yield [];
-        const value = view.values.get(built.id);
-        if (value?.kind !== "snapshot") throw new Error("RankCandidates received no snapshot");
-        combined(own).throwIfAborted();
-        return { kind: "ranking", snapshot: value.snapshot, candidates: rankCandidates(value.snapshot) };
-      }, "EmptyPolicy"),
-      {
-        id: graph.NodeId("RankCandidates"),
-        policy: "EmptyPolicy",
-        description: "Ranks every indexed type by longest root distance.",
-        trigger: graph.trigger.when(built),
-        contract: contracts({
-          [built.id]: { expect: "A RefactorValue of kind snapshot containing the freshly built Graft snapshot, used to rank candidates." },
-        }),
-      },
-    ),
-  );
-
-  /** RefactorBatches: admits four candidates at a time; each completed lane applies and releases its refactor. */
-  const resultId = workflow.addNode(
-    graph.nodes.deterministicNode(
-      new graph.nodes.Deterministic<never, RefactorValue>(
-        async function* (own): graph.NodeGenerator<never, RefactorValue> {
-          const view = yield [];
-          const value = view.values.get(ranking.id);
-          if (value?.kind !== "ranking") throw new Error("RefactorBatches received no ranking");
-          return {
-            kind: "run",
-            run: await refactorCandidates(value.snapshot, value.candidates, runBatch, refreshSnapshot, combined(own)),
-          };
-        },
-        "LockPolicy",
-        options.collection,
-      ),
-      {
-        id: graph.NodeId("RefactorBatches"),
-        policy: "LockPolicy",
-        description: "Runs every candidate batch, applying and releasing each approved refactor.",
-        trigger: graph.trigger.when(ranking),
-        contract: contracts({
-          [ranking.id]: { expect: "A RefactorValue of kind ranking containing the snapshot and ordered candidates, used to run refactoring batches." },
-        }),
-      },
-    ),
-  );
-
-  workflow.addEdge(buildId, rankId, built);
-  workflow.addEdge(rankId, resultId, ranking);
-  return { workflow, buildId, rankId, resultId };
-}
-
-// ## 10. The live runner
-//
-// Preflight first: the protected `LockPolicy` collection (`sandbox: "always"`), the Git working-tree
-// root through its mux, then the trusted-build `EmptyPolicy` collection. The controller's
-// `GraftBuild` node runs `graft build` through the trusted collection's bash tool; the first
-// nonempty batch adds one model runtime and the Graft research tool schemas (one discard-only MCP
-// connection on the protected collection) shared by every batch. Each research call opens and
-// discards its own Graft connection. Model-produced refactors apply through the protected mux.
-
-const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
-
-/** The inherited environment's defined entries: a managed command's complete environment. */
-function inheritedEnvironment(): Record<string, string> {
-  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-}
-
-async function hashFile(path: string): Promise<string | null> {
-  try {
-    return sha256(await readFile(path));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-/**
- * Graft's decoding, as the applier sees it: UTF-16LE after its BOM, else UTF-8 without a leading
- * BOM. UTF-16BE and malformed text are unsupported.
- */
-function decodeSource(bytes: Uint8Array, path: string): string {
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) throw new Error(`${path}: UTF-16BE source is unsupported`);
-  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : "utf-8";
-  try {
-    // `ignoreBOM: false` (the default) drops the encoding's own BOM.
-    return new TextDecoder(encoding, { fatal: true }).decode(bytes);
-  } catch (error) {
-    throw new Error(`${path}: malformed ${encoding} source`, { cause: error });
-  }
-}
-
-/** Every indexed file's SHA-256 (`null` when absent), read now. */
-async function captureBaseline(root: string, snapshot: GraftSnapshot): Promise<ReadonlyMap<string, string | null>> {
-  const files = new Map<string, string | null>();
-  for (const path of snapshot.files) files.set(path, await hashFile(join(root, path)));
-  return files;
-}
-
-/** Reads current source inside the repository, refusing escapes and files changed since `baseline`. */
-function repositorySourceReader(root: string, rootReal: string, baseline: ReadonlyMap<string, string | null>) {
-  return async (path: string): Promise<string | undefined> => {
-    if (!isRepoRelativePath(path)) throw new Error(`${path} is not a repo-relative path`);
-    const absolute = join(root, path);
-    // The deepest existing ancestor decides where the path really leads.
-    for (let probe = absolute; ; probe = dirname(probe)) {
-      let real: string;
-      try {
-        real = await realpath(probe);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || probe === root) throw error;
-        continue;
-      }
-      if (real !== rootReal && !real.startsWith(rootReal + sep)) throw new Error(`${path} resolves outside the repository`);
-      break;
-    }
-    let bytes: Uint8Array;
-    try {
-      bytes = await readFile(absolute);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    }
-    const expected = baseline.get(path);
-    if (expected !== undefined && sha256(bytes) !== expected) throw new Error(`${path} changed since this batch's baseline`);
-    return decodeSource(bytes, path);
-  };
-}
-
-const WORK_TREE_ROOT_REQUIRED = "Yak shaver requires a Git working-tree root";
-
-/** Requires `root` to be a Git working-tree root, asked through one managed, read-only command. */
-async function requireWorkTreeRoot(mux: tools.NativeMux, root: string, signal?: AbortSignal): Promise<void> {
-  signal?.throwIfAborted();
-  const chunks: Buffer[] = [];
-  const run = mux.start(
-    { command: "git rev-parse --is-inside-work-tree --show-prefix", cwd: root, principal: "yak-preflight", env: inheritedEnvironment() },
-    (error, data) => {
-      if (error === null) chunks.push(data);
-    },
-  );
-  const abort = () => run.abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  const result = await run.wait().finally(() => signal?.removeEventListener("abort", abort));
-  signal?.throwIfAborted();
-  const output = Buffer.concat(chunks).toString("utf8");
-  // At the root, `--show-prefix` prints an empty line.
-  if (result.exitCode !== 0 || result.cancelled || result.timedOut || !/^true\r?\n\r?\n$/.test(output)) {
-    throw new Error(WORK_TREE_ROOT_REQUIRED, { cause: new Error(`git rev-parse: ${JSON.stringify(result)} ${output.trim()}`) });
-  }
-}
-
-function graftTool(available: readonly AgentTool[], name: string): AgentTool {
-  const matches = available.filter((tool) => {
-    const identity = mcp.getJuncoMcpToolIdentity(tool);
-    return identity?.serverName === "graft" && identity.originalToolName === name;
-  });
-  if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.21.1-compatible server is required`);
-  return matches[0]!;
-}
-
-/**
- * `template`'s schema, name, and description, executed on a fresh discard-only connection that is
- * closed before the call resolves: no Graft server, and none of its cache writes, outlive one call.
- * `open` holds connections not yet closed, for the runner's cleanup.
- */
-function discardingGraftTool(
-  definition: mcp.JuncoMcpTools,
-  root: string,
-  collection: tools.ToolCollection,
-  template: AgentTool,
-  name: string,
-  open: Set<mcp.JuncoMcpConnection>,
-): AgentTool {
-  return {
-    ...template,
-    async execute(toolCallId, params, signal, onUpdate) {
-      const connection = await definition.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
-      open.add(connection);
-      const close = async () => {
-        try {
-          await connection.close();
-        } finally {
-          open.delete(connection);
-        }
-      };
-      let result: AgentToolResult<unknown>;
-      try {
-        result = await graftTool(connection.tools, name).execute(toolCallId, params, signal, onUpdate);
-      } catch (error) {
-        return disposeAll(error, [close], `Graft ${name} failed and its connection was not discarded cleanly`);
-      }
-      await close();
-      return result;
-    },
-  };
-}
-
-/** Text of a direct MCP tool call; an `isError` result is a failure. */
-async function callTool(tool: AgentTool, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  const result = await tool.execute(`yak-shaver-${tool.name}`, args, signal);
-  const text = contentText(result.content);
-  if ("isError" in result && result.isError === true) throw new Error(`${tool.name} failed: ${text}`);
-  return text;
-}
-
-async function pinnedModels(): Promise<ModelRuntime> {
-  const models = await ModelRuntime.create();
-  if (!(await models.listCredentials()).some(({ providerId }) => providerId === PROVIDER)) {
-    throw new Error("A saved Pi GitHub Copilot login is required");
-  }
-  const available = await models.getAvailable(PROVIDER);
-  for (const pin of [PROPOSER_MODEL, JUDGE_MODEL]) {
-    const model = available.find((candidate) => candidate.id === pin.model);
-    if (model === undefined) throw new Error(`${PROVIDER}/${pin.model} is unavailable`);
-    if (!getSupportedThinkingLevels(model).includes(pin.thinkingLevel)) {
-      throw new Error(`${PROVIDER}/${pin.model} does not support thinking level ${pin.thinkingLevel}`);
-    }
-  }
-  return models;
-}
-
-/** The live index builder, batch runner and refresher. */
-type LiveRunner = {
-  readonly buildSnapshot: SnapshotBuilder;
-  readonly runBatch: BatchRunner;
-  readonly refreshSnapshot: SnapshotRefresher;
-};
-
-/** `collection`'s tool named `name`. */
-function collectionTool(collection: tools.ToolCollection, name: string): AgentTool {
-  const tool = collection.tools.find((candidate) => candidate.name === name);
-  if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
-  return tool;
-}
-
-/** `graft build .` through the trusted collection's sandboxed bash tool, then the published snapshot. */
-function graftBuilder(root: string): SnapshotBuilder {
-  return async (signal, collection) => {
-    if (collection === undefined) throw new TypeError("GraftBuild requires a tool collection");
-    await callTool(collectionTool(collection, "bash"), { command: "graft build ." }, signal);
-    return parseSnapshot(await readFile(join(root, GRAPH_FILE), "utf8"));
-  };
-}
-
-/**
- * The live runner: shared resources once; per batch a fresh source baseline, fresh agents and
- * recorders, and an applier bound to that baseline. Both collections are borrowed: `collection`
- * (`LockPolicy`) runs agents, research and the applier; `buildCollection` (`EmptyPolicy`) only the
- * fixed refresh command.
- */
-function liveRunner(options: {
-  readonly root: string;
-  readonly rootReal: string;
-  readonly buildCollection: tools.ToolCollection;
-  readonly collection: tools.ToolCollection;
-  /** The Graft MCP definition and the runner's set of connections not yet discarded. */
-  readonly graft: mcp.JuncoMcpTools;
-  readonly connections: Set<mcp.JuncoMcpConnection>;
-  readonly observer: tracer.DataflowTracer;
-  readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
-}): LiveRunner {
-  const { root, collection, observer } = options;
-  let shared: { readonly models: ModelRuntime; readonly research: readonly AgentTool[] } | undefined;
-
-  /** The research tool schemas, read over one discard-only connection once `GraftBuild` made an index. */
-  const graftTools = async (signal?: AbortSignal): Promise<AgentTool[]> => {
-    const { graft, connections } = options;
-    const preflight = await graft.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
-    connections.add(preflight);
-    try {
-      return GRAFT_RESEARCH_TOOLS.map((name) =>
-        discardingGraftTool(graft, root, collection, graftTool(preflight.tools, name), name, connections),
-      );
-    } finally {
-      try {
-        await preflight.close();
-      } finally {
-        connections.delete(preflight);
-      }
-    }
-  };
-
-  const acquireShared = async (signal?: AbortSignal) => {
-    if (shared !== undefined) return shared;
-    const models = await pinnedModels();
-    signal?.throwIfAborted();
-    const research = await graftTools(signal);
-    for (const name of FILE_RESEARCH_TOOLS) research.push(collectionTool(collection, name));
-    shared = { models, research };
-    return shared;
-  };
-
-  const runBatch: BatchRunner = async (snapshot, batch, signal) => {
-    const { models, research } = await acquireShared(signal);
-    const baseline = await captureBaseline(root, snapshot);
-    const readSource = repositorySourceReader(root, options.rootReal, baseline);
-    const acquired: agent.JuncoAgent[] = [];
-    const lanes: CandidateLane[] = [];
-    try {
-      for (const work of batch) {
-        signal?.throwIfAborted();
-        const proposal = createProposalTool({ snapshot, work, readSource });
-        const verdict = createVerdictTool();
-        const proposerTools: AgentTool[] = [...research, tools.createTaskTool(), tools.createYieldTool(), proposal.tool];
-        const proposer = await agent.JuncoAgent.create({
-          provider: PROVIDER,
-          model: PROPOSER_MODEL.model,
-          thinkingLevel: PROPOSER_MODEL.thinkingLevel,
-          models,
-          systemPrompt: ANALYST_SYSTEM_PROMPT,
-          cwd: root,
-          tools: proposerTools,
-          policy: "LockPolicy",
-          collection,
-        });
-        acquired.push(proposer);
-        signal?.throwIfAborted();
-        const judgeTools: AgentTool[] = [...research, tools.RecvTool(), tools.InfoTool(), verdict.tool];
-        const judge = await agent.JuncoAgent.create({
-          provider: PROVIDER,
-          model: JUDGE_MODEL.model,
-          thinkingLevel: JUDGE_MODEL.thinkingLevel,
-          models,
-          systemPrompt: JUDGE_SYSTEM_PROMPT,
-          cwd: root,
-          tools: judgeTools,
-          contract: contracts({
-            [`judge-input:${work.rank}`]: {
-              expect:
-                "One prepared judge prompt containing the validated proposal, candidate facts, and computed metrics, consumed through recv before issuing a verdict.",
-            },
-          }),
-          policy: "LockPolicy",
-          collection,
-        });
-        acquired.push(judge);
-        lanes.push({ work, proposer, judge, proposal, verdict });
-      }
-    } catch (error) {
-      return disposeAll(error, [...acquired].reverse().map((member) => () => member.return()), "Lane acquisition failed");
-    }
-    const apply: RefactorApplier = async (refactor, applySignal) => {
-      // Only the refactor's own targets, at this batch's baseline; a create's target was absent.
-      const targets = new Map(refactor.proposal.edits.map((edit) => [edit.path, baseline.get(edit.path) ?? null]));
-      // Model-produced bytes publish under the protected policy, never the trusted build's.
-      const files = await applyRefactor(root, collection.mux, refactor, targets, applySignal);
-      options.onApplied(refactor, files);
-      return files;
-    };
-    return runCandidateBatch({ snapshot, lanes, observer, apply, taskFailurePolicy: "ignore" }, signal);
-  };
-
-  return {
-    buildSnapshot: graftBuilder(root),
-    runBatch,
-    // The fixed index-refresh command is not model-authored: it runs under the trusted policy.
-    refreshSnapshot: (signal) => refreshGraftSnapshot(root, options.buildCollection.mux, signal),
-  };
-}
-
-/**
- * Refactor `repositoryRoot`, a Git working-tree root, in place: every approved refactor is applied
- * and released as its review completes. Nothing is committed and no report is written. On a later
- * failure, earlier applied and released refactors are retained, never reverted.
- */
-export async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: AbortSignal): Promise<RefactorRun> {
-  const root = resolve(repositoryRoot);
-  if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
-  signal?.throwIfAborted();
-
-  const observer = tracer.createTracer();
-  const failures: unknown[] = [];
-  const connections = new Set<mcp.JuncoMcpConnection>();
-  let protectedCollection: tools.ToolCollection | undefined;
-  let buildCollection: tools.ToolCollection | undefined;
-  let controller: YakShaverGraph | undefined;
-  let run: RefactorRun | undefined;
-  let applied = 0;
-  try {
-    protectedCollection = await tools.ToolCollection.create(root, { policy: "LockPolicy", sandbox: "always" });
-    await requireWorkTreeRoot(protectedCollection.mux, root, signal);
-    buildCollection = await tools.ToolCollection.create(root, { policy: "EmptyPolicy", sandbox: "always" });
-    const graft = mcp.JuncoMcpTools.add({
-      name: "graft",
-      type: "stdio",
-      command: "graft",
-      args: ["mcp", root],
-      clientOptions: { requestTimeoutMs: 300_000 },
-    });
-    const live = liveRunner({
-      root,
-      rootReal: await realpath(root),
-      buildCollection,
-      collection: protectedCollection,
-      graft,
-      connections,
-      observer,
-      onApplied: (refactor, files) => {
-        applied++;
-        console.log(`Applied and released ${refactor.candidate.definition.id}: ${files.join(", ")}`);
-      },
-    });
-    controller = createYakShaverGraph({
-      buildSnapshot: live.buildSnapshot,
-      runBatch: live.runBatch,
-      refreshSnapshot: live.refreshSnapshot,
-      buildCollection,
-      collection: protectedCollection,
-      observer,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    const results = await controller.workflow.run(signal === undefined ? {} : { signal });
-    const value = results.get(controller.resultId);
-    if (value?.kind !== "run") throw new Error("The controller finished without a refactor run");
-    run = value.run;
-  } catch (error) {
-    failures.push(error);
-  }
-  // Every release is attempted, in order, whatever failed before it; the collections close last.
-  for (const release of [
-    () => controller?.workflow.close(),
-    async () => {
-      const errors: unknown[] = [];
-      for (const connection of connections) {
-        try {
-          await connection.close();
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-      connections.clear();
-      if (errors.length > 0) throw new AggregateError(errors, "Graft connections were not discarded cleanly");
-    },
-    () => observer.flush(),
-    () => buildCollection?.close(),
-    () => protectedCollection?.close(),
-  ]) {
-    try {
-      await release();
-    } catch (error) {
-      failures.push(error);
-    }
-  }
-  if (failures.length > 0) {
-    if (applied === 0) {
-      if (failures.length === 1) throw failures[0];
-      throw new AggregateError(failures, "Yak shaver failed", { cause: failures[0] });
-    }
-    const retained = `Previously applied and released changes are retained (${applied} refactor${applied === 1 ? "" : "s"})`;
-    if (failures.length === 1) {
-      const failure = failures[0];
-      throw new Error(`${failure instanceof Error ? failure.message : String(failure)}. ${retained}.`, { cause: failure });
-    }
-    throw new AggregateError(failures, `Yak shaver failed. ${retained}.`, { cause: failures[0] });
-  }
-  if (run === undefined) throw new Error("No refactor run was produced");
-  const { totals } = run;
-  console.log(
-    `Applied and released refactors: ${totals.applied}; projected new call sites: ${totals.addedCallSites}; net nonblank lines removed: ${totals.netLinesRemoved}`,
-  );
-  return run;
-}
-
-// ── Owner-side apply-and-release ──
+// ## 9. Owner-side apply-and-release
 //
 // One managed Brush command per approved refactor: a static Bun worker preflights and writes every
 // target (`Edit`), then the same command runs `release -- <path>` for each exact path (`Release`),
@@ -2113,8 +1489,10 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
 // parent aborts it, discarding the private view instead of letting a nonzero exit publish partial
 // changes.
 
-/** Applies one reviewed refactor and releases exactly its paths; resolves their sorted unique list. */
-export type RefactorApplier = (refactor: AcceptedRefactor, signal?: AbortSignal) => Promise<readonly string[]>;
+/** The inherited environment's defined entries: a managed command's complete environment. */
+function inheritedEnvironment(): Record<string, string> {
+  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+}
 
 /** Retained diagnostic text per managed operation; control frames are never truncated. */
 const DIAGNOSTIC_LIMIT = 64 * 1024;
@@ -2380,7 +1758,7 @@ export async function applyRefactor(
   signal?.throwIfAborted();
   const { proposal } = refactor;
   const label = `${proposal.candidateId} (rank ${refactor.rank})`;
-  const paths = [...new Set(proposal.edits.map((edit) => edit.path))].sort(compareText);
+  const paths = [...new Set(proposal.edits.map((edit) => edit.path))].sort();
   if (paths.length === 0) throw new Error(`Refactor ${label} has no edits to apply`);
   const files = paths.map((path) => {
     if (!isRepoRelativePath(path)) throw new Error(`Refactor ${label}: ${path} is not a repo-relative path`);
@@ -2612,6 +1990,378 @@ export async function refreshGraftSnapshot(root: string, mux: tools.NativeMux, s
     throw new Error("The Graft refresh worker emitted an unknown frame");
   }
   return parseSnapshot(frame.text);
+}
+
+// ## 10. The live runner
+//
+// Preflight first: the protected `tools.LockPolicy` collection (`sandbox: "always"`), the Git working-tree
+// root through its mux, then the trusted-build `tools.EmptyPolicy` collection, whose sandboxed bash
+// tool runs `graft build .` before ranking. The first nonempty batch adds one model runtime and the
+// Graft research tool schemas (one discard-only MCP connection on the protected collection) shared
+// by every batch. Each research call opens and discards its own Graft connection. Model-produced
+// refactors apply through the protected mux.
+
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+async function hashFile(path: string): Promise<string | null> {
+  try {
+    return sha256(await readFile(path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * Graft's decoding, as the applier sees it: UTF-16LE after its BOM, else UTF-8 without a leading
+ * BOM. UTF-16BE and malformed text are unsupported.
+ */
+function decodeSource(bytes: Uint8Array, path: string): string {
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) throw new Error(`${path}: UTF-16BE source is unsupported`);
+  const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : "utf-8";
+  try {
+    // `ignoreBOM: false` (the default) drops the encoding's own BOM.
+    return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`${path}: malformed ${encoding} source`, { cause: error });
+  }
+}
+
+/** Every indexed file's SHA-256 (`null` when absent), read now. */
+async function captureBaseline(root: string, snapshot: GraftSnapshot): Promise<ReadonlyMap<string, string | null>> {
+  const files = new Map<string, string | null>();
+  for (const path of snapshot.files) files.set(path, await hashFile(join(root, path)));
+  return files;
+}
+
+/** Reads current source inside the repository, refusing escapes and files changed since `baseline`. */
+function repositorySourceReader(root: string, rootReal: string, baseline: ReadonlyMap<string, string | null>) {
+  return async (path: string): Promise<string | undefined> => {
+    if (!isRepoRelativePath(path)) throw new Error(`${path} is not a repo-relative path`);
+    const absolute = join(root, path);
+    // The deepest existing ancestor decides where the path really leads.
+    for (let probe = absolute; ; probe = dirname(probe)) {
+      let real: string;
+      try {
+        real = await realpath(probe);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || probe === root) throw error;
+        continue;
+      }
+      if (real !== rootReal && !real.startsWith(rootReal + sep)) throw new Error(`${path} resolves outside the repository`);
+      break;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await readFile(absolute);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const expected = baseline.get(path);
+    if (expected !== undefined && sha256(bytes) !== expected) throw new Error(`${path} changed since this batch's baseline`);
+    return decodeSource(bytes, path);
+  };
+}
+
+const WORK_TREE_ROOT_REQUIRED = "Yak shaver requires a Git working-tree root";
+
+/** Requires `root` to be a Git working-tree root, asked through one managed, read-only command. */
+async function requireWorkTreeRoot(mux: tools.NativeMux, root: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  const chunks: Buffer[] = [];
+  const run = mux.start(
+    { command: "git rev-parse --is-inside-work-tree --show-prefix", cwd: root, principal: "yak-preflight", env: inheritedEnvironment() },
+    (error, data) => {
+      if (error === null) chunks.push(data);
+    },
+  );
+  const abort = () => run.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const result = await run.wait().finally(() => signal?.removeEventListener("abort", abort));
+  signal?.throwIfAborted();
+  const output = Buffer.concat(chunks).toString("utf8");
+  // At the root, `--show-prefix` prints an empty line.
+  if (result.exitCode !== 0 || result.cancelled || result.timedOut || !/^true\r?\n\r?\n$/.test(output)) {
+    throw new Error(WORK_TREE_ROOT_REQUIRED, { cause: new Error(`git rev-parse: ${JSON.stringify(result)} ${output.trim()}`) });
+  }
+}
+
+function graftTool(available: readonly AgentTool[], name: string): AgentTool {
+  const matches = available.filter((tool) => {
+    const identity = mcp.getJuncoMcpToolIdentity(tool);
+    return identity?.serverName === "graft" && identity.originalToolName === name;
+  });
+  if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.21.1-compatible server is required`);
+  return matches[0]!;
+}
+
+/**
+ * `template`'s schema, name, and description, executed on a fresh discard-only connection that is
+ * closed before the call resolves: no Graft server, and none of its cache writes, outlive one call.
+ * `open` holds connections not yet closed, for the runner's cleanup.
+ */
+function discardingGraftTool(
+  definition: mcp.JuncoMcpTools,
+  root: string,
+  collection: tools.ToolCollection,
+  template: AgentTool,
+  name: string,
+  open: Set<mcp.JuncoMcpConnection>,
+): AgentTool {
+  return {
+    ...template,
+    async execute(toolCallId, params, signal, onUpdate) {
+      const connection = await definition.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
+      open.add(connection);
+      const close = async () => {
+        try {
+          await connection.close();
+        } finally {
+          open.delete(connection);
+        }
+      };
+      let result: AgentToolResult<unknown>;
+      try {
+        result = await graftTool(connection.tools, name).execute(toolCallId, params, signal, onUpdate);
+      } catch (error) {
+        return disposeAll(error, [close], `Graft ${name} failed and its connection was not discarded cleanly`);
+      }
+      await close();
+      return result;
+    },
+  };
+}
+
+/** Text of a direct MCP tool call; an `isError` result is a failure. */
+async function callTool(tool: AgentTool, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+  const result = await tool.execute(`yak-shaver-${tool.name}`, args, signal);
+  const text = contentText(result.content);
+  if ("isError" in result && result.isError === true) throw new Error(`${tool.name} failed: ${text}`);
+  return text;
+}
+
+async function pinnedModels(): Promise<ModelRuntime> {
+  const models = await ModelRuntime.create();
+  if (!(await models.listCredentials()).some(({ providerId }) => providerId === PROVIDER)) {
+    throw new Error("A saved Pi GitHub Copilot login is required");
+  }
+  const available = await models.getAvailable(PROVIDER);
+  for (const pin of [PROPOSER_MODEL, JUDGE_MODEL]) {
+    const model = available.find((candidate) => candidate.id === pin.model);
+    if (model === undefined) throw new Error(`${PROVIDER}/${pin.model} is unavailable`);
+    if (!getSupportedThinkingLevels(model).includes(pin.thinkingLevel)) {
+      throw new Error(`${PROVIDER}/${pin.model} does not support thinking level ${pin.thinkingLevel}`);
+    }
+  }
+  return models;
+}
+
+/** `collection`'s tool named `name`. */
+function collectionTool(collection: tools.ToolCollection, name: string): AgentTool {
+  const tool = collection.tools.find((candidate) => candidate.name === name);
+  if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
+  return tool;
+}
+
+/**
+ * The live batch runner and refresher: shared resources once; per batch a fresh source baseline,
+ * fresh agents and recorders, and an applier bound to that baseline. Both collections are borrowed:
+ * `collection` (`tools.LockPolicy`) runs agents, research and the applier; `buildCollection`
+ * (`tools.EmptyPolicy`) only the fixed refresh command.
+ */
+function liveRunner(options: {
+  readonly root: string;
+  readonly rootReal: string;
+  readonly buildCollection: tools.ToolCollection;
+  readonly collection: tools.ToolCollection;
+  /** The Graft MCP definition and the runner's set of connections not yet discarded. */
+  readonly graft: mcp.JuncoMcpTools;
+  readonly connections: Set<mcp.JuncoMcpConnection>;
+  readonly observer: tracer.DataflowTracer;
+  readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
+}): { readonly runBatch: BatchRunner; readonly refreshSnapshot: SnapshotRefresher } {
+  const { root, collection, observer } = options;
+  let shared: { readonly models: ModelRuntime; readonly research: readonly AgentTool[] } | undefined;
+
+  /** The research tool schemas, read over one discard-only connection once `graft build` made an index. */
+  const graftTools = async (signal?: AbortSignal): Promise<AgentTool[]> => {
+    const { graft, connections } = options;
+    const preflight = await graft.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
+    connections.add(preflight);
+    try {
+      return GRAFT_RESEARCH_TOOLS.map((name) =>
+        discardingGraftTool(graft, root, collection, graftTool(preflight.tools, name), name, connections),
+      );
+    } finally {
+      try {
+        await preflight.close();
+      } finally {
+        connections.delete(preflight);
+      }
+    }
+  };
+
+  const acquireShared = async (signal?: AbortSignal) => {
+    if (shared !== undefined) return shared;
+    const models = await pinnedModels();
+    signal?.throwIfAborted();
+    const research = await graftTools(signal);
+    for (const name of FILE_RESEARCH_TOOLS) research.push(collectionTool(collection, name));
+    shared = { models, research };
+    return shared;
+  };
+
+  const runBatch: BatchRunner = async (snapshot, batch, signal) => {
+    const { models, research } = await acquireShared(signal);
+    const baseline = await captureBaseline(root, snapshot);
+    const readSource = repositorySourceReader(root, options.rootReal, baseline);
+    const acquired: agent.JuncoAgent[] = [];
+    const lanes: CandidateLane[] = [];
+    try {
+      for (const work of batch) {
+        signal?.throwIfAborted();
+        const proposal = new ProposalRecorder({ snapshot, work, readSource });
+        const verdict = new VerdictRecorder();
+        const proposerTools: AgentTool[] = [...research, new tools.TaskTool(), new tools.YieldTool(), proposal.tool];
+        const proposer = await agent.JuncoAgent.create({
+          provider: PROVIDER,
+          model: PROPOSER_MODEL.model,
+          thinkingLevel: PROPOSER_MODEL.thinkingLevel,
+          models,
+          systemPrompt: ANALYST_SYSTEM_PROMPT,
+          cwd: root,
+          tools: proposerTools,
+          collection,
+        });
+        acquired.push(proposer);
+        signal?.throwIfAborted();
+        const judgeTools: AgentTool[] = [...research, verdict.tool];
+        const judge = await agent.JuncoAgent.create({
+          provider: PROVIDER,
+          model: JUDGE_MODEL.model,
+          thinkingLevel: JUDGE_MODEL.thinkingLevel,
+          models,
+          systemPrompt: JUDGE_SYSTEM_PROMPT,
+          cwd: root,
+          tools: judgeTools,
+          collection,
+        });
+        acquired.push(judge);
+        lanes.push({ work, proposer, judge, proposal, verdict });
+      }
+    } catch (error) {
+      return disposeAll(error, [...acquired].reverse().map((member) => () => member.return()), "Lane acquisition failed");
+    }
+    const apply: RefactorApplier = async (refactor, applySignal) => {
+      // Only the refactor's own targets, at this batch's baseline; a create's target was absent.
+      const targets = new Map(refactor.proposal.edits.map((edit) => [edit.path, baseline.get(edit.path) ?? null]));
+      // Model-produced bytes publish under the protected policy, never the trusted build's.
+      const files = await applyRefactor(root, collection.mux, refactor, targets, applySignal);
+      options.onApplied(refactor, files);
+      return files;
+    };
+    return runCandidateBatch({ snapshot, lanes, observer, apply, taskFailurePolicy: "ignore" }, signal);
+  };
+
+  return {
+    runBatch,
+    // The fixed index-refresh command is not model-authored: it runs under the trusted policy.
+    refreshSnapshot: (signal) => refreshGraftSnapshot(root, options.buildCollection.mux, signal),
+  };
+}
+
+/**
+ * Refactor `repositoryRoot`, a Git working-tree root, in place: rebuild its Graft index, then every
+ * approved refactor is applied and released as its review completes. Nothing is committed and no
+ * report is written. On a later failure, earlier applied and released refactors are retained.
+ */
+export async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: AbortSignal): Promise<RefactorRun> {
+  const root = resolve(repositoryRoot);
+  if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
+  signal?.throwIfAborted();
+
+  const observer = tracer.StdoutTracer.shared();
+  const failures: unknown[] = [];
+  const connections = new Set<mcp.JuncoMcpConnection>();
+  let protectedCollection: tools.ToolCollection | undefined;
+  let buildCollection: tools.ToolCollection | undefined;
+  let run: RefactorRun | undefined;
+  let applied = 0;
+  try {
+    protectedCollection = await tools.ToolCollection.create(root, { policy: tools.LockPolicy, sandbox: "always" });
+    await requireWorkTreeRoot(protectedCollection.mux, root, signal);
+    buildCollection = await tools.ToolCollection.create(root, { policy: tools.EmptyPolicy, sandbox: "always" });
+    const graft = mcp.JuncoMcpTools.add({
+      name: "graft",
+      type: "stdio",
+      command: "graft",
+      args: ["mcp", root],
+      clientOptions: { requestTimeoutMs: 300_000 },
+    });
+    const live = liveRunner({
+      root,
+      rootReal: await realpath(root),
+      buildCollection,
+      collection: protectedCollection,
+      graft,
+      connections,
+      observer,
+      onApplied: (refactor, files) => {
+        applied++;
+        console.log(`Applied and released ${refactor.candidate.definition.id}: ${files.join(", ")}`);
+      },
+    });
+    signal?.throwIfAborted();
+    await callTool(collectionTool(buildCollection, "bash"), { command: "graft build ." }, signal);
+    signal?.throwIfAborted();
+    const snapshot = parseSnapshot(await readFile(join(root, GRAPH_FILE), "utf8"));
+    run = await refactorCandidates(snapshot, live.runBatch, live.refreshSnapshot, signal);
+  } catch (error) {
+    failures.push(error);
+  }
+  // Every release is attempted, in order, whatever failed before it; the collections close last.
+  for (const release of [
+    async () => {
+      const errors: unknown[] = [];
+      for (const connection of connections) {
+        try {
+          await connection.close();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      connections.clear();
+      if (errors.length > 0) throw new AggregateError(errors, "Graft connections were not discarded cleanly");
+    },
+    () => observer.flush(),
+    () => buildCollection?.close(),
+    () => protectedCollection?.close(),
+  ]) {
+    try {
+      await release();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    if (applied === 0) {
+      if (failures.length === 1) throw failures[0];
+      throw new AggregateError(failures, "Yak shaver failed", { cause: failures[0] });
+    }
+    const retained = `Previously applied and released changes are retained (${applied} refactor${applied === 1 ? "" : "s"})`;
+    if (failures.length === 1) {
+      const failure = failures[0];
+      throw new Error(`${failure instanceof Error ? failure.message : String(failure)}. ${retained}.`, { cause: failure });
+    }
+    throw new AggregateError(failures, `Yak shaver failed. ${retained}.`, { cause: failures[0] });
+  }
+  if (run === undefined) throw new Error("No refactor run was produced");
+  const { totals } = run;
+  console.log(
+    `Applied and released refactors: ${totals.applied}; projected new call sites: ${totals.addedCallSites}; net nonblank lines removed: ${totals.netLinesRemoved}`,
+  );
+  return run;
 }
 
 if (import.meta.main) {

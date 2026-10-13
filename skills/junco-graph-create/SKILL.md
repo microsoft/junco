@@ -1,6 +1,6 @@
 ---
 name: junco-graph-create
-description: Create succinct, literate TypeScript Junco workflows using the public graph, agent, tools, mcp, schedulers, compaction, and tracer namespaces. Use whenever a user asks to build a Junco workflow or dataflow graph, coordinate agents, implement fan-out/fan-in or feedback loops, or compose deterministic nodes and nested agencies.
+description: Create succinct, literate TypeScript Junco workflows using the public graph, agent, tools, mcp, schedulers, and tracer namespaces. Use whenever a user asks to build a Junco workflow or dataflow graph, coordinate agents, implement fan-out/fan-in or feedback loops, or compose deterministic nodes and nested agencies.
 ---
 
 # Junco graph creation
@@ -27,12 +27,12 @@ Read top to bottom in execution order: a JSDoc header stating purpose, topology,
 ## Public API
 
 ```text
-import { graph, agent, tools, schedulers, compaction, tracer } from "junco-agency";
+import { graph, agent, tools, schedulers, tracer } from "junco-agency";
 ```
 
 Import only the namespaces a program uses. Spell node constructors as `graph.nodes.*` and trigger rules as `graph.trigger.*`. Model, session, and content APIs are not re-exported by `agent`; import them from `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-coding-agent`.
 
-The fenced blocks below are **verbatim signature excerpts**, not executable declarations: documentation comments and implementation bodies are omitted. Junco types named in an excerpt under a namespace heading are exported from that namespace (for example `graph.Message`, `graph.ParentView`, `graph.NodeGenerator`, `graph.NodeOptions`, `schedulers.Schedule`) unless marked implementation-local or attributed to a Pi package. Inside excerpts, the branded types are spelled `NodeId`, `EdgeId`, and `Width`; through the namespace, their *type* names are `graph.NodeIdType`, `graph.EdgeIdType`, and `graph.WidthType` (the unsuffixed names are the brand-constructor values).
+The fenced blocks below are **verbatim signature excerpts**, not executable declarations: documentation comments and implementation bodies are omitted. Junco types named in an excerpt under a namespace heading are exported from that namespace (for example `graph.Message`, `graph.ParentView`, `graph.NodeGenerator`, `graph.NodeOptions`, `schedulers.Schedule`) unless marked implementation-local or attributed to a Pi package. Inside excerpts, the branded types are spelled `NodeId`, `EdgeId`, and `Width`; through the namespace, their *type* names are `graph.NodeIdType`, `graph.EdgeIdType`, and `graph.WidthType` (the unsuffixed names are the construction objects `graph.NodeId.create`, `graph.EdgeId.create`, `graph.Width.create`).
 
 ### graph
 
@@ -115,10 +115,14 @@ Verbatim signature excerpts (identity, width, edges, message helpers; `Newtype` 
 
 ```text
 export type NodeId = Newtype<string, "NodeId">;
-export const NodeId = (value: string): NodeId =>
+export const NodeId = {
+  create: (value: string): NodeId =>
+};
 
 export type EdgeId = Newtype<string, "EdgeId">;
-export const EdgeId = (value: string): EdgeId =>
+export const EdgeId = {
+  create: (value: string): EdgeId =>
+};
 
 export type ValidWidth<W extends number> = W extends PositiveInfinity
   ? W
@@ -129,20 +133,26 @@ export type ValidWidth<W extends number> = W extends PositiveInfinity
       : Integer<W>;
 
 export type Width = Newtype<number, "Width">;
-export const Width = <W extends number>(value: ValidWidth<W>): Width =>
+export const Width = {
+  create: <W extends number>(value: ValidWidth<W>): Width =>
+};
 export const UNBOUNDED: Width = Number.POSITIVE_INFINITY as Width;
 
-export const messageEdge = <N, T>(id: string): Edge<N, T> =>
-export const valueEdge = <N, T>(id: string): Edge<N, T> =>
+export const Edge = {
+  message: <N, T>(id: string): Edge<N, T> =>
+  value: <N, T>(id: string): Edge<N, T> =>
+};
 
-export const msg = <N, T>(edge: Edge<N, T>, payload: N): Message<N> =>
+export const Message = {
+  create: <N, T>(edge: Edge<N, T>, payload: N): Message<N> =>
+};
 export const from = <N, T>(
   view: ParentView<N, T>,
   edge: Edge<N, T>,
 ): readonly N[] =>
 ```
 
-Verbatim signature excerpts (`graph.JuncoGraph`, `graph.createParallelAgentGraph`):
+Verbatim signature excerpts (`graph.JuncoGraph`):
 
 ```text
 export class JuncoGraph<
@@ -157,7 +167,7 @@ export class JuncoGraph<
     window: Width,
     threads: Width,
     tracer: DataflowTracer,
-    policy: ToolCollectionOptions["policy"],
+    policy: ToolCollection["policy"],
     collection?: ToolCollection,
   )
   static async create<N, T, EH, Q extends DataflowScheduler<N, T>>(
@@ -166,44 +176,59 @@ export class JuncoGraph<
     build: (collection: ToolCollection) =>
       JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>,
   ): Promise<JuncoGraph<N, T, EH, Q>>
-  readonly policy: ToolCollectionOptions["policy"]
+  readonly policy: ToolCollection["policy"]
   get collection(): ToolCollection | undefined
   get signal(): AbortSignal
   abort(reason: unknown = new DOMException("Graph aborted", "AbortError")): Promise<void>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
+  compact(policy: CompactionPolicy): Promise<void>
 
-export function createParallelAgentGraph<N = AgenticInput, T = AssistantMessage>(
-  policy: ToolCollectionOptions["policy"],
-  tracer: DataflowTracer = createTracer(),
-  collection?: ToolCollection,
-): JuncoGraph<N, T>
+  static parallel<N = AgenticInput, T = AssistantMessage>(
+    policy: ToolCollection["policy"],
+    tracer: DataflowTracer = StdoutTracer.shared(),
+    collection?: ToolCollection,
+  ): JuncoGraph<N, T>
+  static spawn<Input, N = AgenticInput, T = AssistantMessage>(
+    root: AgenticNode<N, T>,
+    inputs: readonly Input[],
+    child: (input: Input) => AgenticNode<N, T>,
+  ): JuncoGraph<N, T>
+  appendChildren<Input>(
+    rootId: NodeIdType,
+    inputs: readonly Input[],
+    child: (input: Input) => AgenticNode<N, T>,
+  ): void
 ```
 
 Construction rules:
 
-- **Choose the graph class by node state.** `graph.DataflowGraph<S, N, T, EH>` holds ordinary state such as `undefined`. `graph.JuncoGraph` / `graph.createParallelAgentGraph(policy)` hold lifecycle-owned states only: prompt agents, nested `JuncoGraph`s, and `graph.nodes.Deterministic` coroutines. Never cast `{ state: undefined }` into a `JuncoGraph`.
+- **Choose the graph class by node state.** `graph.DataflowGraph<S, N, T, EH>` holds ordinary state such as `undefined`. `graph.JuncoGraph` / `graph.JuncoGraph.parallel(policy)` hold lifecycle-owned states only: prompt agents, nested `JuncoGraph`s, and `graph.nodes.Deterministic` coroutines. Never cast `{ state: undefined }` into a `JuncoGraph`.
 - **`graph.nodes.Agentic` is the graph-state union**, not the cooperative agent interface `agent.Agentic`.
-- **Edges.** Message edges queue emitted `N`; value edges receive the source's returned `T` once. Read message batches with `graph.from(view, edge)` or `view.messages`; read parent results through `view.values.get(edge.id)`. `msg`/`emit` target wired message edges, never value edges. Edge IDs must be unique per source-outbound and per target-inbound set. Register both endpoints before `addEdge`. Never mutate an edge's transport.
+- **Edges.** Message edges queue emitted `N`; value edges receive the source's returned `T` once. Read message batches with `graph.from(view, edge)` or `view.messages`; read parent results through `view.values.get(edge.id)`. `Message.create`/`emit` target wired message edges, never value edges. Edge IDs must be unique per source-outbound and per target-inbound set. Register both endpoints before `addEdge`. Never mutate an edge's transport.
 - **Generator protocol.** A dependent body starts with `let view = yield []`; priming does not consume its queued inputs. Each activation advances the generator once. Returning `T` marks the node done and resolves its value edges. Annotate a hand-written body as `async function* (): graph.NodeGenerator<N, T> { … }`.
-- **Generic inference.** `emitOnce`, `stepNode`, and `msg` infer `N` from their arguments. When the graph's `N` is a union, pass explicit generics (`graph.nodes.emitOnce<void, Payload, string>(…)`, `graph.nodes.stepNode<void, Payload, string>(…)`). `graph.from(view, edge)` returns the view's (graph-wide) `N`, not the edge's narrower type: narrow each payload with a type guard instead of casting.
+- **Generic inference.** `new StepNode` / `new EmitOnce` infer `S`, `N`, `T` from their arguments, including `options` (`state: undefined` infers `S = undefined`). When that differs from the registering graph's types (a `void`-state graph, a union `N`, a trigger narrower than the graph), pass explicit generics: `new graph.nodes.StepNode<void, Payload, string>(…)`. `Message.create` infers from its arguments. `graph.from(view, edge)` returns the view's (graph-wide) `N`, not the edge's narrower type: narrow each payload with a type guard instead of casting.
 - **Agent graphs use `AgenticInput` messages and `AssistantMessage` results** (the `JuncoGraph` defaults). A deterministic node feeding an agent emits `{ kind: "prompt", text }`.
 - **Closing.** `JuncoGraph.close()` recursively and terminally closes every member: agents, nested graphs, Pi schedulers, coroutines. Results stay readable. Registering an agent therefore hands its lifetime to the graph; before registration, the acquirer closes it (`await using`, or `await member[Symbol.asyncDispose]()` for each earlier acquisition when a later one fails). Repeated close is safe. A graph whose members must outlive it (persistent agents across rounds) is not closed per round; close the members once at the end.
 - **Execution.** `run()` returns cumulative completed-node results when nothing is available; it does not prove every node finished, and a streaming sink may legitimately stay unfinished. `step()` runs at most one window. Never overlap `step`/`run` on one graph. Do not catch and silence `DataflowDefinitionError`, `DataflowNodeError`, or cancellation.
 
 ### graph.nodes
 
-Verbatim signature excerpts (body helpers and constant factories; `ConstNodeOptions` and `ConstNodeSpec` are implementation-local supporting types):
+Verbatim signature excerpts (body and constant node classes; `ConstNodeOptions` and `ConstNodeSpec` are implementation-local supporting types):
 
 ```text
-export const emitOnce = <S, N, T>(
-  batch: () => Message<N>[],
-  ret: T,
-): StepFn<S, N, T> =>
+export class StepNode<S, N, T> implements NodeSpec<S, N, T>
+  constructor(
+    fn: (state: S, view: ParentView<N, T>) => Message<N>[],
+    options: Omit<NodeSpec<S, N, T>, "step">,
+  )
 
-export const stepNode = <S, N, T>(
-  fn: (state: S, view: ParentView<N, T>) => Message<N>[],
-): StepFn<S, N, T> =>
+export class EmitOnce<S, N, T> implements NodeSpec<S, N, T>
+  constructor(
+    batch: () => Message<N>[],
+    ret: T,
+    options: Omit<NodeSpec<S, N, T>, "step">,
+  )
 
 type ConstNodeOptions<S, T> = Pick<
   NodeOptions<never, never>,
@@ -221,22 +246,24 @@ type ConstNodeSpec<S, N, T> = Omit<
   readonly is_available?: AvailabilityFn<unknown, unknown>;
 };
 
-export const ConstFanout = <S, N, T>(
-  payload: N,
-  outputs: readonly Edge<N, T>[],
-  options: ConstNodeOptions<S, T>,
-): ConstNodeSpec<S, N, T> =>
+export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T>
+  constructor(
+    payload: N,
+    outputs: readonly Edge<N, T>[],
+    options: ConstNodeOptions<S, T>,
+  )
 
-export const ConstFanin = <S, C, T>(
-  inputs: readonly Edge<C, T>[],
-  output: Edge<C[], T>,
-  options: ConstNodeOptions<S, T>,
-): ConstNodeSpec<S, C | C[], T> =>
+export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T>
+  constructor(
+    inputs: readonly Edge<C, T>[],
+    output: Edge<C[], T>,
+    options: ConstNodeOptions<S, T>,
+  )
 ```
 
-- `emitOnce` emits its batch, then returns `ret` on the next activation. `stepNode` never returns: use it for a streaming sink.
+- `EmitOnce` emits its batch, then returns `ret` on the next activation. `StepNode` never returns: use it for a streaming sink. Both are complete specs: `options` supplies everything but `step` (`{ state, trigger, … }`).
 - A finite generator's trigger/availability must still admit the activation that performs its final `return`. Bound feedback loops by the task's actual stop condition.
-- Constant factories return complete specs; `{ state, ret }` is required (`undefined` only where the graph's types allow it). Invoke a factory once per node.
+- Constant node classes construct complete specs; `{ state, ret }` is required (`undefined` only where the graph's types allow it). Construct one with `new` once per node.
 - `ConstFanout` sends one shared payload reference on each distinct message edge, in `outputs` order, then completes. Zero outputs still complete.
 - `ConstFanin` accumulates every message from every input across activations, emits one list in the supplied *input order* (not arrival order), and completes on its next activation. An array-valued payload stays one element. Zero inputs emit one `[]`. The graph's message type must admit both `C` and `C[]`.
 - Value-edge arguments and duplicate edges are definition errors.
@@ -258,38 +285,37 @@ export type Agentic<N = AgenticInput, T = AssistantMessage> =
   | MockAgent
   | Deterministic<N, T>;
 
-export type AgenticNode<N = AgenticInput, T = AssistantMessage> = NodeSpec<Agentic<N, T>, N, T>;
-
-export type AgentNodeBinding = {
-  readonly prompt?: string;
+export type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
+  | (NodeSpec<Agentic<N, T>, N, T> &
+      NotNested & { readonly policy: ToolCollection["policy"] }) // raw spec with step
+  | (StepLess<N, T> &
+      NotNested & {
+        readonly state: Deterministic<N, T>;
+        readonly step?: never;
+        readonly policy?: never; // authorized by the coroutine's own policy
+      })
+  | (StepLess<N, T> & {
+      readonly state: JuncoGraph<N, T>;
+      readonly step?: never;
+      readonly policy?: never; // authorized by the child graph's own policy
+      readonly result: NodeIdType;
+      readonly receive?: (view: ParentView<N, T>) => void | Promise<void>;
+      readonly afterStep?: () => void | Promise<void>;
+    })
+  | (StepLess<N, T> &
+      NotNested & {
+        readonly state: JuncoAgent | MockAgent; // chat wires only (N = AgenticInput, T = AssistantMessage)
+        readonly step?: never;
+        readonly policy: ToolCollection["policy"];
+      })
+) & {
+  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
-
-export type GraphNodeBinding<N = AgenticInput, T = AssistantMessage> = {
-  readonly result: NodeIdType;
-  readonly receive?: (view: ParentView<N, T>) => void | Promise<void>;
-  readonly afterStep?: () => void | Promise<void>;
-  readonly contract?: (edgeId: EdgeId) => Contract;
-};
-
-export function agentNode(
-  agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage> &
-    Pick<ToolCollectionOptions, "policy">,
-  binding: AgentNodeBinding = {},
-): AgenticNode
-
-export function deterministicNode<N, T>(
-  state: Deterministic<N, T>,
-  options: NodeOptions<N, T> &
-    Pick<ToolCollectionOptions, "policy"> &
-    Pick<AgenticNode<N, T>, "contract">, // contract?: (edgeId: EdgeIdType) => Contract
-): AgenticNode<N, T>
-
-export function graphNode<N, T, EH, Q extends DataflowScheduler<N, T>>(
-  graph: JuncoGraph<N, T, EH, Q>,
-  options: NodeOptions<N, T> & Pick<ToolCollectionOptions, "policy">,
-  binding: GraphNodeBinding<N, T>,
-): AgenticNode<N, T>
+// `NotNested` (result/receive/afterStep?: never) and `StepLess` (NodeSpec minus state/step) are implementation-local.
+// Register step-less: graph.addNode({ ...options, policy, state: agent }), { ...options, state: coroutine },
+// or { ...options, state: childGraph, result, receive?, afterStep? }. A step-less coroutine or nested
+// graph spec takes no `policy`: any own `policy` field (even a matching or `undefined` one) throws TypeError.
+// Each addNode builds its own driver; a step-less spec with any other state throws TypeError.
 
 export class Deterministic<N = AgenticInput, T = AssistantMessage> implements NodeGenerator<N, T>
   constructor(
@@ -297,19 +323,19 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
       signal: AbortSignal,
       collection?: ToolCollection,
     ) => NodeGenerator<N, T>,
-    policy: ToolCollectionOptions["policy"],
+    policy: ToolCollection["policy"],
     collection?: ToolCollection,
   )
   abort(reason: unknown = new DOMException("Deterministic aborted", "AbortError")): Promise<void>
   close(): Promise<void>
 ```
 
-- `agentNode` runs **one prompt** per node and returns when that run settles, so a source node with `trigger: always()` and `binding.prompt` runs exactly once. Start an idle agent with `binding.prompt` (or its staged prompt); delivered messages and unseen parent values are **data**, retained per edge in the node's inbox until the model calls `recv` — they never start, steer or prompt the agent. An idle agent with input but no prompt stays quiescent. The model sends on outgoing message edges with `send({ id: edgeId, payload })` and discovers routes and receivers' expectations with `info({})`; value edges carry only the final result. Only `yield` and a Marsh policy denial pause a run. A settled run becomes the node's `AssistantMessage` result; a failed run throws its native error.
-- **Contracts.** `info` reports, for every parent and child edge, the *receiving* node's `Contract.expect`. Supply it beside the receiver: `JuncoAgent.create({ contract: (edgeId) => ... })`, `deterministicNode(..., { contract })`, `graphNode(..., { contract })`. A finite receiver throws `JuncoAgentError("invalid_state", \`No contract for edge "${edgeId}"\`)` for an unknown edge; `info` fails rather than omitting it.
-- **Validated handoffs.** When a consumer's assignment must be built from a checked upstream result, insert a deterministic input-preparer node (`Deterministic` + `deterministicNode`, one-shot `published` availability) that validates the value, sends one `{ kind: "prompt", text }` message, and give the consumer `recv`/`info` and the start prompt "Call recv once and carry out the prompt in the single received message." (`examples/mcp.ts` `DependenciesInput`).
+- A registered agent (`workflow.addNode({ ...options, state: agent })`) runs **one prompt** per node and returns when that run settles, so a source node with `trigger: TriggerRule.always()` and a staged prompt runs exactly once. The prompt belongs to the agent: `JuncoAgent.create({ prompt })` (one-shot) or `agent.stagePrompt(prompt)` before a later round's registration (throws `busy` unless idle). `prompt` may be `(inputs: graph.ParentView<AgenticInput, AssistantMessage>) => string`: it runs once, synchronously, on the node's first activation with the retained inbox (not drained), and a throw fails the node with that error. Never put `prompt` on the registration object; delivered messages and unseen parent values are **data**, retained per edge in the node's inbox until the model calls `recv` — they never start, steer or prompt the agent. An idle agent with input but no prompt stays quiescent. The model sends on outgoing message edges with `send({ id: edgeId, payload })` and discovers routes and receivers' expectations with `info({})`; value edges carry only the final result. Only `yield` and a Marsh policy denial pause a run. A settled run becomes the node's `AssistantMessage` result; a failed run throws its native error.
+- **Contracts.** `info` reports, for every parent and child edge, the *receiving* node's `Contract.expect`. Supply it beside the receiver: `contract` on the receiving node's registration (`{ ...options, state, contract }`, for agents, coroutines and nested graphs alike; an agent registration's contract replaces the agent's own), or `JuncoAgent.create({ contract: (edgeId) => ... })` as an agent's default. A finite receiver throws `JuncoAgentError("invalid_state", \`No contract for edge "${edgeId}"\`)` for an unknown edge; `info` fails rather than omitting it.
+- **Validated handoffs.** When a consumer's assignment must be built from a checked upstream result, give the consumer a prompt callback that reads `inputs.messages.get(edgeId)` / `inputs.values.get(edgeId)`, throws on invalid data and returns the assignment text (`examples/mixed.ts` Reviewer, `examples/mcp.ts` Dependencies; the consumer needs no `recv`). Wire the upstream edges straight into the consumer, trigger it on them, and put each incoming edge's `contract` on the consumer's registration. Never insert a separate deterministic node just to prepare a prompt message.
 - Never separately iterate an agent the graph is driving.
-- `deterministicNode` registers a `Deterministic` coroutine whose `body(signal)` speaks the same generator protocol; a coroutine has one consumer, so register it once. Honor `signal` in long loops.
-- `graphNode` requires `binding.result` to name an **already registered** child node; a child that quiesces without that result fails. Use `receive` to feed the child (for example by queuing an input on a source the child exposes) and select only the deliberate final node, so intermediate drafts never escape.
+- `{ ...options, state: coroutine }` registers a `Deterministic` coroutine whose `body(signal)` speaks the same generator protocol; a coroutine has one consumer, so register it once. Honor `signal` in long loops.
+- `{ ...options, state: childGraph, result }` requires `result` to name an **already registered** child node (missing → `TypeError("A nested graph node requires a result")`; unknown → `DataflowDefinitionError`); a child that quiesces without that result fails. Use `receive` to feed the child (for example by queuing an input on a source the child exposes) and select only the deliberate final node, so intermediate drafts never escape.
 
 ### graph.trigger
 
@@ -327,28 +353,36 @@ export type TriggerRule<N, T> = {
   readonly rule: readonly TriggerEntry<N, T>[];
 };
 
-export const on = <N, T>(edge: Edge<N, T>): TriggerEntry<N, T> =>
-export function allOf<
-  const Entries extends readonly TriggerEntry<unknown, unknown>[],
->(...entries: Entries): TriggerRule<
+export const TriggerEntry = {
+  on: <N, T>(edge: Edge<N, T>): TriggerEntry<N, T> =>
+};
+
+function allOf<const Entries extends readonly TriggerEntry<unknown, unknown>[]>(
+  ...entries: Entries
+): TriggerRule<
   Entries[number][typeof triggerEntry][0],
   Entries[number][typeof triggerEntry][1]
 >;
-export function allOf<N = never, T = never>(
+function allOf<N = never, T = never>(
   ...entries: readonly TriggerEntry<N, T>[]
 ): TriggerRule<N, T>;
-export function anyOf<
-  const Entries extends readonly TriggerEntry<unknown, unknown>[],
->(...entries: Entries): TriggerRule<
+function anyOf<const Entries extends readonly TriggerEntry<unknown, unknown>[]>(
+  ...entries: Entries
+): TriggerRule<
   Entries[number][typeof triggerEntry][0],
   Entries[number][typeof triggerEntry][1]
 >;
-export function anyOf<N = never, T = never>(
+function anyOf<N = never, T = never>(
   ...entries: readonly TriggerEntry<N, T>[]
 ): TriggerRule<N, T>;
-export const when = <N, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
-export const always = <N = never, T = never>(): TriggerRule<N, T> =>
-export const never = <N = never, T = never>(): TriggerRule<N, T> =>
+
+export const TriggerRule = {
+  allOf,
+  anyOf,
+  when: <N, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
+  always: <N = never, T = never>(): TriggerRule<N, T> => allOf<N, T>(),
+  never: <N = never, T = never>(): TriggerRule<N, T> => anyOf<N, T>(),
+};
 export const satisfiedEdges = <N, T>(
   trigger: TriggerRule<N, T>,
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
@@ -361,9 +395,9 @@ export const evaluateTrigger = <N, T>(
 ): boolean =>
 ```
 
-- Spell conjunction `allOf(on(a), on(b))` and disjunction `anyOf(on(a), on(b))`; never arrays, bare edges or bare `EdgeId`s (`triggerEntry` is an implementation-local type-only brand; an entry is the edge id string at runtime).
+- Spell conjunction `TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b))` and disjunction `TriggerRule.anyOf(TriggerEntry.on(a), TriggerEntry.on(b))`; never arrays, bare edges or bare `EdgeId`s (`triggerEntry` is an implementation-local type-only brand; an entry is the edge id string at runtime).
 - Entries carry their edge's message and result types: an unannotated `allOf`/`anyOf` infers the union of every entry's payloads, and a rule only fits a node whose payload types include them. A narrow rule serves a wider-payload graph; a wrong-payload rule is a compile error.
-- `anyOf` is ordered: ordinary trigger-driven reads take only the first satisfied entry. `when(edge)` is a single-edge conjunction. `always()` is the empty conjunction (sources); `never()` the empty disjunction. Without type arguments, empty rules fit every graph.
+- `TriggerRule.anyOf` is ordered: ordinary trigger-driven reads take only the first satisfied entry. `TriggerRule.when(edge)` is a single-edge conjunction. `TriggerRule.always()` is the empty conjunction (sources); `TriggerRule.never()` the empty disjunction. Without type arguments, empty rules fit every graph.
 - A rule naming an unwired inbound edge, or repeating an entry, is a definition error.
 - A trigger says *which* edges must carry something; `is_available` may further restrict or extend readiness (e.g. "publish once": `is_available: () => !published`).
 
@@ -393,7 +427,7 @@ export type AgenticOptions<
 > = Omit<AgentHarnessOptions<undefined>, "tools" | "resources" | "toolExecution"> & {
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
-  readonly prompt?: string;
+  readonly prompt?: string | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string); // one-shot staged prompt
   readonly images?: ImageContent[];
 };
 
@@ -445,7 +479,8 @@ export class JuncoAgent<
 
   get status(): AgenticStatus
   prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage>
-  next(): Promise<IteratorResult<AgenticStep, void>>
+  stagePrompt(prompt: string | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string), options?: { images?: ImageContent[] }): void // closed; busy unless idle with no queued demand
+  next(inputs?: ParentView<AgenticInput, AssistantMessage>): Promise<IteratorResult<AgenticStep, void>> // callback stage without inputs: failed invalid_state; throw: failed with that error; non-string: failed invalid_argument
   return(value?: void | PromiseLike<void>): Promise<IteratorResult<AgenticStep, void>>
   async [Symbol.asyncDispose](): Promise<void>
   steer(text: string, options?: { images?: ImageContent[] }): Promise<void>
@@ -462,7 +497,7 @@ export class JuncoAgent<
   compact(options?: { customInstructions?: string }): Promise<void>
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
   // JuncoAgent only, not Agentic:
-  runWithNodeContext<N, T, R>(context: JuncoAgentNodeContext<N, T>, work: () => Promise<R>): Promise<R> // { messaging?, task?, complaint? }; overlapping binding rejects busy; agentNode does this
+  runWithNodeContext<N, T, R>(context: JuncoAgentNodeContext<N, T>, work: () => Promise<R>): Promise<R> // { messaging?, task?, complaint? }; overlapping binding rejects busy; graph-registered agents do this
   contract(edgeId: EdgeIdType): Contract // from the `contract` option; else invalid_state; never starts a run
   setTaskPolicy(policy: TaskPolicy | undefined): void // throw to reject a hosted task launch (not a decision) as a tool error
   setTaskBatch(input: TaskInput): Promise<void> // idle only; model launches the stored batch once with task({}); children get an ordinary task tool
@@ -492,13 +527,13 @@ export class JuncoAgentError extends Error
 The voluntary-suspension tool lives under **`tools`** (see below), not `agent`.
 
 - **Construct with the static factories.** The constructor is protected: `await agent.JuncoAgent.create(...)`, never `new agent.JuncoAgent(...)`.
-- **Policy and collection:** every factory requires `policy: "LockPolicy" | "EmptyPolicy"`; an optional `collection` (same policy, else `invalid_argument`) is borrowed through the agent's own lease and binds its native lifetime, not its tools. Every node spec (`agentNode`, `deterministicNode`, `graphNode`, raw specs) also requires `policy`, equal to its state's.
-- **Normal construction:** `create({ models, provider, model, policy, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
-- **Pre-resolved construction:** `fromResolved({ models, model, policy, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
+- **Policy and collection:** agents take no `policy`; an optional `collection` selects their authorization (`collection.policy`) and is borrowed through the agent's own lease, binding its native lifetime, not its tools. An implicit collection (omitted `tools`, or nonempty MCP definitions without a collection) is `ToolCollection.create(cwd)` under the default `tools.LockPolicy`; for any other policy open and pass the collection yourself. Registered agents and every explicit-`step` raw spec require `policy` on their node spec: the very object (policies compare by identity) of a real agent's `collection.policy` when it has one, and of a coroutine's or child graph's when the raw spec holds one. A step-less coroutine or nested graph is authorized by its own constructor policy and its spec takes no `policy` (supplying one throws `TypeError`).
+- **Normal construction:** `create({ models, provider, model, systemPrompt, tools })`. It resolves the exact IDs, checks the saved login, and owns its default in-memory session. A supplied `session` transfers to the agent.
+- **Pre-resolved construction:** `fromResolved({ models, model, session, tools })` only with an already resolved native `Model<Api>` and a Pi core `Session`; the session transfers.
 - **MCP tool sources:** both factories accept `mcp.JuncoMcpTools` definitions in `tools`, alone or mixed with concrete tools (`tools: [servers, lsp, ...collection.tools]`), connected from `cwd`. Each agent gets fresh MCP clients and server processes, closed with it; discovered names are `mcp__<server>__<tool>`. A definition is a factory-only source: `setTools` takes concrete tools only.
 - **Three model argument shapes; never substitute one for another:** `create` takes a model ID *string* in `model`; `fromResolved` takes a resolved `Model<Api>` in `model`; `setModel` takes `{ provider, modelId }` (`ModelIdentity`).
 - **Final text:** use `contentText(message.content)` from `@earendil-works/pi-ai`; require `message.stopReason === "stop"` and nonblank trimmed text before forwarding a report.
-- **Iterator boundaries:** preserve `yield` / `settled` / `failed`; rethrow a failed boundary's `error`. `return()` and an early `for await` break close the agent terminally; to reuse an agent across rounds drive it with explicit `next()` (or let `agentNode` drive it).
+- **Iterator boundaries:** preserve `yield` / `settled` / `failed`; rethrow a failed boundary's `error`. `return()` and an early `for await` break close the agent terminally; to reuse an agent across rounds drive it with explicit `next()` (or register it in a graph and `stagePrompt` each round).
 
 ### tools
 
@@ -509,18 +544,27 @@ export interface ToolCollectionOptions {
   bash?: BashToolOptions;
   native?: NativeModule;
   sandbox?: "shared" | "always";
-  policy: "LockPolicy" | "EmptyPolicy";
+  policy?: Policy; // default LockPolicy
   principal?: string;
 }
 
 export class ToolCollection
   readonly tools: AgentTool<any>[];
-  readonly policy: ToolCollectionOptions["policy"];
+  readonly policy: Policy;
   readonly mux: NativeMux;
   readonly native: NativeModule;
-  static async create(cwd: string, options: ToolCollectionOptions): Promise<ToolCollection>
+  static async create(cwd: string, options?: ToolCollectionOptions): Promise<ToolCollection>
   lease(): { close(): Promise<void> }
   close(): Promise<void>
+
+export interface Policy { toNative(native: NativeModule): NativePolicy } // open: implement it for a new policy
+export const LockPolicy: Policy;  // a write owns its file until released or deleted
+export const EmptyPolicy: Policy; // grants every capability
+export const Policy = {
+  and(left: Policy, right: Policy): Policy, // grants what both grant
+  or(left: Policy, right: Policy): Policy,  // grants what either grants
+  not(policy: Policy): Policy,              // grants what `policy` denies
+};
 
 export interface LspToolOptions {
   readonly readOnly?: boolean;
@@ -532,29 +576,33 @@ export const LspTool = {
   async create(cwd: string, options: LspToolOptions = {}): Promise<LspTool>
   async shutdown(): Promise<void>
 
-export type ShellMuxOperations = BashOperations & { close(): Promise<void> };
-export function createShellMuxOperations(options?: {
-  readonly native?: NativeModule;
-  readonly mux?: NativeMux;
-  readonly sandbox?: "shared" | "always";
-  readonly policy?: ToolCollectionOptions["policy"];
-  principal?: string;
-}): ShellMuxOperations
+export class ShellMuxOperations implements BashOperations
+  constructor(options?: {
+    readonly native?: NativeModule;
+    readonly mux?: NativeMux;
+    readonly sandbox?: "shared" | "always";
+    readonly policy?: Policy; // only without `mux`: a borrowed mux keeps its own
+    principal?: string;
+  })
+  close(): Promise<void>
 
 export interface ShellMuxLease {
   readonly mux: NativeMux;
   readonly native: NativeModule;
+  readonly policy: Policy;
   readonly closed: boolean;
   release(): Promise<void>;
 }
-export async function acquireShellMux(
-  cwd: string,
-  options: {
-    readonly native?: NativeModule;
-    readonly sandbox?: "shared" | "always";
-    readonly policy: ToolCollectionOptions["policy"];
-  },
-): Promise<ShellMuxLease>
+export const ShellMuxLease = {
+  async create(
+    cwd: string,
+    options: {
+      readonly native?: NativeModule;
+      readonly sandbox?: "shared" | "always";
+      readonly policy?: Policy;
+    } = {},
+  ): Promise<ShellMuxLease>
+};
 
 export const MARSH_POLICY_DENIED = "MARSH_POLICY_DENIED";
 export interface MarshPolicyDeniedError extends Error {
@@ -564,14 +612,16 @@ export function isMarshPolicyDenied(error: unknown): error is MarshPolicyDeniedE
 
 export type YieldToolDetails = { readonly reason: string };
 export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
-export function createYieldTool(): YieldTool
+export const YieldTool: new () => YieldTool
 export function isYieldTool(tool: object): boolean
 
 export type Contract = { readonly expect: string };
-export function RecvTool<N = unknown, T = unknown>(host?): RecvTool<N, T> // recv({}): drains retained { messages, values }
-export function SendTool<N = unknown>(host?): SendTool                     // send({ id: edgeId, payload }): one message on an outgoing message edge
-export function InfoTool(host?): InfoTool                                  // info({}): { parents, children: { id, edgeId, kind, expect }[] }
-// Each has companions: RecvTool.is(tool) / RecvTool.invoke(tool, host, toolCallId, input, signal), likewise SendTool/InfoTool.
+export class RecvTool<N = unknown, T = unknown>
+  constructor(host?: { readonly view: ParentView<N, T>; consume(): void }) // recv({}): drains retained { messages, values }
+export class SendTool<N = unknown>
+  constructor(host?: { send(message: Message<N>): void })                // send({ id: edgeId, payload }): one message on an outgoing message edge
+export class InfoTool                                                     // info({}): { parents, children: { id, edgeId, kind, expect }[] }
+// Each has static companions: RecvTool.is(tool) / RecvTool.invoke(tool, host, toolCallId, input, signal), likewise SendTool/InfoTool.
 
 export type TaskToolDetails = {
   readonly tasks: readonly { readonly id: string; readonly name?: string }[];
@@ -587,78 +637,110 @@ export type TaskToolHost = (
 ) => Promise<TaskToolDetails["tasks"]>; // launch: one handle per task; retry: the task's handle; ignore: none. Reject only if nothing was admitted.
 export type TaskTool = AgentTool<typeof taskParameters, TaskToolDetails>;
 export type AssignedTaskTool = AgentTool<typeof assignedParameters, TaskToolDetails>;
-export function createTaskTool(host?: TaskToolHost): TaskTool
-export function createAssignedTaskTool(input: TaskInput): AssignedTaskTool // model launches the stored batch with task({})
+export const TaskTool: new (host?: TaskToolHost) => TaskTool
+export const AssignedTaskTool: new (input: TaskInput) => AssignedTaskTool // model launches the stored batch with task({})
 export function isTaskTool(tool: object): tool is TaskTool | AssignedTaskTool
 export function isAssignedTaskTool(tool: object): tool is AssignedTaskTool
 export function invokeTaskTool(tool: TaskTool | AssignedTaskTool, host: TaskToolHost, toolCallId: string, input: TaskCall, signal: AbortSignal): Promise<AgentToolResult<TaskToolDetails>>
 ```
 
-(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object returned by `createYieldTool()`; a same-named tool or a spread copy is not one. `launchSchema` is implementation-local: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`, required shared `context` prepended to every task, at least one task, non-blank strings, no extra properties. `taskParameters`/`assignedParameters` are one model-facing object (launch fields and/or decision fields `action`, `id`, `attempt`, all optional); each call is checked against the exact launch (free-form only), `{}` (assigned only) or decision shape (`attempt` a positive safe integer). The same branding rule applies to `isTaskTool` and `isAssignedTaskTool`.)
+(`yieldParameters` is implementation-local: `{ reason: string }`, non-empty, no extra properties. `isYieldTool` is true only for a tool object constructed by `new YieldTool()`; a same-named tool or a spread copy is not one. `launchSchema` is implementation-local: `{ context: string; tasks: { name?: string; task: string; model?: { provider: string; modelId: string }; tools?: string[] }[] }`, required shared `context` prepended to every task, at least one task, non-blank strings, no extra properties. `taskParameters`/`assignedParameters` are one model-facing object (launch fields and/or decision fields `action`, `id`, `attempt`, all optional); each call is checked against the exact launch (free-form only), `{}` (assigned only) or decision shape (`attempt` a positive safe integer). The same branding rule applies to `isTaskTool` and `isAssignedTaskTool`.)
 
 (`UpstreamLspTool`, `UpstreamLspToolDetails`, `LspToolFields`, `TUnsafe` are implementation-local. `LspTool` is a factory object plus a tool type, not a constructible class.)
 
-Native tool factories, by capability (`read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`). Verbatim signature excerpts; the return-type aliases (`ReadToolDetails`, `NativeGrepToolDetails`, `FindToolDetails`, `BoundedToolDetails`, `Ast*Result`, `DiffStreamResult`, the `*Schema` values, and the `createPi*` upstream factories) are signature references, not importable namespace types; `HashlineEditDetails` is exported:
+Native tool factories, by capability (`read`, `bash`, `edit`, `release`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`). Verbatim signature excerpts; the return-type aliases (`ReadToolDetails`, `NativeGrepToolDetails`, `FindToolDetails`, `BoundedToolDetails`, `Ast*Result`, `DiffStreamResult`, the `*Schema` values, and the `createPi*` upstream factories) are signature references, not importable namespace types; `HashlineEditDetails` is exported:
 
 ```text
-export function createReadTool(
-  cwd: string,
-  store: EditStore,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiReadTool>["parameters"], ReadToolDetails | undefined>
+export const ReadTool = {
+  create(
+    cwd: string,
+    store: EditStore,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
+    ReturnType<typeof createPiReadTool>["parameters"],
+    ReadToolDetails | undefined
+  >
+};
 
-export function createBashTool(
-  cwd: string,
-  options: BashToolOptions & {
-    operations: NonNullable<BashToolOptions["operations"]>;
-  },
-): AgentTool<any>
+export const BashTool = {
+  create(
+    cwd: string,
+    options: BashToolOptions & {
+      operations: NonNullable<BashToolOptions["operations"]>;
+    },
+  ): AgentTool<any>
+};
 
-export function createEditTool(
-  cwd: string,
-  store: EditStore,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<typeof editSchema, HashlineEditDetails>
+export const EditTool = {
+  create(
+    cwd: string,
+    store: EditStore,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<typeof editSchema, HashlineEditDetails>
+};
 
-export function createGrepTool(
-  cwd: string,
-  store: EditStore,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiGrepToolDefinition>["parameters"], NativeGrepToolDetails>
+export const ReleaseTool = {
+  create(
+    cwd: string,
+    mux: NativeMux,
+  ): AgentTool<typeof releaseSchema, undefined>
+};
 
-export function createFindTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<ReturnType<typeof createPiFindTool>["parameters"], FindToolDetails | undefined>
+export const GrepTool = {
+  create(
+    cwd: string,
+    store: EditStore,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
+    ReturnType<typeof createPiGrepToolDefinition>["parameters"],
+    NativeGrepToolDetails
+  >
+};
 
-export function createAstGrepTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>>
+export const FindTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<
+    ReturnType<typeof createPiFindTool>["parameters"],
+    FindToolDetails | undefined
+  >
+};
 
-export function createAstEditTool(
-  cwd: string,
-  native: NativeModule,
-  mux: NativeMux,
-): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>>
+export const AstGrepTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>>
+};
 
-export function createDiffTool(
-  native: NativeModule,
-): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>>
+export const AstEditTool = {
+  create(
+    cwd: string,
+    native: NativeModule,
+    mux: NativeMux,
+  ): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>>
+};
+
+export const DiffTool = {
+  create(
+    native: NativeModule,
+  ): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>>
+};
 ```
 
-Prefer `tools.ToolCollection.create(cwd, { policy })` over assembling these factories by hand: it builds all eight tools, and its `read`, `grep`, and `edit` share one provenance store. LSP is not in the collection. There is no `tools.write` or `tools.ls`.
+Prefer `tools.ToolCollection.create(cwd, { policy })` over assembling these factories by hand: it builds all eight tools, and its `read`, `grep`, and `edit` share one provenance store. Policies compare by identity, so build a composed policy (`tools.Policy.and(tools.LockPolicy, custom)`) once and pass that same object to the collection and to every node and graph using it. LSP is not in the collection. There is no `tools.write` or `tools.ls`.
 
 Tool selection and ownership:
 
-- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task`, `yield`, `recv`, `send` and `info`. Explicit arrays replace defaults: a graph agent that consumes inputs needs `tools.RecvTool()`, one that sends needs `tools.SendTool()` and usually `tools.InfoTool()`.
-- **Voluntary suspension** needs the real `tools.createYieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues. It is the only voluntary pause: `task`, `recv`, `send`, `info` and `schedule` never pause.
-- **Subagents** need the real `tools.createTaskTool()` among the caller's tools and the caller driven by `agentNode`. A successful call returns handles immediately and the run continues; the children start when the caller next calls `yield` (or hits a policy pause) or finishes its run, so instruct a caller that needs reports before continuing to `yield`. At that point the node's state becomes a `graph.Spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside `agentNode` the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
+- **Pure prompt/review agents get explicit `tools: []`.** Omitting `tools` makes `create` acquire the native collection plus `task`, `yield`, `recv`, `send` and `info`. Explicit arrays replace defaults: a graph agent that consumes inputs needs `new tools.RecvTool()`, one that sends needs `new tools.SendTool()` and usually `new tools.InfoTool()`.
+- **Voluntary suspension** needs the real `new tools.YieldTool()` in the explicit array; an arbitrary tool named `yield` is not the scheduling primitive. Executing it only returns its reason; a `JuncoAgent` pauses at it, while a plain Pi agent continues. It is the only voluntary pause: `task`, `recv`, `send`, `info` and `schedule` never pause.
+- **Subagents** need the real `new tools.TaskTool()` among the caller's tools and the caller registered as a graph node. A successful call returns handles immediately and the run continues; the children start when the caller next calls `yield` (or hits a policy pause) or finishes its run, so instruct a caller that needs reports before continuing to `yield`. At that point the node's state becomes a `graph.JuncoGraph.spawn` graph rooted at the same caller, one child per task. Completed `task_result` reports (`id`, `attempt`, …) reach the caller as follow-ups, then one `task_batch_complete` marker once every task of the launch is completed or ignored. The node returns the caller's answer only after every delivered report and marker was answered. Children inherit the caller's model, active tools and registered MCP definitions (fresh servers each) unless a task names a `model` or narrower `tools`. Outside a graph the call fails as an ordinary tool error. For workflow-owned assignments, `await agent.setTaskBatch(input)` and tell the model to call `task({})` (admitted at most once; no payload to copy). Failures follow `agent.setTaskFailurePolicy(...)`: `"ignore"` drops them silently; `{ retries: n }` (default `n = 0`) reruns the failed task alone in a fresh child, then delivers a `decisionRequired` report the caller must resolve with `task({ action: "retry" | "ignore", id, attempt })` before finishing (else `Task failure decisions required: …`). Failed attempts are disposed once; a teardown failure (`JuncoAgentCleanupError`) and cancellation propagate.
 - **Semantic navigation:** `await tools.LspTool.create(process.cwd(), { readOnly: true })` for read-only roles; enable mutating LSP only for a role that edits. Requires Bun and caller-installed language-server binaries. LSP uses host filesystem/process access, not the native sandbox.
 - **Native coding tools** need the built native addon and an existing dedicated Btrfs seed (writable parent, `user_subvol_rm_allowed`). `ToolCollection.create` and omitted agent `tools` both require it, with no ordinary-filesystem fallback. Do not silently swap in other tools when prerequisites are missing; report them.
 - **Ownership.** Explicit tool arrays remain caller-owned. Acquire in a guarded sequence so a later constructor failure still closes earlier acquisitions. Drain/close graph members first, then call `LspTool.shutdown()` once after every process-wide LSP user has finished, then close each owned collection. Each `ToolCollection` owns its own ShellMux and policy; agents, graphs, coroutines and MCP connections given that collection borrow it through their own `lease()` and release only that hold. The final release (usually the creator's `close()` or the root graph of `graph.JuncoGraph.create`) closes the mux. Borrowers never close the collection itself. Keep these resources outside multi-round loops when agents persist.
@@ -764,17 +846,24 @@ export type SchedulerOptions<State, N = unknown, T = unknown> = {
   ) => InputSchedule;
 };
 
-export function createScheduler<State, N = unknown, T = unknown>(
-  options: SchedulerOptions<State, N, T>,
-): DataflowScheduler<N, T> & {
+export class Scheduler<State, N = unknown, T = unknown>
+  implements DataflowScheduler<N, T>
   state: State;
-}
+  constructor(options: SchedulerOptions<State, N, T>)
 
-export function createRoundRobinScheduler<N = unknown, T = unknown>(): DataflowScheduler<N, T> & {
-  state: NodeId | undefined;
-}
+export class RoundRobinScheduler<N = unknown, T = unknown> extends Scheduler<
+  NodeId | undefined,
+  N,
+  T
+>
+  constructor()
 
-export function createParallelScheduler<N = unknown, T = unknown>(): DataflowScheduler<N, T>
+export class ParallelScheduler<N = unknown, T = unknown> extends Scheduler<
+  undefined,
+  N,
+  T
+>
+  constructor()
 ```
 
 Verbatim signature excerpts (Pi scheduler; `scheduleParameters` is implementation-local):
@@ -808,8 +897,9 @@ export type PiSchedulerOptions<
   P extends PromptTemplate = PromptTemplate,
 > = Omit<
   AgenticOptions<S, P, ScheduleTool>,
-  "tools" | "activeToolNames" | "model" | "models" | "session"
+  "tools" | "activeToolNames" | "model" | "models" | "session" | "prompt"
 > & {
+  readonly prompt?: string; // string-only: no prompt callback for schedulers
   readonly model?: AgenticOptions<S, P, ScheduleTool>["model"];
   readonly models?: AgenticOptions<S, P, ScheduleTool>["models"] | ModelRuntime;
   readonly session?: Session;
@@ -829,53 +919,68 @@ export class PiScheduler<
     options: PiSchedulerOptions<N, T, S, P>,
   ): Promise<PiScheduler<N, T, S, P>>
 
-export async function createAgencyScheduler<
-  S extends Skill = Skill,
-  P extends PromptTemplate = PromptTemplate,
-  N = AgenticInput,
-  T = AssistantMessage,
->(
-  getGraph: () => JuncoGraph<N, T> | undefined,
-  options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> = {},
-): Promise<PiScheduler<N, T, S, P>>
+// graph.JuncoGraph:
+  static async pi<
+    S extends Skill = Skill,
+    P extends PromptTemplate = PromptTemplate,
+    N = AgenticInput,
+    T = AssistantMessage,
+  >(
+    options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> & {
+      readonly policy: ToolCollection["policy"];
+      readonly tracer?: DataflowTracer;
+      readonly window?: Width;
+      readonly threads?: Width;
+    },
+  ): Promise<JuncoGraph<N, T, unknown, PiScheduler<N, T, S, P>>>
 ```
 
 `ScheduleTool` is the Pi scheduler's sole model tool, with the fixed protocol `schedule({ lanes })` where `lanes: string[][]` are node IDs; each successful call runs exactly one bounded graph window and returns a fresh `SchedulerInfo`.
 
 | Requirement | Construction and drive |
 |---|---|
-| Ordinary independent agent or mixed work | `graph.createParallelAgentGraph(policy)`; `await workflow.run()`. Its agency-aware live reads avoid redelivering retained values. |
-| Pure deterministic parallel graph | `schedulers.createParallelScheduler()`, `graph.Width(1)`, `graph.UNBOUNDED`; `run()` or `step()`. One lane per available node; a finite thread bound does not throttle it and can reject the plan. |
-| One-node-at-a-time deterministic fairness | `schedulers.createRoundRobinScheduler()`, `graph.Width(1)`, `graph.Width(1)`; `run()` or `step()`. Rotation follows string ID order, so `"1" < "10" < "2"`. |
-| Custom or model-driven scheduling | `createScheduler` only for a requested policy; `createAgencyScheduler` when a model must judge scheduling. Drive with the Pi protocol below. |
+| Ordinary independent agent or mixed work | `graph.JuncoGraph.parallel(policy)`; `await workflow.run()`. Its agency-aware live reads avoid redelivering retained values. |
+| Pure deterministic parallel graph | `new schedulers.ParallelScheduler()`, `graph.Width.create(1)`, `graph.UNBOUNDED`; `run()` or `step()`. One lane per available node; a finite thread bound does not throttle it and can reject the plan. |
+| One-node-at-a-time deterministic fairness | `new schedulers.RoundRobinScheduler()`, `graph.Width.create(1)`, `graph.Width.create(1)`; `run()` or `step()`. Rotation follows string ID order, so `"1" < "10" < "2"`. |
+| Custom or model-driven scheduling | `new schedulers.Scheduler({ state, schedule, resolveInputs? })` only for a requested policy; `graph.JuncoGraph.pi(...)` when a model must judge scheduling. Drive with the Pi protocol below. |
 
-**Custom policies.** A `Schedule` is lanes × turns; same-column lanes run concurrently; input reads are explicit (`triggerInputs(candidate)` for ordinary reads); `state` is a value, not a factory, and persists across calls. A repeated-batch policy must supply a live `resolveInputs`. One scheduler belongs to one graph. An empty plan while work is available, duplicate IDs in a column, unavailable nodes, invalid reads, and exceeded bounds are errors. There are no exported `RoundRobin` or `Parallel` classes.
+**Custom policies.** A `Schedule` is lanes × turns; same-column lanes run concurrently; input reads are explicit (`triggerInputs(candidate)` for ordinary reads); `state` is a value, not a factory, and persists across calls. A repeated-batch policy must supply a live `resolveInputs`. One scheduler belongs to one graph. An empty plan while work is available, duplicate IDs in a column, unavailable nodes, invalid reads, and exceeded bounds are errors. `RoundRobinScheduler` and `ParallelScheduler` extend `Scheduler` and expose its `.state`.
 
-**Model-driven agency.** Construction is a cycle:
+**Model-driven agency.** Construction:
 
-1. Declare `let workflow: graph.JuncoGraph | undefined`.
-2. Create a native session: `const repo = new MemorySessionRepo()` and `const session = await repo.create({}, BACKGROUND_CONTEXT)` (both from `@earendil-works/pi-agent-core`; not the coding-agent `SessionManager`).
-3. `const scheduler = await schedulers.createAgencyScheduler(() => workflow, { model, models, session, systemPrompt, prompt })`, passing the currently resolved `Model<Api>`, the runtime, and the session so the factory uses `PiScheduler.make`. Never rely on the factory's fixed-model default when `model` is omitted.
-4. `const constructed = new graph.JuncoGraph(scheduler, graph.UNBOUNDED, graph.UNBOUNDED, tracer.createTracer())`, register and wire nodes, then `workflow = constructed`.
-5. Drive only the scheduler: loop `await scheduler.next()`; continue after `kind === "yield"`, throw the error after `kind === "failed"`, finish after `kind === "settled"` (require `message.stopReason === "stop"`); `done` before settlement is an error. Do not start a competing `workflow.run()`: the scheduler's synchronous `schedule()` only consumes the model's staged decision.
-6. Read results with `workflow.result(id)`, which returns an fp-ts `Option` (no fp-ts import needed): `const r = workflow.result(id); if (r._tag !== "Some") throw …; use(r.value)`.
-7. In `finally`, `await workflow.close()` (cascades to the scheduler, which owns the transferred session, and to every member), then `await repo.close(BACKGROUND_CONTEXT)`.
+1. Create a native session: `const repo = new MemorySessionRepo()` and `const session = await repo.create({}, BACKGROUND_CONTEXT)` (both from `@earendil-works/pi-agent-core`; not the coding-agent `SessionManager`).
+2. `const workflow = await graph.JuncoGraph.pi({ model, models, session, systemPrompt, prompt, policy })`, passing the currently resolved `Model<Api>`, the runtime, and the session so it uses `PiScheduler.make`. Never rely on the fixed-model default (`PiScheduler.opus`) when `model` is omitted. `tracer` defaults to `tracer.StdoutTracer.shared()`, `window`/`threads` to `graph.UNBOUNDED`. Then `const scheduler = workflow.scheduler`, and register and wire nodes.
+3. Drive only the scheduler: loop `await scheduler.next()`; continue after `kind === "yield"`, throw the error after `kind === "failed"`, finish after `kind === "settled"` (require `message.stopReason === "stop"`); `done` before settlement is an error. Do not start a competing `workflow.run()`: the scheduler's synchronous `schedule()` only consumes the model's staged decision.
+4. Read results with `workflow.result(id)`, which returns an fp-ts `Option` (no fp-ts import needed): `const r = workflow.result(id); if (r._tag !== "Some") throw …; use(r.value)`.
+5. In `finally`, `await workflow.close()` (cascades to the scheduler, which owns the transferred session, and to every member), then `await repo.close(BACKGROUND_CONTEXT)`.
 
-**Multiple model-scheduled rounds with persistent agents.** Closing a graph *or* its scheduler closes every member, so never close a round's graph or scheduler when the round ends. Build each round as a fresh `JuncoGraph` plus its own agency scheduler (one scheduler per graph; each with its own session from the shared repository) whose nodes reuse the persistent agents, staged with that round's `prompt`. Keep every round graph in a list. After a round settles, compact *that* round graph (each persistent agent appears there once). In the outer `finally`, close every round graph (agent close is idempotent), flush each distinct tracer, then close the repository.
+**Multiple model-scheduled rounds with persistent agents.** Closing a graph *or* its scheduler closes every member, so never close a round's graph or scheduler when the round ends. Build each round as a fresh `graph.JuncoGraph.pi(...)` graph (one scheduler per graph; each with its own session from the shared repository) whose nodes reuse the persistent agents, staged with that round's `agent.stagePrompt(prompt)`. Keep every round graph in a list. After a round settles, compact *that* round graph (`await roundGraph.compact(policy)`; each persistent agent appears there once). In the outer `finally`, close every round graph (agent close is idempotent), flush each distinct tracer, then close the repository.
 
 Quiescence is not universal node completion, and the runtime rejects a normal scheduler settlement while graph work remains available.
 
-### compaction
+### Graph compaction
 
-Verbatim signature excerpts:
+Verbatim signature excerpts (`CompactionPolicy` is exported at the package root and as `graph.nodes.CompactionPolicy`):
 
 ```text
-export type CompactionPolicy = "all" | "more-than-forty" | "all-available" | "more-than-forty-available";
+export type CompactionPolicy =
+  | "all"
+  | "more-than-forty"
+  | "all-available"
+  | "more-than-forty-available";
 
-export async function compactGraph<A extends Agentic<N, T>, N, T, EH, Q extends DataflowScheduler<N, T>>(
-  graph: DataflowGraph<A, N, T, EH, Q>,
-  policy: CompactionPolicy,
-): Promise<void>
+// graph.JuncoGraph:
+  static async compact<
+    A extends Agentic<N, T>,
+    N,
+    T,
+    EH,
+    Q extends DataflowScheduler<N, T>,
+  >(
+    graph: DataflowGraph<A, N, T, EH, Q>,
+    policy: CompactionPolicy,
+  ): Promise<void>
+  compact(policy: CompactionPolicy): Promise<void> // JuncoGraph.compact(this, policy)
 ```
 
 - `"all"`: every direct prompt-agent node state. `"more-than-forty"`: those whose context is strictly above 40% of their model's context window. `"all-available"`: direct agents in one current `available()` snapshot. `"more-than-forty-available"`: the intersection.
@@ -924,17 +1029,18 @@ export class StdoutTracer implements DataflowTracer
   complain(nodeId: NodeIdType, complaint: string): void
   flush(): Promise<void>
 
-export function createTracer(): DataflowTracer
+export class StdoutTracer implements DataflowTracer
+  static shared(): StdoutTracer
 ```
 
 `DataflowTracer` is an interface a backend implements; never `new` it.
 
-- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`) and a policy as its fifth; `createParallelAgentGraph(policy)` (and `graph.Spawn`) default to `tracer.createTracer()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
-- **Backend selection.** `tracer.createTracer()` returns one shared backend per process: `tracer.StdoutTracer` by default, which prints each run's topology as a Unicode graph followed by every activation's full inputs and outcomes (payloads may be sensitive); or, when the user wants Opik, run with `bun run --feature=opik …` (needs the optional `dataflow-engine-opik` and `opik` modules). Any `tracer.DataflowTracer` passed explicitly always wins. The Opik adapter is not a namespace export; never silently fall back to another backend after a configuration failure.
+- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`) and a policy as its fifth; `JuncoGraph.parallel(policy)`, `JuncoGraph.spawn` and `JuncoGraph.pi` default to `tracer.StdoutTracer.shared()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
+- **Backend selection.** `tracer.StdoutTracer.shared()` returns one shared `StdoutTracer` (named `JuncoGraph.run`) per process, which prints each run's topology as a Unicode graph followed by every activation's full inputs and outcomes (payloads may be sensitive). Any `tracer.DataflowTracer` passed explicitly always wins; the Opik adapter (`dataflow-engine-opik`) is not a namespace export and must be passed explicitly. Never silently fall back to another backend after a configuration failure.
 - **Callbacks** are synchronous and read-only. `startRun` fires once per `run()`/`step()`; `startNode` fires per activation with phase `"prime"` (no view, `inputs === undefined`) or `"resume"` (the delivered view); run `end` receives cumulative results; `fail` reports the exact rejection or raw activation cause. `complain` fires when an agent node's always-on `complain` tool records an issue (node ID and text only; the full issue is in `tools.issueLog`), at any time. Views and result maps are live: snapshot anything retained. The engine warns about and ignores observer exceptions.
 - **Flushing** is caller-owned and separate from disposal:
   `try { … } finally { try { await workflow.close(); } finally { await workflow.tracer.flush(); } }`.
-  `workflow.tracer` exposes the supplied or automatic backend; every graph given `createTracer()` shares a single backend instance. Share one backend across child graphs and flush each distinct backend once after all users stop (collect them in a `Set`). A successful flush does not prove remote ingestion.
+  `workflow.tracer` exposes the supplied or automatic backend; every graph given `StdoutTracer.shared()` shares a single backend instance. Share one backend across child graphs and flush each distinct backend once after all users stop (collect them in a `Set`). A successful flush does not prove remote ingestion.
 
 ### Supporting Pi APIs
 
@@ -982,11 +1088,11 @@ close(context: Context): Promise<void>;
 
 ## Composition patterns
 
-**Feedback recurrence.** A source (`emitOnce`, trigger `always()`) seeds the recurrence; the recurrence node's trigger `anyOf(on(seed), on(loop))` takes seed or feedback; a self-edge (`addEdge(id, id, loop)`) carries the next state; the task's finite count ends production with a `return`. A generator cannot emit and return in one activation, so the activation that emits the last value still sends feedback; the next activation checks the count and returns. Assert the recurrence's result in the `run()` map to prove completion. A `stepNode` sink drains the output and quiesces without returning. Read the delivered pair with `graph.from` and check its length/types before use instead of non-null assertions. Ten Fibonacci values from seeds `0, 1` are `[0,1,1,2,3,5,8,13,21,34]`.
+**Feedback recurrence.** A source (`new EmitOnce(…)`, trigger `TriggerRule.always()`) seeds the recurrence; the recurrence node's trigger `TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop))` takes seed or feedback; a self-edge (`addEdge(id, id, loop)`) carries the next state; the task's finite count ends production with a `return`. A generator cannot emit and return in one activation, so the activation that emits the last value still sends feedback; the next activation checks the count and returns. Assert the recurrence's result in the `run()` map to prove completion. A `new StepNode(…)` sink drains the output and quiesces without returning. Read the delivered pair with `graph.from` and check its length/types before use instead of non-null assertions. Ten Fibonacci values from seeds `0, 1` are `[0,1,1,2,3,5,8,13,21,34]`.
 
-**Research/review committee.** Agents and their sessions persist; each round builds a fresh `createParallelAgentGraph(policy)`. Value edges fan final reports into deterministic input-preparer nodes, which validate them and send one prepared prompt to each consumer (`recv`). An optional partial handoff is a real message: the producer calls `info`, picks the child entry with `kind === "message"`, `send`s on its `edgeId`, then calls `yield`. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
+**Research/review committee.** Agents and their sessions persist; each round builds a fresh `graph.JuncoGraph.parallel(policy)`. Value edges fan final reports straight into each consumer, whose staged prompt callback validates them and composes its assignment; the consumer's registration carries the receiver contracts. An optional partial handoff is a real message: the producer calls `info`, picks the child entry with `kind === "message"`, `send`s on its `edgeId`, then calls `yield`; the consumer triggers on `anyOf(partial, final)` and its callback reads whichever arrived. A structured verdict tool (an `AgentTool` that records `{ approved, feedback }`) decides the next round: take-and-clear exactly one verdict per round and fail when it is missing; never infer approval from prose. Keep the requested stop rule; do not add a round cap. Do not close the per-round graph (that would close the shared agents); close the agents once when orchestration finishes, and flush the shared tracer once.
 
-**Mixed nested work.** A deterministic source (`Deterministic` + `deterministicNode`, `is_available: () => !published`) publishes one `{ kind: "prompt", text }` to an agent (which `recv`s it from its start prompt) and to a nested graph. The nested `JuncoGraph` is registered with `graph.nodes.graphNode(child, options, { result: finalId, receive, contract })`, exposing only its deliberately selected final node, so intermediate drafts never escape. A deterministic input-preparer joins the required finals with `allOf` and sends the reviewer its prepared prompt. Close the root (recursive) and flush separately.
+**Mixed nested work.** A deterministic source (a `Deterministic` registered as `{ ...options, state: coroutine }`, `is_available: () => !published`) publishes one `{ kind: "prompt", text }` to an agent (which `recv`s it from its start prompt) and to a nested graph. The nested `JuncoGraph` is registered as `{ ...options, state: child, result: finalId, receive, contract }`, exposing only its deliberately selected final node, so intermediate drafts never escape. The reviewer joins the required finals with `TriggerRule.allOf`, and its staged prompt callback validates them and composes its assignment. Close the root (recursive) and flush separately.
 
 ## Executable example
 
@@ -1008,37 +1114,38 @@ import { graph, schedulers, tracer } from "junco-agency";
  */
 async function collectPair(observer?: tracer.DataflowTracer): Promise<number[]> {
   const workflow = new graph.DataflowGraph<void, number | number[], string, never>(
-    schedulers.createParallelScheduler(),
-    graph.Width(1),
+    new schedulers.ParallelScheduler(),
+    graph.Width.create(1),
     graph.UNBOUNDED,
     observer,
   );
-  const leftEdge = graph.messageEdge<number, string>("left");
-  const rightEdge = graph.messageEdge<number, string>("right");
-  const collectedEdge = graph.messageEdge<number[], string>("collected");
+  const leftEdge = graph.Edge.message<number, string>("left");
+  const rightEdge = graph.Edge.message<number, string>("right");
+  const collectedEdge = graph.Edge.message<number[], string>("collected");
   const captured: number[] = [];
 
   /** Sources: each publishes one constant once, then returns its name. */
-  const left = workflow.addNode(graph.nodes.ConstFanout(7, [leftEdge], { state: undefined, ret: "left" }));
-  const right = workflow.addNode(graph.nodes.ConstFanout(9, [rightEdge], { state: undefined, ret: "right" }));
+  const left = workflow.addNode(new graph.nodes.ConstFanout(7, [leftEdge], { state: undefined, ret: "left" }));
+  const right = workflow.addNode(new graph.nodes.ConstFanout(9, [rightEdge], { state: undefined, ret: "right" }));
 
   /** Collector: emits one list in input order once every input has delivered. */
   const collector = workflow.addNode(
-    graph.nodes.ConstFanin([rightEdge, leftEdge], collectedEdge, { state: undefined, ret: "collected" }),
+    new graph.nodes.ConstFanin([rightEdge, leftEdge], collectedEdge, { state: undefined, ret: "collected" }),
   );
 
   /** Sink: streams every delivered list into `captured`; never returns. */
-  const sink = workflow.addNode({
-    state: undefined,
-    trigger: graph.trigger.when(collectedEdge),
-    step: graph.nodes.stepNode<void, number | number[], string>((_state, view) => {
-      for (const payload of graph.from(view, collectedEdge)) {
-        if (!Array.isArray(payload)) throw new Error("Collector emitted a non-array payload");
-        captured.push(...payload);
-      }
-      return [];
-    }),
-  });
+  const sink = workflow.addNode(
+    new graph.nodes.StepNode<void, number | number[], string>(
+      (_state, view) => {
+        for (const payload of graph.from(view, collectedEdge)) {
+          if (!Array.isArray(payload)) throw new Error("Collector emitted a non-array payload");
+          captured.push(...payload);
+        }
+        return [];
+      },
+      { state: undefined, trigger: graph.trigger.TriggerRule.when(collectedEdge) },
+    ),
+  );
 
   workflow
     .addEdge(left, collector, leftEdge)
@@ -1061,10 +1168,10 @@ Run with `bun run <file>.ts`; it prints `[9,7]`.
 ## Before returning
 
 - [ ] No checkout, source, example, or machine paths anywhere; only package imports.
-- [ ] Every name used exists in the namespace it is spelled from (`graph`, `graph.nodes`, `graph.trigger`, `agent`, `tools`, `mcp`, `schedulers`, `compaction`, `tracer`, or a Pi package).
+- [ ] Every name used exists in the namespace it is spelled from (`graph`, `graph.nodes`, `graph.trigger`, `agent`, `tools`, `mcp`, `schedulers`, `tracer`, or a Pi package).
 - [ ] Agent workflows pin models verified *now* (catalog + credentials + official freshness source, dated in JSDoc), or the missing prerequisite is reported. No model IDs were copied from memory or this skill.
 - [ ] Tools are explicit per role, with owners, prerequisites (Bun, language servers, native addon, Btrfs seed), and release order stated.
 - [ ] The stop condition is intentional and matches the task; finite generators can reach their `return`; no added retries, caps, or agents.
-- [ ] Every edge is wired exactly once with the right kind (message vs value); no `msg` on value edges; no duplicate trigger entries.
+- [ ] Every edge is wired exactly once with the right kind (message vs value); no `Message.create` on value edges; no duplicate trigger entries.
 - [ ] The generated program was executed (or typechecked offline) and its output observed; limitations are stated precisely.
 - [ ] Graphs close in `finally`, tracer flush runs even if close fails, shared agents are released only after their last round (by the owning graph close or once by their acquirer), LSP shuts down once, collections and session repos close after their users.

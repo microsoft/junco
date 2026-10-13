@@ -39,6 +39,7 @@ import {
   type EdgeIdType,
   NodeId,
   type NodeIdType,
+  type ParentView,
 } from "dataflow-engine";
 import {
   getJuncoMcpToolIdentity,
@@ -47,13 +48,10 @@ import {
   JuncoMcpTools,
 } from "junco-mcp";
 import {
-  type ComplainTool,
+  AssignedTaskTool,
+  ComplainTool,
   type ComplaintContext,
   type Contract,
-  createAssignedTaskTool,
-  createComplainTool,
-  createTaskTool,
-  createYieldTool,
   InfoTool,
   type Issue,
   invokeComplainTool,
@@ -68,14 +66,16 @@ import {
   SendTool,
   type TaskCall,
   type TaskInput,
+  TaskTool,
   type TaskToolHost,
   type ToolBinding,
   ToolCollection,
-  type ToolCollectionOptions,
+  YieldTool,
 } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import type {
   Agentic,
+  AgenticInput,
   AgenticOptions,
   AgenticStatus,
   AgenticStep,
@@ -156,9 +156,11 @@ export type TaskAgentOptions = {
  * outgoing routes and topology for recv/send/info, its task host, and complaint attribution.
  */
 export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
-  readonly messaging?: NonNullable<Parameters<typeof RecvTool<N, T>>[0]> &
-    NonNullable<Parameters<typeof SendTool<N>>[0]> &
-    NonNullable<Parameters<typeof InfoTool>[0]>;
+  readonly messaging?: NonNullable<
+    ConstructorParameters<typeof RecvTool<N, T>>[0]
+  > &
+    NonNullable<ConstructorParameters<typeof SendTool<N>>[0]> &
+    NonNullable<ConstructorParameters<typeof InfoTool>[0]>;
   readonly task?: TaskToolHost;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
 };
@@ -204,23 +206,6 @@ type OwnedResources = {
   toolCollection?: ToolCollection;
   repo?: MemorySessionRepo;
 };
-
-/** Rejects a missing or unknown policy, or a collection opened under another policy. */
-function checkPolicy(
-  policy: unknown,
-  collection: ToolCollection | undefined,
-): void {
-  if (policy !== "LockPolicy" && policy !== "EmptyPolicy")
-    throw new JuncoAgentError(
-      "invalid_argument",
-      'policy must be "LockPolicy" or "EmptyPolicy"',
-    );
-  if (collection !== undefined && collection.policy !== policy)
-    throw new JuncoAgentError(
-      "invalid_argument",
-      "Collection policy does not match agent policy",
-    );
-}
 
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
@@ -270,14 +255,13 @@ async function failBeforeConstruction(
 /**
  * Expands factory-only sources in order: concrete tools keep their identity, and each MCP
  * definition is connected from `cwd` on `owned.toolCollection`, recorded in `owned` before its
- * tools are appended. A nonempty definition without a collection first creates one under
- * `policy`, owned by `owned`. `signal` cancels connection acquisition only.
+ * tools are appended. A nonempty definition without a collection first creates one under the
+ * collection default, owned by `owned`. `signal` cancels connection acquisition only.
  */
 async function resolveToolSources(
   sources: JuncoAgentTools | undefined,
   cwd: string,
   owned: OwnedResources,
-  policy: ToolCollectionOptions["policy"],
   signal?: AbortSignal,
 ): Promise<AgentTool[]> {
   const tools: AgentTool[] = [];
@@ -285,7 +269,7 @@ async function resolveToolSources(
   for (const source of sources instanceof JuncoMcpTools ? [sources] : sources) {
     if (source instanceof JuncoMcpTools) {
       if (source.size > 0 && owned.toolCollection === undefined) {
-        owned.toolCollection = await ToolCollection.create(cwd, { policy });
+        owned.toolCollection = await ToolCollection.create(cwd);
         owned.collection = owned.toolCollection;
       }
       const connection = await source.connect({
@@ -450,8 +434,30 @@ type Boundary = {
 };
 type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
   acted: boolean;
+  /** The graph view this `next` carried, read only by a staged prompt function. */
+  readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
 };
 const closedError = () => new JuncoAgentError("closed", "JuncoAgent is closed");
+
+/** A staged prompt's text: a function reads, without draining, the graph view of its `next`. */
+function stagedText(
+  prompt: NonNullable<AgenticOptions["prompt"]>,
+  inputs: ParentView<AgenticInput, AssistantMessage> | undefined,
+): string {
+  if (typeof prompt === "string") return prompt;
+  if (inputs === undefined)
+    throw new JuncoAgentError(
+      "invalid_state",
+      "A prompt function requires ParentView inputs",
+    );
+  const text: unknown = prompt(inputs);
+  if (typeof text !== "string")
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "A prompt function must return a string",
+    );
+  return text;
+}
 
 /** A cooperative iterator around a single native Pi lane; the native lane is never public. */
 export class JuncoAgent<
@@ -481,21 +487,18 @@ export class JuncoAgent<
   static async fromResolved(
     options: JuncoAgentResolvedOptions,
   ): Promise<JuncoAgent> {
-    const { cwd, tools, policy, collection, ...native } = options;
+    const { cwd, tools, collection, ...native } = options;
     const owned: OwnedResources = { toolCollection: collection };
     let agent: JuncoAgent;
     try {
-      checkPolicy(policy, collection);
       const resolved = await resolveToolSources(
         tools,
         resolve(cwd ?? process.cwd()),
         owned,
-        policy,
       );
       agent = new JuncoAgent(
         {
           ...native,
-          policy,
           collection: owned.toolCollection,
           tools: resolved,
         },
@@ -535,7 +538,6 @@ export class JuncoAgent<
       session: suppliedSession,
       cwd,
       tools,
-      policy,
       collection,
       ...native
     } = options;
@@ -543,7 +545,6 @@ export class JuncoAgent<
     let session: Session | undefined = suppliedSession;
     let agent: JuncoAgent | undefined;
     try {
-      checkPolicy(policy, collection);
       const models =
         suppliedModels ??
         (await (
@@ -595,24 +596,22 @@ export class JuncoAgent<
         if (owned.toolCollection === undefined) {
           owned.toolCollection = await ToolCollection.create(
             resolve(cwd ?? process.cwd()),
-            { policy },
           );
           owned.collection = owned.toolCollection;
         }
         agentTools = [
           ...owned.toolCollection.tools,
-          createTaskTool(),
-          createYieldTool(),
-          RecvTool(),
-          SendTool(),
-          InfoTool(),
+          new TaskTool(),
+          new YieldTool(),
+          new RecvTool(),
+          new SendTool(),
+          new InfoTool(),
         ];
       } else {
         agentTools = await resolveToolSources(
           tools,
           resolve(cwd ?? process.cwd()),
           owned,
-          policy,
         );
       }
       agent = new JuncoAgent(
@@ -621,7 +620,6 @@ export class JuncoAgent<
           session,
           models,
           model,
-          policy,
           collection: owned.toolCollection,
           tools: agentTools,
         },
@@ -642,12 +640,10 @@ export class JuncoAgent<
   }
 
   readonly #options: AgenticOptions<S, P, T>;
-  /** Authorization policy of this agent's native resources. */
-  readonly policy: ToolCollectionOptions["policy"];
   /**
-   * The collection binding this agent's policy and lifetime, borrowed: the agent holds it through
-   * its own binding, whose tools act as this agent's one policy owner. Take `collection.lease()`
-   * to keep it beyond the agent; never close it directly.
+   * The collection selecting this agent's authorization policy and lifetime, borrowed: the agent
+   * holds it through its own binding, whose tools act as this agent's one policy owner. Take
+   * `collection.lease()` to keep it beyond the agent; never close it directly.
    */
   readonly collection: ToolCollection | undefined;
   readonly #owned: OwnedResources;
@@ -662,9 +658,9 @@ export class JuncoAgent<
     return this.#lane;
   }
   /** This agent's identity for complaints made outside a bound graph node. */
-  readonly nodeId: NodeIdType = NodeId(`agent-${crypto.randomUUID()}`);
+  readonly nodeId: NodeIdType = NodeId.create(`agent-${crypto.randomUUID()}`);
   /** The always-on complaint tool this agent owns; supplied genuine ones are rebound to it. */
-  readonly #complainTool: ComplainTool = createComplainTool();
+  readonly #complainTool: ComplainTool = new ComplainTool();
   /** The collection's genuine `release` tool, always present and active with a collection. */
   readonly #releaseTool: AgentTool | undefined;
   #tools: (T | ComplainTool)[];
@@ -684,7 +680,10 @@ export class JuncoAgent<
   #pendingCompactions = 0;
   #aborting = false;
   #staged:
-    | { readonly text: string; readonly images?: ImageContent[] }
+    | {
+        readonly text: NonNullable<AgenticOptions["prompt"]>;
+        readonly images?: ImageContent[];
+      }
     | undefined;
   #closing = false;
   #closed = false;
@@ -704,9 +703,7 @@ export class JuncoAgent<
     options: AgenticOptions<S, P, T>,
     owned: OwnedResources = {},
   ) {
-    checkPolicy(options.policy, options.collection);
     this.#options = options;
-    this.policy = options.policy;
     this.collection = options.collection;
     this.#owned = owned;
     this.#releaseTool = options.collection?.tools.find(
@@ -740,7 +737,6 @@ export class JuncoAgent<
       images: _images,
       tools: _tools,
       resources: _resources,
-      policy: _policy,
       collection: _collection,
       contract: _contract,
       activeToolNames,
@@ -835,8 +831,8 @@ export class JuncoAgent<
   /**
    * `models` with `streamSimple` giving each request's system prompt {@link RELEASE_INSTRUCTION}
    * (once; the supplied context is never mutated) and snapshotting that outgoing request of the
-   * current run, after every native context hook and provider conversion. Other members pass
-   * through.
+   * current run, after every native context hook and provider conversion. `completeSimple`
+   * (compaction and summaries) goes through the same wrapper. Other members pass through.
    */
   #captureRequests(models: Models): Models {
     const streamSimple: Models["streamSimple"] = (model, supplied, options) => {
@@ -862,10 +858,16 @@ export class JuncoAgent<
       }
       return models.streamSimple(model, context, options);
     };
+    const completeSimple: Models["completeSimple"] = (
+      model,
+      context,
+      options,
+    ) => streamSimple(model, context, options).result();
     const bound = new Map<unknown, unknown>();
     return new Proxy(models, {
       get: (target, key) => {
         if (key === "streamSimple") return streamSimple;
+        if (key === "completeSimple") return completeSimple;
         const value: unknown = Reflect.get(target, key, target);
         if (typeof value !== "function") return value;
         let method = bound.get(value);
@@ -978,9 +980,12 @@ export class JuncoAgent<
             );
           }
           // This agent's own owner-bound counterpart of a collection tool.
-          return await (
-            this.#owned.binding?.tools.get(tool) ?? tool
-          ).execute(id, params, signal, (update) => onUpdate(update));
+          return await (this.#owned.binding?.tools.get(tool) ?? tool).execute(
+            id,
+            params,
+            signal,
+            (update) => onUpdate(update),
+          );
         } catch (error) {
           if (isMarshPolicyDenied(error)) {
             run.batch?.reasons.set(id, {
@@ -1138,6 +1143,24 @@ export class JuncoAgent<
       name,
       ...(args === undefined ? {} : { args }),
     });
+  }
+  stagePrompt(
+    prompt: NonNullable<AgenticOptions<S, P, T>["prompt"]>,
+    options?: { images?: ImageContent[] },
+  ): void {
+    if (this.#closing) throw closedError();
+    if (this.#pendingCompactions > 0)
+      throw new JuncoAgentError("busy", "JuncoAgent compaction is pending");
+    if (this.status !== "idle" || this.#aborting || this.#demands.length > 0) {
+      throw new JuncoAgentError(
+        "busy",
+        "JuncoAgent already has a pending prompt or run",
+      );
+    }
+    this.#staged = {
+      text: prompt,
+      ...(options?.images === undefined ? {} : { images: options.images }),
+    };
   }
   #explicitRun(request: RunRequest): Promise<AssistantMessage> {
     if (this.#closing) return Promise.reject(closedError());
@@ -1419,7 +1442,7 @@ export class JuncoAgent<
       );
     let assigned: T;
     try {
-      assigned = createAssignedTaskTool(input) as AgentTool as T;
+      assigned = new AssignedTaskTool(input) as AgentTool as T;
     } catch (cause) {
       return Promise.reject(
         new JuncoAgentError(
@@ -1494,7 +1517,7 @@ export class JuncoAgent<
    * session. They inherit this agent's current model, thinking level, active tools, resources and
    * harness settings unless overridden; a tool subset can only narrow the active tools. Ordinary
    * tools are shared; each MCP definition this agent registered is reconnected for every child,
-   * which exposes only the selected original tools, on this agent's collection and policy. Each
+   * which exposes only the selected original tools, on this agent's collection. Each
    * child holds its own collection lease. Everything is validated before any child is created; on failure or
    * `signal` abort every created child is closed again.
    */
@@ -1618,13 +1641,13 @@ export class JuncoAgent<
           try {
             session = await owned.repo!.create({}, BACKGROUND_CONTEXT);
             for (const { source, cwd } of registrations)
-              await resolveToolSources(source, cwd, owned, this.policy, signal);
+              await resolveToolSources(source, cwd, owned, signal);
             live();
             // Rebind each selected MCP tool to the one fresh wrapper of the same operation; an
             // assigned batch belongs to this agent, so a child gets an ordinary task tool.
             const tools = selection.map(({ tool, mcp }) => {
               if (mcp === undefined)
-                return isAssignedTaskTool(tool) ? createTaskTool() : tool;
+                return isAssignedTaskTool(tool) ? new TaskTool() : tool;
               const { serverName, originalToolName } = mcp.identity;
               const fresh = owned.mcpSources![mcp.occurrence]!.tools.filter(
                 (candidate) => {
@@ -1649,7 +1672,6 @@ export class JuncoAgent<
                 session,
                 models,
                 model,
-                policy: this.policy,
                 collection: owned.toolCollection,
                 thinkingLevel,
                 systemPrompt: this.#options.systemPrompt,
@@ -2061,11 +2083,14 @@ export class JuncoAgent<
   [Symbol.asyncIterator](): this {
     return this;
   }
-  next(): Promise<IteratorResult<AgenticStep, void>> {
+  next(
+    inputs?: ParentView<AgenticInput, AssistantMessage>,
+  ): Promise<IteratorResult<AgenticStep, void>> {
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });
     const demand: Demand = {
       ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(),
       acted: false,
+      ...(inputs === undefined ? {} : { inputs }),
     };
     this.#demands.push(demand);
     this.#pump();
@@ -2116,9 +2141,16 @@ export class JuncoAgent<
             },
           });
         } else {
+          let prompt: string;
+          try {
+            prompt = stagedText(text, demand.inputs);
+          } catch (error) {
+            this.#publish({ step: { kind: "failed", error } });
+            return;
+          }
           void this.#admit({
             kind: "prompt",
-            prompt: text,
+            prompt,
             ...(images === undefined ? {} : { images }),
           }).catch(() => {});
         }

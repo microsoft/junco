@@ -27,8 +27,10 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import type { DataflowTracer, EdgeIdType } from "dataflow-engine";
+import type { DataflowTracer, EdgeIdType, ParentView } from "dataflow-engine";
 import {
+  type AgenticInput,
+  type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
   JuncoAgentError,
@@ -95,7 +97,7 @@ export type MockTranscript<
   P extends PromptTemplate,
   T extends AgentTool,
 > = {
-  readonly prompt?: string;
+  readonly prompt?: AgenticOptions["prompt"];
   readonly images?: ImageContent[];
   readonly history?: readonly AgentMessage[];
   readonly models?: readonly Model<Api>[];
@@ -166,7 +168,11 @@ type Boundary = {
   readonly run?: RunRecord;
   readonly gate?: Resolvers<void>;
 };
-type Demand = Resolvers<IteratorResult<AgenticStep, void>> & { acted: boolean };
+type Demand = Resolvers<IteratorResult<AgenticStep, void>> & {
+  acted: boolean;
+  /** The graph view this `next` carried, read only by a staged prompt function. */
+  readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
+};
 
 const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
 const invalidTranscript = () =>
@@ -259,7 +265,10 @@ export class MockAgent<
   readonly #hooks = new Map<HookName, StoredHook[]>();
 
   #staged:
-    | { readonly text: string; readonly images?: ImageContent[] }
+    | {
+        readonly text: NonNullable<AgenticOptions["prompt"]>;
+        readonly images?: ImageContent[];
+      }
     | undefined;
   #run: RunRecord | undefined;
   readonly #drives = new Set<Promise<unknown>>();
@@ -386,6 +395,29 @@ export class MockAgent<
   ): Promise<AssistantMessage> {
     this.#record("prompt", options === undefined ? [text] : [text, options]);
     return this.#explicitRun(() => this.#user(text, options?.images));
+  }
+
+  stagePrompt(
+    prompt: NonNullable<AgenticOptions["prompt"]>,
+    options?: { images?: ImageContent[] },
+  ): void {
+    this.#record(
+      "stagePrompt",
+      options === undefined ? [prompt] : [prompt, options],
+    );
+    if (this.#closing) throw closedError();
+    if (this.#pendingCompactions > 0)
+      throw new JuncoAgentError("busy", "MockAgent compaction is pending");
+    if (this.status !== "idle" || this.#aborting || this.#demands.length > 0) {
+      throw new JuncoAgentError(
+        "busy",
+        "MockAgent already has a pending prompt or run",
+      );
+    }
+    this.#staged = {
+      text: prompt,
+      ...(options?.images === undefined ? {} : { images: options.images }),
+    };
   }
 
   skill(
@@ -951,11 +983,14 @@ export class MockAgent<
     return this;
   }
 
-  next(): Promise<IteratorResult<AgenticStep, void>> {
+  next(
+    inputs?: ParentView<AgenticInput, AssistantMessage>,
+  ): Promise<IteratorResult<AgenticStep, void>> {
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });
     const demand: Demand = {
       ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(),
       acted: false,
+      ...(inputs === undefined ? {} : { inputs }),
     };
     this.#demands.push(demand);
     this.#pump();
@@ -1003,7 +1038,29 @@ export class MockAgent<
             },
           });
         } else {
-          void this.#admit(this.#user(text, images)).catch(() => {});
+          // A function reads, without draining, the graph view of this `next`.
+          let prompt: unknown = text;
+          try {
+            if (typeof text === "function") {
+              if (demand.inputs === undefined)
+                throw new JuncoAgentError(
+                  "invalid_state",
+                  "A prompt function requires ParentView inputs",
+                );
+              prompt = text(demand.inputs);
+              if (typeof prompt !== "string")
+                throw new JuncoAgentError(
+                  "invalid_argument",
+                  "A prompt function must return a string",
+                );
+            }
+          } catch (error) {
+            this.#publish({ step: { kind: "failed", error } });
+            return;
+          }
+          void this.#admit(this.#user(prompt as string, images)).catch(
+            () => {},
+          );
         }
       }
       return;

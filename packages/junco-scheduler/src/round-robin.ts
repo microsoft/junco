@@ -1,9 +1,5 @@
-import {
-  type DataflowScheduler,
-  type NodeIdType as NodeId,
-  triggerInputs,
-} from "dataflow-engine";
-import { createScheduler } from "./scheduler.js";
+import { type NodeIdType as NodeId, triggerInputs } from "dataflow-engine";
+import { Scheduler } from "./scheduler.js";
 
 /**
  * Run exactly one candidate occurrence per window, rotating through node ids in increasing
@@ -20,21 +16,21 @@ import { createScheduler } from "./scheduler.js";
  * @example
  * ```ts
  * import { DataflowGraph, Width } from "dataflow-engine";
- * import { createRoundRobinScheduler } from "junco-scheduler";
+ * import { RoundRobinScheduler } from "junco-scheduler";
  *
- * const scheduler = createRoundRobinScheduler<number, string>();
- * const graph = new DataflowGraph<void, number, string, never>(scheduler, Width(1), Width(1));
+ * const scheduler = new RoundRobinScheduler<number, string>();
+ * const graph = new DataflowGraph<void, number, string, never>(scheduler, Width.create(1), Width.create(1));
  * // ...after some graph.step() calls, scheduler.state is the last id that ran.
  * ```
  */
-export function createRoundRobinScheduler<
-  N = unknown,
-  T = unknown,
->(): DataflowScheduler<N, T> & {
-  state: NodeId | undefined;
-} {
-  const scheduler: DataflowScheduler<N, T> & { state: NodeId | undefined } =
-    createScheduler<NodeId | undefined, N, T>({
+export class RoundRobinScheduler<N = unknown, T = unknown> extends Scheduler<
+  NodeId | undefined,
+  N,
+  T
+> {
+  constructor() {
+    // The policy runs only after construction, so it may assign the cursor through `this`.
+    super({
       state: undefined,
       schedule: (available, last) => {
         let first: NodeId | undefined;
@@ -50,11 +46,11 @@ export function createRoundRobinScheduler<
         }
         const chosen = next ?? first;
         if (chosen === undefined) return [];
-        scheduler.state = chosen;
+        this.state = chosen;
         return [
           [{ id: chosen, inputs: triggerInputs(available.get(chosen)!) }],
         ];
       },
     });
-  return scheduler;
+  }
 }

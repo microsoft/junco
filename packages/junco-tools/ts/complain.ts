@@ -121,48 +121,51 @@ const complainParameters = deepFreeze(
   ),
 );
 
-/** The always-on `complain` tool. */
-export type ComplainTool = AgentTool<typeof complainParameters, undefined>;
-
 /** Tools this module created. A same-named or copied tool is not a complaint tool. */
 const complainTools = new WeakSet<object>();
 
 /** Shared by executions that receive no abort signal. */
 const neverAborted = new AbortController().signal;
 
+/** The always-on `complain` tool. */
+export type ComplainTool = AgentTool<typeof complainParameters, undefined>;
+
 /**
- * A fresh, frozen `complain` tool recording through `host` with the context `context` resolves at
- * execution time. Without either, direct execution fails rather than pretend success.
+ * Constructs a fresh, frozen {@link ComplainTool} recording through `host` with the context
+ * `context` resolves at execution time. Without either, direct execution fails rather than pretend
+ * success.
  */
-export function createComplainTool<N = unknown>(
+export const ComplainTool: new <N = unknown>(
   host?: ComplainToolHost,
   context?: () => ComplaintContext<N>,
-): ComplainTool {
-  const tool: ComplainTool = {
-    name: "complain",
-    label: "complain",
-    description:
-      "Report constraints, communication failures, or other obstacles you encounter. Explain the " +
-      "problem in your own words. The complaint is recorded for debugging; this tool does not " +
-      "pause execution or fix the problem.",
-    parameters: complainParameters,
-    executionMode: "sequential",
-    execute: (_toolCallId, input, signal) => {
+) => ComplainTool = class<N> {
+  name = "complain";
+  label = "complain";
+  description =
+    "Report constraints, communication failures, or other obstacles you encounter. Explain the " +
+    "problem in your own words. The complaint is recorded for debugging; this tool does not " +
+    "pause execution or fix the problem.";
+  parameters = complainParameters;
+  executionMode: ComplainTool["executionMode"] = "sequential";
+  execute: ComplainTool["execute"];
+
+  constructor(host?: ComplainToolHost, context?: () => ComplaintContext<N>) {
+    this.execute = (_toolCallId, input, signal) => {
       if (host === undefined || context === undefined)
         throw new Error("complain requires an agent context");
       return record(host, context, input, signal);
-    },
-  };
-  complainTools.add(tool);
-  return Object.freeze(tool);
-}
+    };
+    complainTools.add(this);
+    Object.freeze(this);
+  }
+};
 
-/** Whether `tool` is a `complain` tool created by {@link createComplainTool}. */
+/** Whether `tool` is a `complain` tool constructed by {@link ComplainTool}. */
 export function isComplainTool(tool: object): tool is ComplainTool {
   return complainTools.has(tool);
 }
 
-/** Executes a {@link createComplainTool} tool through `host` and `context`, ignoring its bindings. */
+/** Executes a {@link ComplainTool} through `host` and `context`, ignoring its bindings. */
 export function invokeComplainTool<N>(
   tool: ComplainTool,
   host: ComplainToolHost,
@@ -172,7 +175,7 @@ export function invokeComplainTool<N>(
   signal: AbortSignal,
 ): Promise<AgentToolResult<undefined>> {
   if (!isComplainTool(tool))
-    throw new TypeError("Not a complain tool created by createComplainTool");
+    throw new TypeError("Not a complain tool constructed by ComplainTool");
   return record(host, () => context, input, signal);
 }
 

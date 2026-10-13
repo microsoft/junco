@@ -24,7 +24,12 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { acquireShellMux, createShellMuxOperations } from "../dist/index.js";
+import {
+  isMarshPolicyDenied,
+  LockPolicy,
+  ShellMuxLease,
+  ShellMuxOperations,
+} from "../dist/index.js";
 import { readBtrfsFixture } from "./btrfs-fixture.mjs";
 import {
   cleanup,
@@ -177,9 +182,9 @@ async function packagedSession(sessionManager) {
  * owner can still open the seed and run on it.
  */
 async function assertSeedUsable(seed) {
-  const probe = createShellMuxOperations({
+  const probe = new ShellMuxOperations({
     principal: "seed-probe",
-    policy: "LockPolicy",
+    policy: LockPolicy,
   });
   try {
     const chunks = [];
@@ -199,7 +204,7 @@ async function assertSeedUsable(seed) {
  * prints `ready`, then exits on its own once the host creates `gate`.
  */
 async function managedHold(t, { gate, ready, done }) {
-  const lease = await acquireShellMux(state.seed, { policy: "LockPolicy" });
+  const lease = await ShellMuxLease.create(state.seed, { policy: LockPolicy });
   const seen = deferred(t.signal, `${ready} readiness`);
   const hold = { lease, output: "" };
   try {
@@ -491,17 +496,187 @@ test("a new session cannot inherit the previous principal's grants", {
   await assertSeedUsable(state.seed);
 });
 
+/** Runs `command` at the seed through `mux`; resolves its exit code, rejecting when denied. */
+async function managed(mux, command, label) {
+  const result = await mux
+    .start(
+      {
+        command,
+        cwd: state.seed,
+        principal: label,
+        env: nativeEnv(state.testRoot),
+      },
+      () => {},
+    )
+    .wait();
+  return result.exitCode;
+}
+
+/** A live `cat` sharing the seed, so shared-mode commands on `mux` take the managed route. */
+function peer(mux) {
+  return mux.spawn(
+    {
+      command: "cat",
+      cwd: state.seed,
+      principal: "peer",
+      env: nativeEnv(state.testRoot),
+    },
+    () => {},
+    () => {},
+  );
+}
+
+test("a release publishes without a live peer and survives reopening the seed", {
+  timeout: 120_000,
+}, async () => {
+  const lease = await ShellMuxLease.create(state.seed, { policy: LockPolicy });
+  try {
+    assert.equal(lease.mux.sandbox, "shared");
+    const owner = lease.mux.forkOwner();
+    const challenger = lease.mux.forkOwner();
+    const live = await peer(lease.mux);
+    assert.equal(
+      await managed(
+        owner,
+        "printf owned > src/released.txt; printf kept > src/kept.txt",
+        "owner",
+      ),
+      0,
+    );
+    await assert.rejects(
+      managed(challenger, "printf stolen > src/released.txt", "challenger"),
+      isMarshPolicyDenied,
+    );
+    await assert.rejects(
+      challenger.release(state.seed, "src/released.txt"),
+      isMarshPolicyDenied,
+    );
+    assert.equal((await live.finish()).exitCode, 0);
+
+    // No peer is alive, yet the release takes the managed route and publishes. It writes nothing.
+    await owner.release(state.seed, "src/released.txt");
+    assert.equal(
+      await readFile(join(state.seed, "src/released.txt"), "utf8"),
+      "owned",
+    );
+  } finally {
+    await lease.release();
+  }
+
+  // A fresh mux and a fresh owner: the release is durable, and the unreleased file is not freed.
+  const reopened = await ShellMuxLease.create(state.seed, {
+    policy: LockPolicy,
+  });
+  try {
+    const writer = reopened.mux.forkOwner();
+    const live = await peer(reopened.mux);
+    assert.equal(
+      await managed(writer, "printf next > src/released.txt", "writer"),
+      0,
+    );
+    await assert.rejects(
+      managed(writer, "printf lost > src/kept.txt", "writer"),
+      isMarshPolicyDenied,
+    );
+    assert.equal((await live.finish()).exitCode, 0);
+    assert.equal(
+      await readFile(join(state.seed, "src/released.txt"), "utf8"),
+      "next",
+    );
+    assert.equal(
+      await readFile(join(state.seed, "src/kept.txt"), "utf8"),
+      "kept",
+    );
+  } finally {
+    await reopened.release();
+  }
+  await assertSeedUsable(state.seed);
+});
+
+test("a removal releases exactly the removed names across reopening the seed", {
+  timeout: 120_000,
+}, async () => {
+  const options = { policy: LockPolicy, sandbox: "always" };
+  const lease = await ShellMuxLease.create(state.seed, options);
+  try {
+    const owner = lease.mux.forkOwner();
+    const challenger = lease.mux.forkOwner();
+    assert.equal(
+      await managed(
+        owner,
+        "printf a > src/removed.txt; printf b > src/recreated.txt",
+        "owner",
+      ),
+      0,
+    );
+    // Removal needs the same authority as an edit, so it cannot clear a foreign claim.
+    await assert.rejects(
+      managed(challenger, "rm src/removed.txt", "challenger"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(
+      await readFile(join(state.seed, "src/removed.txt"), "utf8"),
+      "a",
+    );
+    assert.equal(
+      await managed(
+        owner,
+        [
+          "rm src/removed.txt",
+          "rm src/recreated.txt",
+          "printf again > src/recreated.txt",
+          "printf x > src/transient.txt",
+          "rm src/transient.txt",
+          "mkdir src/dir",
+          "rmdir src/dir",
+        ].join("; "),
+        "owner",
+      ),
+      0,
+    );
+  } finally {
+    await lease.release();
+  }
+
+  const reopened = await ShellMuxLease.create(state.seed, options);
+  try {
+    const writer = reopened.mux.forkOwner();
+    // Recreating a removed name needs no read of what no longer exists, even for a
+    // create-then-remove that left no diff at all.
+    assert.equal(
+      await managed(
+        writer,
+        "printf mine > src/removed.txt; printf mine > src/transient.txt; mkdir src/dir",
+        "writer",
+      ),
+      0,
+    );
+    // A name recreated after its removal is owned again.
+    await assert.rejects(
+      managed(writer, "printf lost > src/recreated.txt", "writer"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(
+      await readFile(join(state.seed, "src/recreated.txt"), "utf8"),
+      "again",
+    );
+  } finally {
+    await reopened.release();
+  }
+  await assertSeedUsable(state.seed);
+});
+
 test("a nested btrfs seed is refused without disturbing an open mux", {
   timeout: 120_000,
 }, async () => {
-  const options = { policy: "LockPolicy" };
-  const lease = await acquireShellMux(state.seed, options);
+  const options = { policy: LockPolicy };
+  const lease = await ShellMuxLease.create(state.seed, options);
   const nested = join(state.seed, "nested-seed");
   try {
     await promisify(execFile)("btrfs", ["subvolume", "create", nested]);
     await assert.rejects(lease.mux.validateCwd(nested), Error);
     await assert.rejects(lease.mux.validateCwd(state.testRoot), Error);
-    const again = await acquireShellMux(join(state.seed, "src"), options);
+    const again = await ShellMuxLease.create(join(state.seed, "src"), options);
     await again.release();
     assert.equal(await lease.mux.exists(state.seed, "src/file0.txt"), true);
     await assertSeedUsable(state.seed);

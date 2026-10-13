@@ -1,6 +1,5 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import {
-  always,
   EdgeId,
   type EdgeIdType,
   type Message,
@@ -8,8 +7,10 @@ import {
   type NodeGenerator,
   NodeId,
   type NodeOptions,
+  type NodeSpec,
   type ParentView,
   type StepFn,
+  TriggerRule,
 } from "dataflow-engine";
 import {
   JuncoAgent,
@@ -24,11 +25,11 @@ import type {
   TaskInput,
   TaskToolDetails,
   TaskToolHost,
-  ToolCollectionOptions,
+  ToolCollection,
 } from "junco-tools";
+import { cancellation } from "./agent-operations.js";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
-import { cancellation } from "./graph-node.js";
-import type { JuncoGraph } from "./junco-graph.js";
+import { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 import {
   type NodePolicy,
@@ -37,16 +38,6 @@ import {
   registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
-import { appendSpawnChildren, Spawn } from "./spawn.js";
-
-/** How a prompt-agent node executes; carries no registration options. */
-export type AgentNodeBinding = {
-  /**
-   * Starts an idle agent without a staged prompt, once, on the node's first activation. One agent
-   * can run in successive graphs, each node with its own prompt.
-   */
-  readonly prompt?: string;
-};
 
 /** The final report a subagent sends back to the agent that started it, as JSON follow-up text. */
 type TaskReport = {
@@ -96,8 +87,8 @@ type TaskRecord = {
   readonly batch: TaskBatch;
 };
 
-/** The node-internal binding: the public one, plus what a task subagent's node adds. */
-type DriverBinding = AgentNodeBinding & {
+/** How a prompt-agent node executes, beyond its registration options: what a task subagent adds. */
+type DriverBinding = {
   /** Messages routed once the final result is ready, one activation before it is returned. */
   readonly complete?: (
     this: Node<Agentic, AgenticInput, AssistantMessage>,
@@ -106,7 +97,7 @@ type DriverBinding = AgentNodeBinding & {
   readonly inputMode?: "all-messages";
 };
 
-const ROOT = NodeId("root");
+const ROOT = NodeId.create("root");
 const PROCESS_REPORTS = "Process the queued task reports.";
 /** The unused paired route from the root to a task child. */
 const TASK_EDGE_CONTRACT: Contract = {
@@ -189,7 +180,7 @@ function taskReportMessage(
     ...report,
   };
   return {
-    id: EdgeId(`${child.id}->${ROOT}`),
+    id: EdgeId.create(`${child.id}->${ROOT}`),
     payload: {
       kind: report.status === "failed" ? "error" : "followUp",
       text: JSON.stringify(full),
@@ -256,12 +247,30 @@ function taskErrorText(error: unknown): string {
   return lines.join("\n");
 }
 
+function hasMessages(
+  view: ParentView<AgenticInput, AssistantMessage>,
+): boolean {
+  for (const id of view.messages.keys())
+    if ((view.messages.get(id)?.length ?? 0) > 0) return true;
+  return false;
+}
+
+/** The batch one activation received: each payload with its edge, in edge then delivery order. */
+function deliveredMessages<N, T>(view: ParentView<N, T>): Message<N>[] {
+  const delivered: Message<N>[] = [];
+  for (const id of view.messages.keys())
+    for (const payload of view.messages.get(id) ?? [])
+      delivered.push({ id, payload });
+  return delivered;
+}
+
 /**
  * The one run of a prompt agent, shared by whichever body currently drives it: the node's own body
- * until a task call expands it, then the internal Spawn root. Only the current driver advances it.
+ * until a task call expands it, then the internal spawn root. Only the current driver advances it.
+ * Internal: graphs construct its node for a registered agent without a step.
  */
-class AgentDriver {
-  /** The node's one run has started: explicitly prompted or its staged prompt demanded. */
+export class AgentDriver {
+  /** The node's one run has started: its staged prompt demanded. */
   started = false;
   /** A native run was admitted and its settlement has not been read. */
   active = false;
@@ -271,7 +280,7 @@ class AgentDriver {
   readonly values = new Map<EdgeIdType, AssistantMessage>();
   /**
    * The outer node's own graph registration, captured when its body was primed: `send` and `info`
-   * keep using it after promotion makes the agent an inner Spawn root.
+   * keep using it after promotion makes the agent an inner spawn root.
    */
   registration: NodeRegistration | undefined;
   #messageHost:
@@ -295,14 +304,11 @@ class AgentDriver {
   result: AssistantMessage | undefined;
   /** The policy of the body currently driving the agent, which records its pauses. */
   policy: NodePolicy;
-  #prompt: string | undefined;
 
   constructor(
     readonly agent: JuncoAgent | MockAgent,
-    prompt: string | undefined,
     policy: NodePolicy,
   ) {
-    this.#prompt = prompt;
     this.policy = policy;
   }
 
@@ -464,7 +470,7 @@ class AgentDriver {
     if (record === undefined)
       throw new JuncoAgentError("invalid_state", "Malformed task report");
     if (
-      edge !== EdgeId(`${record.node}->${ROOT}`) ||
+      edge !== EdgeId.create(`${record.node}->${ROOT}`) ||
       report.attempt !== record.attempt ||
       record.state !== "running"
     )
@@ -533,13 +539,13 @@ class AgentDriver {
       send: (message) => {
         const registration = this.registration;
         if (registration === undefined)
-          throw new Error("send requires an agentNode graph host");
+          throw new Error("send requires a JuncoGraph host");
         registration.send(message);
       },
       info: () => {
         const registration = this.registration;
         if (registration === undefined)
-          throw new Error("info requires an agentNode graph host");
+          throw new Error("info requires a JuncoGraph host");
         return registration.info();
       },
     };
@@ -596,22 +602,9 @@ class AgentDriver {
 
   async #advance(): Promise<void> {
     const agent = this.agent;
-    if (this.#prompt !== undefined) {
-      const text = this.#prompt;
-      this.#prompt = undefined;
-      if (this.started || agent.status !== "idle")
-        throw new JuncoAgentError(
-          "invalid_state",
-          "Agentic node runs one prompt, and its agent must be idle",
-        );
-      this.started = true;
-      this.active = true;
-      // Its settlement, success or failure, arrives through agent.next().
-      agent.prompt(text).catch(() => undefined);
-    }
     await this.#flush();
     if (!this.started) {
-      // Delivered data waits in the inbox; an idle agent without a prompt has nothing to await.
+      // Delivered data waits in the inbox; an agent without a staged prompt has nothing to await.
       if (agent.status !== "ready") return;
       this.started = true;
       this.active = true;
@@ -622,7 +615,8 @@ class AgentDriver {
       this.active = true;
       agent.prompt(PROCESS_REPORTS).catch(() => undefined);
     }
-    const result = await agent.next();
+    // The retained inbox is also the view a staged prompt function reads.
+    const result = await agent.next(this.#messaging().view);
     if (result.done === true) throw closedNode();
     const boundary = result.value;
     if (boundary.kind === "yield") {
@@ -645,359 +639,334 @@ class AgentDriver {
     // An earlier answer is interim until every accepted report was answered.
     if (this.outstanding.size === 0) this.result = boundary.message;
   }
-}
-
-function hasMessages(
-  view: ParentView<AgenticInput, AssistantMessage>,
-): boolean {
-  for (const id of view.messages.keys())
-    if ((view.messages.get(id)?.length ?? 0) > 0) return true;
-  return false;
-}
-
-/** The batch one activation received: each payload with its edge, in edge then delivery order. */
-function deliveredMessages<N, T>(view: ParentView<N, T>): Message<N>[] {
-  const delivered: Message<N>[] = [];
-  for (const id of view.messages.keys())
-    for (const payload of view.messages.get(id) ?? [])
-      delivered.push({ id, payload });
-  return delivered;
-}
-
-/** The node body and availability of one prompt agent, expanding into a Spawn graph on `task`. */
-function driverNode(
-  agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage> &
-    Pick<ToolCollectionOptions, "policy">,
-  binding: DriverBinding,
-): AgenticNode {
-  const { prompt, complete, inputMode } = binding;
-  const seenValues = new Set<EdgeIdType>();
-  const policy: NodePolicy = {
-    agent,
-    seenValues,
-    ...(inputMode === undefined ? {} : { inputMode }),
-  };
-  const driver = new AgentDriver(agent, prompt, policy);
-  /** The Spawn graph this node's state became, once a task call expanded it. */
-  let spawned: JuncoGraph | undefined;
 
   /**
-   * Close a failed attempt's node state exactly once, record its failure for the root, and report
-   * it. Teardown failure is no task failure: it propagates with both causes.
+   * A graph node driving one prompt agent through a single run.
+   *
+   * The body first yields `[]` so the engine's priming consumes nothing. Each later activation
+   * retains the delivered batch and any parent result it has not seen in the node's inbox, which
+   * the model drains through `recv`; payloads are data, never native commands. The node demands
+   * the agent's staged prompt once, passing that inbox as the view a prompt function reads, then
+   * calls `agent.next()` at most once per activation: a `yield` step leaves the agent suspended, a
+   * settled step returns the native final message, and a failed step throws the native error.
+   * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
+   * message edges and `info` describes this node's routes with each receiver's contract. Unless
+   * `options.is_available` replaces it, the node is available before it starts only when its
+   * trigger fires with a staged prompt or fresh inbound data, and once started it stays resumable
+   * until its run settles. Its receiver contract is `options.contract`, else the agent's.
+   *
+   * A `JuncoAgent`'s `task` calls are admitted while the node drives it; the run continues. At its
+   * next pause or settlement the node's state becomes a `JuncoGraph.spawn` graph whose root is the same
+   * running agent and whose children run one fresh subagent per task, linked by paired message
+   * queues; the node keeps its id, trigger, edges and inbox, and later drives that graph one step
+   * per activation. Each subagent starts from its task prompt and sends its final report back
+   * through its queue; the agent receives reports as follow-ups, and the node returns its answer
+   * only after every report entered its context and was answered. Later task calls add siblings
+   * under the same root.
    */
-  const retire = async (
-    node: Node<Agentic, AgenticInput, AssistantMessage>,
-    child: StagedChild,
-    failure: unknown,
-    report: Pick<TaskReport, "output" | "stopReason" | "error">,
-  ): Promise<Message<AgenticInput>[]> => {
-    // The failed subagent, or the Spawn graph it expanded into; never the containing graph.
-    const state = node.state;
-    // This teardown owns the state's outcome; the owning graph's close must not repeat it.
-    nodePolicies.get(node.step)!.closedTaskState = state;
-    try {
-      await state[Symbol.asyncDispose]();
-    } catch (cleanupError) {
-      if (addsFailure(cleanupError, failure))
-        throw new AggregateError(
-          [failure, cleanupError],
-          "Task subagent execution and cleanup failed",
-          { cause: failure },
-        );
-    }
-    return [taskReportMessage(child, { status: "failed", ...report })];
-  };
-
-  /**
-   * A task subagent's node: started by its bound prompt, reporting its final message. An
-   * unsuccessful settlement or a thrown failure closes the subagent and reports the failure as an
-   * `error` input; cancellation of the owning graph propagates instead.
-   */
-  const childNode = (child: StagedChild): AgenticNode => ({
-    ...driverNode(
-      child.agent,
-      {
-        id: NodeId(child.id),
-        trigger: always(),
-        policy: options.policy,
-        ...(child.name === undefined ? {} : { description: child.name }),
-      },
-      {
-        prompt: child.prompt,
-        async complete(message) {
-          const output = contentText(message.content);
-          const error =
-            message.errorMessage === undefined
-              ? {}
-              : { error: message.errorMessage };
-          if (message.stopReason === "stop")
-            return [
-              taskReportMessage(child, {
-                status: "completed",
-                output,
-                stopReason: message.stopReason,
-                ...error,
-              }),
-            ];
-          spawned?.signal.throwIfAborted();
-          if (agent.status === "closed") throw closedNode();
-          return retire(
-            this,
-            child,
-            new Error(
-              message.errorMessage ?? `Subagent stopped: ${message.stopReason}`,
-            ),
-            { output, stopReason: message.stopReason, ...error },
-          );
-        },
-        inputMode: "all-messages",
-      },
-    ),
-    async on_error(error, signal) {
-      signal?.throwIfAborted();
-      // A failed teardown already retired this attempt; it never retires twice.
-      if (nodePolicies.get(this.step)!.closedTaskState === this.state)
-        throw error;
-      const notification = await retire(this, child, error, {
-        output: "",
-        stopReason: "error",
-        error: taskErrorText(error),
-      });
-      signal?.throwIfAborted();
-      return notification;
-    },
-    contract: (edgeId) =>
-      edgeId === EdgeId(`${ROOT}->${child.id}`)
-        ? TASK_EDGE_CONTRACT
-        : child.agent.contract(edgeId),
-  });
-
-  /** Register staged children under the root; each starts from its bound prompt. */
-  const commit = async (graph: JuncoGraph): Promise<void> => {
-    const staged = driver.staged;
-    if (staged.length === 0) return;
-    driver.staged = [];
-    // As at expansion: a call aborted after acquiring its children never publishes them.
-    const aborted = staged.find(({ signal }) => signal.aborted)?.signal;
-    if (aborted !== undefined) await disposeStaged(staged, aborted.reason);
-    try {
-      appendSpawnChildren(graph, ROOT, staged, childNode);
-    } catch (error) {
-      await disposeStaged(
-        staged.filter(
-          ({ id, agent }) => graph.getNode(NodeId(id))?.state !== agent,
-        ),
-        error,
-      );
-    }
-  };
-
-  /**
-   * Replace this node's state with a Spawn graph of the same running agent as its root plus the
-   * staged children. Nothing else about the node changes; the agent's lifetime moves to the root.
-   */
-  const expand = async (
-    node: Node<Agentic, AgenticInput, AssistantMessage>,
-  ): Promise<JuncoGraph> => {
-    const staged = driver.staged;
-    driver.staged = [];
-    const rootPolicy: NodePolicy = { agent, inputMode: "all-messages" };
-    const rootStep: StepFn<Agentic, AgenticInput, AssistantMessage> =
-      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-        let messages: Message<AgenticInput>[] = [];
-        while (true) {
-          await driver.activate(this, messages, graph.signal);
-          if (driver.result !== undefined) return driver.result;
-          messages = deliveredMessages(yield []);
-        }
-      };
-    nodePolicies.set(rootStep, rootPolicy);
-    let graph: JuncoGraph;
-    try {
-      graph = Spawn(
-        {
-          id: ROOT,
-          trigger: always(),
-          policy: options.policy,
-          state: agent,
-          step: rootStep,
-          is_available: (view) =>
-            driver.result === undefined &&
-            (hasMessages(view) ||
-              driver.active ||
-              driver.unread.size > 0 ||
-              !driver.answered),
-          // Every report route, current or retained, carries the same harness protocol.
-          contract: () => TASK_REPORT_CONTRACT,
-          // A failing task's root unblocks its descendants so the failure reaches the task node.
-          ...(node.on_error === undefined
-            ? {}
-            : {
-                async on_error(error, signal) {
-                  signal?.throwIfAborted();
-                  try {
-                    await graph.abort(error);
-                  } catch (abortError) {
-                    throw new AggregateError(
-                      [error, abortError],
-                      "Task subgraph abort failed",
-                      { cause: error },
-                    );
-                  }
-                  throw error;
-                },
-              }),
-        },
-        staged,
-        childNode,
-      );
-    } catch (error) {
-      return disposeStaged(staged, error);
-    }
-    // No await between these checks and publication.
-    const aborted = staged.find(({ signal }) => signal.aborted)?.signal;
-    if (aborted !== undefined) return disposeStaged(staged, aborted.reason);
-    if (agent.status === "closed") return disposeStaged(staged, closedNode());
-    node.state = graph;
-    // The root drives the agent from now on; this body keeps only its external reads.
-    nodePolicies.set(step, {
+  static node(
+    agent: JuncoAgent | MockAgent,
+    options: NodeOptions<AgenticInput, AssistantMessage> &
+      Pick<ToolCollection, "policy"> &
+      Pick<AgenticNode, "contract" | "on_error">,
+    binding: DriverBinding = {},
+  ): NodeSpec<Agentic, AgenticInput, AssistantMessage> &
+    Pick<ToolCollection, "policy"> &
+    Pick<AgenticNode, "contract"> {
+    const { complete, inputMode } = binding;
+    const seenValues = new Set<EdgeIdType>();
+    const policy: NodePolicy = {
+      agent,
       seenValues,
       ...(inputMode === undefined ? {} : { inputMode }),
-    });
-    driver.policy = rootPolicy;
-    return graph;
-  };
+    };
+    const driver = new AgentDriver(agent, policy);
+    /** The spawn graph this node's state became, once a task call expanded it. */
+    let spawned: JuncoGraph | undefined;
 
-  /** One bounded advance of the expanded graph, then registration of newly accepted tasks. */
-  const advanceGraph = async (graph: JuncoGraph): Promise<void> => {
-    const signal = graph.signal;
-    signal.throwIfAborted();
-    if (graph.available().size > 0) {
+    /**
+     * Close a failed attempt's node state exactly once, record its failure for the root, and report
+     * it. Teardown failure is no task failure: it propagates with both causes.
+     */
+    const retire = async (
+      node: Node<Agentic, AgenticInput, AssistantMessage>,
+      child: StagedChild,
+      failure: unknown,
+      report: Pick<TaskReport, "output" | "stopReason" | "error">,
+    ): Promise<Message<AgenticInput>[]> => {
+      // The failed subagent, or the spawn graph it expanded into; never the containing graph.
+      const state = node.state;
+      // This teardown owns the state's outcome; the owning graph's close must not repeat it.
+      nodePolicies.get(node.step)!.closedTaskState = state;
       try {
-        await graph.step({ signal });
-      } catch (error) {
-        throw cancellation(signal, error);
+        await state[Symbol.asyncDispose]();
+      } catch (cleanupError) {
+        if (addsFailure(cleanupError, failure))
+          throw new AggregateError(
+            [failure, cleanupError],
+            "Task subagent execution and cleanup failed",
+            { cause: failure },
+          );
       }
-      signal.throwIfAborted();
-    }
-    await commit(graph);
-  };
+      return [taskReportMessage(child, { status: "failed", ...report })];
+    };
 
-  /** The final message once the run and every subagent's node finished. */
-  const finished = (): AssistantMessage | undefined =>
-    spawned === undefined || spawned.available().size === 0
-      ? driver.result
-      : undefined;
+    /**
+     * A task subagent's node: started by its task prompt, staged once here, reporting its final
+     * message. An unsuccessful settlement or a thrown failure closes the subagent and reports the
+     * failure as an `error` input; cancellation of the owning graph propagates instead.
+     */
+    const childNode = (child: StagedChild) => {
+      child.agent.stagePrompt(child.prompt);
+      return AgentDriver.node(
+        child.agent,
+        {
+          id: NodeId.create(child.id),
+          trigger: TriggerRule.always(),
+          policy: options.policy,
+          ...(child.name === undefined ? {} : { description: child.name }),
+          async on_error(error, signal) {
+            signal?.throwIfAborted();
+            // A failed teardown already retired this attempt; it never retires twice.
+            if (nodePolicies.get(this.step)!.closedTaskState === this.state)
+              throw error;
+            const notification = await retire(this, child, error, {
+              output: "",
+              stopReason: "error",
+              error: taskErrorText(error),
+            });
+            signal?.throwIfAborted();
+            return notification;
+          },
+          contract: (edgeId) =>
+            edgeId === EdgeId.create(`${ROOT}->${child.id}`)
+              ? TASK_EDGE_CONTRACT
+              : child.agent.contract(edgeId),
+        },
+        {
+          async complete(message) {
+            const output = contentText(message.content);
+            const error =
+              message.errorMessage === undefined
+                ? {}
+                : { error: message.errorMessage };
+            if (message.stopReason === "stop")
+              return [
+                taskReportMessage(child, {
+                  status: "completed",
+                  output,
+                  stopReason: message.stopReason,
+                  ...error,
+                }),
+              ];
+            spawned?.signal.throwIfAborted();
+            if (agent.status === "closed") throw closedNode();
+            return retire(
+              this,
+              child,
+              new Error(
+                message.errorMessage ??
+                  `Subagent stopped: ${message.stopReason}`,
+              ),
+              { output, stopReason: message.stopReason, ...error },
+            );
+          },
+          inputMode: "all-messages",
+        },
+      );
+    };
 
-  const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
-    async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-      // Captured once, at priming: a promoted agent keeps this node's routes and topology.
-      driver.registration = registeredNodeContexts.get(this);
-      let view = yield [];
-      /** The result already reported; a failed attempt's state is closed by then. */
-      let reported: AssistantMessage | undefined;
+    /** Register staged children under the root; each starts from its bound prompt. */
+    const commit = async (graph: JuncoGraph): Promise<void> => {
+      const staged = driver.staged;
+      if (staged.length === 0) return;
+      driver.staged = [];
+      // As at expansion: a call aborted after acquiring its children never publishes them.
+      const aborted = staged.find(({ signal }) => signal.aborted)?.signal;
+      if (aborted !== undefined) await disposeStaged(staged, aborted.reason);
       try {
-        while (true) {
-          if (reported !== undefined) return reported;
-          // Retain the delivery for recv; values are seen once staged, so a postponed recv
-          // never lets a permanent result starve a newer message.
-          const messages = deliveredMessages(view);
-          for (const { id, payload } of messages) {
-            const retained = driver.messages.get(id);
-            if (retained === undefined) driver.messages.set(id, [payload]);
-            else retained.push(payload);
-          }
-          const values = unseenValues(view.values, seenValues);
-          for (const id of values.keys())
-            driver.values.set(id, values.get(id) as AssistantMessage);
-          if (finished() === undefined) {
-            if (spawned === undefined) {
-              await driver.activate(this, messages);
-              if (driver.staged.length > 0) spawned = await expand(this);
-            } else {
-              await advanceGraph(spawned);
-            }
-          }
-          const result = finished();
-          if (result !== undefined) {
-            if (complete === undefined) return result;
-            reported = result;
-            view = yield await complete.call(this, result);
-            continue;
-          }
-          view = yield [];
-        }
+        graph.appendChildren(ROOT, staged, childNode);
       } catch (error) {
-        if (driver.staged.length > 0)
-          await disposeStaged(driver.staged.splice(0), error);
-        throw error;
+        await disposeStaged(
+          staged.filter(
+            ({ id, agent }) =>
+              graph.getNode(NodeId.create(id))?.state !== agent,
+          ),
+          error,
+        );
       }
     };
-  nodePolicies.set(step, policy);
 
-  const hasFreshInput = (
-    view: ParentView<AgenticInput, AssistantMessage>,
-  ): boolean => {
-    if (hasMessages(view)) return true;
-    for (const id of view.values.keys()) if (!seenValues.has(id)) return true;
-    return false;
-  };
-
-  return {
-    ...options,
-    state: agent,
-    step,
-    contract: (edgeId) => agent.contract(edgeId),
-    is_available:
-      options.is_available ??
-      ((view, triggered) => {
-        if (spawned !== undefined)
-          return (
-            driver.result !== undefined ||
-            spawned.available().size > 0 ||
-            (triggered && hasFreshInput(view))
-          );
-        return (
-          driver.started ||
-          (triggered &&
-            (agent.status === "ready" ||
-              (prompt !== undefined && agent.status === "idle") ||
-              hasFreshInput(view)))
+    /**
+     * Replace this node's state with a spawn graph of the same running agent as its root plus the
+     * staged children. Nothing else about the node changes; the agent's lifetime moves to the root.
+     */
+    const expand = async (
+      node: Node<Agentic, AgenticInput, AssistantMessage>,
+    ): Promise<JuncoGraph> => {
+      const staged = driver.staged;
+      driver.staged = [];
+      const rootPolicy: NodePolicy = { agent, inputMode: "all-messages" };
+      const rootStep: StepFn<Agentic, AgenticInput, AssistantMessage> =
+        async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+          let messages: Message<AgenticInput>[] = [];
+          while (true) {
+            await driver.activate(this, messages, graph.signal);
+            if (driver.result !== undefined) return driver.result;
+            messages = deliveredMessages(yield []);
+          }
+        };
+      nodePolicies.set(rootStep, rootPolicy);
+      let graph: JuncoGraph;
+      try {
+        graph = JuncoGraph.spawn<StagedChild, AgenticInput, AssistantMessage>(
+          {
+            id: ROOT,
+            trigger: TriggerRule.always(),
+            policy: options.policy,
+            state: agent,
+            step: rootStep,
+            is_available: (view) =>
+              driver.result === undefined &&
+              (hasMessages(view) ||
+                driver.active ||
+                driver.unread.size > 0 ||
+                !driver.answered),
+            // Every report route, current or retained, carries the same harness protocol.
+            contract: () => TASK_REPORT_CONTRACT,
+            // A failing task's root unblocks its descendants so the failure reaches the task node.
+            ...(node.on_error === undefined
+              ? {}
+              : {
+                  async on_error(error, signal) {
+                    signal?.throwIfAborted();
+                    try {
+                      await graph.abort(error);
+                    } catch (abortError) {
+                      throw new AggregateError(
+                        [error, abortError],
+                        "Task subgraph abort failed",
+                        { cause: error },
+                      );
+                    }
+                    throw error;
+                  },
+                }),
+          },
+          staged,
+          childNode,
         );
-      }),
-  };
-}
+      } catch (error) {
+        return disposeStaged(staged, error);
+      }
+      // No await between these checks and publication.
+      const aborted = staged.find(({ signal }) => signal.aborted)?.signal;
+      if (aborted !== undefined) return disposeStaged(staged, aborted.reason);
+      if (agent.status === "closed") return disposeStaged(staged, closedNode());
+      node.state = graph;
+      // The root drives the agent from now on; this body keeps only its external reads.
+      nodePolicies.set(step, {
+        seenValues,
+        ...(inputMode === undefined ? {} : { inputMode }),
+      });
+      driver.policy = rootPolicy;
+      return graph;
+    };
 
-/**
- * A graph node driving one prompt agent through a single run.
- *
- * The body first yields `[]` so the engine's priming consumes nothing. Each later activation
- * retains the delivered batch and any parent result it has not seen in the node's inbox, which the
- * model drains through `recv`; payloads are data, never native commands. The node starts an idle
- * agent once with `binding.prompt` (or demands its staged prompt), then calls `agent.next()` at most
- * once per activation: a `yield` step leaves the agent suspended, a settled step returns the native
- * final message, and a failed step throws the native error. While it drives a `JuncoAgent`, the
- * agent's `send` admits messages on this node's outgoing message edges and `info` describes this
- * node's routes with each receiver's contract. A node runs at most one prompt. Unless
- * `options.is_available` replaces it, the node is available before it starts only when its trigger
- * fires with a staged prompt, its own `prompt` for an idle agent, or fresh inbound data, and once
- * started it stays resumable until its run settles. Its receiver contract is the agent's.
- *
- * A `JuncoAgent`'s `task` calls are admitted while the node drives it; the run continues. At its
- * next pause or settlement the node's state becomes a `Spawn` graph whose root is the same running
- * agent and whose children run one fresh subagent per task, linked by paired message queues; the
- * node keeps its id, trigger, edges and inbox, and later drives that graph one step per
- * activation. Each subagent starts from its task prompt and sends its final report back through
- * its queue; the agent receives reports as follow-ups, and the node returns its answer only after
- * every report entered its context and was answered. Later task calls add siblings under the same
- * root.
- */
-export function agentNode(
-  agent: JuncoAgent | MockAgent,
-  options: NodeOptions<AgenticInput, AssistantMessage> &
-    Pick<ToolCollectionOptions, "policy">,
-  binding: AgentNodeBinding = {},
-): AgenticNode {
-  return driverNode(agent, options, binding);
+    /** One bounded advance of the expanded graph, then registration of newly accepted tasks. */
+    const advanceGraph = async (graph: JuncoGraph): Promise<void> => {
+      const signal = graph.signal;
+      signal.throwIfAborted();
+      if (graph.available().size > 0) {
+        try {
+          await graph.step({ signal });
+        } catch (error) {
+          throw cancellation(signal, error);
+        }
+        signal.throwIfAborted();
+      }
+      await commit(graph);
+    };
+
+    /** The final message once the run and every subagent's node finished. */
+    const finished = (): AssistantMessage | undefined =>
+      spawned === undefined || spawned.available().size === 0
+        ? driver.result
+        : undefined;
+
+    const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
+      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+        // Captured once, at priming: a promoted agent keeps this node's routes and topology.
+        driver.registration = registeredNodeContexts.get(this);
+        let view = yield [];
+        /** The result already reported; a failed attempt's state is closed by then. */
+        let reported: AssistantMessage | undefined;
+        try {
+          while (true) {
+            if (reported !== undefined) return reported;
+            // Retain the delivery for recv; values are seen once staged, so a postponed recv
+            // never lets a permanent result starve a newer message.
+            const messages = deliveredMessages(view);
+            for (const { id, payload } of messages) {
+              const retained = driver.messages.get(id);
+              if (retained === undefined) driver.messages.set(id, [payload]);
+              else retained.push(payload);
+            }
+            const values = unseenValues(view.values, seenValues);
+            for (const id of values.keys())
+              driver.values.set(id, values.get(id) as AssistantMessage);
+            if (finished() === undefined) {
+              if (spawned === undefined) {
+                await driver.activate(this, messages);
+                if (driver.staged.length > 0) spawned = await expand(this);
+              } else {
+                await advanceGraph(spawned);
+              }
+            }
+            const result = finished();
+            if (result !== undefined) {
+              if (complete === undefined) return result;
+              reported = result;
+              view = yield await complete.call(this, result);
+              continue;
+            }
+            view = yield [];
+          }
+        } catch (error) {
+          if (driver.staged.length > 0)
+            await disposeStaged(driver.staged.splice(0), error);
+          throw error;
+        }
+      };
+    nodePolicies.set(step, policy);
+
+    const hasFreshInput = (
+      view: ParentView<AgenticInput, AssistantMessage>,
+    ): boolean => {
+      if (hasMessages(view)) return true;
+      for (const id of view.values.keys()) if (!seenValues.has(id)) return true;
+      return false;
+    };
+
+    return {
+      ...options,
+      state: agent,
+      step,
+      contract: options.contract ?? ((edgeId) => agent.contract(edgeId)),
+      is_available:
+        options.is_available ??
+        ((view, triggered) => {
+          if (spawned !== undefined)
+            return (
+              driver.result !== undefined ||
+              spawned.available().size > 0 ||
+              (triggered && hasFreshInput(view))
+            );
+          return (
+            driver.started ||
+            (triggered && (agent.status === "ready" || hasFreshInput(view)))
+          );
+        }),
+    };
+  }
 }

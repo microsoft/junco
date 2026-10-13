@@ -7,11 +7,10 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { NodeId } from "dataflow-engine";
+import { DataflowNodeError, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
-import { InfoTool, RecvTool } from "junco-tools";
-import { createMixedGraph, goalsPrompt } from "../examples/mixed.ts";
+import { goalsPrompt, MixedGraph, memberOptions } from "../examples/mixed.ts";
 import { Deterministic } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
 
@@ -32,10 +31,15 @@ function latestUserText(context: Context): string {
 }
 
 /**
- * Real agents over faux models; Direct and Reviewer read their prompt through recv. Ralph's run r returns `draft-r`; with `failSecond` its
- * second request throws instead. Dispose it to close the graph and every agent.
+ * Real agents over faux models, built from the example's own construction options: Direct reads
+ * its goals through recv and answers `directAnswer`; Reviewer's prompt is composed from the graph
+ * inputs. Ralph's run r returns `draft-r`; with `failSecond` its second request throws instead.
+ * Dispose it to close the graph and every agent.
  */
-async function mixedWorkflow(failSecond = false) {
+async function mixedWorkflow(
+  failSecond = false,
+  directAnswer = "direct-answer",
+) {
   const prompts: Record<Role, string[]> = {
     Ralph: [],
     Direct: [],
@@ -79,28 +83,26 @@ async function mixedWorkflow(failSecond = false) {
   ];
 
   const agents: JuncoAgent[] = [];
-  const agent = async (
-    responses: readonly FauxResponseStep[],
-    receives = false,
-  ) => {
+  const agent = async (role: Role, responses: readonly FauxResponseStep[]) => {
     const { options } = await nativeOptions(responses);
     const created = await JuncoAgent.fromResolved({
       ...options,
-      tools: receives ? [RecvTool(), InfoTool()] : [],
+      ...memberOptions[role],
     });
     agents.push(created);
     return created;
   };
   try {
     const members = {
-      Ralph: await agent(ralphResponses),
-      Direct: await agent(receiving("Direct", "direct-answer"), true),
-      Reviewer: await agent(
-        receiving("Reviewer", "Ralph: clearer coverage."),
-        true,
-      ),
+      Ralph: await agent("Ralph", ralphResponses),
+      Direct: await agent("Direct", receiving("Direct", directAnswer)),
+      Reviewer: await agent("Reviewer", [
+        recording("Reviewer", () =>
+          fauxAssistantMessage("Ralph: clearer coverage."),
+        ),
+      ]),
     };
-    const { graph, reviewerId } = createMixedGraph(members);
+    const { graph, reviewerId } = MixedGraph.create(members);
     return {
       graph,
       reviewerId,
@@ -131,7 +133,7 @@ async function stepUntil(
   }
 }
 
-const ralphId = NodeId("Ralph");
+const ralphId = NodeId.create("Ralph");
 
 test("Ralph runs two full-assignment rounds and only its final draft is reviewed", async () => {
   let agents: readonly JuncoAgent[];
@@ -140,7 +142,7 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     await using flow = await mixedWorkflow();
     agents = flow.agents;
     const { graph, reviewerId, prompts } = flow;
-    goalsSource = graph.getNode(NodeId("Goals"))?.state;
+    goalsSource = graph.getNode(NodeId.create("Goals"))?.state;
 
     await stepUntil(graph, () => prompts.Ralph.length === 1);
     assert.equal(prompts.Reviewer.length, 0);
@@ -148,7 +150,9 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.ok(O.isNone(graph.result(reviewerId)));
 
     const results = await graph.run();
-    assert.ok(results.get(reviewerId) !== undefined);
+    const selected = results.get(reviewerId);
+    assert.ok(selected?.content[0]?.type === "text");
+    assert.equal(selected.content[0].text, "Ralph: clearer coverage.");
     assert.equal(prompts.Ralph.length, 2);
     assert.equal(prompts.Ralph[0], goalsPrompt);
     assert.ok(prompts.Ralph[1]!.includes(goalsPrompt));
@@ -157,6 +161,7 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
 
     assert.equal(prompts.Reviewer.length, 1);
     const review = prompts.Reviewer[0]!;
+    assert.ok(review.includes(goalsPrompt));
     assert.ok(review.includes("direct-answer"));
     assert.ok(review.includes("draft-2"));
     assert.ok(!review.includes("draft-1"));
@@ -180,4 +185,20 @@ test("a failed second Ralph round rejects the graph and never reaches the Review
   assert.ok(O.isNone(graph.result(ralphId)));
   assert.ok(O.isNone(graph.result(reviewerId)));
   assert.equal(prompts.Reviewer.length, 0);
+}, 5_000);
+
+test("a blank Direct answer fails the Reviewer before any Reviewer request", async () => {
+  await using flow = await mixedWorkflow(false, " ");
+  const { graph, reviewerId, prompts } = flow;
+
+  const failure = await graph.run().then(
+    () => assert.fail("graph should reject"),
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DataflowNodeError);
+  assert.equal(failure.nodeId, reviewerId);
+  assert.equal(prompts.Ralph.length, 2);
+  assert.deepEqual(prompts.Direct, [goalsPrompt]);
+  assert.equal(prompts.Reviewer.length, 0);
+  assert.ok(O.isNone(graph.result(reviewerId)));
 }, 5_000);

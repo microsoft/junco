@@ -1,20 +1,18 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import type { NativeMux } from "../native/index.js";
-import { createAstEditTool, createAstGrepTool } from "./ast.js";
-import { createBashTool } from "./bash.js";
-import { createDiffTool } from "./diff.js";
-import { createEditTool } from "./edit.js";
-import { createFindTool } from "./find.js";
-import { createGrepTool } from "./grep.js";
+import { AstEditTool, AstGrepTool } from "./ast.js";
+import { BashTool } from "./bash.js";
+import { DiffTool } from "./diff.js";
+import { EditTool } from "./edit.js";
+import { FindTool } from "./find.js";
+import { GrepTool } from "./grep.js";
 import type { NativeModule } from "./native.js";
-import {
-  createShellMuxOperations,
-  type ShellMuxOperations,
-} from "./operations.js";
-import { createReadTool } from "./read.js";
-import { createReleaseTool } from "./release.js";
-import { acquireShellMux, type ShellMuxLease } from "./shell-mux.js";
+import { ShellMuxOperations } from "./operations.js";
+import type { Policy } from "./policy.js";
+import { ReadTool } from "./read.js";
+import { ReleaseTool } from "./release.js";
+import { ShellMuxLease } from "./shell-mux.js";
 import { resolveToolPath } from "./tool-support.js";
 
 export interface ToolCollectionOptions {
@@ -23,8 +21,8 @@ export interface ToolCollectionOptions {
   native?: NativeModule;
   /** Routing mode of this collection's mux (default "shared"). */
   sandbox?: "shared" | "always";
-  /** Authorization policy of this collection's mux. */
-  policy: "LockPolicy" | "EmptyPolicy";
+  /** Authorization policy of this collection's mux (default `LockPolicy`). */
+  policy?: Policy;
   /** Display/ordering label for the default bash operations; never a policy identity. */
   principal?: string;
 }
@@ -56,10 +54,12 @@ type BuildTools = (
  * seed, while a writing call may run in a private snapshot whose changes publish only when
  * the collection's `policy` authorizes them. Writes take ownership; `release` relinquishes it.
  *
- * `tools` and `mux` act as this collection's own policy owner, distinct from every other
- * collection's; {@link bind} gives each further owner (an agent) its own counterparts.
+ * `tools` act as this collection's own policy owner, distinct from every other collection's;
+ * {@link bind} gives each further owner (an agent) its own counterparts. `mux` is the session
+ * itself, as borrowers (MCP servers, custom operations) use it: each of its calls acts as its
+ * own fresh shell unless the borrower forks an owner.
  *
- * The returned `tools` come from the same factories exported standalone and
+ * The returned `tools` come from the same `create` methods exported standalone and
  * are directly usable as a bare Agent's tools, SDK `customTools`, or with
  * `pi.registerTool`. `cwd` must lie inside a btrfs seed.
  *
@@ -70,14 +70,16 @@ type BuildTools = (
  */
 export class ToolCollection {
   readonly tools: AgentTool<any>[];
-  readonly policy: ToolCollectionOptions["policy"];
+  readonly policy: Policy;
   readonly mux: NativeMux;
   readonly native: NativeModule;
   readonly #lease: ShellMuxLease;
   readonly #operations: ShellMuxOperations | undefined;
   readonly #build: BuildTools;
   /** Caller-supplied bash operations every owner shares, or `undefined` for owner-bound ones. */
-  readonly #customOperations: NonNullable<BashToolOptions["operations"]> | undefined;
+  readonly #customOperations:
+    | NonNullable<BashToolOptions["operations"]>
+    | undefined;
   readonly #abort = new AbortController();
   readonly #invocations = new Set<Promise<unknown>>();
   #holders = 1;
@@ -88,13 +90,12 @@ export class ToolCollection {
   private constructor(
     mux: NativeMux,
     build: BuildTools,
-    policy: ToolCollectionOptions["policy"],
     lease: ShellMuxLease,
     operations: ShellMuxOperations | undefined,
     customOperations: NonNullable<BashToolOptions["operations"]> | undefined,
   ) {
-    this.policy = policy;
-    this.mux = mux;
+    this.policy = lease.policy;
+    this.mux = lease.mux;
     this.native = lease.native;
     this.#lease = lease;
     this.#operations = operations;
@@ -139,18 +140,14 @@ export class ToolCollection {
 
   static async create(
     cwd: string,
-    options: ToolCollectionOptions,
+    options: ToolCollectionOptions = {},
   ): Promise<ToolCollection> {
-    const policy = options?.policy;
-    if (policy !== "LockPolicy" && policy !== "EmptyPolicy") {
-      throw new TypeError('policy must be "LockPolicy" or "EmptyPolicy"');
-    }
     const root = resolveToolPath(process.cwd(), cwd);
     // Rejects outside a seed: every file tool needs one.
-    const lease = await acquireShellMux(root, {
+    const lease = await ShellMuxLease.create(root, {
       native: options.native,
       sandbox: options.sandbox,
-      policy,
+      policy: options.policy,
     });
     const { native } = lease;
     let operations: ShellMuxOperations | undefined;
@@ -160,26 +157,25 @@ export class ToolCollection {
       const store = new native.EditStore();
       operations = options.bash?.operations
         ? undefined
-        : createShellMuxOperations({
+        : new ShellMuxOperations({
             native,
             mux,
             principal: options.principal,
           });
       const build: BuildTools = (mux, operations) => [
-        createReadTool(root, store, native, mux),
-        createBashTool(root, { ...options.bash, operations }),
-        createEditTool(root, store, native, mux),
-        createReleaseTool(root, mux),
-        createGrepTool(root, store, native, mux),
-        createFindTool(root, native, mux),
-        createAstGrepTool(root, native, mux),
-        createAstEditTool(root, native, mux),
-        createDiffTool(native),
+        ReadTool.create(root, store, native, mux),
+        BashTool.create(root, { ...options.bash, operations }),
+        EditTool.create(root, store, native, mux),
+        ReleaseTool.create(root, mux),
+        GrepTool.create(root, store, native, mux),
+        FindTool.create(root, native, mux),
+        AstGrepTool.create(root, native, mux),
+        AstEditTool.create(root, native, mux),
+        DiffTool.create(native),
       ];
       return new ToolCollection(
         mux,
         build,
-        policy,
         lease,
         operations,
         options.bash?.operations,
@@ -239,7 +235,7 @@ export class ToolCollection {
     const invocations = new Set<Promise<unknown>>();
     const operations = this.#customOperations
       ? undefined
-      : createShellMuxOperations({ native: this.native, mux });
+      : new ShellMuxOperations({ native: this.native, mux });
     let closing: Promise<void> | undefined;
     const bound = this.#build(mux, this.#customOperations ?? operations!);
     const tools = new Map<AgentTool<any>, AgentTool<any>>();
@@ -248,7 +244,9 @@ export class ToolCollection {
         tool,
         signal,
         () =>
-          closing === undefined ? undefined : new Error("ToolBinding is closed"),
+          closing === undefined
+            ? undefined
+            : new Error("ToolBinding is closed"),
         invocations,
       );
       tools.set(this.tools[index]!, tool);

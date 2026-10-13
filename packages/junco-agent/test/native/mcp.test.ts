@@ -30,12 +30,7 @@ import {
   type JuncoMcpConnectOptions,
   JuncoMcpTools,
 } from "junco-mcp";
-import {
-  createTaskTool,
-  isTaskTool,
-  type NativeModule,
-  ToolCollection,
-} from "junco-tools";
+import { isTaskTool, LockPolicy, type NativeModule, ToolCollection, TaskTool } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../../src/index.ts";
@@ -63,7 +58,7 @@ beforeAll(async () => {
   seed = join(root, "seed");
   // A server cwd below the seed; it must exist before the CopyTree mux opens.
   await mkdir(join(seed, "work"), { recursive: true });
-  collection = await ToolCollection.create(seed, { native: copyTree, policy: "LockPolicy" });
+  collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy });
 });
 
 afterAll(async () => {
@@ -148,7 +143,6 @@ test("create runs an MCP tool beside an ordinary tool", async () => {
     provider: "faux",
     model: "faux-1",
     cwd: seed,
-    policy: "LockPolicy",
     collection,
     tools: [fixture(), ordinary.tool],
     prompt: "go",
@@ -176,7 +170,6 @@ test("fromResolved accepts a lone definition and several definitions in order", 
     models,
     model,
     cwd: seed,
-    policy: "LockPolicy",
     collection,
     tools: [fixture("a"), fixture("b")],
     prompt: "go",
@@ -193,7 +186,6 @@ test("fromResolved accepts a lone definition and several definitions in order", 
     models,
     model,
     cwd: seed,
-    policy: "LockPolicy",
     collection,
     tools: fixture("solo"),
   });
@@ -216,7 +208,6 @@ test("two agents reusing one definition get their own servers; closing one leave
       provider: "faux",
       model: "faux-1",
       cwd: seed,
-      policy: "LockPolicy",
       collection,
       tools: [definition],
       prompt: "go",
@@ -227,7 +218,6 @@ test("two agents reusing one definition get their own servers; closing one leave
       provider: "faux",
       model: "faux-1",
       cwd: seed,
-      policy: "LockPolicy",
       collection,
       tools: [definition],
       prompt: "go",
@@ -252,7 +242,6 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         provider: "faux",
         model: "faux-1",
         cwd: seed,
-        policy: "LockPolicy",
         collection,
         tools: [fixture("good"), fixture("bad", { JUNCO_MCP_FIXTURE_MODE: "list-failure" })],
       }),
@@ -264,7 +253,6 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         provider: "faux",
         model: "faux-1",
         cwd: seed,
-        policy: "LockPolicy",
         collection,
         tools: [fixture("fx"), countingTool("mcp__fx__echo").tool],
       }),
@@ -279,7 +267,6 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         models: resolvedModels,
         model,
         cwd: seed,
-        policy: "LockPolicy",
         collection,
         tools: [fixture("selected")],
         activeToolNames: ["mcp__selected__missing"],
@@ -297,7 +284,6 @@ test("a failing source, a name conflict or an unknown active tool closes only th
     session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
     ...scripted([]),
     cwd: seed,
-    policy: "LockPolicy",
     collection,
     tools: [fixture("after")],
   });
@@ -332,7 +318,6 @@ test("a late Marsh denial surfaces from agent disposal", () =>
       provider: "faux",
       model: "faux-1",
       cwd: seed,
-      policy: "LockPolicy",
       collection,
       tools: [fixture("intruder")],
       prompt: "go",
@@ -372,7 +357,6 @@ async function resolvedAgent(
     models,
     model,
     cwd: seed,
-    policy: "LockPolicy",
     collection,
     tools,
     ...(activeToolNames === undefined ? {} : { activeToolNames }),
@@ -524,7 +508,7 @@ test("subagents of a lone definition reach their own server with its args, env a
 test("subagents of a mixed list share ordinary tools and reconnect every definition", () =>
   withNativeCleanup(async (defer) => {
     const ordinary = countingTool("ordinary");
-    const task = createTaskTool();
+    const task = new TaskTool();
     const models = await fauxRuntime([
       toolTurn(
         fauxToolCall("mcp__b__read_state", {}, { id: "b" }),
@@ -537,7 +521,6 @@ test("subagents of a mixed list share ordinary tools and reconnect every definit
       provider: "faux",
       model: "faux-1",
       cwd: seed,
-      policy: "LockPolicy",
       collection,
       tools: [
         task,
@@ -583,7 +566,7 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
         toolTurn(fauxToolCall("mcp__fx__echo", { text: "x" }, { id: "e" })),
         reportResults,
       ],
-      [createTaskTool(), definition],
+      [new TaskTool(), definition],
       ["task", "mcp__fx__read_state"],
     );
     defer(() => parent.return());
@@ -601,9 +584,14 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
       const [inherit, none] = await parent.createSubagents([{}, { tools: [] }]);
       defer(() => inherit!.return());
       defer(() => none!.return());
-      expect(namesOf(inherit!.getTools())).toEqual(["task", "mcp__fx__read_state", "complain"]);
-      expect(namesOf(inherit!.getActiveTools())).toEqual(["task", "mcp__fx__read_state", "complain"]);
-      expect(namesOf(none!.getTools())).toEqual(["complain"]);
+      expect(namesOf(inherit!.getTools())).toEqual(["task", "mcp__fx__read_state", "complain", "release"]);
+      expect(namesOf(inherit!.getActiveTools())).toEqual([
+        "task",
+        "mcp__fx__read_state",
+        "complain",
+        "release",
+      ]);
+      expect(namesOf(none!.getTools())).toEqual(["complain", "release"]);
 
       // Neither model call reaches a server: each child's server counts only the probe.
       await none!.prompt("go");
@@ -621,10 +609,11 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
         command: process.execPath,
         args: [SERVER],
       });
-      expect(namesOf(inherit!.getTools())).toEqual(["task", "mcp__fx__read_state", "complain"]);
+      const inherited = ["task", "mcp__fx__read_state", "complain", "release"];
+      expect(namesOf(inherit!.getTools())).toEqual(inherited);
       const [later] = await parent.createSubagents([{}]);
       defer(() => later!.return());
-      expect(namesOf(later!.getTools())).toEqual(["task", "mcp__fx__read_state", "complain"]);
+      expect(namesOf(later!.getTools())).toEqual(inherited);
     } finally {
       tracker.restore();
     }

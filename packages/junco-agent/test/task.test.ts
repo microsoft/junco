@@ -16,11 +16,11 @@ import {
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import {
-  createTaskTool,
   isAssignedTaskTool,
   isComplainTool,
   isTaskTool,
   type TaskInput,
+  TaskTool,
   type TaskToolDetails,
   type TaskToolHost,
 } from "junco-tools";
@@ -156,7 +156,7 @@ test(
           return fauxAssistantMessage("after handles");
         },
       ],
-      { tools: [createTaskTool()], prompt: "split" },
+      { tools: [new TaskTool()], prompt: "split" },
     );
     const runs: string[] = [];
     const turns: string[] = [];
@@ -207,7 +207,7 @@ test(
         ),
         fauxAssistantMessage("done"),
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     try {
       const settled = await agent.runWithNodeContext({ task: host }, () =>
@@ -244,7 +244,7 @@ test(
         },
         fauxAssistantMessage("done"),
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     agent.setTaskPolicy((input) => {
       seen.push(input.tasks.map(({ task }) => task).join());
@@ -286,31 +286,31 @@ test(
       {
         label: "empty batch",
         input: { context: "c", tasks: [] },
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
       },
       {
         label: "blank instructions",
         input: { context: "c", tasks: [{ task: "   " }] },
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
       },
       {
         label: "unknown property",
         input: { context: "c", tasks: [{ task: "x", extra: 1 }] },
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
       },
       {
         label: "missing context",
         input: { tasks: [{ task: "x" }] },
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
       },
-      { label: "no host bound", tools: () => [createTaskTool()], bind: false },
+      { label: "no host bound", tools: () => [new TaskTool()], bind: false },
       {
         label: "host rejection",
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
         host: async () => {
           throw new Error("refused");
@@ -318,7 +318,7 @@ test(
       },
       {
         label: "inactive task tool",
-        tools: () => [createTaskTool(), countingTool("other").tool],
+        tools: () => [new TaskTool(), countingTool("other").tool],
         activeToolNames: ["other"],
         bind: true,
       },
@@ -330,14 +330,14 @@ test(
       {
         label: "spread copy",
         tools: () => {
-          const original: AgentTool = createTaskTool();
+          const original: AgentTool = new TaskTool();
           return [{ ...original }];
         },
         bind: true,
       },
       {
         label: "blocked by hook",
-        tools: () => [createTaskTool()],
+        tools: () => [new TaskTool()],
         bind: true,
         block: true,
       },
@@ -403,7 +403,7 @@ test(
 test(
   "one branded task tool shared by two agents admits each call through its own agent's host",
   async () => {
-    const shared = createTaskTool();
+    const shared = new TaskTool();
     const a = recordingHost("a");
     const b = recordingHost("b");
     const first = await newAgent(
@@ -447,7 +447,7 @@ test(
 );
 
 test("binding a second node context while one is bound is busy", async () => {
-  const { agent } = await newAgent([], { tools: [createTaskTool()] });
+  const { agent } = await newAgent([], { tools: [new TaskTool()] });
   const { host } = recordingHost();
   try {
     const inner = await agent.runWithNodeContext({ task: host }, async () => {
@@ -493,7 +493,7 @@ test(
         toolTurn(taskCall("held", { context: "c", tasks: [{ task: "x" }] })),
         fauxAssistantMessage("must not run"),
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     try {
       const outcome = agent.runWithNodeContext({ task: host }, () =>
@@ -532,7 +532,7 @@ test(
         ),
         fauxAssistantMessage("replaced done"),
       ],
-      { tools: [createTaskTool(), other.tool] },
+      { tools: [new TaskTool(), other.tool] },
     );
     try {
       await agent.setActiveTools(["other"]);
@@ -549,7 +549,7 @@ test(
         true,
       );
 
-      const replacement = createTaskTool();
+      const replacement = new TaskTool();
       await agent.setTools([replacement, other.tool]);
       assertTools(agent.getActiveTools(), [replacement, other.tool]);
       const second = await agent.runWithNodeContext(
@@ -587,13 +587,13 @@ test(
   async () => {
     const a = countingTool("a");
     const b = countingTool("b");
-    const ordinary = createTaskTool();
+    const ordinary = new TaskTool();
     const active = await newAgent([], {
       tools: [a.tool, ordinary, b.tool],
       activeToolNames: ["task", "a"],
     });
     const inactive = await newAgent([], {
-      tools: [a.tool, createTaskTool(), b.tool],
+      tools: [a.tool, new TaskTool(), b.tool],
       activeToolNames: ["b"],
     });
     try {
@@ -637,7 +637,7 @@ test(
         toolTurn(taskCall("t1", { context: "c", tasks: [{ task: "x" }] })),
         fauxAssistantMessage("done"),
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     try {
       for (const { agent } of [none, spoofed])
@@ -704,7 +704,7 @@ test(
           return fauxAssistantMessage("done");
         },
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     const input = batch();
     await agent.setTaskBatch(input);
@@ -769,7 +769,7 @@ test(
           return fauxAssistantMessage("done");
         },
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     await agent.setTaskBatch(batch());
     try {
@@ -813,7 +813,7 @@ test(
           return fauxAssistantMessage("done");
         },
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     await agent.setTaskBatch(batch());
     try {
@@ -862,7 +862,7 @@ test(
         ),
         fauxAssistantMessage("done"),
       ],
-      { tools: [createTaskTool()], prompt: "go" },
+      { tools: [new TaskTool()], prompt: "go" },
     );
     await agent.setTaskBatch(batch());
     agent.setTaskPolicy((input) => {
@@ -906,7 +906,7 @@ test(
     const agents = await Promise.all(
       ["a", "b"].map(() =>
         newAgent([toolTurn(taskCall("go", {})), fauxAssistantMessage("done")], {
-          tools: [createTaskTool()],
+          tools: [new TaskTool()],
           prompt: "go",
         }),
       ),
@@ -941,7 +941,7 @@ test(
 );
 
 test("task failure policy defaults to zero retries and validates retry counts", async () => {
-  const { agent } = await newAgent([], { tools: [createTaskTool()] });
+  const { agent } = await newAgent([], { tools: [new TaskTool()] });
   try {
     assert.deepEqual(agent.getTaskFailurePolicy(), { retries: 0 });
     for (const retries of [
@@ -1006,7 +1006,6 @@ async function twoProviderParent(
   const agent = await JuncoAgent.fromResolved({
     session,
     models,
-    policy: "LockPolicy",
     model: main.getModel("main")!,
     thinkingLevel: "high",
     systemPrompt: "sys",
@@ -1185,7 +1184,6 @@ test(
     const parent = await JuncoAgent.fromResolved({
       session,
       models: withAuth,
-      policy: "LockPolicy",
       model,
     });
     const spy = spySessions();
@@ -1283,7 +1281,7 @@ test(
   "children get a fresh ordinary task tool, not the parent's assigned batch or policies",
   async () => {
     const a = countingTool("a");
-    const { agent, main } = await twoProviderParent([createTaskTool(), a.tool]);
+    const { agent, main } = await twoProviderParent([new TaskTool(), a.tool]);
     await agent.setTaskBatch(batch());
     agent.setTaskFailurePolicy("ignore");
     agent.setTaskPolicy(() => {

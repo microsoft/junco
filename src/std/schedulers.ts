@@ -1,5 +1,5 @@
-// `schedulers`: the engine's scheduler contract, junco-scheduler's policies and Pi scheduler, and
-// the agency's Pi scheduler factory.
+// `schedulers`: the engine's scheduler contract, junco-scheduler's policies and Pi scheduler. A
+// model-driven agency graph is `graph.JuncoGraph.pi`.
 
 export {
   type DataflowScheduler,
@@ -11,9 +11,9 @@ export {
   triggerInputs,
 } from "dataflow-engine";
 export {
-  createParallelScheduler,
-  createRoundRobinScheduler,
-  createScheduler,
+  ParallelScheduler,
+  RoundRobinScheduler,
+  Scheduler,
   type SchedulerOptions,
 } from "junco-scheduler";
 export {
@@ -23,4 +23,3 @@ export {
   type SchedulerInfo,
   type ScheduleTool,
 } from "junco-scheduler/agent";
-export { createAgencyScheduler } from "../agency.js";

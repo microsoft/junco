@@ -15,12 +15,12 @@ import { Type } from "typebox";
 import {
   type CandidateLane,
   type CandidateWork,
-  createProposalTool,
-  createVerdictTool,
   type GraftSnapshot,
+  ProposalRecorder,
   parseSnapshot,
   type RefactorVerdict,
   type SearchReport,
+  VerdictRecorder,
 } from "../examples/yak-shaver.ts";
 import { agent as agentApi, tools as toolsApi } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
@@ -271,12 +271,12 @@ export async function scriptedLane(
     judgeCalls: 0,
     judgeInputs: [],
   };
-  const proposal = createProposalTool({
+  const proposal = new ProposalRecorder({
     snapshot,
     work,
     readSource: async (path) => sources.get(path),
   });
-  const verdict = createVerdictTool();
+  const verdict = new VerdictRecorder();
   let earlyTried = false;
   let started = false;
   let yieldsLeft = script.beforeResearchYields ?? 0;
@@ -461,22 +461,11 @@ export async function scriptedLane(
     Array.from({ length: 200 }, () => dispatch),
   );
   const judgeOptions = await nativeOptions([
-    () => {
+    (context: Context) => {
       log.judgeCalls++;
       script.onJudge?.();
-      return toolUse(call("recv", {}));
-    },
-    (context: Context) => {
-      // The judge's input is what recv actually delivered, not its start prompt.
-      const result = context.messages.at(-1);
-      const received = JSON.parse(
-        result?.role === "toolResult" ? contentText(result.content) : "{}",
-      ) as {
-        messages?: { payload?: { text?: string } }[];
-      };
-      log.judgeInputs.push(
-        (received.messages ?? []).map((message) => message.payload?.text ?? ""),
-      );
+      // The judge's input is the staged prompt its callback composed.
+      log.judgeInputs.push(userTexts(context));
       return toolUse(call("judge_refactor", script.verdict ?? allPass));
     },
     fauxAssistantMessage("verdict recorded"),
@@ -490,15 +479,15 @@ export async function scriptedLane(
       ...extraTools,
       ...(script.beforeResearchYields === undefined
         ? []
-        : [toolsApi.createYieldTool()]),
-      toolsApi.createTaskTool(),
+        : [new toolsApi.YieldTool()]),
+      new toolsApi.TaskTool(),
       proposal.tool,
     ],
   });
   const judge = await agentApi.JuncoAgent.fromResolved({
     ...judgeOptions.options,
     systemPrompt: "judge",
-    tools: [read, toolsApi.RecvTool(), toolsApi.InfoTool(), verdict.tool],
+    tools: [read, verdict.tool],
   });
   return { lane: { work, proposer, judge, proposal, verdict }, log };
 }

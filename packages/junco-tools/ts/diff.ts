@@ -27,49 +27,51 @@ const diffSchema = Type.Object({
  * Unified diff between two in-memory texts, computed by pi-diff's exact Myers
  * implementation over JavaScript's own UTF-16 code units. Touches no files.
  */
-export function createDiffTool(
-  native: NativeModule,
-): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>> {
-  const tool = {
-    name: "diff",
-    label: "Diff",
-    description:
-      "Compute a unified diff between oldText and newText without changing files.",
-    promptSnippet: "Diff two texts without touching the filesystem",
-    parameters: diffSchema,
-    async execute(_toolCallId, params, signal) {
-      throwIfAborted(signal);
-      if (params.context !== undefined)
-        requireU32("context", params.context, 0);
+export const DiffTool = {
+  create(
+    native: NativeModule,
+  ): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>> {
+    const tool = {
+      name: "diff",
+      label: "Diff",
+      description:
+        "Compute a unified diff between oldText and newText without changing files.",
+      promptSnippet: "Diff two texts without touching the filesystem",
+      parameters: diffSchema,
+      async execute(_toolCallId, params, signal) {
+        throwIfAborted(signal);
+        if (params.context !== undefined)
+          requireU32("context", params.context, 0);
 
-      const stream = new native.DiffStream();
-      stream.push(native.DiffSide.Old, params.oldText);
-      stream.push(native.DiffSide.New, params.newText);
-      stream.finishSide(native.DiffSide.Old);
-      stream.finishSide(native.DiffSide.New);
-      // Myers has no internal interruption point, so the worker is always
-      // awaited to completion; cancellation is reported after it settles.
-      const result = await stream.finish(params.context);
-      throwIfAborted(signal);
+        const stream = new native.DiffStream();
+        stream.push(native.DiffSide.Old, params.oldText);
+        stream.push(native.DiffSide.New, params.newText);
+        stream.finishSide(native.DiffSide.Old);
+        stream.finishSide(native.DiffSide.New);
+        // Myers has no internal interruption point, so the worker is always
+        // awaited to completion; cancellation is reported after it settles.
+        const result = await stream.finish(params.context);
+        throwIfAborted(signal);
 
-      if (result.hunks.length === 0) {
-        return {
-          content: [{ type: "text", text: "No differences." }],
-          details: { result },
-        };
-      }
-      const lines = ["--- before", "+++ after"];
-      for (const hunk of result.hunks) {
-        lines.push(
-          `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
-          ...hunk.lines,
-        );
-      }
-      return boundedToolResult(lines.join("\n"), result);
-    },
-  } satisfies ToolDefinition<
-    typeof diffSchema,
-    BoundedToolDetails<DiffStreamResult>
-  >;
-  return tool;
-}
+        if (result.hunks.length === 0) {
+          return {
+            content: [{ type: "text", text: "No differences." }],
+            details: { result },
+          };
+        }
+        const lines = ["--- before", "+++ after"];
+        for (const hunk of result.hunks) {
+          lines.push(
+            `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+            ...hunk.lines,
+          );
+        }
+        return boundedToolResult(lines.join("\n"), result);
+      },
+    } satisfies ToolDefinition<
+      typeof diffSchema,
+      BoundedToolDetails<DiffStreamResult>
+    >;
+    return tool;
+  },
+};

@@ -202,9 +202,9 @@ export class DataflowGraph<
   addNode(spec: NodeSpec<S, N, T>): NodeId {
     let id: NodeId;
     if (spec.id === undefined) {
-      id = NodeId(String(this.#nextNodeIndex++));
+      id = NodeId.create(String(this.#nextNodeIndex++));
       while (this.#graph.getNode(id) !== undefined) {
-        id = NodeId(String(this.#nextNodeIndex++));
+        id = NodeId.create(String(this.#nextNodeIndex++));
       }
     } else {
       id = spec.id;

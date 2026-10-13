@@ -257,6 +257,94 @@ describe("transcript runs and the scheduling iterator", () => {
     assert.deepEqual(userTexts(b.history), ["staged"]);
   });
 
+  test("a callback stage runs once on demand with its view and static images", async () => {
+    const view = { messages: new Map(), values: new Map() };
+    const pic = image("p");
+    const seen: unknown[] = [];
+    const agent = new MockAgent({
+      images: [pic],
+      prompt: (inputs) => {
+        seen.push(inputs);
+        return "from view";
+      },
+      runs: [run([settle(FIRST)])],
+    });
+    assert.equal(agent.status, "ready");
+    assert.equal(seen.length, 0);
+    assert.deepEqual(agent.requests, []);
+    const result = await agent.next(view);
+    assert.ok(!result.done);
+    assert.equal(settledMessage(result.value), FIRST);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0], view);
+    assert.deepEqual(userTexts(agent.history), ["from view"]);
+    assert.deepEqual(imagesOf(userMessage(agent, "from view")), [pic]);
+    assert.equal(agent.status, "idle");
+    await agent.return();
+    assert.equal(seen.length, 1);
+  });
+
+  test("a callback stage fails without inputs, on throw and on non-strings before any frame", async () => {
+    const view = { messages: new Map(), values: new Map() };
+    let calls = 0;
+    const agent = new MockAgent({
+      prompt: () => {
+        calls++;
+        return "unused";
+      },
+      runs: [run([settle(FIRST)])],
+    });
+    assert.ok(hasCode("invalid_state")(failedError(await stepOf(agent))));
+    assert.equal(calls, 0);
+    const cause = new Error("cause");
+    agent.stagePrompt(() => {
+      throw cause;
+    });
+    assert.equal(
+      failedError((await agent.next(view)).value as AgenticStep),
+      cause,
+    );
+    for (const bad of [() => 42, async () => "promised"]) {
+      agent.stagePrompt(bad as unknown as () => string);
+      const failure = (await agent.next(view)).value as AgenticStep;
+      assert.ok(hasCode("invalid_argument")(failedError(failure)));
+    }
+    assert.deepEqual(agent.requests, []);
+    assert.equal(agent.status, "idle");
+    agent.stagePrompt("recovered");
+    assert.equal(settledMessage(await stepOf(agent)), FIRST);
+    assert.deepEqual(userTexts(agent.history), ["recovered"]);
+    await agent.return();
+  });
+
+  test("stagePrompt is busy while staged, suspended or awaited, and closed after return", async () => {
+    let other = 0;
+    const agent = new MockAgent(SHARED);
+    assert.throws(
+      () =>
+        agent.stagePrompt(() => {
+          other++;
+          return "other";
+        }),
+      hasCode("busy"),
+    );
+    assert.ok(hasCode("busy")(await rejection(agent.prompt("explicit"))));
+    assert.equal(agent.status, "ready");
+    assert.equal((await stepOf(agent)).kind, "yield");
+    assert.throws(() => agent.stagePrompt("held"), hasCode("busy"));
+    assert.equal(settledMessage(await stepOf(agent)), FIRST);
+    agent.stagePrompt("round two");
+    assert.equal(settledMessage(await stepOf(agent)), SECOND);
+    assert.equal(other, 0);
+    assert.deepEqual(userTexts(agent.history), ["staged", "round two"]);
+    const queued = agent.next();
+    await Promise.resolve();
+    assert.throws(() => agent.stagePrompt("queued"), hasCode("busy"));
+    await agent.return();
+    assert.deepEqual(await queued, { value: undefined, done: true });
+    assert.throws(() => agent.stagePrompt("closed"), hasCode("closed"));
+  });
+
   test("a scripted event finishes before its boundary becomes visible", async () => {
     const DONE = assistant("done");
     const agent = new MockAgent({
@@ -905,7 +993,7 @@ describe("subscriptions, hooks and cancellation", () => {
     assert.throws(
       () =>
         agent.complain({
-          nodeId: NodeId("closed"),
+          nodeId: NodeId.create("closed"),
           messages: [],
           prompt: { messages: [] },
           complaint: "too late",

@@ -1,7 +1,12 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import type { ParentView } from "../src/index.ts";
-import { allOf, anyOf, messageEdge, on, triggerInputs } from "../src/index.ts";
+import {
+  Edge,
+  TriggerEntry,
+  TriggerRule,
+  triggerInputs,
+} from "../src/index.ts";
 
 const EMPTY_VIEW: ParentView<number, string> = {
   messages: new Map(),
@@ -9,14 +14,17 @@ const EMPTY_VIEW: ParentView<number, string> = {
 };
 
 test("triggerInputs: `all` reads every rule edge whole, `any` reads only the first satisfied edge", () => {
-  const edgeA = messageEdge<number, string>("a");
-  const edgeB = messageEdge<number, string>("b");
+  const edgeA = Edge.message<number, string>("a");
+  const edgeB = Edge.message<number, string>("b");
   const a = edgeA.id;
   const b = edgeB.id;
   const view = EMPTY_VIEW;
   const status = "ready";
 
-  const conjunction = allOf(on(edgeA), on(edgeB));
+  const conjunction = TriggerRule.allOf(
+    TriggerEntry.on(edgeA),
+    TriggerEntry.on(edgeB),
+  );
   assert.deepEqual(
     [
       ...triggerInputs({
@@ -45,7 +53,10 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
     [],
   );
 
-  const disjunction = anyOf(on(edgeA), on(edgeB));
+  const disjunction = TriggerRule.anyOf(
+    TriggerEntry.on(edgeA),
+    TriggerEntry.on(edgeB),
+  );
   assert.deepEqual(
     [
       ...triggerInputs({

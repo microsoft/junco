@@ -1,5 +1,6 @@
 export type {
   Agentic,
+  AgenticInput,
   AgenticOptions,
   AgenticStatus,
   AgenticStep,

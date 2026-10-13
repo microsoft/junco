@@ -1,9 +1,19 @@
+import type { Edge } from "./edges.js";
 import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { TriggerRule } from "./trigger.js";
 
 /** A single datum crossing one message edge. */
 export type Message<N> = { readonly id: EdgeId; readonly payload: N };
+
+/** Construction of {@link Message}s. */
+export const Message = {
+  /** A message bound for `edge`, carrying `payload` by reference. */
+  create: <N, T>(edge: Edge<N, T>, payload: N): Message<N> => ({
+    id: edge.id,
+    payload,
+  }),
+};
 
 /**
  * Keyed read access to one side of a node's inbound state.
@@ -60,7 +70,7 @@ export type NodeGenerator<N, T> = AsyncGenerator<
  *  - Each advance yields mutable `Message<N>[]` — every message the node emits that turn, routed
  *    in array order. Yield `[]` to emit nothing; a pure sink does exactly that and stays alive.
  *  - Returning `T` marks the node `done`. A node that must run for the whole graph's life simply
- *    never returns (see `stepNode` in `builders.ts`).
+ *    never returns (see `StepNode` in `builders.ts`).
  */
 export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
 

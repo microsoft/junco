@@ -12,9 +12,9 @@ import {
   Width,
 } from "dataflow-engine";
 import {
-  createParallelScheduler,
-  createRoundRobinScheduler,
-  createScheduler,
+  ParallelScheduler,
+  RoundRobinScheduler,
+  Scheduler,
 } from "../src/index.ts";
 
 class Ledger {
@@ -27,7 +27,7 @@ class Ledger {
 }
 
 export function classStateKeepsItsMethods(edge: EdgeIdType) {
-  const scheduler = createScheduler({
+  const scheduler = new Scheduler({
     state: new Ledger(),
     schedule(available, state, window, threads) {
       const capacity: number = window * threads;
@@ -55,7 +55,7 @@ export function classStateKeepsItsMethods(edge: EdgeIdType) {
 }
 
 export function payloadsFlowIntoTheCandidateView(edge: EdgeIdType) {
-  const scheduler = createScheduler({
+  const scheduler = new Scheduler({
     state: { reads: 0 },
     schedule(
       available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
@@ -87,24 +87,22 @@ export function payloadsFlowIntoTheCandidateView(edge: EdgeIdType) {
     string,
     never,
     typeof scheduler
-  >(scheduler, Width(1), UNBOUNDED);
+  >(scheduler, Width.create(1), UNBOUNDED);
   const reads: number = graph.scheduler.state.reads;
   return [typed, reads];
 }
 
 export function shippedStrategiesKeepTheirShapes() {
-  const parallel = createParallelScheduler<number, string>();
-  // @ts-expect-error the stateless strategy exposes no state
-  parallel.state;
-  const rotation = createRoundRobinScheduler<number, string>();
+  const parallel = new ParallelScheduler<number, string>();
+  const rotation = new RoundRobinScheduler<number, string>();
   const cursor: NodeIdType | undefined = rotation.state;
   rotation.state = undefined;
   // @ts-expect-error the cursor is a branded NodeId, not a raw string
   rotation.state = "a";
   const graph = new DataflowGraph<void, number, string, never, typeof rotation>(
     rotation,
-    Width(1),
-    Width(1),
+    Width.create(1),
+    Width.create(1),
   );
   const last: NodeIdType | undefined = graph.scheduler.state;
   return [parallel, cursor, last];

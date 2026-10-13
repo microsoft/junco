@@ -3,7 +3,7 @@
 import type { PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import type { DataflowTracer } from "dataflow-engine";
 import type { AgenticOptions } from "junco-agent";
-import type { Issue, ToolCollection } from "junco-tools";
+import { type Issue, LockPolicy, type ToolCollection } from "junco-tools";
 import {
   PiScheduler,
   type PiSchedulerOptions,
@@ -22,12 +22,11 @@ export function bothFactoriesShareOneOptionsShape<
   >,
   collection: ToolCollection,
 ) {
-  const empty: PiSchedulerOptions = { policy: "EmptyPolicy" };
+  const empty: PiSchedulerOptions = {};
   const made: Promise<PiScheduler<N, T, S, P>> = PiScheduler.make(shared);
   const opus: Promise<PiScheduler<N, T, S, P>> = PiScheduler.opus(shared);
   const resolved: PiSchedulerOptions<N, T, S, P> = {
     ...native,
-    policy: "LockPolicy",
     collection,
     prompt: "Run available work.",
   };
@@ -36,15 +35,15 @@ export function bothFactoriesShareOneOptionsShape<
   // A redundant model is accepted on opus, which keeps its own fixed selection.
   const opusWithModel: Promise<PiScheduler<N, T, S, P>> =
     PiScheduler.opus(resolved);
-  const unchecked: Promise<PiScheduler> = PiScheduler.make({
-    policy: "LockPolicy",
-  });
-  // @ts-expect-error The policy is required; there is no default.
-  const missingPolicy: PiSchedulerOptions = {};
-  // @ts-expect-error Policies are the two case-sensitive literals.
-  const invalidPolicy: PiSchedulerOptions = { policy: "gitpolicy" };
+  const unchecked: Promise<PiScheduler> = PiScheduler.make({});
+  // @ts-expect-error Authorization comes only from the collection.
+  const withPolicy: PiSchedulerOptions = { policy: LockPolicy };
   // @ts-expect-error opus has no default options.
   const defaulted: Promise<PiScheduler> = PiScheduler.opus();
+  const callbackPrompt: PiSchedulerOptions = {
+    // @ts-expect-error A scheduler has no graph view for a prompt function.
+    prompt: () => "Run available work.",
+  };
   return [
     empty,
     made,
@@ -52,9 +51,9 @@ export function bothFactoriesShareOneOptionsShape<
     fromNative,
     opusWithModel,
     unchecked,
-    missingPolicy,
-    invalidPolicy,
+    withPolicy,
     defaulted,
+    callbackPrompt,
   ];
 }
 

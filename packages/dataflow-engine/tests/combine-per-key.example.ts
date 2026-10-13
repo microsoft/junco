@@ -4,20 +4,18 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
-import type { Edge, Message } from "../src/index.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import {
-  always,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 type Pair = {
@@ -33,10 +31,10 @@ type Result = {
 type Msg = Pair | Result;
 
 test("cookbook: combine-per-key sum and multiply from same source", async () => {
-  const sumInEdge = messageEdge<Msg, string>("sumIn");
-  const multiplyInEdge = messageEdge<Msg, string>("multiplyIn");
-  const sumOutEdge = messageEdge<Msg, string>("sumOut");
-  const multiplyOutEdge = messageEdge<Msg, string>("multiplyOut");
+  const sumInEdge = Edge.message<Msg, string>("sumIn");
+  const multiplyInEdge = Edge.message<Msg, string>("multiplyIn");
+  const sumOutEdge = Edge.message<Msg, string>("sumOut");
+  const multiplyOutEdge = Edge.message<Msg, string>("multiplyOut");
 
   const inputPairs: [string, number][] = [
     ["a", 1],
@@ -49,26 +47,34 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
 
   const sums: Result[] = [];
   const products: Result[] = [];
-  const tracer = createExampleTracer("cookbook/combine-per-key");
+  const tracer = ExampleTracer.create("cookbook/combine-per-key");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
 
-  const sourceId = graph.addNode({
-    state: undefined,
-    trigger: always(),
-    step: emitOnce<void, Msg, string>(() => {
-      const events: Message<Msg>[] = [];
-      for (const [key, value] of inputPairs) {
-        const pair: Pair = { kind: "pair", key, value };
-        events.push(msg(sumInEdge, pair), msg(multiplyInEdge, pair));
-      }
-      return events;
-    }, "source done"),
-  });
+  const sourceId = graph.addNode(
+    new EmitOnce<void, Msg, string>(
+      () => {
+        const events: Message<Msg>[] = [];
+        for (const [key, value] of inputPairs) {
+          const pair: Pair = { kind: "pair", key, value };
+          events.push(
+            Message.create(sumInEdge, pair),
+            Message.create(multiplyInEdge, pair),
+          );
+        }
+        return events;
+      },
+      "source done",
+      {
+        state: undefined,
+        trigger: TriggerRule.always(),
+      },
+    ),
+  );
 
   const makeCombine = (
     inputEdge: Edge<Msg, string>,
@@ -76,32 +82,36 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
     init: number,
     reduce: (acc: number, v: number) => number,
   ) => {
-    const id = graph.addNode({
-      state: undefined,
-      trigger: when(inputEdge),
-      step: stepNode<void, Msg, string>((_state, view) => {
-        const groups = pipe(
-          from(view, inputEdge),
-          RA.filter((m): m is Pair => m.kind === "pair"),
-          RNEA.groupBy((p) => p.key),
-        );
-        const events: Message<Msg>[] = [];
-        for (const key of Object.keys(groups).sort(S.Ord.compare)) {
-          const group = groups[key]!;
-          events.push(
-            msg(outputEdge, {
-              kind: "result",
-              key,
-              value: pipe(
-                group,
-                RA.reduce(init, (a, p) => reduce(a, p.value)),
-              ),
-            }),
+    const id = graph.addNode(
+      new StepNode<void, Msg, string>(
+        (_state, view) => {
+          const groups = pipe(
+            from(view, inputEdge),
+            RA.filter((m): m is Pair => m.kind === "pair"),
+            RNEA.groupBy((p) => p.key),
           );
-        }
-        return events;
-      }),
-    });
+          const events: Message<Msg>[] = [];
+          for (const key of Object.keys(groups).sort(S.Ord.compare)) {
+            const group = groups[key]!;
+            events.push(
+              Message.create(outputEdge, {
+                kind: "result",
+                key,
+                value: pipe(
+                  group,
+                  RA.reduce(init, (a, p) => reduce(a, p.value)),
+                ),
+              }),
+            );
+          }
+          return events;
+        },
+        {
+          state: undefined,
+          trigger: TriggerRule.when(inputEdge),
+        },
+      ),
+    );
     return id;
   };
 
@@ -113,27 +123,35 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
     (a, b) => a * b,
   );
 
-  const sumSinkId = graph.addNode({
-    state: undefined,
-    trigger: when(sumOutEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, sumOutEdge)) {
-        if (m.kind === "result") sums.push(m);
-      }
-      return [];
-    }),
-  });
+  const sumSinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, sumOutEdge)) {
+          if (m.kind === "result") sums.push(m);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(sumOutEdge),
+      },
+    ),
+  );
 
-  const multiplySinkId = graph.addNode({
-    state: undefined,
-    trigger: when(multiplyOutEdge),
-    step: stepNode<void, Msg, string>((_state, view) => {
-      for (const m of from(view, multiplyOutEdge)) {
-        if (m.kind === "result") products.push(m);
-      }
-      return [];
-    }),
-  });
+  const multiplySinkId = graph.addNode(
+    new StepNode<void, Msg, string>(
+      (_state, view) => {
+        for (const m of from(view, multiplyOutEdge)) {
+          if (m.kind === "result") products.push(m);
+        }
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(multiplyOutEdge),
+      },
+    ),
+  );
 
   graph.addEdge(sourceId, sumCombineId, sumInEdge);
   graph.addEdge(sourceId, multiplyCombineId, multiplyInEdge);

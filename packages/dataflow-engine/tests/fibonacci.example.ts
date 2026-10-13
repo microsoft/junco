@@ -1,50 +1,53 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
-import { createParallelScheduler } from "junco-scheduler";
-import { createExampleTracer } from "../examples/tracing.ts";
+import { ParallelScheduler } from "junco-scheduler";
+import { ExampleTracer } from "../examples/tracing.ts";
 import type { NodeGenerator } from "../src/index.ts";
 import {
-  always,
-  anyOf,
   DataflowGraph,
-  emitOnce,
+  Edge,
+  EmitOnce,
   from,
-  messageEdge,
-  msg,
-  on,
-  stepNode,
+  Message,
+  StepNode,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
-  when,
 } from "../src/index.ts";
 
 test("cookbook: fibonacci via self-loop", async () => {
-  const fibSeed = messageEdge<number, string>("fibSeed");
-  const fibLoop = messageEdge<number, string>("fibLoop");
-  const fibOut = messageEdge<number, string>("fibOut");
+  const fibSeed = Edge.message<number, string>("fibSeed");
+  const fibLoop = Edge.message<number, string>("fibLoop");
+  const fibOut = Edge.message<number, string>("fibOut");
 
   const results: number[] = [];
-  const tracer = createExampleTracer("cookbook/fibonacci");
+  const tracer = ExampleTracer.create("cookbook/fibonacci");
   const graph = new DataflowGraph<void, number, string, never>(
-    createParallelScheduler(),
-    Width(1),
+    new ParallelScheduler(),
+    Width.create(1),
     UNBOUNDED,
     tracer,
   );
 
-  const seedId = graph.addNode({
-    state: undefined,
-    trigger: always(),
-    step: emitOnce<void, number, string>(
-      () => [msg(fibSeed, 0), msg(fibSeed, 1)],
+  const seedId = graph.addNode(
+    new EmitOnce<void, number, string>(
+      () => [Message.create(fibSeed, 0), Message.create(fibSeed, 1)],
       "seeded",
+      {
+        state: undefined,
+        trigger: TriggerRule.always(),
+      },
     ),
-  });
+  );
 
   const fibId = graph.addNode({
     state: undefined,
-    trigger: anyOf(on(fibSeed), on(fibLoop)),
+    trigger: TriggerRule.anyOf(
+      TriggerEntry.on(fibSeed),
+      TriggerEntry.on(fibLoop),
+    ),
     step: async function* (): NodeGenerator<number, string> {
       let inputs = yield [];
       for (let i = 0; i < 10; i++) {
@@ -52,20 +55,28 @@ test("cookbook: fibonacci via self-loop", async () => {
           inputs.messages.get(fibLoop.id))!;
         const a = pair[0]!;
         const b = pair[1]!;
-        inputs = yield [msg(fibOut, a), msg(fibLoop, b), msg(fibLoop, a + b)];
+        inputs = yield [
+          Message.create(fibOut, a),
+          Message.create(fibLoop, b),
+          Message.create(fibLoop, a + b),
+        ];
       }
       return "emitted 10 fibs";
     },
   });
 
-  const sinkId = graph.addNode({
-    state: undefined,
-    trigger: when(fibOut),
-    step: stepNode<void, number, string>((_state, view) => {
-      for (const v of from(view, fibOut)) results.push(v);
-      return [];
-    }),
-  });
+  const sinkId = graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) => {
+        for (const v of from(view, fibOut)) results.push(v);
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(fibOut),
+      },
+    ),
+  );
 
   graph.addEdge(seedId, fibId, fibSeed);
   graph.addEdge(fibId, fibId, fibLoop);

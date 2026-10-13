@@ -171,7 +171,7 @@ jobs:
         run: bun run test:coverage
 
       - name: Upload coverage
-        if: always()
+        if: TriggerRule.always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage
@@ -201,17 +201,17 @@ jobs:
           bun install --ignore-scripts --omit=dev --omit=peer
           cat > smoke.mjs <<'EOF'
           import assert from "node:assert/strict";
-          import { DataflowDefinitionError, DataflowGraph, NodeId, Width, always } from "dataflow-engine";
-          import { createRoundRobinScheduler } from "junco-scheduler";
+          import { DataflowDefinitionError, DataflowGraph, NodeId, TriggerRule, Width } from "dataflow-engine";
+          import { RoundRobinScheduler } from "junco-scheduler";
           for (const peer of ["junco-agent", "junco-tools", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
             assert.throws(() => import.meta.resolve(peer), `${peer} unexpectedly installed`);
           }
-          const scheduler = createRoundRobinScheduler();
-          const graph = new DataflowGraph(scheduler, Width(4), Width(4));
-          assert.throws(() => new DataflowGraph(scheduler, Width(1), Width(1)), (error) => error instanceof DataflowDefinitionError);
+          const scheduler = new RoundRobinScheduler();
+          const graph = new DataflowGraph(scheduler, Width.create(4), Width.create(4));
+          assert.throws(() => new DataflowGraph(scheduler, Width.create(1), Width.create(1)), (error) => error instanceof DataflowDefinitionError);
           const ran = [];
           for (const id of ["2", "1", "10"]) graph.addNode({
-            id: NodeId(id), state: undefined, trigger: always(),
+            id: NodeId.create(id), state: undefined, trigger: TriggerRule.always(),
             step: async function* () { while (true) { ran.push(id); yield []; } },
           });
           for (let i = 0; i < 4; i++) await graph.step();
@@ -228,9 +228,9 @@ jobs:
         run: |
           smoke='
           import assert from "node:assert/strict";
-          import { DataflowGraph, NodeId, Width, always } from "dataflow-engine";
+          import { DataflowGraph, NodeId, TriggerRule, Width } from "dataflow-engine";
           import { OpikDataflowTracer } from "dataflow-engine-opik";
-          import { createParallelScheduler } from "junco-scheduler";
+          import { ParallelScheduler } from "junco-scheduler";
           const traces = [];
           const client = {
             trace(options) {
@@ -248,8 +248,8 @@ jobs:
             async flush() {},
           };
           const tracer = new OpikDataflowTracer(client, "monorepo-smoke");
-          const graph = new DataflowGraph(createParallelScheduler(), Width(1), Width(1), tracer);
-          graph.addNode({ id: NodeId("only"), state: undefined, trigger: always(), step: async function* () { return 42; } });
+          const graph = new DataflowGraph(new ParallelScheduler(), Width.create(1), Width.create(1), tracer);
+          graph.addNode({ id: NodeId.create("only"), state: undefined, trigger: TriggerRule.always(), step: async function* () { return 42; } });
           const results = await graph.run();
           await tracer.flush();
           assert.deepEqual([...results], [["only", 42]]);
@@ -367,7 +367,7 @@ jobs:
           bun run test:native
 
       - name: Upload junco-agent coverage
-        if: always()
+        if: TriggerRule.always()
         uses: actions/upload-artifact@v4
         with:
           name: junco-agent-coverage
@@ -382,7 +382,7 @@ jobs:
           bun run test:coverage
 
       - name: Upload junco-scheduler coverage
-        if: always()
+        if: TriggerRule.always()
         uses: actions/upload-artifact@v4
         with:
           name: junco-scheduler-coverage
@@ -405,7 +405,7 @@ jobs:
           bun run smoke:workflows
 
       - name: Upload agency coverage
-        if: always()
+        if: TriggerRule.always()
         uses: actions/upload-artifact@v4
         with:
           name: agency-coverage
@@ -417,10 +417,10 @@ jobs:
           smoke='
           import assert from "node:assert/strict";
           import { DataflowDefinitionError, DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
-          import { createParallelScheduler } from "junco-scheduler";
-          const scheduler = createParallelScheduler();
-          new DataflowGraph(scheduler, Width(1), UNBOUNDED);
-          assert.throws(() => new DataflowGraph(scheduler, Width(1), UNBOUNDED), (error) => error instanceof DataflowDefinitionError);
+          import { ParallelScheduler } from "junco-scheduler";
+          const scheduler = new ParallelScheduler();
+          new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
+          assert.throws(() => new DataflowGraph(scheduler, Width.create(1), UNBOUNDED), (error) => error instanceof DataflowDefinitionError);
           console.log(`consumer-engine-identity-${RUNTIME}: ok`);
           '
           bun --no-install --eval "const RUNTIME = \"bun\";$smoke"

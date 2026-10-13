@@ -45,7 +45,6 @@ export async function nativeOptions<
     models,
     model,
     systemPrompt: "sys",
-    policy: "LockPolicy",
     ...overrides,
     faux,
   };

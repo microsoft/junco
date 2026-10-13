@@ -41,27 +41,28 @@ export async function graphTypesBuildAndReadTypedNodes(
   g: graph.DataflowGraph<Counter, number, string, never>,
   source: graph.NodeIdType,
 ) {
-  const numbers: graph.Edge<number, string> = graph.messageEdge<number, string>(
-    "numbers",
-  );
-  const done: graph.Edge<number, string> = graph.valueEdge<number, string>(
+  const numbers: graph.Edge<number, string> = graph.Edge.message<
+    number,
+    string
+  >("numbers");
+  const done: graph.Edge<number, string> = graph.Edge.value<number, string>(
     "done",
   );
   const numbersId: graph.EdgeIdType = numbers.id;
-  const doneId: graph.EdgeId = graph.EdgeId("done");
-  const sinkId: graph.NodeId = graph.NodeId("sink");
-  const window: graph.Width = graph.Width(2);
+  const doneId: graph.EdgeId = graph.EdgeId.create("done");
+  const sinkId: graph.NodeId = graph.NodeId.create("sink");
+  const window: graph.Width = graph.Width.create(2);
   const threads: graph.WidthType = graph.UNBOUNDED;
-  const queued: graph.Queue<number> = graph.Queue([1, 2]);
-  const empty: graph.Queue<number> = graph.emptyQueue<number>();
+  const queued: graph.Queue<number> = graph.Queue.from([1, 2]);
+  const empty: graph.Queue<number> = graph.Queue.empty<number>();
   queued.push(3);
-  const sent: graph.Message<number> = graph.msg(
+  const sent: graph.Message<number> = graph.Message.create(
     numbers,
     queued.shift() ?? empty.length,
   );
 
   const bounded = <W extends number>(width: graph.ValidWidth<W>): graph.Width =>
-    graph.Width<W>(width);
+    graph.Width.create<W>(width);
   const widths: graph.WidthType[] = [window, threads, bounded(4)];
 
   const messages: graph.Lookup<graph.EdgeIdType, readonly number[]> = new Map([
@@ -85,7 +86,7 @@ export async function graphTypesBuildAndReadTypedNodes(
       this.state.count += graph.from(current, numbers).length;
       const status: graph.NodeStatus = this.status;
       current = yield status === "running"
-        ? [graph.msg(numbers, this.state.count)]
+        ? [graph.Message.create(numbers, this.state.count)]
         : [];
     }
     return `${this.state.count}`;
@@ -93,9 +94,9 @@ export async function graphTypesBuildAndReadTypedNodes(
   const options: graph.NodeOptions<number, string> = {
     id: sinkId,
     description: "counts numbers until done",
-    trigger: graph.trigger.anyOf<number, string>(
-      trigger.on(numbers),
-      trigger.on(done),
+    trigger: graph.trigger.TriggerRule.anyOf<number, string>(
+      trigger.TriggerEntry.on(numbers),
+      trigger.TriggerEntry.on(done),
     ),
     is_available: availability,
   };
@@ -105,7 +106,9 @@ export async function graphTypesBuildAndReadTypedNodes(
     signal: AbortSignal | undefined,
   ): Promise<readonly graph.Message<number>[]> {
     signal?.throwIfAborted();
-    return error instanceof Error ? [graph.msg(numbers, this.state.count)] : [];
+    return error instanceof Error
+      ? [graph.Message.create(numbers, this.state.count)]
+      : [];
   };
   const spec: graph.NodeSpec<Counter, number, string> = {
     ...options,
@@ -162,10 +165,10 @@ export async function graphTypesBuildAndReadTypedNodes(
   // @ts-expect-error a numeric message cannot carry a string payload
   const wrongPayload: graph.Message<number> = { id: numbersId, payload: "one" };
   // @ts-expect-error msg rejects a payload of the wrong type
-  graph.msg(numbers, "one");
+  graph.Message.create(numbers, "one");
   // @ts-expect-error a node spec requires its step
   const incomplete: graph.NodeSpec<Counter, number, string> = {
-    trigger: graph.trigger.always(),
+    trigger: graph.trigger.TriggerRule.always(),
     state: { count: 0 },
   };
   // @ts-expect-error a node spec's state must match the graph's state type
@@ -200,7 +203,7 @@ export function spawnBuildsTypedStars(
   worker: agent.JuncoAgent,
 ) {
   const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
-  const typed: graph.JuncoGraph<number, string> = graph.Spawn(
+  const typed: graph.JuncoGraph<number, string> = graph.JuncoGraph.spawn(
     root,
     tasks,
     (task) => {
@@ -210,27 +213,42 @@ export function spawnBuildsTypedStars(
       return child(inferred.label);
     },
   );
-  const defaults: graph.JuncoGraph = graph.Spawn(
-    graph.nodes.agentNode(lead, {
-      trigger: trigger.never(),
-      policy: "LockPolicy",
-    }),
+  const defaults: graph.JuncoGraph = graph.JuncoGraph.spawn(
+    {
+      state: lead,
+      trigger: trigger.TriggerRule.never(),
+      policy: tools.LockPolicy,
+    },
     tasks,
-    () =>
-      graph.nodes.agentNode(worker, {
-        trigger: trigger.never(),
-        policy: "LockPolicy",
-      }),
+    () => ({
+      state: worker,
+      trigger: trigger.TriggerRule.never(),
+      policy: tools.LockPolicy,
+    }),
   );
   // @ts-expect-error the root must be an adapted node, not a bare state
-  graph.Spawn(bare, tasks, (task) => child(task.label));
+  graph.JuncoGraph.spawn(bare, tasks, (task) => child(task.label));
   // @ts-expect-error the factory must return an adapted node, not a bare state
-  graph.Spawn(root, tasks, () => state);
+  graph.JuncoGraph.spawn(root, tasks, () => state);
   // @ts-expect-error the factory must return a node, not an arbitrary value
-  graph.Spawn(root, tasks, (task) => task.label);
+  graph.JuncoGraph.spawn(root, tasks, (task) => task.label);
   // @ts-expect-error a string-message child cannot join a number-wired star
-  graph.Spawn<Task, number, string>(root, tasks, () => stringChild);
-  return [typed, defaults];
+  graph.JuncoGraph.spawn<Task, number, string>(root, tasks, () => stringChild);
+  const managed: graph.nodes.AgenticNode<number, string> = {
+    state,
+    trigger: trigger.TriggerRule.never(),
+  };
+  const managedStar = graph.JuncoGraph.spawn(managed, tasks, () => ({
+    state,
+    trigger: trigger.TriggerRule.never(),
+  }));
+  // @ts-expect-error a step-less coroutine's policy is owned by its state
+  const owned: graph.nodes.AgenticNode<number, string> = {
+    state,
+    trigger: trigger.TriggerRule.never(),
+    policy: tools.LockPolicy,
+  };
+  return [typed, defaults, managedStar, owned];
 }
 
 // --- trigger and tracer ----------------------------------------------------------------------------
@@ -240,36 +258,37 @@ export function triggerRulesDriveTypedNodes(
   right: graph.Edge<number, string>,
 ) {
   const kind: trigger.TriggerKind = "any";
-  const leftEntry: trigger.TriggerEntry<number, string> = trigger.on(left);
+  const leftEntry: trigger.TriggerEntry<number, string> =
+    trigger.TriggerEntry.on(left);
   const literal: trigger.TriggerRule<number, string> = {
     kind,
-    rule: [leftEntry, trigger.on(right)],
+    rule: [leftEntry, trigger.TriggerEntry.on(right)],
   };
   const nested: graph.trigger.TriggerRule<number, string> =
-    graph.trigger.allOf(leftEntry);
+    graph.trigger.TriggerRule.allOf(leftEntry);
   const rules: trigger.TriggerRule<number, string>[] = [
     literal,
     nested,
-    trigger.when(right),
-    trigger.always(),
-    trigger.never(),
+    trigger.TriggerRule.when(right),
+    trigger.TriggerRule.always(),
+    trigger.TriggerRule.never(),
   ];
   const inbound = new Map<graph.EdgeIdType, graph.Edge<number, string>>([
     [left.id, left],
     [right.id, right],
   ]);
-  const sink = graph.NodeId("sink");
+  const sink = graph.NodeId.create("sink");
   const ready: boolean[] = rules.map((rule) =>
     trigger.evaluateTrigger(rule, inbound, sink),
   );
   const satisfied: (readonly graph.EdgeIdType[])[] = rules.map((rule) =>
     trigger.satisfiedEdges(rule, inbound, sink),
   );
-  const spec: graph.NodeSpec<undefined, number, string> = {
-    trigger: literal,
-    state: undefined,
-    step: graph.nodes.emitOnce(() => [graph.msg(left, 1)], "once"),
-  };
+  const spec: graph.NodeSpec<undefined, number, string> =
+    new graph.nodes.EmitOnce(() => [graph.Message.create(left, 1)], "once", {
+      trigger: literal,
+      state: undefined,
+    });
   const invalidKind: trigger.TriggerRule<number, string> = {
     // @ts-expect-error a trigger kind is "all" or "any"
     kind: "some",
@@ -282,10 +301,10 @@ export function triggerRulesDriveTypedNodes(
   };
   // @ts-expect-error a number-message entry does not build a string-message rule
   const wrongMessage: trigger.TriggerRule<string, string> =
-    trigger.allOf(leftEntry);
+    trigger.TriggerRule.allOf(leftEntry);
   // @ts-expect-error a string-result entry does not build a Date-result rule
   const wrongResult: graph.trigger.TriggerRule<number, Date> =
-    graph.trigger.anyOf(leftEntry);
+    graph.trigger.TriggerRule.anyOf(leftEntry);
   return [
     ready,
     satisfied,
@@ -354,7 +373,7 @@ export async function tracerHandlesRetainPayloadTypes(
     counting,
     new tracer.DummyTracer(),
     new tracer.StdoutTracer(),
-    tracer.createTracer(),
+    tracer.StdoutTracer.shared(),
   ];
   const run: tracer.DataflowRunTrace<number, string> = counting.startRun(g);
   const primed: tracer.DataflowStepTrace<number, string> = run.startNode(
@@ -368,7 +387,7 @@ export async function tracerHandlesRetainPayloadTypes(
     "resume",
     view,
   );
-  resumed.end({ done: false, value: [graph.msg(edge, 2)] });
+  resumed.end({ done: false, value: [graph.Message.create(edge, 2)] });
   resumed.end({ done: true, value: "two" });
   run.end(new Map([[id, "two"]]));
   // @ts-expect-error a step result is the node's string result type
@@ -378,14 +397,14 @@ export async function tracerHandlesRetainPayloadTypes(
   // @ts-expect-error a step phase is "prime" or "resume"
   run.startNode(id, "restart", undefined);
   const traced = new graph.DataflowGraph<Counter, number, string, never>(
-    schedulers.createParallelScheduler<number, string>(),
-    graph.Width(1),
+    new schedulers.ParallelScheduler<number, string>(),
+    graph.Width.create(1),
     graph.UNBOUNDED,
     counting,
   );
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await graph.createParallelAgentGraph("LockPolicy").tracer.flush();
+  await graph.JuncoGraph.parallel(tools.LockPolicy).tracer.flush();
   return traced;
 }
 
@@ -429,7 +448,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
       ]);
     },
   };
-  const policy = schedulers.createScheduler(options);
+  const policy = new schedulers.Scheduler(options);
   policy.state.batch = 3;
   const contract: schedulers.DataflowScheduler<number, string> = policy;
   const g = new graph.DataflowGraph<
@@ -438,13 +457,13 @@ export async function typedSchedulerPolicyReadsPerEdge(
     string,
     never,
     typeof policy
-  >(policy, graph.Width(2), graph.Width(2));
+  >(policy, graph.Width.create(2), graph.Width.create(2));
   const observed: graph.NodeIdType | undefined = g.scheduler.state.last;
   const fallback: schedulers.InputSchedule[] = [...g.available().values()].map(
     schedulers.triggerInputs,
   );
   const roundRobin: schedulers.DataflowScheduler<number, string> =
-    schedulers.createRoundRobinScheduler<number, string>();
+    new schedulers.RoundRobinScheduler<number, string>();
 
   // @ts-expect-error a planned entry names a node ID, not a raw string
   const rawId: schedulers.NodeSchedule = { id: "a", inputs: new Map() };
@@ -517,27 +536,21 @@ export async function piSchedulerTypesFixTheScheduleTool(
     TaggedSkill,
     TaggedTemplate
   > = await schedulers.PiScheduler.opus(options);
-  let agency: graph.JuncoGraph | undefined;
+  const agency = await graph.JuncoGraph.pi<TaggedSkill, TaggedTemplate>({
+    prompt: "Run the agency.",
+    policy: tools.LockPolicy,
+    tracer: tracer.StdoutTracer.shared(),
+    window: graph.Width.create(1),
+  });
   const agencyScheduler: schedulers.PiScheduler<
     graph.nodes.AgenticInput,
     AssistantMessage,
     TaggedSkill,
     TaggedTemplate
-  > = await schedulers.createAgencyScheduler<TaggedSkill, TaggedTemplate>(
-    () => agency,
-    { prompt: "Run the agency.", policy: "LockPolicy" },
-  );
-  agency = new graph.JuncoGraph(
-    agencyScheduler,
-    graph.Width(1),
-    graph.UNBOUNDED,
-    tracer.createTracer(),
-    "LockPolicy",
-  );
-  // @ts-expect-error an agency scheduler requires its policy
-  void schedulers.createAgencyScheduler(() => agency, { prompt: "x" });
-  // @ts-expect-error an agency scheduler requires options
-  void schedulers.createAgencyScheduler(() => agency);
+  > = agency.scheduler;
+  void graph.JuncoGraph.pi({ prompt: "x", policy: tools.LockPolicy });
+  // @ts-expect-error an agency graph requires options
+  void graph.JuncoGraph.pi();
   const skillTags: ("skill" | undefined)[] = [
     scheduler,
     opus,
@@ -562,7 +575,6 @@ export async function piSchedulerTypesFixTheScheduleTool(
   // @ts-expect-error the scheduler's tool set is fixed to `schedule` and `complain`
   await scheduler.setTools([plainTool]);
   const replaced: schedulers.PiSchedulerOptions<number, string> = {
-    policy: "LockPolicy",
     // @ts-expect-error construction cannot replace the fixed tool set
     tools: [plainTool],
   };
@@ -660,7 +672,7 @@ export async function agentProtocolNarrowsSteps(
     }
   }
   const issue: tools.Issue<number> = {
-    nodeId: graph.NodeId("n"),
+    nodeId: graph.NodeId.create("n"),
     messages: [],
     prompt: { messages: [] },
     complaint: "blocked",
@@ -669,7 +681,7 @@ export async function agentProtocolNarrowsSteps(
   // @ts-expect-error a complaint string alone is not an issue
   protocol.complain("blocked");
   // @ts-expect-error an issue carries its messages and prompt
-  protocol.complain({ nodeId: graph.NodeId("n"), complaint: "blocked" });
+  protocol.complain({ nodeId: graph.NodeId.create("n"), complaint: "blocked" });
   described.push(String(complained));
 
   // @ts-expect-error a settled step carries its message
@@ -726,7 +738,7 @@ export async function agentFactoriesKeepSpecializations(
     };
   const resolved: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool> =
     await agent.JuncoAgent.fromResolved(options);
-  const yieldTool: tools.YieldTool = tools.createYieldTool();
+  const yieldTool: tools.YieldTool = new tools.YieldTool();
   const createOptions: agent.JuncoAgentCreateOptions<
     Skill,
     PromptTemplate,
@@ -738,7 +750,6 @@ export async function agentFactoriesKeepSpecializations(
     model: "plain",
     tools: [yieldTool],
     thinkingLevel: "high",
-    policy: "LockPolicy",
   };
   const explicit: agent.JuncoAgent<Skill, PromptTemplate, tools.YieldTool> =
     await agent.JuncoAgent.create(createOptions);
@@ -748,7 +759,6 @@ export async function agentFactoriesKeepSpecializations(
       model: "plain",
       cwd: "/tmp",
       resources: { skills: [skill] },
-      policy: "EmptyPolicy",
     });
   const paused = await yieldTool.execute("call-1", { reason: "waiting" });
   const details: tools.YieldToolDetails = paused.details;
@@ -761,10 +771,8 @@ export async function agentFactoriesKeepSpecializations(
   // @ts-expect-error create requires a provider
   const noProvider: agent.JuncoAgentCreateOptions = {
     model: "plain",
-    policy: "LockPolicy",
   };
-  // @ts-expect-error create requires a policy
-  const noPolicy: agent.JuncoAgentCreateOptions = {
+  const minimal: agent.JuncoAgentCreateOptions = {
     provider: "faux",
     model: "plain",
   };
@@ -781,7 +789,7 @@ export async function agentFactoriesKeepSpecializations(
     audited,
     agents,
     noProvider,
-    noPolicy,
+    minimal,
     malformedResources,
     malformedTools,
   ];
@@ -797,7 +805,7 @@ export async function toolFactoriesAreConsumerAgentTools(
   base: agent.AgenticOptions,
   signal: AbortSignal,
 ) {
-  const operations: tools.ShellMuxOperations = tools.createShellMuxOperations({
+  const operations: tools.ShellMuxOperations = new tools.ShellMuxOperations({
     principal: "typed",
     native,
     mux,
@@ -818,12 +826,12 @@ export async function toolFactoriesAreConsumerAgentTools(
     commandPrefix: "set -e",
   } satisfies tools.BashToolOptions;
   const bashInput: tools.BashToolInput = { command: "printf ok", timeout: 5 };
-  const bash = tools.createBashTool(cwd, bashOptions);
+  const bash = tools.BashTool.create(cwd, bashOptions);
   const bashResult = await bash.execute("bash-1", bashInput, signal);
   const bashDetails: tools.BashToolDetails | undefined = bashResult.details;
   const truncated: string | undefined = bashDetails?.fullOutputPath;
 
-  const edit = tools.createEditTool(cwd, store, native, mux);
+  const edit = tools.EditTool.create(cwd, store, native, mux);
   const edited = await edit.execute("edit-1", {
     input: "[a.ts#ABCD]\nPUT 1.=1:\n+x",
   });
@@ -837,31 +845,37 @@ export async function toolFactoriesAreConsumerAgentTools(
     {
       bash: bashOptions,
       native,
-      policy: "LockPolicy",
+      policy: tools.LockPolicy,
       principal: "typed",
     },
   );
   const borrowed: { close(): Promise<void> } = collection.lease();
-  const muxPolicy: "LockPolicy" | "EmptyPolicy" = collection.mux.policy;
+  const collectionPolicy: tools.Policy = collection.policy;
+  // Policies are open: any implementation composes with the shipped ones.
+  const denyAll: tools.Policy = {
+    toNative: (native) => native.NativePolicy.not(native.NativePolicy.empty()),
+  };
+  const composed: tools.Policy = tools.Policy.and(
+    tools.Policy.or(tools.LockPolicy, denyAll),
+    tools.Policy.not(tools.EmptyPolicy),
+  );
   const collectionOptions: tools.ToolCollectionOptions = {
     sandbox: "always",
-    policy: "EmptyPolicy",
+    policy: tools.EmptyPolicy,
     principal: "owned",
   };
-  // @ts-expect-error a collection requires its policy
   const unselected: tools.ToolCollectionOptions = { sandbox: "always" };
   // @ts-expect-error a collection opens its own mux
-  await tools.ToolCollection.create(cwd, { policy: "LockPolicy", mux });
-  // @ts-expect-error a collection requires options
+  await tools.ToolCollection.create(cwd, { policy: tools.LockPolicy, mux });
   await tools.ToolCollection.create(cwd);
   const agentTools: AgentTool[] = [
-    tools.createReadTool(cwd, store, native, mux),
+    tools.ReadTool.create(cwd, store, native, mux),
     edit,
-    tools.createGrepTool(cwd, store, native, mux),
-    tools.createFindTool(cwd, native, mux),
-    tools.createAstGrepTool(cwd, native, mux),
-    tools.createAstEditTool(cwd, native, mux),
-    tools.createDiffTool(native),
+    tools.GrepTool.create(cwd, store, native, mux),
+    tools.FindTool.create(cwd, native, mux),
+    tools.AstGrepTool.create(cwd, native, mux),
+    tools.AstEditTool.create(cwd, native, mux),
+    tools.DiffTool.create(native),
     bash,
     ...collection.tools,
   ];
@@ -889,7 +903,7 @@ export async function toolFactoriesAreConsumerAgentTools(
   // @ts-expect-error a command prefix is a string
   const numericPrefix: tools.BashToolOptions = { commandPrefix: 1 };
   const invalidSandbox: tools.ToolCollectionOptions = {
-    policy: "LockPolicy",
+    policy: tools.LockPolicy,
     // @ts-expect-error a collection sandbox is "shared" or "always"
     sandbox: "never",
   };
@@ -902,7 +916,8 @@ export async function toolFactoriesAreConsumerAgentTools(
     outcomes,
     collectionOptions,
     unselected,
-    muxPolicy,
+    collectionPolicy,
+    composed,
     nativeAgent,
     deniedCode,
     noCommand,
@@ -973,14 +988,14 @@ export async function independentShellMuxLeases(
   cwd: string,
   native: tools.NativeModule,
 ) {
-  const lease: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
+  const lease: tools.ShellMuxLease = await tools.ShellMuxLease.create(cwd, {
     native,
-    policy: "LockPolicy",
+    policy: tools.LockPolicy,
   });
-  const other: tools.ShellMuxLease = await tools.acquireShellMux(cwd, {
+  const other: tools.ShellMuxLease = await tools.ShellMuxLease.create(cwd, {
     native,
     sandbox: "always",
-    policy: "EmptyPolicy",
+    policy: tools.EmptyPolicy,
   });
   const independent: boolean = lease.mux !== other.mux && !lease.closed;
   const mode: "shared" | "always" = lease.mux.sandbox;
@@ -1003,11 +1018,10 @@ export async function independentShellMuxLeases(
   await other.release();
 
   // @ts-expect-error a lease's sandbox is "shared" or "always"
-  await tools.acquireShellMux(cwd, { sandbox: "never", policy: "LockPolicy" });
-  // @ts-expect-error a lease requires its policy
-  await tools.acquireShellMux(cwd, { native });
+  await tools.ShellMuxLease.create(cwd, { sandbox: "never" });
+  await tools.ShellMuxLease.create(cwd, { native });
   // @ts-expect-error a lease opens its own mux
-  await tools.acquireShellMux(cwd, { policy: "LockPolicy", mux: other.mux });
+  await tools.ShellMuxLease.create(cwd, { mux: other.mux });
   // @ts-expect-error a lease is released, not closed
   await lease.close();
   return [independent, mode, finished, processOptions];
@@ -1050,14 +1064,12 @@ export async function mcpDefinitionsComposeWithAgentFactories(
       model: "plain",
       cwd,
       tools: graft,
-      policy: "LockPolicy",
     });
   const mixed: agent.JuncoAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "plain",
     cwd,
     tools: [graft, lsp, ...collection.tools, tool],
-    policy: collection.policy,
     collection,
   });
   const resolvedOptions: agent.JuncoAgentResolvedOptions = {
@@ -1109,8 +1121,8 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
       ...(name === undefined ? {} : { name }),
     }));
   };
-  const task = tools.createTaskTool(host);
-  const unhosted: AgentTool = tools.createTaskTool();
+  const task = new tools.TaskTool(host);
+  const unhosted: AgentTool = new tools.TaskTool();
   const branded: boolean = tools.isTaskTool(unhosted);
   const admitted = await tools.invokeTaskTool(
     task,
@@ -1139,7 +1151,7 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
     async () => 1,
   );
   const batch: tools.TaskInput = { context: "c", tasks: [{ task: "x" }] };
-  const assigned: tools.AssignedTaskTool = tools.createAssignedTaskTool(batch);
+  const assigned: tools.AssignedTaskTool = new tools.AssignedTaskTool(batch);
   const launched = await tools.invokeTaskTool(
     assigned,
     host,
@@ -1232,8 +1244,8 @@ export async function messagingToolsAreNominalAgentTools(
     info: () => ({
       parents: [
         {
-          id: graph.NodeId("source"),
-          edgeId: graph.EdgeId("numbers"),
+          id: graph.NodeId.create("source"),
+          edgeId: graph.EdgeId.create("numbers"),
           kind: "message" as const,
           ...contract,
         },
@@ -1241,10 +1253,10 @@ export async function messagingToolsAreNominalAgentTools(
       children: [],
     }),
   };
-  const recv: tools.RecvTool<number, string> = tools.RecvTool(host);
-  const send: tools.SendTool = tools.SendTool(host);
-  const info: tools.InfoTool = tools.InfoTool(host);
-  const unhosted: tools.RecvTool = tools.RecvTool();
+  const recv: tools.RecvTool<number, string> = new tools.RecvTool(host);
+  const send: tools.SendTool = new tools.SendTool(host);
+  const info: tools.InfoTool = new tools.InfoTool(host);
+  const unhosted: tools.RecvTool = new tools.RecvTool();
   // Constructed values are AgentTools without unwrapping.
   const loadout: AgentTool[] = [recv, send, info, unhosted];
   const recognized: boolean[] = [
@@ -1280,20 +1292,22 @@ export async function messagingToolsAreNominalAgentTools(
   const routeEdge: graph.EdgeIdType | undefined = route?.edgeId;
   const routeKind: "message" | "value" | undefined = route?.kind;
   const expected: string | undefined = route?.expect;
-  const agreed: tools.Contract = specialized.contract(graph.EdgeId("numbers"));
+  const agreed: tools.Contract = specialized.contract(
+    graph.EdgeId.create("numbers"),
+  );
 
-  // @ts-expect-error an unwrapped carrier is not a nominal recv tool
-  const plainRecv: tools.RecvTool = {} as tools.RecvTool["_A"];
-  // @ts-expect-error an unwrapped carrier is not a nominal send tool
-  const plainSend: tools.SendTool = {} as tools.SendTool["_A"];
-  // @ts-expect-error an unwrapped carrier is not a nominal info tool
-  const plainInfo: tools.InfoTool = {} as tools.InfoTool["_A"];
-  // @ts-expect-error the constructors are called, not instantiated
-  void new tools.RecvTool();
+  // @ts-expect-error a copied carrier is not a nominal recv tool
+  const plainRecv: tools.RecvTool<number, string> = { ...recv };
+  // @ts-expect-error a copied carrier is not a nominal send tool
+  const plainSend: tools.SendTool = { ...send };
+  // @ts-expect-error a copied carrier is not a nominal info tool
+  const plainInfo: tools.InfoTool = { ...info };
+  // @ts-expect-error the constructors require new
+  void tools.RecvTool();
   // @ts-expect-error send names its edge
   await tools.SendTool.invoke(send, host, "send-2", { payload: 1 }, signal);
   // @ts-expect-error a contract is queried by edge, not node
-  void specialized.contract(graph.NodeId("source"));
+  void specialized.contract(graph.NodeId.create("source"));
   // @ts-expect-error a contract states its expectation
   const vague: tools.Contract = {};
   return [

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createComplainTool,
+  ComplainTool,
   invokeComplainTool,
   isComplainTool,
   issueLog,
@@ -56,7 +56,7 @@ const call = (tool, input, signal) =>
 
 test("invalid complaint inputs reject and append nothing", async () => {
   const host = loggingHost();
-  const tool = createComplainTool(host, () => context());
+  const tool = new ComplainTool(host, () => context());
   const before = issueLog.length;
   for (const input of [
     {},
@@ -73,7 +73,7 @@ test("invalid complaint inputs reject and append nothing", async () => {
 
 test("a pre-aborted signal rejects before recording", async () => {
   const host = loggingHost();
-  const tool = createComplainTool(host, () => context());
+  const tool = new ComplainTool(host, () => context());
   const before = issueLog.length;
   const controller = new AbortController();
   controller.abort(new Error("stop"));
@@ -100,9 +100,9 @@ test("a pre-aborted signal rejects before recording", async () => {
 test("unhosted execution rejects and appends nothing", async () => {
   const before = issueLog.length;
   for (const tool of [
-    createComplainTool(),
-    createComplainTool(loggingHost()),
-    createComplainTool(undefined, () => context()),
+    new ComplainTool(),
+    new ComplainTool(loggingHost()),
+    new ComplainTool(undefined, () => context()),
   ]) {
     await assert.rejects(
       call(tool, { complaint: "x" }),
@@ -113,7 +113,7 @@ test("unhosted execution rejects and appends nothing", async () => {
 });
 
 test("tool is genuine, frozen and copies are not genuine", () => {
-  const tool = createComplainTool();
+  const tool = new ComplainTool();
   assert.equal(tool.name, "complain");
   assert.equal(tool.executionMode, "sequential");
   assert.ok(isComplainTool(tool));
@@ -128,8 +128,8 @@ test("tool is genuine, frozen and copies are not genuine", () => {
 test("successful calls preserve order, repeats and node identity", async () => {
   const host = loggingHost();
   const before = issueLog.length;
-  const a = createComplainTool(host, () => context("node-a"));
-  const b = createComplainTool(host, () => context(""));
+  const a = new ComplainTool(host, () => context("node-a"));
+  const b = new ComplainTool(host, () => context(""));
   await call(a, { complaint: " first " });
   await call(b, { complaint: "second" });
   await call(a, { complaint: " first " });
@@ -146,7 +146,7 @@ test("successful calls preserve order, repeats and node identity", async () => {
 
 test("snapshots are frozen and cannot alter later history", async () => {
   const host = loggingHost();
-  const tool = createComplainTool(host, () => context("snap"));
+  const tool = new ComplainTool(host, () => context("snap"));
   const before = issueLog.length;
   await call(tool, { complaint: "one" });
   const snapshot = issueLog.snapshot();
@@ -172,7 +172,7 @@ test("mutating caller-owned prompt and messages after recording leaves the issue
   const ctx = context("mut");
   const payload = { kind: "prompt" };
   ctx.messages = [{ id: "e", payload }];
-  const tool = createComplainTool(host, () => ctx);
+  const tool = new ComplainTool(host, () => ctx);
   const before = issueLog.length;
   await call(tool, { complaint: "c" });
   ctx.prompt.systemPrompt = "changed";
@@ -199,10 +199,9 @@ test("observer receives node and complaint; a throwing observer cannot prevent r
     complain: (nodeId, complaint) => seen.push([nodeId, complaint]),
   };
   const before = issueLog.length;
-  await call(
-    createComplainTool(host, () => context("obs", { tracer: good })),
-    { complaint: "ok" },
-  );
+  await call(new ComplainTool(host, () => context("obs", { tracer: good })), {
+    complaint: "ok",
+  });
   assert.deepEqual(seen, [["obs", "ok"]]);
   // Silences the shared logger's warning; only the domain outcome is asserted.
   t.mock.method(console, "log", () => {});
@@ -211,10 +210,9 @@ test("observer receives node and complaint; a throwing observer cannot prevent r
       throw new Error("observer down");
     },
   };
-  await call(
-    createComplainTool(host, () => context("obs", { tracer: bad })),
-    { complaint: "kept" },
-  );
+  await call(new ComplainTool(host, () => context("obs", { tracer: bad })), {
+    complaint: "kept",
+  });
   assert.deepEqual(
     since(before).map((i) => i.complaint),
     ["ok", "kept"],
@@ -225,7 +223,7 @@ test("observer receives node and complaint; a throwing observer cannot prevent r
 test("invokeComplainTool rejects non-genuine tools", async () => {
   const host = loggingHost();
   const before = issueLog.length;
-  const fake = { ...createComplainTool(host, () => context()) };
+  const fake = { ...new ComplainTool(host, () => context()) };
   await assert.rejects(
     (async () =>
       invokeComplainTool(
@@ -245,7 +243,7 @@ test("invokeComplainTool rejects non-genuine tools", async () => {
 test("invokeComplainTool ignores factory bindings", async () => {
   const bound = loggingHost();
   const current = loggingHost();
-  const tool = createComplainTool(bound, () => context("bound"));
+  const tool = new ComplainTool(bound, () => context("bound"));
   const before = issueLog.length;
   await invokeComplainTool(
     tool,
@@ -265,7 +263,7 @@ test("invokeComplainTool ignores factory bindings", async () => {
 
 test("context and host failures propagate without acknowledgement", async () => {
   const before = issueLog.length;
-  const tool = createComplainTool(loggingHost(), () => {
+  const tool = new ComplainTool(loggingHost(), () => {
     throw new Error("no context");
   });
   await assert.rejects(call(tool, { complaint: "x" }), /no context/);
@@ -275,15 +273,12 @@ test("context and host failures propagate without acknowledgement", async () => 
     },
   };
   await assert.rejects(
-    call(
-      createComplainTool(failing, () => context()),
-      { complaint: "x" },
-    ),
+    call(new ComplainTool(failing, () => context()), { complaint: "x" }),
     /host failed/,
   );
   await assert.rejects(
     invokeComplainTool(
-      createComplainTool(),
+      new ComplainTool(),
       failing,
       context(),
       "id",
@@ -295,10 +290,7 @@ test("context and host failures propagate without acknowledgement", async () => 
   // An unclonable prompt fails the snapshot before insertion.
   const unclonable = context("bad", { prompt: { messages: [], fn: () => {} } });
   await assert.rejects(
-    call(
-      createComplainTool(loggingHost(), () => unclonable),
-      { complaint: "x" },
-    ),
+    call(new ComplainTool(loggingHost(), () => unclonable), { complaint: "x" }),
   );
   assert.equal(issueLog.length, before);
 });

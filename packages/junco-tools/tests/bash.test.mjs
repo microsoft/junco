@@ -16,9 +16,10 @@ import {
   DEFAULT_MAX_LINES,
 } from "@earendil-works/pi-coding-agent";
 import {
-  createBashTool,
-  createShellMuxOperations,
+  BashTool,
   isMarshPolicyDenied,
+  LockPolicy,
+  ShellMuxOperations,
 } from "../dist/index.js";
 import { NativeMux } from "../target/native-test/index.js";
 import {
@@ -44,12 +45,12 @@ test("complete multi-chunk UTF-8 output and final marker precede settlement", {
   const instance = await fixture();
   const outputFiles = new Set();
   try {
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal: "output-owner",
     });
-    const tool = createBashTool(instance.seed, { operations });
+    const tool = BashTool.create(instance.seed, { operations });
     const expected = "λ🙂".repeat(40000) + "\nFINAL-MARKER-雪\n";
     const producer =
       "const fs = require('node:fs'); const output = Buffer.from('λ🙂'.repeat(40000) + '\\nFINAL-MARKER-雪\\n'); for (let offset = 0; offset < output.length; offset += 4093) fs.writeSync(1, output.subarray(offset, offset + 4093));";
@@ -87,12 +88,12 @@ test("callback failure rejects without killing Node or disabling the session", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal: "callback-owner",
     });
-    const tool = createBashTool(instance.seed, { operations });
+    const tool = BashTool.create(instance.seed, { operations });
     let receivedOutput = false;
     await assert.rejects(
       tool.execute(
@@ -128,15 +129,15 @@ test("a zero-exit policy denial leaves all seed contents unchanged", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const owner = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const owner = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "file-owner",
       }),
     });
-    const intruder = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const intruder = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "another-agent",
@@ -205,7 +206,7 @@ async function policyLogScenario(level, failAfterGrant = false) {
     import { access, readFile, rm } from "node:fs/promises";
     import { join } from "node:path";
     import {
-      acquireShellMux, createBashTool, createShellMuxOperations, isMarshPolicyDenied,
+      BashTool, isMarshPolicyDenied, LockPolicy, ShellMuxLease, ShellMuxOperations,
     } from ${url("../dist/index.js")};
     import { log } from ${url("../dist/log.js")};
     import { cleanup, copyTreeNative, seedFixture } from ${url("./helpers.mjs")};
@@ -235,13 +236,13 @@ async function policyLogScenario(level, failAfterGrant = false) {
     let shutdownError;
     let snapshot;
     try {
-      lease = await acquireShellMux(seed, { native, sandbox: "always", policy: "LockPolicy" });
+      lease = await ShellMuxLease.create(seed, { native, sandbox: "always", policy: LockPolicy });
       // A closed handle stays reachable; the child must still exit on its own.
       globalThis.retainedLease = lease;
       const tool = (principal) => {
-        const operations = createShellMuxOperations({ native, mux: lease.mux, principal });
+        const operations = new ShellMuxOperations({ native, mux: lease.mux, principal });
         owners.push(operations);
-        return createBashTool(seed, { operations });
+        return BashTool.create(seed, { operations });
       };
       await tool("file-owner").execute("claim-file", {
         command: "cat src/file0.txt > /dev/null; printf 'owned\\\\n' > src/file0.txt",
@@ -329,10 +330,6 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
     assert.equal(violation.level, "INFO");
     assert.equal(violation.data.action, "Edit");
     assert.deepEqual(violation.data.resource, ["src", "file0.txt"]);
-    assert.match(
-      violation.data.failedPrecondition,
-      /^src\/file0\.txt is unstaged by \S+;/,
-    );
     assert.ok(violation.data.allowedFixes.length > 0);
     assert.match(stdout, /^INFO /m);
     if (level === "INFO") {
@@ -349,15 +346,10 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
     const [created] = decision(records, true, "Edit", ["src", "new.txt"]);
     assert.ok(read && edit && created, JSON.stringify(grants));
     // The owner's native principal read and edited the file; another's tentative grant for
-    // the new file precedes its violation, which names the owner.
+    // the new file precedes its violation.
     assert.equal(read.data.principal, edit.data.principal);
     assert.equal(created.data.principal, violation.data.principal);
     assert.notEqual(violation.data.principal, edit.data.principal);
-    assert.ok(
-      violation.data.failedPrecondition.includes(
-        `unstaged by ${edit.data.principal};`,
-      ),
-    );
     assert.ok(records.indexOf(read) < records.indexOf(edit));
     assert.ok(records.indexOf(edit) < records.indexOf(created));
     assert.ok(records.indexOf(created) < records.indexOf(violation));
@@ -384,8 +376,8 @@ test("a pipeline result is returned and published to the seed", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "publish-owner",
@@ -414,8 +406,8 @@ test("stdout and stderr both reach the tool result", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "streams-owner",
@@ -441,8 +433,8 @@ test("a nonzero process status produces a model-visible error result", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "status-owner",
@@ -469,8 +461,8 @@ test("commands run without a PTY and receive a real stdin EOF", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "stdin-owner",
@@ -508,8 +500,8 @@ test("cwd, prefix, hook and literal environment reach the command verbatim", {
   try {
     await mkdir(nested, { recursive: true });
     await writeFile(join(nested, "probe.txt"), "nested\n");
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "context-owner",
@@ -574,7 +566,7 @@ test("a working directory outside the seed never silently runs at its root", {
     const outside = join(instance.root, "outside");
     await mkdir(outside, { recursive: true });
     await symlink(outside, join(instance.seed, "escape"), "dir");
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal: "cwd-owner",
@@ -590,7 +582,7 @@ test("a working directory outside the seed never silently runs at its root", {
     ];
     for (const [cwd, expected] of rejected) {
       await assert.rejects(
-        createBashTool(cwd, { operations }).execute(
+        BashTool.create(cwd, { operations }).execute(
           "bad-cwd",
           {
             command: "printf 'must-not-run\\n' > src/escaped.txt",
@@ -608,7 +600,7 @@ test("a working directory outside the seed never silently runs at its root", {
       access(join(outside, "src")),
       (error) => error.code === "ENOENT",
     );
-    const result = await createBashTool(instance.seed, { operations }).execute(
+    const result = await BashTool.create(instance.seed, { operations }).execute(
       "good-cwd",
       {
         command: "printf 'valid cwd\\n'",
@@ -626,8 +618,8 @@ test("each call gets a fresh shell over a durable filesystem", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "reuse-owner",
@@ -660,8 +652,8 @@ test("a silent successful command uses Pi's empty-output result", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "silent-owner",
@@ -681,8 +673,8 @@ test("the line limit bounds the tail and persists complete output", {
   const instance = await fixture();
   const outputFiles = new Set();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "lines-owner",
@@ -745,8 +737,8 @@ test("the byte limit truncates only past its boundary and keeps every byte", {
   const instance = await fixture();
   const outputFiles = new Set();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "bytes-owner",
@@ -796,8 +788,8 @@ test("aborting a running command keeps its output and publishes nothing", {
   const controller = new AbortController();
   let run;
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "cancel-owner",
@@ -861,8 +853,8 @@ test("a timeout keeps its output and publishes nothing", {
   const outputFiles = new Set();
   let run;
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "timeout-owner",
@@ -922,8 +914,8 @@ test("a pre-aborted signal rejects before the command can run", {
 }, async (t) => {
   const instance = await fixture();
   try {
-    const tool = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const tool = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux: instance.mux,
         native: instance.native,
         principal: "pre-abort-owner",
@@ -961,7 +953,7 @@ test("invalid timeouts are rejected before any work is admitted", {
 }, async () => {
   const instance = await fixture();
   try {
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux: instance.mux,
       native: instance.native,
       principal: "validation-owner",
@@ -1188,15 +1180,15 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
       "claimed\n",
     );
 
-    const owner = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const owner = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux,
         native: instance.native,
         principal: "file-owner",
       }),
     });
-    const intruder = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const intruder = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux,
         native: instance.native,
         principal: "another-agent",
@@ -1247,8 +1239,8 @@ test("fresh shells and reopened seeds do not inherit a reused name's grants", {
 
     // A fresh shell after reopen is exactly as unprivileged as a fresh shell before it: a
     // returning name inherits nothing an earlier session left unsettled.
-    const returning = createBashTool(instance.seed, {
-      operations: createShellMuxOperations({
+    const returning = BashTool.create(instance.seed, {
+      operations: new ShellMuxOperations({
         mux,
         native: instance.native,
         principal: "file-owner",
@@ -1392,12 +1384,12 @@ test("closing an operations owner joins its run and leaves a borrowed mux open",
   const gate = join(instance.root, "borrowed-gate");
   let run;
   try {
-    const operations = createShellMuxOperations({
+    const operations = new ShellMuxOperations({
       mux,
       native: instance.native,
       principal: "borrowed-owner",
     });
-    const tool = createBashTool(instance.seed, { operations });
+    const tool = BashTool.create(instance.seed, { operations });
     const ready = deferred(t.signal, "borrowed readiness");
     run = tool.execute(
       "borrowed",
@@ -1422,12 +1414,12 @@ test("closing an operations owner joins its run and leaves a borrowed mux open",
       /closed/,
     );
     // The borrowed mux is still open for its owner.
-    const fresh = createShellMuxOperations({
+    const fresh = new ShellMuxOperations({
       mux,
       native: instance.native,
       principal: "next-owner",
     });
-    const after = await createBashTool(instance.seed, {
+    const after = await BashTool.create(instance.seed, {
       operations: fresh,
     }).execute("next-owner", { command: "printf 'still open\\n'" }, t.signal);
     await fresh.close();

@@ -8,24 +8,15 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import {
-  always,
-  messageEdge,
-  NodeId,
-  type NodeIdType,
-  when,
-} from "dataflow-engine";
+import { Edge, NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
+import { LockPolicy } from "junco-tools";
 import {
   type AgenticInput,
-  agentNode,
-  compactGraph,
-  compaction,
+  type CompactionPolicy,
   Deterministic,
-  deterministicNode,
-  graphNode,
-  type JuncoGraph,
+  JuncoGraph,
   MockAgent,
   type MockMaintenance,
   type MockTranscript,
@@ -88,13 +79,13 @@ function member(
   });
 }
 
-const node = (agent: MockAgent, id: string) =>
-  agentNode(agent, {
-    id: NodeId(id),
-    policy: "LockPolicy",
-    description: id,
-    trigger: always(),
-  });
+const node = (agent: MockAgent, id: string) => ({
+  id: NodeId.create(id),
+  state: agent,
+  policy: LockPolicy,
+  description: id,
+  trigger: TriggerRule.always(),
+});
 
 const resultText = (
   graph: JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>,
@@ -140,15 +131,14 @@ async function policyGraph() {
     a: graph.addNode(node(agents.a, "a")),
     b: graph.addNode(node(agents.b, "b")),
   } as Record<keyof typeof agents, NodeIdType>;
-  const never = messageEdge<AgenticInput, AssistantMessage>("d->c");
-  ids.c = graph.addNode(
-    agentNode(agents.c, {
-      id: NodeId("c"),
-      policy: "LockPolicy",
-      description: "c",
-      trigger: when(never),
-    }),
-  );
+  const never = Edge.message<AgenticInput, AssistantMessage>("d->c");
+  ids.c = graph.addNode({
+    id: NodeId.create("c"),
+    state: agents.c,
+    policy: LockPolicy,
+    description: "c",
+    trigger: TriggerRule.when(never),
+  });
   ids.d = graph.addNode({ ...node(agents.d, "d"), is_available: () => false });
   ids.e = eId;
   ids.f = graph.addNode(node(agents.f, "f"));
@@ -157,10 +147,7 @@ async function policyGraph() {
   return { graph, agents, ids };
 }
 
-const POLICIES: readonly (readonly [
-  compaction.CompactionPolicy,
-  readonly string[],
-])[] = [
+const POLICIES: readonly (readonly [CompactionPolicy, readonly string[]])[] = [
   ["all", ["a", "b", "c", "d", "e", "f"]],
   ["more-than-forty", ["b", "d", "e"]],
   ["all-available", ["a", "b", "f"]],
@@ -178,7 +165,7 @@ describe("policy selection", () => {
           ),
         ),
       );
-      assert.equal(await compaction.compactGraph(graph, name), undefined);
+      assert.equal(await graph.compact(name), undefined);
 
       for (const [key, agent] of Object.entries(agents)) {
         const changed = expected.includes(key);
@@ -216,16 +203,16 @@ describe("policy boundaries", () => {
   test("an empty graph or selection completes without requests", async () => {
     for (const [policy] of POLICIES)
       assert.equal(
-        await compactGraph(plainGraph("parallel"), policy),
+        await JuncoGraph.compact(plainGraph("parallel"), policy),
         undefined,
       );
     const graph = plainGraph("parallel");
     // No compaction record: a wrongly selected member would reject.
     const quiet = member(40, { maintenance: [] });
     graph.addNode(node(quiet, "quiet"));
-    assert.equal(await compactGraph(graph, "more-than-forty"), undefined);
+    assert.equal(await JuncoGraph.compact(graph, "more-than-forty"), undefined);
     assert.equal(
-      await compactGraph(graph, "more-than-forty-available"),
+      await JuncoGraph.compact(graph, "more-than-forty-available"),
       undefined,
     );
     assert.equal(await quiet.context_size(), 40);
@@ -235,12 +222,15 @@ describe("policy boundaries", () => {
     const graph = plainGraph("parallel");
     const full = member(90);
     graph.addNode(node(full, "full"));
-    // @ts-expect-error the runtime boundary rejects a selector outside CompactionPolicy
-    await assert.rejects(compactGraph(graph, "most"), (error: unknown) => {
-      assert.ok(error instanceof JuncoAgentError);
-      assert.equal(error.code, "invalid_argument");
-      return true;
-    });
+    await assert.rejects(
+      // @ts-expect-error the runtime boundary rejects a selector outside CompactionPolicy
+      JuncoGraph.compact(graph, "most"),
+      (error: unknown) => {
+        assert.ok(error instanceof JuncoAgentError);
+        assert.equal(error.code, "invalid_argument");
+        return true;
+      },
+    );
     assert.equal(await full.context_size(), 90);
     assert.deepEqual(userTexts(full.history), ["t".repeat(360)]);
     assert.deepEqual(full.calls, []);
@@ -258,11 +248,14 @@ describe("policy boundaries", () => {
         "more-than-forty",
         "more-than-forty-available",
       ] as const) {
-        await assert.rejects(compactGraph(graph, policy), (error: unknown) => {
-          assert.ok(error instanceof JuncoAgentError);
-          assert.equal(error.code, "invalid_state");
-          return true;
-        });
+        await assert.rejects(
+          JuncoGraph.compact(graph, policy),
+          (error: unknown) => {
+            assert.ok(error instanceof JuncoAgentError);
+            assert.equal(error.code, "invalid_state");
+            return true;
+          },
+        );
       }
       assert.equal(await full.context_size(), 90);
       assert.deepEqual(full.calls, []);
@@ -291,7 +284,7 @@ describe("policy boundaries", () => {
     graph.addNode(node(available, "available"));
     graph.addNode({ ...node(hidden, "hidden"), is_available: () => false });
     assert.equal(
-      await compactGraph(graph, "more-than-forty-available"),
+      await JuncoGraph.compact(graph, "more-than-forty-available"),
       undefined,
     );
     assert.equal(hidden.modelReads, 0);
@@ -328,7 +321,7 @@ describe("policy boundaries", () => {
       ...node(late, "late"),
       is_available: () => readiness.late,
     });
-    const compaction = compactGraph(graph, "more-than-forty-available");
+    const compaction = JuncoGraph.compact(graph, "more-than-forty-available");
     await measuring.promise;
     readiness.early = false;
     readiness.late = true;
@@ -351,7 +344,7 @@ describe("policy boundaries", () => {
       assert.ok(windows < 8, "member never yielded");
       await graph.step();
     }
-    const compaction = compactGraph(graph, "all");
+    const compaction = JuncoGraph.compact(graph, "all");
     void compaction.catch(() => undefined);
     await flushMacrotask();
     assert.equal(await idle.context_size(), 1);
@@ -381,7 +374,7 @@ describe("policy boundaries", () => {
     graph.addNode(node(a, "a"));
     graph.addNode(node(b, "b"));
     graph.addNode(node(c, "c"));
-    await assert.rejects(compactGraph(graph, "all"), (error: unknown) => {
+    await assert.rejects(JuncoGraph.compact(graph, "all"), (error: unknown) => {
       assert.ok(error instanceof AggregateError);
       assert.deepEqual(error.errors, [first, second]);
       return true;
@@ -431,22 +424,19 @@ describe("policy boundaries", () => {
           yield [];
           return assistant("coroutine done");
         },
-        "LockPolicy",
+        LockPolicy,
       );
-      const childId = graph.addNode(
-        graphNode(
-          child,
-          { id: NodeId("child"), policy: "LockPolicy", trigger: always() },
-          { result: innerId },
-        ),
-      );
-      const coroutineId = graph.addNode(
-        deterministicNode(coroutine, {
-          id: NodeId("coroutine"),
-          policy: "LockPolicy",
-          trigger: always(),
-        }),
-      );
+      const childId = graph.addNode({
+        id: NodeId.create("child"),
+        trigger: TriggerRule.always(),
+        state: child,
+        result: innerId,
+      });
+      const coroutineId = graph.addNode({
+        id: NodeId.create("coroutine"),
+        trigger: TriggerRule.always(),
+        state: coroutine,
+      });
       return { inner, child, coroutine, childId, coroutineId };
     };
     const started = new Set<Deterministic<AgenticInput, AssistantMessage>>();
@@ -456,7 +446,7 @@ describe("policy boundaries", () => {
       const bare = plainGraph("parallel");
       const alone = addSkipped(bare);
       assert.equal(bare.available().size, 2, name);
-      assert.equal(await compactGraph(bare, name), undefined, name);
+      assert.equal(await JuncoGraph.compact(bare, name), undefined, name);
       assert.equal(alone.inner.reads, 0, name);
       assert.deepEqual(alone.inner.calls, [], name);
 
@@ -474,7 +464,7 @@ describe("policy boundaries", () => {
       const fullId = graph.addNode(node(full, "full"));
       const smallId = graph.addNode(node(small, "small"));
       assert.equal(graph.available().size, 4, name);
-      assert.equal(await compactGraph(graph, name), undefined, name);
+      assert.equal(await JuncoGraph.compact(graph, name), undefined, name);
 
       // POLICIES' fixture compacts b (41 tokens) under every policy and f (20) only without a threshold.
       assert.equal(await full.context_size(), 1, name);

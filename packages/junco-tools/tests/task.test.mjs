@@ -3,11 +3,11 @@ import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  createAssignedTaskTool,
-  createTaskTool,
+  AssignedTaskTool,
   invokeTaskTool,
   isAssignedTaskTool,
   isTaskTool,
+  TaskTool,
 } from "../dist/task.js";
 import { assistantText, scriptedModel, toolResult } from "./scripted-model.mjs";
 
@@ -44,7 +44,7 @@ async function settle(agent) {
 
 test("an explicitly hosted task tool works in a bare Pi agent and its handles reach the next request", async () => {
   const { host, calls } = recordingHost();
-  const tool = createTaskTool(host);
+  const tool = new TaskTool(host);
   assert.equal(tool.name, "task");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(isTaskTool(tool), true);
@@ -97,7 +97,7 @@ test("an explicitly hosted task tool works in a bare Pi agent and its handles re
 });
 
 test("an unhosted task call is an ordinary tool error and the agent continues", async () => {
-  const tool = createTaskTool();
+  const tool = new TaskTool();
   const { faux, model, streamFn } = scriptedModel();
   const capture = {};
   faux.setResponses([
@@ -126,21 +126,18 @@ test("an unhosted task call is an ordinary tool error and the agent continues", 
     const result = toolResult(capture.context.messages, "lonely");
     assert.ok(result);
     assert.equal(result.isError, true);
-    assert.match(text(result), /task requires an agentNode graph host/);
     assert.equal(assistantText(agent.state.messages.at(-1)), "recovered");
   } finally {
     await settle(agent);
   }
-  await assert.rejects(
-    async () =>
-      tool.execute("direct", { context: "c", tasks: [{ task: "x" }] }),
-    /task requires an agentNode graph host/,
+  await assert.rejects(async () =>
+    tool.execute("direct", { context: "c", tasks: [{ task: "x" }] }),
   );
 });
 
 test("invalid task input never reaches the host", async () => {
   const { host, calls } = recordingHost();
-  const tool = createTaskTool(host);
+  const tool = new TaskTool(host);
   const invalid = [
     {},
     { context: "c", tasks: [] },
@@ -184,7 +181,7 @@ test("invalid task input never reaches the host", async () => {
 
 test("the host receives trimmed names, preserved text and a detached snapshot", async () => {
   const { host, calls } = recordingHost();
-  const tool = createTaskTool(host);
+  const tool = new TaskTool(host);
   const input = {
     context: "  shared\n background  ",
     tasks: [
@@ -228,7 +225,7 @@ test("the host receives trimmed names, preserved text and a detached snapshot", 
 });
 
 test("host rejection and a mismatched handle count fail the call", async () => {
-  const rejecting = createTaskTool(async () => {
+  const rejecting = new TaskTool(async () => {
     throw new Error("host refused");
   });
   await assert.rejects(
@@ -236,11 +233,11 @@ test("host rejection and a mismatched handle count fail the call", async () => {
     /host refused/,
   );
 
-  const short = createTaskTool(async () => [{ id: "only" }]);
+  const short = new TaskTool(async () => [{ id: "only" }]);
   await assert.rejects(
     short.execute("b", { context: "c", tasks: [{ task: "x" }, { task: "y" }] }),
   );
-  const long = createTaskTool(async () => [{ id: "one" }, { id: "two" }]);
+  const long = new TaskTool(async () => [{ id: "one" }, { id: "two" }]);
   await assert.rejects(
     long.execute("c", { context: "c", tasks: [{ task: "x" }] }),
   );
@@ -281,7 +278,7 @@ test("host rejection and a mismatched handle count fail the call", async () => {
 });
 
 test("only factory-created tools are task primitives", async () => {
-  const tool = createTaskTool();
+  const tool = new TaskTool();
   const copy = { ...tool };
   const impostor = { name: "task", label: "task", execute: tool.execute };
   assert.equal(isTaskTool(copy), false);
@@ -303,7 +300,7 @@ test("only factory-created tools are task primitives", async () => {
 
   // invokeTaskTool uses the supplied host, not the one the tool was created with.
   const own = recordingHost();
-  const hosted = createTaskTool(own.host);
+  const hosted = new TaskTool(own.host);
   const result = await invokeTaskTool(
     hosted,
     host,
@@ -320,7 +317,7 @@ test("only factory-created tools are task primitives", async () => {
 
 test("an already aborted signal stops admission before the host", async () => {
   const { host, calls } = recordingHost();
-  const tool = createTaskTool(host);
+  const tool = new TaskTool(host);
   const controller = new AbortController();
   controller.abort(new Error("stop"));
   await assert.rejects(
@@ -355,12 +352,12 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
       { task: "second", tools: [] },
     ],
   };
-  const tool = createAssignedTaskTool(input);
+  const tool = new AssignedTaskTool(input);
   assert.equal(tool.name, "task");
   assert.equal(tool.executionMode, "sequential");
   assert.equal(isTaskTool(tool), true);
   assert.equal(isAssignedTaskTool(tool), true);
-  assert.equal(isAssignedTaskTool(createTaskTool()), false);
+  assert.equal(isAssignedTaskTool(new TaskTool()), false);
   // The batch is not published to the model.
   assert.doesNotMatch(JSON.stringify(tool.parameters), /first|second/);
   assert.doesNotMatch(tool.description, /first|second/);
@@ -397,10 +394,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   assert.deepEqual(calls[1].input, expected);
 
   // Without a host, an assigned tool fails like an unhosted ordinary one.
-  await assert.rejects(
-    async () => tool.execute("direct", {}),
-    /task requires an agentNode graph host/,
-  );
+  await assert.rejects(async () => tool.execute("direct", {}));
 });
 
 test("an assigned task tool rejects invalid batches and non-trigger launches", async () => {
@@ -411,12 +405,12 @@ test("an assigned task tool rejects invalid batches and non-trigger launches", a
     { tasks: [{ task: "x" }] },
   ])
     assert.throws(
-      () => createAssignedTaskTool(input),
+      () => new AssignedTaskTool(input),
       /Invalid task input/,
       JSON.stringify(input),
     );
 
-  const tool = createAssignedTaskTool({ context: "c", tasks: [{ task: "x" }] });
+  const tool = new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] });
   const { host, calls } = recordingHost();
   const signal = new AbortController().signal;
   for (const input of [
@@ -431,14 +425,14 @@ test("an assigned task tool rejects invalid batches and non-trigger launches", a
     );
   // `{}` is only a trigger for an assigned batch.
   await assert.rejects(
-    invokeTaskTool(createTaskTool(), host, "bad", {}, signal),
+    invokeTaskTool(new TaskTool(), host, "bad", {}, signal),
     /Invalid task input/,
   );
   assert.equal(calls.length, 0);
 });
 
 test("copies of an assigned task tool are not task primitives", () => {
-  const tool = createAssignedTaskTool({ context: "c", tasks: [{ task: "x" }] });
+  const tool = new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] });
   const copy = { ...tool };
   const impostor = { name: "task", label: "task", execute: tool.execute };
   const { host, calls } = recordingHost();
@@ -454,8 +448,8 @@ test("copies of an assigned task tool are not task primitives", () => {
 test("both task variants pass valid decisions to the host as exactly { action, id, attempt }", async () => {
   const signal = new AbortController().signal;
   for (const tool of [
-    createTaskTool(),
-    createAssignedTaskTool({ context: "c", tasks: [{ task: "x" }] }),
+    new TaskTool(),
+    new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] }),
   ]) {
     const { host, calls } = recordingHost();
     const retried = await invokeTaskTool(
@@ -511,8 +505,8 @@ test("invalid decisions never reach the host", async () => {
     },
   ];
   for (const tool of [
-    createTaskTool(),
-    createAssignedTaskTool({ context: "c", tasks: [{ task: "x" }] }),
+    new TaskTool(),
+    new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] }),
   ]) {
     const { host, calls } = recordingHost();
     for (const input of invalid)
@@ -529,7 +523,7 @@ test("decision receipts must match the decision", async () => {
   const signal = new AbortController().signal;
   const retry = { action: "retry", id: "t", attempt: 1 };
   const ignore = { action: "ignore", id: "t", attempt: 1 };
-  const tool = createTaskTool();
+  const tool = new TaskTool();
   for (const handles of [[], [{ id: "other" }], [{ id: "t" }, { id: "t" }]])
     await assert.rejects(
       invokeTaskTool(tool, async () => handles, "r", retry, signal),

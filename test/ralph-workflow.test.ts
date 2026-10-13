@@ -11,28 +11,20 @@ import {
   type ImageContent,
 } from "@earendil-works/pi-ai";
 import {
-  always,
   DataflowNodeError,
-  type Edge,
+  Edge,
   from,
-  messageEdge,
-  msg,
+  Message,
   type NodeGenerator,
   type NodeIdType,
-  when,
+  TriggerRule,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
-import { createYieldTool } from "junco-tools";
-import {
-  type AgenticInput,
-  createParallelAgentGraph,
-  Deterministic,
-  deterministicNode,
-  JuncoGraph,
-} from "../src/index.ts";
-import { ralph } from "../src/workflows/index.ts";
+import { LockPolicy, YieldTool } from "junco-tools";
+import { type AgenticInput, Deterministic, JuncoGraph } from "../src/index.ts";
+import { Ralph } from "../src/workflows/index.ts";
 import { nativeOptions, waitingTool } from "./support.ts";
 
 // The Ralph workflow over real native agents on faux models, inside real parent graphs. A dormant
@@ -129,50 +121,43 @@ let edges = 0;
  */
 function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
   const tag = ++edges;
-  const input = messageEdge<AgenticInput, AssistantMessage>(
+  const input = Edge.message<AgenticInput, AssistantMessage>(
     `source->ralph-${tag}`,
   );
-  const output = messageEdge<AgenticInput, AssistantMessage>(
+  const output = Edge.message<AgenticInput, AssistantMessage>(
     `ralph->sink-${tag}`,
   );
-  const sourceId = parent.addNode(
-    deterministicNode(
-      new Deterministic<AgenticInput, AssistantMessage>(
-        async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-          while (true) yield [];
-        },
-        "LockPolicy",
-      ),
-      {
-        trigger: always(),
-        is_available: () => false,
-        policy: "LockPolicy",
+  const sourceId = parent.addNode({
+    trigger: TriggerRule.always(),
+    is_available: () => false,
+    state: new Deterministic<AgenticInput, AssistantMessage>(
+      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+        while (true) yield [];
       },
+      LockPolicy,
     ),
-  );
+  });
   const delivered: string[] = [];
   let sinkRuns = 0;
-  const sinkId = parent.addNode(
-    deterministicNode(
-      new Deterministic<AgenticInput, AssistantMessage>(
-        async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-          const view = yield [];
-          sinkRuns++;
-          for (const value of from(view, output))
-            delivered.push(value.kind === "appendMessage" ? "" : value.text);
-          return fauxAssistantMessage("received");
-        },
-        "LockPolicy",
-      ),
-      { trigger: when(output), policy: "LockPolicy" },
+  const sinkId = parent.addNode({
+    trigger: TriggerRule.when(output),
+    state: new Deterministic<AgenticInput, AssistantMessage>(
+      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+        const view = yield [];
+        sinkRuns++;
+        for (const value of from(view, output))
+          delivered.push(value.kind === "appendMessage" ? "" : value.text);
+        return fauxAssistantMessage("received");
+      },
+      LockPolicy,
     ),
-  );
+  });
   let id: NodeIdType;
   try {
-    id = ralph(parent, agent, {
+    id = Ralph.register(parent, agent, {
       input,
       output,
-      policy: "LockPolicy",
+      policy: LockPolicy,
       ...(rounds === undefined ? {} : { rounds }),
     });
   } catch (error) {
@@ -187,7 +172,8 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     delivered,
     sinkRuns: () => sinkRuns,
     send: (...inputs: AgenticInput[]) => {
-      for (const value of inputs) parent.emit(sourceId, msg(input, value));
+      for (const value of inputs)
+        parent.emit(sourceId, Message.create(input, value));
     },
   };
 }
@@ -199,7 +185,7 @@ describe("ralph workflow", () => {
   test(
     "runs two rounds by default and queues only the final draft on its completing step",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
+      await using parent = JuncoGraph.parallel(LockPolicy);
       const { agent, requests } = await member(["draft-1", "draft-2"]);
       const flow = attach(parent, agent);
 
@@ -246,7 +232,7 @@ describe("ralph workflow", () => {
     test(
       `rounds: ${rounds} runs exactly ${rounds} full rounds and publishes only the last`,
       async () => {
-        await using parent = createParallelAgentGraph("LockPolicy");
+        await using parent = JuncoGraph.parallel(LockPolicy);
         const drafts = Array.from(
           { length: rounds },
           (_, index) => `draft-${index + 1}`,
@@ -292,9 +278,9 @@ describe("ralph workflow", () => {
   test(
     "an invalid round count throws before registering anything",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
-      const input = messageEdge<AgenticInput, AssistantMessage>("in");
-      const output = messageEdge<AgenticInput, AssistantMessage>("out");
+      await using parent = JuncoGraph.parallel(LockPolicy);
+      const input = Edge.message<AgenticInput, AssistantMessage>("in");
+      const output = Edge.message<AgenticInput, AssistantMessage>("out");
       const nodes = () => {
         const ids: NodeIdType[] = [];
         parent.forEachNode((id) => ids.push(id));
@@ -313,11 +299,11 @@ describe("ralph workflow", () => {
           const before = nodes();
           assert.throws(
             () =>
-              ralph(parent, agent, {
+              Ralph.register(parent, agent, {
                 input,
                 output,
                 rounds,
-                policy: "LockPolicy",
+                policy: LockPolicy,
               }),
             RangeError,
           );
@@ -351,7 +337,7 @@ describe("ralph workflow", () => {
     test(
       `rejects ${name} before any model work`,
       async () => {
-        await using parent = createParallelAgentGraph("LockPolicy");
+        await using parent = JuncoGraph.parallel(LockPolicy);
         const { agent, requests } = await member(["draft-1", "draft-2"]);
         const flow = attach(parent, agent);
 
@@ -368,7 +354,7 @@ describe("ralph workflow", () => {
   test(
     "a second assignment after the first round is rejected, not restarted",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
+      await using parent = JuncoGraph.parallel(LockPolicy);
       const { agent, requests } = await member([
         "draft-1",
         "draft-2",
@@ -410,7 +396,7 @@ describe("ralph workflow", () => {
     test(
       `${name} rejects without publishing an earlier draft`,
       async () => {
-        await using parent = createParallelAgentGraph("LockPolicy");
+        await using parent = JuncoGraph.parallel(LockPolicy);
         const { agent, requests } = await member(replies);
         const flow = attach(parent, agent);
 
@@ -431,7 +417,7 @@ describe("ralph workflow", () => {
   test(
     "native yields resume within a round and never count as one",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
+      await using parent = JuncoGraph.parallel(LockPolicy);
       const { agent, requests } = await member(
         [
           fauxAssistantMessage(
@@ -441,7 +427,7 @@ describe("ralph workflow", () => {
           "draft-1",
           "draft-2",
         ],
-        { tools: [createYieldTool()] },
+        { tools: [new YieldTool()] },
       );
       const flow = attach(parent, agent);
 
@@ -461,7 +447,7 @@ describe("ralph workflow", () => {
   test(
     "a staged agent is not idle and is rejected before its staged prompt runs",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
+      await using parent = JuncoGraph.parallel(LockPolicy);
       const { agent, requests } = await member(["staged answer"], {
         staged: "staged",
       });
@@ -486,7 +472,7 @@ describe("ralph workflow", () => {
   test(
     "aborting the parent mid-round cancels Ralph with the abort reason",
     async () => {
-      await using parent = createParallelAgentGraph("LockPolicy");
+      await using parent = JuncoGraph.parallel(LockPolicy);
       const hold = waitingTool("hold", { endOnAbort: true });
       const { agent, requests } = await member(
         [
@@ -521,7 +507,7 @@ describe("ralph workflow", () => {
   test(
     "independent Ralphs in one parent share nothing and close with it",
     async () => {
-      const parent = createParallelAgentGraph("LockPolicy");
+      const parent = JuncoGraph.parallel(LockPolicy);
       let children: unknown[] = [];
       let agents: JuncoAgent[] = [];
       try {

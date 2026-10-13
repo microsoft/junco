@@ -110,8 +110,10 @@ export type PiSchedulerOptions<
   P extends PromptTemplate = PromptTemplate,
 > = Omit<
   AgenticOptions<S, P, ScheduleTool>,
-  "tools" | "activeToolNames" | "model" | "models" | "session"
+  "tools" | "activeToolNames" | "model" | "models" | "session" | "prompt"
 > & {
+  /** A text prompt only: the scheduler has no graph view for a prompt function. */
+  readonly prompt?: string;
   readonly model?: AgenticOptions<S, P, ScheduleTool>["model"];
   readonly models?: AgenticOptions<S, P, ScheduleTool>["models"] | ModelRuntime;
   readonly session?: Session;
@@ -188,9 +190,9 @@ type RunState = {
  * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
  * import { PiScheduler } from "junco-scheduler/agent";
  *
- * const scheduler = await PiScheduler.opus({ policy: "LockPolicy", prompt: "Run available work." });
+ * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
  * try {
- *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
+ *   const graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
  *   // ...graph.addNode(...) / graph.addEdge(...)
  *   while (true) {
  *     const { done, value } = await scheduler.next();
@@ -253,9 +255,9 @@ export class PiScheduler<
    * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
    * import { PiScheduler } from "junco-scheduler/agent";
    *
-   * const scheduler = await PiScheduler.opus({ policy: "LockPolicy", prompt: "Run available work." });
+   * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
    * try {
-   *   const graph = new DataflowGraph(scheduler, Width(1), UNBOUNDED);
+   *   const graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED);
    *   // ...graph.addNode(...) / graph.addEdge(...)
    *   while (true) {
    *     const { done, value } = await scheduler.next();
@@ -463,7 +465,7 @@ export class PiScheduler<
       );
     return lanes.map((lane) =>
       lane.map((raw): NodeSchedule => {
-        const id = NodeId(raw);
+        const id = NodeId.create(raw);
         const candidate = available.get(id);
         // An unknown id stays in the plan for the engine to reject.
         return {

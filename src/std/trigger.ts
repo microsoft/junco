@@ -1,16 +1,10 @@
 // `trigger` (also `graph.trigger`): a node's readiness rule over its inbound edges. A rule's kind
-// is "all" or "any"; `on(edge)` names an entry for `allOf`/`anyOf`.
+// is "all" or "any"; `TriggerEntry.on(edge)` names an entry for `TriggerRule.allOf`/`anyOf`.
 
 export {
-  allOf,
-  always,
-  anyOf,
   evaluateTrigger,
-  never,
-  on,
   satisfiedEdges,
-  type TriggerEntry,
+  TriggerEntry,
   type TriggerKind,
-  type TriggerRule,
-  when,
+  TriggerRule,
 } from "dataflow-engine";

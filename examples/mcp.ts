@@ -10,10 +10,10 @@
 //    `JuncoGraph.create` and passed explicitly to both agent factories.
 // 2. Research maps the repository with `mcp__graft__graft_repo_map` and selects exactly five
 //    central, repository-owned classes, confirming each declaration.
-// 3. A deterministic DependenciesInput node runs once Research's report exists, as a value edge,
-//    validates it and sends the prepared dependency assignment on a message edge. Dependencies
-//    `recv`s that assignment and traces every one of those five classes itself with outbound
-//    all-depth `mcp__graft__graft_trace_calls`.
+// 3. Dependencies runs once Research's report exists, as a value edge. Its staged prompt callback
+//    validates that report and embeds it in the dependency assignment; Dependencies then traces
+//    every one of those five classes itself with outbound all-depth
+//    `mcp__graft__graft_trace_calls`.
 // 4. The runner closes the graph (and with it both agents, their graft servers and, last, the
 //    collection's ShellMux), then flushes the tracer.
 //
@@ -83,17 +83,6 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   return text;
 }
 
-/** A finite receiver's contracts by incoming edge id; it expects nothing on any other edge. */
-function contracts(
-  byEdge: Readonly<Record<string, tools.Contract>>,
-): (edgeId: graph.EdgeIdType) => tools.Contract {
-  return (edgeId) => {
-    if (!Object.hasOwn(byEdge, edgeId))
-      throw new agent.JuncoAgentError("invalid_state", `No contract for edge "${edgeId}"`);
-    return byEdge[edgeId]!;
-  };
-}
-
 // ## 3. Prompts
 
 const systemPrompts = {
@@ -131,13 +120,10 @@ function dependencyPrompt(report: string): string {
 
 // ## 4. The graph
 //
-// Research runs once on its own prompt. Its final message is a value on
-// `Research->DependenciesInput`; that deterministic node validates the report once, embeds it in
-// the dependency assignment and sends it on `DependenciesInput->Dependencies`, where Dependencies
-// receives it through `recv`.
+// Research runs once on its own prompt. Its final message is a value on `Research->Dependencies`;
+// Dependencies' staged prompt callback validates that report once and embeds it in its assignment.
 
-const researchReportId = graph.EdgeId("Research->DependenciesInput");
-const dependencyAssignmentId = graph.EdgeId("DependenciesInput->Dependencies");
+const researchReportId = graph.EdgeId.create("Research->Dependencies");
 
 /** The graph and its two member nodes. */
 export interface McpGraph {
@@ -146,55 +132,42 @@ export interface McpGraph {
   dependencyId: graph.NodeIdType;
 }
 
-export function createMcpGraph(members: Members): McpGraph {
-  const researchResult = graph.valueEdge<graph.nodes.AgenticInput, AssistantMessage>(
-    researchReportId,
-  );
-  const assignment = graph.messageEdge<graph.nodes.AgenticInput, AssistantMessage>(
-    dependencyAssignmentId,
-  );
-  const g = graph.createParallelAgentGraph("LockPolicy");
-  const researchId = g.addNode(graph.nodes.agentNode(members.Research, {
-    id: graph.NodeId("Research"),
-    policy: "LockPolicy",
-    description: "Selects five central classes of the repository through graft.",
-    trigger: graph.trigger.always(),
-  }, { prompt: researchPrompt }));
-  let published = false;
-  const prepare = new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(
-    async function* (signal): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
-      let view = yield [];
-      while (true) {
-        signal.throwIfAborted();
-        const report = finalText(view.values.get(researchResult.id), "Research");
-        published = true;
-        view = yield [graph.msg(assignment, { kind: "prompt", text: dependencyPrompt(report) })];
-      }
-    },
-    "EmptyPolicy",
-  );
-  const inputId = g.addNode(graph.nodes.deterministicNode(prepare, {
-    id: graph.NodeId("DependenciesInput"),
-    policy: "EmptyPolicy",
-    description: "Embeds Research's validated report in the dependency assignment, once.",
-    trigger: graph.trigger.when(researchResult),
-    is_available: (_view, triggered) => triggered && !published,
-    contract: contracts({
-      [researchReportId]: {
-        expect:
-          "Normally completed, non-empty research report selecting five classes, embedded as untrusted data in the dependency-analysis prompt.",
+export const McpGraph = {
+  create(members: Members): McpGraph {
+    const researchResult = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>(
+      researchReportId,
+    );
+    const g = graph.JuncoGraph.parallel(tools.LockPolicy);
+    members.Research.stagePrompt(researchPrompt);
+    const researchId = g.addNode({
+      state: members.Research,
+      id: graph.NodeId.create("Research"),
+      policy: tools.LockPolicy,
+      description: "Selects five central classes of the repository through graft.",
+      trigger: graph.trigger.TriggerRule.always(),
+    });
+    members.Dependencies.stagePrompt((inputs) =>
+      dependencyPrompt(finalText(inputs.values.get(researchResult.id), "Research")),
+    );
+    const dependencyId = g.addNode({
+      state: members.Dependencies,
+      id: graph.NodeId.create("Dependencies"),
+      policy: tools.LockPolicy,
+      description: "Traces the dependency chains of Research's five classes through graft.",
+      trigger: graph.trigger.TriggerRule.when(researchResult),
+      contract: (edgeId) => {
+        if (edgeId !== researchReportId)
+          throw new agent.JuncoAgentError("invalid_state", `No contract for edge "${edgeId}"`);
+        return {
+          expect:
+            "Normally completed, non-empty research report selecting five classes, embedded as untrusted data in the dependency-analysis prompt.",
+        };
       },
-    }),
-  }));
-  const dependencyId = g.addNode(graph.nodes.agentNode(members.Dependencies, {
-    id: graph.NodeId("Dependencies"),
-    policy: "LockPolicy",
-    description: "Traces the dependency chains of Research's five classes through graft.",
-    trigger: graph.trigger.when(assignment),
-  }, { prompt: "Call recv once and carry out the prompt in the single received message." }));
-  g.addEdge(researchId, inputId, researchResult).addEdge(inputId, dependencyId, assignment);
-  return { graph: g, researchId, dependencyId };
-}
+    });
+    g.addEdge(researchId, dependencyId, researchResult);
+    return { graph: g, researchId, dependencyId };
+  },
+};
 
 // ## 5. Command line
 
@@ -238,7 +211,7 @@ export async function runMcpExample(): Promise<void> {
   try {
     const models = await modelRuntime();
     let made: McpGraph | undefined;
-    await graph.JuncoGraph.create(repositoryRoot, { policy: "LockPolicy" }, async (collection) => {
+    await graph.JuncoGraph.create(repositoryRoot, { policy: tools.LockPolicy }, async (collection) => {
       const acquired: agent.JuncoAgent[] = [];
       try {
         const member = async (id: keyof Members) => {
@@ -251,19 +224,7 @@ export async function runMcpExample(): Promise<void> {
             thinkingLevel: "medium",
             systemPrompt: systemPrompts[id],
             cwd: repositoryRoot,
-            tools:
-              id === "Dependencies" ? [graft, tools.RecvTool(), tools.InfoTool()] : [graft],
-            ...(id === "Dependencies"
-              ? {
-                  contract: contracts({
-                    [dependencyAssignmentId]: {
-                      expect:
-                        "One prompt message containing the prepared five-class dependency-analysis assignment, consumed through recv.",
-                    },
-                  }),
-                }
-              : {}),
-            policy: "LockPolicy",
+            tools: [graft],
             collection,
           });
           acquired.push(created);
@@ -278,7 +239,7 @@ export async function runMcpExample(): Promise<void> {
         };
         const Research = await member("Research");
         const Dependencies = await member("Dependencies");
-        made = createMcpGraph({ Research, Dependencies });
+        made = McpGraph.create({ Research, Dependencies });
         return made.graph;
       } catch (error) {
         // Not yet owned by a graph: return every acquired agent, then rethrow.

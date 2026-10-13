@@ -7,16 +7,14 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
-  always,
-  anyOf,
+  Edge,
   type EdgeIdType,
-  messageEdge,
   NodeId,
-  on,
-  valueEdge,
+  TriggerEntry,
+  TriggerRule,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticInput, agentNode, tools } from "../src/index.ts";
+import { type AgenticInput, tools } from "../src/index.ts";
 import {
   policyGraph,
   STRATEGIES,
@@ -73,10 +71,10 @@ const VALUE_EXPECT =
 export async function runDeterministicFixture(
   strategy: Strategy,
 ): Promise<DeterministicSummary> {
-  const handoff = messageEdge<AgenticInput, AssistantMessage>(
+  const handoff = Edge.message<AgenticInput, AssistantMessage>(
     "producer->worker",
   );
-  const value = valueEdge<AgenticInput, AssistantMessage>("producer=>worker");
+  const value = Edge.value<AgenticInput, AssistantMessage>("producer=>worker");
   const infos: Record<"producer" | "worker", Info[]> = {
     producer: [],
     worker: [],
@@ -115,7 +113,7 @@ export async function runDeterministicFixture(
       ),
       fauxAssistantMessage("seed"),
     ],
-    { prompt: "produce", tools: [tools.InfoTool(), tools.SendTool()] },
+    { prompt: "produce", tools: [new tools.InfoTool(), new tools.SendTool()] },
   );
 
   let received: Received[] = [];
@@ -149,7 +147,7 @@ export async function runDeterministicFixture(
     Array.from({ length: 12 }, () => work),
     {
       prompt: "work",
-      tools: [tools.InfoTool(), tools.RecvTool()],
+      tools: [new tools.InfoTool(), new tools.RecvTool()],
       contract: (edgeId: EdgeIdType) => {
         const contract = contracts[edgeId];
         if (!contract) throw new Error(`No contract for edge "${edgeId}"`);
@@ -159,22 +157,23 @@ export async function runDeterministicFixture(
   );
 
   await using graph = policyGraph(strategy);
-  const p = graph.addNode(
-    agentNode(producer.agent, {
-      id: NodeId("producer"),
-      description: "produces the seed",
-      policy: "LockPolicy",
-      trigger: always(),
-    }),
-  );
-  const w = graph.addNode(
-    agentNode(worker.agent, {
-      id: NodeId("worker"),
-      policy: "LockPolicy",
-      description: "works from the seed",
-      trigger: anyOf(on(handoff), on(value)),
-    }),
-  );
+  const p = graph.addNode({
+    id: NodeId.create("producer"),
+    state: producer.agent,
+    description: "produces the seed",
+    policy: tools.LockPolicy,
+    trigger: TriggerRule.always(),
+  });
+  const w = graph.addNode({
+    id: NodeId.create("worker"),
+    state: worker.agent,
+    policy: tools.LockPolicy,
+    description: "works from the seed",
+    trigger: TriggerRule.anyOf(
+      TriggerEntry.on(handoff),
+      TriggerEntry.on(value),
+    ),
+  });
   graph.addEdge(p, w, handoff).addEdge(p, w, value);
 
   await graph.run();

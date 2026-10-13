@@ -15,12 +15,12 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { always, NodeId, type NodeOptions, UNBOUNDED } from "dataflow-engine";
+import { NodeId, type NodeOptions, TriggerRule, UNBOUNDED } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import type { SchedulerInfo } from "junco-scheduler/agent";
-import { createYieldTool, type ToolCollectionOptions } from "junco-tools";
-import { type AgenticInput, agentNode, createAgencyScheduler, graphNode, JuncoGraph, tracer } from "../src/index.ts";
+import { LockPolicy, type ToolCollection, YieldTool } from "junco-tools";
+import { type AgenticInput, JuncoGraph, tracer } from "../src/index.ts";
 
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
@@ -59,7 +59,7 @@ const runAvailable = (name: string) => (info: SchedulerInfo): Decision =>
 
 async function agency(
   name: string,
-  policy: ToolCollectionOptions["policy"],
+  policy: ToolCollection["policy"],
   members: readonly (JuncoAgent | JuncoGraph)[],
   decide: (info: SchedulerInfo, request: number) => Decision,
 ) {
@@ -74,64 +74,59 @@ async function agency(
       : fauxAssistantMessage(decision.text);
   };
   const { faux, options } = await nativeOptions([respond]);
-  let current: JuncoGraph | undefined;
-  const scheduler = await createAgencyScheduler(() => current, {
+  const graph = await JuncoGraph.pi({
     ...options,
     systemPrompt: `You schedule ${name}.`,
-    policy,
     prompt: `Run ${name}.`,
+    policy,
+    tracer: tracer.StdoutTracer.shared(),
+    window: UNBOUNDED,
+    threads: UNBOUNDED,
   });
-  const graph = new JuncoGraph(scheduler, UNBOUNDED, UNBOUNDED, tracer.createTracer(), policy);
-  current = graph;
+  const scheduler = graph.scheduler;
   for (const [index, member] of members.entries()) {
-    const options: NodeOptions<AgenticInput, AssistantMessage> & Pick<ToolCollectionOptions, "policy"> = {
+    const options: NodeOptions<AgenticInput, AssistantMessage> = {
       description: `${name} member ${index}`,
-      policy,
-      trigger: always(),
+      trigger: TriggerRule.always(),
     };
     graph.addNode(
       member instanceof JuncoGraph
-        ? graphNode(member, options, { result: NodeId("0") })
-        : agentNode(member, options),
+        ? { ...options, state: member, result: NodeId.create("0") }
+        : { ...options, policy, state: member },
     );
   }
   return { graph, scheduler };
 }
 
-async function leafAgent(
-  policy: ToolCollectionOptions["policy"],
-  responses: readonly FauxResponseStep[],
-  tools: readonly AgentTool[] = [],
-) {
+async function leafAgent(responses: readonly FauxResponseStep[], tools: readonly AgentTool[] = []) {
   const { faux, options } = await nativeOptions(responses);
-  const agent = await JuncoAgent.fromResolved({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part.", policy });
+  const agent = await JuncoAgent.fromResolved({ ...options, systemPrompt: "leaf", tools: [...tools], prompt: "Do your part." });
   return { faux, agent };
 }
 
 const log: string[] = [];
 const leaf = await leafAgent(
-  "LockPolicy",
   [
     fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
       stopReason: "toolUse",
     }),
     fauxAssistantMessage("leaf-result"),
   ],
-  [createYieldTool()],
+  [new YieldTool()],
 );
-const sibling = await leafAgent("LockPolicy", [fauxAssistantMessage("sibling-result")]);
+const sibling = await leafAgent([fauxAssistantMessage("sibling-result")]);
 sibling.agent.events.on("run_end", (event) => {
   if (event.status === "completed") log.push("sibling done");
 });
 
-const grandchild = await agency("grandchild", "LockPolicy", [leaf.agent], runAvailable("grandchild"));
-const child = await agency("child", "LockPolicy", [grandchild.graph], runAvailable("child"));
+const grandchild = await agency("grandchild", LockPolicy, [leaf.agent], runAvailable("grandchild"));
+const child = await agency("child", LockPolicy, [grandchild.graph], runAvailable("child"));
 child.scheduler.events.on("tool_start", (event) => {
   if (event.toolName === "schedule") log.push("child window");
 });
 // The root primes both members, runs the child (all its windows), then the sibling, then the rest.
 const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
-const root = await agency("root", "LockPolicy", [child.graph, sibling.agent], (info, request) =>
+const root = await agency("root", LockPolicy, [child.graph, sibling.agent], (info, request) =>
   request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
 );
 // Every nested graph shares the automatically selected tracer.
@@ -151,7 +146,7 @@ try {
 }
 
 const resultOf = (graph: JuncoGraph, id: string) => {
-  const result = graph.result(NodeId(id));
+  const result = graph.result(NodeId.create(id));
   return O.isSome(result) ? textOf(result.value) : undefined;
 };
 const leafResult = resultOf(grandchild.graph, "0");

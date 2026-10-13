@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Message, NodeGenerator, ParentView } from "dataflow-engine";
 import { JuncoAgentError } from "junco-agent";
-import type { ToolCollection, ToolCollectionOptions } from "junco-tools";
+import type { ToolCollection } from "junco-tools";
 import type { AgenticInput } from "./agentic.js";
 import { checkPolicy } from "./node-policy.js";
 
@@ -42,19 +42,20 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage>
   /** Aborted by {@link abort} or {@link close}; never replaced. */
   readonly signal: AbortSignal = this.#controller.signal;
   /** Authorization policy of this node; equals `collection.policy` when one is supplied. */
-  readonly policy: ToolCollectionOptions["policy"];
+  readonly policy: ToolCollection["policy"];
   /** The borrowed collection handed to the body; never closed by the coroutine. */
   readonly collection: ToolCollection | undefined;
 
   /**
-   * @throws {TypeError} for a missing or unknown policy, or a collection with another policy.
+   * @throws {TypeError} for a missing policy, or a collection with another policy (policies
+   *   compare by identity).
    */
   constructor(
     body: (
       signal: AbortSignal,
       collection?: ToolCollection,
     ) => NodeGenerator<N, T>,
-    policy: ToolCollectionOptions["policy"],
+    policy: ToolCollection["policy"],
     collection?: ToolCollection,
   ) {
     checkPolicy(policy, collection);

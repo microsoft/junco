@@ -9,18 +9,18 @@ Each node is an `async function*`. The runtime resumes it with the inputs its tr
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 360}}}%%
 flowchart TB
-  subgraph Definition["new DataflowGraph#lt;S, N, T, EH, Q#gt;(scheduler: Q, window, threads: WidthType via Width() or UNBOUNDED, tracer?: DataflowTracer)"]
-    N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*, stepNode, emitOnce)"]
-    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>messageEdge: Queue#lt;N#gt; FIFO<br/>valueEdge: write-once Option#lt;T#gt;"]
-    S["DataflowScheduler#lt;N, T#gt;<br/>junco-scheduler: createParallelScheduler, createRoundRobinScheduler, createScheduler"]
+  subgraph Definition["new DataflowGraph#lt;S, N, T, EH, Q#gt;(scheduler: Q, window, threads: WidthType via Width.create() or UNBOUNDED, tracer?: DataflowTracer)"]
+    N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*), or new StepNode / new EmitOnce"]
+    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>Edge.message: Queue#lt;N#gt; FIFO<br/>Edge.value: write-once Option#lt;T#gt;"]
+    S["DataflowScheduler#lt;N, T#gt;<br/>junco-scheduler: ParallelScheduler, RoundRobinScheduler, Scheduler"]
   end
   subgraph Run["step(options?) / run(options?): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
     A["available: Map#lt;NodeIdType, NodeAvailability#gt;<br/>AvailabilityFn / evaluateTrigger / satisfiedEdges"] --> P["schedule(available): Schedule<br/>NodeSchedule lanes, InputSchedule reads<br/>triggerInputs default"]
     P --> K["validate Schedule<br/>throws DataflowDefinitionError"]
     K --> X["pop MessageSchedule counts<br/>into ParentView#lt;N, T#gt; (messages, values)"]
     X --> G["NodeGenerator#lt;N, T#gt;.next(view)<br/>AsyncGenerator#lt;Message#lt;N#gt;[], T, ParentView#gt;"]
-    G -- "yield Message[] via msg()" --> Q["route to outbound Queue#lt;N#gt;"]
-    G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>resolve valueEdge cells"]
+    G -- "yield Message[] via Message.create()" --> Q["route to outbound Queue#lt;N#gt;"]
+    G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>resolve value edge cells"]
     G -- "throw EH" --> F["reject: DataflowNodeError#lt;EH#gt;"]
     Q --> A
     R --> A
@@ -34,7 +34,7 @@ flowchart TB
 | Part | Role |
 |---|---|
 | `DataflowGraph<S, N, T, EH, Q>` | Owns nodes and edges (an `ngraph.graph` multigraph) and drives `step()`/`run()`. `N` is the message payload type, `T` the node return type, `S` the node state type and `EH` the error type that node bodies throw. The optional `Q` (default `DataflowScheduler<N, T>`) keeps the concrete scheduler type on `graph.scheduler`. |
-| `messageEdge` / `valueEdge` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
+| `Edge.message` / `Edge.value` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
 | Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
 | `DataflowScheduler` | Decides **who** runs, in which lane and turn, and **how much** each node reads from each edge. |
 
@@ -53,43 +53,38 @@ Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import
 ## Quick start
 
 ```ts
-import { createParallelScheduler } from "junco-scheduler";
+import { ParallelScheduler } from "junco-scheduler";
 import {
-  DataflowGraph, UNBOUNDED, Width,
-  always, emitOnce, from, messageEdge, msg, stepNode, when,
+  DataflowGraph, Edge, EmitOnce, Message, StepNode, TriggerRule, UNBOUNDED, Width, from,
 } from "dataflow-engine";
 import type { NodeGenerator } from "dataflow-engine";
 
-const numbers = messageEdge<number, string>("numbers");
-const squares = messageEdge<number, string>("squares");
+const numbers = Edge.message<number, string>("numbers");
+const squares = Edge.message<number, string>("squares");
 const graph = new DataflowGraph<void, number, string, never>(
-  createParallelScheduler(), Width(1), UNBOUNDED,
+  new ParallelScheduler(), Width.create(1), UNBOUNDED,
 );
 
-const source = graph.addNode({
-  state: undefined,
-  trigger: always(),
-  step: emitOnce(() => [msg(numbers, 1), msg(numbers, 2), msg(numbers, 3)], "source done"),
-});
+const source = graph.addNode(new EmitOnce<void, number, string>(
+  () => [Message.create(numbers, 1), Message.create(numbers, 2), Message.create(numbers, 3)],
+  "source done",
+  { state: undefined, trigger: TriggerRule.always() },
+));
 
 const square = graph.addNode({
   state: undefined,
-  trigger: when(numbers),
+  trigger: TriggerRule.when(numbers),
   step: async function* (): NodeGenerator<number, string> {
     let view = yield []; // prime: the first activation delivers no input
-    while (true) view = yield from(view, numbers).map((n) => msg(squares, n * n));
+    while (true) view = yield from(view, numbers).map((n) => Message.create(squares, n * n));
   },
 });
 
 const seen: number[] = [];
-const sink = graph.addNode({
-  state: undefined,
-  trigger: when(squares),
-  step: stepNode((_state, view) => {
-    seen.push(...from(view, squares));
-    return [];
-  }),
-});
+const sink = graph.addNode(new StepNode<void, number, string>((_state, view) => {
+  seen.push(...from(view, squares));
+  return [];
+}, { state: undefined, trigger: TriggerRule.when(squares) }));
 
 graph.addEdge(source, square, numbers).addEdge(square, sink, squares);
 const results = await graph.run();
@@ -103,7 +98,7 @@ A node body has the type `NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, 
 1. **Prime.** On a node's first activation, the runtime calls `step()` and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
 2. **Deliver.** Every later activation pops the scheduled inputs and calls `next(view)`. `from(view, edge)` (or `view.messages.get(edge.id)`) is this turn's batch from that edge. A key exists only for an edge that actually delivered something, which is how an `anyOf` body tells which branch fired. `view.values` holds the value edges that have resolved.
 3. **Emit.** Each `yield` is the full list of messages for this turn, routed in order. `yield []` emits nothing and keeps the node alive.
-4. **Finish.** `return value` marks the node `done`, records `value` in `run()`'s result map and resolves every outbound value edge. A node that never returns, such as a sink or anything built with `stepNode`, is absent from the results.
+4. **Finish.** `return value` marks the node `done`, records `value` in `run()`'s result map and resolves every outbound value edge. A node that never returns, such as a sink or any `StepNode`, is absent from the results.
 5. **Fail.** A throw terminates the node, and `run()` rejects with `DataflowNodeError` (`nodeId`, `error: EH`) — unless the node has an `on_error` hook (below).
 
 An optional `on_error(error, signal)` (`ErrorFn<S, N, T>`) on the spec recovers a body failure: a throw from `step()` or the generator's `next()`. The node is `done` first; the hook then runs once, as a method with the node as `this`, in the same activation, and its returned messages are routed in order like a yield (`[]` routes nothing). The node records no result and its value edges stay unresolved; the tracer sees the activation's `fail(error)` and, if nothing else fails, a normal run `end`. A body that threw exactly the aborted signal's reason propagates it without calling the hook. Wiring, scheduling and routing errors (`DataflowDefinitionError`) never reach it. A hook that throws rejects the invocation with `DataflowNodeError` carrying its own error (or a `DataflowDefinitionError`/the aborted signal's reason unchanged) and is never run again; an unwired returned message rejects after earlier ones were queued.
@@ -115,12 +110,12 @@ Local variables in a generator persist across activations. Here, taken from `exa
 ```ts
 const fib = graph.addNode({
   state: undefined,
-  trigger: anyOf(on(seed), on(loop)),
+  trigger: TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop)),
   step: async function* (): NodeGenerator<number, string> {
     let view = yield [];
     for (let i = 0; i < 10; i++) {
       const [a, b] = (view.messages.get(seed.id) ?? view.messages.get(loop.id))!;
-      view = yield [msg(out, a), msg(loop, b), msg(loop, a + b)];
+      view = yield [Message.create(out, a), Message.create(loop, b), Message.create(loop, a + b)];
     }
     return "emitted 10";
   },
@@ -131,10 +126,10 @@ graph.addEdge(seedId, fib, seed).addEdge(fib, fib, loop).addEdge(fib, sinkId, ou
 A value edge passes a node's return value downstream:
 
 ```ts
-const done = valueEdge<number, string>("done");
+const done = Edge.value<number, string>("done");
 const report = graph.addNode({
   state: undefined,
-  trigger: when(done),
+  trigger: TriggerRule.when(done),
   step: async function* (): NodeGenerator<number, string> {
     const view = yield [];
     return `source returned: ${view.values.get(done.id)}`;
@@ -147,16 +142,16 @@ A value edge is never consumed: once resolved, it satisfies its trigger on every
 
 ### Constant fan-out and fan-in
 
-`ConstFanout` and `ConstFanin` return complete specs for `graph.addNode`; wire their edges with `graph.addEdge` as usual. `ConstFanout(payload, outputs, { state, ret })` sends the same `payload` (by reference) once on every output message edge, then returns `ret`. `ConstFanin(inputs, output, { state, ret })` waits until every input message edge has delivered, across any number of activations or `run()` calls, then sends one list on `output` in `inputs` order (not arrival order) and returns `ret`; later input never produces another list, and no inputs send one `[]`. Inputs are `Edge<C, T>` and the output is `Edge<C[], T>`, so the graph's message type must admit both. Call `ConstFanin` once per collector node. Both throw `DataflowDefinitionError` for a value edge or a repeated edge id.
+`new ConstFanout(...)` and `new ConstFanin(...)` construct complete specs for `graph.addNode`; wire their edges with `graph.addEdge` as usual. `new ConstFanout(payload, outputs, { state, ret })` sends the same `payload` (by reference) once on every output message edge, then returns `ret`. `new ConstFanin(inputs, output, { state, ret })` waits until every input message edge has delivered, across any number of activations or `run()` calls, then sends one list on `output` in `inputs` order (not arrival order) and returns `ret`; later input never produces another list, and no inputs send one `[]`. Inputs are `Edge<C, T>` and the output is `Edge<C[], T>`, so the graph's message type must admit both. Construct one `ConstFanin` per collector node. Both throw `DataflowDefinitionError` for a value edge or a repeated edge id.
 
 ```ts
-const a = messageEdge<number, string>("a");
-const b = messageEdge<number, string>("b");
-const list = messageEdge<number[], string>("list");
-const graph = new DataflowGraph<void, number | number[], string, never>(createParallelScheduler(), Width(1), UNBOUNDED);
-const one = graph.addNode(ConstFanout(1, [a], { state: undefined, ret: "one" }));
-const two = graph.addNode(ConstFanout(2, [b], { state: undefined, ret: "two" }));
-const join = graph.addNode(ConstFanin([b, a], list, { state: undefined, ret: "join" }));
+const a = Edge.message<number, string>("a");
+const b = Edge.message<number, string>("b");
+const list = Edge.message<number[], string>("list");
+const graph = new DataflowGraph<void, number | number[], string, never>(new ParallelScheduler(), Width.create(1), UNBOUNDED);
+const one = graph.addNode(new ConstFanout(1, [a], { state: undefined, ret: "one" }));
+const two = graph.addNode(new ConstFanout(2, [b], { state: undefined, ret: "two" }));
+const join = graph.addNode(new ConstFanin([b, a], list, { state: undefined, ret: "join" }));
 graph.addEdge(one, join, a).addEdge(two, join, b).addEdge(join, sink, list); // sink receives [2, 1]
 ```
 
@@ -164,10 +159,10 @@ graph.addEdge(one, join, a).addEdge(two, join, b).addEdge(join, sink, list); // 
 
 | Trigger | Fires when |
 |---|---|
-| `always()` | every turn (use for sources) |
-| `when(e)` | `e` has a queued message or a resolved value |
-| `allOf(on(a), on(b))` | every entry is satisfied; when only some are, nothing is read |
-| `anyOf(on(a), on(b))` | the first satisfied entry, in the order given |
+| `TriggerRule.always()` | every turn (use for sources) |
+| `TriggerRule.when(e)` | `e` has a queued message or a resolved value |
+| `TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b))` | every entry is satisfied; when only some are, nothing is read |
+| `TriggerRule.anyOf(TriggerEntry.on(a), TriggerEntry.on(b))` | the first satisfied entry, in the order given |
 
 The engine evaluates each node's trigger first, then consults its `is_available(view, triggered)` hook. The default hook returns `triggered`; a node may override it, e.g. to wait for a deeper backlog or to keep a started actor resumable.
 
@@ -177,9 +172,9 @@ Concrete schedulers live in the sibling package `junco-scheduler` (`import { ...
 
 | Scheduler | Plan |
 |---|---|
-| `createParallelScheduler()` | Runs every available node in one concurrent turn, one lane each. Construct the graph with `threads = UNBOUNDED`. |
-| `createRoundRobinScheduler()` | Runs exactly one node per window, taking ids in increasing string order after the last one run, wrapping around. |
-| `createScheduler({ state, schedule, resolveInputs? })` | Builds a custom policy with mutable state kept across cycles. |
+| `new ParallelScheduler()` | Runs every available node in one concurrent turn, one lane each. Construct the graph with `threads = UNBOUNDED`. |
+| `new RoundRobinScheduler()` | Runs exactly one node per window, taking ids in increasing string order after the last one run, wrapping around. |
+| `new Scheduler({ state, schedule, resolveInputs? })` | Builds a custom policy with mutable state kept across cycles. `ParallelScheduler` and `RoundRobinScheduler` extend it. |
 | Custom | Implement `create(window, threads)` and `schedule(available)`, and optionally `resolveInputs(entry, live)` and `bind(available, step)` (receives callbacks to read candidates and drive one step). |
 
 ```ts
@@ -211,7 +206,7 @@ Both calls resolve to the cumulative map of finished nodes, and `available()` re
 
 ### Emitting from outside a node body
 
-`graph.emit(fromId, msg(edge, payload))` synchronously appends one payload to the message edge wired out of `fromId` in this graph, exactly as a yielded message is routed. It only enqueues: it does not drive the graph, consume inputs, complete or start `fromId`, or resolve a value edge; the next availability and read decision observes the message. Calls and yields append in invocation order, and an enqueued message is never rolled back. An edge not wired out of `fromId` (including an incoming-only edge) and a value edge both throw `DataflowDefinitionError`. Call it on the graph that owns the outgoing edge: a nested graph's own `emit` addresses only its internal edges.
+`graph.emit(fromId, Message.create(edge, payload))` synchronously appends one payload to the message edge wired out of `fromId` in this graph, exactly as a yielded message is routed. It only enqueues: it does not drive the graph, consume inputs, complete or start `fromId`, or resolve a value edge; the next availability and read decision observes the message. Calls and yields append in invocation order, and an enqueued message is never rolled back. An edge not wired out of `fromId` (including an incoming-only edge) and a value edge both throw `DataflowDefinitionError`. Call it on the graph that owns the outgoing edge: a nested graph's own `emit` addresses only its internal edges.
 
 ## Rendering graph topology
 

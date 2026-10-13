@@ -107,15 +107,6 @@ export type TaskToolHost = (
   signal: AbortSignal,
 ) => Promise<TaskToolDetails["tasks"]>;
 
-/** A free-form `task` tool: the model supplies the whole batch. */
-export type TaskTool = AgentTool<typeof taskParameters, TaskToolDetails>;
-
-/** A `task` tool launching one stored batch: the model only sends `{}`. */
-export type AssignedTaskTool = AgentTool<
-  typeof assignedParameters,
-  TaskToolDetails
->;
-
 /** Tools this module created. Only these are graph primitives; a same-named or copied tool is not. */
 const taskTools = new WeakSet<object>();
 /** The detached batch of each assigned tool, kept off its model-facing schema. */
@@ -131,62 +122,76 @@ const START_HELP =
   "Subagents start when you explicitly call yield or finish your current run; call yield when " +
   "you need their reports before continuing.";
 
-/**
- * A fresh `task` tool. Executing it admits subagents through `host`, or through the host a
- * `JuncoAgent` scopes to a graph activation; without either it fails rather than pretend success.
- */
-export function createTaskTool(host?: TaskToolHost): TaskTool {
-  const tool: TaskTool = {
-    name: "task",
-    label: "task",
-    description:
-      "Start one or more subagents. Each runs in a fresh session with only the instructions you " +
-      "give it (plus the shared context prepended to each), so be complete. This returns one handle per task " +
-      "immediately. Each subagent's final report later arrives as a message carrying its handle ID. " +
-      `${START_HELP} Optionally choose a registered model ({ provider, modelId }) or a ` +
-      `subset of your active tool names per task; omitted values inherit yours. ${DECISION_HELP}`,
-    parameters: taskParameters,
-    executionMode: "sequential",
-    execute: (toolCallId, input, signal) => {
-      if (!host) throw new Error("task requires an agentNode graph host");
-      return admit(tool, host, toolCallId, input, signal);
-    },
-  };
-  taskTools.add(tool);
-  return tool;
-}
+/** A free-form `task` tool: the model supplies the whole batch. */
+export type TaskTool = AgentTool<typeof taskParameters, TaskToolDetails>;
+
+/** A `task` tool launching one stored batch: the model only sends `{}`. */
+export type AssignedTaskTool = AgentTool<
+  typeof assignedParameters,
+  TaskToolDetails
+>;
 
 /**
- * A `task` tool whose launch is the validated, detached `input`: the model calls it with `{}`,
- * and may also send decisions about failed tasks. It has no host of its own.
+ * Constructs a fresh {@link TaskTool}. Executing it admits subagents through `host`, or through
+ * the host a `JuncoAgent` scopes to a graph activation; without either it fails rather than
+ * pretend success.
  */
-export function createAssignedTaskTool(input: TaskInput): AssignedTaskTool {
-  const batch = detach(check(launchSchema, input));
-  const count = batch.tasks.length;
-  const tool: AssignedTaskTool = {
-    name: "task",
-    label: "task",
-    description:
-      `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
-      "assignments are fixed. This returns one handle per task immediately; each subagent's " +
-      `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`,
-    parameters: assignedParameters,
-    executionMode: "sequential",
-    execute: () => {
-      throw new Error("task requires an agentNode graph host");
-    },
-  };
-  taskTools.add(tool);
-  assignedInputs.set(tool, batch);
-  return tool;
-}
+export const TaskTool: new (host?: TaskToolHost) => TaskTool = class {
+  name = "task";
+  label = "task";
+  description =
+    "Start one or more subagents. Each runs in a fresh session with only the instructions you " +
+    "give it (plus the shared context prepended to each), so be complete. This returns one handle per task " +
+    "immediately. Each subagent's final report later arrives as a message carrying its handle ID. " +
+    `${START_HELP} Optionally choose a registered model ({ provider, modelId }) or a ` +
+    `subset of your active tool names per task; omitted values inherit yours. ${DECISION_HELP}`;
+  parameters = taskParameters;
+  executionMode: TaskTool["executionMode"] = "sequential";
+  execute: TaskTool["execute"];
 
-/** Whether `tool` is a `task` tool created by {@link createTaskTool} or {@link createAssignedTaskTool}. */
+  constructor(host?: TaskToolHost) {
+    this.execute = (toolCallId, input, signal) => {
+      if (!host) throw new Error("task requires a JuncoGraph host");
+      return admit(this, host, toolCallId, input, signal);
+    };
+    taskTools.add(this);
+  }
+};
+
+/**
+ * Constructs an {@link AssignedTaskTool} whose launch is the validated, detached `input`: the
+ * model calls it with `{}`, and may also send decisions about failed tasks. It has no host of its
+ * own.
+ */
+export const AssignedTaskTool: new (input: TaskInput) => AssignedTaskTool =
+  class {
+    name = "task";
+    label = "task";
+    description: string;
+    parameters = assignedParameters;
+    executionMode: AssignedTaskTool["executionMode"] = "sequential";
+    execute: AssignedTaskTool["execute"] = () => {
+      throw new Error("task requires a JuncoGraph host");
+    };
+
+    constructor(input: TaskInput) {
+      const batch = detach(check(launchSchema, input));
+      const count = batch.tasks.length;
+      this.description =
+        `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
+        "assignments are fixed. This returns one handle per task immediately; each subagent's " +
+        `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`;
+      taskTools.add(this);
+      assignedInputs.set(this, batch);
+    }
+  };
+
+/** Whether `tool` is a `task` tool constructed by {@link TaskTool} or {@link AssignedTaskTool}. */
 export function isTaskTool(tool: object): tool is TaskTool | AssignedTaskTool {
   return taskTools.has(tool);
 }
 
-/** Whether `tool` is a `task` tool created by {@link createAssignedTaskTool}. */
+/** Whether `tool` is a `task` tool constructed by {@link AssignedTaskTool}. */
 export function isAssignedTaskTool(tool: object): tool is AssignedTaskTool {
   return assignedInputs.has(tool);
 }
@@ -200,7 +205,7 @@ export function invokeTaskTool(
   signal: AbortSignal,
 ): Promise<AgentToolResult<TaskToolDetails>> {
   if (!isTaskTool(tool))
-    throw new TypeError("Not a task tool created by createTaskTool");
+    throw new TypeError("Not a task tool constructed by TaskTool");
   return admit(tool, host, toolCallId, input, signal);
 }
 

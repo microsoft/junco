@@ -19,15 +19,12 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import type { TaskToolDetails } from "junco-tools";
+import { LockPolicy, type TaskToolDetails } from "junco-tools";
 import { Type } from "typebox";
 import {
   type AgenticInput,
   agent as agentApi,
-  agentNode,
-  createParallelAgentGraph,
   Deterministic,
-  deterministicNode,
   graph,
   JuncoGraph,
   tools as toolsApi,
@@ -35,7 +32,7 @@ import {
 } from "../src/index.ts";
 import { waitingTool } from "./support.ts";
 
-// Real JuncoAgents on Pi's faux providers, driven through agentNode on the parallel policy: a
+// Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call expands the caller's node into a Spawn graph whose workers report back through queues.
 
 type Agent = agentApi.JuncoAgent;
@@ -101,7 +98,6 @@ async function newCaller(
     model,
     systemPrompt: "sys",
     tools,
-    policy: "LockPolicy",
     ...(contract === undefined ? {} : { contract }),
   });
   closers.push(() => agent.return());
@@ -203,7 +199,7 @@ type QueuedReport = { kind: AgenticInput["kind"]; report: Report };
  */
 async function driveObservingReports(
   outer: JuncoGraph,
-  id = graph.NodeId("caller"),
+  id = graph.NodeId.create("caller"),
 ): Promise<QueuedReport[]> {
   const queued: QueuedReport[] = [];
   // A report may stay queued across windows; record each queued input once.
@@ -212,7 +208,8 @@ async function driveObservingReports(
     await outer.step();
     const state = outer.getNode(id)?.state;
     if (!(state instanceof JuncoGraph)) continue;
-    const messages = state.available().get(graph.NodeId("root"))?.view.messages;
+    const messages = state.available().get(graph.NodeId.create("root"))
+      ?.view.messages;
     for (const edge of messages?.keys() ?? []) {
       for (const input of messages?.get(edge) ?? []) {
         if (seen.has(input)) continue;
@@ -270,19 +267,20 @@ const toolUse = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
 
 function callerNode(caller: Agent, prompt = "Start") {
-  return agentNode(
-    caller,
-    {
-      id: graph.NodeId("caller"),
-      trigger: trigger.always(),
-      policy: "LockPolicy",
-    },
-    { prompt },
-  );
+  caller.stagePrompt(prompt);
+  return {
+    id: graph.NodeId.create("caller"),
+    trigger: trigger.TriggerRule.always(),
+    policy: LockPolicy,
+    state: caller,
+  };
 }
 
 /** The expanded node's inner graph. */
-function innerOf(outer: JuncoGraph, id = graph.NodeId("caller")): JuncoGraph {
+function innerOf(
+  outer: JuncoGraph,
+  id = graph.NodeId.create("caller"),
+): JuncoGraph {
   const state = outer.getNode(id)?.state;
   assert.ok(state instanceof JuncoGraph, "the node's state is its Spawn graph");
   return state;
@@ -389,11 +387,9 @@ async function failingCaller(
     toolUse(taskCall(names.map((name) => taskOn(r, name)))),
     ...turns,
   ]);
-  const caller = await newCaller(r.models, "caller", [
-    toolsApi.createTaskTool(),
-  ]);
+  const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool()]);
   caller.setTaskFailurePolicy(policy);
-  const outer = createParallelAgentGraph("LockPolicy");
+  const outer = JuncoGraph.parallel(LockPolicy);
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
   return { caller, outer, id };
@@ -422,7 +418,7 @@ function causesOf(error: unknown): unknown[] {
   return [...seen];
 }
 
-describe("task tool through agentNode", () => {
+describe("task tool through a graph-driven agent", () => {
   test("workers run under a Spawn root while the caller continues; their reports finish the original node", async () => {
     const hold = holdTool();
     const r = registry("caller", "alpha", "beta");
@@ -468,7 +464,7 @@ describe("task tool through agentNode", () => {
       },
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
       hold.tool,
     ]);
     const runIds = new Set<string>();
@@ -476,7 +472,7 @@ describe("task tool through agentNode", () => {
       if (lane === "main") runIds.add(runId);
     });
 
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     const id = outer.addNode(callerNode(caller, "Start the workers"));
     closers.push(() => outer.close());
     const node = outer.getNode(id);
@@ -494,7 +490,7 @@ describe("task tool through agentNode", () => {
     );
     assert.equal(outer.getNode(id), node, "the node itself is unchanged");
     const inner = innerOf(outer);
-    assert.equal(inner.getNode(graph.NodeId("root"))?.state, caller);
+    assert.equal(inner.getNode(graph.NodeId.create("root"))?.state, caller);
     const handles = seen.handles ?? [];
     assert.deepEqual(
       handles.map(({ name }) => name),
@@ -538,9 +534,9 @@ describe("task tool through agentNode", () => {
       [childPrompt("do alpha"), childPrompt("do beta")],
     );
     for (const child of childIds) {
-      const member = inner.getNode(graph.NodeId(child));
+      const member = inner.getNode(graph.NodeId.create(child));
       assert.ok(member && member.state !== caller);
-      assert.ok(O.isSome(inner.result(graph.NodeId(child))));
+      assert.ok(O.isSome(inner.result(graph.NodeId.create(child))));
     }
   });
 
@@ -553,10 +549,10 @@ describe("task tool through agentNode", () => {
       messages: { id: string; payload: AgenticInput }[];
       values: { id: string; payload: AssistantMessage }[];
     };
-    const sourceEdge: Edge = graph.valueEdge("source=>caller");
-    const notesEdge: Edge = graph.messageEdge("notes->caller");
-    const outboundEdge: Edge = graph.messageEdge("caller->down");
-    const resultEdge: Edge = graph.valueEdge("caller=>down");
+    const sourceEdge: Edge = graph.Edge.value("source=>caller");
+    const notesEdge: Edge = graph.Edge.message("notes->caller");
+    const outboundEdge: Edge = graph.Edge.message("caller->down");
+    const resultEdge: Edge = graph.Edge.value("caller=>down");
     const expects: Record<string, string> = {
       [sourceEdge.id]: "caller takes the upstream value",
       [notesEdge.id]: "caller takes ordered notes",
@@ -664,11 +660,11 @@ describe("task tool through agentNode", () => {
       r.models,
       "caller",
       [
-        toolsApi.createTaskTool(),
-        toolsApi.createYieldTool(),
-        toolsApi.RecvTool(),
-        toolsApi.SendTool(),
-        toolsApi.InfoTool(),
+        new toolsApi.TaskTool(),
+        new toolsApi.YieldTool(),
+        new toolsApi.RecvTool(),
+        new toolsApi.SendTool(),
+        new toolsApi.InfoTool(),
       ],
       contract,
     );
@@ -676,48 +672,51 @@ describe("task tool through agentNode", () => {
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
-    const sourceId = outer.addNode(
-      deterministicNode(
-        new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+    const sourceId = outer.addNode({
+      trigger: trigger.TriggerRule.always(),
+      state: new Deterministic<AgenticInput, AssistantMessage>(
+        async function* () {
           yield [];
           return upstreamValue;
-        }, "LockPolicy"),
-        { trigger: trigger.always(), policy: "LockPolicy" },
+        },
+        LockPolicy,
       ),
-    );
-    const notesId = outer.addNode(
-      deterministicNode(
-        new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+    });
+    const notesId = outer.addNode({
+      // Emits once the worker is running, while the caller's node is expanded and suspended.
+      trigger: trigger.TriggerRule.always(),
+      is_available: () => alphaStarted,
+      state: new Deterministic<AgenticInput, AssistantMessage>(
+        async function* () {
           yield [
             { id: notesEdge.id, payload: { kind: "followUp", text: "note-1" } },
             { id: notesEdge.id, payload: { kind: "followUp", text: "note-2" } },
           ];
           return fauxAssistantMessage("notes done");
-        }, "LockPolicy"),
-        // Emits once the worker is running, while the caller's node is expanded and suspended.
-        {
-          trigger: trigger.always(),
-          is_available: () => alphaStarted,
-          policy: "LockPolicy",
         },
+        LockPolicy,
       ),
-    );
-    const callerId = outer.addNode(
-      agentNode(
-        caller,
-        {
-          id: graph.NodeId("caller"),
-          policy: "LockPolicy",
-          trigger: trigger.anyOf(trigger.on(notesEdge), trigger.on(sourceEdge)),
-        },
-        { prompt: "Start" },
+    });
+    caller.stagePrompt("Start");
+    const callerId = outer.addNode({
+      id: graph.NodeId.create("caller"),
+      policy: LockPolicy,
+      trigger: trigger.TriggerRule.anyOf(
+        trigger.TriggerEntry.on(notesEdge),
+        trigger.TriggerEntry.on(sourceEdge),
       ),
-    );
-    const downId = outer.addNode(
-      deterministicNode(
-        new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+      state: caller,
+    });
+    const downId = outer.addNode({
+      trigger: trigger.TriggerRule.anyOf(
+        trigger.TriggerEntry.on(outboundEdge),
+        trigger.TriggerEntry.on(resultEdge),
+      ),
+      contract,
+      state: new Deterministic<AgenticInput, AssistantMessage>(
+        async function* () {
           let view = yield [];
           while (true) {
             for (const input of view.messages.get(outboundEdge.id) ?? [])
@@ -729,17 +728,10 @@ describe("task tool through agentNode", () => {
             }
             view = yield [];
           }
-        }, "LockPolicy"),
-        {
-          policy: "LockPolicy",
-          trigger: trigger.anyOf(
-            trigger.on(outboundEdge),
-            trigger.on(resultEdge),
-          ),
-          contract,
         },
+        LockPolicy,
       ),
-    );
+    });
     outer
       .addEdge(sourceId, callerId, sourceEdge)
       .addEdge(notesId, callerId, notesEdge)
@@ -874,9 +866,9 @@ describe("task tool through agentNode", () => {
       (context) => fauxAssistantMessage(`${userTexts(context)[0]}-report`),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -944,10 +936,10 @@ describe("task tool through agentNode", () => {
     ]);
     r.script("grand", [fauxAssistantMessage("grand-report")]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -965,7 +957,7 @@ describe("task tool through agentNode", () => {
     assert.equal(nested.length, 1, "one nested child scope");
     const [alpha, grand] = created;
     assert.ok(alpha && grand);
-    assert.equal(nested[0]!.getNode(graph.NodeId("root"))?.state, alpha);
+    assert.equal(nested[0]!.getNode(graph.NodeId.create("root"))?.state, alpha);
     let grandFound = false;
     nested[0]!.forEachNode((child, member) => {
       if (child !== "root") grandFound = member.state === grand;
@@ -1005,15 +997,15 @@ describe("task tool through agentNode", () => {
       fauxAssistantMessage("c-report"),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
-      toolsApi.createYieldTool(),
+      new toolsApi.TaskTool(),
+      new toolsApi.YieldTool(),
     ]);
     caller.hooks.on("after_tool", ({ toolCallId }) =>
       toolCallId === "t2"
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1024,7 +1016,10 @@ describe("task tool through agentNode", () => {
       seen.map((context) => reportsIn(context).map(({ output }) => output)),
       [["a-report"], ["a-report", "c-report"]],
     );
-    assert.equal(innerOf(outer).getNode(graph.NodeId("root"))?.state, caller);
+    assert.equal(
+      innerOf(outer).getNode(graph.NodeId.create("root"))?.state,
+      caller,
+    );
   });
 
   test("an invalid batch fails as an ordinary tool error before any child or graph change", async () => {
@@ -1052,10 +1047,10 @@ describe("task tool through agentNode", () => {
       },
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1075,7 +1070,7 @@ describe("task tool through agentNode", () => {
       toolUse(taskCall([{ task: "a" }, { task: "b" }], "t1")),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
     caller.hooks.on("after_tool", ({ toolCallId }) => {
@@ -1083,7 +1078,7 @@ describe("task tool through agentNode", () => {
       if (toolCallId === "t1") void caller.abort();
       return undefined;
     });
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1098,9 +1093,9 @@ describe("task tool through agentNode", () => {
     const r = registry("caller");
     r.script("caller", [toolUse(taskCall([{ task: "a" }], "t1"))]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     const id = outer.addNode(callerNode(caller));
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
@@ -1141,11 +1136,11 @@ describe("task tool through agentNode", () => {
       fauxAssistantMessage("a-report"),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
       hold.tool,
     ]);
     const created = trackSubagents(caller);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     const id = outer.addNode(callerNode(caller));
     const running = outer.run();
     await hold.started;
@@ -1179,9 +1174,9 @@ describe("task tool through agentNode", () => {
       }),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1207,7 +1202,7 @@ describe("task tool through agentNode", () => {
     assert.equal(ignored?.isError, false);
     assert.equal(textOf(ignored!), `Ignored task ${report?.id}.`);
     assert.deepEqual(markersIn(finalContext), [[report?.id]]);
-    const value = innerOf(outer).result(graph.NodeId(report?.id ?? ""));
+    const value = innerOf(outer).result(graph.NodeId.create(report?.id ?? ""));
     assert.ok(
       O.isSome(value),
       "a genuine error stop keeps its assistant result",
@@ -1241,7 +1236,7 @@ describe("task tool through agentNode", () => {
     r.script("bad", [fauxAssistantMessage("must not run")]);
     r.script("good", [fauxAssistantMessage("good-report")]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
     caller.setTaskFailurePolicy("ignore");
     let bad: Agent | undefined;
@@ -1250,7 +1245,7 @@ describe("task tool through agentNode", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1299,13 +1294,16 @@ describe("task tool through agentNode", () => {
     assert.deepEqual(markersIn(finalContext), [[badId, goodId]]);
 
     const inner = innerOf(outer);
-    const badNode = inner.getNode(graph.NodeId(badId));
+    const badNode = inner.getNode(graph.NodeId.create(badId));
     assert.ok(bad);
     assert.equal(badNode?.state, bad);
     assert.equal(badNode?.status, "done");
-    assert.ok(O.isNone(inner.result(graph.NodeId(badId))), "no invented value");
+    assert.ok(
+      O.isNone(inner.result(graph.NodeId.create(badId))),
+      "no invented value",
+    );
     assert.equal(bad.status, "closed");
-    const goodValue = inner.result(graph.NodeId(goodId));
+    const goodValue = inner.result(graph.NodeId.create(goodId));
     assert.ok(O.isSome(goodValue));
     assert.equal(contentText(goodValue.value.content), "good-report");
     await outer.close();
@@ -1365,8 +1363,8 @@ describe("task tool through agentNode", () => {
       fauxAssistantMessage("slow-report"),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
-      toolsApi.createYieldTool(),
+      new toolsApi.TaskTool(),
+      new toolsApi.YieldTool(),
       waiting.tool,
     ]);
     caller.setTaskFailurePolicy("ignore");
@@ -1380,7 +1378,7 @@ describe("task tool through agentNode", () => {
         throw new Error("nested worker exploded");
       });
     });
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1413,10 +1411,10 @@ describe("task tool through agentNode", () => {
     assert.equal(created.length, 3, "the child and both grandchildren");
     for (const agent of created) assert.equal(agent.status, "closed");
     const inner = innerOf(outer);
-    const childNode = inner.getNode(graph.NodeId(childHandle.id));
+    const childNode = inner.getNode(graph.NodeId.create(childHandle.id));
     assert.ok(childNode?.state instanceof JuncoGraph, "the task had expanded");
     assert.equal(childNode.status, "done");
-    assert.ok(O.isNone(inner.result(graph.NodeId(childHandle.id))));
+    assert.ok(O.isNone(inner.result(graph.NodeId.create(childHandle.id))));
     await outer.close();
   }, 5_000);
 
@@ -1445,9 +1443,9 @@ describe("task tool through agentNode", () => {
       fauxAssistantMessage("worker-report"),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
@@ -1506,7 +1504,7 @@ describe("task tool through agentNode", () => {
       }),
     ]);
     const caller = await newCaller(r.models, "caller", [
-      toolsApi.createTaskTool(),
+      new toolsApi.TaskTool(),
     ]);
     const batch = {
       context: "Original context.",
@@ -1520,7 +1518,7 @@ describe("task tool through agentNode", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const outer = createParallelAgentGraph("LockPolicy");
+    const outer = JuncoGraph.parallel(LockPolicy);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 

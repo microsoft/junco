@@ -11,19 +11,18 @@ import {
 } from "@earendil-works/pi-ai";
 import { JuncoAgent } from "junco-agent";
 import {
-  createYieldTool,
   InfoTool,
   MARSH_POLICY_DENIED,
-  RecvTool,
   SendTool,
+  YieldTool,
 } from "junco-tools";
 import { Type } from "typebox";
 import {
   convene,
-  createOssSearchTool,
-  createReviewTool,
   type MemberId,
   type Members,
+  OssSearchTool,
+  ReviewTool,
 } from "../examples/oss-committee.ts";
 import { scripted } from "./support.ts";
 
@@ -79,28 +78,6 @@ function toolResultText(context: Context, name: string): string {
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("");
 }
-
-/** The single prepared prompt delivered by the latest `recv`. */
-function receivedPrompt(context: Context): string {
-  const { messages, values } = JSON.parse(toolResultText(context, "recv")) as {
-    messages: { id: string; payload: { kind: string; text?: string } }[];
-    values: unknown[];
-  };
-  const [message, ...extra] = messages;
-  if (
-    message?.payload.kind !== "prompt" ||
-    message.payload.text === undefined ||
-    extra.length > 0 ||
-    values.length > 0
-  )
-    throw new Error("recv did not deliver exactly one prepared prompt");
-  return message.payload.text;
-}
-
-const recvCall = (id: string) =>
-  fauxAssistantMessage([fauxToolCall("recv", {}, { id })], {
-    stopReason: "toolUse",
-  });
 
 /** A Librarian tool whose only effect is a Marsh policy denial, which pauses the run. */
 const guardedTool: AgentTool = {
@@ -161,7 +138,7 @@ export async function scriptedCommittee(
   const responses = lookups.flat();
   const librarianStopReason = script.librarianStopReason ?? "stop";
   const searchQueries: string[] = [];
-  const search = createOssSearchTool(
+  const search = new OssSearchTool(
     Object.assign(
       async (url: Parameters<typeof fetch>[0]) => {
         const response = responses[searchQueries.length];
@@ -177,7 +154,7 @@ export async function scriptedCommittee(
       { preconnect: fetch.preconnect },
     ),
   );
-  const review = createReviewTool();
+  const review = new ReviewTool();
   const memberInputs: Record<MemberId, string[]> = {
     Librarian: [],
     Architect: [],
@@ -346,9 +323,7 @@ export async function scriptedCommittee(
 
   const architect: FauxResponseFactory = (context) => {
     modelRequests.push("Architect");
-    if (context.messages.at(-1)?.role === "user")
-      return recvCall(`architect-recv-${memberInputs.Architect.length + 1}`);
-    const input = receivedPrompt(context);
+    const input = latestUserText(context);
     memberInputs.Architect.push(input);
     const labels = input.includes("\n\nReview feedback:\n")
       ? ["Original request", "Review feedback", "Librarian report"]
@@ -428,11 +403,9 @@ export async function scriptedCommittee(
   const reducer: FauxResponseFactory = (context) => {
     modelRequests.push("Reducer");
     const last = context.messages.at(-1);
-    if (last?.role === "user")
-      return recvCall(`reducer-recv-${reducerRound + 2}`);
-    if (last?.role === "toolResult" && last.toolName === "recv") {
+    if (last?.role === "user") {
       reducerRound++;
-      reducerInput = receivedPrompt(context);
+      reducerInput = latestUserText(context);
       memberInputs.Reducer.push(reducerInput);
       const verdict = reviews[reducerRound];
       if (verdict === undefined) throw new Error("No scripted review remains");
@@ -465,7 +438,6 @@ export async function scriptedCommittee(
       model,
       systemPrompt: `You are the ${id} of a three-member design committee.`,
       tools,
-      policy: "LockPolicy",
     });
     created.push(agent);
     return agent;
@@ -475,17 +447,13 @@ export async function scriptedCommittee(
     members = {
       Librarian: await member("Librarian", librarian, [
         search.tool,
-        createYieldTool(),
+        new YieldTool(),
         guardedTool,
-        InfoTool(),
-        SendTool(),
+        new InfoTool(),
+        new SendTool(),
       ]),
-      Architect: await member("Architect", architect, [RecvTool(), InfoTool()]),
-      Reducer: await member("Reducer", reducer, [
-        review.tool,
-        RecvTool(),
-        InfoTool(),
-      ]),
+      Architect: await member("Architect", architect, [new InfoTool()]),
+      Reducer: await member("Reducer", reducer, [review.tool]),
     };
   } catch (error) {
     await Promise.allSettled(created.map((agent) => agent.return()));
