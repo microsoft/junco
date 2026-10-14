@@ -42,11 +42,13 @@ bun run smoke
 
 ## Tracing (local only)
 
-A direct `JuncoGraph` requires a tracer as its constructor's fourth argument (`TypeError` when missing), and its `tracer` property is never `undefined`. `tracer.StdoutTracer.shared()` returns the shared default `tracer.StdoutTracer`, built once per process, named `JuncoGraph.run`, and shared by every graph given it, nested ones included; Ralph's child graph uses its parent's tracer. `JuncoGraph.parallel(policy)` (and so `JuncoGraph.spawn`) and `JuncoGraph.pi` default to it; an explicit tracer, such as `new tracer.DummyTracer()` for no output or any other `tracer.DataflowTracer` implementation, always wins. Callers own `await graph.tracer.flush()`, as every example does.
+A direct `JuncoGraph` requires a tracer as its constructor's fourth argument (`TypeError` when missing), and its `tracer` property is never `undefined`. `JuncoGraph.parallel(policy)`, `JuncoGraph.spawn` and `JuncoGraph.pi` default to `tracer.TuiTracer.shared()`: one shared lazy TUI named `JuncoGraph.run` when stdin and stdout are TTYs and `TERM !== "dumb"`, otherwise a silent, stateless `DummyTracer`. Explicit Dummy, custom and Opik tracers always win. `parallel` and `spawn` remain synchronous; imports, factory construction and shared selection do not load native bindings, enter terminal modes, install handlers or write output. The first observer callback starts the lazy display.
 
-`StdoutTracer` prints each `run()`/`step()` as it happens: a `[run <n>] <name>` header, the graph's topology drawn as Unicode boxes and arrows with [`mermaid-ascii`](https://www.npmjs.com/package/mermaid-ascii) (patched under `patches/`; every subgraph drawn separately under a `Subgraph [<path>]:` heading), then `Trace:` and one line per activation start (`prime`/`resume` with its delivered inputs) and outcome (`yield`, `return` or the raw `error`), ending with the run's cumulative results or escaping error. Payloads are printed in full with `util.inspect`, snapshotted when each event happens, without invoking application getters or custom inspection; they may include sensitive data. Parallel edges between the same two nodes share one arrow with their labels joined by ` / `; opposite-direction edges between the same pair can overlap each other's labels.
+For explicit acquisition, use `const tui = await tracer.TuiTracer.create("My workflow")` (the name is optional), then pass it to your graphs. It rejects unsuitable terminals before loading native bindings; native initialization failures surface rather than falling back to another backend. Only one session may own the terminal. The ratatui display has two vertically stacked panes: `JuncoGraph` above and live `Agent traces` below. Topology stays fixed across steps unless it changes; only currently executing scheduled nodes are green. Stable identity colors and scoped `[g<serial>:<NodeId>]` badges distinguish repeated local IDs in nested graphs. Agent messages, tool progress and lifecycle outcomes appear independently of `LOG_LEVEL`. Promoted task parents retain their agent identity: return records show outcomes and stop reasons, not another copy of streamed messages. Payloads are snapshotted without application getters or custom inspection and may contain sensitive data; retained display history is bounded, not a durable transcript.
 
-Every `StdoutTracer` record is written at INFO through `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) stdout logger, prefixed with its level (`INFO `, `WARN `, …); tracer diagnostics and `issueLog`'s complaint-observer failures use WARN. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; any other value fails before native or model work. The same logger receives every junco-policy capability decision of the ShellMux `ShellMuxLease.create` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. Each mux's `lease.release()` (and so a collection's final release) drains those records and flushes stdout before it resolves.
+Share one tracer across child graphs: Ralph and promoted task graphs inherit their parent's observer; separately constructed children must receive the same explicit tracer from their caller. Close all graphs before calling `await observer.flush()` once for the shared observer. TUI `flush()` draws the final state and waits for `q`/Esc before restoring the terminal; `q`/Esc can also dismiss early without cancelling computation. `await tui.close()` or async disposal restores without waiting for dismissal. Flushing or closing an unused lazy instance performs no terminal I/O. While the screen is owned, do not write directly to stdout/stderr; capture MCP stderr (`stderr: "pipe"`) and print final results only after restoration. Tab switches pane focus; arrows, PageUp/PageDown and Home/End pan or scroll, and End resumes trace tail-follow.
+
+Operational logs still use `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) logger. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; missing/blank means INFO, names are trimmed and case-insensitive, and unknown or numeric values fail before native or model work. `issueLog`'s complaint-observer failures use WARN. The logger receives every junco-policy capability decision of the ShellMux `ShellMuxLease.create` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. While the TUI owns the terminal, admitted operational logs are redirected exclusively into its trace pane. Each mux's `lease.release()` (and so a collection's final release) drains these records; its `flushLog()` barrier waits for drawing, not keyboard dismissal. Outside the TUI that barrier flushes stdout.
 
 `dataflow-engine-opik` is a workspace package and a root development dependency providing `OpikDataflowTracer`, so the root install already provides it and `opik`; under Bun its `bun` export loads its source directly. Pass it explicitly like any other tracer, configured by the SDK's `OPIK_*` variables:
 
@@ -85,25 +87,31 @@ const writer = await JuncoAgent.fromResolved({
   ...writerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), prompt: "Draft the summary.",
 });
 // With a native `model` the scheduler uses it; without one it is GitHub Copilot `claude-opus-5.5`
-// through Pi's saved login (run Pi's /login first). Tracer defaults to StdoutTracer.shared(),
+// through Pi's saved login (run Pi's /login first). Tracer defaults to TuiTracer.shared(),
 // window and threads to UNBOUNDED.
 await using graph = await JuncoGraph.pi({
   ...schedulerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
   systemPrompt: "Coordinate the team.", prompt: "Produce the report.", policy: LockPolicy,
 }); // disposal closes every member
 const scheduler = graph.scheduler;
-scheduler.events.on("run_end", ({ status }) => { if (status === "failed") console.error("Scheduler run failed"); });
+// Event subscribers must not print directly while the TUI owns the terminal.
 // scheduler.hooks.on("transform_context", handler) registers native request hooks.
 // Invalid local arguments/state and overlapping work reject with JuncoAgentError.
 for (const [agent, description] of [[researcher, "researches"], [writer, "writes"]] as const) {
   graph.addNode({ state: agent, description, policy: LockPolicy, trigger: TriggerRule.always() }); // runs its constructor prompt
 }
 
-for await (const step of scheduler) {
-  if (step.kind === "yield") continue; // one graph window completed; the next iteration resumes
-  console.log(step.kind === "settled" ? step.message : step.error);
-  break;
+let outcome: unknown;
+try {
+  for await (const step of scheduler) {
+    if (step.kind === "yield") continue; // one graph window completed; the next iteration resumes
+    outcome = step.kind === "settled" ? step.message : step.error;
+    break;
+  }
+} finally {
+  try { await graph.close(); } finally { await graph.tracer.flush(); }
 }
+console.log(outcome); // the terminal has been restored
 // Leaving scope closes the graph: its scheduler and agents, with their sessions.
 // The caller owns the repo and closes it afterwards with sessions.close(BACKGROUND_CONTEXT).
 ```
@@ -122,7 +130,7 @@ Before running the live example, start `pi`, use `/login`, and select GitHub Cop
 bun run examples/oss-committee.ts ./request.txt ./plan.md
 ```
 
-The first argument is a nonblank UTF-8 request file; the optional output defaults to `plan.md` in the current working directory. Existing outputs are rejected before credentials are read, and publication uses exclusive creation (`wx`): a failed/aborted run or concurrent writer cannot overwrite a plan. Each member's exact model ID **and** reasoning level must be in the installed Copilot catalog before its saved login is checked; per-account model access can still fail, with no plan published. Each GitHub lookup returns at most five repository URLs and GitHub-reported metadata, not a bound on the number of requests. The search fetch is unauthenticated; Pi's saved Copilot login authenticates the model runtime, not GitHub repository search. Yield is a scheduling handoff, not an HTTP retry or a quota increase. `incomplete_results=true` means partial research, a valid empty result is reported as no matching library, and a failed lookup remains disclosed as unavailable research. A missing/`NOASSERTION` SPDX identifier means unknown license. GitHub-reported SPDX identifiers, stars and push times do not verify full license terms or quality; versions and API compatibility are likewise unverified. Never place secrets, private identifiers, or private endpoints in a GitHub query or the request/reports exported to a tracer. `convene` flushes the rounds' shared automatic tracer once, and all members close, **before** the approved titled plan is written. A successful `flush()` does not prove ingestion: each review round is one `JuncoGraph.run` trace; inspect its three node results and activation spans in Opik's project → Logs → Traces.
+The first argument is a nonblank UTF-8 request file; the optional output defaults to `plan.md` in the current working directory. Existing outputs are rejected before credentials are read, and publication uses exclusive creation (`wx`): a failed/aborted run or concurrent writer cannot overwrite a plan. Each member's exact model ID **and** reasoning level must be in the installed Copilot catalog before its saved login is checked; per-account model access can still fail, with no plan published. Each GitHub lookup returns at most five repository URLs and GitHub-reported metadata, not a bound on the number of requests. The search fetch is unauthenticated; Pi's saved Copilot login authenticates the model runtime, not GitHub repository search. Yield is a scheduling handoff, not an HTTP retry or a quota increase. `incomplete_results=true` means partial research, a valid empty result is reported as no matching library, and a failed lookup remains disclosed as unavailable research. A missing/`NOASSERTION` SPDX identifier means unknown license. GitHub-reported SPDX identifiers, stars and push times do not verify full license terms or quality; versions and API compatibility are likewise unverified. Never place secrets, private identifiers, or private endpoints in a GitHub query or the request/reports exported to a tracer. `convene` flushes the rounds' shared automatic tracer once, and all members close, **before** the approved titled plan is written. In an interactive terminal, dismiss the final TUI with `q`/Esc before publication; redirected execution uses Dummy and emits no trace output. When you explicitly supply Opik, inspect each review round's three node results and activation spans in its project → Logs → Traces; successful `flush()` alone does not prove remote ingestion.
 
 The tool restricts search to GitHub repositories but cannot detect secrets in a model-generated query. Submit only requests safe for public GitHub search and complete tracer export; prompt instructions alone do not enforce that boundary.
 
@@ -134,7 +142,7 @@ The tool restricts search to GitHub repositories but cannot detect secrets in a 
 bun run examples/mcp.ts
 ```
 
-For a scripted end-to-end run without model credentials, run `bun run test/oss-committee.fixture.ts`. The fixture prints the approved plan of one scripted round. `bun test test/oss-committee.test.ts` exercises the same rounds offline with the default `StdoutTracer`.
+For a scripted end-to-end run without model credentials, run `bun run test/oss-committee.fixture.ts`. The fixture prints the approved plan of one scripted round. It and `bun test test/oss-committee.test.ts` choose an explicit `DummyTracer`, keeping offline output deterministic even in a terminal.
 
 ### Yak shaver: in-place refactoring (live)
 
@@ -145,6 +153,18 @@ Prerequisites: `graft` 0.21.1-compatible on `PATH`, the production native addon,
 ```sh
 bun run examples/yak-shaver.ts /path/to/repo
 ```
+
+### Verus loop (live)
+
+[`examples/verus.ts`](examples/verus.ts) runs persistent Verifier → Reviewer → Cleanup rounds until cancellation. All three agents receive every tool from the `verus` stdio entry in `~/.omp/agent/mcp.json`: code queries, diagnostics, and supported LSP mutations. There are no local Rust parsers, direct Verus/Cargo commands, or separate file/grep tools. The Reviewer must obtain its own MCP diagnostics each round; successful diagnostics do not terminate the loop or establish whole-project proof coverage.
+
+```sh
+bun run examples/verus.ts /path/to/source /path/to/new-output 'Natural-language specification'
+```
+
+Requires the native junco-tools addon, output inside a Btrfs seed, the configured lsp-mcp bridge/Verus analyzer, and a saved Pi Copilot login for `github-copilot/gpt-6.1-sol` with high thinking. Source is mirrored into a new/empty output directory. The bridge's `.lsp-mcp.json` is copied from its configured cwd into a private temporary directory inside output, avoiding ShellMux's external-cwd restriction; that directory and all agents are disposed on exit, while output is retained.
+
+Output-only mutation and Reviewer read-only behavior are role instructions, not filesystem enforcement: every role has the full MCP tool set. The bridge can apply offered code actions, rename, and formatting, but exposes no arbitrary file-write API; unsupported translation/proof edits must be reported rather than claimed as applied. Empty LSP diagnostics are not evidence that the verifier ran. `bun test test/verus.test.ts` covers round ordering, independent review, feedback, cancellation, MCP failures, and source-copy isolation.
 
 ## API
 
@@ -170,7 +190,7 @@ type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
 ) & { readonly contract?: (edgeId: EdgeIdType) => Contract };
 
 // addNode/addEdge, inspection and results are DataflowGraph's. `tracer` is required; pass
-// `tracer.StdoutTracer.shared()` for the shared default (see Tracing).
+// `tracer.TuiTracer.shared()` for the automatic interactive/Dummy selection (see Tracing).
 class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>>
   extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
   // policy: a junco-tools `Policy` (compared by identity); a supplied collection must have it and is borrowed until close.
@@ -181,7 +201,7 @@ class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends
     build: (collection: ToolCollection) => JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>): Promise<JuncoGraph<N, T, EH, Q>>;
   // Every available node runs in each window: junco-scheduler's ParallelScheduler, Width.create(1), UNBOUNDED.
   static parallel<N = AgenticInput, T = AssistantMessage>(
-    policy: ToolCollection["policy"], tracer: DataflowTracer = StdoutTracer.shared(), collection?: ToolCollection,
+    policy: ToolCollection["policy"], tracer: DataflowTracer = TuiTracer.shared(), collection?: ToolCollection,
   ): JuncoGraph<N, T>;
   // A JuncoGraph.parallel graph under the root's registration policy (a managed root's state policy,
   // else the spec's) holding `root` plus one child per input, built by `child` in
@@ -190,12 +210,13 @@ class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends
   // Factory/registration errors propagate synchronously; already-created members stay caller-owned.
   static spawn<Input, N = AgenticInput, T = AssistantMessage>(
     root: AgenticNode<N, T>, inputs: readonly Input[], child: (input: Input) => AgenticNode<N, T>,
+    tracer: DataflowTracer = TuiTracer.shared(),
   ): JuncoGraph<N, T>;
   // A model-driven graph; drive it through `graph.scheduler`. PiScheduler, PiSchedulerOptions,
   // SchedulerInfo and ScheduleTool come from "junco-scheduler/agent"; the agency supplies the
   // scheduler's adapter itself. A defined `model` selects PiScheduler.make (requiring model, models
   // and session); otherwise PiScheduler.opus selects Copilot Opus 5.5. `tracer` defaults to
-  // StdoutTracer.shared(), `window`/`threads` to UNBOUNDED; the graph is assigned before this resolves.
+  // TuiTracer.shared(), `window`/`threads` to UNBOUNDED; the graph is assigned before this resolves.
   static pi<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate, N = AgenticInput, T = AssistantMessage>(
     options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> & {
       readonly policy: ToolCollection["policy"];
@@ -277,7 +298,7 @@ The root entry also re-exports the standard library for building junco workflows
 | `agent` | `JuncoAgent`, `JuncoAgentError`, `TaskPolicy`, `TaskFailurePolicy`, `SubagentObserver`, and the `Agentic` protocol types | `junco-agent` |
 | `tools` | Everything `junco-tools` exports: `ToolCollection`, `LspTool`, the native tool classes' `create` factories (`ReadTool.create`, `BashTool.create`, …), `YieldTool`/`isYieldTool`, the graph messaging tools `new RecvTool()`/`new SendTool()`/`new InfoTool()` (each class with static `.is`/`.invoke`) and their edge `Contract`, `TaskTool`/`AssignedTaskTool`/`isTaskTool`/`isAssignedTaskTool`/`invokeTaskTool` with the `TaskInput`/`TaskDecision`/`TaskRequest`/`TaskCall` contracts, the always-on `ComplainTool`/`isComplainTool`/`invokeComplainTool` with the shared `issueLog` and its `Issue`/`Prompt` types, ShellMux operations (`ShellMuxOperations`, `ShellMuxLease`), the Marsh policy-denial check, and the type-only `NativeModule`, `NativeMux` and `EditStore` contracts | `junco-tools` |
 | `schedulers` | `Scheduler`, `ParallelScheduler`, `RoundRobinScheduler` (both extend `Scheduler`), `PiScheduler`, the `DataflowScheduler` contract and its schedule types, `triggerInputs` (a model-driven agency graph is `graph.JuncoGraph.pi`) | `junco-scheduler`, `dataflow-engine` |
-| `tracer` | `DataflowTracer`, `DataflowRunTrace`, `DataflowStepTrace`, the no-op `DummyTracer`, and `StdoutTracer` (`StdoutTracer.shared()` returns the shared default) | `dataflow-engine`, this package |
+| `tracer` | `DataflowTracer`, `DataflowRunTrace`, `DataflowStepTrace`, the no-op `DummyTracer`, and `TuiTracer` (`shared()` selects the lazy interactive default or Dummy; `await create(name?)` explicitly acquires a TUI) | `dataflow-engine`, this package |
 
 ```ts
 import { graph, schedulers, tracer, trigger } from "junco-agency";
@@ -289,7 +310,7 @@ const sink = g.addNode(new graph.nodes.StepNode(() => [], { state: undefined, tr
 g.addEdge(source, sink, a);
 ```
 
-A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikDataflowTracer` from the `dataflow-engine-opik` workspace package, or `tracer.StdoutTracer`) as its fourth argument, or omit it to run untraced. A `JuncoGraph` always takes one (see [Tracing](#tracing-local-only)). The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
+A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikDataflowTracer` from the `dataflow-engine-opik` workspace package, or `tracer.TuiTracer.shared()`) as its fourth argument, or omit it to run untraced. A `JuncoGraph` always takes one (see [Tracing](#tracing-local-only)). The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
 
 ### Prompt agents: `graph.addNode({ ...options, state: agent })`
 
@@ -353,12 +374,13 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 
 The default suite also runs `test/compaction.test.ts`: each policy's selection over one real graph with available, trigger-blocked, availability-rejected and completed members; the strict 40% threshold; unknown policies and unknown context windows rejecting before any change; available-only policies never measuring unavailable members; invocation-time snapshots; a later member compacting while an earlier one is still yielded; and ordered failure aggregation. The native adapter's context sizing and deferred compaction are covered by `junco-agent`'s own suite.
 
-`test/stdout-tracer.test.ts` (also in the default suite) runs real graphs in Bun subprocesses: Unicode drawings of escaped labels, parallel edges, self-loops, nested, shared, empty and recursive subgraphs and a 40-node chain; full, snapshotted payloads (BigInts, cycles, long arrays and strings) without application getters; activation errors, handled recoveries, run failures and rendering diagnostics; per-invocation blocks and shared-tracer settlement order; required `JuncoGraph` tracers, Ralph's inherited tracer, and `StdoutTracer.shared()` returning one shared `StdoutTracer`.
+`test/tui-graph.test.ts` (in the default suite) covers graph geometry for escaped labels, parallel edges, self-loops, nested/shared/empty/recursive graphs and a long chain, plus immediate safe payload snapshots with BigInts, cycles and long values without application getters or custom inspection. Ordinary runtime tests supply `DummyTracer` or a deliberate recording/custom observer, so a terminal never changes their backend.
 
 The mock replays Agentic interactions; it does not simulate provider reasoning, native policy denial or tool execution. Those, and the Pi scheduler itself, are covered by separately runnable suites; CI runs `test:integration`, `test:native` and both workflow smokes, but not `smoke:pi`:
 
 - `bun run test:integration` (offline, faux providers): the real `PiScheduler` factories and Opus acquisition from a fixture login, `JuncoGraph.pi` graph assignment, candidate-only `SchedulerInfo` with native descriptions, schedule-tool plans, input fairness, nested Pi graphs, 32-level recursive driving, abort/close cascades, the OSS committee, the mixed example, and the Ralph workflow (`test/ralph-workflow.test.ts`: default and configured round counts, final-only publication timing, assignment protocol, failed rounds, native yields, idle admission, cancellation, and isolation of several workflows in one parent). `bun test test/oss-committee.test.ts` runs twelve network-free committee tests with injected GitHub responses: value-edge gating within a round, failed-lookup yield handoff before Librarian resumes, success followed by failure, truncated final reports before and after handoff, valid empty search, approval guards, scoped/malformed search metadata and GitHub trust signals, revision rounds that route the Reducer's feedback to Librarian and Architect until approval, a round without a verdict, and a failed lookup followed by a normal round. Neither those offline tests nor `flush()` prove live GitHub access or Copilot entitlement.
 - `bun run smoke:workflows` (after `bun run build`) runs `test/workflows.fixture.ts` under Node's TypeScript stripping against the built `junco-agency` and `junco-agency/workflows` entrypoints, and `bun run smoke:workflows:bun` runs it under Bun against the source entrypoints. Using the root `agent`, `tools`, `graph` and `trigger` namespaces, it first checks a tool created by `new tools.YieldTool()`: `turn_end` subscribers see its successful result before `JuncoAgent` suspends, only the next explicit `next()` resumes the run, and `return()` closes it terminally. It then runs a three-round Ralph over a native agent on a faux model, checking that the nested graph is the root bundle's `JuncoGraph` and that closing the parent closes it and the agent. Both print `{"rounds":3,"delivered":["draft-3"],"sharedGraphIdentity":true,"closed":true}`.
-- `bun run smoke:pi` runs the offline recursive Pi example: it prints its `StdoutTracer` trace, then `root complete; leaf-result + sibling-result; 3 root windows`.
-- `bun run test:native` runs `test/policy-yield.test.ts`, which uses junco-tools' real Marsh policy through the CopyTree native test addon (see Setup): denied `edit`, applying `ast_edit`, and `bash` calls pause in source order without publishing edits or starting a second model request until resumed. A failed native test is not evidence of a passing policy boundary, and the deterministic policy-reason scenario does not prove native enforcement.
+- `bun run smoke:pi` runs the offline recursive Pi example with automatic tracing: interactive terminals show the TUI until dismissal; redirected runs stay silently untraced. After restoration it prints `root complete; leaf-result + sibling-result; 3 root windows`.
+- `bun run smoke:tui` is a credential-free real-terminal smoke using native agents with faux responses. With the production addon built, run it in an interactive terminal (`TERM=xterm-256color`, at least 100×30): observe Alpha then Beta green, stable upper topology and live lower-pane text, then press `q` after completion. It checks terminal restoration before printing `TUI_SMOKE_OK`; it needs neither a Btrfs mount nor model credentials.
+- `bun run test:native` includes the real Linux PTY tests in `test/tui-tracer.test.ts` (automatic/explicit acquisition, live member and task traces, failure, dismissal and terminal restoration) and `test/policy-yield.test.ts`, which uses junco-tools' real Marsh policy through the CopyTree native test addon (see Setup): denied `edit`, applying `ast_edit`, and `bash` calls pause in source order without publishing edits or starting a second model request until resumed. A failed native test is not evidence of a passing policy boundary, and the deterministic policy-reason scenario does not prove native enforcement.
 - `bun run test:all` runs all three suites. The build can be loaded under Node.js with `node --input-type=module -e 'await import("./dist/index.js")'`.

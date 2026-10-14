@@ -5,7 +5,7 @@ import {
   contentText,
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
-import { DataflowNodeError, NodeId } from "dataflow-engine";
+import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
   approvedPlan,
@@ -18,6 +18,8 @@ import {
   type ScriptedReview,
   scriptedCommittee,
 } from "./oss-committee.fixture.ts";
+
+const quiet = new DummyTracer();
 
 const repositoryUrl = "https://github.com/tui-cs/Terminal.Gui";
 const textOf = (message: AssistantMessage) =>
@@ -39,6 +41,8 @@ test("a round gates each member on the previous member's complete report", async
     request,
     committee.members,
     committee.search,
+    undefined,
+    quiet,
   );
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   await graph.step(); // prime the Librarian without starting its prompt
@@ -80,6 +84,8 @@ test("a failed lookup sends partial research to the Architect before the Librari
     request,
     committee.members,
     committee.search,
+    undefined,
+    quiet,
   );
   await graph.step(); // prime the Librarian
   await graph.step(); // failed lookup, then info, send and the real yield tool
@@ -123,6 +129,8 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     request,
     committee.members,
     committee.search,
+    undefined,
+    quiet,
   );
   await graph.step(); // prime the Librarian
   await graph.step(); // failed lookup, then a policy denial pauses the run
@@ -145,6 +153,8 @@ test("a later failed lookup sends partial research even after an earlier search 
     committee.members,
     committee.search,
     committee.review,
+    undefined,
+    quiet,
   );
   assert.equal(committee.search.searches(), 1);
   assert.equal(committee.search.failures(), 1);
@@ -161,6 +171,8 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     request,
     committee.members,
     committee.search,
+    undefined,
+    quiet,
   );
   const error = await graph.run().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
@@ -179,6 +191,8 @@ test("a truncated research report never reaches the Architect", async () => {
     request,
     committee.members,
     committee.search,
+    undefined,
+    quiet,
   );
   const error = await graph.run().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
@@ -197,6 +211,8 @@ test("a valid empty search is reported without inventing a candidate", async () 
     committee.members,
     committee.search,
     committee.review,
+    undefined,
+    quiet,
   );
   assert.ok(
     committee.memberInputs.Architect[0]?.includes(
@@ -364,6 +380,8 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
     committee.members,
     committee.search,
     committee.review,
+    undefined,
+    quiet,
   );
   assert.ok(plan.includes("Review round: 3"));
   assert.ok(!plan.includes("Review round: 1"));
@@ -380,7 +398,7 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
 test("a round without a review verdict publishes nothing", async () => {
   await using committee = await scriptedCommittee({ reviews: ["skip"] });
   await assert.rejects(
-    convene(request, committee.members, committee.search, committee.review),
+    convene(request, committee.members, committee.search, committee.review, undefined, quiet),
   );
   assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);
@@ -395,6 +413,8 @@ test("a failed lookup in one round does not block a later normal round", async (
     committee.members,
     committee.search,
     committee.review,
+    undefined,
+    quiet,
   );
   assert.ok(plan.includes("Review round: 2"));
   assert.ok(plan.includes(repositoryUrl));

@@ -192,6 +192,140 @@ test("a zero-exit policy denial leaves all seed contents unchanged", {
   }
 });
 
+/** Logger-only subprocesses need neither a seed nor terminal ownership. */
+async function loggerScenario(source, level) {
+  const env = { ...process.env };
+  if (level === undefined) delete env.LOG_LEVEL;
+  else env.LOG_LEVEL = level;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", `
+    import assert from "node:assert/strict";
+    ${source}
+  `], {
+    cwd: new URL("../", import.meta.url),
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 15_000,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  assert.equal(code, 0, `${stderr}\n${stdout}`);
+  assert.equal(stderr, "");
+  return stdout === "" ? undefined : JSON.parse(stdout);
+}
+
+test("LOG_LEVEL defaults to INFO, accepts trimmed case-insensitive names, and refuses unknown or numeric names", async () => {
+  const source = `
+    const { log, flushLog } = await import("./dist/log.js");
+    const records = [];
+    log.settings.prettyLogLevelMethod = { "*": () => {} };
+    log.attachTransport((record) => records.push({ level: record._meta.logLevelName, marker: record[0] }));
+    log.debug("level-debug");
+    log.info("level-info");
+    log.warn("level-warn");
+    await flushLog();
+    process.stdout.write(JSON.stringify(records));
+  `;
+  const info = [
+    { level: "INFO", marker: "level-info" },
+    { level: "WARN", marker: "level-warn" },
+  ];
+  assert.deepEqual(await loggerScenario(source), info);
+  assert.deepEqual(await loggerScenario(source, "   "), info);
+  assert.deepEqual(await loggerScenario(source, "  dEbUg  "), [
+    { level: "DEBUG", marker: "level-debug" }, ...info,
+  ]);
+  assert.deepEqual(await loggerScenario(source, "WARN"), info.slice(1));
+  for (const level of ["2", "BOGUS"]) {
+    await loggerScenario(`
+      await assert.rejects(import("./dist/log.js"), Error);
+    `, level);
+  }
+});
+
+test("complaint observer failures keep issues and admit warnings at WARN but not ERROR", async () => {
+  const source = `
+    const { NodeId } = await import("dataflow-engine");
+    const { issueLog } = await import("./dist/index.js");
+    const { log, flushLog } = await import("./dist/log.js");
+    const records = [];
+    log.settings.prettyLogLevelMethod = { "*": () => {} };
+    log.attachTransport((record) => records.push({ level: record._meta.logLevelName, marker: record[0] }));
+    issueLog.append(
+      { nodeId: NodeId.create("warning-check"), messages: [], prompt: { systemPrompt: "check", messages: [] }, complaint: "kept" },
+      { complain() { throw new Error("complaint-observer-smoke"); } },
+    );
+    assert.equal(issueLog.snapshot().at(-1).complaint, "kept");
+    await flushLog();
+    process.stdout.write(JSON.stringify(records));
+  `;
+  assert.deepEqual(await loggerScenario(source, "WARN"), [
+    { level: "WARN", marker: "[dataflow-engine] DataflowTracer callback failed" },
+  ]);
+  assert.deepEqual(await loggerScenario(source, "ERROR"), []);
+});
+
+test("redirectLog exclusively owns output, restores the exact table, and flushLog fences only the sink", async () => {
+  await loggerScenario(`
+    const { log, redirectLog, flushLog } = await import("./dist/log.js");
+    const previousLines = [];
+    const previous = { "*": (line) => previousLines.push(line) };
+    log.settings.prettyLogLevelMethod = previous;
+    const lines = [];
+    let resolveBarrier;
+    const barrier = new Promise((resolve) => { resolveBarrier = resolve; });
+    let flushes = 0;
+    const release = redirectLog({
+      write(line) { lines.push(line); },
+      flush() { flushes++; return barrier; },
+    });
+    log.info("sink-marker");
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0].includes("sink-marker"));
+    assert.deepEqual(previousLines, []);
+    const copy = await import("./dist/log.js?second-copy");
+    assert.throws(() => copy.redirectLog({ write() {}, async flush() {} }), {
+      message: "Junco log output is already redirected",
+    });
+    let settled = false;
+    const flushing = copy.flushLog().then(() => { settled = true; });
+    await Promise.resolve();
+    assert.equal(flushes, 1);
+    assert.equal(settled, false);
+    resolveBarrier();
+    await flushing;
+    release();
+    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    release();
+    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    log.info("restored-marker");
+    await flushLog();
+    assert.equal(lines.length, 1);
+    assert.equal(previousLines.length, 1);
+    assert.ok(previousLines[0].includes("restored-marker"));
+    const next = redirectLog({ write() {}, async flush() {} });
+    const owned = log.settings.prettyLogLevelMethod;
+    release();
+    assert.equal(log.settings.prettyLogLevelMethod, owned);
+    next();
+    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    const failure = new Error("sink failure");
+    const fail = redirectLog({ write() { throw failure; }, async flush() { throw failure; } });
+    try {
+      assert.throws(() => log.info("failed-write"), (error) => error === failure);
+      await assert.rejects(flushLog(), (error) => error === failure);
+    } finally {
+      fail();
+    }
+    assert.equal(log.settings.prettyLogLevelMethod, previous);
+  `, "INFO");
+});
+
 /**
  * The zero-exit denial scenario in a fresh Node process at `level`, through production
  * acquisition: an owned lease opens the CopyTree seed and installs the real logger callback,
@@ -309,17 +443,13 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
   timeout: 90_000,
 }, async () => {
   for (const level of ["DEBUG", "INFO", "WARN"]) {
-    const { stdout, stderr, shutdown, records } =
+    const { stderr, shutdown, records } =
       await policyLogScenario(level);
     assert.equal(shutdown, "ok");
     assert.equal(stderr, "");
     if (level === "WARN") {
       // Authorization and rollback were asserted in the child; nothing was logged.
       assert.deepEqual(records, []);
-      assert.doesNotMatch(
-        stdout,
-        /^(SILLY|TRACE|DEBUG|INFO|WARN|ERROR|FATAL) /m,
-      );
       continue;
     }
     const grants = records.filter(({ data }) => data?.granted === true);
@@ -331,10 +461,8 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
     assert.equal(violation.data.action, "Edit");
     assert.deepEqual(violation.data.resource, ["src", "file0.txt"]);
     assert.ok(violation.data.allowedFixes.length > 0);
-    assert.match(stdout, /^INFO /m);
     if (level === "INFO") {
       assert.equal(grants.length, 0);
-      assert.doesNotMatch(stdout, /^DEBUG /m);
       continue;
     }
     for (const grant of grants) {
@@ -353,7 +481,6 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
     assert.ok(records.indexOf(read) < records.indexOf(edit));
     assert.ok(records.indexOf(edit) < records.indexOf(created));
     assert.ok(records.indexOf(created) < records.indexOf(violation));
-    assert.match(stdout, /^DEBUG /m);
   }
 });
 

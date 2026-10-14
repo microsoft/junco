@@ -38,6 +38,7 @@ import {
   registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
+import { TuiTracer } from "./tui-tracer.js";
 
 /** The final report a subagent sends back to the agent that started it, as JSON follow-up text. */
 type TaskReport = {
@@ -571,18 +572,20 @@ export class AgentDriver {
           await this.#receiveTaskReport(message, reportSignal);
       return this.#advance();
     };
-    if (!(agent instanceof JuncoAgent)) return advance();
-    const unsubscribe = agent.events.on("message_end", ({ lane, message }) => {
-      if (lane !== "main") return;
-      if (message.role === "user") {
-        if (this.unread.delete(contentText(message.content)))
-          this.answered = false;
-      } else if (message.role === "assistant") {
-        this.answered = true;
-      }
-    });
+    const tracer = registeredNodeContexts.get(node)?.tracer;
+    const detach = tracer instanceof TuiTracer ? tracer.observeAgent(node, agent.events) : undefined;
+    let unsubscribe: (() => void) | undefined;
     try {
-      const tracer = registeredNodeContexts.get(node)?.tracer;
+      if (!(agent instanceof JuncoAgent)) return await advance();
+      unsubscribe = agent.events.on("message_end", ({ lane, message }) => {
+        if (lane !== "main") return;
+        if (message.role === "user") {
+          if (this.unread.delete(contentText(message.content)))
+            this.answered = false;
+        } else if (message.role === "assistant") {
+          this.answered = true;
+        }
+      });
       await agent.runWithNodeContext(
         {
           messaging: this.#messaging(),
@@ -596,7 +599,11 @@ export class AgentDriver {
         advance,
       );
     } finally {
-      unsubscribe();
+      try {
+        unsubscribe?.();
+      } finally {
+        detach?.();
+      }
     }
   }
 
@@ -855,6 +862,7 @@ export class AgentDriver {
           },
           staged,
           childNode,
+          registeredNodeContexts.get(node)?.tracer,
         );
       } catch (error) {
         return disposeStaged(staged, error);

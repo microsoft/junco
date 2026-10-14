@@ -28,6 +28,7 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
+  type DataflowTracer,
   Edge,
   EdgeId,
   type EdgeIdType,
@@ -157,8 +158,8 @@ export interface MixedGraph {
 }
 
 export const MixedGraph = {
-  create(members: Members): MixedGraph {
-    const graph = JuncoGraph.parallel(LockPolicy);
+  create(members: Members, observer?: DataflowTracer): MixedGraph {
+    const graph = JuncoGraph.parallel(LockPolicy, observer);
     const directInput = Edge.message<AgenticInput, AssistantMessage>(directInputId);
     const ralphInput = Edge.message<AgenticInput, AssistantMessage>("Goals->Ralph");
     const ralphFinal = Edge.message<AgenticInput, AssistantMessage>(ralphFinalId);
@@ -242,10 +243,11 @@ async function main(signal?: AbortSignal): Promise<void> {
   await using Reviewer = await member("Reviewer");
   signal?.throwIfAborted();
   const { graph, reviewerId } = MixedGraph.create({ Ralph, Direct, Reviewer });
+  let review: string;
   try {
     const results = await graph.run({ signal });
     signal?.throwIfAborted();
-    console.log(`Final review:\n${finalText(results.get(reviewerId), "Reviewer")}`);
+    review = finalText(results.get(reviewerId), "Reviewer");
   } finally {
     // Both graphs share the automatically selected tracer: flush it even when close fails.
     try {
@@ -254,6 +256,7 @@ async function main(signal?: AbortSignal): Promise<void> {
       await graph.tracer.flush();
     }
   }
+  console.log(`Final review:\n${review}`);
 }
 
 if (import.meta.main) {

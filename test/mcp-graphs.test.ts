@@ -122,7 +122,7 @@ function single(
   graph: JuncoGraph;
   id: NodeIdType;
 } {
-  const graph = JuncoGraph.parallel(LockPolicy, undefined, collection);
+  const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer(), collection);
   agent.stagePrompt("go");
   const id = graph.addNode({
     id: NodeId.create("member"),
@@ -167,7 +167,7 @@ test(
           const nested = single(nestedMember, collection);
           forgetNestedMember();
           const forgetNested = defer(() => nested.graph.close());
-          const graph = JuncoGraph.parallel(LockPolicy, undefined, collection);
+          const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer(), collection);
           const forgetGraph = defer(() => graph.close());
           rootMember.stagePrompt("go");
           rootId = graph.addNode({

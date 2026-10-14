@@ -186,13 +186,14 @@ export class JuncoGraph<
 
   static parallel<N = AgenticInput, T = AssistantMessage>(
     policy: ToolCollection["policy"],
-    tracer: DataflowTracer = StdoutTracer.shared(),
+    tracer: DataflowTracer = TuiTracer.shared(),
     collection?: ToolCollection,
   ): JuncoGraph<N, T>
   static spawn<Input, N = AgenticInput, T = AssistantMessage>(
     root: AgenticNode<N, T>,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
+    tracer: DataflowTracer = TuiTracer.shared(),
   ): JuncoGraph<N, T>
   appendChildren<Input>(
     rootId: NodeIdType,
@@ -950,7 +951,7 @@ export class PiScheduler<
 **Model-driven agency.** Construction:
 
 1. Create a native session: `const repo = new MemorySessionRepo()` and `const session = await repo.create({}, BACKGROUND_CONTEXT)` (both from `@earendil-works/pi-agent-core`; not the coding-agent `SessionManager`).
-2. `const workflow = await graph.JuncoGraph.pi({ model, models, session, systemPrompt, prompt, policy })`, passing the currently resolved `Model<Api>`, the runtime, and the session so it uses `PiScheduler.make`. Never rely on the fixed-model default (`PiScheduler.opus`) when `model` is omitted. `tracer` defaults to `tracer.StdoutTracer.shared()`, `window`/`threads` to `graph.UNBOUNDED`. Then `const scheduler = workflow.scheduler`, and register and wire nodes.
+2. `const workflow = await graph.JuncoGraph.pi({ model, models, session, systemPrompt, prompt, policy })`, passing the currently resolved `Model<Api>`, the runtime, and the session so it uses `PiScheduler.make`. Never rely on the fixed-model default (`PiScheduler.opus`) when `model` is omitted. `tracer` defaults to `tracer.TuiTracer.shared()` (lazy interactive TUI or silent Dummy), `window`/`threads` to `graph.UNBOUNDED`. This adds no terminal acquisition to Pi's existing factory promise. Then `const scheduler = workflow.scheduler`, and register and wire nodes.
 3. Drive only the scheduler: loop `await scheduler.next()`; continue after `kind === "yield"`, throw the error after `kind === "failed"`, finish after `kind === "settled"` (require `message.stopReason === "stop"`); `done` before settlement is an error. Do not start a competing `workflow.run()`: the scheduler's synchronous `schedule()` only consumes the model's staged decision.
 4. Read results with `workflow.result(id)`, which returns an fp-ts `Option` (no fp-ts import needed): `const r = workflow.result(id); if (r._tag !== "Some") throw …; use(r.value)`.
 5. In `finally`, `await workflow.close()` (cascades to the scheduler, which owns the transferred session, and to every member), then `await repo.close(BACKGROUND_CONTEXT)`.
@@ -1024,24 +1025,27 @@ export class DummyTracer implements DataflowTracer
   complain(_nodeId: NodeId, _complaint: string): void
   flush(): Promise<void>
 
-export class StdoutTracer implements DataflowTracer
-  constructor(name: string = "DataflowGraph.run")
+export class TuiTracer implements DataflowTracer
+  private constructor(name: string)
+  static shared(): DataflowTracer
+  static create(name: string = "JuncoGraph.run"): Promise<TuiTracer>
   startRun<S, N, T, EH>(graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T>
   complain(nodeId: NodeIdType, complaint: string): void
   flush(): Promise<void>
-
-export class StdoutTracer implements DataflowTracer
-  static shared(): StdoutTracer
+  close(): Promise<void>
+  [Symbol.asyncDispose](): Promise<void>
 ```
 
 `DataflowTracer` is an interface a backend implements; never `new` it.
 
-- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`) and a policy as its fifth; `JuncoGraph.parallel(policy)`, `JuncoGraph.spawn` and `JuncoGraph.pi` default to `tracer.StdoutTracer.shared()`. A generic `DataflowGraph` without an observer is untraced. `new tracer.DummyTracer()` explicitly disables tracing; pass the same choice to every separately constructed child graph.
-- **Backend selection.** `tracer.StdoutTracer.shared()` returns one shared `StdoutTracer` (named `JuncoGraph.run`) per process, which prints each run's topology as a Unicode graph followed by every activation's full inputs and outcomes (payloads may be sensitive). Any `tracer.DataflowTracer` passed explicitly always wins; the Opik adapter (`dataflow-engine-opik`) is not a namespace export and must be passed explicitly. Never silently fall back to another backend after a configuration failure.
+- **A `JuncoGraph` always has a tracer.** A direct `new graph.JuncoGraph(...)` requires one as its fourth argument (omitting it throws `TypeError`) and a policy as its fifth; `JuncoGraph.parallel(policy)`, `JuncoGraph.spawn` and `JuncoGraph.pi` default to `tracer.TuiTracer.shared()`. A generic `DataflowGraph` without an observer is untraced. Explicit Dummy, custom and Opik observers always win; the Opik adapter (`dataflow-engine-opik`) is not a namespace export. Use `new tracer.DummyTracer()` explicitly in ordinary runtime tests, including tests run in real terminals.
+- **Backend selection and acquisition.** `tracer.TuiTracer.shared()` returns a shared lazy TUI named `JuncoGraph.run` only when both stdin and stdout are TTYs and `TERM !== "dumb"`; otherwise it returns a silent stateless `DummyTracer`. `parallel` and `spawn` stay synchronous. Imports, factory construction and shared selection do not load native bindings, enter terminal modes, install handlers or write output; the first observer call starts initialization. For awaited explicit acquisition use `const tui = await tracer.TuiTracer.create("My workflow")` (name optional) and pass it to the graph. Unsuitable terminals reject before native import; interactive initialization failures surface from explicit creation or lazy flush/close, never through fallback. One TUI owns the terminal at a time; after restoration a later factory may select a fresh shared instance, but old callbacks never reopen it.
+- **Display and children.** The two vertically stacked panes show `JuncoGraph` topology above live `Agent traces`. Layout persists across steps unless topology changes. Stable identity colors and scoped `[g<serial>:<NodeId>]` badges distinguish duplicate local IDs; green highlights only currently executing scheduled nodes, not all available or yielded nodes. Live member text, thinking, tool progress, outcomes and complaints are independent of `LOG_LEVEL`. Snapshotted payloads may contain sensitive data; bounded display history is not persisted history. Ralph and promoted task children inherit their parent's tracer. Pass the same explicit instance to separately constructed nested graphs; an explicitly different child observer is not overridden.
+- **Terminal ownership and operational logs.** Do not write directly to stdout/stderr while the TUI owns them. Capture MCP stderr (`stderr: "pipe"`, after any config spread) and print final results after restoration. Admitted `junco-tools/log` records are redirected exclusively into the trace pane. `LOG_LEVEL` still controls operational/policy logs, not TUI lifecycle or agent records: default INFO, trimmed case-insensitive names `SILLY`, `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`; invalid/numeric names reject at startup. Policy violations remain INFO and tentative grants DEBUG. `flushLog()` is a draw barrier, not interactive completion, so tool cleanup does not wait for dismissal.
 - **Callbacks** are synchronous and read-only. `startRun` fires once per `run()`/`step()`; `startNode` fires per activation with phase `"prime"` (no view, `inputs === undefined`) or `"resume"` (the delivered view); run `end` receives cumulative results; `fail` reports the exact rejection or raw activation cause. `complain` fires when an agent node's always-on `complain` tool records an issue (node ID and text only; the full issue is in `tools.issueLog`), at any time. Views and result maps are live: snapshot anything retained. The engine warns about and ignores observer exceptions.
 - **Flushing** is caller-owned and separate from disposal:
   `try { … } finally { try { await workflow.close(); } finally { await workflow.tracer.flush(); } }`.
-  `workflow.tracer` exposes the supplied or automatic backend; every graph given `StdoutTracer.shared()` shares a single backend instance. Share one backend across child graphs and flush each distinct backend once after all users stop (collect them in a `Set`). A successful flush does not prove remote ingestion.
+  Share one observer across child graphs and flush each distinct observer once after all users stop (collect them in a `Set`). TUI `flush()` draws the final frame and waits for `q`/Esc to restore the terminal. Early `q`/Esc dismisses without cancelling computation; Ctrl-C restores before application cancellation. `await tui.close()` or async disposal restores without keyboard dismissal. Unused lazy flush/close is I/O-free; an old dismissed tracer never reopens. Tab changes pane focus; arrows, PageUp/PageDown and Home/End pan/scroll, with End restoring trace tail-follow. A successful flush does not prove remote ingestion. `bun run smoke:tui` is a credential-free production-addon smoke (no Btrfs mount); real Linux PTY coverage belongs to `test/tui-tracer.test.ts` in `test:native`, not ordinary Dummy-backed runtime tests.
 
 ### Supporting Pi APIs
 

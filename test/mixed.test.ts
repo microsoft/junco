@@ -7,7 +7,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DataflowNodeError, NodeId } from "dataflow-engine";
+import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { goalsPrompt, MixedGraph, memberOptions } from "../examples/mixed.ts";
@@ -102,7 +102,7 @@ async function mixedWorkflow(
         ),
       ]),
     };
-    const { graph, reviewerId } = MixedGraph.create(members);
+    const { graph, reviewerId } = MixedGraph.create(members, new DummyTracer());
     return {
       graph,
       reviewerId,

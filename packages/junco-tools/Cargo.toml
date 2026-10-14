@@ -23,6 +23,8 @@ marsh-core = { git = "https://github.com/junco-org/marsh.git", rev = "ab0397dd44
 marsh-btrfs = { git = "https://github.com/junco-org/marsh.git", rev = "ab0397dd44497de1e29a8e799c0ed4f4a3f6e4d3" }
 brush-core = "=0.5.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
+crossterm = "=0.29.0"
 
 # Unmodified Oh My Pi engines, imported from a pinned public Git revision.
 pi-ast = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }

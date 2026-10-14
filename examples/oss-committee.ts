@@ -37,7 +37,7 @@ import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { type Contract, InfoTool, LockPolicy, SendTool, YieldTool } from "junco-tools";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { type AgenticInput, JuncoGraph } from "../src/index.ts";
+import { type AgenticInput, JuncoGraph, tracer } from "../src/index.ts";
 import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Tools
@@ -244,8 +244,8 @@ export interface ReviewRound {
 }
 
 export const ReviewRound = {
-  create(request: string, members: Members, search: SearchCounts, feedback?: string): ReviewRound {
-    const graph = JuncoGraph.parallel(LockPolicy);
+  create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: DataflowTracer): ReviewRound {
+    const graph = JuncoGraph.parallel(LockPolicy, observer);
     const research = Edge.value<AgenticInput, AssistantMessage>(researchId);
     const partialResearch = Edge.message<AgenticInput, AssistantMessage>(partialResearchId);
     const researchForReducer = Edge.value<AgenticInput, AssistantMessage>(reducerResearchId);
@@ -354,15 +354,15 @@ export async function convene(
   search: SearchCounts,
   review: Pick<ReviewTool, "takeVerdict">,
   signal?: AbortSignal,
+  observer?: DataflowTracer,
 ): Promise<string> {
   let feedback: string | undefined;
   // Rounds share the automatically selected tracer: flush it once, however the committee ends.
-  let tracer: DataflowTracer | undefined;
+  const selected = observer ?? tracer.TuiTracer.shared();
   try {
     for (;;) {
       signal?.throwIfAborted();
-      const { graph, reducerId } = ReviewRound.create(request, members, search, feedback);
-      tracer = graph.tracer;
+      const { graph, reducerId } = ReviewRound.create(request, members, search, feedback, selected);
       const plan = (await graph.run({ signal })).get(reducerId);
       signal?.throwIfAborted();
       const verdict = review.takeVerdict();
@@ -371,7 +371,7 @@ export async function convene(
       feedback = verdict.feedback;
     }
   } finally {
-    await tracer?.flush();
+    await selected.flush();
   }
 }
 

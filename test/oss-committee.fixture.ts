@@ -9,6 +9,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
+import { DummyTracer } from "dataflow-engine";
 import { JuncoAgent } from "junco-agent";
 import {
   InfoTool,
@@ -483,6 +484,8 @@ if (import.meta.main) {
       committee.members,
       committee.search,
       committee.review,
+      undefined,
+      new DummyTracer(),
     ),
   );
 }

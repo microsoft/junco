@@ -49,7 +49,7 @@ import {
   registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
-import { StdoutTracer } from "./stdout-tracer.js";
+import { TuiTracer } from "./tui-tracer.js";
 
 /** The step-less nested-graph branch of {@link AgenticNode}. */
 type NestedNode<N, T> = Extract<
@@ -137,7 +137,7 @@ export class JuncoGraph<
   readonly policy: ToolCollection["policy"];
 
   /**
-   * @param tracer Required execution observer; `StdoutTracer.shared()` is the shared default.
+   * @param tracer Required execution observer; `TuiTracer.shared()` selects the shared default.
    * @param policy Required authorization policy of this graph.
    * @param collection Borrowed; the graph holds its own lease until close and never closes it.
    * @throws {TypeError} when `tracer` or `policy` is missing, or `collection` has another policy
@@ -209,12 +209,12 @@ export class JuncoGraph<
    * A graph that runs every available node in each window: junco-scheduler's parallel policy with
    * the one-turn window and unbounded threads that policy requires. A running node re-reads its live
    * inputs with the agency rule, so a delivered result never starves a newer message. `tracer`
-   * defaults to {@link StdoutTracer.shared}. `policy` and the borrowed `collection` are the
+   * defaults to {@link TuiTracer.shared}. `policy` and the borrowed `collection` are the
    * constructor's.
    */
   static parallel<N = AgenticInput, T = AssistantMessage>(
     policy: ToolCollection["policy"],
-    tracer: DataflowTracer = StdoutTracer.shared(),
+    tracer: DataflowTracer = TuiTracer.shared(),
     collection?: ToolCollection,
   ): JuncoGraph<N, T> {
     let graph: JuncoGraph<N, T> | undefined;
@@ -249,8 +249,9 @@ export class JuncoGraph<
     root: AgenticNode<N, T>,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
+    tracer: DataflowTracer = TuiTracer.shared(),
   ): JuncoGraph<N, T> {
-    const graph = JuncoGraph.parallel<N, T>(JuncoGraph.#nodePolicy(root));
+    const graph = JuncoGraph.parallel<N, T>(JuncoGraph.#nodePolicy(root), tracer);
     graph.appendChildren(graph.addNode(root), inputs, child);
     return graph;
   }
@@ -293,7 +294,7 @@ export class JuncoGraph<
    * `PiScheduler.make` when `options.model` is given (requiring `models` and `session`), otherwise
    * by `PiScheduler.opus` (GitHub Copilot `claude-opus-5.5` through Pi's saved login). The graph
    * is constructed with `policy`, `window`/`threads` (default `UNBOUNDED`), `tracer` (default
-   * {@link StdoutTracer.shared}) and the borrowed `collection`, which the scheduler borrows too.
+   * {@link TuiTracer.shared}) and the borrowed `collection`, which the scheduler borrows too.
    * Drive it through `graph.scheduler`.
    *
    * The agency supplies the scheduler's adapter:
@@ -363,7 +364,7 @@ export class JuncoGraph<
         scheduler,
         window ?? UNBOUNDED,
         threads ?? UNBOUNDED,
-        tracer === undefined ? StdoutTracer.shared() : tracer,
+        tracer === undefined ? TuiTracer.shared() : tracer,
         policy,
         piOptions.collection,
       );
