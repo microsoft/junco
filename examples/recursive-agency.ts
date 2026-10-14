@@ -80,7 +80,7 @@ async function agency(
     systemPrompt: `You schedule ${name}.`,
     prompt: `Run ${name}.`,
     policy,
-    tracer: tracer.StdoutTracer.shared(),
+    tracer: tracer.TuiTracer.shared(),
     window: UNBOUNDED,
     threads: UNBOUNDED,
   });

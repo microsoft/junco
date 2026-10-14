@@ -272,6 +272,60 @@ Every factory returns a Pi `AgentTool` that also carries Pi's prompt metadata an
 - Commands are observed in-process: marsh's tracer threads seize each spawned command before it runs, and the interpreter reports its own file accesses. No companion executable is needed. Node children work: libuv's epoll-only `io_uring` ring is accepted, while rings that submit filesystem operations are refused.
 - A publication marsh's policy refuses rejects a routed file tool (`edit`, an applying `ast_edit`), `bash`, or a native `NativeRun.wait()` with a real `Error` whose own `code` is `"MARSH_POLICY_DENIED"`; its message is marsh's diagnostic. Test it with `isMarshPolicyDenied`, never the message text. Every other failure, including cancellation, timeouts, and read-only tool errors, stays a plain error without that code. A refused hashline `edit` also discards the anchors it recorded, so its unpublished result cannot back a later edit.
 
+## Native terminal display
+
+`NativeTui` and its input types are runtime/declaration exports of **`junco-tools/native` only**, not package-root runtime exports. They are present in both the production addon and the `test-fs` addon (`target/native-test/index.js`). Opening the display needs no `ToolCollection`, `NativeMux`, btrfs seed/mount, or Marsh tracing capabilities; the package's native build prerequisites above remain unchanged.
+
+```ts
+import { NativeTui } from "junco-tools/native";
+
+type NativeTuiNode = { key: string; nodeId: string; scope: string };
+type NativeTuiBox = {
+  nodeKey: string;
+  x: number; y: number; width: number; height: number;
+};
+type NativeTuiTrace = {
+  nodeKey?: string;
+  text: string;
+  recordId?: string;
+  mode?: "append" | "replace";
+  tone?: "normal" | "thinking" | "error";
+};
+
+// NativeTui's public API:
+// static open(name: string): Promise<NativeTui>
+// setGraph(nodes: NativeTuiNode[], lines: string[], boxes: NativeTuiBox[]): void
+// setActive(nodeKey: string, active: boolean): void
+// trace(record: NativeTuiTrace): void
+// flush(): Promise<void>
+// finish(): Promise<void>
+// waitForExit(): Promise<"dismissed" | "interrupted" | "closed">
+// close(): Promise<void>
+```
+
+`open(name)` requires interactive **stdin and stdout**, otherwise rejecting with `TuiTracer requires an interactive terminal on stdin and stdout`. One session owns the terminal process-wide; another acquisition rejects with `A TUI session already owns this terminal`. It resolves after initialization on a dedicated native thread, which owns input polling, raw mode, the alternate screen, and the hidden cursor. Startup failures roll back ownership and partially entered terminal modes. Normal close, input/render failures, and worker unwinding attempt cursor, alternate-screen, and raw-mode restoration before publishing completion; there is no process-wide panic hook. Direct `process.exit()`, process abort, and `SIGKILL` bypass asynchronous cleanup.
+
+`setGraph` replaces the drawing but retains registered identities/colors until close. `key` is raw scoped identity; `nodeId` is the escaped display spelling and `scope` identifies its graph. Box positions must be nonnegative integers and dimensions positive integers, all finite and within the native range. Invalid geometry, unknown node keys, and invalid trace modes/tones reject rather than inventing nodes. `setActive` controls execution highlights, independently of topology. `trace` appends a record without `recordId`, or coalesces one by `(nodeKey, recordId)`; `append`/`normal` are the defaults, and `replace` replaces progress text. Omitted `nodeKey` uses a neutral `[system]` badge.
+
+The screen has exactly two bordered, vertically stacked panes: **JuncoGraph** (40%) and **Agent traces** (60%), with the session name in their titles. Registered scoped badges keep distinct identity colors; only active node rectangles are green/bold, with active IDs also in the graph title. Thinking bodies are dim and error bodies red without changing badge colors. Activity/trace updates preserve graph coordinates; resizing changes the viewport. Controls in display text are escaped (newlines retained, tabs expanded to four spaces).
+
+`Tab` switches focus; arrows pan the graph or scroll traces; PageUp/PageDown scroll the focused pane; Home/End go to its start/end. Trace End restores tail-follow after manual scrolling. `q`/Esc dismiss at any time without cancelling graph computation, and later updates are discarded. Ctrl-C restores and reports `interrupted`; the higher-level `TuiTracer` handles application signal propagation. History is in-memory display text only, bounded to **4 MiB**, **4,096 records**, and **32 KiB per formatted entry**. Truncation is UTF-8-safe and marked `[display truncated]`; oldest records are evicted with an omitted count in the trace title. These limits do not truncate graph results or agent state.
+
+- `flush()` is a **draw barrier** for preceding updates, never a keyboard wait. After intentional closure it settles after restoration.
+- `finish()` marks completion synchronously when called, requests the final frame, and waits for dismissal/restoration. A dismissal queued before that final draw does not skip the frame.
+- `waitForExit()` observes the same restored/joined worker completion and reports `dismissed`, `interrupted`, or `closed`.
+- `close()` immediately fences updates and restores/joins without requiring keyboard dismissal; it is idempotent. Display failures are latched and reject barriers/completion after restoration, with no stdout fallback.
+
+For graphs, use `junco-agency`'s `tracer.TuiTracer` rather than managing the native screen directly. Its caller owns interactive completion: stop/close all shared graphs, then call the shared tracer's `flush()` to retain the final screen until `q`/Esc; `close()`/async disposal restores without waiting. This interactive finish is deliberately different from `NativeTui.flush()` and `flushLog()`. While the TUI owns the terminal, do not directly write to process stdout/stderr (including inherited subprocess stderr); capture such output instead.
+
+## Operational logging and output ownership
+
+The `junco-tools/log` APIs are `log`, `redirectLog(output: { write(line: string): void; flush(): Promise<void> }): () => void`, and `flushLog(): Promise<void>`. Operational/policy logging remains controlled by `LOG_LEVEL`, read once at startup: missing/blank means INFO, names are trimmed and case-insensitive, and only SILLY, TRACE, DEBUG, INFO, WARN, ERROR, or FATAL are accepted (numeric/unknown names reject). Policy grants are tentative DEBUG records; policy violations are INFO. TUI lifecycle/member trace records are independent of this operational log threshold.
+
+`redirectLog` exclusively replaces `log.settings.prettyLogLevelMethod` with the sink's `write`, rather than adding a transport that also prints to stdout. Ownership is shared across module copies through `Symbol.for("junco-tools.log.output")`; a second redirect rejects with `Junco log output is already redirected`. The returned idempotent release restores the exact previous method table.
+
+Without a redirect, `flushLog()` fences stdout with a stream write callback. While redirected, it awaits **only the owned sink's `flush()`**. `TuiTracer` first captures the existing stdout barrier, acquires the redirect before its first initialization await, and buffers new operational lines until the screen opens. Its sink uses the native draw barrier, not interactive tracer completion, and releases ownership on startup failure/restoration. Thus `ShellMuxLease.release()` still drains its policy log without waiting for `q`/Esc. Sink failures are latched by `TuiTracer` for its own teardown rather than escaping into tool cleanup.
+
 ## Execution limits and development checks
 
 Commands use marsh's brush interpreter, not Pi's local OS-shell backend. A process exit code of zero can still be rejected by publication policy. Snapshots are **not OS confinement**: absolute-path writes and network effects remain possible. Cancellation waits for backend-owned cleanup and can be delayed by commands racing ShellMux's stop scan; do not treat timeout as a universal hard wall-clock kill guarantee.
@@ -290,7 +344,7 @@ bun run test
 
 `NativeMux.openCopyTree(seed, { sandbox? }?)` exists only in `target/native-test/index.js`. Its ordinary `NativeMux.open` still requires btrfs. CopyTree tests do not exercise real-btrfs ioctls or storage atomicity.
 
-The native tracer also needs readable kernel BTF/kallsyms and effective BPF/performance/system-log capabilities. On this WSL2 kernel, unprivileged runs lack `CAP_SYSLOG`, while privileged runs may still fail on kernel evidence loss or timing; do not weaken Marsh policy checks to hide those failures. Re-run native integration on a compatible kernel before treating that surface as verified.
+Marsh's native command tracer (not `NativeTui`) also needs readable kernel BTF/kallsyms and effective BPF/performance/system-log capabilities. On this WSL2 kernel, unprivileged runs lack `CAP_SYSLOG`, while privileged runs may still fail on kernel evidence loss or timing; do not weaken Marsh policy checks to hide those failures. Re-run native integration on a compatible kernel before treating that surface as verified.
 
 The packaged extension and the production addon's mux lifecycle are covered by a separate opt-in lane that uses the **production** addon:
 

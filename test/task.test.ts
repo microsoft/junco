@@ -27,6 +27,7 @@ import {
   Deterministic,
   graph,
   JuncoGraph,
+  tracer,
   tools as toolsApi,
   trigger,
 } from "../src/index.ts";
@@ -46,6 +47,8 @@ type Report = {
   error?: string;
   decisionRequired?: true;
 };
+
+const quiet = new tracer.DummyTracer();
 
 const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -389,7 +392,7 @@ async function failingCaller(
   ]);
   const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool()]);
   caller.setTaskFailurePolicy(policy);
-  const outer = JuncoGraph.parallel(LockPolicy);
+  const outer = JuncoGraph.parallel(LockPolicy, quiet);
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
   return { caller, outer, id };
@@ -472,7 +475,30 @@ describe("task tool through a graph-driven agent", () => {
       if (lane === "main") runIds.add(runId);
     });
 
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const activations: { graph: object; id: graph.NodeIdType }[] = [];
+    const completions: { graph: object; id: graph.NodeIdType }[] = [];
+    const observer: tracer.DataflowTracer = {
+      startRun<S, N, T, EH>(
+        traced: graph.DataflowGraph<S, N, T, EH>,
+      ): tracer.DataflowRunTrace<N, T> {
+        return {
+          startNode(id) {
+            activations.push({ graph: traced, id });
+            return {
+              end(step) {
+                if (step.done) completions.push({ graph: traced, id });
+              },
+              fail() {},
+            };
+          },
+          end() {},
+          fail() {},
+        };
+      },
+      complain() {},
+      async flush() {},
+    };
+    const outer = JuncoGraph.parallel(LockPolicy, observer);
     const id = outer.addNode(callerNode(caller, "Start the workers"));
     closers.push(() => outer.close());
     const node = outer.getNode(id);
@@ -535,6 +561,15 @@ describe("task tool through a graph-driven agent", () => {
     );
     for (const child of childIds) {
       const member = inner.getNode(graph.NodeId.create(child));
+      assert.ok(child.startsWith("task-"), "the worker has its real task ID");
+      assert.ok(
+        activations.some((event) => event.graph === inner && event.id === child),
+        `the promoted graph observed activation of ${child}`,
+      );
+      assert.ok(
+        completions.some((event) => event.graph === inner && event.id === child),
+        `the promoted graph observed completion of ${child}`,
+      );
       assert.ok(member && member.state !== caller);
       assert.ok(O.isSome(inner.result(graph.NodeId.create(child))));
     }
@@ -672,7 +707,7 @@ describe("task tool through a graph-driven agent", () => {
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const sourceId = outer.addNode({
       trigger: trigger.TriggerRule.always(),
@@ -868,7 +903,7 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -939,7 +974,7 @@ describe("task tool through a graph-driven agent", () => {
       new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1005,7 +1040,7 @@ describe("task tool through a graph-driven agent", () => {
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1050,7 +1085,7 @@ describe("task tool through a graph-driven agent", () => {
       new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1078,7 +1113,7 @@ describe("task tool through a graph-driven agent", () => {
       if (toolCallId === "t1") void caller.abort();
       return undefined;
     });
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1095,7 +1130,7 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     const id = outer.addNode(callerNode(caller));
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
@@ -1140,7 +1175,7 @@ describe("task tool through a graph-driven agent", () => {
       hold.tool,
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     const id = outer.addNode(callerNode(caller));
     const running = outer.run();
     await hold.started;
@@ -1176,7 +1211,7 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1245,7 +1280,7 @@ describe("task tool through a graph-driven agent", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1378,7 +1413,7 @@ describe("task tool through a graph-driven agent", () => {
         throw new Error("nested worker exploded");
       });
     });
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 
@@ -1445,7 +1480,7 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
@@ -1518,7 +1553,7 @@ describe("task tool through a graph-driven agent", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const outer = JuncoGraph.parallel(LockPolicy);
+    const outer = JuncoGraph.parallel(LockPolicy, quiet);
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
 

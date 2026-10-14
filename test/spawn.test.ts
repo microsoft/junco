@@ -1,11 +1,14 @@
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
+import { DummyTracer } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import { LockPolicy } from "junco-tools";
 import { graph, trigger } from "../src/index.ts";
 
 // graph.Spawn over real Deterministic members on the real parallel policy: the star topology it
 // builds, the independent queues in each direction, and members exchanging messages on their own.
+
+const quiet = new DummyTracer();
 
 type Edge = graph.Edge<number, string>;
 type Member = graph.nodes.Deterministic<number, string>;
@@ -170,6 +173,7 @@ describe("graph.JuncoGraph.spawn", () => {
           state: child,
         };
       },
+      quiet,
     );
     try {
       const links = linksOf(g);
@@ -215,6 +219,7 @@ describe("graph.JuncoGraph.spawn", () => {
           state: idle(new Set()),
         };
       },
+      quiet,
     );
     try {
       const nodes: string[] = [];

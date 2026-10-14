@@ -1,4 +1,4 @@
-import { OpikDataflowTracer } from "dataflow-engine-opik";
+import { OpikTracer } from "dataflow-engine-opik";
 import { Opik } from "opik";
 import type { DataflowTracer } from "../src/index.ts";
 
@@ -7,6 +7,6 @@ const client = new Opik();
 
 export const ExampleTracer = {
   create(name: string): DataflowTracer {
-    return new OpikDataflowTracer(client, name);
+    return new OpikTracer(client, name);
   },
 };

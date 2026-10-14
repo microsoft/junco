@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Opik } from "opik";
 import { NodeId } from "dataflow-engine";
-import { OpikDataflowTracer } from "../src/index.ts";
+import { OpikTracer } from "../src/index.ts";
 
 // The real Opik SDK exporting over HTTP to a local receiver: no credentials, no recording fake.
 
@@ -35,7 +35,7 @@ test("each complaint exports one distinct completed trace carrying only node and
     },
   });
   try {
-    const tracer = new OpikDataflowTracer(
+    const tracer = new OpikTracer(
       new Opik({
         apiUrl: `${receiver.url.href}api`,
         apiKey: "local-test",

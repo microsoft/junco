@@ -32,7 +32,9 @@
  *
  * Ownership: the runner owns two `sandbox: "always"` tool collections — the protected `tools.LockPolicy`
  * one (agents, research, applier) and the trusted-build `tools.EmptyPolicy` one (`graft build`, index
- * refresh) — the shared model runtime, and the tracer. Every Graft MCP
+ * refresh) — the shared model runtime, and an OpikTracer configured by the SDK's OPIK_*
+ * environment/config. Batch graph traces are exported to Opik and flushed before collections close.
+ * Every Graft MCP
  * connection is discard-only and lives for one call. Each batch graph owns its fresh lane agents and
  * their native research children and is closed before the next batch is admitted. Previously
  * applied and released refactors are retained when a later step fails.
@@ -40,7 +42,8 @@
  * Prerequisites: an installed `graft` (0.21.1-compatible, run as `graft mcp <root>` and
  * `graft build .`; Graft's normal query refresh stays enabled), the
  * production `junco-tools/native` addon, the Git working-tree root inside a dedicated Btrfs seed,
- * and a saved Pi GitHub Copilot login entitled to both pinned models. Run:
+ * and a saved Pi GitHub Copilot login entitled to both pinned models. Configure Opik's endpoint,
+ * workspace, project, and credentials before running; traces include graph inputs and outputs. Run:
  *
  * ```sh
  * bun run examples/yak-shaver.ts [repository-root]
@@ -53,7 +56,9 @@ import { dirname, join, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, contentText, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { OpikTracer } from "dataflow-engine-opik";
 import { agent, graph, mcp, tools, tracer } from "junco-agency";
+import { Opik } from "opik";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { ctrlC } from "./cancellation.ts";
@@ -2276,7 +2281,7 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
   if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
   signal?.throwIfAborted();
 
-  const observer = tracer.StdoutTracer.shared();
+  const observer = new OpikTracer(new Opik(), "runYakShaver");
   const failures: unknown[] = [];
   const connections = new Set<mcp.JuncoMcpConnection>();
   let protectedCollection: tools.ToolCollection | undefined;

@@ -1,6 +1,19 @@
 import type { TextEdge } from "mermaid-ascii";
 import mermaidAscii from "mermaid-ascii";
 
+export type TuiNodeBox = {
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+export type TuiGraphSection = {
+  readonly path: readonly string[];
+  readonly lines: readonly string[];
+  readonly boxes: readonly TuiNodeBox[];
+};
+
 const UNSUPPORTED = "Unsupported DataflowGraph Mermaid output";
 const DECLARATION = /^(n\d+)\["([^"]*)"\];$/;
 const SUBGRAPH = /^subgraph (n\d+)\["([^"]*)"\]$/;
@@ -10,7 +23,7 @@ const LINK = /^(n\d+) -->\|"([^"]*)"\| (n\d+);$/;
 interface Frame {
   /** Decoded node ids from the root down to this scope; empty for the root. */
   readonly path: readonly string[];
-  /** Synthetic Mermaid id to escaped display label, in declaration order. */
+  /** Synthetic Mermaid id to decoded node identity, in declaration order. */
   readonly nodes: Map<string, string>;
   readonly links: { from: string; to: string; label: string }[];
   readonly children: Frame[];
@@ -22,9 +35,14 @@ const decode = (label: string): string =>
     String.fromCodePoint(Number(code)),
   );
 
-/** Render a decoded label on one terminal line with control characters, quotes, and backslashes escaped. */
-const display = (decoded: string): string =>
-  JSON.stringify(decoded).slice(1, -1);
+/** ASCII cell spelling shared by graph labels and trace badges. */
+export const escapeTuiLabel = (decoded: string): string =>
+  JSON.stringify(decoded)
+    .slice(1, -1)
+    .replace(
+      /[^\x20-\x7e]/g,
+      (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
 
 function parse(mermaid: string): Frame {
   const [header, ...lines] = mermaid.split("\n").map((line) => line.trim());
@@ -39,7 +57,7 @@ function parse(mermaid: string): Frame {
       throw new Error(UNSUPPORTED);
     }
     declared.add(id);
-    frame.nodes.set(id, display(decode(label)));
+    frame.nodes.set(id, decode(label));
   };
   for (const line of lines) {
     const scope = scopes.at(-1) ?? root;
@@ -64,7 +82,7 @@ function parse(mermaid: string): Frame {
       declare(scope, id, label);
     } else if (link) {
       const [, from = "", label = "", to = ""] = link;
-      scope.links.push({ from, to, label: display(decode(label)) });
+      scope.links.push({ from, to, label: decode(label) });
     } else {
       throw new Error(UNSUPPORTED);
     }
@@ -76,16 +94,20 @@ function parse(mermaid: string): Frame {
 }
 
 /** Draw one scope's declarations and links as a Unicode canvas. */
-function draw(frame: Frame): string {
+function draw(frame: Frame): TuiGraphSection {
   const data = new Map<string, TextEdge[]>();
   for (const label of frame.nodes.values()) {
-    data.set(label, []);
+    data.set(escapeTuiLabel(label), []);
   }
   // One arrow per ordered endpoint pair, carrying every parallel edge label in order.
   const grouped = new Map<string, Map<string, string[]>>();
   for (const { from, to, label } of frame.links) {
-    const source = frame.nodes.get(from);
-    const target = frame.nodes.get(to);
+    const rawSource = frame.nodes.get(from);
+    const rawTarget = frame.nodes.get(to);
+    const source =
+      rawSource === undefined ? undefined : escapeTuiLabel(rawSource);
+    const target =
+      rawTarget === undefined ? undefined : escapeTuiLabel(rawTarget);
     if (source === undefined || target === undefined) {
       throw new Error(UNSUPPORTED);
     }
@@ -99,7 +121,7 @@ function draw(frame: Frame): string {
       labels = [];
       targets.set(target, labels);
     }
-    labels.push(label);
+    labels.push(escapeTuiLabel(label));
   }
   for (const [source, targets] of grouped) {
     data.set(
@@ -113,7 +135,24 @@ function draw(frame: Frame): string {
   }
   const graph = mermaidAscii.Graph.makeGraph(data);
   graph.createMapping();
-  return mermaidAscii.DrawingCanvas.drawingToString(graph.draw().getCanvas());
+  const lines = mermaidAscii.DrawingCanvas.drawingToString(
+    graph.draw().getCanvas(),
+  ).split("\n");
+  const boxes = Array.from(frame.nodes.values(), (id): TuiNodeBox => {
+    const node = graph.getNode(escapeTuiLabel(id));
+    if (node?.drawingCoord === undefined || node.drawing === undefined) {
+      throw new Error(UNSUPPORTED);
+    }
+    const [width, height] = node.drawing.getDrawingSize();
+    return {
+      id,
+      x: node.drawingCoord.x,
+      y: node.drawingCoord.y,
+      width: width + 1,
+      height: height + 1,
+    };
+  });
+  return { path: frame.path, lines, boxes };
 }
 
 function* preorder(frame: Frame): Generator<Frame> {
@@ -123,13 +162,10 @@ function* preorder(frame: Frame): Generator<Frame> {
   }
 }
 
-/**
- * Render a `DataflowGraph` Mermaid document as Unicode box drawings: the root scope first, then
- * every subgraph scope in preorder under a heading naming its decoded containment path.
- */
-export function renderStdoutGraph(mermaid: string): string {
+/** Root and nested canvases in preorder, with section-relative geometry. */
+export function renderTuiGraph(mermaid: string): readonly TuiGraphSection[] {
   if (mermaid === "") {
-    return "(empty graph)";
+    return [{ path: [], lines: ["(empty graph)"], boxes: [] }];
   }
   const root = parse(mermaid);
   const direction = mermaidAscii.graphDirection;
@@ -137,11 +173,7 @@ export function renderStdoutGraph(mermaid: string): string {
   mermaidAscii.setGraphDirection("TD");
   mermaidAscii.setUseAscii(false);
   try {
-    const sections = [draw(root)];
-    for (const frame of preorder(root)) {
-      sections.push(`Subgraph ${JSON.stringify(frame.path)}:`, draw(frame));
-    }
-    return sections.join("\n");
+    return [root, ...preorder(root)].map(draw);
   } finally {
     mermaidAscii.setGraphDirection(direction);
     mermaidAscii.setUseAscii(ascii);

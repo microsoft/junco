@@ -229,7 +229,7 @@ jobs:
           smoke='
           import assert from "node:assert/strict";
           import { DataflowGraph, NodeId, TriggerRule, Width } from "dataflow-engine";
-          import { OpikDataflowTracer } from "dataflow-engine-opik";
+          import { OpikTracer } from "dataflow-engine-opik";
           import { ParallelScheduler } from "junco-scheduler";
           const traces = [];
           const client = {
@@ -247,7 +247,7 @@ jobs:
             },
             async flush() {},
           };
-          const tracer = new OpikDataflowTracer(client, "monorepo-smoke");
+          const tracer = new OpikTracer(client, "monorepo-smoke");
           const graph = new DataflowGraph(new ParallelScheduler(), Width.create(1), Width.create(1), tracer);
           graph.addNode({ id: NodeId.create("only"), state: undefined, trigger: TriggerRule.always(), step: async function* () { return 42; } });
           const results = await graph.run();

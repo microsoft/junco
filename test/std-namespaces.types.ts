@@ -213,6 +213,12 @@ export function spawnBuildsTypedStars(
       return child(inferred.label);
     },
   );
+  const explicit: graph.JuncoGraph<number, string> = graph.JuncoGraph.spawn(
+    root,
+    tasks,
+    (task) => child(task.label),
+    new tracer.DummyTracer(),
+  );
   const defaults: graph.JuncoGraph = graph.JuncoGraph.spawn(
     {
       state: lead,
@@ -248,7 +254,7 @@ export function spawnBuildsTypedStars(
     trigger: trigger.TriggerRule.never(),
     policy: tools.LockPolicy,
   };
-  return [typed, defaults, managedStar, owned];
+  return [typed, explicit, defaults, managedStar, owned];
 }
 
 // --- trigger and tracer ----------------------------------------------------------------------------
@@ -369,11 +375,13 @@ export async function tracerHandlesRetainPayloadTypes(
   edge: graph.Edge<number, string>,
 ) {
   const counting = new CountingTracer();
+  const tui: tracer.TuiTracer = await tracer.TuiTracer.create();
+  const shared: tracer.DataflowTracer = tracer.TuiTracer.shared();
   const tracers: tracer.DataflowTracer[] = [
     counting,
     new tracer.DummyTracer(),
-    new tracer.StdoutTracer(),
-    tracer.StdoutTracer.shared(),
+    tui,
+    shared,
   ];
   const run: tracer.DataflowRunTrace<number, string> = counting.startRun(g);
   const primed: tracer.DataflowStepTrace<number, string> = run.startNode(
@@ -405,6 +413,8 @@ export async function tracerHandlesRetainPayloadTypes(
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
   await graph.JuncoGraph.parallel(tools.LockPolicy).tracer.flush();
+  await tui.close();
+  await tui[Symbol.asyncDispose]();
   return traced;
 }
 
@@ -539,7 +549,7 @@ export async function piSchedulerTypesFixTheScheduleTool(
   const agency = await graph.JuncoGraph.pi<TaggedSkill, TaggedTemplate>({
     prompt: "Run the agency.",
     policy: tools.LockPolicy,
-    tracer: tracer.StdoutTracer.shared(),
+    tracer: tracer.TuiTracer.shared(),
     window: graph.Width.create(1),
   });
   const agencyScheduler: schedulers.PiScheduler<

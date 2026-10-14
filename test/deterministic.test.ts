@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowNodeError,
+  DummyTracer,
   Edge,
   Message,
   TriggerEntry,
@@ -24,6 +25,8 @@ import {
   JuncoGraph,
   MockAgent,
 } from "../src/index.ts";
+
+const quiet = new DummyTracer();
 
 // Deterministic coroutines inside real JuncoGraphs on the real parallel policy: cooperative abort,
 // draining close and the single-consumer guard, observed through graph drives, edges and results.
@@ -89,7 +92,7 @@ function consumer<T>(result: T) {
 
 describe("abort", () => {
   test("joins a gated finally, cleans up once and starts no downstream work", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const result = Edge.value<string, string>("waiting-result");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
@@ -146,7 +149,7 @@ describe("abort", () => {
   });
 
   test("preserves an unrelated cleanup error, which a later close does not report again", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
     const failing = new Deterministic<string, string>(async function* (signal) {
@@ -181,7 +184,7 @@ describe("abort", () => {
   });
 
   test("a run failure already delivered to its drive is not reported again by close", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const broken = new Error("body failed");
     let cleaned = 0;
     const failing = new Deterministic<string, string>(async function* () {
@@ -215,8 +218,8 @@ describe("abort", () => {
 });
 
 test("caller cancellation interrupts nested work and joins its cleanup", async () => {
-  const parent = JuncoGraph.parallel<string, string>(LockPolicy);
-  const child = JuncoGraph.parallel<string, string>(LockPolicy);
+  const parent = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+  const child = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
   const caller = new AbortController();
   const reason = new Error("caller stopped");
   const entered = Promise.withResolvers<void>();
@@ -271,7 +274,7 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
 
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const input = Edge.message<string, string>("input");
     const suspendedCleanup = Edge.message<string, string>("suspended-cleanup");
     const waitingCleanup = Edge.message<string, string>("waiting-cleanup");
@@ -363,7 +366,7 @@ describe("close", () => {
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
-    const graph = JuncoGraph.parallel(LockPolicy);
+    const graph = JuncoGraph.parallel(LockPolicy, quiet);
     const failure = new Error("finally failed");
     const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
       async function* () {
@@ -407,7 +410,7 @@ describe("close", () => {
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -475,12 +478,12 @@ describe("close", () => {
       }
       return "never published";
     }, LockPolicy);
-    const child = JuncoGraph.parallel<string, string>(LockPolicy);
+    const child = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const result = child.addNode({
       trigger: TriggerRule.always(),
       state: coroutine,
     });
-    const parent = JuncoGraph.parallel<string, string>(LockPolicy);
+    const parent = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     parent.addNode({
       trigger: TriggerRule.always(),
       is_available: () => false,
@@ -525,7 +528,7 @@ describe("close", () => {
 
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
-    const first = JuncoGraph.parallel<string, string>(LockPolicy);
+    const first = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
       return "first";
@@ -537,7 +540,7 @@ describe("single consumer", () => {
     await first.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
-    const second = JuncoGraph.parallel<string, string>(LockPolicy);
+    const second = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const value = Edge.value<string, string>("shared-result");
     const downstream = consumer("downstream");
     const againId = second.addNode({
@@ -568,7 +571,7 @@ describe("single consumer", () => {
   });
 
   test("a coroutine closed before priming fails on activation without resolving its value edge", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const value = Edge.value<string, string>("closed-result");
     let bodyRan = false;
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
@@ -605,7 +608,7 @@ describe("single consumer", () => {
   });
 
   test("a body genuinely returning undefined resolves its value edge", async () => {
-    const graph = JuncoGraph.parallel<string, string | undefined>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string | undefined>(LockPolicy, quiet);
     const value = Edge.value<string, string | undefined>("undefined-result");
     const source = new Deterministic<string, string | undefined>(
       // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
@@ -775,12 +778,12 @@ describe("policy and borrowed collections", () => {
   });
 
   test("addNode takes a managed state's policy and rejects any supplied one; an explicit step must match its state", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
     const coroutine = new Deterministic<string, string>(async function* () {
       yield [];
       return "x";
     }, LockPolicy);
-    const child = JuncoGraph.parallel<string, string>(EmptyPolicy);
+    const child = JuncoGraph.parallel<string, string>(EmptyPolicy, quiet);
     const childId = child.addNode({
       trigger: TriggerRule.always(),
       state: new Deterministic<string, string>(async function* () {
@@ -837,7 +840,7 @@ describe("policy and borrowed collections", () => {
       state: child,
       result: childId,
     });
-    const agents = JuncoGraph.parallel(LockPolicy);
+    const agents = JuncoGraph.parallel(LockPolicy, quiet);
     agents.addNode({
       state: new MockAgent({ runs: [] }),
       policy: EmptyPolicy,
@@ -856,9 +859,9 @@ describe("policy and borrowed collections", () => {
         closes++;
       }
     }, EmptyPolicy);
-    const child = JuncoGraph.parallel<never, number>(EmptyPolicy);
+    const child = JuncoGraph.parallel<never, number>(EmptyPolicy, quiet);
     const answer = child.addNode({ state, trigger: TriggerRule.always() });
-    const parent = JuncoGraph.parallel<never, number>(LockPolicy);
+    const parent = JuncoGraph.parallel<never, number>(LockPolicy, quiet);
     const nested = parent.addNode({
       state: child,
       result: answer,
@@ -904,12 +907,12 @@ describe("policy and borrowed collections", () => {
     const collection = countedCollection(LockPolicy, events);
     const root = JuncoGraph.parallel<string, string>(
       LockPolicy,
-      undefined,
+      quiet,
       collection,
     );
     const child = JuncoGraph.parallel<string, string>(
       LockPolicy,
-      undefined,
+      quiet,
       collection,
     );
     const coroutine = new Deterministic<string, string>(

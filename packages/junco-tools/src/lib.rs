@@ -17,6 +17,7 @@ mod task;
 #[cfg(test)]
 mod testing;
 mod tool;
+mod tui;
 mod utils;
 
 use std::collections::HashMap;
