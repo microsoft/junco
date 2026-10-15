@@ -50,13 +50,13 @@ Share one tracer across child graphs: Ralph and promoted task graphs inherit the
 
 Operational logs still use `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) logger. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; missing/blank means INFO, names are trimmed and case-insensitive, and unknown or numeric values fail before native or model work. `issueLog`'s complaint-observer failures use WARN. The logger receives every junco-policy capability decision of the ShellMux `ShellMuxLease.create` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. While the TUI owns the terminal, admitted operational logs are redirected exclusively into its trace pane. Each mux's `lease.release()` (and so a collection's final release) drains these records; its `flushLog()` barrier waits for drawing, not keyboard dismissal. Outside the TUI that barrier flushes stdout.
 
-`dataflow-engine-opik` is a workspace package and a root development dependency providing `OpikDataflowTracer`, so the root install already provides it and `opik`; under Bun its `bun` export loads its source directly. Pass it explicitly like any other tracer, configured by the SDK's `OPIK_*` variables:
+`dataflow-engine-opik` is a workspace package and a root development dependency providing `OpikTracer`, so the root install already provides it and `opik`; under Bun its `bun` export loads its source directly. Pass it explicitly like any other tracer, configured by the SDK's `OPIK_*` variables:
 
 ```ts
-import { OpikDataflowTracer } from "dataflow-engine-opik";
+import { OpikTracer } from "dataflow-engine-opik";
 import { Opik } from "opik";
 
-const tracer = new OpikDataflowTracer(new Opik(), "JuncoGraph.run");
+const tracer = new OpikTracer(new Opik(), "JuncoGraph.run");
 ```
 
 ## CI
@@ -310,7 +310,7 @@ const sink = g.addNode(new graph.nodes.StepNode(() => [], { state: undefined, tr
 g.addEdge(source, sink, a);
 ```
 
-A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikDataflowTracer` from the `dataflow-engine-opik` workspace package, or `tracer.TuiTracer.shared()`) as its fourth argument, or omit it to run untraced. A `JuncoGraph` always takes one (see [Tracing](#tracing-local-only)). The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
+A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikTracer` from the `dataflow-engine-opik` workspace package, or `tracer.TuiTracer.shared()`) as its fourth argument, or omit it to run untraced. A `JuncoGraph` always takes one (see [Tracing](#tracing-local-only)). The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
 
 ### Prompt agents: `graph.addNode({ ...options, state: agent })`
 

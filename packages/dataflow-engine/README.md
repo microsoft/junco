@@ -218,7 +218,7 @@ A node whose state is itself a `DataflowGraph` renders as a `subgraph` titled wi
 
 Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `step()` or `run()` invocation and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures, and the end or failure of the invocation. For `step()`, `end` means that window finished, not that the graph is quiescent. `complain(nodeId, complaint)` receives a complaint recorded for a node, independent of any run; the graph never calls it itself. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
 
-`DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikDataflowTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation, and each complaint as its own completed `<name>.complain` trace (node ID and complaint text only). This package never depends on Opik.
+`DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation, and each complaint as its own completed `<name>.complain` trace (node ID and complaint text only). This package never depends on Opik.
 
 ## Examples and development
 

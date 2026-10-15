@@ -3,4 +3,4 @@ export type {
   DataflowRunTrace,
   DataflowStepTrace,
 } from "dataflow-engine";
-export { OpikDataflowTracer } from "./opik-dataflow-tracer.js";
+export { OpikTracer } from "./opik-tracer.js";

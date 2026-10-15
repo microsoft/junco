@@ -81,7 +81,7 @@ function activationInput<N, T>(
  * The caller owns the `Opik` client's configuration and lifetime, and must `await flush()` before
  * exiting. A resolved flush is NOT proof of ingestion: the SDK logs transport failures.
  */
-export class OpikDataflowTracer implements DataflowTracer {
+export class OpikTracer implements DataflowTracer {
   readonly #client: Opik;
   readonly #name: string;
 
