@@ -1,6 +1,6 @@
 # junco-agency
 
-Recursive agentic dataflow graphs. A `JuncoGraph` is a native [`dataflow-engine`](packages/dataflow-engine) graph whose node states are `Agentic`: a `JuncoAgent` ([`junco-agent`](packages/junco-agent)), a `MockAgent`, a nested `JuncoGraph`, or a `Deterministic` coroutine. Every kind registers through the engine's own `addNode` with the engine's one `NodeOptions` (`id`, `description`, `trigger`, `is_available`); the graph adds recursive abort/close over its members. `JuncoGraph.pi()` builds such a graph driven by a `PiScheduler` ([`junco-scheduler/agent`](packages/junco-scheduler)), whose model drives it through its only tool, `schedule`: one bounded graph window per call. Nesting needs neither flattening nor a forwarding object.
+Recursive agentic dataflow graphs. A `JuncoGraph` is a native [`dataflow-engine`](packages/dataflow-engine) graph whose node states are `Agentic`: agents, nested graphs, `Deterministic` coroutines, and deterministic `Source`/`Sink` ports. Every graph has fresh positional source and sink nodes; nested execution returns only its sink's retained result. Graphs own work and resource lifetime, never scheduling policy. An external `schedulers.context({ graph, scheduler })` pairs a graph with a typed function from [`junco-scheduler`](packages/junco-scheduler); `parallel()`, `roundRobin()` or the stateless `pi(...)` oracle decide which existing work nodes advance.
 
 ## Setup
 
@@ -14,7 +14,7 @@ bun run build:examples
 bun --no-install examples/dist/recursive-agency.js
 ```
 
-`build:examples` bundles `examples/recursive-agency.ts`, `mixed.ts`, `oss-committee.ts`, `mcp.ts`, and `yak-shaver.ts` (with shared chunks and external source maps) into `examples/dist/` for Bun. Every reachable workspace package resolves through its `bun` export to TypeScript source, so the tools → engine → agent → scheduler chain below is not a prerequisite. Five boundaries stay external and must be installed where the bundle runs: the generated `junco-tools/native` loader (loaded lazily, only when default native tools are created), `@oh-my-pi/pi-coding-agent`, and the three `@earendil-works` Pi packages (which locate their assets from their own install). The first three examples supply explicit tools, so they need no native addon (`mcp.ts` and `yak-shaver.ts` run MCP servers and native file tools on the native ShellMux); the recursive example is offline, while `mixed` and `oss-committee` still need their existing credentials and inputs.
+`build:examples` bundles `examples/recursive-agency.ts`, `mixed.ts`, `oss-committee.ts`, `mcp.ts`, `verus.ts`, and `yak-shaver.ts` (with shared chunks and external source maps) into `examples/dist/` for Bun. Reachable workspace packages resolve through their `bun` exports to TypeScript source, so producer declaration builds are not prerequisites. Five boundaries stay external and must be installed where the bundle runs: the generated lazy `junco-tools/native` loader, `@oh-my-pi/pi-coding-agent`, and the three `@earendil-works` Pi packages (which locate their own assets). Recursive/mixed/committee supply explicit tools and need no native addon; recursive is offline, while mixed/committee retain their credentials and inputs. MCP, Verus and yak-shaver workflows retain their native ShellMux/MCP prerequisites. Cancellation has no graph/scheduler to migrate.
 
 `dataflow-engine`'s own examples follow the same contract: after the root install, `bun run examples` (or `examples:build`) in `packages/dataflow-engine` bundles them from workspace sources without any producer build; see its [README](packages/dataflow-engine/README.md#examples-and-development).
 
@@ -42,7 +42,7 @@ bun run smoke
 
 ## Tracing (local only)
 
-A direct `JuncoGraph` requires a tracer as its constructor's fourth argument (`TypeError` when missing), and its `tracer` property is never `undefined`. `JuncoGraph.parallel(policy)`, `JuncoGraph.spawn` and `JuncoGraph.pi` default to `tracer.TuiTracer.shared()`: one shared lazy TUI named `JuncoGraph.run` when stdin and stdout are TTYs and `TERM !== "dumb"`, otherwise a silent, stateless `DummyTracer`. Explicit Dummy, custom and Opik tracers always win. `parallel` and `spawn` remain synchronous; imports, factory construction and shared selection do not load native bindings, enter terminal modes, install handlers or write output. The first observer callback starts the lazy display.
+A `JuncoGraph` takes fresh source and sink nodes, window and thread bounds, a tracer (or `undefined`), and its authorization policy, in that order. Its tracer defaults to `tracer.TuiTracer.shared()`: one shared lazy TUI named `JuncoGraph.run` when stdin and stdout are TTYs and `TERM !== "dumb"`, otherwise a silent, stateless `DummyTracer`. Explicit Dummy, custom and Opik tracers always win. Construction and `spawn` remain synchronous; imports, factory construction and shared selection do not load native bindings, enter terminal modes, install handlers or write output. The first observer callback starts the lazy display.
 
 For explicit acquisition, use `const tui = await tracer.TuiTracer.create("My workflow")` (the name is optional), then pass it to your graphs. It rejects unsuitable terminals before loading native bindings; native initialization failures surface rather than falling back to another backend. Only one session may own the terminal. The ratatui display has two vertically stacked panes: `JuncoGraph` above and live `Agent traces` below. Topology stays fixed across steps unless it changes; only currently executing scheduled nodes are green. Stable identity colors and scoped `[g<serial>:<NodeId>]` badges distinguish repeated local IDs in nested graphs. Agent messages, tool progress and lifecycle outcomes appear independently of `LOG_LEVEL`. Promoted task parents retain their agent identity: return records show outcomes and stop reasons, not another copy of streamed messages. Payloads are snapshotted without application getters or custom inspection and may contain sensitive data; retained display history is bounded, not a durable transcript.
 
@@ -63,8 +63,8 @@ const tracer = new OpikTracer(new Opik(), "JuncoGraph.run");
 
 `.github/workflows/ci.yml` runs on every push, pull request, and manual dispatch, with two independent jobs that each run one root `bun install --frozen-lockfile`:
 
-- `core` needs no secrets. It installs with `--ignore-scripts`, so no native addon is built, and runs the root Biome check (`bun run check:ci`); then, before any package or native build, bundles the root examples from workspace sources (`bun run build:examples`), builds the engine's traced examples (`examples:build`, not executed) and runs its deterministic `--no-tracing` examples with their exact output, asserts after each that no package `dist`/`native`/`target` output appeared, and runs the copied root bundles in a temporary consumer that installs only the Pi vendor externals, without `opik` (the recursive example's successful exit with empty stderr, and the committee's usage rejection). It runs `junco-mcp`'s in-memory protocol suite from source, without the native addon. It then builds the engine, the scheduler's deterministic root (`build:core`, `typecheck:core` over that root with its scheduler suite and type fixture, then the scheduler suite), and the Opik adapter (build and typecheck); runs the engine's typecheck (Dummy) and `examples:typecheck` (Opik) against those declarations, and its tests with coverage (uploaded as the `coverage` artifact); packs the engine and scheduler into an isolated consumer without agent or Pi peers and runs the round-robin smoke under Bun and Node; and runs an offline Opik graph smoke through an in-memory Opik client.
-- `test` needs no secrets either: Cargo fetches the public `marsh` and `junco-policy` from GitHub, and the root install's `postinstall` builds the production addon. It runs junco-tools' rustfmt, Clippy and Rust unit tests, builds its production and CopyTree test addons and runs its Node tests, then builds and tests tools → MCP (core and native suites) → engine → agent (including its native MCP suite) → scheduler (full `typecheck` and both suites) → Opik adapter → agency; the agent and scheduler suites run with coverage of their own `src/` (uploaded as the `junco-agent-coverage` and `junco-scheduler-coverage` artifacts). For the agency it runs build, typecheck (the built-package fixture needs the emitted declarations), the deterministic suites with coverage (uploaded as the `agency-coverage` artifact), the deterministic smoke, the offline integration suites, the native policy-yield suite (`bun run test:native`), and the `junco-agency/workflows` smoke under Bun (source entrypoints) and Node (built entrypoints), then checks that the workspace `junco-scheduler` and the agency share one `dataflow-engine` instance under Bun and Node, and runs the relocated `junco-agent` CLI launcher (`--version`).
+- `core` needs no secrets. It installs with `--ignore-scripts` (no native addon), runs root Biome, bundles all root and engine examples from workspace sources before package builds, and executes deterministic engine examples with exact outputs and no accidental producer artifacts. Copied root bundles run in an isolated Pi-vendor-only consumer without Opik; MCP protocol tests use in-memory transports. It then builds the native engine, peer-free scheduler core and Opik adapter; runs core type fixtures, scheduler context/CSL property tests and the renamed faux-only `test/agent.test.ts`; typechecks and tests all engine consumers. Packed core packages are exercised without optional peers under Bun and Node (round-robin `1,10,2,1`), and offline Opik traces/results are checked through an in-memory client.
+- `test` also needs no secrets: Cargo fetches public native dependencies and root installation builds the production addon. It runs tools' Rust/Node/native tests, builds dependency producers in order, checks the full scheduler and all its suites, then builds/typechecks the agency and runs deterministic, integration, native and Bun/Node workflow smokes. Coverage artifacts retain each package's own source scope. Workspace engine error identity is exercised through a rejected policy before work and a subsequent successful context drive under Bun and Node; the relocated agent CLI launcher is checked separately.
 
 No Btrfs mount, tracing service, language server, or model credentials are required: native suites run on CopyTree workspaces.
 
@@ -72,12 +72,14 @@ No Btrfs mount, tracing service, language server, or model credentials are requi
 
 ```ts
 import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { TriggerRule } from "dataflow-engine";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, YieldTool } from "junco-tools";
-import { JuncoGraph } from "junco-agency";
+import { graph as graphApi, schedulers } from "junco-agency";
 
-// Resolve models beforehand; each supplied session transfers to its agent and closes on return().
+// Resolve member options and schedulerOptions.models/model beforehand.
+// Only member agents own sessions; scheduling makes one completeSimple call per decision.
 const sessions = new MemorySessionRepo();
 const researcher = await JuncoAgent.fromResolved({
   ...researcherOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
@@ -86,43 +88,51 @@ const researcher = await JuncoAgent.fromResolved({
 const writer = await JuncoAgent.fromResolved({
   ...writerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT), prompt: "Draft the summary.",
 });
-// With a native `model` the scheduler uses it; without one it is GitHub Copilot `claude-opus-5.5`
-// through Pi's saved login (run Pi's /login first). Tracer defaults to TuiTracer.shared(),
-// window and threads to UNBOUNDED.
-await using graph = await JuncoGraph.pi({
-  ...schedulerOptions, session: await sessions.create({}, BACKGROUND_CONTEXT),
-  systemPrompt: "Coordinate the team.", prompt: "Produce the report.", policy: LockPolicy,
-}); // disposal closes every member
-const scheduler = graph.scheduler;
-// Event subscribers must not print directly while the TUI owns the terminal.
-// scheduler.hooks.on("transform_context", handler) registers native request hooks.
-// Invalid local arguments/state and overlapping work reject with JuncoAgentError.
-for (const [agent, description] of [[researcher, "researches"], [writer, "writes"]] as const) {
-  graph.addNode({ state: agent, description, policy: LockPolicy, trigger: TriggerRule.always() }); // runs its constructor prompt
-}
+const writerId = graphApi.NodeId.create("writer");
+const final = graphApi.Edge.value<graphApi.nodes.AgenticInput, AssistantMessage>("writer->$sink");
+const source = new graphApi.nodes.Source<graphApi.nodes.AgenticInput, AssistantMessage>(() => {
+  throw new graphApi.DataflowDefinitionError("Report workflow does not accept external input");
+}, { id: graphApi.NodeId.create("$source") });
+const sink = new graphApi.nodes.Sink<graphApi.nodes.AgenticInput, AssistantMessage>(async function* (): graphApi.NodeGenerator<graphApi.nodes.AgenticInput, AssistantMessage> {
+  yield [];
+  const result = execution.graph.result(writerId);
+  if (!O.isSome(result)) throw new Error("Writer did not produce a result");
+  return result.value;
+}, { id: graphApi.NodeId.create("$sink"), trigger: graphApi.trigger.TriggerRule.when(final) });
+const execution = schedulers.context({
+  graph: new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1), graphApi.UNBOUNDED, undefined, LockPolicy),
+  scheduler: schedulers.pi({
+    models: schedulerOptions.models, model: schedulerOptions.model,
+    systemPrompt: "Coordinate the team.", prompt: "Produce the report.",
+  }),
+});
+execution.graph.addNode({ id: graphApi.NodeId.create("researcher"), state: researcher,
+  description: "researches", policy: LockPolicy, trigger: graphApi.trigger.TriggerRule.always() });
+execution.graph.addNode({ id: writerId, state: writer,
+  description: "writes", policy: LockPolicy, trigger: graphApi.trigger.TriggerRule.always() });
+execution.graph.addEdge(writerId, sink.id, final);
 
-let outcome: unknown;
+let outcome: AssistantMessage | undefined;
 try {
-  for await (const step of scheduler) {
-    if (step.kind === "yield") continue; // one graph window completed; the next iteration resumes
-    outcome = step.kind === "settled" ? step.message : step.error;
-    break;
-  }
+  await execution.run();
+  const result = execution.graph.result(sink.id);
+  if (!O.isSome(result)) throw new Error("Report workflow did not produce its sink result");
+  outcome = result.value;
 } finally {
-  try { await graph.close(); } finally { await graph.tracer.flush(); }
+  try {
+    try { await execution.graph.close(); } finally { await execution.graph.tracer.flush(); }
+  } finally { await sessions.close(BACKGROUND_CONTEXT); }
 }
 console.log(outcome); // the terminal has been restored
-// Leaving scope closes the graph: its scheduler and agents, with their sessions.
-// The caller owns the repo and closes it afterwards with sessions.close(BACKGROUND_CONTEXT).
 ```
 
-[`examples/recursive-agency.ts`](examples/recursive-agency.ts) runs a root → child → grandchild agency around a leaf that pauses once, plus a root sibling, entirely offline on faux models. Each scheduler reports only its own completion; the leaf and sibling results are read from the retained graphs.
+[`examples/recursive-agency.ts`](examples/recursive-agency.ts) runs a root → child → grandchild agency around a leaf that pauses once, plus a root sibling, entirely offline on faux models. Each context records only its own decisions; leaf, sibling and sink results are inspected on the retained native graphs.
 
-All five example CLIs handle Ctrl-C with a scoped `AbortSignal`: cancellation interrupts active agents, nested graphs and cooperative coroutines, joins cleanup, and exits with status 130. Importing an example installs no signal handler. Setup awaits without cancellation support finish before the next signal check; bodies that ignore cancellation must still drain.
+All six graph example CLIs handle Ctrl-C with a scoped `AbortSignal`: cancellation interrupts active agents, nested graphs and cooperative coroutines, joins cleanup, and exits with status 130. Imports install no signal handlers. Setup awaits without cancellation support finish before the next signal check; bodies that ignore cancellation must still drain.
 
 ### OSS committee (live)
 
-[`examples/oss-committee.ts`](examples/oss-committee.ts) is a literate, top-to-bottom junco example and **not** a `PiScheduler` agency: three persistent `JuncoAgent` members run review rounds, each a fresh `JuncoGraph.parallel(LockPolicy)` graph over the same members, whose sessions keep every earlier round. The Librarian (`claude-opus-5.5`, medium reasoning) uses `search_oss` with generic technical terms rather than the verbatim request; each result reports GitHub stars and last push time alongside the repository URL and reported license. The Architect (`gpt-6-sol`, high) is toolless and designs from the available research; the Reducer (`claude-sonnet-5.5`, xhigh) combines both final reports, records a typed verdict with its `review` tool and produces the **only** titled Markdown plan. A revision request starts another round in which the Librarian continues investigating and the Architect revises its design from the Reducer's feedback; approval — minimal, clean custom code over well-trusted OSS libraries — publishes the plan. There is no round limit, and a round that ends without a verdict fails without publishing. Normally, a value edge gates Architect on a valid successful lookup and a nonempty, normally stopped Librarian report. After a failed lookup in any round, Librarian must call the real `yield` tool with its available public research, the failure and the remaining gaps in the reason. A message edge hands that partial snapshot to Architect while Librarian stays paused. Librarian resumes only after Architect returns, then writes its closing report without further searches. Reducer still waits for both final reports; missing, empty or truncated final reports cannot publish a plan. Returning after a failed lookup without the required yield is rejected rather than silently accepted. `JuncoAgent.create` rejects a reasoning level a model does not support, so no reasoning level is silently downgraded.
+[`examples/oss-committee.ts`](examples/oss-committee.ts) is a literate, top-to-bottom deterministic-policy workflow: three persistent `JuncoAgent` members run review rounds, each with fresh Source/Sink ports, a passive `JuncoGraph` and a `schedulers.parallel()` context over the same members. Their sessions keep every earlier round. The Librarian (`claude-opus-5.5`, medium reasoning) uses `search_oss` with generic technical terms rather than the verbatim request; each result reports GitHub stars and last push time alongside the repository URL and reported license. The Architect (`gpt-6-sol`, high) is toolless and designs from the available research; the Reducer (`claude-sonnet-5.5`, xhigh) combines both final reports, records a typed verdict with its `review` tool and produces the **only** titled Markdown plan. A revision request starts another round in which the Librarian continues investigating and the Architect revises its design from the Reducer's feedback; approval — minimal, clean custom code over well-trusted OSS libraries — publishes the plan. There is no round limit, and a round that ends without a verdict fails without publishing. Normally, a value edge gates Architect on a valid successful lookup and a nonempty, normally stopped Librarian report. After a failed lookup in any round, Librarian must call the real `yield` tool with its available public research, the failure and the remaining gaps in the reason. A message edge hands that partial snapshot to Architect while Librarian stays paused. Librarian resumes only after Architect returns, then writes its closing report without further searches. Reducer still waits for both final reports; missing, empty or truncated final reports cannot publish a plan. Returning after a failed lookup without the required yield is rejected rather than silently accepted. `JuncoAgent.create` rejects a reasoning level a model does not support, so no reasoning level is silently downgraded.
 
 Before running the live example, start `pi`, use `/login`, and select GitHub Copilot. The committee shares Pi's `ModelRuntime` and uses the saved login in `~/.pi/agent/auth.json` (or `$PI_CODING_AGENT_DIR/auth.json`); Pi handles OAuth refresh. A missing or unusable login fails with instructions to run `/login`, without starting an interactive login or publishing a plan. Environment-only tokens and Copilot CLI credentials do not replace the saved Pi login.
 
@@ -142,11 +152,15 @@ The tool restricts search to GitHub repositories but cannot detect secrets in a 
 bun run examples/mcp.ts
 ```
 
+On a `mcp.JuncoMcpTools` definition, `definition.connect({ collection, toolLifetime: "call" })` closes schema discovery before returning and starts only the originating server for each invocation; each call joins its process cleanup before settling. The default `"connection"` lifetime keeps servers until `close()`. Lifetime is independent of `discardOnClose` (default `false`): set it to `true` for fresh, discard-only research. Call-scoped connections hold a collection lease; their cached `close()` fences new calls, cancels and joins active calls, then releases that lease. Select concrete tools with ordinary arrays and `mcp.getJuncoMcpToolIdentity(tool)`, not published collision names.
+
 For a scripted end-to-end run without model credentials, run `bun run test/oss-committee.fixture.ts`. The fixture prints the approved plan of one scripted round. It and `bun test test/oss-committee.test.ts` choose an explicit `DummyTracer`, keeping offline output deterministic even in a terminal.
 
 ### Yak shaver: in-place refactoring (live)
 
-[`examples/yak-shaver.ts`](examples/yak-shaver.ts) applies generalizing refactors in place to a Graft-indexed Git working tree and releases each changed file; it writes no report and never commits. It is one literate file, read top to bottom in numbered sections. `runYakShaver` first runs `graft build .` through the trusted tool collection's sandboxed `bash` tool so every run starts from a current index. It then ranks every indexed `class`, `interface`, `type`, `enum`, `struct`, and `trait` (merged with its owned methods) by its longest dependency distance, in strongly-connected-component hops, from the public API (exported AST-origin symbols) or a test path, deepest first and then by ascending positive distinct-caller count; nothing is cut off. `refactorCandidates` admits four initially ranked candidates at a time, resolved against the current snapshot (a candidate removed by an earlier refactor is reported `removed`). Each batch is one parallel graph of `Proposer:r ==proposal:r==> Judge:r` lanes driven one step at a time; every proposer's native `task` call spawns up to three read-only researchers over far-first file shards, and an independent judge, whose staged prompt callback validates the proposal and composes its assignment, records four criteria. As soon as a lane's review passes all four criteria, adds a caller definition, and removes net nonblank lines, its edits are applied and exactly its paths released (`release -- <path>`) inside one managed command, so the lane's owner releases its own files; applications drain one at a time. After a batch that applied anything, a private, discarded `graft build` refreshes the in-memory snapshot. Every Graft MCP connection is discard-only and lives for one call.
+[`examples/yak-shaver.ts`](examples/yak-shaver.ts) applies generalizing refactors in place to a Graft-indexed Git working tree and releases each changed file; it writes no report and never commits. It is one literate file, read top to bottom in numbered sections. `runYakShaver` first runs `graft build .` through the trusted tool collection's sandboxed `bash` tool so every run starts from a current index. It then ranks every indexed `class`, `interface`, `type`, `enum`, `struct`, and `trait` (merged with its owned methods) by its longest dependency distance, in strongly-connected-component hops, from the public API (exported AST-origin symbols) or a test path, deepest first and then by ascending positive distinct-caller count; nothing is cut off. `refactorCandidates` admits four initially ranked candidates at a time, resolved against the current snapshot (a candidate removed by an earlier refactor is reported `removed`). Each batch is one parallel graph of `Proposer:r ==proposal:r==> Judge:r` lanes driven one step at a time; every proposer's native `task` call spawns up to three read-only researchers over far-first file shards, and an independent judge, whose staged prompt callback validates the proposal and composes its assignment, records four criteria. As soon as a lane's review passes all four criteria, adds a caller definition, and removes net nonblank lines, its edits are applied and exactly its paths released (`release -- <path>`) inside one managed command, so the lane's owner releases its own files; applications drain one at a time. After a batch that applied anything, the trusted sandboxed `graft build .` publishes the refreshed cache before the next admission. Research uses concrete SDK tools from one lazy `toolLifetime: "call", discardOnClose: true` connection: each invocation sees fresh source and discards its private writes before returning.
+
+`liveRunner` borrows the root's research `AsyncDisposableStack` for lazy acquisition. Root cleanup explicitly attempts research close, tracer flush, trusted build close, then protected collection close; body and cleanup failures remain in `SuppressedError` chains. Each batch explicitly closes its graph on success or failure; construction failures also dispose every supplied but unregistered agent. Failed lane acquisition disposes its acquired agents in reverse order. Scheduler-context steps retain the apply-before-next-window barrier; neither a tracer nor a graph-wide `run()` publishes refactors.
 
 Prerequisites: `graft` 0.21.1-compatible on `PATH`, the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
 
@@ -172,62 +186,50 @@ Output-only mutation and Reviewer read-only behavior are role instructions, not 
 type AgenticInput =
   | { readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error"; readonly text: string; readonly images?: ImageContent[] } // error: a failure notification, delivered as a follow-up
   | { readonly kind: "appendMessage"; readonly message: AgentMessage };
-// The four node-state kinds; N/T default to the chat wire types and stay overridable.
-type Agentic<N = AgenticInput, T = AssistantMessage> = JuncoAgent | JuncoGraph<N, T> | MockAgent | Deterministic<N, T>;
-// A raw spec with `step` (plus required `policy`); or a step-less spec whose state is a Deterministic
-// or a nested JuncoGraph (with `result`, `receive?`, `afterStep?`), authorized by its state's own
-// `policy` and so taking none (a supplied own `policy` field, even a matching or `undefined` one,
-// throws `TypeError`), or (chat wires only) a JuncoAgent | MockAgent with required `policy`; each
-// with an optional receiver `contract?: (edgeId) => Contract`. `StepLess` is implementation-local:
-// `Omit<NodeSpec<Agentic<N, T>, N, T>, "state" | "step">`. Only the nested branch may carry
-// `result`/`receive`/`afterStep`.
+// Native work states; N/T default to chat wire types and remain overridable.
+type Agentic<N = AgenticInput, T = AssistantMessage> =
+  JuncoAgent | JuncoGraph<N, T> | MockAgent | Deterministic<N, T> | Source<N, T> | Sink<N, T>;
+// StepLess is implementation-local: NodeSpec minus state/step.
 type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
   | (NodeSpec<Agentic<N, T>, N, T> & { readonly policy: ToolCollection["policy"] })
+  | ((Source<N, T> | Sink<N, T>) & { readonly policy?: never })
   | (StepLess<N, T> & { readonly state: Deterministic<N, T>; readonly step?: never; readonly policy?: never })
-  | (StepLess<N, T> & { readonly state: JuncoGraph<N, T>; readonly step?: never; readonly policy?: never; readonly result: NodeIdType;
-      readonly receive?: (view: ParentView<N, T>) => void | Promise<void>; readonly afterStep?: () => void | Promise<void> })
+  | (StepLess<N, T> & {
+      readonly state: SchedulerContext<Agentic<N, T>, N, T, never, JuncoGraph<N, T>>;
+      readonly step?: never; readonly policy?: never;
+    })
   | (StepLess<N, T> & { readonly state: JuncoAgent | MockAgent; readonly step?: never; readonly policy: ToolCollection["policy"] }) // chat wires only
 ) & { readonly contract?: (edgeId: EdgeIdType) => Contract };
 
-// addNode/addEdge, inspection and results are DataflowGraph's. `tracer` is required; pass
-// `tracer.TuiTracer.shared()` for the automatic interactive/Dummy selection (see Tracing).
-class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>>
-  extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
-  // policy: a junco-tools `Policy` (compared by identity); a supplied collection must have it and is borrowed until close.
-  constructor(scheduler: Q, window: Width, threads: Width, tracer: DataflowTracer, policy: ToolCollection["policy"], collection?: ToolCollection); // TypeError without a tracer
-  // Creates one collection, passes it to `build` (which must hand it to every member), checks every
-  // member's collection, and gives the returned root graph the creator hold.
-  static create<N, T, EH, Q extends DataflowScheduler<N, T>>(cwd: string, options: ToolCollectionOptions,
-    build: (collection: ToolCollection) => JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>): Promise<JuncoGraph<N, T, EH, Q>>;
-  // Every available node runs in each window: junco-scheduler's ParallelScheduler, Width.create(1), UNBOUNDED.
-  static parallel<N = AgenticInput, T = AssistantMessage>(
-    policy: ToolCollection["policy"], tracer: DataflowTracer = TuiTracer.shared(), collection?: ToolCollection,
-  ): JuncoGraph<N, T>;
-  // A JuncoGraph.parallel graph under the root's registration policy (a managed root's state policy,
-  // else the spec's) holding `root` plus one child per input, built by `child` in
-  // order and wired by appendChildren. Construction only wires queues: members send and consume
-  // messages through their own triggers and yields. Ids are the ones `addNode` returns.
-  // Factory/registration errors propagate synchronously; already-created members stay caller-owned.
+// Graph construction is passive. Pair it externally with schedulers.context to drive it.
+class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never>
+  extends DataflowGraph<Agentic<N, T>, N, T, EH> {
+  constructor(source: Source<N, T>, sink: Sink<NoInfer<N>, NoInfer<T>>,
+    window: Width, threads: Width, tracer: DataflowTracer | undefined,
+    policy: ToolCollection["policy"], collection?: ToolCollection);
+  readonly source: Source<N, T>;
+  readonly sink: Sink<N, T>;
+  // The returned context's graph adopts the collection's creator hold.
+  static create<N, T, EH, C = AgencyNodeMetadata>(cwd: string, options: ToolCollectionOptions,
+    build: (collection: ToolCollection) =>
+      SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>> |
+      Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>
+  ): Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>;
+  // Preserve skeleton IDs/topology with fresh transports and caller-supplied meaningful ports.
+  static map<S, L, N = AgenticInput, T = AssistantMessage>(
+    skeleton: Pick<import("ngraph.graph").Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
+    f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
+    options: { readonly source: Source<N, T>; readonly sink: Sink<N, T>;
+      readonly policy: ToolCollection["policy"]; readonly tracer?: DataflowTracer },
+  ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>>;
+  // Ports precede root and children. Construction failures leave members caller-owned.
   static spawn<Input, N = AgenticInput, T = AssistantMessage>(
-    root: AgenticNode<N, T>, inputs: readonly Input[], child: (input: Input) => AgenticNode<N, T>,
+    source: Source<N, T>, sink: Sink<N, T>, root: AgenticNode<N, T>,
+    inputs: readonly Input[], child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
-  ): JuncoGraph<N, T>;
-  // A model-driven graph; drive it through `graph.scheduler`. PiScheduler, PiSchedulerOptions,
-  // SchedulerInfo and ScheduleTool come from "junco-scheduler/agent"; the agency supplies the
-  // scheduler's adapter itself. A defined `model` selects PiScheduler.make (requiring model, models
-  // and session); otherwise PiScheduler.opus selects Copilot Opus 5.5. `tracer` defaults to
-  // TuiTracer.shared(), `window`/`threads` to UNBOUNDED; the graph is assigned before this resolves.
-  static pi<S extends Skill = Skill, P extends PromptTemplate = PromptTemplate, N = AgenticInput, T = AssistantMessage>(
-    options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> & {
-      readonly policy: ToolCollection["policy"];
-      readonly tracer?: DataflowTracer;
-      readonly window?: Width;
-      readonly threads?: Width;
-    },
-  ): Promise<JuncoGraph<N, T, unknown, PiScheduler<N, T, S, P>>>;
-  // await JuncoGraph.compact(graph, "more-than-forty-available"), or graph.compact(policy).
-  static compact<A extends Agentic<N, T>, N, T, EH, Q extends DataflowScheduler<N, T>>(
-    graph: DataflowGraph<A, N, T, EH, Q>, policy: CompactionPolicy,
+  ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>>;
+  static compact<A extends Agentic<N, T>, N, T, EH>(
+    graph: DataflowGraph<A, N, T, EH>, policy: CompactionPolicy,
   ): Promise<void>;
   compact(policy: CompactionPolicy): Promise<void>;
   // One child per input under the registered `rootId`, each with two fresh message edges,
@@ -236,7 +238,7 @@ class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends
   readonly policy: ToolCollection["policy"];
   readonly collection: ToolCollection | undefined;
   readonly tracer: DataflowTracer;
-  get signal(): AbortSignal;                 // step()/run() observe it automatically
+  get signal(): AbortSignal;                 // context drives observe it automatically
   abort(reason?: unknown): Promise<void>;    // recursive; a fresh signal once settled
   close(): Promise<void>;                    // recursive and terminal; cached
   [Symbol.asyncDispose](): Promise<void>;    // close()
@@ -246,10 +248,11 @@ class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = unknown, Q extends
 // Prompt agents register directly: graph.addNode({ ...options, policy, state: agent }) — a step-less spec whose
 // state is a JuncoAgent or MockAgent (chat wires only). Each addNode builds its own driver; its receiver
 // contract is options.contract ?? agent.contract(edgeId). Raw { state, step, policy } specs register unchanged;
-// a step-less spec with any other state throws TypeError. A step-less { ...options, state: coroutine }
-// runs a Deterministic as its own body; { ...options, state: childGraph, result, receive?, afterStep?, contract? }
-// nests a graph (missing `result` throws TypeError; an unknown `result` id DataflowDefinitionError). Both
-// run under their state's own policy and take none (a supplied own `policy` field throws TypeError).
+// Complete Source/Sink specs register their own state directly under the graph's policy.
+// A step-less { ...options, state: coroutine } runs its Deterministic body.
+// A step-less { ...options, state: childContext, contract? } nests childContext.graph;
+// its native state is that actual graph, and its result comes only from the child sink.
+// Coroutine and nested-context specs take no own policy field.
 // The prompt belongs to the agent:
 //   JuncoAgent.create/fromResolved({ prompt: string | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string) })
 //   agent.stagePrompt(prompt, { images? }) // arms a later round
@@ -278,13 +281,17 @@ type CompactionPolicy =
 // use the native event/hook surfaces. Local invariant failures throw JuncoAgentError.
 ```
 
-Every kind registers with the engine's own `NodeOptions`; a nested graph's execution-only fields (`result`, `receive`, `afterStep`) drive its node and never become node state; a prompt lives on its agent. An explicit `options.is_available` replaces a helper's default availability exactly like a native `NodeSpec` hook. `description` is optional for every kind and stays on the native node (`graph.getNode(id).description`). Node state is the original instance, except for a registered agent that called `task` (below): narrow `graph.getNode(id)!.state` with `instanceof` before using kind-specific methods.
+**Skeletons.** Build text-only topology with `createGraph<string, void>({ multigraph: true })` from `ngraph.graph`, then call `JuncoGraph.map(skeleton, text => members.get(text)!, { source, sink, policy: tools.LockPolicy })` with pre-acquired agents and fresh meaningful ports. It returns a parallel context; wire the chosen terminal work's value edge into its sink before driving. Mapping is synchronous, in insertion order, and never runs a member or copies queued data. IDs, direction, parallel links, cycles and isolated nodes survive with independent empty transports. Bare roots start immediately; other bare states wait for any incoming message (cycles need an explicitly triggered seed). Full specs customize triggers/contracts; nested work uses `{ state: childContext, ...nodeOptions }`. The skeleton's ID overrides the spec's. A failed mapper leaves acquired members caller-owned; successful mapping hands registered resources to the graph.
+
+Every kind reuses the engine's `NodeOptions`. An explicit `is_available` replaces the helper default. Descriptions stay on native nodes; a prompt lives on its agent. Native state is the original instance, including ports and nested graphs, except when an agent promotes itself into its own task graph. Contexts and policies are never native work states.
 
 **Subagents.** A `JuncoAgent` registered as a node can call the `task` tool (`new tools.TaskTool()`, included in `JuncoAgent.create`'s default tools). The call acquires one fresh subagent per task through `createSubagents` (inheriting the caller's model, active tools and registered MCP definitions unless the task narrows them) and returns their handles immediately; the caller's run continues. The children start when the caller next calls `yield` (or hits a policy pause) or finishes its current run, so a caller that needs their reports before continuing calls `yield`. A workflow that owns the assignments calls `agent.setTaskBatch(input)` instead: the model then launches that stored batch with `task({})`, at most once per agent (a rejected admission may be retried; a second launch fails with `Task batch already admitted; wait for its results.`). At that pause or settlement the node's `state` becomes a `JuncoGraph.spawn` graph whose `"root"` node is the same running caller and whose children (node id = handle id for the first attempt, `<id>:attempt:<n>` for retries; `description` = task name) run the subagents; the node keeps its id, trigger, edges, retained inbox, original `send`/`info` routes and seen values, and steps that graph once per activation. Each child starts from its bound task prompt and sends one final report, `{"type":"task_result","id","name"?,"attempt","status":"completed"|"failed","output","stopReason","error"?,"decisionRequired"?}`, back on `<node>->root`, always carrying the stable logical `id`; the caller receives each delivered report as a follow-up while it keeps working, and is prompted again (`Process the queued task reports.`) if it already answered. Once every task of a launch is completed or ignored, the caller receives one `{"type":"task_batch_complete","ids":[...]}` follow-up (original IDs, admission order), which also wakes it when every task was ignored. The node returns the caller's answer only after every delivered report and marker entered its context and was answered. Later task calls add siblings under the same root; a child's own task call nests a spawn graph in that child's node. Close and abort reach every member through the graph cascade.
 
+Promoted task execution retains its context separately from that native graph state. Fresh `$source`/`$sink` ports carry only external input/output: Source routes original edge-addressed views into the original inbox before root work, while an internal wake never reaches model `recv`. Task reports/retries stay on native root/child edges. Promoted `send` validates the original sender's edge before staging in the sink, and the outer wrapper drains after the child evaluation; non-aborted failed work still delivers already-accepted sends (delivery failure aggregates after work failure). Abort wins and leaves undelivered output buffered. Only the sink's exact retained result can complete the outer node, after all task/report work.
+
 **Task failures.** A child fails when it settles with a stop reason other than `stop` (its real output is kept) or its run throws (a failed native boundary, a hook error; recovered through the engine's `on_error` hook). Either way its subagent, or the spawn graph it expanded into, is disposed exactly once before anything else happens; a teardown failure is not reportable work but an `AggregateError` (the failure, then the teardown failure) that fails the graph, even under `"ignore"`. Cancellation of the owning graph propagates and is never retried or ignored. The caller's `setTaskFailurePolicy` (snapshotted per admitted task, default `{ retries: 0 }`) then decides: `"ignore"` drops the failure silently (no report reaches the caller); `{ retries: n }` reruns only that task in a fresh child with its original prompt, model and tool subset up to `n` times without telling the caller (an allocation failure also uses a retry), then delivers the failed report with `decisionRequired: true`. The caller answers with `task({ action: "retry" | "ignore", id, attempt })`: retry runs one more attempt under the same handle (started like any task, at the caller's next `yield` or settlement) and asks again if it fails; ignore returns `Ignored task <id>.`. Neither pauses. Unknown, stale or repeated decisions are ordinary tool errors. A caller that settles while a delivered question is unanswered fails with `Task failure decisions required: <ids>`. Ordinary registered agents have no such hook: a thrown failure still rejects the drive.
 
-**Complaints.** Every `JuncoAgent` has an always-on `complain` tool (see `junco-agent`). While a graph drives a registered agent, a complaint is recorded in the shared `tools.issueLog` (also `graph.issueLog` and `agent.issueLog`, all the same object) with that node's ID, the messages delivered to the current activation (`{ id: edge, payload }`, in edge order), the full model request and the complaint, and is reported to `tracer.complain(nodeId, complaint)` of the graph the node was registered in. After a task expansion the caller's complaints use its spawn graph's `"root"` node and tracer; each child uses its task handle ID. `MockAgent.complain(issue, tracer?)` appends a supplied issue to the same log.
+**Complaints.** Every `JuncoAgent` has an always-on `complain` tool. Graph-driven complaints retain the original registration's node ID, delivered edge-addressed inputs, full model request and issue in the shared `tools.issueLog` (`graph.issueLog` and `agent.issueLog` are the same object), and notify that graph's tracer. Task promotion preserves the outer caller's original registration and attribution; each child uses its task handle ID. `MockAgent.complain(issue,tracer?)` uses the same log.
 
 ### Standard library namespaces
 
@@ -292,25 +299,28 @@ The root entry also re-exports the standard library for building junco workflows
 
 | Namespace | Contents | Source |
 |---|---|---|
-| `graph` | `DataflowGraph`, `JuncoGraph` (with `JuncoGraph.parallel`, `JuncoGraph.spawn`, `JuncoGraph.pi`, `JuncoGraph.compact`), edges (`Edge.message`, `Edge.value`, `Message.create`, `from`), `NodeId`/`EdgeId`, `Width`/`UNBOUNDED`, `Queue` (`Queue.from`, `Queue.empty`), `renderPretty`, the definition/node errors, and the node/edge types | `dataflow-engine`, this package |
-| `graph.nodes` | Node constructors: `ConstFanout`, `ConstFanin`, `StepNode`, `EmitOnce`, `Deterministic`, and the `Agentic`/`AgenticInput`/`AgenticNode`/`CompactionPolicy` types | `dataflow-engine`, this package |
+| `graph` | `DataflowGraph`, `JuncoGraph` (with `create`, `map`, `spawn`, `compact`), native observations/execution, edges (`Edge.message`, `Edge.value`, `Message.create`, `from`), `NodeId`/`EdgeId`, `Width`/`UNBOUNDED`, `Queue`, `renderPretty`, errors and native node/edge types | `dataflow-engine`, this package |
+| `graph.nodes` | `Source`, `Sink`, `ConstFanout`, `ConstFanin`, `StepNode`, `EmitOnce`, `Deterministic`, and the `Agentic`/`AgenticInput`/`AgenticNode`/`CompactionPolicy` types | `dataflow-engine`, this package |
 | `trigger` (also `graph.trigger`) | `TriggerRule`, `TriggerEntry` and `TriggerKind` (`"all"` or `"any"`); rules `TriggerRule.allOf(...)`, `TriggerRule.anyOf(...)`, `TriggerRule.when(edge)`, `TriggerRule.always()`, `TriggerRule.never()`; entries `TriggerEntry.on(edge)`, typed by their edge's message and result payloads; `evaluateTrigger`, `satisfiedEdges` | `dataflow-engine` |
 | `agent` | `JuncoAgent`, `JuncoAgentError`, `TaskPolicy`, `TaskFailurePolicy`, `SubagentObserver`, and the `Agentic` protocol types | `junco-agent` |
 | `tools` | Everything `junco-tools` exports: `ToolCollection`, `LspTool`, the native tool classes' `create` factories (`ReadTool.create`, `BashTool.create`, …), `YieldTool`/`isYieldTool`, the graph messaging tools `new RecvTool()`/`new SendTool()`/`new InfoTool()` (each class with static `.is`/`.invoke`) and their edge `Contract`, `TaskTool`/`AssignedTaskTool`/`isTaskTool`/`isAssignedTaskTool`/`invokeTaskTool` with the `TaskInput`/`TaskDecision`/`TaskRequest`/`TaskCall` contracts, the always-on `ComplainTool`/`isComplainTool`/`invokeComplainTool` with the shared `issueLog` and its `Issue`/`Prompt` types, ShellMux operations (`ShellMuxOperations`, `ShellMuxLease`), the Marsh policy-denial check, and the type-only `NativeModule`, `NativeMux` and `EditStore` contracts | `junco-tools` |
-| `schedulers` | `Scheduler`, `ParallelScheduler`, `RoundRobinScheduler` (both extend `Scheduler`), `PiScheduler`, the `DataflowScheduler` contract and its schedule types, `triggerInputs` (a model-driven agency graph is `graph.JuncoGraph.pi`) | `junco-scheduler`, `dataflow-engine` |
+| `schedulers` | The three operators `choose`, `separate`, `agent`; derived `parallel`, `roundRobin`; agency-aware `context`; stateless `pi`; `Decision`, `Snapshot`, `Scheduler`, `SchedulerContext`, `AgencyNodeMetadata`, `PiOptions`, `SchedulerRequest`, and the native observation type | `junco-scheduler`, this package |
 | `tracer` | `DataflowTracer`, `DataflowRunTrace`, `DataflowStepTrace`, the no-op `DummyTracer`, and `TuiTracer` (`shared()` selects the lazy interactive default or Dummy; `await create(name?)` explicitly acquires a TUI) | `dataflow-engine`, this package |
 
 ```ts
 import { graph, schedulers, tracer, trigger } from "junco-agency";
+import { context } from "junco-scheduler";
 
-const g = new graph.DataflowGraph(new schedulers.ParallelScheduler(), graph.Width.create(1), graph.UNBOUNDED, new tracer.DummyTracer());
+const g = new graph.DataflowGraph<void, number, string, never>(graph.Width.create(1), graph.UNBOUNDED, new tracer.DummyTracer());
+const execution = context({ graph: g, scheduler: schedulers.parallel() });
 const a = graph.Edge.message<number, string>("a");
 const source = g.addNode(new graph.nodes.ConstFanout(7, [a], { state: undefined, ret: "sent" }));
-const sink = g.addNode(new graph.nodes.StepNode(() => [], { state: undefined, trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(a)) }));
+const sink = g.addNode(new graph.nodes.StepNode<void, number, string>(() => [], { state: undefined, trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(a)) }));
 g.addEdge(source, sink, a);
+await execution.run();
 ```
 
-A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikTracer` from the `dataflow-engine-opik` workspace package, or `tracer.TuiTracer.shared()`) as its fourth argument, or omit it to run untraced. A `JuncoGraph` always takes one (see [Tracing](#tracing-local-only)). The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
+A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer` (for example `OpikTracer` from `dataflow-engine-opik`, or `tracer.TuiTracer.shared()`) as its third argument, or omit it to run untraced. A `JuncoGraph` takes its tracer or `undefined` as the fifth argument, after its ports and bounds. The Opik adapter is not re-exported; this package does not depend on `dataflow-engine-opik` or `opik`.
 
 ### Prompt agents: `graph.addNode({ ...options, state: agent })`
 
@@ -320,11 +330,12 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 - One member can run in successive graphs, staged before each later registration with `stagePrompt`; its session keeps every earlier run.
 - A finished node keeps its agent alive and usable until a graph containing it closes.
 
-### Nested graphs: `{ ...options, state: child, result }`
+### Nested graphs: `{ ...options, state: childContext }`
 
-- The node's state is the child graph itself. Its body first yields nothing; every later activation calls `receive` with the delivered batch and only unseen parent results, then advances the child once: a policy-scheduled child takes one `child.step()`, a `PiScheduler` child one `scheduler.next()`. After each successful advance `afterStep` runs, then the node completes with `child.result(result)` once a policy child is quiescent, or once a Pi child settled with stop reason `stop` and nothing available; otherwise it yields nothing and stays resumable. A selected `undefined` is a real result.
-- `result` is required (`TypeError` otherwise) and must name a registered child node (`DataflowDefinitionError` otherwise). A quiescent child without that result fails with `invalid_state`; so do an idle Pi scheduler without a staged prompt (unless it already settled with the result retained), a non-`stop` settlement, and a normal settlement with graph work still available. A closed scheduler fails with `closed`. Cancellation through the child's signal wins over any result. By default the node is available once started or whenever its trigger fires.
-- A nested node has no return-only message output. To send messages on its parent's outgoing edges, call the parent's inherited `graph.emit(nestedNodeId, Message.create(edge, payload))` from `afterStep`; on the completing activation the messages are queued before the node's result is published, in the same parent step. The Ralph workflow sends only its final round this way.
+- Register the child's `SchedulerContext`, not a bare graph. The registered native state is still the actual `childContext.graph`. Priming yields nothing and makes no child decision. Each later parent activation admits its edge-addressed message batches and once-only value keys into the child's Source, then advances at most one child decision.
+- Source routing is scheduled deterministic work; it validates/converts the original `ParentView` and returns messages for explicitly wired internal edges. An empty view is ignored. Each graph requires fresh Source/Sink instances with mandatory distinct branded IDs; inbound source edges, outbound sink edges and value edges out of the non-returning source are rejected.
+- Only after successful child work, its Sink drains FIFO messages through the parent wrapper's real sender ID. A completing sink can stage its final messages and return its exact `T` in one activation. Failed delivery retains the undelivered suffix, and child failure/cancellation publishes nothing.
+- Quiescence returns exactly `childContext.graph.result(childContext.graph.sink.id)`, including present `undefined`. Absence is an `invalid_state` failure. Intermediate member results never become nested output. A precompleted child with empty ingress can publish its retained sink result without another child decision.
 
 ### Workflows: `junco-agency/workflows`
 
@@ -339,25 +350,25 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 - `new Deterministic(body, policy, collection?)` invokes `body(signal, collection)` once; the generator speaks the engine's own protocol (dependent bodies start with `let view = yield []`, sources may emit immediately) and its closure holds any state. `step()` hands the coroutine to one consumer only; a second registration or a direct advance before it fails with `invalid_state`, and advancing a finished coroutine fails with `invalid_state`.
 - `abort(reason)` aborts `signal` and joins the advance in flight; a rejection with exactly that reason is cancellation. `close()` (and async disposal) is cached: it signals pending work, joins it, then drains the generator through `return()`, discarding cleanup batches; later advances reject with `closed`, and an advance in flight when close began rejects with the signal's reason rather than publishing cleanup output. A sole cleanup error rejects as itself, several as `AggregateError("Deterministic close failed")`. Bodies that ignore their signal cannot be preempted.
 
-### Scheduling: `JuncoGraph.pi`
+### Scheduling: policies paired with work graphs
 
-- The scheduler is `junco-scheduler`'s `PiScheduler`: `PiScheduler.make` when a native `model` is given, otherwise `PiScheduler.opus` (GitHub Copilot `claude-opus-5.5` through Pi's saved login; a missing model or login fails with `JuncoAgentError`, without fallback). Both factories take the same `PiSchedulerOptions` (whose `prompt` is string-only): `make` rejects with `invalid_argument` unless `model`, `models` and `session` are all given, while `opus` ignores a supplied `model` and checks saved logins only on a model collection that can list them (a bare native collection fails its login check). Its only tool is `schedule({ lanes })`, frozen with its schema; `setTools` and `setActiveTools` accept nothing else. Its instructions are appended to the caller's `systemPrompt` (a callback keeps native `this` and context).
-- Every request ends with a transient `SchedulerInfo:` user message, never persisted or emitted: the window/thread bounds and only the currently available nodes, each with its node status and `details` — its native `description` when present, plus a prompt agent's status and latest pause reasons. Unavailable or finished nodes, results and edges are never shown; a node's absence, or a quiescent snapshot, proves neither completion nor any output. The graph's owner reads node results with `graph.result(id)`.
-- `JuncoGraph.pi` assigns the graph before it resolves, so the scheduler always reads its own graph; its adapter still rejects a snapshot, run admission or window with `invalid_state`, before any provider call, if the graph is missing. Nodes and edges may be added at any time; there is no topology snapshot.
-- Lanes run concurrently; position `k` of every lane forms column `k`, which starts after column `k - 1` finishes. A ready member's first occurrence only primes it. Only ids available when the window starts may be planned, within `threads` lanes and `window` columns; the engine validates the whole plan before anything runs, and later columns skip members that finished or went idle. Reads follow each member's trigger: `allOf` reads everything or nothing, and `anyOf` prefers an input over an already delivered parent result.
-- Each successful call runs exactly one graph window and returns a fresh `SchedulerInfo`; the scheduler's run continues, so consecutive `schedule` turns drive successive windows within one `next()`. More than one `schedule` call in a response rejects all of them before any graph work; invalid plans and nonempty plans with nothing available are ordinary tool errors; an empty plan with nothing available just returns `SchedulerInfo`. Nothing is retried or replayed automatically.
-- A normally finishing run is accepted only when no graph work remains available and observed work was scheduled; otherwise it fails with `invalid_state`. A member failure fails the run with the original `DataflowNodeError` even if the model then answers normally. `error`/`aborted` final messages and stopping runs pass through unchanged.
+- The core language has exactly three operators: `choose({ where?, rank, width? })` ranks available owned nodes with raw string-ID ties, `separate(leftOwns, left, right)` partitions exclusive selection authority and concatenates validated child decisions left-to-right, and `agent(invoke)` normalizes one oracle response. `parallel()` and history-derived `roundRobin(order?, width?)` are derived policies. A `Scheduler<S,N,T,C>` is an ordinary sync/async function returning `{ selected: readonly NodeIdType[] }`; application priority, FIFO, random choice and fallback remain ordinary TypeScript.
+- `schedulers.context({ graph, scheduler })` supplies agency metadata (`agentStatus`, `lastYield`) and unseen-value/task-inbox reads. For a plain native graph use `context` from `junco-scheduler`, with optional typed `describeNode` and pure `readInputs` hooks. Pairing performs no observation, provider call, registration or binding. Policies are reusable; histories belong independently to each context, not the graph or policy closure. `execution.step()` takes at most one decision; `execution.run()` repeats to quiescence, without asking a policy when no work is available.
+- Snapshots retain exact native state/message/result and caller metadata types. Their all-node records, topology tuples, queue arrays, result membership, metadata map and history are detached readonly containers. Opaque state/message/result/metadata values are borrowed identities, not deep-cloned or frozen; callbacks must only read them, and applications needing historical object contents must use immutable data. Native mutation and non-empty Source admission invalidate an in-flight decision; metadata is captured freshly for every decision.
+- `separate` separates only authority over existing work-node IDs and projects history to each branch. Native observations, external metadata and thread bounds stay shared. Authority safety does not promise thread feasibility, progress, fairness, JavaScript memory/effect isolation or external-service isolation. The frame rule applies only to owned-local readonly callbacks; ordinary TypeScript is not sandboxed. Policies, contexts and branches never become work nodes or transports.
+- `schedulers.pi({ models, model, systemPrompt?, prompt?, streamOptions? })` is a stateless oracle using `models.completeSimple`: one request per current decision, no scheduler session, iterator, hidden conversation or default model. The last user message is `SchedulerSnapshot:\n` plus a `SchedulerRequest<C>` containing version, threads (`null` for unbounded), available-owned native node IDs/status/descriptions, their defined external metadata pairs and projected history. Native state, inputs and results are omitted; only the application's metadata must be JSON-serializable. Use `agent` for deliberate data-aware summaries.
+- The only model tool is strict `schedule({ waves: string[][] })`. Later waves are speculative: stable-deduplicate and filter each to available owned IDs, execute the first non-empty wave, then recompute from a fresh snapshot. A ready node is only primed on first selection. Exactly one schedule call with `stopReason: "toolUse"` is required; malformed/extra keys, missing/multiple calls and provider failures reject before work. No retry, text-only settlement or fallback is invented.
+- Every decision lowers to one native column. Duplicate, unowned or unavailable selections, invalid reads, stale decisions and exceeded native capacity fail before activation/input consumption. Empty top-level selection with available work is an error; a branch may abstain beside a progressing sibling. History commits actual started IDs after a column drains, even if work failed. Native execution drains admitted work before releasing its evaluation gate.
 
 ### Lifecycle: `JuncoGraph`
 
-- `step()`/`run()` observe `graph.signal` without any argument. Passing `{ signal }` also binds caller cancellation for that evaluation: it recursively aborts members already executing, starts no later column, and waits for the active column and requested abort cleanup. The listener is removed on completion; an already-aborted caller starts no work. Cancellation does not close the graph, but interrupted members do not resume their cancelled runs. A cancelled drive rejects with the reason or a `DataflowNodeError` caused by it; concurrent drive and abort failures are retained together in an `AggregateError`. Pi scheduler windows exclude their driving scheduler from the abort join to avoid waiting on their own tool execution.
-- `abort(reason)` snapshots membership recursively (nested graphs, each graph's `PiScheduler` before its members, agents and coroutines; shared or cyclic states once), starts every non-closed agent's or scheduler's native `abort()` and every coroutine's `abort(reason)` synchronously, then aborts each visited graph's signal with the same reason. It settles when they all do, failures rejecting as one ordered `AggregateError("Graph abort failed")`, and then gives each nonterminal graph a fresh signal. A pending abort is joined; a closed graph rejects `closed`.
-- `close()` is terminal and cached, including its failure: agents, schedulers and coroutines are closed through their `Symbol.asyncDispose` — so a subclass's own async disposal and the cleanup it awaits are joined — never a separate abort; every visited graph's signal aborts with one `Graph closed` reason. Later drives reject, results stay readable, and `await using` closes on scope exit. Abort and close are stack-safe at any finite depth.
-- An agency scheduler's own `abort()`/`return()` cascades through its graph's members the same way, excluding itself; a later `graph.close()` joins that native close. Lifecycle promises join resource lifecycles, not arbitrary node-body awaits; callers observe their run promises separately.
+- Context drives enter the graph's generic `evaluate` scope before planning and observe `graph.signal`. Passing `{ signal }` also binds caller cancellation for that evaluation: recursively abort active resources, start no later work, and join the current provider/port/node work and cleanup. Already-aborted calls start nothing. Original cancellation wins; distinct concurrent cleanup failures are retained through existing aggregation.
+- `abort(reason)` snapshots native membership recursively (graphs, agents and coroutines; shared/cyclic states once), starts resource cancellation, aborts each graph signal and joins resource operations plus active evaluations before replacing nonterminal controllers. A pending abort is joined; a closed graph rejects `closed`. Ports are deterministic work, not independent lifecycle resources.
+- `close()` is terminal and cached, including failure. It aborts graph signals and joins active planning/execution and each agent/coroutine's async disposal before releasing collection holds. Results remain readable. Close and abort are stack-safe; internal cancellation cleanup never awaits its own evaluation gate. Contexts and policies own no resources and have no inverse graph binding.
 
 ### Context compaction: `JuncoGraph.compact`
 
-- Every prompt agent reports `context_size()`, an estimate of its current conversation's tokens, and `compact()`, which queues Pi's compaction after any admitted run and resolves to `undefined`. `JuncoGraph.compact(graph, policy)` (or `graph.compact(policy)`) applies `compact()` to the direct `JuncoAgent`/`MockAgent` node states of any graph; nested graphs and coroutines are skipped, never compacted recursively. It never runs the graph or consumes messages or results, and a scheduler is compacted only when it is itself a node. A policy outside `CompactionPolicy` rejects with `invalid_argument` before the graph is inspected.
+- Every prompt agent reports `context_size()`, an estimate of its conversation's tokens, and `compact()`, which queues Pi's compaction after any admitted run. `JuncoGraph.compact(graph, policy)` (or `graph.compact(policy)`) applies it only to direct `JuncoAgent`/`MockAgent` states; nested graphs, coroutines and ports are skipped. It never executes work or consumes inputs/results. An unknown policy rejects with `invalid_argument` before inspection.
 - `"all"` and `"more-than-forty"` consider every node, finished or unavailable included; `"all-available"` and `"more-than-forty-available"` take one `graph.available()` snapshot. Selection happens when `JuncoGraph.compact` is called; later readiness or topology changes do not alter it.
 - Threshold policies read each candidate's `context_size()` and `getModel()` once and select members holding strictly more than 40% of their model's `contextWindow`. A member whose model or window is missing, non-finite or not positive rejects the compaction with `invalid_state` before any request is made.
 - Each selected member gets one request, all dispatched without waiting for one another; every request finishes, and failures reject as one `AggregateError("Graph compaction failed")` in node order, keeping each member's original error — a member closed while its compaction is pending or accepted contributes its `closed` error. Successful members stay compacted.
@@ -365,7 +376,7 @@ A generic `DataflowGraph`'s tracer stays optional: pass a `tracer.DataflowTracer
 
 ## Verification
 
-`bun run test` is the deterministic default suite, run by CI with coverage (`bun run test:coverage`, LCOV at `coverage/lcov.info`, uploaded by the `test` job as the `agency-coverage` artifact; it reports agency `src/` only). Each package's implementation is tested by its own suite: `dataflow-engine` (`tests/`, graph/trigger/scheduler/tracer/primitives), `junco-scheduler` (`test/scheduler.test.ts` core, `test/pi-scheduler.test.ts` Pi adapter), `junco-agent` (`test/junco-agent.test.ts`) and `junco-tools` (`tests/*.test.mjs` under Node). The agency's own suites do not repeat them; `test/std-namespaces.test.ts` composes the root `graph`, `schedulers`, `tracer` and `trigger` namespaces into one fan-out/fan-in graph, and `test/agentic.types.ts` plus `test/std-namespaces.types.ts` (root `bun run typecheck`) compile every exported type as a consumer contract. Its prompt agents are `MockAgent`s (exported from `src/mock-agent.ts`): an `Agentic` that replays one constant transcript — scripted yields, terminals, hook results, events and maintenance records — with `JuncoAgent`'s status, admission, queue, iterator, abort and close semantics, and no provider, harness, tool or session. `test/mock-agent.test.ts` checks that complete surface. `test/agent-node.test.ts` and `test/deterministic-agency.test.ts` run real `JuncoGraph`s of mock agents, `Deterministic` coroutines and nested graphs on `junco-scheduler`'s `RoundRobinScheduler` (`Width.create(1)` × `Width.create(1)`) and `ParallelScheduler` (`Width.create(1)` × `UNBOUNDED`): the prompt-agent adapter, value-once priming, all five dispatched methods, single-prompt and close failures, suspended continuation, `anyOf`/`allOf` reads, shared `NodeOptions` availability across kinds, nested-graph completion, result selection and captured-signal cancellation, both policies' window contracts, recursive abort/close over cyclic and shared graphs, graph-signal cancellation, close-once and failed-close reuse, and 4096-deep nesting. `test/deterministic.test.ts` covers the coroutine's cooperative abort, close draining, direct `return`/`throw`, async iteration, single-consumer and finished guards. `bun run smoke` runs `test/deterministic-agency.fixture.ts` (one producer/worker graph per policy, closed through `graph.close()`) and prints:
+`bun run test` is the deterministic default suite, run by CI with agency-source coverage (`coverage/lcov.info`). Packages test their own implementation: engine graph/trigger/tracer/primitives; scheduler `test/scheduler.test.ts`, `test/scheduler-dsl.property.test.ts` (executable CSL authority laws with fast-check), and faux-only `test/agent.test.ts`; native agent/tool behavior in their packages. Root type fixtures cover typed observations, metadata, ports and context subtype preservation. Root mock-backed suites exercise both `roundRobin()` (window/thread 1) and `parallel()` (window 1/unbounded threads): native priming, all/any reads, batches, unseen-value fairness, nested sink-only completion, cancellation, resource ownership, shared/cyclic graphs and deep stack-safe traversal. Mock transcripts preserve agent admission, queue, yield, result, abort and close semantics without a provider. `bun run smoke` drives one real context per policy, closes its graph, and prints:
 
 ```json
 {"scheduler":"round-robin","producer":"seed","worker":"done","inputs":["upstream: seed","context first","then work"],"closed":true}
@@ -378,9 +389,9 @@ The default suite also runs `test/compaction.test.ts`: each policy's selection o
 
 The mock replays Agentic interactions; it does not simulate provider reasoning, native policy denial or tool execution. Those, and the Pi scheduler itself, are covered by separately runnable suites; CI runs `test:integration`, `test:native` and both workflow smokes, but not `smoke:pi`:
 
-- `bun run test:integration` (offline, faux providers): the real `PiScheduler` factories and Opus acquisition from a fixture login, `JuncoGraph.pi` graph assignment, candidate-only `SchedulerInfo` with native descriptions, schedule-tool plans, input fairness, nested Pi graphs, 32-level recursive driving, abort/close cascades, the OSS committee, the mixed example, and the Ralph workflow (`test/ralph-workflow.test.ts`: default and configured round counts, final-only publication timing, assignment protocol, failed rounds, native yields, idle admission, cancellation, and isolation of several workflows in one parent). `bun test test/oss-committee.test.ts` runs twelve network-free committee tests with injected GitHub responses: value-edge gating within a round, failed-lookup yield handoff before Librarian resumes, success followed by failure, truncated final reports before and after handoff, valid empty search, approval guards, scoped/malformed search metadata and GitHub trust signals, revision rounds that route the Reducer's feedback to Librarian and Architect until approval, a round without a verdict, and a failed lookup followed by a normal round. Neither those offline tests nor `flush()` prove live GitHub access or Copilot entitlement.
+- `bun run test:integration` (offline, faux providers): stateless `pi` and candidate-only `SchedulerRequest<AgencyNodeMetadata>` with native descriptions, strict wave protocol, input fairness, nested contexts, 32-level recursive driving, pending-provider cancellation/drain, the OSS committee, mixed example and Ralph workflow. Ralph coverage retains configured rounds, final-only publication, assignment validation, failures, native yields, idle admission, cancellation and independent state. Committee tests retain value-edge gating, failed-lookup partial handoff, normal/truncated/empty research, verdict guards, revision routing and scoped search metadata. These checks and tracer flush do not prove live GitHub access or provider entitlement.
 - `bun run smoke:workflows` (after `bun run build`) runs `test/workflows.fixture.ts` under Node's TypeScript stripping against the built `junco-agency` and `junco-agency/workflows` entrypoints, and `bun run smoke:workflows:bun` runs it under Bun against the source entrypoints. Using the root `agent`, `tools`, `graph` and `trigger` namespaces, it first checks a tool created by `new tools.YieldTool()`: `turn_end` subscribers see its successful result before `JuncoAgent` suspends, only the next explicit `next()` resumes the run, and `return()` closes it terminally. It then runs a three-round Ralph over a native agent on a faux model, checking that the nested graph is the root bundle's `JuncoGraph` and that closing the parent closes it and the agent. Both print `{"rounds":3,"delivered":["draft-3"],"sharedGraphIdentity":true,"closed":true}`.
-- `bun run smoke:pi` runs the offline recursive Pi example with automatic tracing: interactive terminals show the TUI until dismissal; redirected runs stay silently untraced. After restoration it prints `root complete; leaf-result + sibling-result; 3 root windows`.
+- `bun run smoke:pi` runs the offline recursive Pi example with automatic tracing: interactive terminals show the TUI until dismissal; redirected runs stay silently untraced. After restoration it prints `root complete; leaf-result + sibling-result; 11 root decisions`.
 - `bun run smoke:tui` is a credential-free real-terminal smoke using native agents with faux responses. With the production addon built, run it in an interactive terminal (`TERM=xterm-256color`, at least 100×30): observe Alpha then Beta green, stable upper topology and live lower-pane text, then press `q` after completion. It checks terminal restoration before printing `TUI_SMOKE_OK`; it needs neither a Btrfs mount nor model credentials.
 - `bun run test:native` includes the real Linux PTY tests in `test/tui-tracer.test.ts` (automatic/explicit acquisition, live member and task traces, failure, dismissal and terminal restoration) and `test/policy-yield.test.ts`, which uses junco-tools' real Marsh policy through the CopyTree native test addon (see Setup): denied `edit`, applying `ast_edit`, and `bash` calls pause in source order without publishing edits or starting a second model request until resumed. A failed native test is not evidence of a passing policy boundary, and the deterministic policy-reason scenario does not prove native enforcement.
 - `bun run test:all` runs all three suites. The build can be loaded under Node.js with `node --input-type=module -e 'await import("./dist/index.js")'`.

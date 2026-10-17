@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -41,7 +41,6 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   const groups: GroupMsg[] = [];
   const tracer = ExampleTracer.create("cookbook/bigquery-side-input");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -140,7 +139,8 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   graph.addEdge(attachId, sinkId, resultsEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(
       groups.map((g) => [g.id, g.corpus, g.word]),

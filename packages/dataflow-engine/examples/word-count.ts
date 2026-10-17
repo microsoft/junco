@@ -1,4 +1,4 @@
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import {
   DataflowGraph,
   Edge,
@@ -29,7 +29,6 @@ const unifiedCounts = new Map<string, number>();
 
 const tracer = ExampleTracer.create("examples/word-count");
 const graph = new DataflowGraph<void, Msg, string, never>(
-  new ParallelScheduler(),
   Width.create(1),
   UNBOUNDED,
   tracer,
@@ -140,7 +139,8 @@ graph.addEdge(splitterId, charSumId, charCountEdge);
 graph.addEdge(charSumId, charSumSinkId, charSumEdge);
 
 try {
-  await graph.run();
+  const execution = context({ scheduler: parallel(), graph });
+  await execution.run();
 
   console.log(
     JSON.stringify({

@@ -14,9 +14,10 @@ import {
   TriggerRule,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticInput, tools } from "../src/index.ts";
+import { type AgenticInput, tools } from "junco-agency";
 import {
-  policyGraph,
+  policyContext,
+  terminalPorts,
   STRATEGIES,
   type Strategy,
   textOf,
@@ -156,7 +157,9 @@ export async function runDeterministicFixture(
     },
   );
 
-  await using graph = policyGraph(strategy);
+  const ports = terminalPorts();
+  const graphContext = policyContext(ports.source, ports.sink, strategy);
+  await using graph = graphContext.graph;
   const p = graph.addNode({
     id: NodeId.create("producer"),
     state: producer.agent,
@@ -176,7 +179,8 @@ export async function runDeterministicFixture(
   });
   graph.addEdge(p, w, handoff).addEdge(p, w, value);
 
-  await graph.run();
+  ports.connect(graph, w);
+  await graphContext.run();
 
   const outputs = [p, w].map((id) => {
     const result = graph.result(id);
@@ -200,7 +204,10 @@ export async function runDeterministicFixture(
     [...(infos.worker[0]?.parents ?? [])].sort(byEdge),
     routes.map((route) => ({ ...route, id: p })).sort(byEdge),
   );
-  assert.deepEqual(infos.worker[0]?.children, []);
+  assert.deepEqual(infos.worker[0]?.children, [{
+    id: graph.sink.id, edgeId: "terminal->$sink", kind: "value",
+    expect: "Graph output consumes final work results and publishes messages.",
+  }]);
 
   // Parent result first, then message FIFO, from what recv actually returned.
   const inputs = [

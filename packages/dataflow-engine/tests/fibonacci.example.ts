@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import type { NodeGenerator } from "../src/index.ts";
 import {
@@ -25,7 +25,6 @@ test("cookbook: fibonacci via self-loop", async () => {
   const results: number[] = [];
   const tracer = ExampleTracer.create("cookbook/fibonacci");
   const graph = new DataflowGraph<void, number, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -83,7 +82,8 @@ test("cookbook: fibonacci via self-loop", async () => {
   graph.addEdge(fibId, sinkId, fibOut);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(results, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]);
     assert.equal(completed.get(fibId), "emitted 10 fibs");

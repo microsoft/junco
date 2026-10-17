@@ -1,41 +1,15 @@
-import { type NodeSchedule, triggerInputs } from "dataflow-engine";
-import { Scheduler } from "./scheduler.js";
+import { type NodeIdType } from "dataflow-engine";
+import { type Decision, type Snapshot } from "./scheduler.js";
 
-/**
- * Run every candidate at once: one single-entry lane per available node, in candidate order, one
- * turn per window. An empty candidate set plans `[]`. Stateless (`state: undefined`).
- *
- * The plan is never capped or split across later columns, so its lane count is the number of
- * available nodes. Construct the graph with `threads = UNBOUNDED` and `window = Width.create(1)`: with
- * fewer finite threads than candidates the graph rejects the plan as a definition error before any
- * node advances, rather than silently throttling. Each entry reads `triggerInputs(candidate)`.
- *
- * @example
- * ```ts
- * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
- * import { ParallelScheduler } from "junco-scheduler";
- *
- * const graph = new DataflowGraph<void, number, string, never>(
- *   new ParallelScheduler(),
- *   Width.create(1),
- *   UNBOUNDED,
- * );
- * ```
- */
-export class ParallelScheduler<N = unknown, T = unknown> extends Scheduler<
-  undefined,
-  N,
-  T
-> {
-  constructor() {
-    super({
-      state: undefined,
-      schedule: (available) => {
-        const lanes: NodeSchedule[][] = [];
-        for (const [id, candidate] of available)
-          lanes.push([{ id, inputs: triggerInputs(candidate) }]);
-        return lanes;
-      },
-    });
-  }
+/** Select every available owned node in candidate order; native capacity stays authoritative. */
+export function parallel(): <S, N, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
+  signal?: AbortSignal,
+) => Decision | Promise<Decision> {
+  return (snapshot) => {
+    const selected: NodeIdType[] = [];
+    for (const id of snapshot.available)
+      if (snapshot.owned.has(id)) selected.push(id);
+    return { selected };
+  };
 }

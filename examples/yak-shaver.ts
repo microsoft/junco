@@ -24,8 +24,8 @@
  *    caller definition, and a positive projected net of removed nonblank source lines, its edits
  *    are applied in place and exactly its paths are released (`release -- <path>`) inside one managed
  *    command, so the lane's owner both edits and releases its files. Completed applications drain
- *    one at a time; research and review stay parallel. After a batch that applied anything, a
- *    private, discarded `graft build` refreshes the in-memory snapshot for the next admission.
+ *    one at a time; research and review stay parallel. After a batch that applied anything, the same
+ *    trusted sandboxed Bash build publishes Graft's generated cache and refreshes the next admission.
  * 5. **Output (§10).** `runYakShaver` acquires everything, runs `graft build .` through the trusted
  *    collection's sandboxed `bash` tool so every run starts from a current index, awaits
  *    `refactorCandidates`, and prints a structured run on stdout; no report file. Nothing is committed.
@@ -34,6 +34,9 @@
  * one (agents, research, applier) and the trusted-build `tools.EmptyPolicy` one (`graft build`, index
  * refresh) — the shared model runtime, and an OpikTracer configured by the SDK's OPIK_*
  * environment/config. Batch graph traces are exported to Opik and flushed before collections close.
+ * Generated-cache writes may retain the build owner's claims; a failed build may publish partial
+ * cache changes, but rejects before admitting a stale snapshot. Each agent factory checks its pinned
+ * model's account eligibility before the batch runs; both roles reuse the shared model runtime.
  * Every Graft MCP
  * connection is discard-only and lives for one call. Each batch graph owns its fresh lane agents and
  * their native research children and is closed before the next batch is admitted. Previously
@@ -53,11 +56,12 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, contentText, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { OpikTracer } from "dataflow-engine-opik";
-import { agent, graph, mcp, tools, tracer } from "junco-agency";
+import * as O from "fp-ts/lib/Option.js";
+import { agent, graph, mcp, schedulers, tools, tracer } from "junco-agency";
 import { Opik } from "opik";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -1266,26 +1270,19 @@ export type CandidateLane = {
   readonly verdict: VerdictRecorder;
 };
 
-type CandidateBatchGraphOptions = {
+type CandidateBatchRunOptions = {
   readonly snapshot: GraftSnapshot;
   readonly lanes: readonly CandidateLane[];
   readonly observer?: tracer.DataflowTracer;
   /** What happens to a failed researcher; default `"ignore"`: its shard stays incomplete. */
   readonly taskFailurePolicy?: agent.TaskFailurePolicy;
-};
-
-type CandidateBatchRunOptions = CandidateBatchGraphOptions & {
   readonly apply: RefactorApplier;
+  readonly collection?: tools.ToolCollection;
 };
 
 type CandidateGraphLane = Omit<CandidateLane, "proposer" | "judge"> & {
   readonly proposerId: graph.NodeIdType;
   readonly judgeId: graph.NodeIdType;
-};
-
-type CandidateBatchGraph = {
-  readonly workflow: graph.JuncoGraph;
-  readonly lanes: readonly CandidateGraphLane[];
 };
 
 /** A member's answer counts only when its run finished normally with text. */
@@ -1299,36 +1296,74 @@ function finalText(message: AssistantMessage | undefined, member: string): strin
   return text;
 }
 
-/** Attempt every closer in order, then rethrow `primary`, aggregated with any close failures. */
-async function disposeAll(primary: unknown, closers: readonly (() => Promise<unknown>)[], message: string): Promise<never> {
-  const failures: unknown[] = [];
-  for (const close of closers) {
-    try {
-      await close();
-    } catch (error) {
-      failures.push(error);
-    }
+/**
+ * A lane's structured results once it completed: `undefined` while its proposer (or, for a
+ * proposal, its judge) is still working. At quiescence an incomplete lane is a protocol error, as is
+ * a missing final message, proposal, or required verdict. Consumes the lane's recorders.
+ */
+function completedAnalysis(
+  lane: CandidateGraphLane,
+  results: ReadonlyMap<graph.NodeIdType, AssistantMessage>,
+  quiescent: boolean,
+): CandidateAnalysis | undefined {
+  const rank = lane.work.rank;
+  const proposerMessage = results.get(lane.proposerId);
+  if (proposerMessage === undefined && !quiescent) return undefined;
+  finalText(proposerMessage, `Proposer:${rank}`);
+  const recorded = lane.proposal.peek();
+  if (recorded === undefined) throw new Error(`Proposer:${rank} finished without recording ${lane.proposal.tool.name}`);
+  if (recorded.kind === "none") {
+    if (results.has(lane.judgeId) || lane.verdict.takeVerdict() !== undefined) throw new Error(`Judge:${rank} ran for a no-proposal result`);
+    lane.proposal.takeProposal();
+    return { proposal: recorded };
   }
-  if (failures.length > 0) throw new AggregateError([primary, ...failures], message, { cause: primary });
-  throw primary;
+  const judgeMessage = results.get(lane.judgeId);
+  if (judgeMessage === undefined && !quiescent) return undefined;
+  finalText(judgeMessage, `Judge:${rank}`);
+  const verdict = lane.verdict.takeVerdict();
+  if (verdict === undefined) throw new Error(`Judge:${rank} finished without recording ${lane.verdict.tool.name}`);
+  lane.proposal.takeProposal();
+  return { proposal: recorded, verdict };
 }
 
 /**
- * One batch graph over fresh lane agents, in rank order. Takes ownership of every supplied agent:
- * on a construction failure it closes the graph (and the agents already registered) and disposes
- * the rest; once it returns, the graph owns them all.
+ * Construct one batch graph and drive it one step at a time. After every successful step each newly
+ * completed lane is finalized once: a `none` result needs no judge; a reviewed proposal that passes
+ * every gate is applied and released at once through `options.apply`, without waiting for other
+ * lanes. Completed applications drain one at a time, in lane order, before the next step. The graph,
+ * with every native descendant and unrun judge, is closed before the outcomes return; on a failure
+ * application stops and earlier applications remain published.
  */
-async function createCandidateBatch(options: CandidateBatchGraphOptions): Promise<CandidateBatchGraph> {
+export async function runCandidateBatch(options: CandidateBatchRunOptions, signal?: AbortSignal): Promise<readonly CandidateOutcome[]> {
   const { snapshot, lanes } = options;
-  const workflow = graph.JuncoGraph.parallel(tools.LockPolicy, options.observer);
-  const unregistered = new Set(lanes.flatMap((lane) => [lane.proposer, lane.judge]));
+  const unregistered = new Set(lanes.flatMap(({ proposer, judge }) => [proposer, judge]));
+  const outcomes = new Map<number, CandidateOutcome>();
+  const graphLanes: CandidateGraphLane[] = [];
+  let acquired: graph.JuncoGraph | undefined;
   try {
     if (lanes.length === 0 || lanes.length > CANDIDATE_BATCH_SIZE) {
       throw new Error(`A candidate batch has 1–${CANDIDATE_BATCH_SIZE} lanes, not ${lanes.length}`);
     }
     if (new Set(lanes.map((lane) => lane.work.rank)).size !== lanes.length) throw new Error("Candidate batch ranks must be unique");
-    const graphLanes: CandidateGraphLane[] = [];
-    for (const lane of lanes) {
+    const finalResults = lanes.map((lane) => graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>(`Proposer:${lane.work.rank}->$sink`));
+    const source = new graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>(() => {
+      throw new graph.DataflowDefinitionError("Yak shaver does not accept external input");
+    }, { id: graph.NodeId.create("$source") });
+    const sink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage> = new graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
+      yield [];
+      const last = lanes.reduce((last, lane) => lane.work.rank > last.work.rank ? lane : last);
+      const result = workflow.result(graph.NodeId.create(`Proposer:${last.work.rank}`));
+      if (O.isNone(result)) throw new Error("Final proposer did not produce a result");
+      return result.value;
+    }, {
+      id: graph.NodeId.create("$sink"),
+      trigger: graph.trigger.TriggerRule.allOf(...finalResults.map((edge) => graph.trigger.TriggerEntry.on(edge))),
+      is_available: (_view, triggered) => triggered && lanes.every((lane) => outcomes.has(lane.work.rank)),
+    });
+    const workflow = new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, options.observer, tools.LockPolicy, options.collection);
+    acquired = workflow;
+    const execution = schedulers.context({ scheduler: schedulers.parallel(), graph: workflow });
+    for (const [index, lane] of lanes.entries()) {
       const { work } = lane;
       const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter(isResearchTool);
       await lane.proposer.setTaskBatch(researchTasks(snapshot, work, research));
@@ -1373,68 +1408,16 @@ async function createCandidateBatch(options: CandidateBatchGraphOptions): Promis
         },
       });
       unregistered.delete(lane.judge);
-      workflow.addEdge(proposerId, judgeId, proposalEdge);
+      workflow.addEdge(proposerId, judgeId, proposalEdge).addEdge(proposerId, sink.id, finalResults[index]!);
       graphLanes.push({ work, proposal: lane.proposal, verdict: lane.verdict, proposerId, judgeId });
     }
-    return { workflow, lanes: graphLanes };
-  } catch (error) {
-    return disposeAll(
-      error,
-      [() => workflow.close(), ...[...unregistered].map((member) => () => member.return())],
-      "Candidate batch construction failed",
-    );
-  }
-}
-
-/**
- * A lane's structured results once it completed: `undefined` while its proposer (or, for a
- * proposal, its judge) is still working. At quiescence an incomplete lane is a protocol error, as is
- * a missing final message, proposal, or required verdict. Consumes the lane's recorders.
- */
-function completedAnalysis(
-  lane: CandidateGraphLane,
-  results: ReadonlyMap<graph.NodeIdType, AssistantMessage>,
-  quiescent: boolean,
-): CandidateAnalysis | undefined {
-  const rank = lane.work.rank;
-  const proposerMessage = results.get(lane.proposerId);
-  if (proposerMessage === undefined && !quiescent) return undefined;
-  finalText(proposerMessage, `Proposer:${rank}`);
-  const recorded = lane.proposal.peek();
-  if (recorded === undefined) throw new Error(`Proposer:${rank} finished without recording ${lane.proposal.tool.name}`);
-  if (recorded.kind === "none") {
-    if (results.has(lane.judgeId) || lane.verdict.takeVerdict() !== undefined) throw new Error(`Judge:${rank} ran for a no-proposal result`);
-    lane.proposal.takeProposal();
-    return { proposal: recorded };
-  }
-  const judgeMessage = results.get(lane.judgeId);
-  if (judgeMessage === undefined && !quiescent) return undefined;
-  finalText(judgeMessage, `Judge:${rank}`);
-  const verdict = lane.verdict.takeVerdict();
-  if (verdict === undefined) throw new Error(`Judge:${rank} finished without recording ${lane.verdict.tool.name}`);
-  lane.proposal.takeProposal();
-  return { proposal: recorded, verdict };
-}
-
-/**
- * Construct one batch graph and drive it one step at a time. After every successful step each newly
- * completed lane is finalized once: a `none` result needs no judge; a reviewed proposal that passes
- * every gate is applied and released at once through `options.apply`, without waiting for other
- * lanes. Completed applications drain one at a time, in lane order, before the next step. The graph,
- * with every native descendant and unrun judge, is closed before the outcomes return; on a failure
- * application stops and earlier applications remain published.
- */
-export async function runCandidateBatch(options: CandidateBatchRunOptions, signal?: AbortSignal): Promise<readonly CandidateOutcome[]> {
-  const built = await createCandidateBatch(options);
-  const outcomes = new Map<number, CandidateOutcome>();
-  try {
     signal?.throwIfAborted();
     let results: ReadonlyMap<graph.NodeIdType, AssistantMessage> = new Map();
-    while (built.workflow.available().size > 0) {
-      results = await built.workflow.step(signal === undefined ? {} : { signal });
+    while (workflow.available().size > 0) {
+      results = await execution.step(signal === undefined ? {} : { signal });
       signal?.throwIfAborted();
       const completed: [CandidateWork, CandidateAnalysis][] = [];
-      for (const lane of built.lanes) {
+      for (const lane of graphLanes) {
         if (outcomes.has(lane.work.rank)) continue;
         const analysis = completedAnalysis(lane, results, false);
         if (analysis !== undefined) completed.push([lane.work, analysis]);
@@ -1465,17 +1448,30 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
         });
       }
     }
-    for (const lane of built.lanes) {
+    for (const lane of graphLanes) {
       if (outcomes.has(lane.work.rank)) continue;
       completedAnalysis(lane, results, true);
       throw new Error(`Lane ${lane.work.rank} completed without being finalized`);
     }
   } catch (error) {
-    return disposeAll(error, [() => built.workflow.close()], "Candidate batch failed and did not close cleanly");
+    let failure = error;
+    try {
+      await acquired?.close();
+    } catch (closeError) {
+      failure = new SuppressedError(closeError, failure);
+    }
+    for (const member of [...unregistered].reverse()) {
+      try {
+        await member[Symbol.asyncDispose]();
+      } catch (closeError) {
+        failure = new SuppressedError(closeError, failure);
+      }
+    }
+    throw failure;
   }
-  await built.workflow.close();
+  await acquired!.close();
   signal?.throwIfAborted();
-  return built.lanes.map((lane) => outcomes.get(lane.work.rank)!);
+  return graphLanes.map((lane) => outcomes.get(lane.work.rank)!);
 }
 
 /** Applies one reviewed refactor and releases exactly its paths; resolves their sorted unique list. */
@@ -1872,124 +1868,19 @@ export async function applyRefactor(
   }
 }
 
-/**
- * The refresh worker, serialized into `bun --eval`: runs `graft build .` in its private view,
- * forwards bounded build output to stderr, emits exactly one JSON frame on stdout, then stays alive
- * until the parent aborts it so the rebuilt cache is never published.
- */
-function refreshWorker(graphFile: string): void {
-  const { spawnSync } = process.getBuiltinModule("node:child_process");
-  const fs = process.getBuiltinModule("node:fs");
-  const emit = (frame: unknown) => process.stdout.write(`${JSON.stringify(frame)}\n`);
-  try {
-    const build = spawnSync("graft", ["build", "."], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
-    const output = `${build.stdout ?? ""}${build.stderr ?? ""}`;
-    if (output !== "") process.stderr.write(output.slice(-64 * 1024));
-    if (build.error !== undefined) throw build.error;
-    if (build.status !== 0) throw new Error(`graft build . exited ${build.status ?? build.signal}`);
-    emit({ kind: "snapshot", text: fs.readFileSync(graphFile, "utf8") });
-  } catch (error) {
-    emit({ kind: "snapshot_failed", error: error instanceof Error ? error.message : String(error) });
-  }
-  setInterval(() => {}, 1 << 30);
-}
-
-/**
- * The current source's Graft snapshot, rebuilt inside one managed, discarded process: the rebuilt
- * `graft/` cache is never published or claimed, so later batches inspect current source without
- * owning ignored files.
- */
-export async function refreshGraftSnapshot(root: string, mux: tools.NativeMux, signal?: AbortSignal): Promise<GraftSnapshot> {
+/** Rebuild and publish the Graft cache through the caller's trusted build collection. */
+export async function refreshGraftSnapshot(
+  root: string,
+  buildCollection: tools.ToolCollection,
+  signal?: AbortSignal,
+): Promise<GraftSnapshot> {
   signal?.throwIfAborted();
-  const stdout: Buffer[] = [];
-  let framed = false;
-  let extra = false;
-  let diagnostics = 0;
-  let streamError: unknown;
-  let notify!: () => void;
-  const reported = new Promise<void>((resolve) => {
-    notify = resolve;
-  });
-  const onStdout = (error: Error | null, data: Buffer) => {
-    if (error !== null) {
-      streamError ??= error;
-      notify();
-      return;
-    }
-    if (framed) {
-      extra ||= data.length > 0;
-      return;
-    }
-    stdout.push(data);
-    const newline = data.indexOf(0x0a);
-    if (newline >= 0) {
-      framed = true;
-      extra = newline < data.length - 1;
-      notify();
-    }
-  };
-  const onStderr = (error: Error | null, data: Buffer) => {
-    if (error !== null) {
-      streamError ??= error;
-      notify();
-      return;
-    }
-    if (diagnostics >= DIAGNOSTIC_LIMIT) return;
-    const kept = data.subarray(0, DIAGNOSTIC_LIMIT - diagnostics);
-    diagnostics += kept.length;
-    process.stderr.write(kept);
-  };
-  const child = await mux.spawn(
-    {
-      command: process.execPath,
-      args: ["--eval", `(${refreshWorker.toString()})(${JSON.stringify(GRAPH_FILE)})`],
-      cwd: root,
-      principal: "yak-graft-refresh",
-      env: inheritedEnvironment(),
-    },
-    onStdout,
-    onStderr,
-  );
-  const outcome = child.wait().then(
-    (result) => ({ result }) as const,
-    (error: unknown) => ({ error }) as const,
-  );
-  const onAbort = () => child.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  let final: Awaited<typeof outcome>;
-  let exitedFirst: boolean;
-  try {
-    if (signal?.aborted) child.abort();
-    exitedFirst = (await Promise.race([outcome.then(() => true), reported.then(() => false)])) === true;
-    child.abort();
-    final = await outcome;
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-  if ("error" in final) throw final.error;
+  const bash = buildCollection.tools.find((tool) => tool.name === "bash");
+  if (bash === undefined) throw new Error("The native tool collection has no bash tool");
+  const result = await bash.execute("yak-shaver-refresh", { command: "graft build ." }, signal);
+  if ("isError" in result && result.isError === true) throw new Error(`bash failed: ${contentText(result.content)}`);
   signal?.throwIfAborted();
-  if (exitedFirst || !final.result.cancelled) {
-    throw new Error(
-      `The Graft refresh worker exited (code ${final.result.exitCode ?? "none"}) before it could be discarded; its cache may have been published`,
-    );
-  }
-  if (streamError !== undefined) throw new Error("The Graft refresh worker's output failed", { cause: streamError });
-  if (!framed || extra) throw new Error("The Graft refresh worker must emit exactly one JSON line");
-  const line = Buffer.concat(stdout).toString("utf8").trimEnd();
-  let frame: unknown;
-  try {
-    frame = JSON.parse(line);
-  } catch (error) {
-    throw new Error("The Graft refresh worker emitted malformed JSON", { cause: error });
-  }
-  if (typeof frame !== "object" || frame === null || !("kind" in frame)) throw new Error("The Graft refresh worker emitted an unknown frame");
-  if (frame.kind === "snapshot_failed" && "error" in frame && typeof frame.error === "string") {
-    throw new Error(`Refreshing the Graft snapshot failed: ${frame.error}`);
-  }
-  if (frame.kind !== "snapshot" || !("text" in frame) || typeof frame.text !== "string") {
-    throw new Error("The Graft refresh worker emitted an unknown frame");
-  }
-  return parseSnapshot(frame.text);
+  return parseSnapshot(await readFile(join(root, GRAPH_FILE), "utf8"));
 }
 
 // ## 10. The live runner
@@ -2066,102 +1957,18 @@ function repositorySourceReader(root: string, rootReal: string, baseline: Readon
 
 const WORK_TREE_ROOT_REQUIRED = "Yak shaver requires a Git working-tree root";
 
-/** Requires `root` to be a Git working-tree root, asked through one managed, read-only command. */
-async function requireWorkTreeRoot(mux: tools.NativeMux, root: string, signal?: AbortSignal): Promise<void> {
+/** Requires a Git working-tree root through the protected collection's native bash tool. */
+async function requireWorkTreeRoot(collection: tools.ToolCollection, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
-  const chunks: Buffer[] = [];
-  const run = mux.start(
-    { command: "git rev-parse --is-inside-work-tree --show-prefix", cwd: root, principal: "yak-preflight", env: inheritedEnvironment() },
-    (error, data) => {
-      if (error === null) chunks.push(data);
-    },
-  );
-  const abort = () => run.abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  const result = await run.wait().finally(() => signal?.removeEventListener("abort", abort));
+  const bash = collection.tools.find((tool) => tool.name === "bash");
+  if (bash === undefined) throw new Error("The native tool collection has no bash tool");
+  const result = await bash.execute("yak-shaver-preflight", { command: "git rev-parse --is-inside-work-tree --show-prefix" }, signal);
   signal?.throwIfAborted();
-  const output = Buffer.concat(chunks).toString("utf8");
+  const output = contentText(result.content);
   // At the root, `--show-prefix` prints an empty line.
-  if (result.exitCode !== 0 || result.cancelled || result.timedOut || !/^true\r?\n\r?\n$/.test(output)) {
-    throw new Error(WORK_TREE_ROOT_REQUIRED, { cause: new Error(`git rev-parse: ${JSON.stringify(result)} ${output.trim()}`) });
+  if (("isError" in result && result.isError === true) || !/^true\r?\n\r?\n$/.test(output)) {
+    throw new Error(WORK_TREE_ROOT_REQUIRED, { cause: new Error(`git rev-parse: ${output}`) });
   }
-}
-
-function graftTool(available: readonly AgentTool[], name: string): AgentTool {
-  const matches = available.filter((tool) => {
-    const identity = mcp.getJuncoMcpToolIdentity(tool);
-    return identity?.serverName === "graft" && identity.originalToolName === name;
-  });
-  if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.21.1-compatible server is required`);
-  return matches[0]!;
-}
-
-/**
- * `template`'s schema, name, and description, executed on a fresh discard-only connection that is
- * closed before the call resolves: no Graft server, and none of its cache writes, outlive one call.
- * `open` holds connections not yet closed, for the runner's cleanup.
- */
-function discardingGraftTool(
-  definition: mcp.JuncoMcpTools,
-  root: string,
-  collection: tools.ToolCollection,
-  template: AgentTool,
-  name: string,
-  open: Set<mcp.JuncoMcpConnection>,
-): AgentTool {
-  return {
-    ...template,
-    async execute(toolCallId, params, signal, onUpdate) {
-      const connection = await definition.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
-      open.add(connection);
-      const close = async () => {
-        try {
-          await connection.close();
-        } finally {
-          open.delete(connection);
-        }
-      };
-      let result: AgentToolResult<unknown>;
-      try {
-        result = await graftTool(connection.tools, name).execute(toolCallId, params, signal, onUpdate);
-      } catch (error) {
-        return disposeAll(error, [close], `Graft ${name} failed and its connection was not discarded cleanly`);
-      }
-      await close();
-      return result;
-    },
-  };
-}
-
-/** Text of a direct MCP tool call; an `isError` result is a failure. */
-async function callTool(tool: AgentTool, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  const result = await tool.execute(`yak-shaver-${tool.name}`, args, signal);
-  const text = contentText(result.content);
-  if ("isError" in result && result.isError === true) throw new Error(`${tool.name} failed: ${text}`);
-  return text;
-}
-
-async function pinnedModels(): Promise<ModelRuntime> {
-  const models = await ModelRuntime.create();
-  if (!(await models.listCredentials()).some(({ providerId }) => providerId === PROVIDER)) {
-    throw new Error("A saved Pi GitHub Copilot login is required");
-  }
-  const available = await models.getAvailable(PROVIDER);
-  for (const pin of [PROPOSER_MODEL, JUDGE_MODEL]) {
-    const model = available.find((candidate) => candidate.id === pin.model);
-    if (model === undefined) throw new Error(`${PROVIDER}/${pin.model} is unavailable`);
-    if (!getSupportedThinkingLevels(model).includes(pin.thinkingLevel)) {
-      throw new Error(`${PROVIDER}/${pin.model} does not support thinking level ${pin.thinkingLevel}`);
-    }
-  }
-  return models;
-}
-
-/** `collection`'s tool named `name`. */
-function collectionTool(collection: tools.ToolCollection, name: string): AgentTool {
-  const tool = collection.tools.find((candidate) => candidate.name === name);
-  if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
-  return tool;
 }
 
 /**
@@ -2175,39 +1982,38 @@ function liveRunner(options: {
   readonly rootReal: string;
   readonly buildCollection: tools.ToolCollection;
   readonly collection: tools.ToolCollection;
-  /** The Graft MCP definition and the runner's set of connections not yet discarded. */
   readonly graft: mcp.JuncoMcpTools;
-  readonly connections: Set<mcp.JuncoMcpConnection>;
+  readonly resources: AsyncDisposableStack;
   readonly observer: tracer.DataflowTracer;
   readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
 }): { readonly runBatch: BatchRunner; readonly refreshSnapshot: SnapshotRefresher } {
   const { root, collection, observer } = options;
   let shared: { readonly models: ModelRuntime; readonly research: readonly AgentTool[] } | undefined;
 
-  /** The research tool schemas, read over one discard-only connection once `graft build` made an index. */
-  const graftTools = async (signal?: AbortSignal): Promise<AgentTool[]> => {
-    const { graft, connections } = options;
-    const preflight = await graft.connect({ cwd: root, collection, discardOnClose: true, ...(signal === undefined ? {} : { signal }) });
-    connections.add(preflight);
-    try {
-      return GRAFT_RESEARCH_TOOLS.map((name) =>
-        discardingGraftTool(graft, root, collection, graftTool(preflight.tools, name), name, connections),
-      );
-    } finally {
-      try {
-        await preflight.close();
-      } finally {
-        connections.delete(preflight);
-      }
-    }
-  };
-
   const acquireShared = async (signal?: AbortSignal) => {
     if (shared !== undefined) return shared;
-    const models = await pinnedModels();
+    const models = await ModelRuntime.create();
     signal?.throwIfAborted();
-    const research = await graftTools(signal);
-    for (const name of FILE_RESEARCH_TOOLS) research.push(collectionTool(collection, name));
+    const connection = options.resources.adopt(
+      await options.graft.connect({
+        cwd: root, collection, toolLifetime: "call", discardOnClose: true,
+        ...(signal === undefined ? {} : { signal }),
+      }),
+      (connection) => connection.close(),
+    );
+    const research = GRAFT_RESEARCH_TOOLS.map((name) => {
+      const matches = connection.tools.filter((tool) => {
+        const identity = mcp.getJuncoMcpToolIdentity(tool);
+        return identity?.serverName === "graft" && identity.originalToolName === name;
+      });
+      if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.21.1-compatible server is required`);
+      return matches[0]!;
+    });
+    for (const name of FILE_RESEARCH_TOOLS) {
+      const tool = collection.tools.find((tool) => tool.name === name);
+      if (tool === undefined) throw new Error(`The native tool collection has no ${name} tool`);
+      research.push(tool);
+    }
     shared = { models, research };
     return shared;
   };
@@ -2251,7 +2057,15 @@ function liveRunner(options: {
         lanes.push({ work, proposer, judge, proposal, verdict });
       }
     } catch (error) {
-      return disposeAll(error, [...acquired].reverse().map((member) => () => member.return()), "Lane acquisition failed");
+      let failure = error;
+      for (const member of acquired.reverse()) {
+        try {
+          await member[Symbol.asyncDispose]();
+        } catch (closeError) {
+          failure = new SuppressedError(closeError, failure);
+        }
+      }
+      throw failure;
     }
     const apply: RefactorApplier = async (refactor, applySignal) => {
       // Only the refactor's own targets, at this batch's baseline; a create's target was absent.
@@ -2261,13 +2075,13 @@ function liveRunner(options: {
       options.onApplied(refactor, files);
       return files;
     };
-    return runCandidateBatch({ snapshot, lanes, observer, apply, taskFailurePolicy: "ignore" }, signal);
+    return runCandidateBatch({ snapshot, lanes, observer, collection, apply, taskFailurePolicy: "ignore" }, signal);
   };
 
   return {
     runBatch,
     // The fixed index-refresh command is not model-authored: it runs under the trusted policy.
-    refreshSnapshot: (signal) => refreshGraftSnapshot(root, options.buildCollection.mux, signal),
+    refreshSnapshot: (signal) => refreshGraftSnapshot(root, options.buildCollection, signal),
   };
 }
 
@@ -2282,15 +2096,16 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
   signal?.throwIfAborted();
 
   const observer = new OpikTracer(new Opik(), "runYakShaver");
-  const failures: unknown[] = [];
-  const connections = new Set<mcp.JuncoMcpConnection>();
+  const resources = new AsyncDisposableStack();
   let protectedCollection: tools.ToolCollection | undefined;
   let buildCollection: tools.ToolCollection | undefined;
-  let run: RefactorRun | undefined;
+  let run!: RefactorRun;
   let applied = 0;
+  let failed = false;
+  let failure: unknown;
   try {
     protectedCollection = await tools.ToolCollection.create(root, { policy: tools.LockPolicy, sandbox: "always" });
-    await requireWorkTreeRoot(protectedCollection.mux, root, signal);
+    await requireWorkTreeRoot(protectedCollection, signal);
     buildCollection = await tools.ToolCollection.create(root, { policy: tools.EmptyPolicy, sandbox: "always" });
     const graft = mcp.JuncoMcpTools.add({
       name: "graft",
@@ -2305,35 +2120,21 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
       buildCollection,
       collection: protectedCollection,
       graft,
-      connections,
+      resources,
       observer,
       onApplied: (refactor, files) => {
         applied++;
         console.log(`Applied and released ${refactor.candidate.definition.id}: ${files.join(", ")}`);
       },
     });
-    signal?.throwIfAborted();
-    await callTool(collectionTool(buildCollection, "bash"), { command: "graft build ." }, signal);
-    signal?.throwIfAborted();
-    const snapshot = parseSnapshot(await readFile(join(root, GRAPH_FILE), "utf8"));
+    const snapshot = await refreshGraftSnapshot(root, buildCollection, signal);
     run = await refactorCandidates(snapshot, live.runBatch, live.refreshSnapshot, signal);
   } catch (error) {
-    failures.push(error);
+    failed = true;
+    failure = error;
   }
-  // Every release is attempted, in order, whatever failed before it; the collections close last.
   for (const release of [
-    async () => {
-      const errors: unknown[] = [];
-      for (const connection of connections) {
-        try {
-          await connection.close();
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-      connections.clear();
-      if (errors.length > 0) throw new AggregateError(errors, "Graft connections were not discarded cleanly");
-    },
+    () => resources.disposeAsync(),
     () => observer.flush(),
     () => buildCollection?.close(),
     () => protectedCollection?.close(),
@@ -2341,22 +2142,17 @@ export async function runYakShaver(repositoryRoot: string = process.cwd(), signa
     try {
       await release();
     } catch (error) {
-      failures.push(error);
+      failure = failed ? new SuppressedError(error, failure) : error;
+      failed = true;
     }
   }
-  if (failures.length > 0) {
-    if (applied === 0) {
-      if (failures.length === 1) throw failures[0];
-      throw new AggregateError(failures, "Yak shaver failed", { cause: failures[0] });
-    }
-    const retained = `Previously applied and released changes are retained (${applied} refactor${applied === 1 ? "" : "s"})`;
-    if (failures.length === 1) {
-      const failure = failures[0];
-      throw new Error(`${failure instanceof Error ? failure.message : String(failure)}. ${retained}.`, { cause: failure });
-    }
-    throw new AggregateError(failures, `Yak shaver failed. ${retained}.`, { cause: failures[0] });
+  if (failed) {
+    if (applied === 0) throw failure;
+    throw new Error(
+      `Yak shaver failed. Previously applied and released changes are retained (${applied} refactor${applied === 1 ? "" : "s"}).`,
+      { cause: failure },
+    );
   }
-  if (run === undefined) throw new Error("No refactor run was produced");
   const { totals } = run;
   console.log(
     `Applied and released refactors: ${totals.applied}; projected new call sites: ${totals.addedCallSites}; net nonblank lines removed: ${totals.netLinesRemoved}`,

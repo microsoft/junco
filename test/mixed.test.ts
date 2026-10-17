@@ -102,14 +102,14 @@ async function mixedWorkflow(
         ),
       ]),
     };
-    const { graph, reviewerId } = MixedGraph.create(members, new DummyTracer());
+    const { execution, reviewerId } = MixedGraph.create(members, new DummyTracer());
     return {
-      graph,
+      execution,
       reviewerId,
       agents,
       prompts,
       async [Symbol.asyncDispose]() {
-        await graph.close();
+        await execution.graph.close();
       },
     };
   } catch (error) {
@@ -120,16 +120,16 @@ async function mixedWorkflow(
 
 /** Step the graph until `done`, failing instead of spinning once nothing can run. */
 async function stepUntil(
-  graph: {
-    available(): ReadonlyMap<unknown, unknown>;
+  execution: {
+    graph: { available(): ReadonlyMap<unknown, unknown> };
     step(): Promise<unknown>;
   },
   done: () => boolean,
 ) {
   while (!done()) {
-    if (graph.available().size === 0)
+    if (execution.graph.available().size === 0)
       throw new Error("Graph stalled before the expected request");
-    await graph.step();
+    await execution.step();
   }
 }
 
@@ -141,15 +141,16 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
   {
     await using flow = await mixedWorkflow();
     agents = flow.agents;
-    const { graph, reviewerId, prompts } = flow;
+    const { execution, reviewerId, prompts } = flow;
+    const graph = execution.graph;
     goalsSource = graph.getNode(NodeId.create("Goals"))?.state;
 
-    await stepUntil(graph, () => prompts.Ralph.length === 1);
+    await stepUntil(execution, () => prompts.Ralph.length === 1);
     assert.equal(prompts.Reviewer.length, 0);
     assert.ok(O.isNone(graph.result(ralphId)));
     assert.ok(O.isNone(graph.result(reviewerId)));
 
-    const results = await graph.run();
+    const results = await execution.run();
     const selected = results.get(reviewerId);
     assert.ok(selected?.content[0]?.type === "text");
     assert.equal(selected.content[0].text, "Ralph: clearer coverage.");
@@ -166,7 +167,7 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.ok(review.includes("draft-2"));
     assert.ok(!review.includes("draft-1"));
 
-    await graph.run();
+    await execution.run();
     assert.deepEqual(
       [prompts.Ralph.length, prompts.Direct.length, prompts.Reviewer.length],
       [2, 1, 1],
@@ -178,9 +179,10 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
 
 test("a failed second Ralph round rejects the graph and never reaches the Reviewer", async () => {
   await using flow = await mixedWorkflow(true);
-  const { graph, reviewerId, prompts } = flow;
+  const { execution, reviewerId, prompts } = flow;
+    const graph = execution.graph;
 
-  await assert.rejects(() => graph.run());
+  await assert.rejects(() => execution.run());
   assert.equal(prompts.Ralph.length, 2);
   assert.ok(O.isNone(graph.result(ralphId)));
   assert.ok(O.isNone(graph.result(reviewerId)));
@@ -189,9 +191,10 @@ test("a failed second Ralph round rejects the graph and never reaches the Review
 
 test("a blank Direct answer fails the Reviewer before any Reviewer request", async () => {
   await using flow = await mixedWorkflow(false, " ");
-  const { graph, reviewerId, prompts } = flow;
+  const { execution, reviewerId, prompts } = flow;
+    const graph = execution.graph;
 
-  const failure = await graph.run().then(
+  const failure = await execution.run().then(
     () => assert.fail("graph should reject"),
     (error: unknown) => error,
   );

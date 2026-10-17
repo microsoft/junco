@@ -584,6 +584,17 @@ export class JuncoAgent<
           { cause },
         );
       }
+      const available = await models.getAvailable(provider);
+      if (
+        !available.some(
+          (candidate) => candidate.provider === provider && candidate.id === modelId,
+        )
+      ) {
+        throw new JuncoAgentError(
+          "invalid_argument",
+          `Model not available: ${provider}/${modelId}`,
+        );
+      }
       if (suppliedSession === undefined) {
         owned.repo = new MemorySessionRepo();
         session = await owned.repo.create({}, BACKGROUND_CONTEXT);

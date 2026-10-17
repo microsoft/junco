@@ -1,6 +1,5 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { ParallelScheduler } from "junco-scheduler";
 import {
   DataflowGraph,
   Edge,
@@ -15,7 +14,7 @@ import {
 type Graph = DataflowGraph<unknown, number, string, never>;
 
 const newGraph = (): Graph =>
-  new DataflowGraph(new ParallelScheduler(), Width.create(1), UNBOUNDED);
+  new DataflowGraph<unknown, number, string, never>(Width.create(1), UNBOUNDED);
 
 const add = (graph: Graph, id: string, state: unknown = undefined): NodeId =>
   graph.addNode(

@@ -37,6 +37,7 @@ class Terminal {
   pending = "";
   cells: Cell[][] = [];
   readonly frames: Screen[] = [];
+  completedFrame: Screen | undefined;
 
   constructor() {
     this.clear();
@@ -53,6 +54,7 @@ class Terminal {
   resize(width: number, height: number) {
     this.width = width;
     this.height = height;
+    this.completedFrame = undefined;
     this.clear();
     this.x = 0;
     this.y = 0;
@@ -184,8 +186,11 @@ class Terminal {
             this.left++;
           }
         }
-        if (parameters.startsWith("?") && values.includes(25))
+        if (parameters.startsWith("?") && values.includes(25)) {
           this.cursorVisible = code === "h";
+          // Native draws end with cursor-hide; a PTY read may stop halfway through a draw.
+          if (!this.cursorVisible && this.alternate) this.completedFrame = this.screen();
+        }
         break;
     }
   }
@@ -247,6 +252,18 @@ function occurrences(
 }
 const graphText = (screen: Screen) => screen.rows.slice(1, 11).join("\n");
 const traces = (screen: Screen) => screen.rows.slice(13, 29).join("\n");
+
+/** Visible records for one concrete node, including their wrapped continuation rows. */
+function nodeTraces(screen: Screen, node: string): string {
+  const lines: string[] = [];
+  let selected = false;
+  for (const row of screen.rows.slice(13, 29)) {
+    const badge = row.match(/\[(?:g\d+:[^\]]+|system)\]/u)?.[0];
+    if (badge !== undefined) selected = badge === node;
+    if (selected) lines.push(row.slice(1, -1).trim());
+  }
+  return lines.join("");
+}
 const green = (screen: Screen, id: string) =>
   occurrences(screen, id, 1, 11).some(
     ({ cell }) => cell.color === "green" && cell.bold,
@@ -423,8 +440,15 @@ async function openPty(
       )!;
     },
     async screen(predicate: (screen: Screen) => boolean, description: string) {
-      await until(() => predicate(terminal.screen()), description);
-      return terminal.screen();
+      let result: Screen | undefined;
+      await until(() => {
+        const frame = terminal.completedFrame;
+        if (frame === undefined || !predicate(frame)) return false;
+        result = frame;
+        return true;
+      }, description);
+      assert.ok(result);
+      return result;
     },
     async input(bytes: string) {
       assert.ok(
@@ -483,8 +507,13 @@ for (const [flag, level, marker] of [
         async (pty) => {
           if (flag !== "--explicit") await pty.phase("constructed");
           await pty.phase("active");
+          const completeTopology = (screen: Screen) => {
+            const canvas = graphText(screen);
+            return canvas.includes("terminal->$sink (value)") &&
+              canvas.includes("alpha=>beta (value)");
+          };
           const alpha = await pty.screen(
-            (screen) => green(screen, "Alpha"),
+            (screen) => green(screen, "Alpha") && completeTopology(screen),
             "Alpha actively green",
           );
           assert.equal(
@@ -497,7 +526,7 @@ for (const [flag, level, marker] of [
           const betaTitle = await pty.screen(
             (screen) =>
               screen.rows[0]!.includes("active: [g1:Beta]") &&
-              !green(screen, "Alpha"),
+              !green(screen, "Alpha") && completeTopology(screen),
             "Beta scheduled after Alpha ends",
           );
           assert.equal(
@@ -517,19 +546,21 @@ for (const [flag, level, marker] of [
               screen.rows[0]!.includes("complete") &&
               !screen.rows[0]!.includes("active:") &&
               !green(screen, "Alpha") &&
-              graphText(screen).includes("Alpha"),
+              graphText(screen).includes("Alpha") && completeTopology(screen),
             "final inactive topology restored to its original viewport",
           );
           assert.equal(graphText(final), graphText(alpha));
           if (flag === "--fail") await pty.input("\t\x1b[H\x1b[6~");
           const messages = await pty.screen(
-            (screen) => traces(screen).includes("beta done"),
+            (screen) => screen.rows[0]!.includes("complete") &&
+              !screen.rows[0]!.includes("active:") &&
+              nodeTraces(screen, "[g1:Beta]").includes("beta done"),
             "finalized Beta message remains in trace history",
           );
           assert.equal(
-            occurrences(messages, "beta done", 13, 29).length,
+            nodeTraces(messages, "[g1:Beta]").replace(/\s+/gu, "").split("betadone").length - 1,
             1,
-            "stream finalization must not duplicate the message",
+            "Beta stream finalization must not duplicate Beta's message in another Beta record",
           );
           const betaBadge = occurrences(messages, ":Beta]", 13, 29);
           assert.ok(betaBadge.length > 0);
@@ -600,16 +631,25 @@ test(
         const active = await pty.screen(
           (screen) =>
             graphText(screen).includes("caller") &&
+            graphText(screen).includes("terminal->$sink") &&
             screen.rows[0]!.includes("task-"),
           "parent scene retained while the promoted child runs",
         );
-        await pty.input("\x1b[F");
-        const childScene = await pty.screen(
-          (screen) => graphText(screen).includes("task-"),
-          "promoted child topology reachable in the same graph pane",
-        );
+        const task = active.rows[0]!.match(/\[(g\d+):(task-[^\]]+)\]/u);
+        const taskScope = task?.[1];
+        const taskId = task?.[2];
+        assert.ok(taskScope && taskId, "active title identifies the actual promoted task and scope");
+        let childScene = active;
+        while (!occurrences(childScene, taskId, 1, 11).some(({ cell }) => cell.color !== "default")) {
+          const previous = graphText(childScene);
+          await pty.input("\x1b[6~");
+          childScene = await pty.screen(
+            (screen) => graphText(screen) !== previous,
+            "panning toward the actual promoted task node",
+          );
+        }
         assert.equal(
-          occurrences(childScene, "task-", 1, 11).filter(
+          occurrences(childScene, taskId, 1, 11).filter(
             ({ cell }) => cell.color !== "default",
           ).length,
           1,
@@ -622,32 +662,44 @@ test(
         );
         pty.command("worker");
         const complete = await pty.phase("tasks-complete");
-        assert.ok(complete.childId?.startsWith("task-"));
+        assert.equal(complete.childId, taskId);
         await pty.phase("awaiting-dismissal");
         const finalized = await pty.screen(
           (screen) =>
             screen.rows[0]?.includes("complete") === true &&
-            traces(screen).includes("combined: worker done"),
-          "completed promoted-agent scene",
+            !screen.rows[0]!.includes("active:") &&
+            graphText(screen) === graphText(active),
+          "completed promoted-agent scene retains the parent geometry",
         );
-        const finalText = finalized.rows
-          .slice(13, 29)
-          .join("")
-          .replace(/\s+/gu, "");
+        const wrapperText = nodeTraces(finalized, "[g1:caller]");
+        assert.ok(wrapperText.includes("return"), "the parent wrapper publishes its native return");
+        assert.equal(wrapperText.replace(/\s+/gu, "").split("combined:workerdone").length - 1, 0,
+          "the wrapper return does not replay the inner root's streamed message");
+        await pty.input("\t");
+        let tracePage = finalized;
+        const revealMessage = async (node: string, message: string): Promise<Screen> => {
+          const previous = traces(tracePage);
+          await pty.input("\x1b[H");
+          tracePage = await pty.screen((screen) => traces(screen) !== previous, "trace history at Home");
+          const expected = message.replace(/\s+/gu, "");
+          while (!nodeTraces(tracePage, node).replace(/\s+/gu, "").includes(expected)) {
+            const before = traces(tracePage);
+            await pty.input("\x1b[6~");
+            tracePage = await pty.screen((screen) => traces(screen) !== before,
+              `panning to ${node}'s retained message`);
+          }
+          return tracePage;
+        };
+        const rootMessage = await revealMessage(`[${taskScope}:root]`, "assistant: combined: worker done");
         assert.equal(
-          finalText.split("combined:workerdone").length - 1,
+          nodeTraces(rootMessage, `[${taskScope}:root]`).replace(/\s+/gu, "").split("combined:workerdone").length - 1,
           1,
-          "promotion must not repeat the streamed assistant message in its return record",
+          "promotion finalizes the actual root's streamed assistant message once",
         );
-        await pty.input("\t\x1b[H\x1b[6~");
-        await pty.screen(
-          (screen) =>
-            traces(screen).includes("worker done") &&
-            occurrences(screen, `${complete.childId}]`, 13, 29).some(
-              ({ cell }) => cell.color !== "default",
-            ),
-          "worker text correlated to its real scoped task ID",
-        );
+        const workerMessage = await revealMessage(`[${taskScope}:${taskId}]`, "assistant: worker done");
+        assert.ok(occurrences(workerMessage, `${taskId}]`, 13, 29).some(
+          ({ cell }) => cell.color !== "default",
+        ), "worker text retains its actual scoped task identity");
         assert.equal(pty.exited, false);
         await pty.input("q");
         await pty.done("TUI_TASKS_OK");
@@ -971,14 +1023,19 @@ import "junco-mcp";
 const listeners = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal));
 const addons = Object.keys(require.cache).filter((path) => path.endsWith(".node"));
 // Loading-boundary test: static root import would execute before the captured baselines.
-const { JuncoGraph, Deterministic, tracer, graph, trigger } = await import("junco-agency");
+const { JuncoGraph, Deterministic, tracer, graph, trigger, schedulers } = await import("junco-agency");
 import { LockPolicy } from "junco-tools";
 assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal)), listeners);
 assert.deepEqual(Object.keys(require.cache).filter((path) => path.endsWith(".node")), addons);
 assert.ok(tracer.TuiTracer.shared() instanceof tracer.DummyTracer);
-const flow = JuncoGraph.parallel(LockPolicy);
+const resultEdge = graph.Edge.value("quiet->$sink");
+const source = new graph.nodes.Source(() => { throw new graph.DataflowDefinitionError("Portable graph does not accept external input"); }, { id: graph.NodeId.create("$source") });
+const sink = new graph.nodes.Sink(async function* () { yield []; const result = flow.result(graph.NodeId.create("quiet")); if (result._tag !== "Some") throw new Error("quiet result is absent"); return result.value; }, { id: graph.NodeId.create("$sink"), trigger: trigger.TriggerRule.when(resultEdge) });
+const flow = new JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, LockPolicy);
+const execution = schedulers.context({ graph: flow, scheduler: schedulers.parallel() });
 const id = flow.addNode({ id: graph.NodeId.create("quiet"), trigger: trigger.TriggerRule.always(), state: new Deterministic(async function* () { yield []; return "done"; }, LockPolicy) });
-assert.equal((await flow.run()).get(id), "done");
+flow.addEdge(id, sink.id, resultEdge);
+assert.equal((await execution.run()).get(id), "done");
 await flow.close();
 await tracer.TuiTracer.shared().flush();
 await assert.rejects(tracer.TuiTracer.create(), (error) => error instanceof Error && error.message === ${JSON.stringify(terminalError)});

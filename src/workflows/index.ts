@@ -1,1 +1,1 @@
-export { Ralph, type RalphOptions } from "./ralph.js";
+export { Ralph, type RalphNodeOptions, type RalphOptions } from "./ralph.js";

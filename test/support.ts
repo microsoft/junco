@@ -17,7 +17,10 @@ import {
 import {
   DummyTracer,
   type EdgeIdType,
+  Source,
+  Sink,
   UNBOUNDED,
+  Width,
   type WidthType,
 } from "dataflow-engine";
 import type {
@@ -25,27 +28,30 @@ import type {
   JuncoAgent,
   Agentic as JuncoAgentProtocol,
 } from "junco-agent";
-import type { PiScheduler, SchedulerInfo } from "junco-scheduler/agent";
+import type { SchedulerContext } from "junco-scheduler";
+import { pi, type SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
 import {
+  type Agentic,
   type AgenticInput,
   agent as agentApi,
   JuncoGraph,
+  schedulers,
   tools as toolsApi,
-} from "../src/index.ts";
+} from "junco-agency";
 
-/** A graph driven by an agency `PiScheduler`, as every native-suite agency is. */
-export type PiGraph = JuncoGraph<
+import type { AgencyNodeMetadata } from "../src/node-policy.ts";
+
+export type AgencyContext = SchedulerContext<
+  Agentic<AgenticInput, AssistantMessage>,
   AgenticInput,
   AssistantMessage,
-  unknown,
-  PiScheduler<AgenticInput, AssistantMessage>
+  AgencyNodeMetadata,
+  JuncoGraph<AgenticInput, AssistantMessage>
 >;
 
-// Offline scaffolding: every agent gets its own faux provider in an explicit Models collection and
-// an in-memory session. Scheduler scripts read the SchedulerInfo of the request they answer.
-
+// Every real agent has an in-memory session; scheduler requests are stateless snapshots.
 let providers = 0;
 
 /** A faux model serving `responses` in order. */
@@ -141,95 +147,74 @@ export function waitingTool(
   };
 }
 
-/** The SchedulerInfo appended to the request that `context` belongs to. */
-export function schedulerInfoOf(context: Context): SchedulerInfo {
+/** The typed snapshot appended to the model request. */
+export function schedulerRequestOf(context: Context): SchedulerRequest<AgencyNodeMetadata> {
   for (let index = context.messages.length - 1; index >= 0; index--) {
     const message = context.messages[index]!;
     if (message.role !== "user") continue;
-    const content =
-      typeof message.content === "string"
-        ? message.content
-        : message.content
-            .map((block) => (block.type === "text" ? block.text : ""))
-            .join("");
-    if (content.startsWith("SchedulerInfo:\n")) {
-      return JSON.parse(
-        content.slice("SchedulerInfo:\n".length),
-      ) as SchedulerInfo;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((block) => block.type === "text" ? block.text : "").join("");
+    if (content.startsWith("SchedulerSnapshot:\n")) {
+      return JSON.parse(content.slice("SchedulerSnapshot:\n".length)) as SchedulerRequest<AgencyNodeMetadata>;
     }
   }
-  throw new Error("request carries no SchedulerInfo");
+  throw new Error("request carries no SchedulerSnapshot");
 }
 
-export type Decision =
-  | { readonly lanes: readonly (readonly string[])[] }
-  | { readonly text: string };
+export type Decision = { readonly waves: readonly (readonly string[])[] };
 
-/** Schedule every candidate in its own lane; once quiescent, answer a fixed completion. */
-export const runAvailable = (info: SchedulerInfo): Decision =>
-  info.nodes.length > 0
-    ? { lanes: info.nodes.map((node) => [node.id]) }
-    : { text: "graph quiescent" };
+export const runAvailable = (request: SchedulerRequest<AgencyNodeMetadata>): Decision => ({
+  waves: [request.nodes.map((node) => node.id)],
+});
 
-/** A faux scheduler model answering every request with `decide(SchedulerInfo)`. */
 export function schedulerModel(
-  decide: (info: SchedulerInfo, request: number) => Decision = runAvailable,
+  decide: (request: SchedulerRequest<AgencyNodeMetadata>, index: number) => Decision = runAvailable,
 ) {
   const { faux, models, model } = scripted();
   const decisions: Decision[] = [];
   const respond: FauxResponseFactory = (context) => {
     faux.appendResponses([respond]);
-    const decision = decide(schedulerInfoOf(context), decisions.length);
+    const decision = decide(schedulerRequestOf(context), decisions.length);
     decisions.push(decision);
-    return "lanes" in decision
-      ? fauxAssistantMessage(
-          [scheduleCall(decision.lanes, `schedule-${decisions.length}`)],
-          { stopReason: "toolUse" },
-        )
-      : fauxAssistantMessage(decision.text);
+    return fauxAssistantMessage(
+      [scheduleCall(decision.waves, `schedule-${decisions.length}`)],
+      { stopReason: "toolUse" },
+    );
   };
   faux.setResponses([respond]);
   return { faux, models, model, decisions };
 }
 
-/** One `schedule` tool call. */
 export const scheduleCall = (
-  lanes: readonly (readonly string[])[],
+  waves: readonly (readonly string[])[],
   id: string,
-) => fauxToolCall("schedule", { lanes }, { id });
+) => fauxToolCall("schedule", { waves }, { id });
 
-/** A scheduler script: a SchedulerInfo-driven decision, or explicit faux responses. */
 export type Script =
-  | ((info: SchedulerInfo, request: number) => Decision)
+  | ((request: SchedulerRequest<AgencyNodeMetadata>, index: number) => Decision)
   | readonly FauxResponseStep[];
 
-/** An agency graph over a fresh scheduler for `script`, staged with `prompt` when given. */
 export async function agencyGraph(
+  source: Source<AgenticInput, AssistantMessage>,
+  sink: Sink<AgenticInput, AssistantMessage>,
   script: Script = runAvailable,
   {
     prompt,
-    window = UNBOUNDED,
     threads = UNBOUNDED,
   }: {
     readonly prompt?: string;
-    readonly window?: WidthType;
     readonly threads?: WidthType;
   } = {},
-) {
+): Promise<{ context: AgencyContext; faux: FauxProviderHandle }> {
   const { faux, models, model } =
     typeof script === "function" ? schedulerModel(script) : scripted(script);
-  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
-  const graph: PiGraph = await JuncoGraph.pi({
-    session,
-    models,
-    model,
-    ...(prompt === undefined ? {} : { prompt }),
-    policy: LockPolicy,
-    tracer: new DummyTracer(),
-    window,
-    threads,
+  const graph = new JuncoGraph(source, sink, Width.create(1), threads, new DummyTracer(), LockPolicy);
+  const context = schedulers.context({
+    graph,
+    scheduler: pi({ models, model, ...(prompt === undefined ? {} : { prompt }) }),
   });
-  return { graph, scheduler: graph.scheduler, faux, session };
+  return { context, faux };
 }
 
 /** Resume through every pause until the current run settles or fails; returns that step. */

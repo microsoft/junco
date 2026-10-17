@@ -1,7 +1,6 @@
 // Offline recursive agency: root → child → grandchild → a leaf that yields once, plus a root sibling.
-// Every member has its own faux model; each scheduler model reads the SchedulerInfo of the request it
-// answers and, once nothing is available, reports completion. Member results are read from the
-// retained graphs, never through a scheduler. Run: bun run examples/recursive-agency.ts
+// Scheduler models select one current wave from SchedulerSnapshot; only work graphs own members.
+// Run: bun run examples/recursive-agency.ts
 
 import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
@@ -15,13 +14,17 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { NodeId, type NodeOptions, TriggerRule, UNBOUNDED } from "dataflow-engine";
+import { Edge, NodeId, type NodeOptions, TriggerRule, UNBOUNDED, Width } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
-import type { SchedulerInfo } from "junco-scheduler/agent";
+import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy, type ToolCollection, YieldTool } from "junco-tools";
-import { type AgenticInput, JuncoGraph, tracer } from "../src/index.ts";
+import { type AgenticInput, graph as graphApi, schedulers, tracer } from "../src/index.ts";
 import { ctrlC } from "./cancellation.ts";
+
+type AgencyContext = ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
+type Request = SchedulerRequest<schedulers.AgencyNodeMetadata>;
+type Plan = { readonly waves: readonly (readonly string[])[] };
 
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
@@ -38,65 +41,69 @@ async function nativeOptions(responses: readonly FauxResponseStep[]) {
   return { faux, options };
 }
 
-function schedulerInfoOf(context: Context): SchedulerInfo {
+function schedulerRequestOf(context: Context): Request {
   const last = context.messages.at(-1);
   const text = last?.role === "user"
     ? typeof last.content === "string"
       ? last.content
       : last.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("")
     : "";
-  assert.ok(text.startsWith("SchedulerInfo:\n"));
-  return JSON.parse(text.slice("SchedulerInfo:\n".length)) as SchedulerInfo;
+  assert.ok(text.startsWith("SchedulerSnapshot:\n"));
+  return JSON.parse(text.slice("SchedulerSnapshot:\n".length)) as Request;
 }
 
 const textOf = (message: AssistantMessage) =>
   message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 
-type Decision = { readonly lanes: string[][] } | { readonly text: string };
+/** One simultaneous wave, recomputed from the current request, including scheduled sink work. */
+const runAvailable = (request: Request): Plan => ({ waves: [request.nodes.map((node) => node.id)] });
 
-/** Run every available member; once nothing is available, report this scheduler's completion. */
-const runAvailable = (name: string) => (info: SchedulerInfo): Decision =>
-  info.nodes.length > 0 ? { lanes: info.nodes.map((node) => [node.id]) } : { text: `${name} complete` };
-
-async function agency(
+function agency(
   name: string,
   policy: ToolCollection["policy"],
-  members: readonly (JuncoAgent | JuncoGraph)[],
-  decide: (info: SchedulerInfo, request: number) => Decision,
+  members: readonly (JuncoAgent | AgencyContext)[],
+  decide: (request: Request) => Plan,
 ) {
-  let requests = 0;
-  const respond: FauxResponseFactory = (context) => {
+  const provider = `faux-${++providers}`;
+  const faux = fauxProvider({ api: provider, provider });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const decisions: string[][] = [];
+  const respond: FauxResponseFactory = (requestContext) => {
     faux.appendResponses([respond]);
-    const decision = decide(schedulerInfoOf(context), requests++);
-    return "lanes" in decision
-      ? fauxAssistantMessage([fauxToolCall("schedule", { lanes: decision.lanes }, { id: `${name}-${requests}` })], {
-          stopReason: "toolUse",
-        })
-      : fauxAssistantMessage(decision.text);
+    const decision = decide(schedulerRequestOf(requestContext));
+    decisions.push([...(decision.waves[0] ?? [])]);
+    return fauxAssistantMessage([
+      fauxToolCall("schedule", { waves: decision.waves }, { id: `${name}-${decisions.length}` }),
+    ], { stopReason: "toolUse" });
   };
-  const { faux, options } = await nativeOptions([respond]);
-  const graph = await JuncoGraph.pi({
-    ...options,
-    systemPrompt: `You schedule ${name}.`,
-    prompt: `Run ${name}.`,
-    policy,
-    tracer: tracer.TuiTracer.shared(),
-    window: UNBOUNDED,
-    threads: UNBOUNDED,
+  faux.setResponses([respond]);
+  const finalResult = Edge.value<AgenticInput, AssistantMessage>("0->$sink");
+  const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>(() => {
+    throw new graphApi.DataflowDefinitionError(`${name} does not accept external input`);
+  }, { id: NodeId.create("$source") });
+  const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> = new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): graphApi.NodeGenerator<AgenticInput, AssistantMessage> {
+    yield [];
+    const result = graph.result(NodeId.create("0"));
+    if (O.isNone(result)) throw new Error(`${name} member 0 did not produce a result`);
+    return result.value;
+  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(finalResult) });
+  const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> = new graphApi.JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer.TuiTracer.shared(), policy);
+  const context = schedulers.context({
+    scheduler: schedulers.pi({ models, model: faux.getModel(), systemPrompt: `You schedule ${name}.`, prompt: `Run ${name}.` }),
+    graph,
   });
-  const scheduler = graph.scheduler;
   for (const [index, member] of members.entries()) {
     const options: NodeOptions<AgenticInput, AssistantMessage> = {
       description: `${name} member ${index}`,
       trigger: TriggerRule.always(),
     };
-    graph.addNode(
-      member instanceof JuncoGraph
-        ? { ...options, state: member, result: NodeId.create("0") }
-        : { ...options, policy, state: member },
-    );
+    graph.addNode(member instanceof JuncoAgent
+      ? { ...options, policy, state: member }
+      : { ...options, state: member });
   }
-  return { graph, scheduler };
+  graph.addEdge(NodeId.create("0"), sink.id, finalResult);
+  return { context, decisions };
 }
 
 async function leafAgent(responses: readonly FauxResponseStep[], tools: readonly AgentTool[] = []) {
@@ -121,44 +128,35 @@ async function main(signal: AbortSignal) {
     if (event.status === "completed") log.push("sibling done");
   });
 
-  const grandchild = await agency("grandchild", LockPolicy, [leaf.agent], runAvailable("grandchild"));
-  const child = await agency("child", LockPolicy, [grandchild.graph], runAvailable("child"));
-  child.scheduler.events.on("tool_start", (event) => {
-    if (event.toolName === "schedule") log.push("child window");
+  const grandchild = agency("grandchild", LockPolicy, [leaf.agent], runAvailable);
+  const child = agency("child", LockPolicy, [grandchild.context], (request) => {
+    log.push("child decision");
+    return runAvailable(request);
   });
-  // The root primes both members, runs the child (all its windows), then the sibling, then the rest.
-  const rootPlan = [[["0"], ["1"]], [["0"]], [["1"]]];
-  const root = await agency("root", LockPolicy, [child.graph, sibling.agent], (info, request) =>
-    request < rootPlan.length ? { lanes: rootPlan[request]! } : runAvailable("root")(info),
-  );
-  // Every nested graph shares the automatically selected tracer.
-  let windows = 0;
-  let settled: string | undefined;
+  const root = agency("root", LockPolicy, [child.context, sibling.agent], (request) => {
+    if (request.history.length === 0) return { waves: [["0", "1"]] };
+    if (request.nodes.some((node) => node.id === "0")) return { waves: [["0"]] };
+    return runAvailable(request);
+  });
   const failures: unknown[] = [];
   let abortWork: Promise<void> | undefined;
   const interrupt = () => {
-    abortWork = root.graph.abort(signal.reason).catch((error) => {
+    abortWork = root.context.graph.abort(signal.reason).catch((error) => {
       failures.push(error);
     });
   };
   signal.addEventListener("abort", interrupt, { once: true });
   if (signal.aborted) interrupt();
   try {
-    root.scheduler.events.on("tool_end", (event) => {
-      if (event.toolName === "schedule" && !event.isError) windows++;
-    });
-    // Schedule windows run inside one public next(); only settlement ends it.
     signal.throwIfAborted();
-    const step = await root.scheduler.next();
+    await root.context.run({ signal });
     signal.throwIfAborted();
-    assert.ok(!step.done && step.value.kind === "settled", "root scheduler settled in one next()");
-    settled = textOf(step.value.message);
   } catch (error) {
     failures.push(error);
   } finally {
     signal.removeEventListener("abort", interrupt);
     await abortWork;
-    for (const release of [() => root.graph.close(), () => root.graph.tracer.flush()]) {
+    for (const release of [() => root.context.graph.close(), () => root.context.graph.tracer.flush()]) {
       try {
         await release();
       } catch (error) {
@@ -169,24 +167,29 @@ async function main(signal: AbortSignal) {
   if (failures.length > 0) throw new AggregateError(failures, "Recursive agency failed", { cause: failures[0] });
   signal.throwIfAborted();
 
-  const resultOf = (graph: JuncoGraph, id: string) => {
-    const result = graph.result(NodeId.create(id));
-    return O.isSome(result) ? textOf(result.value) : undefined;
+  const resultOf = (context: AgencyContext, id: string) => {
+    const result = context.graph.result(NodeId.create(id));
+    assert.ok(O.isSome(result), `Missing retained result ${id}`);
+    return result.value;
   };
-  const leafResult = resultOf(grandchild.graph, "0");
-  const siblingResult = resultOf(root.graph, "1");
-  assert.equal(settled, "root complete");
+  const final = resultOf(grandchild.context, "0");
+  const leafResult = textOf(final);
+  const siblingResult = textOf(resultOf(root.context, "1"));
   assert.equal(leafResult, "leaf-result");
   assert.equal(siblingResult, "sibling-result");
-  assert.equal(windows, 3);
+  for (const execution of [grandchild.context, child.context, root.context]) {
+    assert.equal(resultOf(execution, execution.graph.sink.id), final);
+    assert.equal(resultOf(execution, "0"), final);
+  }
+  assert.deepEqual(root.decisions, [
+    ["0", "1"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["$sink", "1"], ["$sink"],
+  ]);
   const siblingDone = log.indexOf("sibling done");
-  assert.ok(siblingDone > 0 && log.lastIndexOf("child window") < siblingDone, log.join(", "));
+  assert.ok(siblingDone > 0 && log.lastIndexOf("child decision") < siblingDone, log.join(", "));
   assert.equal(leaf.faux.state.callCount, 2);
   assert.equal(sibling.faux.state.callCount, 1);
-  for (const actor of [root.scheduler, child.scheduler, grandchild.scheduler, leaf.agent, sibling.agent]) {
-    assert.equal(actor.status, "closed");
-  }
-  console.log(`${settled}; ${leafResult} + ${siblingResult}; ${windows} root windows`);
+  for (const actor of [leaf.agent, sibling.agent]) assert.equal(actor.status, "closed");
+  console.log(`root complete; ${leafResult} + ${siblingResult}; ${root.decisions.length} root decisions`);
 }
 
 if (import.meta.main) {

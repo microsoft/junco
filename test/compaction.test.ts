@@ -8,7 +8,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { Edge, NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
+import { DataflowDefinitionError, Edge, NodeId, type NodeIdType, Source, Sink, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import { LockPolicy } from "junco-tools";
@@ -23,8 +23,8 @@ import {
 } from "../src/index.ts";
 import {
   assistant,
-  type PolicyScheduler,
-  plainGraph,
+  plainContext,
+  terminalPorts,
   run,
   settle,
   textOf,
@@ -88,7 +88,7 @@ const node = (agent: MockAgent, id: string) => ({
 });
 
 const resultText = (
-  graph: JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>,
+  graph: JuncoGraph<AgenticInput, AssistantMessage>,
   id: NodeIdType,
 ): string | undefined => {
   const result = graph.result(id);
@@ -102,15 +102,18 @@ const flushMacrotask = () =>
  * Available a=40, b=41, f=20; c=39 with an unsatisfied trigger; d=70 whose availability rejects;
  * e=90 completed by the graph before the others were added.
  */
-async function policyGraph() {
-  const graph = plainGraph("round-robin");
+async function compactionFixture() {
+  const graphPorts = terminalPorts();
+  const graphContext = plainContext(graphPorts.source, graphPorts.sink, "round-robin");
+  const graph = graphContext.graph;
   const finished = assistant("e done");
   const e = member(90 - estimateTokens(user("e")) - estimateTokens(finished), {
     prompt: "e",
     runs: [run([settle(finished)])],
   });
   const eId = graph.addNode(node(e, "e"));
-  await graph.run();
+  graphPorts.connect(graph, eId);
+  await graphContext.run();
   assert.equal(resultText(graph, eId), "e done");
   assert.equal(await e.context_size(), 90);
 
@@ -144,7 +147,7 @@ async function policyGraph() {
   ids.f = graph.addNode(node(agents.f, "f"));
   graph.addEdge(ids.d, ids.c, never);
   assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
-  return { graph, agents, ids };
+  return { graph, graphContext, agents, ids };
 }
 
 const POLICIES: readonly (readonly [CompactionPolicy, readonly string[]])[] = [
@@ -157,7 +160,7 @@ const POLICIES: readonly (readonly [CompactionPolicy, readonly string[]])[] = [
 describe("policy selection", () => {
   for (const [name, expected] of POLICIES) {
     test(`${name} compacts exactly ${expected.join(",")} and leaves graph state to normal execution`, async () => {
-      const { graph, agents, ids } = await policyGraph();
+      const { graph, graphContext, agents, ids } = await compactionFixture();
       const before = Object.fromEntries(
         await Promise.all(
           Object.entries(agents).map(
@@ -184,7 +187,7 @@ describe("policy selection", () => {
       }
       assert.deepEqual([...graph.available().keys()], [ids.a, ids.b, ids.f]);
 
-      await graph.run();
+      await graphContext.run();
       assert.equal(resultText(graph, ids.e), "e done");
       for (const key of ["a", "b", "f"] as const) {
         assert.equal(resultText(graph, ids[key]), `${key} done`);
@@ -201,15 +204,23 @@ describe("policy selection", () => {
 
 describe("policy boundaries", () => {
   test("an empty graph or selection completes without requests", async () => {
-    for (const [policy] of POLICIES)
-      assert.equal(
-        await JuncoGraph.compact(plainGraph("parallel"), policy),
-        undefined,
-      );
-    const graph = plainGraph("parallel");
+    for (const [policy] of POLICIES) {
+      const source = new Source<AgenticInput, AssistantMessage>(() => {
+        throw new DataflowDefinitionError("Empty compaction graph does not accept external input");
+      }, { id: NodeId.create("$source") });
+      const sink = new Sink<AgenticInput, AssistantMessage>(async function* () {
+        throw new Error("Empty compaction graph has no terminal result");
+      }, { id: NodeId.create("$sink"), trigger: TriggerRule.never() });
+      const execution = plainContext(source, sink, "parallel");
+      assert.equal(await JuncoGraph.compact(execution.graph, policy), undefined);
+    }
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
     // No compaction record: a wrongly selected member would reject.
     const quiet = member(40, { maintenance: [] });
-    graph.addNode(node(quiet, "quiet"));
+    const quietId = graph.addNode(node(quiet, "quiet"));
+    graphPorts.connect(graph, quietId);
     assert.equal(await JuncoGraph.compact(graph, "more-than-forty"), undefined);
     assert.equal(
       await JuncoGraph.compact(graph, "more-than-forty-available"),
@@ -219,9 +230,12 @@ describe("policy boundaries", () => {
   });
 
   test("an unknown policy rejects before inspecting the graph", async () => {
-    const graph = plainGraph("parallel");
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
     const full = member(90);
-    graph.addNode(node(full, "full"));
+    const fullId = graph.addNode(node(full, "full"));
+    graphPorts.connect(graph, fullId);
     await assert.rejects(
       // @ts-expect-error the runtime boundary rejects a selector outside CompactionPolicy
       JuncoGraph.compact(graph, "most"),
@@ -238,11 +252,14 @@ describe("policy boundaries", () => {
 
   test("an unknown context window rejects a threshold policy before any history changes", async () => {
     for (const window of [null, 0, -1, Number.POSITIVE_INFINITY, Number.NaN]) {
-      const graph = plainGraph("parallel");
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+      const graph = graphContext.graph;
       // Staged prompts make both members available.
       const full = member(90, { prompt: "go" });
       const unknown = member(90, { prompt: "go" }, window);
-      graph.addNode(node(full, "full"));
+      const fullId = graph.addNode(node(full, "full"));
+    graphPorts.connect(graph, fullId);
       graph.addNode(node(unknown, "unknown"));
       for (const policy of [
         "more-than-forty",
@@ -270,7 +287,9 @@ describe("policy boundaries", () => {
         return super.getModel();
       }
     }
-    const graph = plainGraph("parallel");
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
     const available = member(90, {
       prompt: "go",
       runs: [yieldsThen(0, "done")],
@@ -281,7 +300,8 @@ describe("policy boundaries", () => {
       history: seeded(90),
       runs: [],
     });
-    graph.addNode(node(available, "available"));
+    const availableId = graph.addNode(node(available, "available"));
+    graphPorts.connect(graph, availableId);
     graph.addNode({ ...node(hidden, "hidden"), is_available: () => false });
     assert.equal(
       await JuncoGraph.compact(graph, "more-than-forty-available"),
@@ -312,8 +332,10 @@ describe("policy boundaries", () => {
       runs: [],
     });
     const late = member(90, { prompt: "go" });
-    const graph = plainGraph("parallel");
-    graph.addNode({
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
+    const earlyId = graph.addNode({
       ...node(early, "early"),
       is_available: () => readiness.early,
     });
@@ -321,6 +343,7 @@ describe("policy boundaries", () => {
       ...node(late, "late"),
       is_available: () => readiness.late,
     });
+    graphPorts.connect(graph, earlyId);
     const compaction = JuncoGraph.compact(graph, "more-than-forty-available");
     await measuring.promise;
     readiness.early = false;
@@ -332,7 +355,9 @@ describe("policy boundaries", () => {
   });
 
   test("a later idle member compacts while an earlier selected member is still yielded", async () => {
-    const graph = plainGraph("round-robin");
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "round-robin");
+    const graph = graphContext.graph;
     const held = member(50, {
       prompt: "hold",
       runs: [yieldsThen(1, "held done")],
@@ -340,9 +365,10 @@ describe("policy boundaries", () => {
     const idle = member(50);
     const heldId = graph.addNode(node(held, "held"));
     graph.addNode(node(idle, "idle"));
+    graphPorts.connect(graph, heldId);
     for (let windows = 0; held.status !== "suspended"; windows++) {
       assert.ok(windows < 8, "member never yielded");
-      await graph.step();
+      await graphContext.step();
     }
     const compaction = JuncoGraph.compact(graph, "all");
     void compaction.catch(() => undefined);
@@ -352,7 +378,7 @@ describe("policy boundaries", () => {
     assert.deepEqual(userTexts(held.history), ["t".repeat(200), "hold"]);
 
     // Driving the graph lets the held run settle normally; its compaction follows.
-    await graph.run();
+    await graphContext.run();
     assert.equal(await compaction, undefined);
     assert.equal(resultText(graph, heldId), "held done");
     assert.deepEqual(userTexts(held.history), ["x"]);
@@ -367,12 +393,15 @@ describe("policy boundaries", () => {
           { method: "compact", args: [], result: { ok: false, error } },
         ],
       });
-    const graph = plainGraph("parallel");
+    const graphPorts = terminalPorts();
+    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
     const a = failing(first);
     const b = member(90);
     const c = failing(second);
     graph.addNode(node(a, "a"));
-    graph.addNode(node(b, "b"));
+    const bId = graph.addNode(node(b, "b"));
+    graphPorts.connect(graph, bId);
     graph.addNode(node(c, "c"));
     await assert.rejects(JuncoGraph.compact(graph, "all"), (error: unknown) => {
       assert.ok(error instanceof AggregateError);
@@ -401,12 +430,7 @@ describe("policy boundaries", () => {
      * coroutine, to `graph`.
      */
     const addSkipped = (
-      graph: JuncoGraph<
-        AgenticInput,
-        AssistantMessage,
-        unknown,
-        PolicyScheduler
-      >,
+      graph: JuncoGraph<AgenticInput, AssistantMessage>,
     ) => {
       const inner = new Measured({
         prompt: "inner",
@@ -416,7 +440,9 @@ describe("policy boundaries", () => {
         maintenance: [],
         runs: [yieldsThen(0, "inner done")],
       });
-      const child = plainGraph("parallel");
+      const childPorts = terminalPorts();
+      const childContext = plainContext(childPorts.source, childPorts.sink, "parallel");
+      const child = childContext.graph;
       const innerId = child.addNode(node(inner, "inner"));
       const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
         async function* () {
@@ -426,11 +452,11 @@ describe("policy boundaries", () => {
         },
         LockPolicy,
       );
+      childPorts.connect(child, innerId);
       const childId = graph.addNode({
         id: NodeId.create("child"),
         trigger: TriggerRule.always(),
-        state: child,
-        result: innerId,
+        state: childContext,
       });
       const coroutineId = graph.addNode({
         id: NodeId.create("coroutine"),
@@ -443,14 +469,21 @@ describe("policy boundaries", () => {
 
     for (const [name, expected] of POLICIES) {
       // Without a compactable direct state, nothing is measured or requested.
-      const bare = plainGraph("parallel");
+      const barePorts = terminalPorts();
+      const bareContext = plainContext(barePorts.source, barePorts.sink, "parallel");
+      const bare = bareContext.graph;
       const alone = addSkipped(bare);
+      barePorts.connect(bare, alone.childId);
       assert.equal(bare.available().size, 2, name);
       assert.equal(await JuncoGraph.compact(bare, name), undefined, name);
       assert.equal(alone.inner.reads, 0, name);
       assert.deepEqual(alone.inner.calls, [], name);
 
-      const graph = plainGraph("parallel");
+      const graphPorts = terminalPorts();
+
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+
+      const graph = graphContext.graph;
       const nested = addSkipped(graph);
       const { childId, coroutineId } = nested;
       const full = member(90, {
@@ -463,6 +496,7 @@ describe("policy boundaries", () => {
       });
       const fullId = graph.addNode(node(full, "full"));
       const smallId = graph.addNode(node(small, "small"));
+      graphPorts.connect(graph, fullId);
       assert.equal(graph.available().size, 4, name);
       assert.equal(await JuncoGraph.compact(graph, name), undefined, name);
 
@@ -483,7 +517,7 @@ describe("policy boundaries", () => {
       assert.equal(graph.getNode(coroutineId)!.state, nested.coroutine);
 
       // The skipped states then execute normally, the nested member with its uncompacted history.
-      await graph.run();
+      await graphContext.run();
       assert.deepEqual(
         [childId, coroutineId, fullId, smallId].map((id) =>
           resultText(graph, id),

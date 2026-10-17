@@ -27,6 +27,7 @@ import {
   tools as toolsApi,
   tracer as tracerApi,
   trigger,
+  schedulers,
 } from "junco-agency";
 import { Ralph } from "junco-agency/workflows";
 
@@ -159,48 +160,26 @@ try {
     model: faux.getModel(),
     tools: [],
   });
-  // Explicitly untraced, so this smoke prints only its JSON summary; the Ralph child inherits it.
-  const graph = graphApi.JuncoGraph.parallel(
-    toolsApi.LockPolicy,
-    new tracerApi.DummyTracer(),
-  );
-  parent = graph;
-
-  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>(
-    "source->ralph",
-  );
-  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>(
-    "ralph->sink",
-  );
-  const sourceId = graph.addNode({
-    trigger: trigger.TriggerRule.always(),
-    is_available: () => false,
-    state: new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
-      async function* (): graphApi.NodeGenerator<
-        AgenticInput,
-        AssistantMessage
-      > {
-        while (true) yield [];
-      },
-      toolsApi.LockPolicy,
-    ),
-  });
+  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>("source->ralph");
+  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>("ralph->sink");
+  const final = graphApi.Edge.value<AgenticInput, AssistantMessage>("ralph-result");
+  const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>((view) =>
+    graphApi.from(view, input).map((value) => graphApi.Message.create(input, value)),
+    { id: graphApi.NodeId.create("$source") });
   const delivered: string[] = [];
-  const sinkId = graph.addNode({
-    trigger: trigger.TriggerRule.when(output),
-    state: new graphApi.nodes.Deterministic<AgenticInput, AssistantMessage>(
-      async function* (): graphApi.NodeGenerator<
-        AgenticInput,
-        AssistantMessage
-      > {
-        const view = yield [];
-        for (const value of graphApi.from(view, output))
-          delivered.push(value.kind === "appendMessage" ? "" : value.text);
-        return fauxAssistantMessage("received");
-      },
-      toolsApi.LockPolicy,
-    ),
-  });
+  const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> = new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): graphApi.NodeGenerator<AgenticInput, AssistantMessage> {
+    const view = yield [];
+    for (const value of graphApi.from(view, output))
+      delivered.push(value.kind === "appendMessage" ? "" : value.text);
+    const result = graph.result(id);
+    assert.ok(O.isSome(result));
+    return result.value;
+  }, { id: graphApi.NodeId.create("$sink"), trigger: trigger.TriggerRule.allOf(
+    trigger.TriggerEntry.on(output), trigger.TriggerEntry.on(final)) });
+  const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> = new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1),
+    graphApi.UNBOUNDED, new tracerApi.DummyTracer(), toolsApi.LockPolicy);
+  const execution = schedulers.context({ graph, scheduler: schedulers.parallel() });
+  parent = graph;
   const id: graphApi.NodeIdType = Ralph.register(graph, agent, {
     input,
     output,
@@ -208,7 +187,7 @@ try {
     rounds: 3,
   });
   owned = true;
-  graph.addEdge(sourceId, id, input).addEdge(id, sinkId, output);
+  graph.addEdge(source.id, id, input).addEdge(id, sink.id, output).addEdge(id, sink.id, final);
 
   const child = graph.getNode(id)?.state;
   assert.ok(
@@ -216,14 +195,11 @@ try {
     "the workflow's nested graph is the root package's JuncoGraph",
   );
 
-  graph.emit(
-    sourceId,
-    graphApi.Message.create(input, { kind: "prompt", text: assignment }),
-  );
+  source.enqueue({ messages: new Map([[input.id, [{ kind: "prompt", text: assignment }]]]), values: new Map() });
   for (let windows = 0; O.isNone(graph.result(id)); windows++) {
     assert.ok(windows < 64, "Ralph did not complete within 64 graph windows");
     assert.deepEqual(queued(output), []);
-    await graph.step();
+    await execution.step();
   }
   assert.deepEqual(queued(output), [{ kind: "prompt", text: "draft-3" }]);
   const result = graph.result(id);
@@ -231,14 +207,15 @@ try {
     O.isSome(result) && contentText(result.value.content) === "draft-3",
   );
 
-  await graph.run();
-  await graph.run();
+  await execution.run();
+  await execution.run();
   assert.equal(requests.length, 3);
   assert.deepEqual(
     requests.map((request) => request.users.at(-1)),
     [assignment, revision("draft-1"), revision("draft-2")],
   );
   assert.deepEqual(delivered, ["draft-3"]);
+  assert.deepEqual(graph.result(sink.id), graph.result(id));
 
   await graph.close();
   closed = true;

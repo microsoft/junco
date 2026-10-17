@@ -85,8 +85,8 @@ test("recv leaves the inbox intact when rendering, cancellation, validation or h
 });
 
 function wiredGraph() {
-  // Admission only: emit never consults the scheduler, so it is never driven.
-  const graph = new DataflowGraph({ create() {} }, Width.create(1), UNBOUNDED);
+  // Admission only: the passive graph is never driven.
+  const graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const step = async function* () {
     yield [];
   };

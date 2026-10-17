@@ -46,6 +46,17 @@ export type ParentView<N, T> = {
   readonly values: Lookup<EdgeId, T>;
 };
 
+/** Detach native input containers, preserving present-undefined values and opaque identity. */
+export function snapshotView<N, T>(view: ParentView<N, T>): ParentView<N, T> {
+  // ponytail: opaque S/N/T values are borrowed; use immutable application data when historical value snapshots are required
+  const messages = new Map<EdgeId, readonly N[]>();
+  for (const id of view.messages.keys())
+    messages.set(id, Object.freeze([...(view.messages.get(id) ?? [])]));
+  const values = new Map<EdgeId, T | undefined>();
+  for (const id of view.values.keys()) values.set(id, view.values.get(id));
+  return Object.freeze({ messages, values });
+}
+
 /** Lifecycle of a node: never activated, mid-generator, or terminated. */
 export type NodeStatus = "ready" | "running" | "done";
 

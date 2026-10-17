@@ -8,6 +8,8 @@ import {
   Message,
   TriggerEntry,
   TriggerRule,
+  Width,
+  UNBOUNDED,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
@@ -24,7 +26,10 @@ import {
   graph as graphApi,
   JuncoGraph,
   MockAgent,
+  schedulers,
 } from "../src/index.ts";
+
+import { terminalPorts } from "./deterministic-support.ts";
 
 const quiet = new DummyTracer();
 
@@ -92,7 +97,9 @@ function consumer<T>(result: T) {
 
 describe("abort", () => {
   test("joins a gated finally, cleans up once and starts no downstream work", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const result = Edge.value<string, string>("waiting-result");
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
@@ -120,8 +127,8 @@ describe("abort", () => {
       state: downstream.coroutine,
     });
     graph.addEdge(waitingId, downstreamId, result);
-
-    const drive = failureOf(graph.run());
+    graphPorts.connect(graph, downstreamId);
+    const drive = failureOf(graphContext.run());
     await entered.promise;
     const reason = new Error("consumer cancellation");
     const aborting = graph.abort(reason);
@@ -139,7 +146,7 @@ describe("abort", () => {
 
     // A fresh signal: a plain drive runs, yet nothing downstream of the cancelled coroutine starts.
     assert.equal(graph.signal.aborted, false);
-    assert.equal((await graph.run()).has(downstreamId), false);
+    assert.equal((await graphContext.run()).has(downstreamId), false);
     assert.equal(downstream.ran, false);
     assert.ok(unresolved(result));
     assert.ok(O.isNone(graph.result(waitingId)));
@@ -149,7 +156,9 @@ describe("abort", () => {
   });
 
   test("preserves an unrelated cleanup error, which a later close does not report again", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
     const failing = new Deterministic<string, string>(async function* (signal) {
@@ -167,7 +176,8 @@ describe("abort", () => {
       state: failing,
     });
 
-    const drive = failureOf(graph.run());
+    graphPorts.connect(graph, id);
+    const drive = failureOf(graphContext.run());
     await entered.promise;
     const aborted = await failureOf(graph.abort(new Error("stop")));
     assert.ok(aborted instanceof AggregateError);
@@ -184,7 +194,9 @@ describe("abort", () => {
   });
 
   test("a run failure already delivered to its drive is not reported again by close", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const broken = new Error("body failed");
     let cleaned = 0;
     const failing = new Deterministic<string, string>(async function* () {
@@ -200,7 +212,8 @@ describe("abort", () => {
       state: failing,
     });
 
-    const failure = await failureOf(graph.run());
+    graphPorts.connect(graph, id);
+    const failure = await failureOf(graphContext.run());
     assert.ok(
       failure instanceof DataflowNodeError &&
         failure.nodeId === id &&
@@ -218,8 +231,12 @@ describe("abort", () => {
 });
 
 test("caller cancellation interrupts nested work and joins its cleanup", async () => {
-  const parent = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
-  const child = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+  const parentPorts = terminalPorts<string, string>();
+  const parent = new JuncoGraph(parentPorts.source, parentPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+  const parentContext = schedulers.context({ graph: parent, scheduler: schedulers.parallel() });
+  const childPorts = terminalPorts<string, string>();
+  const child = new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+  const childContext = schedulers.context({ graph: child, scheduler: schedulers.parallel() });
   const caller = new AbortController();
   const reason = new Error("caller stopped");
   const entered = Promise.withResolvers<void>();
@@ -242,8 +259,10 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
     state: worker,
     trigger: TriggerRule.always(),
   });
-  parent.addNode({ state: child, result, trigger: TriggerRule.always() });
-  const drive = failureOf(parent.run({ signal: caller.signal }));
+  childPorts.connect(child, result);
+  const nested = parent.addNode({ state: childContext, trigger: TriggerRule.always() });
+  parentPorts.connect(parent, nested);
+  const drive = failureOf(parentContext.run({ signal: caller.signal }));
   const state = settlement(drive);
   try {
     await entered.promise;
@@ -274,7 +293,9 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
 
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const input = Edge.message<string, string>("input");
     const suspendedCleanup = Edge.message<string, string>("suspended-cleanup");
     const waitingCleanup = Edge.message<string, string>("waiting-cleanup");
@@ -327,10 +348,11 @@ describe("close", () => {
     graph.addEdge(suspendedId, suspendedId, input);
     graph.addEdge(suspendedId, downstreamId, suspendedCleanup);
     graph.addEdge(waitingId, downstreamId, waitingCleanup);
+    graphPorts.connect(graph, downstreamId);
     assert.ok(E.isLeft(input.transport));
     input.transport.left.push("go");
 
-    const drive = failureOf(graph.run());
+    const drive = failureOf(graphContext.run());
     await Promise.all([suspendedReady.promise, entered.promise]);
     await flushMacrotask();
 
@@ -362,11 +384,13 @@ describe("close", () => {
       waiting.next(),
       (error) => error instanceof JuncoAgentError && error.code === "closed",
     );
-    await assert.rejects(graph.run(), (error) => error === graph.signal.reason);
+    await assert.rejects(graphContext.run(), (error) => error === graph.signal.reason);
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
-    const graph = JuncoGraph.parallel(LockPolicy, quiet);
+    const graphPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const failure = new Error("finally failed");
     const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
       async function* () {
@@ -380,7 +404,7 @@ describe("close", () => {
       LockPolicy,
     );
     const sibling = new MockAgent({ runs: [] });
-    graph.addNode({
+    const coroutineId = graph.addNode({
       trigger: TriggerRule.always(),
       state: coroutine,
     });
@@ -390,7 +414,8 @@ describe("close", () => {
       trigger: TriggerRule.always(),
       is_available: () => false,
     });
-    await graph.step();
+    graphPorts.connect(graph, coroutineId);
+    await graphContext.step();
 
     const closing = graph.close();
     const closed = await failureOf(closing);
@@ -410,7 +435,9 @@ describe("close", () => {
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -432,7 +459,8 @@ describe("close", () => {
       state: waiting,
     });
 
-    const drive = failureOf(graph.run());
+    graphPorts.connect(graph, id);
+    const drive = failureOf(graphContext.run());
     await entered.promise;
     const reason = new Error("abort first");
     const aborting = graph.abort(reason);
@@ -452,7 +480,7 @@ describe("close", () => {
     // The settled abort leaves the graph terminal under its close reason.
     assert.ok(graph.signal.aborted);
     assert.notEqual(graph.signal.reason, reason);
-    await assert.rejects(graph.run(), (error) => error === graph.signal.reason);
+    await assert.rejects(graphContext.run(), (error) => error === graph.signal.reason);
     await assert.rejects(
       graph.abort(),
       (error) => error instanceof JuncoAgentError && error.code === "closed",
@@ -478,24 +506,29 @@ describe("close", () => {
       }
       return "never published";
     }, LockPolicy);
-    const child = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const childPorts = terminalPorts<string, string>();
+    const child = new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const childContext = schedulers.context({ graph: child, scheduler: schedulers.parallel() });
     const result = child.addNode({
       trigger: TriggerRule.always(),
       state: coroutine,
     });
-    const parent = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const parentPorts = terminalPorts<string, string>();
+    const parent = new JuncoGraph(parentPorts.source, parentPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const parentContext = schedulers.context({ graph: parent, scheduler: schedulers.parallel() });
     parent.addNode({
       trigger: TriggerRule.always(),
       is_available: () => false,
       state: coroutine,
     });
-    parent.addNode({
+    const nested = parent.addNode({
       trigger: TriggerRule.always(),
       is_available: () => false,
-      state: child,
-      result,
+      state: childContext,
     });
-    await child.step();
+    parentPorts.connect(parent, nested);
+    childPorts.connect(child, result);
+    await childContext.step();
 
     try {
       const closing = parent.close();
@@ -528,7 +561,9 @@ describe("close", () => {
 
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
-    const first = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const firstPorts = terminalPorts<string, string>();
+    const first = new JuncoGraph(firstPorts.source, firstPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const firstContext = schedulers.context({ graph: first, scheduler: schedulers.parallel() });
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
       return "first";
@@ -537,10 +572,15 @@ describe("single consumer", () => {
       trigger: TriggerRule.always(),
       state: shared,
     });
-    await first.run();
+    firstPorts.connect(first, firstId);
+    await firstContext.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
-    const second = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const secondPorts = terminalPorts<string, string>();
+
+    const second = new JuncoGraph(secondPorts.source, secondPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+
+    const secondContext = schedulers.context({ graph: second, scheduler: schedulers.parallel() });
     const value = Edge.value<string, string>("shared-result");
     const downstream = consumer("downstream");
     const againId = second.addNode({
@@ -552,9 +592,10 @@ describe("single consumer", () => {
       state: downstream.coroutine,
     });
     second.addEdge(againId, downstreamId, value);
+    secondPorts.connect(second, downstreamId);
 
     await assert.rejects(
-      second.run(),
+      secondContext.run(),
       (error) =>
         error instanceof DataflowNodeError &&
         error.nodeId === againId &&
@@ -563,7 +604,7 @@ describe("single consumer", () => {
     );
     assert.ok(unresolved(value));
     assert.ok(O.isNone(second.result(againId)));
-    assert.equal((await second.run()).has(downstreamId), false);
+    assert.equal((await secondContext.run()).has(downstreamId), false);
     assert.equal(downstream.ran, false);
 
     await first.close();
@@ -571,7 +612,9 @@ describe("single consumer", () => {
   });
 
   test("a coroutine closed before priming fails on activation without resolving its value edge", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const value = Edge.value<string, string>("closed-result");
     let bodyRan = false;
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
@@ -589,10 +632,11 @@ describe("single consumer", () => {
       state: downstream.coroutine,
     });
     graph.addEdge(closedId, downstreamId, value);
+    graphPorts.connect(graph, downstreamId);
     await closed.close();
 
     await assert.rejects(
-      graph.run(),
+      graphContext.run(),
       (error) =>
         error instanceof DataflowNodeError &&
         error.nodeId === closedId &&
@@ -608,7 +652,9 @@ describe("single consumer", () => {
   });
 
   test("a body genuinely returning undefined resolves its value edge", async () => {
-    const graph = JuncoGraph.parallel<string, string | undefined>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string | undefined>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const value = Edge.value<string, string | undefined>("undefined-result");
     const source = new Deterministic<string, string | undefined>(
       // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
@@ -640,8 +686,9 @@ describe("single consumer", () => {
       state: dependent,
     });
     graph.addEdge(sourceId, dependentId, value);
+    graphPorts.connect(graph, dependentId);
 
-    await graph.run();
+    await graphContext.run();
     assert.deepEqual(graph.result(sourceId), O.some(undefined));
     assert.deepEqual(observed, { has: true, value: undefined });
     assert.deepEqual(graph.result(dependentId), O.some("consumed"));
@@ -771,19 +818,29 @@ describe("policy and borrowed collections", () => {
       TypeError,
     );
     assert.throws(
-      () => JuncoGraph.parallel(LockPolicy, undefined, empty),
+      () => {
+        const ports = terminalPorts();
+        return new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED, undefined, LockPolicy, empty);
+      },
       TypeError,
     );
-    assert.throws(() => JuncoGraph.parallel(undefined as never), TypeError);
+    assert.throws(() => {
+      const ports = terminalPorts();
+      return new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED, undefined, undefined as never);
+    }, TypeError);
   });
 
   test("addNode takes a managed state's policy and rejects any supplied one; an explicit step must match its state", async () => {
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, quiet);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const coroutine = new Deterministic<string, string>(async function* () {
       yield [];
       return "x";
     }, LockPolicy);
-    const child = JuncoGraph.parallel<string, string>(EmptyPolicy, quiet);
+    const childPorts = terminalPorts<string, string>();
+    const child = new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, quiet, EmptyPolicy);
+    const childContext = schedulers.context({ graph: child, scheduler: schedulers.parallel() });
     const childId = child.addNode({
       trigger: TriggerRule.always(),
       state: new Deterministic<string, string>(async function* () {
@@ -791,12 +848,13 @@ describe("policy and borrowed collections", () => {
         return "y";
       }, EmptyPolicy),
     });
+    childPorts.connect(child, childId);
     const managed = [
       { trigger: TriggerRule.always(), state: coroutine },
-      { trigger: TriggerRule.always(), state: child, result: childId },
+      { trigger: TriggerRule.always(), state: childContext },
     ];
     for (const spec of managed) {
-      for (const policy of [spec.state.policy, EmptyPolicy, LockPolicy, {}]) {
+      for (const policy of [(spec.state instanceof Deterministic ? spec.state.policy : spec.state.graph.policy), EmptyPolicy, LockPolicy, {}]) {
         assert.throws(
           () => graph.addNode({ ...spec, policy } as never),
           TypeError,
@@ -816,8 +874,7 @@ describe("policy and borrowed collections", () => {
       () =>
         graph.addNode({
           trigger: TriggerRule.always(),
-          state: child,
-          result: childId,
+          state: childContext,
           policy: undefined,
         }),
       TypeError,
@@ -834,18 +891,21 @@ describe("policy and borrowed collections", () => {
     );
     let registered = 0;
     graph.forEachNode(() => registered++);
-    assert.equal(registered, 0);
-    graph.addNode({
+    assert.equal(registered, 2);
+    const nested = graph.addNode({
       trigger: TriggerRule.always(),
-      state: child,
-      result: childId,
+      state: childContext,
     });
-    const agents = JuncoGraph.parallel(LockPolicy, quiet);
-    agents.addNode({
+    graphPorts.connect(graph, nested);
+    const agentsPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const agents = new JuncoGraph(agentsPorts.source, agentsPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const agentsContext = schedulers.context({ graph: agents, scheduler: schedulers.parallel() });
+    const agentId = agents.addNode({
       state: new MockAgent({ runs: [] }),
       policy: EmptyPolicy,
       trigger: TriggerRule.always(),
     });
+    agentsPorts.connect(agents, agentId);
     await Promise.all([graph.close(), agents.close(), coroutine.close()]);
   });
 
@@ -859,16 +919,21 @@ describe("policy and borrowed collections", () => {
         closes++;
       }
     }, EmptyPolicy);
-    const child = JuncoGraph.parallel<never, number>(EmptyPolicy, quiet);
+    const childPorts = terminalPorts<never, number>();
+    const child = new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, quiet, EmptyPolicy);
+    const childContext = schedulers.context({ graph: child, scheduler: schedulers.parallel() });
     const answer = child.addNode({ state, trigger: TriggerRule.always() });
-    const parent = JuncoGraph.parallel<never, number>(LockPolicy, quiet);
+    childPorts.connect(child, answer);
+    const parentPorts = terminalPorts<never, number>();
+    const parent = new JuncoGraph(parentPorts.source, parentPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+    const parentContext = schedulers.context({ graph: parent, scheduler: schedulers.parallel() });
     const nested = parent.addNode({
-      state: child,
-      result: answer,
+      state: childContext,
       trigger: TriggerRule.always(),
     });
     try {
-      assert.equal((await parent.run()).get(nested), 42);
+      parentPorts.connect(parent, nested);
+      assert.equal((await parentContext.run()).get(nested), 42);
     } finally {
       await parent.close();
     }
@@ -905,16 +970,12 @@ describe("policy and borrowed collections", () => {
   test("graph close settles members before releasing every visited graph's lease; abort releases none", async () => {
     const events: string[] = [];
     const collection = countedCollection(LockPolicy, events);
-    const root = JuncoGraph.parallel<string, string>(
-      LockPolicy,
-      quiet,
-      collection,
-    );
-    const child = JuncoGraph.parallel<string, string>(
-      LockPolicy,
-      quiet,
-      collection,
-    );
+    const rootPorts = terminalPorts<string, string>();
+    const root = new JuncoGraph(rootPorts.source, rootPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy, collection);
+    const rootContext = schedulers.context({ graph: root, scheduler: schedulers.parallel() });
+    const childPorts = terminalPorts<string, string>();
+    const child = new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, quiet, LockPolicy, collection);
+    const childContext = schedulers.context({ graph: child, scheduler: schedulers.parallel() });
     const coroutine = new Deterministic<string, string>(
       async function* () {
         try {
@@ -931,11 +992,12 @@ describe("policy and borrowed collections", () => {
       trigger: TriggerRule.always(),
       state: coroutine,
     });
-    root.addNode({
+    childPorts.connect(child, childId);
+    const nested = root.addNode({
       trigger: TriggerRule.always(),
-      state: child,
-      result: childId,
+      state: childContext,
     });
+    rootPorts.connect(root, nested);
     assert.equal(root.collection, collection);
     await coroutine.next();
     await root.abort();

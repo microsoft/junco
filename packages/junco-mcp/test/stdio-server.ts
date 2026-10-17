@@ -30,7 +30,9 @@ type RequestId = string | number;
 const ROLE = process.env.JUNCO_MCP_FIXTURE_ROLE;
 const SELF = fileURLToPath(import.meta.url);
 const MODE = new Set(
-  (process.env.JUNCO_MCP_FIXTURE_MODE ?? "")
+  ((process.env.JUNCO_MCP_FIXTURE_MODE_FILE === undefined
+    ? null
+    : readOptional(process.env.JUNCO_MCP_FIXTURE_MODE_FILE)) ?? process.env.JUNCO_MCP_FIXTURE_MODE ?? "")
     .split(",")
     .map((flag) => flag.trim())
     .filter(Boolean),

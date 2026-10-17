@@ -28,7 +28,8 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { agent, graph, mcp, tools } from "junco-agency";
+import * as O from "fp-ts/lib/Option.js";
+import { agent, graph, mcp, schedulers, tools } from "junco-agency";
 import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Where the repository is
@@ -128,7 +129,7 @@ const researchReportId = graph.EdgeId.create("Research->Dependencies");
 
 /** The graph and its two member nodes. */
 export interface McpGraph {
-  graph: graph.JuncoGraph;
+  execution: ReturnType<typeof schedulers.context<graph.nodes.AgenticInput, AssistantMessage, graph.JuncoGraph>>;
   researchId: graph.NodeIdType;
   dependencyId: graph.NodeIdType;
 }
@@ -138,7 +139,18 @@ export const McpGraph = {
     const researchResult = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>(
       researchReportId,
     );
-    const g = graph.JuncoGraph.parallel(tools.LockPolicy);
+    const finalResult = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>("Dependencies->$sink");
+    const source = new graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>(() => {
+      throw new graph.DataflowDefinitionError("MCP does not accept external input");
+    }, { id: graph.NodeId.create("$source") });
+    const sink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage> = new graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
+      yield [];
+      const result = g.result(graph.NodeId.create("Dependencies"));
+      if (O.isNone(result)) throw new Error("Dependencies did not produce a result");
+      return result.value;
+    }, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.when(finalResult) });
+    const g: graph.JuncoGraph<graph.nodes.AgenticInput, AssistantMessage> = new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, tools.LockPolicy);
+    const execution = schedulers.context({ scheduler: schedulers.parallel(), graph: g });
     members.Research.stagePrompt(researchPrompt);
     const researchId = g.addNode({
       state: members.Research,
@@ -165,8 +177,8 @@ export const McpGraph = {
         };
       },
     });
-    g.addEdge(researchId, dependencyId, researchResult);
-    return { graph: g, researchId, dependencyId };
+    g.addEdge(researchId, dependencyId, researchResult).addEdge(dependencyId, sink.id, finalResult);
+    return { execution, researchId, dependencyId };
   },
 };
 
@@ -246,7 +258,7 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
         const Research = await member("Research");
         const Dependencies = await member("Dependencies");
         made = McpGraph.create({ Research, Dependencies });
-        return made.graph;
+        return made.execution;
       } catch (error) {
         // Not yet owned by a graph: return every acquired agent, then rethrow.
         const cleanup: unknown[] = [error];
@@ -264,7 +276,7 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
     // Owned only once `create` accepted it; a rejected graph was already closed.
     built = made!;
     signal?.throwIfAborted();
-    const results = await built.graph.run({ signal });
+    const results = await built.execution.run({ signal });
     signal?.throwIfAborted();
     researchText = finalText(results.get(built.researchId), "Research");
     dependencyText = finalText(results.get(built.dependencyId), "Dependencies");
@@ -275,12 +287,12 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
   try {
     // The graph owns its registered agents, their graft servers and the collection: closing it
     // returns all of them.
-    await built?.graph.close();
+    await built?.execution.graph.close();
   } catch (error) {
     failures.push(error);
   }
   try {
-    await built?.graph.tracer.flush();
+    await built?.execution.graph.tracer.flush();
   } catch (error) {
     failures.push(error);
   }

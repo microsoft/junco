@@ -12,14 +12,12 @@ import {
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
-import { ParallelScheduler } from "junco-scheduler";
 import mermaidAscii from "mermaid-ascii";
 import { escapeTuiLabel, renderTuiGraph } from "../src/tui-graph.ts";
 import { formatTuiPayload } from "../src/tui-tracer.ts";
 
 const graph = () =>
   new DataflowGraph<unknown, unknown, string, unknown>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     new DummyTracer(),

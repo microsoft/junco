@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import { afterEach, describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import {
@@ -27,11 +28,13 @@ import {
   Deterministic,
   graph,
   JuncoGraph,
+  schedulers,
   tracer,
   tools as toolsApi,
   trigger,
 } from "../src/index.ts";
-import { waitingTool } from "./support.ts";
+import { type AgencyContext, waitingTool } from "./support.ts";
+import { registeredNodeContexts } from "../src/node-policy.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call expands the caller's node into a Spawn graph whose workers report back through queues.
@@ -201,14 +204,15 @@ type QueuedReport = { kind: AgenticInput["kind"]; report: Report };
  * queued for the expanded `id`'s root before the next window consumes it.
  */
 async function driveObservingReports(
-  outer: JuncoGraph,
+  execution: AgencyContext,
   id = graph.NodeId.create("caller"),
 ): Promise<QueuedReport[]> {
+  const outer = execution.graph;
   const queued: QueuedReport[] = [];
   // A report may stay queued across windows; record each queued input once.
   const seen = new Set<AgenticInput>();
   while (outer.available().size > 0) {
-    await outer.step();
+    await execution.step();
     const state = outer.getNode(id)?.state;
     if (!(state instanceof JuncoGraph)) continue;
     const messages = state.available().get(graph.NodeId.create("root"))
@@ -279,6 +283,25 @@ function callerNode(caller: Agent, prompt = "Start") {
   };
 }
 
+function taskExecution(observer: tracer.DataflowTracer): AgencyContext {
+  const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(() => {
+    throw new graph.DataflowDefinitionError("Task fixture does not accept external input");
+  }, { id: graph.NodeId.create("$source") });
+  const edge = graph.Edge.value<AgenticInput, AssistantMessage>("caller->$sink");
+  const sink = new graph.nodes.Sink<AgenticInput, AssistantMessage>(async function* () {
+    const view = yield [];
+    const result = view.values.get(edge.id);
+    assert.ok(result);
+    return result;
+  }, { id: graph.NodeId.create("$sink"), trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(edge)) });
+  const work = new JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, LockPolicy);
+  return schedulers.context({ graph: work, scheduler: schedulers.parallel() });
+}
+
+function wireOutput(work: JuncoGraph, id: graph.NodeIdType): void {
+  work.addEdge(id, work.sink.id, graph.Edge.value("caller->$sink"));
+}
+
 /** The expanded node's inner graph. */
 function innerOf(
   outer: JuncoGraph,
@@ -296,7 +319,7 @@ function linksOf(g: JuncoGraph): string[] {
 }
 
 const pairedLinks = (ids: readonly string[]) =>
-  ids.flatMap((id) => [`root->${id}`, `${id}->root`]).sort();
+  ["$source->root", "root->$sink", ...ids.flatMap((id) => [`root->${id}`, `${id}->root`])].sort();
 
 /** The ids of every batch-completion marker among `context`'s user messages. */
 const markersIn = (context: Context): string[][] =>
@@ -392,17 +415,19 @@ async function failingCaller(
   ]);
   const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool()]);
   caller.setTaskFailurePolicy(policy);
-  const outer = JuncoGraph.parallel(LockPolicy, quiet);
+  const execution = taskExecution(quiet);
+  const outer = execution.graph;
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
-  return { caller, outer, id };
+  wireOutput(outer, id);
+  return { caller, outer, execution, id };
 }
 
 /** The node ids under the expanded caller's Spawn root, in registration order. */
 function taskNodes(outer: JuncoGraph): string[] {
   const ids: string[] = [];
   innerOf(outer).forEachNode((child) => {
-    if (child !== "root") ids.push(child);
+    if (child !== "root" && child !== "$source" && child !== "$sink") ids.push(child);
   });
   return ids;
 }
@@ -422,6 +447,70 @@ function causesOf(error: unknown): unknown[] {
 }
 
 describe("task tool through a graph-driven agent", () => {
+  test("failed promoted work preserves accepted sends and orders delivery failures", async () => {
+    for (const failDelivery of [false, true]) {
+      const r = registry("caller", "worker");
+      const outbound = graph.Edge.message<AgenticInput, AssistantMessage>("accepted");
+      const workError = new Error("work failed after accepting send");
+      const deliveryError = new Error("delivery failed");
+      const accepted = Promise.withResolvers<void>();
+      r.script("worker", [fauxAssistantMessage("worker-result")]);
+      r.script("caller", [
+        toolUse(taskCall([taskOn(r, "worker")])),
+        toolUse(yieldCall("promote before sending")),
+        toolUse(fauxToolCall("send", { id: outbound.id, payload: { kind: "followUp", text: "accepted" } }, { id: "accepted-send" })),
+        fauxAssistantMessage("unreachable"),
+      ]);
+      const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool(), new toolsApi.YieldTool(), new toolsApi.SendTool()]);
+      caller.hooks.on("after_tool", ({ toolCallId }) => {
+        if (toolCallId === "accepted-send") accepted.resolve();
+        return undefined;
+      });
+      const execution = taskExecution(quiet);
+      const outer = execution.graph;
+      closers.push(() => outer.close());
+      const id = outer.addNode(callerNode(caller));
+      wireOutput(outer, id);
+      const receiver = outer.addNode({
+        id: graph.NodeId.create("receiver"),
+        trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(outbound)),
+        contract: () => ({ expect: "accepted sends" }),
+        state: new Deterministic<AgenticInput, AssistantMessage>(async function* () { yield []; return fauxAssistantMessage("receiver"); }, LockPolicy),
+      });
+      outer.addEdge(id, receiver, outbound);
+      if (failDelivery) {
+        const node = outer.getNode(id)!;
+        const registration = registeredNodeContexts.get(node)!;
+        registeredNodeContexts.set(node, { ...registration, get signal() { return outer.signal; }, send: () => { throw deliveryError; } });
+      }
+      while (!(outer.getNode(id)?.state instanceof JuncoGraph)) await execution.step();
+      const failing = new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        await accepted.promise;
+        throw workError;
+      }, LockPolicy);
+      innerOf(outer).addNode({
+        id: graph.NodeId.create("$failure"),
+        trigger: trigger.TriggerRule.always(),
+        policy: LockPolicy,
+        state: failing,
+        step: failing.step,
+      });
+      const failure = await execution.run().then(() => assert.fail("work must fail"), (error: unknown) => error);
+      assert.ok(causesOf(failure).includes(workError));
+      const pending: string[] = [];
+      innerOf(outer).sink.drain(({ payload }) => { if ("text" in payload) pending.push(payload.text); });
+      if (failDelivery) {
+        const aggregate = causesOf(failure).find((cause) => cause instanceof AggregateError && cause.message === "Task graph execution and sink delivery failed");
+        assert.ok(aggregate instanceof AggregateError);
+        assert.ok(causesOf(aggregate.errors[0]).includes(workError));
+        assert.equal(aggregate.errors[1], deliveryError);
+        assert.deepEqual(pending, ["accepted"]);
+      } else {
+        assert.deepEqual(pending, []);
+        assert.deepEqual(outer.observe().inputs.get(receiver)?.messages.get(outbound.id), [{ kind: "followUp", text: "accepted" }]);
+      }
+    }
+  });
   test("workers run under a Spawn root while the caller continues; their reports finish the original node", async () => {
     const hold = holdTool();
     const r = registry("caller", "alpha", "beta");
@@ -498,11 +587,13 @@ describe("task tool through a graph-driven agent", () => {
       complain() {},
       async flush() {},
     };
-    const outer = JuncoGraph.parallel(LockPolicy, observer);
+    const execution = taskExecution(observer);
+    const outer = execution.graph;
     const id = outer.addNode(callerNode(caller, "Start the workers"));
+    wireOutput(outer, id);
     closers.push(() => outer.close());
     const node = outer.getNode(id);
-    const running = outer.run();
+    const running = execution.run();
 
     await hold.started;
     assert.deepEqual(
@@ -585,8 +676,8 @@ describe("task tool through a graph-driven agent", () => {
       values: { id: string; payload: AssistantMessage }[];
     };
     const sourceEdge: Edge = graph.Edge.value("source=>caller");
-    const notesEdge: Edge = graph.Edge.message("notes->caller");
-    const outboundEdge: Edge = graph.Edge.message("caller->down");
+    const notesEdge: Edge = graph.Edge.message("$source->root");
+    const outboundEdge: Edge = graph.Edge.message("root->$sink");
     const resultEdge: Edge = graph.Edge.value("caller=>down");
     const expects: Record<string, string> = {
       [sourceEdge.id]: "caller takes the upstream value",
@@ -636,7 +727,7 @@ describe("task tool through a graph-driven agent", () => {
         return toolUse(fauxToolCall("info", {}, { id: "info-1" }));
       const received = results<Received>(context, "recv");
       const messages = received.flatMap((batch) => batch.messages);
-      if (messages.length < 2) {
+      if (messages.length < 5) {
         const last = context.messages.at(-1);
         return toolUse(
           last?.role === "toolResult" && last.toolName === "recv"
@@ -654,7 +745,12 @@ describe("task tool through a graph-driven agent", () => {
         );
       if (infos.length === 1)
         return toolUse(fauxToolCall("info", {}, { id: "info-2" }));
-      if (!called(context, "send")) {
+      const sendResults = context.messages.filter((message) => message.role === "toolResult").filter((message) => message.toolName === "send");
+      if (sendResults.length < 2) return toolUse(fauxToolCall("send", {
+        id: sendResults.length === 0 ? "missing" : resultEdge.id,
+        payload: { kind: "followUp", text: "must not stage" },
+      }, { id: `invalid-send-${sendResults.length}` }));
+      if (sendResults.length === 2) {
         callerInfos.push(...infos);
         const route = infos
           .at(-1)
@@ -677,7 +773,8 @@ describe("task tool through a graph-driven agent", () => {
     };
     r.script(
       "caller",
-      Array.from({ length: 24 }, () => turn),
+      // Five individually delivered notes add six recv/yield turns; rejected sends add two.
+      Array.from({ length: 24 + 6 + 2 }, () => turn),
     );
     r.script("alpha", [
       () => {
@@ -707,7 +804,23 @@ describe("task tool through a graph-driven agent", () => {
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const sourceColumns: graph.NodeIdType[][] = [];
+    const observer: tracer.DataflowTracer = {
+      startRun<S, N, T, EH>(work: graph.DataflowGraph<S, N, T, EH>): tracer.DataflowRunTrace<N, T> {
+        const started: graph.NodeIdType[] = [];
+        return {
+          startNode(id) { started.push(id); return { end() {}, fail() {} }; },
+          end() {
+            if (work.getNode(graph.NodeId.create("root")) !== undefined && started.includes(graph.NodeId.create("$source"))) sourceColumns.push(started);
+          },
+          fail() {},
+        };
+      },
+      complain() {},
+      async flush() {},
+    };
+    const execution = taskExecution(observer);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const sourceId = outer.addNode({
       trigger: trigger.TriggerRule.always(),
@@ -725,9 +838,8 @@ describe("task tool through a graph-driven agent", () => {
       is_available: () => alphaStarted,
       state: new Deterministic<AgenticInput, AssistantMessage>(
         async function* () {
-          yield [
-            { id: notesEdge.id, payload: { kind: "followUp", text: "note-1" } },
-            { id: notesEdge.id, payload: { kind: "followUp", text: "note-2" } },
+          for (let n = 1; n <= 5; n++) yield [
+            { id: notesEdge.id, payload: { kind: "followUp", text: `note-${n}` } },
           ];
           return fauxAssistantMessage("notes done");
         },
@@ -767,6 +879,7 @@ describe("task tool through a graph-driven agent", () => {
         LockPolicy,
       ),
     });
+    wireOutput(outer, downId);
     outer
       .addEdge(sourceId, callerId, sourceEdge)
       .addEdge(notesId, callerId, notesEdge)
@@ -775,10 +888,16 @@ describe("task tool through a graph-driven agent", () => {
     const node = outer.getNode(callerId);
     const links = linksOf(outer);
 
-    const results_ = await outer.run();
+    const results_ = await execution.run();
     const final = results_.get(callerId);
     assert.ok(final);
     assert.equal(contentText(final.content), "final answer");
+    assert.equal(results_.get(outer.sink.id), final);
+    const promoted = innerOf(outer, callerId);
+    assert.equal(promoted.result(promoted.sink.id)._tag, "Some");
+    const innerFinal = promoted.result(promoted.sink.id);
+    assert.ok(O.isSome(innerFinal));
+    assert.equal(innerFinal.value, final);
     assert.equal(outer.getNode(callerId), node);
     assert.deepEqual(linksOf(outer), links, "external edges are unchanged");
     assert.ok(finalContext);
@@ -792,10 +911,7 @@ describe("task tool through a graph-driven agent", () => {
           "text" in payload ? payload.text : "",
         ]),
       ),
-      [
-        [notesEdge.id, "note-1"],
-        [notesEdge.id, "note-2"],
-      ],
+      Array.from({ length: 5 }, (_, n) => [notesEdge.id, `note-${n + 1}`]),
     );
     assert.deepEqual(
       batches.flatMap((batch) =>
@@ -806,6 +922,11 @@ describe("task tool through a graph-driven agent", () => {
       ),
       [[sourceEdge.id, "upstream value"]],
     );
+    const sendResults = finalContext.messages.filter((message) => message.role === "toolResult").filter((message) => message.toolName === "send");
+    assert.equal(sendResults.length, 3);
+    assert.equal(sendResults[0]?.isError, true);
+    assert.equal(sendResults[1]?.isError, true);
+    assert.equal(sendResults[2]?.isError, false);
     assert.equal(
       userTexts(finalContext).includes("note-1"),
       false,
@@ -866,6 +987,11 @@ describe("task tool through a graph-driven agent", () => {
       final,
       "only the final caller result reaches downstream",
     );
+    assert.equal(sourceColumns.length, 5, "each consecutive external delivery runs its Source once");
+    for (const column of sourceColumns) {
+      assert.ok(column.includes(graph.NodeId.create("root")), "queued ingress cannot starve the root");
+      assert.ok(column.indexOf(graph.NodeId.create("$source")) < column.indexOf(graph.NodeId.create("root")), "routing precedes the same-column root activation");
+    }
   });
 
   test("calls in one batch and a later call add ordered siblings under one root", async () => {
@@ -903,21 +1029,23 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
     const inner = innerOf(outer);
     const children: string[] = [];
     inner.forEachNode((child, member) => {
-      if (child !== "root") children.push(member.description ?? "");
+      if (child !== "root" && child !== "$source" && child !== "$sink") children.push(member.description ?? "");
     });
     assert.deepEqual(children, ["alpha", "beta", "gamma"]);
     const ids: string[] = [];
     inner.forEachNode((child) => {
-      if (child !== "root") ids.push(child);
+      if (child !== "root" && child !== "$source" && child !== "$sink") ids.push(child);
     });
     assert.deepEqual(linksOf(inner), pairedLinks(ids));
     assert.deepEqual(
@@ -974,11 +1102,13 @@ describe("task tool through a graph-driven agent", () => {
       new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(
       contentText(results.get(id)?.content ?? []),
       "combined: alpha saw grand-report",
@@ -995,7 +1125,7 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(nested[0]!.getNode(graph.NodeId.create("root"))?.state, alpha);
     let grandFound = false;
     nested[0]!.forEachNode((child, member) => {
-      if (child !== "root") grandFound = member.state === grand;
+      if (child !== "root" && child !== "$source" && child !== "$sink") grandFound = member.state === grand;
     });
     assert.ok(grandFound);
     assert.equal(r.calls("grand"), 1);
@@ -1040,11 +1170,13 @@ describe("task tool through a graph-driven agent", () => {
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
     assert.equal(seen.length, 2);
     assert.deepEqual(
@@ -1085,11 +1217,13 @@ describe("task tool through a graph-driven agent", () => {
       new toolsApi.TaskTool(),
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "no tasks");
     assert.equal(outer.getNode(id)?.state, caller, "the node never expanded");
     assert.equal(created.length, 0);
@@ -1113,11 +1247,13 @@ describe("task tool through a graph-driven agent", () => {
       if (toolCallId === "t1") void caller.abort();
       return undefined;
     });
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    await assert.rejects(outer.run());
+    await assert.rejects(execution.run());
     assert.equal(created.length, 2);
     for (const child of created) assert.equal(child.status, "closed");
     assert.equal(outer.getNode(id)?.state, caller, "nothing was published");
@@ -1130,8 +1266,10 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
     caller.setSubagentObserver({
@@ -1141,7 +1279,7 @@ describe("task tool through a graph-driven agent", () => {
       },
       acquired: (child) => acquired.push(child),
     });
-    await assert.rejects(outer.run());
+    await assert.rejects(execution.run());
     assert.ok(closing);
     await closing;
     assert.equal(caller.status, "closed");
@@ -1175,9 +1313,11 @@ describe("task tool through a graph-driven agent", () => {
       hold.tool,
     ]);
     const created = trackSubagents(caller);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     const id = outer.addNode(callerNode(caller));
-    const running = outer.run();
+    wireOutput(outer, id);
+    const running = execution.run();
     await hold.started;
     assert.ok(outer.getNode(id)?.state instanceof JuncoGraph);
     const closing = outer.close();
@@ -1211,11 +1351,13 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const queued = await driveObservingReports(outer);
+    const queued = await driveObservingReports(execution);
     const final = outer.result(id);
     assert.ok(O.isSome(final), "the caller's original node finished");
     assert.equal(contentText(final.value.content), "final");
@@ -1280,11 +1422,13 @@ describe("task tool through a graph-driven agent", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const queued = await driveObservingReports(outer);
+    const queued = await driveObservingReports(execution);
     const final = outer.result(id);
     assert.ok(O.isSome(final), "the caller's original node finished");
     assert.equal(contentText(final.value.content), "handled both");
@@ -1346,6 +1490,7 @@ describe("task tool through a graph-driven agent", () => {
 
   test("an ignored failed expanded task cancels its blocked descendants and is consumed once by its parent", async () => {
     const waiting = waitingTool("wait", { endOnAbort: true });
+    let rootFailing = false;
     const r = registry("caller", "child", "fast", "slow");
     let handles: TaskToolDetails["tasks"] = [];
     let finalContext: Context | undefined;
@@ -1390,34 +1535,40 @@ describe("task tool through a graph-driven agent", () => {
       fauxAssistantMessage("child must not answer"),
     ]);
     r.script("fast", [fauxAssistantMessage("fast-report")]);
-    r.script("slow", [
-      toolUse(yieldCall("let fast report")),
-      // The child's root takes the delivered report in the next window.
-      toolUse(yieldCall("let the child take the report", "yield-2")),
-      toolUse(fauxToolCall("wait", {}, { id: "w1" })),
-      fauxAssistantMessage("slow-report"),
-    ]);
+    r.script("slow", Array.from({ length: 16 }, (_, turn) => () =>
+      toolUse(yieldCall("wait for the root's failing drive", `slow-yield-${turn}`)),
+    ));
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
       new toolsApi.YieldTool(),
       waiting.tool,
     ]);
     caller.setTaskFailurePolicy("ignore");
-    const created = trackSubagents(caller, (parent, child) => {
-      if (parent !== caller) return;
+    const created = trackSubagents(caller, (parent, child, index) => {
+      if (parent !== caller) {
+        if (index === 1) child.hooks.on("after_tool", async ({ toolName }, context) => {
+          if (toolName === "yield" && rootFailing)
+            await waiting.tool.execute("slow-live-wait", {}, context.abortSignal);
+          return undefined;
+        });
+        return;
+      }
       let runs = 0;
       child.hooks.on("before_drive", async ({ operation }) => {
         if (operation !== "run" || ++runs !== 2) return;
         // The slow grandchild is blocked in the same column when the child's root fails.
+        rootFailing = true;
         await waiting.started;
         throw new Error("nested worker exploded");
       });
     });
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const queued = await driveObservingReports(outer);
+    const queued = await driveObservingReports(execution);
     await waiting.aborted;
     const final = outer.result(id);
     assert.ok(O.isSome(final), "the caller's original node finished");
@@ -1480,11 +1631,13 @@ describe("task tool through a graph-driven agent", () => {
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
-    const results = await outer.run();
+    wireOutput(outer, id);
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)!.content), "combined");
 
     const [child] = seen.handles ?? [];
@@ -1553,11 +1706,13 @@ describe("task tool through a graph-driven agent", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const outer = JuncoGraph.parallel(LockPolicy, quiet);
+    const execution = taskExecution(quiet);
+    const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
+    wireOutput(outer, id);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
     assert.ok(finalContext);
     const tools = toolResultsIn(finalContext);
@@ -1594,7 +1749,7 @@ describe("task tool through a graph-driven agent", () => {
     worker(r, "b", 1);
     worker(r, "c");
     let finalContext: Context | undefined;
-    const { caller, outer, id } = await failingCaller(
+    const { caller, outer, execution, id } = await failingCaller(
       r,
       ["a", "b", "c"],
       "ignore",
@@ -1608,7 +1763,7 @@ describe("task tool through a graph-driven agent", () => {
       if (provider === "a") explode(child, "a exploded");
     });
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(
       contentText(results.get(id)?.content ?? []),
       "final: c-report",
@@ -1632,7 +1787,7 @@ describe("task tool through a graph-driven agent", () => {
     worker(r, "b", 1);
     worker(r, "c", 1);
     let finalContext: Context | undefined;
-    const { caller, outer, id } = await failingCaller(
+    const { caller, outer, execution, id } = await failingCaller(
       r,
       ["a", "b", "c"],
       "ignore",
@@ -1645,7 +1800,7 @@ describe("task tool through a graph-driven agent", () => {
       if (provider === "a") explode(child, "a exploded");
     });
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "fresh final");
     assert.ok(finalContext);
     assert.ok(
@@ -1665,7 +1820,7 @@ describe("task tool through a graph-driven agent", () => {
     const prompts = worker(r, "a", 2);
     worker(r, "b");
     let finalContext: Context | undefined;
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 2 },
@@ -1679,7 +1834,7 @@ describe("task tool through a graph-driven agent", () => {
     );
     const children = childrenOf(caller);
 
-    await outer.run();
+    await execution.run();
     assert.ok(finalContext);
     const [a, b] = markersIn(finalContext)[0] ?? [];
     assert.ok(a && b);
@@ -1716,7 +1871,7 @@ describe("task tool through a graph-driven agent", () => {
     worker(r, "b");
     const questions: number[] = [];
     let finalContext: Context | undefined;
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 2 },
@@ -1735,7 +1890,7 @@ describe("task tool through a graph-driven agent", () => {
     );
     const children = childrenOf(caller);
 
-    await outer.run();
+    await execution.run();
     assert.ok(finalContext);
     assert.deepEqual(questions, [3, 4]);
     const [a, b] = markersIn(finalContext)[0] ?? [];
@@ -1773,7 +1928,7 @@ describe("task tool through a graph-driven agent", () => {
     worker(r, "b");
     let finalContext: Context | undefined;
     let probed = false;
-    const { caller, outer, id } = await failingCaller(
+    const { caller, outer, execution, id } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 0 },
@@ -1798,7 +1953,7 @@ describe("task tool through a graph-driven agent", () => {
     );
     const children = childrenOf(caller);
 
-    const results = await outer.run();
+    const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
     assert.ok(finalContext);
     const [a, b] = markersIn(finalContext)[0] ?? [];
@@ -1832,14 +1987,14 @@ describe("task tool through a graph-driven agent", () => {
   test("a caller that settles with a consumed, undecided failure question fails its graph", async () => {
     const r = registry("caller", "a");
     worker(r, "a", 1);
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 0 },
       answering(undefined, () => assert.fail("no marker")),
     );
     const children = childrenOf(caller);
-    const failure = await outer.run().then(
+    const failure = await execution.run().then(
       () => assert.fail("the graph failed"),
       (error: unknown) => error,
     );
@@ -1858,7 +2013,7 @@ describe("task tool through a graph-driven agent", () => {
       worker(r, "a", 1);
       let acquisitions = 0;
       let rejections = 0;
-      const { caller, outer } = await failingCaller(
+      const { caller, outer, execution } = await failingCaller(
         r,
         ["a"],
         { retries: 0 },
@@ -1872,7 +2027,7 @@ describe("task tool through a graph-driven agent", () => {
         rejections += 1;
         throw new Error("no capacity");
       });
-      const failure = await outer.run().then(
+      const failure = await execution.run().then(
         () => assert.fail("the graph failed"),
         (error: unknown) => error,
       );
@@ -1896,7 +2051,7 @@ describe("task tool through a graph-driven agent", () => {
     let rejections = 0;
     const questions: Report[] = [];
     let finalContext: Context | undefined;
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 1 },
@@ -1921,7 +2076,7 @@ describe("task tool through a graph-driven agent", () => {
       throw new Error("no capacity");
     });
 
-    await outer.run();
+    await execution.run();
     assert.ok(finalContext);
     assert.equal(rejections, 2, "the automatic and the explicit retry");
     assert.deepEqual(
@@ -1945,7 +2100,7 @@ describe("task tool through a graph-driven agent", () => {
     for (const policy of ["ignore", { retries: 1 }] as const) {
       const r = registry("caller", "a");
       worker(r, "a", 1);
-      const { caller, outer } = await failingCaller(
+      const { caller, outer, execution } = await failingCaller(
         r,
         ["a"],
         policy,
@@ -1969,7 +2124,7 @@ describe("task tool through a graph-driven agent", () => {
         const children = childrenOf(caller, undefined, () => {
           arm = true;
         });
-        const failure = await outer.run().then(
+        const failure = await execution.run().then(
           () => assert.fail("the graph failed"),
           (error: unknown) => error,
         );
@@ -2000,7 +2155,7 @@ describe("task tool through a graph-driven agent", () => {
       },
       fauxAssistantMessage("must not run"),
     ]);
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 2 },
@@ -2011,7 +2166,7 @@ describe("task tool through a graph-driven agent", () => {
     );
     outerGraph = outer;
     const children = childrenOf(caller);
-    await assert.rejects(outer.run());
+    await assert.rejects(execution.run());
     await closing?.catch(() => {});
     assert.equal(r.calls("a"), 1);
     assert.equal(children("a").length, 1);
@@ -2022,7 +2177,7 @@ describe("task tool through a graph-driven agent", () => {
   test("an abort after a retry is allocated and before publication closes the new attempt", async () => {
     const r = registry("caller", "a");
     worker(r, "a", 1);
-    const { caller, outer } = await failingCaller(
+    const { caller, outer, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 0 },
@@ -2036,7 +2191,7 @@ describe("task tool through a graph-driven agent", () => {
       return undefined;
     });
     const children = childrenOf(caller);
-    await assert.rejects(outer.run());
+    await assert.rejects(execution.run());
     assert.equal(children("a").length, 2, "the retry was allocated");
     for (const child of children("a")) assert.equal(child.status, "closed");
     assert.equal(r.calls("a"), 1, "the retry never ran");

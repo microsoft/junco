@@ -1,5 +1,5 @@
 export { EmitOnce, from, StepNode } from "./builders.js";
-export type { DataflowRunOptions } from "./dataflow-graph.js";
+export type { DataflowRunOptions, DataflowObservation, DataflowExecution } from "./dataflow-graph.js";
 export { DataflowGraph } from "./dataflow-graph.js";
 export type {
   DataflowRunTrace,
@@ -29,7 +29,6 @@ export type { Pretty } from "./pretty.js";
 export { renderPretty } from "./pretty.js";
 export { Queue } from "./queue.js";
 export type {
-  DataflowScheduler,
   InputSchedule,
   MessageSchedule,
   NodeAvailability,
@@ -37,7 +36,7 @@ export type {
   Schedule,
 } from "./scheduler.js";
 export { triggerInputs } from "./scheduler.js";
-export { ConstFanin, ConstFanout } from "./stdlib.js";
+export { ConstFanin, ConstFanout, Source, Sink } from "./stdlib.js";
 export type { TriggerKind } from "./trigger.js";
 export {
   evaluateTrigger,

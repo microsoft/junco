@@ -17,23 +17,24 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DummyTracer, NodeId, type NodeIdType } from "dataflow-engine";
+import { DummyTracer, NodeId, type NodeIdType, UNBOUNDED, Width } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { JuncoMcpTools } from "junco-mcp";
+import { pi } from "junco-scheduler/agent";
 import {
   LockPolicy,
   type NativeModule,
   TaskTool,
   ToolCollection,
 } from "junco-tools";
-import { JuncoGraph } from "../src/index.ts";
+import { JuncoGraph, schedulers } from "../src/index.ts";
 import { TriggerRule } from "../src/std/trigger.ts";
 import { withNativeCleanup } from "./native-support.ts";
+import { terminalPorts } from "./deterministic-support.ts";
 import {
-  drive,
   nativeOptions,
-  type PiGraph,
+  type AgencyContext,
   schedulerModel,
 } from "./support.ts";
 
@@ -115,22 +116,18 @@ async function member(collection: ToolCollection): Promise<JuncoAgent> {
   });
 }
 
-function single(
-  agent: JuncoAgent,
-  collection: ToolCollection,
-): {
-  graph: JuncoGraph;
-  id: NodeIdType;
-} {
-  const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer(), collection);
+function single(agent: JuncoAgent, collection: ToolCollection) {
+  const ports = terminalPorts();
+  const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
+    new DummyTracer(), LockPolicy, collection);
+  const context = schedulers.context({ graph, scheduler: schedulers.parallel() });
   agent.stagePrompt("go");
   const id = graph.addNode({
-    id: NodeId.create("member"),
-    policy: LockPolicy,
-    trigger: TriggerRule.always(),
-    state: agent,
+    id: NodeId.create("member"), policy: LockPolicy,
+    trigger: TriggerRule.always(), state: agent,
   });
-  return { graph, id };
+  ports.connect(graph, id);
+  return { context, id };
 }
 
 function pidOf(message: AssistantMessage | undefined): number {
@@ -148,7 +145,7 @@ test(
       const separateMember = await member(independent);
       const forgetSeparateMember = defer(() => separateMember.return());
       const separate = single(separateMember, independent);
-      const forgetSeparate = defer(() => separate.graph.close());
+      const forgetSeparate = defer(() => separate.context.graph.close());
       forgetSeparateMember();
 
       // Each actor is the test's until a graph owns it; `create` owns the returned root.
@@ -166,8 +163,11 @@ test(
           const forgetNestedMember = defer(() => nestedMember.return());
           const nested = single(nestedMember, collection);
           forgetNestedMember();
-          const forgetNested = defer(() => nested.graph.close());
-          const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer(), collection);
+          const forgetNested = defer(() => nested.context.graph.close());
+          const ports = terminalPorts();
+          const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
+            new DummyTracer(), LockPolicy, collection);
+          const execution = schedulers.context({ graph, scheduler: schedulers.parallel() });
           const forgetGraph = defer(() => graph.close());
           rootMember.stagePrompt("go");
           rootId = graph.addNode({
@@ -180,23 +180,23 @@ test(
           nestedId = graph.addNode({
             id: NodeId.create("nested"),
             trigger: TriggerRule.always(),
-            state: nested.graph,
-            result: nested.id,
+            state: nested.context,
           });
+          ports.connect(graph, rootId);
           forgetNested();
           forgetGraph();
-          return graph;
+          return execution;
         },
       );
-      const forgetRoot = defer(() => rootGraph.close());
+      const forgetRoot = defer(() => rootGraph.graph.close());
       assert.ok(shared && rootId && nestedId);
-      expect(rootGraph.collection).toBe(shared);
+      expect(rootGraph.graph.collection).toBe(shared);
       expect(shared.mux).not.toBe(independent.mux);
       expect(shared.policy).toBe(LockPolicy);
 
       // The independent graph runs and closes first, closing its agent and that agent's server.
-      const separatePid = pidOf((await separate.graph.run()).get(separate.id));
-      await separate.graph.close().finally(forgetSeparate);
+      const separatePid = pidOf((await separate.context.run()).get(separate.id));
+      await separate.context.graph.close().finally(forgetSeparate);
       // Its collection is still the test's: the graph released only its own lease.
       await independent.mux.validateCwd(seed);
 
@@ -210,18 +210,18 @@ test(
       }
 
       // Closing the root releases the last hold on the shared collection and closes its mux.
-      await rootGraph.close().finally(forgetRoot);
+      await rootGraph.graph.close().finally(forgetRoot);
       await assert.rejects(shared.mux.validateCwd(seed));
 
       // The independent collection still serves a fresh graph and server.
       const lateMember = await member(independent);
       const forgetLateMember = defer(() => lateMember.return());
       const late = single(lateMember, independent);
-      const forgetLate = defer(() => late.graph.close());
+      const forgetLate = defer(() => late.context.graph.close());
       forgetLateMember();
-      const latePid = pidOf((await late.graph.run()).get(late.id));
+      const latePid = pidOf((await late.context.run()).get(late.id));
       expect(latePid).not.toBe(rootPid);
-      await late.graph.close().finally(forgetLate);
+      await late.context.graph.close().finally(forgetLate);
       await independent.mux.validateCwd(seed);
     }),
   60_000,
@@ -299,7 +299,7 @@ function mcpScript(label: string, delegate?: string): FauxResponseStep[] {
 }
 
 test(
-  "a task child and grandchild call the inherited MCP tool on the shared collection; the scheduler's close releases its mux last",
+  "a task child and grandchild inherit the shared MCP collection; graph close releases its mux last",
   () =>
     withNativeCleanup(async (defer) => {
       const models = createModels();
@@ -321,25 +321,18 @@ test(
       let shared: ToolCollection | undefined;
       let caller: JuncoAgent | undefined;
       let id: NodeIdType | undefined;
-      const outer: PiGraph = await JuncoGraph.create(
+      const outer: AgencyContext = await JuncoGraph.create(
         seed,
         { native: copyTree, policy: LockPolicy },
         async (collection) => {
           shared = collection;
           const decider = schedulerModel();
-          const graph: PiGraph = await JuncoGraph.pi({
-            session: await new MemorySessionRepo().create(
-              {},
-              BACKGROUND_CONTEXT,
-            ),
-            models: decider.models,
-            model: decider.model,
-            prompt: "Run the caller.",
-            collection,
-            policy: LockPolicy,
-            tracer: new DummyTracer(),
-          });
-          // The graph's close cascades to its scheduler.
+          const ports = terminalPorts();
+          const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
+            new DummyTracer(), LockPolicy, collection);
+          const execution = schedulers.context({ graph, scheduler: pi({
+            models: decider.models, model: decider.model, prompt: "Run the caller.",
+          }) });
           const forgetGraph = defer(() => graph.close());
           caller = await JuncoAgent.fromResolved({
             session: await new MemorySessionRepo().create(
@@ -362,17 +355,18 @@ test(
             trigger: TriggerRule.always(),
             state: caller,
           });
+          ports.connect(graph, id);
           forgetCaller();
           forgetGraph();
-          return graph;
+          return execution;
         },
       );
-      const forgetOuter = defer(() => outer.close());
+      const forgetOuter = defer(() => outer.graph.close());
       assert.ok(shared && caller && id);
       expect(caller.collection).toBe(shared);
 
-      expect((await drive(outer.scheduler)).kind).toBe("settled");
-      const final = outer.result(id);
+      await outer.run();
+      const final = outer.graph.result(id);
       assert.ok(O.isSome(final), "the caller's node produced a message");
       const parts = contentText(final.value.content).split("|");
       expect(parts.map((part) => part.split(":")[0])).toEqual([
@@ -385,10 +379,10 @@ test(
       for (const pid of pids)
         expect(Number.isInteger(pid) && pid > 0).toBe(true);
 
-      // A scheduler-originated close closes the graph and its members, then the last hold.
-      await outer.scheduler.return().finally(forgetOuter);
+      // Graph close joins members before releasing the final collection hold.
+      await outer.graph.close().finally(forgetOuter);
       expect(caller.status).toBe("closed");
-      expect(outer.scheduler.status).toBe("closed");
+      expect(outer.graph.signal.aborted).toBe(true);
       await assert.rejects(shared.mux.validateCwd(seed));
     }),
   60_000,

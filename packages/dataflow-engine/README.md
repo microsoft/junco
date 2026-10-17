@@ -1,42 +1,43 @@
 # dataflow-engine
 
-Async-generator dataflow engine for TypeScript with pluggable schedulers.
+Async-generator dataflow engine for TypeScript with externally paired scheduling policies.
 
-Each node is an `async function*`. The runtime resumes it with the inputs its trigger asked for, and routes whatever it yields onto its outbound edges. A pluggable scheduler decides which nodes run each turn and how much each one reads.
+Each node is an `async function*`. The graph owns work, topology, concrete execution and resource lifetime, never a scheduler. The external `junco-scheduler` context selects existing work nodes and lowers each decision to one native column; triggers and pure input-read hooks determine how much each selected node reads.
 
 ## Architecture
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 360}}}%%
 flowchart TB
-  subgraph Definition["new DataflowGraph#lt;S, N, T, EH, Q#gt;(scheduler: Q, window, threads: WidthType via Width.create() or UNBOUNDED, tracer?: DataflowTracer)"]
-    N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule (when, allOf, anyOf, always)<br/>step: StepFn (async function*), or new StepNode / new EmitOnce"]
-    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>Edge.message: Queue#lt;N#gt; FIFO<br/>Edge.value: write-once Option#lt;T#gt;"]
-    S["DataflowScheduler#lt;N, T#gt;<br/>junco-scheduler: ParallelScheduler, RoundRobinScheduler, Scheduler"]
+  subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(window, threads, tracer?) — passive work graph"]
+    N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule; step: async generator"]
+    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>message: FIFO queue; value: write-once result"]
   end
-  subgraph Run["step(options?) / run(options?): Promise#lt;ReadonlyMap#lt;NodeIdType, T#gt;#gt;"]
-    A["available: Map#lt;NodeIdType, NodeAvailability#gt;<br/>AvailabilityFn / evaluateTrigger / satisfiedEdges"] --> P["schedule(available): Schedule<br/>NodeSchedule lanes, InputSchedule reads<br/>triggerInputs default"]
-    P --> K["validate Schedule<br/>throws DataflowDefinitionError"]
-    K --> X["pop MessageSchedule counts<br/>into ParentView#lt;N, T#gt; (messages, values)"]
-    X --> G["NodeGenerator#lt;N, T#gt;.next(view)<br/>AsyncGenerator#lt;Message#lt;N#gt;[], T, ParentView#gt;"]
-    G -- "yield Message[] via Message.create()" --> Q["route to outbound Queue#lt;N#gt;"]
+  subgraph Context["context({ graph, scheduler }) — external policy and local history"]
+    A["available() + observe()<br/>typed native data and external metadata"] --> P["Scheduler(snapshot, signal?)<br/>Decision: ordered selected work IDs"]
+    P --> L["validate authority, availability and freshness<br/>lower one entry per lane, one column"]
+  end
+  subgraph Execution["graph.evaluate((execute, signal) => ...) — single-flight lifetime scope"]
+    L --> K["execute(Schedule)<br/>native window/thread/read validation"]
+    K --> X["consume selected inputs into ParentView#lt;N, T#gt;"]
+    X --> G["NodeGenerator#lt;N, T#gt;.next(view)<br/>prime without consuming; resume with delivered view"]
+    G -- "yield Message[]" --> B["route to outbound message queues"]
     G -- "return T" --> R["graph.result(id): Option#lt;T#gt;<br/>resolve value edge cells"]
     G -- "throw EH" --> F["reject: DataflowNodeError#lt;EH#gt;"]
-    Q --> A
-    R --> A
   end
   N --> A
   E --> X
-  S --> P
-  A -- "nothing available" --> Z(["ReadonlyMap#lt;NodeIdType, T#gt;"])
+  B --> A
+  R --> A
+  A -- "nothing available" --> Z(["graph.results(): ReadonlyMap#lt;NodeIdType, T#gt;"])
 ```
 
 | Part | Role |
 |---|---|
-| `DataflowGraph<S, N, T, EH, Q>` | Owns nodes and edges (an `ngraph.graph` multigraph) and drives `step()`/`run()`. `N` is the message payload type, `T` the node return type, `S` the node state type and `EH` the error type that node bodies throw. The optional `Q` (default `DataflowScheduler<N, T>`) keeps the concrete scheduler type on `graph.scheduler`. |
+| `DataflowGraph<S, N, T, EH>` | Owns native nodes/edges (an `ngraph.graph` multigraph), observations and concrete execution via `evaluate`. `S`, `N`, `T` retain native state, message and result types; `EH` is the node-body error type. Construction takes only window/thread bounds and an optional tracer. |
 | `Edge.message` / `Edge.value` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
 | Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
-| `DataflowScheduler` | Decides **who** runs, in which lane and turn, and **how much** each node reads from each edge. |
+| `SchedulerContext<S,N,T,C,G>` | Externally pairs a graph with a typed policy, application metadata `C` and independent history; its `step()`/`run()` drive the graph. Policies and contexts are never work members. |
 
 ## Install
 
@@ -53,7 +54,7 @@ Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import
 ## Quick start
 
 ```ts
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import {
   DataflowGraph, Edge, EmitOnce, Message, StepNode, TriggerRule, UNBOUNDED, Width, from,
 } from "dataflow-engine";
@@ -62,8 +63,9 @@ import type { NodeGenerator } from "dataflow-engine";
 const numbers = Edge.message<number, string>("numbers");
 const squares = Edge.message<number, string>("squares");
 const graph = new DataflowGraph<void, number, string, never>(
-  new ParallelScheduler(), Width.create(1), UNBOUNDED,
+  Width.create(1), UNBOUNDED,
 );
+const execution = context({ scheduler: parallel(), graph });
 
 const source = graph.addNode(new EmitOnce<void, number, string>(
   () => [Message.create(numbers, 1), Message.create(numbers, 2), Message.create(numbers, 3)],
@@ -87,7 +89,7 @@ const sink = graph.addNode(new StepNode<void, number, string>((_state, view) => 
 }, { state: undefined, trigger: TriggerRule.when(squares) }));
 
 graph.addEdge(source, square, numbers).addEdge(square, sink, squares);
-const results = await graph.run();
+const results = await execution.run();
 // seen = [1, 4, 9]; results.get(source) = "source done"; square and sink never return.
 ```
 
@@ -98,8 +100,8 @@ A node body has the type `NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, 
 1. **Prime.** On a node's first activation, the runtime calls `step()` and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
 2. **Deliver.** Every later activation pops the scheduled inputs and calls `next(view)`. `from(view, edge)` (or `view.messages.get(edge.id)`) is this turn's batch from that edge. A key exists only for an edge that actually delivered something, which is how an `anyOf` body tells which branch fired. `view.values` holds the value edges that have resolved.
 3. **Emit.** Each `yield` is the full list of messages for this turn, routed in order. `yield []` emits nothing and keeps the node alive.
-4. **Finish.** `return value` marks the node `done`, records `value` in `run()`'s result map and resolves every outbound value edge. A node that never returns, such as a sink or any `StepNode`, is absent from the results.
-5. **Fail.** A throw terminates the node, and `run()` rejects with `DataflowNodeError` (`nodeId`, `error: EH`) — unless the node has an `on_error` hook (below).
+4. **Finish.** `return value` marks the node `done`, records `value` in `graph.results()` and the context drive's result map, and resolves every outbound value edge. A node that never returns, such as a streaming sink or any `StepNode`, is absent from the results.
+5. **Fail.** A throw terminates the node and rejects execution with `DataflowNodeError` (`nodeId`, `error: EH`) — unless the node has an `on_error` hook (below).
 
 An optional `on_error(error, signal)` (`ErrorFn<S, N, T>`) on the spec recovers a body failure: a throw from `step()` or the generator's `next()`. The node is `done` first; the hook then runs once, as a method with the node as `this`, in the same activation, and its returned messages are routed in order like a yield (`[]` routes nothing). The node records no result and its value edges stay unresolved; the tracer sees the activation's `fail(error)` and, if nothing else fails, a normal run `end`. A body that threw exactly the aborted signal's reason propagates it without calling the hook. Wiring, scheduling and routing errors (`DataflowDefinitionError`) never reach it. A hook that throws rejects the invocation with `DataflowNodeError` carrying its own error (or a `DataflowDefinitionError`/the aborted signal's reason unchanged) and is never run again; an unwired returned message rejects after earlier ones were queued.
 
@@ -145,14 +147,27 @@ A value edge is never consumed: once resolved, it satisfies its trigger on every
 `new ConstFanout(...)` and `new ConstFanin(...)` construct complete specs for `graph.addNode`; wire their edges with `graph.addEdge` as usual. `new ConstFanout(payload, outputs, { state, ret })` sends the same `payload` (by reference) once on every output message edge, then returns `ret`. `new ConstFanin(inputs, output, { state, ret })` waits until every input message edge has delivered, across any number of activations or `run()` calls, then sends one list on `output` in `inputs` order (not arrival order) and returns `ret`; later input never produces another list, and no inputs send one `[]`. Inputs are `Edge<C, T>` and the output is `Edge<C[], T>`, so the graph's message type must admit both. Construct one `ConstFanin` per collector node. Both throw `DataflowDefinitionError` for a value edge or a repeated edge id.
 
 ```ts
+import { context, parallel } from "junco-scheduler";
+import { ConstFanout, ConstFanin, DataflowGraph, Edge, StepNode, TriggerRule, UNBOUNDED, Width, from } from "dataflow-engine";
+
 const a = Edge.message<number, string>("a");
 const b = Edge.message<number, string>("b");
 const list = Edge.message<number[], string>("list");
-const graph = new DataflowGraph<void, number | number[], string, never>(new ParallelScheduler(), Width.create(1), UNBOUNDED);
+const graph = new DataflowGraph<void, number | number[], string, never>(Width.create(1), UNBOUNDED);
+const execution = context({ scheduler: parallel(), graph });
 const one = graph.addNode(new ConstFanout(1, [a], { state: undefined, ret: "one" }));
 const two = graph.addNode(new ConstFanout(2, [b], { state: undefined, ret: "two" }));
 const join = graph.addNode(new ConstFanin([b, a], list, { state: undefined, ret: "join" }));
+const seen: number[] = [];
+const sink = graph.addNode(new StepNode<void, number | number[], string>((_state, view) => {
+  for (const batch of from(view, list)) {
+    if (!Array.isArray(batch)) throw new Error("Expected a collected list");
+    seen.push(...batch);
+  }
+  return [];
+}, { state: undefined, trigger: TriggerRule.when(list) }));
 graph.addEdge(one, join, a).addEdge(two, join, b).addEdge(join, sink, list); // sink receives [2, 1]
+await execution.run(); // seen = [2, 1]
 ```
 
 ## Triggers and schedulers
@@ -168,26 +183,26 @@ The engine evaluates each node's trigger first, then consults its `is_available(
 
 `NodeSpec<S, N, T>` is `NodeOptions<N, T>` plus `state`, `step` and the optional `on_error`. `NodeOptions` holds the registration fields every node kind shares: optional `id`, optional `description` (free prose, kept on the registered `Node` when given and never used for scheduling), the required `trigger` and the optional `is_available` hook. Libraries building node specs reuse this type rather than declaring their own.
 
-Concrete schedulers live in the sibling package `junco-scheduler` (`import { ... } from "junco-scheduler"`); the engine ships only the contract.
+The sibling package `junco-scheduler` supplies three semantic operators and derived policies; the engine's `Schedule` is only a concrete execution format.
 
-| Scheduler | Plan |
+| Policy | Decision |
 |---|---|
-| `new ParallelScheduler()` | Runs every available node in one concurrent turn, one lane each. Construct the graph with `threads = UNBOUNDED`. |
-| `new RoundRobinScheduler()` | Runs exactly one node per window, taking ids in increasing string order after the last one run, wrapping around. |
-| `new Scheduler({ state, schedule, resolveInputs? })` | Builds a custom policy with mutable state kept across cycles. `ParallelScheduler` and `RoundRobinScheduler` extend it. |
-| Custom | Implement `create(window, threads)` and `schedule(available)`, and optionally `resolveInputs(entry, live)` and `bind(available, step)` (receives callbacks to read candidates and drive one step). |
+| `parallel()` | Selects all available owned work in insertion order, in one linear pass; use unbounded threads when all may run together. |
+| `roundRobin(order?, width?)` | Derives a cyclic cursor from context-local projected history; default raw string order is `"1" < "10" < "2"`, default width 1. |
+| `choose({ where?, rank, width? })` | Filters available owned IDs, sorts by comparator with raw string-ID ties, and takes the requested width (default 1). |
+| `separate(leftOwns, left, right)` | Gives complementary disjoint authority/history to both children, drains both, validates scoped selections and concatenates left then right. |
+| `agent(invoke)` | Calls a typed oracle once, then chooses only the first non-empty currently applicable stable-deduplicated wave. |
 
 ```ts
-class OneAtATime implements DataflowScheduler<number, string> {
-  create(_window: number, _threads: number): void {}
-  schedule(available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>): Schedule {
-    const [first] = available;
-    return first ? [[{ id: first[0], inputs: triggerInputs(first[1]) }]] : [];
-  }
-}
+import { choose, context } from "junco-scheduler";
+
+const execution = context({ graph, scheduler: choose({ rank: () => 0 }) });
+const results = await execution.run(); // ties choose by string ID, not registration order
 ```
 
-`triggerInputs` reads each fired edge whole. To read fixed-size batches instead, return counts (`n`, `"all"` or `"none"`) per edge. The graph validates every plan against the lane and window limits, availability and read counts, and throws `DataflowDefinitionError` on a violation. Graph wiring mistakes throw the same error.
+`Scheduler<S,N,T,C>` is one sync/async function type returning `{ selected }`; all native data and metadata remain typed. `parallel()` and `roundRobin()` are universally callable across graph/data domains. Priority/FIFO ranks, nondeterminism and fallback are ordinary TypeScript callbacks, not extra operators. Optional `pi` is imported from `junco-scheduler/agent`, never required by the core entrypoint.
+
+`triggerInputs` reads each fired edge whole. A context's optional pure `readInputs(id, candidate)` instead returns counts (`n`, `"all"` or `"none"`) per edge, and is reused for live reads of running nodes. Native execution validates bounds, availability and all read maps before starting a column; invalid decisions or reads consume nothing and throw `DataflowDefinitionError`. Wiring mistakes throw the same error.
 
 A `Schedule` is **lanes × turns**: `schedule[lane][turn]`. Turn `w` runs index `w` of every lane concurrently, and the next turn starts only after all of them settle. So `[[A, A], [B]]` runs A and B together, then A alone. A ready node's first occurrence primes its generator and counts as a turn.
 
@@ -195,14 +210,33 @@ The whole window is validated before it starts. Before each turn, the graph take
 
 ### Driving a graph
 
+Construct `const execution = context({ graph, scheduler: parallel() })`; neither graph construction nor pairing calls the policy or starts work.
+
 | Call | Executes |
 |---|---|
-| `step(options?)` | At most one scheduler window. If nothing is available, it returns the results without calling the scheduler. |
-| `run(options?)` | Windows until no node is available. |
+| `execution.step(options?)` | At most one current decision, lowered to one column. Quiescence returns results without a policy call. |
+| `execution.run(options?)` | Repeated current decisions until `graph.available()` is empty. |
+| `graph.evaluate((execute, signal) => operation, options?)` | One native evaluation scope around arbitrary planning and serial concrete `execute(schedule, { resolveInputs?, onColumn? })` calls. |
 
-Both calls resolve to the cumulative map of finished nodes, and `available()` returns the current non-destructive snapshot. Execution is resumable: add nodes or edges, then call either method again. Calling either method while one is in flight rejects with `DataflowDefinitionError`.
+Context drives return cumulative completed-node results, available separately through `graph.results()` or `graph.result(id)`. Quiescence does not imply every node completed. Add nodes/edges or emit inputs and drive again. The graph has no policy `run`/`step` methods or scheduler property. Different contexts may share a graph and have independent histories, but its single-flight evaluation gate rejects overlap before any competing policy runs.
 
-`options.signal` (an `AbortSignal`) is checked before planning, before each turn and after each turn settles. When it is aborted, the call rejects with `signal.reason` and starts no further turn. Node activations that are already running are always awaited, never abandoned. Earlier turns are not rolled back.
+`options.signal` is checked before planning, before each column and after it drains. Original cancellation wins and starts no later column; admitted activations are always awaited. A scope-bound executor rejects concurrent calls and calls after scope exit. Even forgotten/unawaited concrete execution is drained before the evaluation/tracer settles; distinct operation/execution failures aggregate in that order. Successful earlier work is never rolled back. The synchronous non-throwing `onColumn` observer receives actual started IDs in lane order after each non-empty column drains, including a failed column.
+
+### Typed observations and selection authority
+
+`graph.observe(): DataflowObservation<S,N,T>` captures **all** native nodes, including done/unavailable work, with only `id`, `status`, defined `description` and native `state`; insertion-ordered link tuples retain direction, parallel links and self-loops. It also contains all-node detached `ParentView` input containers, retained results and a monotone native version. Reads never invoke readiness hooks, consume inputs or activate work. Cached containers are reused until a tracked mutation, activation admission or settlement advances that version; direct writes through retained nodes/transports or opaque values are not tracked.
+
+Containers, queue arrays, primitive fields and membership/order are detached. Opaque `S/N/T` identities are borrowed, never deep-cloned or frozen: policies must only read them, and applications needing historical object contents must use immutable data. External `describeNode` metadata is captured freshly per decision, not cached with native observations; omission gives an empty `ReadonlyMap<NodeIdType,never>`, while `0`, `false`, `null` and `""` are valid values. A mutation during planning/read lowering rejects the stale decision before execution, without a retry.
+
+`Snapshot<S,N,T,C>` adds available/owned ID sets, typed external context, local committed `Decision[]` history and the graph's thread bound. `separate` partitions only exclusive **selection authority** over existing work IDs and projects historical selections to each branch, dropping empty events. Native maps, links, metadata and threads remain shared observations. This CSL contract does not partition JavaScript memory, effects, payloads, queues or external services, and authority safety alone promises neither capacity, progress nor fairness. The frame rule requires owned-local readonly callbacks; it is not a sandbox for arbitrary TypeScript.
+
+### Deterministic source and sink ports
+
+`Source<N,T>(route, { id, description? })` and `Sink<N,T>(body, { id, trigger, is_available?, description? })` are real native node specs (`state === this`), exported by the engine. They consume scheduling capacity and appear in topology, tracing and history. Plain `DataflowGraph` does not require ports; `JuncoGraph` requires fresh positional instances.
+
+`source.enqueue(view)` detaches the native edge-addressed `ParentView` and queues non-empty deliveries FIFO; `peek()` is non-consuming. Empty message keys and present value keys (including `undefined`) survive, opaque payloads remain borrowed, and empty ingress is ignored. Only a scheduled Source invokes its synchronous route, consuming one delivery on its first selected activation with no initial empty yield. Route validation and routing run before selected downstream work starts in that column. Its revision advances on admission/consumption, not reads.
+
+A Sink delegates an ordinary generator, intercepts yielded messages into its ordered outbox and yields `[]` internally. `sink.send(message)` can stage final messages before the body returns its exact native `T`. `drain(deliver)` synchronously removes each message only after delivery succeeds; a failed delivery retains that message and the suffix without replaying successful prefixes. A sink's trigger/availability must keep it dormant when no unhandled input exists; retained value edges must not create a busy loop. Nested agency output is only the designated sink's retained result, including present `undefined`, never an arbitrary member selector.
 
 ### Emitting from outside a node body
 
@@ -216,7 +250,7 @@ A node whose state is itself a `DataflowGraph` renders as a `subgraph` titled wi
 
 ## Tracing
 
-Pass a `DataflowTracer` as the fourth constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` is called once per `step()` or `run()` invocation and returns a handle that sees every generator activation (`"prime"` with no view, `"resume"` with exactly the delivered view), its yield or return, node failures, and the end or failure of the invocation. For `step()`, `end` means that window finished, not that the graph is quiescent. `complain(nodeId, complaint)` receives a complaint recorded for a node, independent of any run; the graph never calls it itself. Callbacks are synchronous observers: they must not mutate what they receive, and an exception they throw is reported with `console.warn` and cannot change the computation. `flush()` is caller-owned; the graph never awaits it.
+Pass a `DataflowTracer` as the third constructor argument to observe execution; omit it for an untraced graph. `startRun(graph)` fires once per native `evaluate` scope (therefore once per context `step()`/`run()` invocation), covering planning as well as work. Its handle observes every generator activation (`"prime"` without a view, `"resume"` with the delivered view), yield/return, node failure and invocation end/failure. A context step's `end` means that decision completed, not that the graph is quiescent. `complain(nodeId, complaint)` is independent of any evaluation; the engine never calls it itself. Callbacks are synchronous readonly observers; exceptions warn and cannot change computation. `flush()` remains caller-owned.
 
 `DummyTracer` is the shipped no-op implementation. The separate [`dataflow-engine-opik`](../dataflow-engine-opik) package provides `OpikTracer(client, name?)`, which exports each run as one Opik trace carrying the graph's Mermaid topology and one child span per activation, and each complaint as its own completed `<name>.complain` trace (node ID and complaint text only). This package never depends on Opik.
 

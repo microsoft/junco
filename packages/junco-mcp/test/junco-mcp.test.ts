@@ -228,6 +228,26 @@ test("connect rejects invalid close timeouts before acquiring the ShellMux", asy
   assert.equal(nativeAddonLoaded(), false);
 });
 
+test("connect rejects unknown lifetimes even for empty definitions", async () => {
+  for (const definition of [new JuncoMcpTools(), JuncoMcpTools.add({ name: "server", type: "stdio", command: "server" })]) {
+    for (const toolLifetime of ["unknown", null, 0]) {
+      await assert.rejects(definition.connect({ toolLifetime: toolLifetime as "call" }), TypeError);
+    }
+  }
+  assert.equal(nativeAddonLoaded(), false);
+});
+
+test("empty definitions ignore cancellation for both lifetimes and acquire nothing", async () => {
+  for (const toolLifetime of ["connection", "call"] as const) {
+    const connection = await new JuncoMcpTools().connect({
+      cwd: "/nonexistent", signal: AbortSignal.abort(), toolLifetime,
+    });
+    assert.deepEqual(connection.tools, []);
+    await connection.close();
+  }
+  assert.equal(nativeAddonLoaded(), false);
+});
+
 test("an empty definition connects without loading the native addon", async () => {
   const connection = await new JuncoMcpTools().connect({ cwd: "/nonexistent" });
   assert.deepEqual(connection.tools, []);

@@ -48,7 +48,8 @@ import {
   LockPolicy,
   RecvTool,
 } from "junco-tools";
-import { type AgenticInput, Deterministic, JuncoGraph } from "../src/index.ts";
+import { type AgenticInput, Deterministic, graph as graphApi, schedulers } from "../src/index.ts";
+import * as O from "fp-ts/lib/Option.js";
 import { Ralph } from "../src/workflows/index.ts";
 import { ctrlC } from "./cancellation.ts";
 
@@ -153,13 +154,24 @@ export const memberOptions = {
 
 /** The mixed graph and its Reviewer node. */
 export interface MixedGraph {
-  graph: JuncoGraph;
+  execution: ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
   reviewerId: NodeIdType;
 }
 
 export const MixedGraph = {
   create(members: Members, observer?: DataflowTracer): MixedGraph {
-    const graph = JuncoGraph.parallel(LockPolicy, observer);
+    const finalResult = Edge.value<AgenticInput, AssistantMessage>("Reviewer->$sink");
+    const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>(() => {
+      throw new graphApi.DataflowDefinitionError("Mixed does not accept external input");
+    }, { id: NodeId.create("$source") });
+    const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> = new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const result = graph.result(NodeId.create("Reviewer"));
+      if (O.isNone(result)) throw new Error("Reviewer did not produce a result");
+      return result.value;
+    }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(finalResult) });
+    const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> = new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1), graphApi.UNBOUNDED, observer, LockPolicy);
+    const execution = schedulers.context({ scheduler: schedulers.parallel(), graph });
     const directInput = Edge.message<AgenticInput, AssistantMessage>(directInputId);
     const ralphInput = Edge.message<AgenticInput, AssistantMessage>("Goals->Ralph");
     const ralphFinal = Edge.message<AgenticInput, AssistantMessage>(ralphFinalId);
@@ -213,8 +225,9 @@ export const MixedGraph = {
       .addEdge(goalsId, directId, directInput)
       .addEdge(goalsId, ralphId, ralphInput)
       .addEdge(directId, reviewerId, directResult)
-      .addEdge(ralphId, reviewerId, ralphFinal);
-    return { graph, reviewerId };
+      .addEdge(ralphId, reviewerId, ralphFinal)
+      .addEdge(reviewerId, sink.id, finalResult);
+    return { execution, reviewerId };
   },
 };
 
@@ -242,18 +255,18 @@ async function main(signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   await using Reviewer = await member("Reviewer");
   signal?.throwIfAborted();
-  const { graph, reviewerId } = MixedGraph.create({ Ralph, Direct, Reviewer });
+  const { execution, reviewerId } = MixedGraph.create({ Ralph, Direct, Reviewer });
   let review: string;
   try {
-    const results = await graph.run({ signal });
+    const results = await execution.run({ signal });
     signal?.throwIfAborted();
     review = finalText(results.get(reviewerId), "Reviewer");
   } finally {
     // Both graphs share the automatically selected tracer: flush it even when close fails.
     try {
-      await graph.close();
+      await execution.graph.close();
     } finally {
-      await graph.tracer.flush();
+      await execution.graph.tracer.flush();
     }
   }
   console.log(`Final review:\n${review}`);

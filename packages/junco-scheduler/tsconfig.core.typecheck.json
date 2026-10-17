@@ -10,9 +10,11 @@
   "include": [
     "src/index.ts",
     "src/scheduler.ts",
+    "src/context.ts",
     "src/parallel.ts",
     "src/round-robin.ts",
     "test/scheduler.test.ts",
-    "test/scheduler.types.ts"
+    "test/scheduler.types.ts",
+    "test/scheduler-dsl.property.test.ts"
   ]
 }

@@ -5,13 +5,18 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   McpAbortError,
   McpClient,
+  McpConnectionClosedError,
   type McpClientOptions,
   type StdioTransportOptions,
   type Tool,
 } from "@earendil-works/pi-mcp";
 import type { ToolCollection } from "junco-tools";
 import { ShellMuxStdioTransport } from "./stdio.js";
-import { adaptMcpTools, restoreTerminalError } from "./tools.js";
+import {
+  adaptMcpTools,
+  getJuncoMcpToolIdentity,
+  restoreTerminalError,
+} from "./tools.js";
 
 /** One MCP server, launched over stdio as a managed job of a Junco ToolCollection's ShellMux. */
 export type JuncoMcpServerOptions = {
@@ -29,6 +34,11 @@ export interface JuncoMcpConnectOptions {
    */
   readonly signal?: AbortSignal;
   /**
+   * Default: "connection", keeping servers until close. "call" closes discovery and opens a
+   * fresh originating server per invocation. Independent of `discardOnClose`.
+   */
+  readonly toolLifetime?: "connection" | "call";
+  /**
    * Close each server by cancelling it, so none of its effects (file writes, caches) publish
    * to the checkout. A server that exits on its own before cancellation fails `close`.
    * Default: `false`, which ends standard input and publishes the server's effects.
@@ -41,10 +51,10 @@ export interface JuncoMcpConnectOptions {
   readonly collection?: ToolCollection;
 }
 
-/** Fresh clients and processes for every server of a definition, with their tools. */
+/** Discovered tools and their connection- or call-scoped clients and processes. */
 export interface JuncoMcpConnection {
   readonly tools: AgentTool[];
-  /** Close every server in reverse order and release the collection lease. Idempotent. */
+  /** Fence new calls, close all owned servers, and release the collection lease. Idempotent. */
   close(): Promise<void>;
 }
 
@@ -59,6 +69,11 @@ interface ServerRecord {
   readonly transport: ShellMuxStdioTransport;
   tools: readonly Tool[];
 }
+
+type CallRecord = {
+  readonly settled: Promise<void>;
+  cleanupFailures?: readonly unknown[];
+};
 
 const CLIENT_IDENTITY = { name: "junco-mcp", version: "0.1.0" } as const;
 
@@ -107,15 +122,35 @@ export class JuncoMcpTools {
   }
 
   /**
-   * Connect every server in insertion order and adapt its tools. Later {@link add} calls
-   * affect later connections only. An empty definition acquires nothing.
+   * Discover every server in insertion order and adapt its tools. Later {@link add} calls
+   * affect later connections only. Call lifetime closes discovery before returning and starts
+   * only the originating server for each invocation. An empty definition acquires nothing.
    */
   async connect(
     options: JuncoMcpConnectOptions = {},
   ): Promise<JuncoMcpConnection> {
+    if (
+      options.toolLifetime !== undefined &&
+      options.toolLifetime !== "connection" &&
+      options.toolLifetime !== "call"
+    ) {
+      throw new TypeError(
+        'JuncoMcpTools: toolLifetime must be "connection" or "call"',
+      );
+    }
+    return options.toolLifetime === "call"
+      ? this.#connectPerCall(options)
+      : this.#connectPhysical(options);
+  }
+
+  async #connectPhysical(
+    options: Omit<JuncoMcpConnectOptions, "toolLifetime">,
+    definitions: readonly ServerDefinition[] = this.#servers,
+    call?: CallRecord,
+  ): Promise<JuncoMcpConnection> {
     const base = resolve(options.cwd ?? process.cwd());
     const signal = options.signal;
-    const servers = this.#servers.map(({ name, options: server }) => ({
+    const servers = definitions.map(({ name, options: server }) => ({
       ...copyServerOptions(server),
       name,
       cwd: resolve(base, server.cwd ?? "."),
@@ -216,6 +251,7 @@ export class JuncoMcpTools {
         close() {
           closing ??= closeServers(records, lease).then((failures) => {
             if (failures.length > 0) {
+              if (call) call.cleanupFailures = failures;
               throw new AggregateError(failures, "JuncoMcpTools close failed", {
                 cause: failures[0],
               });
@@ -226,6 +262,145 @@ export class JuncoMcpTools {
       };
     } catch (primary) {
       const failures = await closeServers(records, lease, primary);
+      if (call && failures.length > 0) call.cleanupFailures = failures;
+      if (failures.length === 0) throw primary;
+      throw new AggregateError(
+        [primary, ...failures],
+        "JuncoMcpTools connection cleanup failed",
+        { cause: primary },
+      );
+    }
+  }
+
+  async #connectPerCall(
+    options: Omit<JuncoMcpConnectOptions, "toolLifetime">,
+  ): Promise<JuncoMcpConnection> {
+    const definition = this.snapshot();
+    const cwd = resolve(options.cwd ?? process.cwd());
+    const collection = options.collection;
+    const discardOnClose = options.discardOnClose;
+    const signal = options.signal;
+    const physicalOptions = { cwd, collection, discardOnClose };
+    if (definition.size === 0) {
+      const closed = Promise.resolve();
+      return { tools: [], close: () => closed };
+    }
+    if (collection === undefined || signal?.aborted) {
+      return definition.#connectPhysical({ ...physicalOptions, signal });
+    }
+
+    const lease = collection.lease();
+    try {
+      const discovery = await definition.#connectPhysical({
+        ...physicalOptions,
+        signal,
+      });
+      const tools = discovery.tools;
+      await discovery.close();
+      if (signal?.aborted) throw new McpAbortError();
+
+      const stop = new AbortController();
+      const calls = new Set<CallRecord>();
+      let closing: Promise<void> | undefined;
+      for (const tool of tools) {
+        const identity = getJuncoMcpToolIdentity(tool)!;
+        const server = definition.#servers.find(
+          ({ name }) => name === identity.serverName,
+        )!;
+        tool.execute = (toolCallId, params, signal, onUpdate) => {
+          if (closing !== undefined) {
+            return Promise.reject(new McpConnectionClosedError());
+          }
+          const callSignal = signal
+            ? AbortSignal.any([signal, stop.signal])
+            : stop.signal;
+          const { promise: settled, resolve } = Promise.withResolvers<void>();
+          const call: CallRecord = { settled };
+          calls.add(call);
+          const invocation = (async () => {
+            if (callSignal.aborted) throw new McpAbortError();
+            let connection: JuncoMcpConnection | undefined;
+            let failed = false;
+            let primary: unknown;
+            let result: Awaited<ReturnType<AgentTool["execute"]>> | undefined;
+            try {
+              connection = await definition.#connectPhysical(
+                { ...physicalOptions, signal: callSignal },
+                [server],
+                call,
+              );
+              const matches = connection.tools.filter((candidate) => {
+                const fresh = getJuncoMcpToolIdentity(candidate);
+                return (
+                  fresh?.serverName === identity.serverName &&
+                  fresh.originalToolName === identity.originalToolName
+                );
+              });
+              if (matches.length !== 1) {
+                throw new Error(
+                  `JuncoMcpTools: expected one tool "${identity.serverName}/${identity.originalToolName}", found ${matches.length}`,
+                );
+              }
+              result = await matches[0]!.execute(
+                toolCallId,
+                params,
+                callSignal,
+                onUpdate,
+              );
+              if (callSignal.aborted) throw new McpAbortError();
+            } catch (error) {
+              failed = true;
+              primary = error;
+            }
+            try {
+              await connection?.close();
+            } catch (closeFailure) {
+              if (failed) {
+                throw new AggregateError(
+                  [primary, closeFailure],
+                  "JuncoMcpTools call cleanup failed",
+                  { cause: primary },
+                );
+              }
+              throw closeFailure;
+            }
+            if (failed) throw primary;
+            if (callSignal.aborted) throw new McpAbortError();
+            return result!;
+          })();
+          const finish = () => {
+            resolve();
+            calls.delete(call);
+          };
+          invocation.then(finish, finish);
+          return invocation;
+        };
+      }
+      return {
+        tools,
+        close() {
+          if (closing === undefined) {
+            const active = [...calls];
+            closing = Promise.resolve().then(async () => {
+              stop.abort(new McpConnectionClosedError());
+              await Promise.all(active.map(({ settled }) => settled));
+              const failures = active.flatMap(
+                ({ cleanupFailures }) => cleanupFailures ?? [],
+              );
+              await lease.close().catch((error) => failures.push(error));
+              if (failures.length > 0) {
+                throw new AggregateError(failures, "JuncoMcpTools close failed", {
+                  cause: failures[0],
+                });
+              }
+            });
+          }
+          return closing;
+        },
+      };
+    } catch (primary) {
+      const failures: unknown[] = [];
+      await lease.close().catch((error) => failures.push(error));
       if (failures.length === 0) throw primary;
       throw new AggregateError(
         [primary, ...failures],

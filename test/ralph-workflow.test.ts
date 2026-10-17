@@ -14,22 +14,25 @@ import {
   DataflowNodeError,
   DummyTracer,
   Edge,
-  from,
-  Message,
-  type NodeGenerator,
+  NodeId,
+  Source, Sink, Width, UNBOUNDED, TriggerEntry,
+  type TriggerEntry as TriggerEntryType,
   type NodeIdType,
+  type NodeGenerator,
   TriggerRule,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { LockPolicy, YieldTool } from "junco-tools";
-import { type AgenticInput, Deterministic, JuncoGraph } from "../src/index.ts";
+import { parallel } from "junco-scheduler";
+import { context } from "../src/node-policy.ts";
+import createGraph from "ngraph.graph";
+import { type AgenticInput, JuncoGraph } from "../src/index.ts";
 import { Ralph } from "../src/workflows/index.ts";
 import { nativeOptions, waitingTool } from "./support.ts";
 
-// The Ralph workflow over real native agents on faux models, inside real parent graphs. A dormant
-// source stands in for the caller's upstream node and a recording sink for its downstream one.
+// Ralph over real native agents on faux models, using scheduled parent source and sink ports.
 
 const quiet = new DummyTracer();
 
@@ -94,7 +97,7 @@ const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
 
 /** Step the graph until `done` holds; a bounded loop, so a regression fails instead of spinning. */
 async function stepUntil(
-  graph: Pick<JuncoGraph, "step">,
+  graph: { step(): Promise<unknown> },
   done: () => boolean,
 ): Promise<void> {
   for (let windows = 0; windows < 64; windows++) {
@@ -116,6 +119,48 @@ function rootCause(error: unknown): unknown {
   return current;
 }
 
+type Boundary = {
+  entries: TriggerEntryType<AgenticInput, AssistantMessage>[];
+  results: NodeIdType[];
+  recorders: Map<string, (values: readonly AgenticInput[]) => void>;
+};
+const boundaries = new WeakMap<JuncoGraph, Boundary>();
+function parentContext() {
+  const config: Boundary = { entries: [], results: [], recorders: new Map() };
+  const source = new Source<AgenticInput, AssistantMessage>((view) =>
+    [...view.messages.keys()].flatMap((id) => (view.messages.get(id) ?? []).map((payload) => ({ id, payload }))),
+    { id: NodeId.create("$source") });
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+    const view = yield [];
+    for (const edge of view.messages.keys()) config.recorders.get(edge)?.(view.messages.get(edge) ?? []);
+    const result = graph.result(config.results.at(-1)!);
+    assert.ok(O.isSome(result));
+    return result.value;
+  }, { id: NodeId.create("$sink"), trigger: { kind: "all", rule: config.entries },
+    is_available: (_view, triggered) => triggered && config.results.length > 0 });
+  const graph: JuncoGraph<AgenticInput, AssistantMessage> = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+  boundaries.set(graph, config);
+  const work = parallel();
+  return context({ graph, scheduler: (snapshot, signal) => {
+    // Admit external batches before advancing controllers whose native inbox was still empty
+    // when this column's reads were planned.
+    if (snapshot.available.has(source.id)) return { selected: [source.id] };
+    return work(snapshot, signal);
+  } });
+}
+function mappedPorts() {
+  let graph: JuncoGraph;
+  const final = Edge.value<AgenticInput, AssistantMessage>("work->$sink");
+  const source = new Source<AgenticInput, AssistantMessage>(() => { throw new Error("No external input"); }, { id: NodeId.create("$source") });
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+    yield [];
+    const result = graph.result(NodeId.create("work"));
+    assert.ok(O.isSome(result));
+    return result.value;
+  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+  return { source, sink, wire(value: JuncoGraph) { graph = value; graph.addEdge(NodeId.create("work"), sink.id, final); } };
+}
+
 let edges = 0;
 
 /**
@@ -130,30 +175,14 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
   const output = Edge.message<AgenticInput, AssistantMessage>(
     `ralph->sink-${tag}`,
   );
-  const sourceId = parent.addNode({
-    trigger: TriggerRule.always(),
-    is_available: () => false,
-    state: new Deterministic<AgenticInput, AssistantMessage>(
-      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-        while (true) yield [];
-      },
-      LockPolicy,
-    ),
-  });
   const delivered: string[] = [];
   let sinkRuns = 0;
-  const sinkId = parent.addNode({
-    trigger: TriggerRule.when(output),
-    state: new Deterministic<AgenticInput, AssistantMessage>(
-      async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-        const view = yield [];
-        sinkRuns++;
-        for (const value of from(view, output))
-          delivered.push(value.kind === "appendMessage" ? "" : value.text);
-        return fauxAssistantMessage("received");
-      },
-      LockPolicy,
-    ),
+  const final = Edge.value<AgenticInput, AssistantMessage>(`ralph-result-${tag}`);
+  const config = boundaries.get(parent)!;
+  config.entries.push(TriggerEntry.on(output), TriggerEntry.on(final));
+  config.recorders.set(output.id, (values) => {
+    sinkRuns++;
+    for (const value of values) delivered.push(value.kind === "appendMessage" ? "" : value.text);
   });
   let id: NodeIdType;
   try {
@@ -167,7 +196,9 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     void agent.return();
     throw error;
   }
-  parent.addEdge(sourceId, id, input).addEdge(id, sinkId, output);
+  parent.addEdge(parent.source.id, id, input)
+    .addEdge(id, parent.sink.id, output).addEdge(id, parent.sink.id, final);
+  config.results.push(id);
   return {
     id,
     input,
@@ -175,8 +206,7 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     delivered,
     sinkRuns: () => sinkRuns,
     send: (...inputs: AgenticInput[]) => {
-      for (const value of inputs)
-        parent.emit(sourceId, Message.create(input, value));
+      parent.source.enqueue({ messages: new Map([[input.id, inputs]]), values: new Map() });
     },
   };
 }
@@ -185,20 +215,163 @@ const revision = (previous: string) =>
   `${assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
 
 describe("ralph workflow", () => {
+  for (const invalid of ["foreign message", "value input"] as const) {
+    test(`rejects ${invalid} at the scheduled source before provider work`, async () => {
+      const execution = parentContext();
+      await using parent = execution.graph;
+      const { agent, requests } = await member(["unused"]);
+      const flow = attach(parent, agent);
+      const child = parent.getNode(flow.id)?.state;
+      assert.ok(child instanceof JuncoGraph);
+      const foreign = Edge.message<AgenticInput, AssistantMessage>("foreign");
+      child.source.enqueue(invalid === "foreign message" ? {
+        messages: new Map([[foreign.id, [prompt(assignment)]]]), values: new Map(),
+      } : {
+        messages: new Map(), values: new Map([[foreign.id, fauxAssistantMessage("invalid")]]),
+      });
+      flow.send(prompt(assignment));
+      await assert.rejects(execution.run(), DataflowNodeError);
+      assert.equal(requests.length, 0);
+      assert.ok(O.isNone(parent.result(flow.id)));
+      assert.deepEqual(flow.delivered, []);
+    }, TIMEOUT_MS);
+  }
+
+  test(
+    "maps a direct assignment without an input edge, retaining only the final answer across native yields",
+    async () => {
+      const { agent, requests } = await member(
+        [
+          fauxAssistantMessage(
+            [
+              fauxToolCall(
+                "yield",
+                { reason: "continue" },
+                { id: "mapped-yield" },
+              ),
+            ],
+            { stopReason: "toolUse" },
+          ),
+          "draft-1",
+          "draft-2",
+        ],
+        { tools: [new YieldTool()] },
+      );
+      const skeleton = createGraph<string>();
+      skeleton.addNode("work", assignment);
+      let assignments = 0;
+      const spec = Ralph.node(agent, {
+        assignment: (view) => {
+          assignments++;
+          assert.equal(requests.length, 0);
+          assert.ok(view);
+          return assignment;
+        },
+        trigger: TriggerRule.always(),
+        policy: LockPolicy,
+        tracer: quiet,
+      });
+      assert.ok("graph" in spec.state && spec.state.graph instanceof JuncoGraph);
+      assert.equal("policy" in spec, false);
+      assert.equal("step" in spec, false);
+      assert.equal(spec.state.graph.tracer, quiet);
+      const ports = mappedPorts();
+      const execution = JuncoGraph.map(skeleton, () => spec, {
+        source: ports.source, sink: ports.sink,
+        policy: LockPolicy,
+        tracer: quiet,
+      });
+      const parent = execution.graph;
+      ports.wire(parent);
+      const id = NodeId.create("work");
+      try {
+        assert.equal(assignments, 0);
+        assert.equal(requests.length, 0);
+        await stepUntil(execution, () => requests.length >= 2);
+        assert.ok(O.isNone(parent.result(id)));
+        await execution.run();
+        assert.equal(assignments, 1);
+        assert.equal(requests.length, 3);
+        assert.equal(resultText(parent, id), "draft-2");
+        assert.equal(requests[0]!.users.at(-1), assignment);
+        assert.equal(requests[2]!.users.at(-1), revision("draft-1"));
+        assert.equal(requests[2]!.users[0], assignment);
+        await execution.run();
+        assert.equal(assignments, 1);
+        assert.equal(requests.length, 3);
+      } finally {
+        await parent.close();
+      }
+      assert.ok(spec.state.graph.signal.aborted);
+      assert.equal(agent.status, "closed");
+    },
+    TIMEOUT_MS,
+  );
+
+  for (const invalid of ["throws", "non-string"] as const) {
+    test(
+      `a mapped assignment callback that ${invalid} fails before a provider request`,
+      async () => {
+        const { agent, requests } = await member(["unused"]);
+        const failure = new Error("assignment failed");
+        let assignments = 0;
+        const skeleton = createGraph<string>();
+        skeleton.addNode("work", assignment);
+        const ports = mappedPorts();
+        const execution = JuncoGraph.map(
+          skeleton,
+          () =>
+            Ralph.node(agent, {
+              assignment: () => {
+                assignments++;
+                if (invalid === "throws") throw failure;
+                return 42 as unknown as string;
+              },
+              trigger: TriggerRule.always(),
+              policy: LockPolicy,
+              tracer: quiet,
+            }),
+          { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: quiet },
+        );
+        const parent = execution.graph;
+        ports.wire(parent);
+        try {
+          await assert.rejects(execution.run(), (error: unknown) => {
+            const cause = rootCause(error);
+            if (invalid === "throws") assert.equal(cause, failure);
+            else {
+              assert.ok(cause instanceof TypeError);
+              assert.equal(cause.message, "Ralph assignment must be a string");
+            }
+            return true;
+          });
+          assert.equal(assignments, 1);
+          assert.equal(requests.length, 0);
+          assert.ok(O.isNone(parent.result(NodeId.create("work"))));
+        } finally {
+          await parent.close();
+        }
+        assert.equal(agent.status, "closed");
+      },
+      TIMEOUT_MS,
+    );
+  }
+
   test(
     "runs two rounds by default and queues only the final draft on its completing step",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const { agent, requests } = await member(["draft-1", "draft-2"]);
       const flow = attach(parent, agent);
 
-      await parent.run();
+      await execution.run();
       assert.equal(requests.length, 0);
       assert.ok(O.isNone(parent.result(flow.id)));
       assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
 
       flow.send(prompt(assignment));
-      await stepUntil(parent, () => requests.length === 1);
+      await stepUntil(execution, () => requests.length === 1);
       assert.equal(requests[0]!.users.at(-1), assignment);
       assert.ok(O.isNone(parent.result(flow.id)));
       assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
@@ -209,17 +382,21 @@ describe("ralph workflow", () => {
           "Ralph did not complete within 64 graph windows",
         );
         assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
-        await parent.step();
+        await execution.step();
       }
       // The completing activation both emitted and published its result: no extra step.
       assert.equal(resultText(parent, flow.id), "draft-2");
       assert.deepEqual(queued(flow.output), [prompt("draft-2")]);
       assert.deepEqual(flow.delivered, []);
 
-      await parent.run();
+      await execution.run();
       assert.deepEqual(flow.delivered, ["draft-2"]);
+      const sinkResult = parent.result(parent.sink.id);
+      const workflowResult = parent.result(flow.id);
+      assert.ok(O.isSome(sinkResult) && O.isSome(workflowResult));
+      assert.equal(sinkResult.value, workflowResult.value);
       assert.deepEqual([queued(flow.input), queued(flow.output)], [[], []]);
-      await parent.run();
+      await execution.run();
       assert.equal(requests.length, 2);
       assert.deepEqual(flow.delivered, ["draft-2"]);
 
@@ -235,7 +412,8 @@ describe("ralph workflow", () => {
     test(
       `rounds: ${rounds} runs exactly ${rounds} full rounds and publishes only the last`,
       async () => {
-        await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+        const execution = parentContext();
+      await using parent = execution.graph;
         const drafts = Array.from(
           { length: rounds },
           (_, index) => `draft-${index + 1}`,
@@ -245,12 +423,12 @@ describe("ralph workflow", () => {
 
         flow.send(prompt(assignment));
         for (let round = 1; round <= rounds; round++) {
-          await stepUntil(parent, () => requests.length === round);
+          await stepUntil(execution, () => requests.length === round);
           if (round < rounds)
             assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
         }
-        await parent.run();
-        await parent.run();
+        await execution.run();
+        await execution.run();
 
         assert.equal(requests.length, rounds);
         assert.equal(resultText(parent, flow.id), drafts.at(-1));
@@ -281,7 +459,8 @@ describe("ralph workflow", () => {
   test(
     "an invalid round count throws before registering anything",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const input = Edge.message<AgenticInput, AssistantMessage>("in");
       const output = Edge.message<AgenticInput, AssistantMessage>("out");
       const nodes = () => {
@@ -289,6 +468,7 @@ describe("ralph workflow", () => {
         parent.forEachNode((id) => ids.push(id));
         return ids;
       };
+      assert.deepEqual(nodes(), [NodeId.create("$source"), NodeId.create("$sink")]);
       for (const rounds of [
         0,
         -1,
@@ -340,12 +520,13 @@ describe("ralph workflow", () => {
     test(
       `rejects ${name} before any model work`,
       async () => {
-        await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+        const execution = parentContext();
+      await using parent = execution.graph;
         const { agent, requests } = await member(["draft-1", "draft-2"]);
         const flow = attach(parent, agent);
 
         flow.send(...inputs);
-        await assert.rejects(parent.run(), DataflowNodeError);
+        await assert.rejects(execution.run(), DataflowNodeError);
         assert.equal(requests.length, 0);
         assert.ok(O.isNone(parent.result(flow.id)));
         assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
@@ -357,7 +538,8 @@ describe("ralph workflow", () => {
   test(
     "a second assignment after the first round is rejected, not restarted",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const { agent, requests } = await member([
         "draft-1",
         "draft-2",
@@ -366,9 +548,9 @@ describe("ralph workflow", () => {
       const flow = attach(parent, agent, 3);
 
       flow.send(prompt(assignment));
-      await stepUntil(parent, () => requests.length === 1);
+      await stepUntil(execution, () => requests.length === 1);
       flow.send(prompt("a replacement assignment"));
-      await assert.rejects(parent.run(), DataflowNodeError);
+      await assert.rejects(execution.run(), DataflowNodeError);
       assert.equal(requests.length, 1);
       assert.ok(O.isNone(parent.result(flow.id)));
       assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
@@ -399,13 +581,14 @@ describe("ralph workflow", () => {
     test(
       `${name} rejects without publishing an earlier draft`,
       async () => {
-        await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+        const execution = parentContext();
+      await using parent = execution.graph;
         const { agent, requests } = await member(replies);
         const flow = attach(parent, agent);
 
         flow.send(prompt(assignment));
-        await assert.rejects(parent.run(), DataflowNodeError);
-        await parent.run().catch(() => undefined);
+        await assert.rejects(execution.run(), DataflowNodeError);
+        await execution.run().catch(() => undefined);
         assert.equal(requests.length, attempted);
         assert.ok(O.isNone(parent.result(flow.id)));
         assert.deepEqual(
@@ -420,7 +603,8 @@ describe("ralph workflow", () => {
   test(
     "native yields resume within a round and never count as one",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const { agent, requests } = await member(
         [
           fauxAssistantMessage(
@@ -435,7 +619,7 @@ describe("ralph workflow", () => {
       const flow = attach(parent, agent);
 
       flow.send(prompt(assignment));
-      await parent.run();
+      await execution.run();
       assert.equal(requests.length, 3);
       assert.deepEqual(requests.at(-1)!.users, [
         assignment,
@@ -450,14 +634,15 @@ describe("ralph workflow", () => {
   test(
     "a staged agent is not idle and is rejected before its staged prompt runs",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const { agent, requests } = await member(["staged answer"], {
         staged: "staged",
       });
       const flow = attach(parent, agent);
 
       flow.send(prompt(assignment));
-      const failure = await parent.run().then(
+      const failure = await execution.run().then(
         () => undefined,
         (error: unknown) => error,
       );
@@ -475,7 +660,8 @@ describe("ralph workflow", () => {
   test(
     "aborting the parent mid-round cancels Ralph with the abort reason",
     async () => {
-      await using parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      await using parent = execution.graph;
       const hold = waitingTool("hold", { endOnAbort: true });
       const { agent, requests } = await member(
         [
@@ -490,7 +676,7 @@ describe("ralph workflow", () => {
       const flow = attach(parent, agent);
 
       flow.send(prompt(assignment));
-      const pending = parent.run().then(
+      const pending = execution.run().then(
         () => undefined,
         (error: unknown) => error,
       );
@@ -498,8 +684,7 @@ describe("ralph workflow", () => {
       const reason = new Error("caller cancelled");
       await parent.abort(reason);
       const failure = await pending;
-      assert.ok(failure instanceof DataflowNodeError);
-      assert.equal(rootCause(failure), reason);
+      assert.equal(failure, reason);
       assert.equal(requests.length, 1);
       assert.ok(O.isNone(parent.result(flow.id)));
       assert.deepEqual([queued(flow.output), flow.delivered], [[], []]);
@@ -510,7 +695,8 @@ describe("ralph workflow", () => {
   test(
     "independent Ralphs in one parent share nothing and close with it",
     async () => {
-      const parent = JuncoGraph.parallel(LockPolicy, quiet);
+      const execution = parentContext();
+      const parent = execution.graph;
       let children: unknown[] = [];
       let agents: JuncoAgent[] = [];
       try {
@@ -524,7 +710,7 @@ describe("ralph workflow", () => {
 
         flowA.send(prompt("assignment A"));
         flowB.send(prompt("assignment B"));
-        await parent.run();
+        await execution.run();
 
         assert.deepEqual(
           a.requests.map((request) => request.users),

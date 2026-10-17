@@ -9,7 +9,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { McpAbortError } from "@earendil-works/pi-mcp";
+import { McpAbortError, McpConnectionClosedError } from "@earendil-works/pi-mcp";
 import { LockPolicy, type NativeModule, type NativeMux, type NativeProcess, ToolCollection, ShellMuxOperations } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
@@ -120,6 +120,9 @@ function watchStderr(cue?: string) {
     },
     get text() {
       return buffer;
+    },
+    pids(): number[] {
+      return [...buffer.matchAll(/junco-mcp fixture (\d+): started in/g)].map((match) => Number(match[1]));
     },
     pid(): number {
       const match = /junco-mcp fixture (\d+): started in/.exec(buffer);
@@ -809,4 +812,266 @@ describe("MCP definitions and tool identity over real servers", () => {
       await connection.close();
     }
   }, TIMEOUT);
+});
+
+describe("call-scoped MCP lifetime", () => {
+  test("discovery and every call stop before returning and see the latest seed", () =>
+    withNativeCleanup(async (defer) => {
+      const root = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-fresh-"));
+      defer(() => rm(root, { recursive: true, force: true }));
+      const seed = join(root, "seed");
+      await mkdir(seed);
+      await writeFile(join(seed, "source.txt"), "Alpha\n");
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      const forgetCollection = defer(() => collection.close());
+      const watch = watchStderr();
+      const connection = await JuncoMcpTools.add(server("fresh", { onStderr: watch.onStderr })).connect({
+        cwd: seed, collection, toolLifetime: "call", discardOnClose: true,
+      });
+      defer(() => connection.close());
+      expect(fixtureRunning(watch.pid())).toBe(false);
+      const first = await state(connection, "fresh", { path: "source.txt" });
+      expect(first.file).toBe("Alpha\n");
+      expect(fixtureRunning(first.pid)).toBe(false);
+      await writeFile(join(seed, "source.txt"), "Alpha\nBeta\n");
+      const second = await state(connection, "fresh", { path: "source.txt" });
+      expect(second.file).toBe("Alpha\nBeta\n");
+      expect(second.pid).not.toBe(first.pid);
+      expect(fixtureRunning(second.pid)).toBe(false);
+      expect((await call(connection, "mcp__fresh__write_file", { path: "private-cache.txt", content: "private\n" })).isError).toBe(false);
+      expect(await absent(join(seed, "private-cache.txt"))).toBe(true);
+      await collection.close().finally(forgetCollection);
+      expect((await state(connection, "fresh", { path: "source.txt" })).file).toBe("Alpha\nBeta\n");
+      await connection.close();
+      await expect(call(connection, "mcp__fresh__read_state")).rejects.toBeInstanceOf(McpConnectionClosedError);
+    }), TIMEOUT);
+  test("call lifetime publishes by default before the call settles", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-publish-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const watch = watchStderr();
+      const connection = await JuncoMcpTools.add(server("publish", { onStderr: watch.onStderr })).connect({
+        cwd: seed, collection, toolLifetime: "call",
+      });
+      defer(() => connection.close());
+      expect((await call(connection, "mcp__publish__write_file", { path: "published.txt", content: "public\n" })).isError).toBe(false);
+      expect(await readFile(join(seed, "published.txt"), "utf8")).toBe("public\n");
+      expect(watch.pids().map(fixtureRunning)).toEqual([false, false]);
+    }), TIMEOUT);
+
+  test("original identities survive collisions and captured configuration excludes unrelated servers", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-identity-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const first = watchStderr();
+      const second = watchStderr();
+      const args = [SERVER, "captured"];
+      const env = { JUNCO_MCP_FIXTURE_MODE: "alias-both", JUNCO_MCP_FIXTURE_MARKER: "captured" };
+      const roots = [{ uri: "file:///captured", name: "captured" }];
+      const definition = JuncoMcpTools.add(server("alias", { args, env, onStderr: first.onStderr, clientOptions: { roots } }))
+        .add(server("unrelated", { onStderr: second.onStderr }));
+      const connection = await definition.connect({ cwd: seed, collection, toolLifetime: "call", discardOnClose: true });
+      defer(() => connection.close());
+      expect([first.pid(), second.pid()].map(fixtureRunning)).toEqual([false, false]);
+      args.push("mutated");
+      env.JUNCO_MCP_FIXTURE_MODE = "alias-underscore";
+      env.JUNCO_MCP_FIXTURE_MARKER = "mutated";
+      roots.push({ uri: "file:///mutated", name: "mutated" });
+      definition.add(server("later"));
+      const aliases = connection.tools.filter((candidate) => {
+        const identity = getJuncoMcpToolIdentity(candidate);
+        return identity?.serverName === "alias" && ["a-b", "a_b"].includes(identity.originalToolName);
+      });
+      expect(aliases).toHaveLength(2);
+      expect(new Set(aliases.map((candidate) => candidate.name)).size).toBe(2);
+      for (const candidate of aliases) {
+        const identity = getJuncoMcpToolIdentity(candidate)!;
+        expect(Object.isFrozen(identity)).toBe(true);
+        expect((await call(connection, candidate.name)).text).toBe(identity.originalToolName);
+        expect(getJuncoMcpToolIdentity(candidate)).toBe(identity);
+      }
+      const captured = await state(connection, "alias");
+      expect(captured.argv).toEqual(["captured"]);
+      expect(captured.marker).toBe("captured");
+      expect(JSON.parse((await call(connection, "mcp__alias__list_roots")).text)).toEqual({ roots: [{ uri: "file:///captured", name: "captured" }] });
+      expect(connection.tools.some((candidate) => candidate.name.startsWith("mcp__later__"))).toBe(false);
+      expect(second.pids()).toHaveLength(1);
+      expect(first.pids().map(fixtureRunning)).toEqual(first.pids().map(() => false));
+    }), TIMEOUT);
+
+  test("identity drift cannot dispatch a different original under the captured published name", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-drift-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      await writeFile(join(seed, "mcp-mode.txt"), "alias-dash");
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const watch = watchStderr();
+      const connection = await JuncoMcpTools.add(server("alias", {
+        env: { JUNCO_MCP_FIXTURE_MODE_FILE: "mcp-mode.txt" }, onStderr: watch.onStderr,
+      })).connect({ cwd: seed, collection, toolLifetime: "call", discardOnClose: true });
+      defer(() => connection.close());
+      const dash = connection.tools.find((candidate) => getJuncoMcpToolIdentity(candidate)?.originalToolName === "a-b");
+      assert.ok(dash);
+      const identity = getJuncoMcpToolIdentity(dash);
+      expect(Object.isFrozen(identity)).toBe(true);
+      await writeFile(join(seed, "mcp-mode.txt"), "alias-underscore");
+      await expect(dash.execute("drift", {})).rejects.toThrow('expected one tool "alias/a-b", found 0');
+      expect(watch.pids().map(fixtureRunning)).toEqual([false, false]);
+      await writeFile(join(seed, "mcp-mode.txt"), "alias-both");
+      expect((await call(connection, dash.name)).text).toBe("a-b");
+      expect(getJuncoMcpToolIdentity(dash)).toBe(identity);
+      expect(watch.pids().map(fixtureRunning)).toEqual([false, false, false]);
+    }), TIMEOUT);
+
+  test("same-ID overlapping calls isolate abort, and logical close joins all physical processes", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-overlap-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const watch = watchStderr();
+      const acquisition = new AbortController();
+      const connection = await JuncoMcpTools.add(server("overlap", { onStderr: watch.onStderr })).connect({
+        cwd: seed, collection, toolLifetime: "call", discardOnClose: true, signal: acquisition.signal,
+      });
+      defer(() => connection.close());
+      acquisition.abort();
+      expect((await call(connection, "mcp__overlap__echo", { text: "still open" })).text).toBe("still open");
+      const preaborted = new AbortController();
+      preaborted.abort();
+      const before = watch.pids().length;
+      await expect(tool(connection, "mcp__overlap__hold").execute("same-id", { key: "pre" }, preaborted.signal)).rejects.toBeInstanceOf(McpAbortError);
+      expect(watch.pids()).toHaveLength(before);
+      const firstReady = Promise.withResolvers<void>();
+      const secondReady = Promise.withResolvers<void>();
+      const caller = new AbortController();
+      const first = tool(connection, "mcp__overlap__hold").execute("same-id", { key: "first", progress: ["ready"] }, caller.signal, () => firstReady.resolve());
+      const firstOutcome = first.then(() => assert.fail("held call returned"), (error: unknown) => error);
+      await Promise.race([firstReady.promise, firstOutcome.then((error) => { throw error; })]);
+      const firstPid = watch.pids().at(-1)!;
+      const second = tool(connection, "mcp__overlap__hold").execute("same-id", { key: "second", progress: ["ready"] }, undefined, () => secondReady.resolve());
+      const secondOutcome = second.then(() => assert.fail("held call returned"), (error: unknown) => error);
+      await Promise.race([secondReady.promise, secondOutcome.then((error) => { throw error; })]);
+      const secondPid = watch.pids().at(-1)!;
+      expect(firstPid).not.toBe(secondPid);
+      expect([firstPid, secondPid].map(fixtureRunning)).toEqual([true, true]);
+      caller.abort();
+      expect(await firstOutcome).toBeInstanceOf(McpAbortError);
+      expect([firstPid, secondPid].map(fixtureRunning)).toEqual([false, true]);
+      const closing = connection.close();
+      expect(connection.close()).toBe(closing);
+      await closing;
+      expect(await secondOutcome).toBeInstanceOf(McpAbortError);
+      expect(watch.pids().map(fixtureRunning)).toEqual(watch.pids().map(() => false));
+      const count = watch.pids().length;
+      await expect(call(connection, "mcp__overlap__echo")).rejects.toBeInstanceOf(McpConnectionClosedError);
+      expect(watch.pids()).toHaveLength(count);
+    }), TIMEOUT);
+
+  test("cancelled discovery stops its process and releases the logical lease", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-discovery-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      const forgetCollection = defer(() => collection.close());
+      const watch = watchStderr("hold-initialize-ready");
+      const controller = new AbortController();
+      const connecting = JuncoMcpTools.add(server("discovery", {
+        env: { JUNCO_MCP_FIXTURE_MODE: "hold-initialize" }, onStderr: watch.onStderr,
+      })).connect({ cwd: seed, collection, toolLifetime: "call", discardOnClose: true, signal: controller.signal });
+      const outcome = connecting.then((connection) => { defer(() => connection.close()); assert.fail("discovery did not hold"); }, (error: unknown) => error);
+      await Promise.race([watch.ready, outcome.then((error) => { throw error; })]);
+      controller.abort();
+      expect(await outcome).toBeInstanceOf(McpAbortError);
+      expect(fixtureRunning(watch.pid())).toBe(false);
+      await collection.close().finally(forgetCollection);
+      expect(() => collection.lease()).toThrow();
+    }), TIMEOUT);
+
+  for (const terminal of ["abort", "close"] as const) {
+    test(`${terminal} during call acquisition stops and joins the admitted process`, () =>
+      withNativeCleanup(async (defer) => {
+        const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", `mcp-call-acquire-${terminal}-`));
+        defer(() => rm(seed, { recursive: true, force: true }));
+        await writeFile(join(seed, "mcp-mode.txt"), "");
+        const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+        defer(() => collection.close());
+        const watch = watchStderr("hold-initialize-ready");
+        const connection = await JuncoMcpTools.add(server("acquire", {
+          env: { JUNCO_MCP_FIXTURE_MODE_FILE: "mcp-mode.txt" }, onStderr: watch.onStderr,
+        })).connect({ cwd: seed, collection, toolLifetime: "call", discardOnClose: true });
+        defer(() => connection.close());
+        await writeFile(join(seed, "mcp-mode.txt"), "hold-initialize");
+        const controller = new AbortController();
+        const invocation = tool(connection, "mcp__acquire__echo").execute("acquire", { text: "held" }, controller.signal);
+        const outcome = invocation.then(() => assert.fail("acquisition did not hold"), (error: unknown) => error);
+        await Promise.race([watch.ready, outcome.then((error) => { throw error; })]);
+        const pid = watch.pids().at(-1)!;
+        expect(fixtureRunning(pid)).toBe(true);
+        if (terminal === "abort") controller.abort();
+        else await connection.close();
+        expect(await outcome).toBeInstanceOf(McpAbortError);
+        expect(fixtureRunning(pid)).toBe(false);
+        if (terminal === "abort") {
+          await writeFile(join(seed, "mcp-mode.txt"), "");
+          expect((await call(connection, "mcp__acquire__echo", { text: "recovered" })).text).toBe("recovered");
+        }
+      }), TIMEOUT);
+  }
+
+  test("logical close preserves cleanup failures from a physical acquisition that never returned", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-cleanup-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      await writeFile(join(seed, "mcp-mode.txt"), "");
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const watch = watchStderr("hold-initialize-ready");
+      const connection = await JuncoMcpTools.add(server("cleanup", {
+        env: { JUNCO_MCP_FIXTURE_MODE_FILE: "mcp-mode.txt" }, onStderr: watch.onStderr,
+      })).connect({ cwd: seed, collection, toolLifetime: "call", discardOnClose: true });
+      const forgetConnection = defer(() => connection.close());
+      const marker = new Error("physical lease cleanup marker");
+      const originalLease = collection.lease;
+      collection.lease = function () {
+        const lease = originalLease.call(this);
+        return { async close() { await lease.close(); throw marker; } };
+      };
+      defer(() => { collection.lease = originalLease; });
+      await writeFile(join(seed, "mcp-mode.txt"), "hold-initialize");
+      const invocation = call(connection, "mcp__cleanup__echo");
+      const outcome = invocation.then(() => assert.fail("acquisition did not hold"), (error: unknown) => error);
+      await Promise.race([watch.ready, outcome.then((error) => { throw error; })]);
+      const pid = watch.pids().at(-1)!;
+      const closed = await connection.close().then(() => assert.fail("cleanup succeeded"), (error: unknown) => error).finally(forgetConnection);
+      const failed = await outcome;
+      expect(failureMessages(failed)).toContain(marker.message);
+      expect(failureMessages(closed)).toContain(marker.message);
+      assert.ok(closed instanceof AggregateError);
+      expect(closed.errors).toContain(marker);
+      expect(fixtureRunning(pid)).toBe(false);
+      collection.lease = originalLease;
+    }), TIMEOUT);
+
+  test("unsafe natural exit is retained by the call and not replayed by later logical close", () =>
+    withNativeCleanup(async (defer) => {
+      const seed = await mkdtemp(join(process.env.TMPDIR ?? "/tmp", "mcp-call-exit-"));
+      defer(() => rm(seed, { recursive: true, force: true }));
+      const collection = await ToolCollection.create(seed, { native: copyTree, policy: LockPolicy, sandbox: "always" });
+      defer(() => collection.close());
+      const watch = watchStderr();
+      const connection = await JuncoMcpTools.add(server("exit", { onStderr: watch.onStderr })).connect({
+        cwd: seed, collection, toolLifetime: "call", discardOnClose: true,
+      });
+      const forgetConnection = defer(() => connection.close());
+      const messages = await rejection(call(connection, "mcp__exit__misbehave", { kind: "exit", code: 0 }));
+      expect(messages).toContain(DISCARD_EXIT);
+      expect(watch.pids().map(fixtureRunning)).toEqual([false, false]);
+      await connection.close().finally(forgetConnection);
+    }), TIMEOUT);
 });

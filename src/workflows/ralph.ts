@@ -1,26 +1,27 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import {
-  type DataflowScheduler,
-  type Edge,
+  type DataflowTracer,
+  Edge,
   from,
   Message,
   type NodeGenerator,
   NodeId,
   type NodeIdType,
   type NodeOptions,
-  type NodeSchedule,
   type ParentView,
+  Source,
+  Sink,
   TriggerRule,
-  triggerInputs,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type JuncoAgent, JuncoAgentError } from "junco-agent";
-import { Scheduler } from "junco-scheduler";
+import { parallel } from "junco-scheduler";
 import type { ToolCollection } from "junco-tools";
-import type { AgenticInput } from "../agentic.js";
+import type { AgenticInput, AgenticNode } from "../agentic.js";
 import { JuncoGraph } from "../junco-graph.js";
+import { context } from "../node-policy.js";
 
 /** Registration options for `Ralph.register`; trigger and availability are owned by the workflow. */
 export type RalphOptions = Pick<
@@ -40,6 +41,16 @@ export type RalphOptions = Pick<
   readonly policy: ToolCollection["policy"];
 };
 
+/** A directly mappable Ralph assignment, using the child's policy and tracer. */
+export type RalphNodeOptions = NodeOptions<AgenticInput, AssistantMessage> & {
+  readonly assignment:
+    | string
+    | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string);
+  readonly rounds?: number;
+  readonly policy: ToolCollection["policy"];
+  readonly tracer: DataflowTracer;
+};
+
 const assignmentError = () =>
   new Error("Ralph requires exactly one prompt assignment");
 
@@ -55,32 +66,14 @@ function finalText(message: AssistantMessage | undefined): string {
   return text;
 }
 
-/** Scheduler-owned progress: one assignment, the completed round count, and the latest draft. */
+/** Lexical workflow progress: one assignment, completed rounds and the latest draft. */
 class RalphState {
   assignment: string | undefined;
   round = 0;
   draft: AssistantMessage | undefined;
 
-  constructor(
-    readonly input: Edge<AgenticInput, AssistantMessage>,
-    readonly rounds: number,
-  ) {}
+  constructor(readonly rounds: number) {}
 
-  /** Retain the one text prompt delivered on `input`; empty continuation deliveries are no-ops. */
-  receive(view: ParentView<AgenticInput, AssistantMessage>): void {
-    const inputs = from(view, this.input);
-    if (inputs.length === 0) return;
-    const [input] = inputs;
-    if (
-      inputs.length !== 1 ||
-      input?.kind !== "prompt" ||
-      (input.images !== undefined && input.images.length > 0) ||
-      this.assignment !== undefined
-    ) {
-      throw assignmentError();
-    }
-    this.assignment = input.text;
-  }
 
   /** The assignment itself for the first round; afterwards the assignment plus the previous draft. */
   nextPrompt(): string {
@@ -92,8 +85,115 @@ class RalphState {
   }
 }
 
+function createRalphGraph(
+  agent: JuncoAgent,
+  rounds: number,
+  policy: ToolCollection["policy"],
+  tracer: DataflowTracer,
+  admit: (view: ParentView<AgenticInput, AssistantMessage>, state: RalphState) => void,
+  output?: Edge<AgenticInput, AssistantMessage>,
+  initialize?: (state: RalphState) => void,
+) {
+  if (!(Number.isSafeInteger(rounds) && rounds >= 1)) {
+    throw new RangeError("Ralph rounds must be a positive safe integer");
+  }
+
+  const state = new RalphState(rounds);
+  const workerId = NodeId.create("RalphStep");
+  const final = Edge.value<AgenticInput, AssistantMessage>("RalphStep->$sink");
+  const source = new Source<AgenticInput, AssistantMessage>((view) => {
+    admit(view, state);
+    return [];
+  }, { id: NodeId.create("$source") });
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (port): NodeGenerator<AgenticInput, AssistantMessage> {
+    yield [];
+    const retained = child.result(workerId);
+    if (O.isNone(retained)) throw new Error("Ralph stopped without a final result");
+    const text = finalText(retained.value);
+    if (output) port.send(Message.create(output, { kind: "prompt", text }));
+    return retained.value;
+  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+  const child: JuncoGraph<AgenticInput, AssistantMessage> = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    policy,
+    agent.collection,
+  );
+
+  /** One full native run of `text`, resuming through native yields, and its settled final message. */
+  const runOnce = async (text: string): Promise<AssistantMessage> => {
+    const signal = child.signal;
+    signal.throwIfAborted();
+    if (agent.status !== "idle")
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Ralph requires an idle agent",
+      );
+    // Its settlement, success or failure, arrives through agent.next().
+    agent.prompt(text).catch(() => undefined);
+    while (true) {
+      const result = await agent.next();
+      signal.throwIfAborted();
+      if (result.done === true)
+        throw new JuncoAgentError(
+          "closed",
+          "Ralph closed before prompt settlement",
+        );
+      const boundary = result.value;
+      if (boundary.kind === "failed") throw boundary.error;
+      if (boundary.kind === "settled") return boundary.message;
+    }
+  };
+
+  async function* step(): NodeGenerator<AgenticInput, AssistantMessage> {
+    if (state.assignment === undefined) initialize?.(state);
+    yield [];
+    while (true) {
+      const message = await runOnce(state.nextPrompt());
+      finalText(message);
+      state.draft = message;
+      state.round++;
+      if (state.round === state.rounds) return message;
+      yield [];
+    }
+  }
+
+  child.addNode({
+    id: workerId,
+    state: agent,
+    policy,
+    trigger: TriggerRule.always(),
+    step,
+    is_available: () => source.peek() === undefined && (state.assignment !== undefined || initialize !== undefined),
+  });
+  child.addEdge(workerId, sink.id, final);
+  return { execution: context({ graph: child, scheduler: parallel() }), state };
+}
+
 /** The Ralph workflow: repeated full-assignment revision rounds of one agent in a nested graph. */
 export const Ralph = {
+  /** Return a step-less nested spec; evaluate its complete assignment only on first delivery. */
+  node(
+    agent: JuncoAgent,
+    options: RalphNodeOptions,
+  ): AgenticNode<AgenticInput, AssistantMessage> {
+    const { assignment, rounds = 2, policy, tracer, ...nodeOptions } = options;
+    const admit = (view: ParentView<AgenticInput, AssistantMessage>, state: RalphState) => {
+      if (state.assignment !== undefined) return;
+      const text = typeof assignment === "function" ? assignment(view) : assignment;
+      if (typeof text !== "string") throw new TypeError("Ralph assignment must be a string");
+      state.assignment = text;
+    };
+    const { execution } = createRalphGraph(
+      agent, rounds, policy, tracer, admit, undefined,
+      (state) => admit({ messages: new Map(), values: new Map() }, state),
+    );
+    return { ...nodeOptions, state: execution };
+  },
+
   /**
    * Register a Ralph workflow in `parent`: a nested one-worker `JuncoGraph` that runs `agent` over
    * the full assignment `rounds` times (default two), each later round revising the previous
@@ -109,102 +209,35 @@ export const Ralph = {
    * @throws {TypeError} before registering anything when `agent.collection` has another policy
    *   than `options.policy`.
    */
-  register<EH, Q extends DataflowScheduler<AgenticInput, AssistantMessage>>(
-    parent: JuncoGraph<AgenticInput, AssistantMessage, EH, Q>,
+  register<EH>(
+    parent: JuncoGraph<AgenticInput, AssistantMessage, EH>,
     agent: JuncoAgent,
     options: RalphOptions,
   ): NodeIdType {
     const { input, output } = options;
-    const rounds = options.rounds === undefined ? 2 : options.rounds;
-    if (!(Number.isSafeInteger(rounds) && rounds >= 1)) {
-      throw new RangeError("Ralph rounds must be a positive safe integer");
-    }
-
-    const scheduler = new Scheduler<RalphState, AgenticInput, AssistantMessage>(
-      {
-        state: new RalphState(input, rounds),
-        schedule: (available) => {
-          const lanes: NodeSchedule[][] = [];
-          for (const [id, candidate] of available)
-            lanes.push([{ id, inputs: triggerInputs(candidate) }]);
-          return lanes;
-        },
-      },
-    );
-    const child = new JuncoGraph(
-      scheduler,
-      Width.create(1),
-      UNBOUNDED,
-      parent.tracer,
+    const { execution } = createRalphGraph(
+      agent,
+      options.rounds === undefined ? 2 : options.rounds,
       options.policy,
-      agent.collection,
+      parent.tracer,
+      (view, state) => {
+        const inputs = from(view, input);
+        const [assignment] = inputs;
+        if ([...view.values.keys()].length !== 0 ||
+          [...view.messages.keys()].some((id) => id !== input.id) ||
+          inputs.length !== 1 || assignment?.kind !== "prompt" ||
+          (assignment.images !== undefined && assignment.images.length > 0) ||
+          state.assignment !== undefined) throw assignmentError();
+        state.assignment = assignment.text;
+      },
+      output,
     );
-
-    /** One full native run of `text`, resuming through native yields, and its settled final message. */
-    const runOnce = async (text: string): Promise<AssistantMessage> => {
-      const signal = child.signal;
-      signal.throwIfAborted();
-      if (agent.status !== "idle")
-        throw new JuncoAgentError(
-          "invalid_state",
-          "Ralph requires an idle agent",
-        );
-      // Its settlement, success or failure, arrives through agent.next().
-      agent.prompt(text).catch(() => undefined);
-      while (true) {
-        const result = await agent.next();
-        signal.throwIfAborted();
-        if (result.done === true)
-          throw new JuncoAgentError(
-            "closed",
-            "Ralph closed before prompt settlement",
-          );
-        const boundary = result.value;
-        if (boundary.kind === "failed") throw boundary.error;
-        if (boundary.kind === "settled") return boundary.message;
-      }
-    };
-
-    async function* step(): NodeGenerator<AgenticInput, AssistantMessage> {
-      yield [];
-      const state = scheduler.state;
-      while (true) {
-        const message = await runOnce(state.nextPrompt());
-        finalText(message);
-        state.draft = message;
-        state.round++;
-        if (state.round === state.rounds) return message;
-        yield [];
-      }
-    }
-
-    const workerId = child.addNode({
-      id: NodeId.create("RalphStep"),
-      state: agent,
-      policy: options.policy,
-      trigger: TriggerRule.always(),
-      step,
-      is_available: () => scheduler.state.assignment !== undefined,
-    });
 
     const nodeId: NodeIdType = parent.addNode({
       id: options.id,
       description: options.description,
       trigger: TriggerRule.when(input),
-      state: child,
-      result: workerId,
-      receive: (view) => scheduler.state.receive(view),
-      afterStep: () => {
-        const retained = child.result(workerId);
-        if (O.isNone(retained)) return;
-        parent.emit(
-          nodeId,
-          Message.create(output, {
-            kind: "prompt",
-            text: finalText(retained.value),
-          }),
-        );
-      },
+      state: execution,
       contract: (edgeId) => {
         if (edgeId !== input.id)
           throw new JuncoAgentError(

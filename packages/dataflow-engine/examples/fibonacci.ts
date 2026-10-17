@@ -1,4 +1,4 @@
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import type { NodeGenerator } from "../src/index.ts";
 import {
   DataflowGraph,
@@ -21,7 +21,6 @@ const fibOut = Edge.message<number, string>("fibOut");
 const results: number[] = [];
 const tracer = ExampleTracer.create("examples/fibonacci");
 const graph = new DataflowGraph<void, number, string, never>(
-  new ParallelScheduler(),
   Width.create(1),
   UNBOUNDED,
   tracer,
@@ -79,7 +78,8 @@ graph.addEdge(fibId, fibId, fibLoop);
 graph.addEdge(fibId, sinkId, fibOut);
 
 try {
-  await graph.run();
+  const execution = context({ scheduler: parallel(), graph });
+  await execution.run();
 
   console.log(JSON.stringify(results));
 } finally {

@@ -4,7 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -49,7 +49,6 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   const products: Result[] = [];
   const tracer = ExampleTracer.create("cookbook/combine-per-key");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -159,7 +158,8 @@ test("cookbook: combine-per-key sum and multiply from same source", async () => 
   graph.addEdge(multiplyCombineId, multiplySinkId, multiplyOutEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(
       sums.map((r) => [r.key, r.value]),
