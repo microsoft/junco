@@ -1,4 +1,3 @@
-import { ParallelScheduler } from "junco-scheduler";
 import type { ValidWidth } from "../src/index.ts";
 import { DataflowGraph, UNBOUNDED, Width } from "../src/index.ts";
 
@@ -19,12 +18,10 @@ export type _runtimeNumberRejected = Expect<Equal<ValidWidth<number>, never>>;
 
 // Accepted: a positive integer literal, and the sanctioned spelling of Infinity.
 new DataflowGraph<void, number, string, never>(
-  new ParallelScheduler(),
   Width.create(1),
   UNBOUNDED,
 );
 new DataflowGraph<void, number, string, never>(
-  new ParallelScheduler(),
   Width.create(64),
   Width.create(8),
 );
@@ -43,7 +40,6 @@ Width.create(-1e999);
 // @ts-expect-error a width computed at runtime cannot be checked at compile time.
 Width.create(runtimeValue);
 new DataflowGraph<void, number, string, never>(
-  new ParallelScheduler(),
   // @ts-expect-error a bare number bypasses the check; widths must be minted by Width.create().
   1,
   UNBOUNDED,

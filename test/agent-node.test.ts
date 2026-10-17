@@ -15,7 +15,6 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   DataflowNodeError,
-  DummyTracer,
   Edge,
   type EdgeIdType,
   Message,
@@ -48,9 +47,9 @@ import { nodePolicies, registeredNodeContexts } from "../src/node-policy.ts";
 import {
   assistant,
   failed,
-  type PolicyScheduler,
-  plainGraph,
-  policyGraph,
+  plainContext,
+  terminalPorts,
+  policyContext,
   requestTexts,
   run,
   STRATEGIES,
@@ -71,12 +70,7 @@ afterEach(async () => {
     await close().catch(() => {});
 });
 
-type Graph = JuncoGraph<
-  AgenticInput,
-  AssistantMessage,
-  unknown,
-  PolicyScheduler
->;
+type Graph = JuncoGraph<AgenticInput, AssistantMessage>;
 type Route = {
   readonly id: string;
   readonly edgeId: string;
@@ -245,8 +239,8 @@ function queued(graph: Graph, edgeId: EdgeIdType): number {
 }
 
 /** Step `graph` until `reached` holds; fails rather than spin forever. */
-async function stepUntil(graph: Graph, reached: () => boolean): Promise<void> {
-  for (let steps = 0; steps < 50 && !reached(); steps++) await graph.step();
+async function stepUntil(graphContext: { step(): Promise<unknown> }, reached: () => boolean): Promise<void> {
+  for (let steps = 0; steps < 50 && !reached(); steps++) await graphContext.step();
   assert.ok(reached(), "the graph never reached the expected state");
 }
 
@@ -261,7 +255,9 @@ for (const strategy of STRATEGIES) {
         prompt: "use it",
         runs: [yieldsThen(2, "dependent done")],
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>(
         "upstream->dependent",
       );
@@ -279,16 +275,17 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(u, d, edge);
 
+      graphPorts.connect(graph, d);
       assert.deepEqual([...graph.available().keys()], [u]);
-      await graph.step(); // primes the upstream
-      await graph.step(); // runs it to its result
+      await graphContext.step(); // primes the upstream
+      await graphContext.step(); // runs it to its result
       assert.ok(O.isSome(graph.result(u)));
-      await graph.step(); // primes the dependent: no frame, input kept
+      await graphContext.step(); // primes the dependent: no frame, input kept
       assert.equal(graph.getNode(d)!.status, "running");
       assert.equal(dependent.status, "ready");
       assert.deepEqual(dependent.requests, []);
       assert.deepEqual(dependent.history, []);
-      await graph.run();
+      await graphContext.run();
 
       assert.deepEqual(requestTexts(dependent.requests), [
         ["use it"],
@@ -331,7 +328,9 @@ for (const strategy of STRATEGIES) {
         fauxAssistantMessage("recipient done"),
       ]);
       const bystander = new MockAgent({ runs: [yieldsThen(0, "never")] });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const s = graph.addNode({
         trigger: TriggerRule.always(),
@@ -350,7 +349,8 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(s, r, toRecipient).addEdge(s, b, toBystander);
 
-      await graph.run();
+      graphPorts.connect(graph, r);
+      await graphContext.run();
 
       const received = resultOf(recipient.results, "recv-1");
       assert.deepEqual(received.details, {
@@ -372,16 +372,19 @@ for (const strategy of STRATEGIES) {
 
     test("a member with neither a staged nor a received prompt is quiescent", async () => {
       const idle = new MockAgent({ runs: [yieldsThen(0, "never")] });
-      const graph = plainGraph(strategy);
-      graph.addNode({
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
+      const idleId = graph.addNode({
         state: idle,
         policy: LockPolicy,
         description: "idle",
         trigger: TriggerRule.always(),
       });
 
+      graphPorts.connect(graph, idleId);
       assert.equal(graph.available().size, 0);
-      await graph.run();
+      await graphContext.run();
       assert.deepEqual(idle.requests, []);
       assert.equal(idle.status, "idle");
     });
@@ -403,7 +406,9 @@ for (const strategy of STRATEGIES) {
         LockPolicy,
       );
       const member = new MockAgent({ runs: [yieldsThen(0, "later")] });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const s = graph.addNode({
         description: "sender",
         trigger: TriggerRule.always(),
@@ -417,7 +422,8 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(s, m, edge);
 
-      await graph.run();
+      graphPorts.connect(graph, s);
+      await graphContext.run();
 
       assert.deepEqual(member.requests, []);
       assert.equal(member.status, "idle");
@@ -436,7 +442,9 @@ for (const strategy of STRATEGIES) {
             yieldsThen(0, "recovered"),
           ],
         });
-        const graph = plainGraph(strategy);
+        const graphPorts = terminalPorts();
+        const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+        const graph = graphContext.graph;
         const id = graph.addNode({
           state: erring,
           policy: LockPolicy,
@@ -444,7 +452,8 @@ for (const strategy of STRATEGIES) {
           trigger: TriggerRule.always(),
         });
 
-        await graph.run();
+        graphPorts.connect(graph, id);
+        await graphContext.run();
         const result = graph.result(id);
         assert.ok(O.isSome(result) && result.value.stopReason === stopReason);
         assert.equal(erring.status, "idle");
@@ -462,7 +471,9 @@ for (const strategy of STRATEGIES) {
         prompt: "never",
         runs: [yieldsThen(0, "never")],
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>("failing->child");
       const f = graph.addNode({
         state: failing,
@@ -478,7 +489,8 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(f, c, edge);
 
-      const error = await graph.run().catch((thrown: unknown) => thrown);
+      graphPorts.connect(graph, c);
+      const error = await graphContext.run().catch((thrown: unknown) => thrown);
       assert.ok(error instanceof DataflowNodeError && error.nodeId === f);
       assert.equal(error.error, cause);
       assert.ok(O.isNone(graph.result(f)));
@@ -490,7 +502,9 @@ for (const strategy of STRATEGIES) {
 
     test("an exhausted transcript fails its node instead of hanging", async () => {
       const exhausted = new MockAgent({ prompt: "go", runs: [] });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode({
         state: exhausted,
         policy: LockPolicy,
@@ -498,7 +512,8 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
       });
 
-      const error = await graph.run().catch((thrown: unknown) => thrown);
+      graphPorts.connect(graph, id);
+      const error = await graphContext.run().catch((thrown: unknown) => thrown);
       assert.ok(error instanceof DataflowNodeError && error.nodeId === id);
       assert.ok(invalidState(error.error));
       assert.ok(O.isNone(graph.result(id)));
@@ -509,7 +524,9 @@ for (const strategy of STRATEGIES) {
         prompt: "go",
         runs: [yieldsThen(1, "never")],
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode({
         state: member,
         policy: LockPolicy,
@@ -517,11 +534,12 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
       });
 
-      await graph.step(); // prime
-      await graph.step(); // starts the run, which pauses
+      graphPorts.connect(graph, id);
+      await graphContext.step(); // prime
+      await graphContext.step(); // starts the run, which pauses
       assert.equal(member.status, "suspended");
       assert.deepEqual(await member.return(), { value: undefined, done: true });
-      const error = await graph.step().catch((thrown: unknown) => thrown);
+      const error = await graphContext.step().catch((thrown: unknown) => thrown);
       assert.ok(error instanceof DataflowNodeError && error.nodeId === id);
       assert.ok(
         error.error instanceof JuncoAgentError && error.error.code === "closed",
@@ -541,7 +559,9 @@ for (const strategy of STRATEGIES) {
         },
         runs: [yieldsThen(1, "first"), yieldsThen(0, "second")],
       });
-      const first = plainGraph(strategy);
+      const firstPorts = terminalPorts();
+      const firstContext = plainContext(firstPorts.source, firstPorts.sink, strategy);
+      const first = firstContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>(
         "upstream->member",
       );
@@ -559,13 +579,16 @@ for (const strategy of STRATEGIES) {
       });
       first.addEdge(upstreamId, firstId, edge);
 
+      firstPorts.connect(first, firstId);
       assert.deepEqual([...first.available().keys()], [upstreamId]);
-      await first.run();
+      await firstContext.run();
       const firstResult = first.result(firstId);
       assert.ok(O.isSome(firstResult) && textOf(firstResult.value) === "first");
       assert.equal(seen.length, 1);
 
-      const second = plainGraph(strategy);
+      const secondPorts = terminalPorts();
+      const secondContext = plainContext(secondPorts.source, secondPorts.sink, strategy);
+      const second = secondContext.graph;
       member.stagePrompt((inputs) => {
         seen.push(inputs);
         return "round two";
@@ -576,7 +599,8 @@ for (const strategy of STRATEGIES) {
         description: "member",
         trigger: TriggerRule.always(),
       });
-      await second.run();
+      secondPorts.connect(second, secondId);
+      await secondContext.run();
       const secondResult = second.result(secondId);
       assert.ok(
         O.isSome(secondResult) && textOf(secondResult.value) === "second",
@@ -604,13 +628,16 @@ for (const strategy of STRATEGIES) {
           error instanceof JuncoAgentError && error.code === "busy",
       );
       assert.equal(member.status, "ready");
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode({
         state: member,
         policy: LockPolicy,
         trigger: TriggerRule.always(),
       });
-      await graph.run();
+      graphPorts.connect(graph, id);
+      await graphContext.run();
       const result = graph.result(id);
       assert.ok(O.isSome(result) && textOf(result.value) === "staged result");
       assert.deepEqual(userTexts(member.history), ["staged"]);
@@ -641,7 +668,9 @@ for (const strategy of STRATEGIES) {
           },
         },
       );
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const seedId = graph.addNode({
         id: NodeId.create("seed"),
@@ -666,20 +695,21 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(seedId, agentId, seed).addEdge(notesId, agentId, notes);
 
-      await stepUntil(graph, () => O.isSome(graph.result(seedId)));
-      await graph.run();
+      graphPorts.connect(graph, agentId);
+      await stepUntil(graphContext, () => O.isSome(graph.result(seedId)));
+      await graphContext.run();
       assert.equal(seen.length, 0);
       assert.equal(receiver.faux.state.callCount, 0);
 
       graph.emit(notesId, Message.create(notes, note));
       await stepUntil(
-        graph,
+        graphContext,
         () => graph.getNode(agentId)!.status === "running",
       );
       assert.equal(seen.length, 0);
       assert.equal(receiver.faux.state.callCount, 0);
 
-      await graph.run();
+      await graphContext.run();
       assert.deepEqual(seen, [[[note], seedMessage]]);
       assert.deepEqual(resultOf(receiver.results, "recv-inputs").details, {
         messages: [{ id: notes.id, payload: note }],
@@ -691,7 +721,7 @@ for (const strategy of STRATEGIES) {
         "Use note with seed",
       ]);
       const calls = receiver.faux.state.callCount;
-      await graph.run();
+      await graphContext.run();
       assert.equal(seen.length, 1);
       assert.equal(receiver.faux.state.callCount, calls);
     });
@@ -703,7 +733,9 @@ for (const strategy of STRATEGIES) {
           throw cause;
         },
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const id = graph.addNode({
         state: thrower.agent,
@@ -711,7 +743,8 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
       });
 
-      const error = await graph.run().catch((thrown: unknown) => thrown);
+      graphPorts.connect(graph, id);
+      const error = await graphContext.run().catch((thrown: unknown) => thrown);
       assert.ok(error instanceof DataflowNodeError && error.nodeId === id);
       assert.equal(error.error, cause);
       assert.ok(O.isNone(graph.result(id)));
@@ -719,12 +752,14 @@ for (const strategy of STRATEGIES) {
       assert.equal(thrower.agent.status, "idle");
     });
 
-    test("an explicit step is registered unchanged, a step-less coroutine runs itself, and a step-less unsupported or result-less spec is rejected", async () => {
+    test("an explicit step is registered unchanged, a step-less coroutine runs itself, and a step-less unsupported or bare graph spec is rejected", async () => {
       const mock = new MockAgent({
         prompt: "unused",
         runs: [yieldsThen(0, "never")],
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode({
         state: mock,
         // biome-ignore lint/correctness/useYield: a custom body resolving on its first activation.
@@ -734,7 +769,8 @@ for (const strategy of STRATEGIES) {
         policy: LockPolicy,
         trigger: TriggerRule.always(),
       });
-      await graph.run();
+      graphPorts.connect(graph, id);
+      await graphContext.run();
       const result = graph.result(id);
       assert.ok(O.isSome(result) && textOf(result.value) === "custom");
       assert.equal(mock.status, "ready");
@@ -751,15 +787,19 @@ for (const strategy of STRATEGIES) {
         state: coroutine,
         trigger: TriggerRule.always(),
       });
-      await graph.run();
+      await graphContext.run();
       const coroutineResult = graph.result(shorthand);
       assert.ok(
         O.isSome(coroutineResult) &&
           textOf(coroutineResult.value) === "coroutine",
       );
 
-      for (const state of [plainGraph(strategy), undefined]) {
-        const target = plainGraph(strategy);
+      const rejectedPorts = terminalPorts();
+      const rejectedGraph = plainContext(rejectedPorts.source, rejectedPorts.sink, strategy).graph;
+      for (const state of [rejectedGraph, undefined]) {
+        const targetPorts = terminalPorts();
+        const targetContext = plainContext(targetPorts.source, targetPorts.sink, strategy);
+        const target = targetContext.graph;
         const nodeId = NodeId.create("stepless");
         assert.throws(
           () =>
@@ -789,12 +829,15 @@ for (const strategy of STRATEGIES) {
         prompt: "inner",
         runs: [yieldsThen(0, "inner done")],
       });
-      const child = plainGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = plainContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const innerId = child.addNode({
         state: inner,
         policy: LockPolicy,
         trigger: TriggerRule.always(),
       });
+      childPorts.connect(child, innerId);
       let entered = false;
       const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
         async function* () {
@@ -805,7 +848,9 @@ for (const strategy of STRATEGIES) {
         LockPolicy,
       );
       const consumer = new MockAgent({ runs: [yieldsThen(0, "consumed")] });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const fromAgent = Edge.value<AgenticInput, AssistantMessage>(
         "agent->consumer",
       );
@@ -823,8 +868,7 @@ for (const strategy of STRATEGIES) {
       const g = graph.addNode({
         ...shared,
         id: NodeId.create("graph"),
-        state: child,
-        result: innerId,
+        state: childContext,
       });
       consumer.stagePrompt("consume");
       const c = graph.addNode({
@@ -834,8 +878,9 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(a, c, fromAgent);
 
+      graphPorts.connect(graph, c);
       assert.equal(graph.available().size, 0);
-      assert.equal((await graph.run()).size, 0);
+      assert.equal((await graphContext.run()).size, 0);
       assert.deepEqual(
         [agent.requests, inner.requests, consumer.requests],
         [[], [], []],
@@ -845,7 +890,7 @@ for (const strategy of STRATEGIES) {
       assert.ok([a, d, g, c].every((id) => O.isNone(graph.result(id))));
 
       admitted = true;
-      await graph.run();
+      await graphContext.run();
 
       const texts = [a, d, g, c].map((id) => {
         const result = graph.result(id);
@@ -941,7 +986,9 @@ for (const strategy of STRATEGIES) {
           }),
         },
       );
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const sourceId = graph.addNode({
         id: NodeId.create("source"),
@@ -970,7 +1017,8 @@ for (const strategy of STRATEGIES) {
         .addEdge(agentId, out.id, toSink);
       const policy = nodePolicies.get(graph.getNode(agentId)!.step)!;
 
-      await stepUntil(graph, () => receiver.agent.status === "suspended");
+      graphPorts.connect(graph, agentId);
+      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
       // The first public pause is the explicit Yield: every earlier tool ran in the same run.
       assert.deepEqual(
         policy.lastYield?.map(({ kind, toolName }) => [kind, toolName]),
@@ -1013,6 +1061,7 @@ for (const strategy of STRATEGIES) {
           kind: "message",
           expect: "Forwarded notes, kept in order.",
         },
+        { id: graph.sink.id, edgeId: "terminal->$sink", kind: "value", expect: "Graph output consumes final work results and publishes messages." },
       ]);
       // info consumed nothing: the first recv holds every delivery, and the second is empty.
       assert.deepEqual(resultOf(receiver.results, "recv-1").details, {
@@ -1026,7 +1075,7 @@ for (const strategy of STRATEGIES) {
       // send admitted exactly one message before the run resumed.
       assert.equal(queued(graph, toSink.id) + out.delivered.length, 1);
 
-      await stepUntil(graph, () => policy.lastYield?.[0]?.kind === "policy");
+      await stepUntil(graphContext, () => policy.lastYield?.[0]?.kind === "policy");
       assert.equal(receiver.agent.status, "suspended");
       assert.equal(receiver.faux.state.callCount, 7);
       assert.deepEqual(
@@ -1037,7 +1086,7 @@ for (const strategy of STRATEGIES) {
       assert.ok(denied.isError);
       assert.match(contentText(denied.content), /denied by policy/);
 
-      await graph.run();
+      await graphContext.run();
       assert.equal(receiver.faux.state.callCount, 8);
       const result = graph.result(agentId);
       assert.ok(O.isSome(result) && textOf(result.value) === "done");
@@ -1058,7 +1107,9 @@ for (const strategy of STRATEGIES) {
         call("recv", {}, "recv-2"),
         fauxAssistantMessage("done"),
       ]);
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const seedId = graph.addNode({
         id: NodeId.create("seed"),
@@ -1085,15 +1136,16 @@ for (const strategy of STRATEGIES) {
       graph.addEdge(seedId, agentId, seed).addEdge(notesId, agentId, notes);
       const policy = nodePolicies.get(graph.getNode(agentId)!.step)!;
 
+      graphPorts.connect(graph, agentId);
       graph.emit(notesId, Message.create(notes, note("n1")));
       graph.emit(notesId, Message.create(notes, note("n2")));
-      await stepUntil(graph, () => receiver.agent.status === "suspended");
+      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
       assert.ok(O.isSome(graph.result(seedId)));
       // Another batch arrives while the model postpones recv.
       graph.emit(notesId, Message.create(notes, note("n3")));
-      await stepUntil(graph, () => policy.lastYield?.[0]?.reason === "again");
+      await stepUntil(graphContext, () => policy.lastYield?.[0]?.reason === "again");
       graph.emit(notesId, Message.create(notes, note("n4")));
-      await graph.run();
+      await graphContext.run();
 
       assert.deepEqual(resultOf(receiver.results, "recv-1").details, {
         messages: ["n1", "n2", "n3"].map((text) => ({
@@ -1148,7 +1200,9 @@ for (const strategy of STRATEGIES) {
         [call("info", {}, "info-1"), fauxAssistantMessage("R done")],
         { tools: [copy] },
       );
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const ids = [p, q, r].map((agent, index) => {
         agent.agent.stagePrompt("Report along your message route.");
@@ -1165,7 +1219,8 @@ for (const strategy of STRATEGIES) {
       const sinkQ = sink(graph, toQ, "sinkQ", "Q's report.");
       graph.addEdge(ids[0]!, sinkP.id, toP).addEdge(ids[1]!, sinkQ.id, toQ);
 
-      await graph.run();
+      graphPorts.connect(graph, ids[2]!);
+      await graphContext.run();
 
       for (const [agent, out, edge, expect] of [
         [p, sinkP, toP, "P's report."],
@@ -1196,7 +1251,9 @@ for (const strategy of STRATEGIES) {
     });
 
     test("a closed graph's registration rejects info and send instead of admitting", async () => {
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const edge = Edge.message<AgenticInput, AssistantMessage>("a->b");
       const a = inert(graph, { id: NodeId.create("a") });
       const b = inert(graph, {
@@ -1204,7 +1261,10 @@ for (const strategy of STRATEGIES) {
         contract: contracts({ [edge.id]: "Anything." }),
       });
       graph.addEdge(a, b, edge);
+      graphPorts.connect(graph, b);
       const registration = registeredNodeContexts.get(graph.getNode(a)!)!;
+      registration.assertSend(edge.id);
+      assert.equal(queued(graph, edge.id), 0);
       const late = Message.create(edge, { kind: "prompt", text: "late" });
       registration.send(late);
       assert.deepEqual(
@@ -1215,6 +1275,7 @@ for (const strategy of STRATEGIES) {
       await graph.close();
 
       assert.throws(() => registration.info());
+      assert.throws(() => registration.assertSend(edge.id));
       assert.throws(() => registration.send(late));
       assert.equal(queued(graph, edge.id), 1);
     });
@@ -1254,7 +1315,9 @@ for (const strategy of STRATEGIES) {
           return { expect: dExpect };
         },
       });
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       closers.push(() => graph.close());
       const a = inert(graph, { id: NodeId.create("A") });
       b.agent.stagePrompt("Inspect your routes.");
@@ -1269,15 +1332,17 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.when(bd),
       });
       // The wrapper's contract, not its selected inner result node's, describes its edge.
-      const inner = plainGraph(strategy);
+      const innerPorts = terminalPorts();
+      const innerContext = plainContext(innerPorts.source, innerPorts.sink, strategy);
+      const inner = innerContext.graph;
       const innerId = inert(inner, {
         contract: contracts({ [bw.id]: "inner: unrelated." }),
       });
+      innerPorts.connect(inner, innerId);
       const w = graph.addNode({
         id: NodeId.create("W"),
         trigger: TriggerRule.when(bw),
-        state: inner,
-        result: innerId,
+        state: innerContext,
         contract: contracts({ [bw.id]: "W: wrapper expectation." }),
       });
       // A disconnected link reusing B->D's edge id has its own receiver's contract.
@@ -1298,14 +1363,15 @@ for (const strategy of STRATEGIES) {
       const info = (id: NodeIdType) =>
         registeredNodeContexts.get(graph.getNode(id)!)!.info();
 
-      await stepUntil(graph, () => b.agent.status === "suspended");
+      graphPorts.connect(graph, bId);
+      await stepUntil(graphContext, () => b.agent.status === "suspended");
       // While B is paused, a route is added and a receiver's contract changes.
       const e = inert(graph, {
         contract: contracts({ [be.id]: "E: late route." }),
       });
       graph.addEdge(bId, e, be);
       dExpect = "D: second contract.";
-      await graph.run();
+      await graphContext.run();
 
       const parents = [
         { id: a, edgeId: ab1.id, kind: "message", expect: "B: first note." },
@@ -1319,6 +1385,7 @@ for (const strategy of STRATEGIES) {
         },
       ];
       const children = [
+        { id: graph.sink.id, edgeId: "terminal->$sink", kind: "value", expect: "Graph output consumes final work results and publishes messages." },
         {
           id: bId,
           edgeId: self.id,
@@ -1389,7 +1456,9 @@ for (const strategy of STRATEGIES) {
     });
 
     test("info fails without a partial result when a receiver lacks, throws or breaks its contract", () => {
-      const graph = plainGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       let contract: Contract | Error = { expect: "Anything." };
       const s = inert(graph, { id: NodeId.create("S") });
       const r = inert(graph, {
@@ -1400,6 +1469,7 @@ for (const strategy of STRATEGIES) {
         },
       });
       graph.addEdge(s, r, Edge.message("s->r"));
+      graphPorts.connect(graph, r);
       const info = () => registeredNodeContexts.get(graph.getNode(s)!)!.info();
       assert.deepEqual(
         info().children.map(({ expect }) => expect),
@@ -1476,7 +1546,9 @@ test("a collectionless real agent uses its node's policy", async () => {
     ...options,
     tools: [],
   });
-  const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer());
+  const graphPorts = terminalPorts();
+  const graphContext = policyContext(graphPorts.source, graphPorts.sink, "parallel");
+  const graph = graphContext.graph;
   try {
     const id = NodeId.create("free");
     agent.stagePrompt("go");
@@ -1486,7 +1558,8 @@ test("a collectionless real agent uses its node's policy", async () => {
       policy: EmptyPolicy,
       trigger: TriggerRule.always(),
     });
-    const result = await graph.run();
+    graphPorts.connect(graph, id);
+    const result = await graphContext.run();
     assert.equal(contentText(result.get(id)!.content), "collectionless-ok");
   } finally {
     await graph.close();

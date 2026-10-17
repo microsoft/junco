@@ -12,6 +12,9 @@ import type {
   JuncoAgentNodeContext,
 } from "junco-agent";
 import type { ToolCollection } from "junco-tools";
+import { context as schedulerContext, type Scheduler, type SchedulerContext } from "junco-scheduler";
+import type { Agentic } from "./agentic.js";
+import type { JuncoGraph } from "./junco-graph.js";
 import type { AgenticNode } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 
@@ -37,6 +40,13 @@ export type NodePolicy = {
   closedTaskState?: object;
 };
 
+/** Source-derived policy metadata; native descriptions remain on native observations. */
+export type AgencyNodeMetadata = Readonly<
+  Pick<NodePolicy, "lastYield"> & {
+    agentStatus?: NonNullable<NodePolicy["agent"]>["status"];
+  }
+>;
+
 /** Keyed by the generated body, so node state itself stays the original instance. */
 export const nodePolicies = new WeakMap<object, NodePolicy>();
 
@@ -48,6 +58,8 @@ export type NodeRegistration = Pick<
   readonly tracer: DataflowTracer;
   /** The owning graph's current signal. */
   readonly signal: AbortSignal;
+  /** Validate the original sender's message route without publishing or consuming anything. */
+  readonly assertSend: (edgeId: EdgeId) => void;
   /** The registered spec's receiver contract, captured because engine nodes drop it. */
   readonly contract?: AgenticNode["contract"];
 };
@@ -113,4 +125,25 @@ export function nodeInputs<N, T>(
   const seen = policy?.seenValues;
   const first = candidate.satisfied.find((edgeId) => !seen?.has(edgeId));
   return first === undefined ? new Map() : new Map([[first, "all"]]);
+}
+
+/** Pair a passive agency graph with policy, sidecar metadata and agency input semantics. */
+export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
+  readonly scheduler: Scheduler<NoInfer<Agentic<N, T>>, NoInfer<N>, NoInfer<T>, AgencyNodeMetadata>;
+  readonly graph: G & JuncoGraph<N, T, never>;
+}): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G> {
+  const { graph } = options;
+  return schedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G>({
+    ...options,
+    readInputs: (id, candidate) => nodeInputs(graph.getNode(id)?.step, candidate),
+    describeNode: (id): AgencyNodeMetadata | undefined => {
+      const node = graph.getNode(id);
+      const policy = node === undefined ? undefined : nodePolicies.get(node.step);
+      if (policy?.agent === undefined && policy?.lastYield === undefined) return undefined;
+      return {
+        ...(policy.agent === undefined ? {} : { agentStatus: policy.agent.status }),
+        ...(policy.lastYield === undefined ? {} : { lastYield: policy.lastYield }),
+      };
+    },
+  });
 }

@@ -10,6 +10,8 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type * as O from "fp-ts/lib/Option.js";
+import { context as nativeContext } from "junco-scheduler";
+import { triggerInputs, type InputSchedule, type MessageSchedule } from "dataflow-engine";
 import {
   agent,
   graph,
@@ -132,8 +134,8 @@ export async function graphTypesBuildAndReadTypedNodes(
   const runOptions: graph.DataflowRunOptions = {
     signal: new AbortController().signal,
   };
-  const results: ReadonlyMap<graph.NodeIdType, string> =
-    await g.run(runOptions);
+  const execution = nativeContext({ graph: g, scheduler: schedulers.parallel() });
+  const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run(runOptions);
   const result: O.Option<string> = g.result(id);
   const finalStatus: graph.NodeStatus | undefined = node?.status;
 
@@ -141,7 +143,7 @@ export async function graphTypesBuildAndReadTypedNodes(
   const rendered: string[] = [graph.renderPretty(leaf), graph.renderPretty(g)];
 
   try {
-    await g.step();
+    await execution.step();
   } catch (error) {
     if (error instanceof graph.DataflowNodeError) {
       const failed: graph.NodeIdType = error.nodeId;
@@ -201,10 +203,14 @@ export function spawnBuildsTypedStars(
   state: graph.nodes.Deterministic<number, string>,
   lead: agent.JuncoAgent,
   worker: agent.JuncoAgent,
+  source: graph.nodes.Source<number, string>,
+  sink: graph.nodes.Sink<number, string>,
+  agentSource: graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>,
+  agentSink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
 ) {
   const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
-  const typed: graph.JuncoGraph<number, string> = graph.JuncoGraph.spawn(
-    root,
+  const typed: schedulers.SchedulerContext<graph.nodes.Agentic<number, string>, number, string, schedulers.AgencyNodeMetadata, graph.JuncoGraph<number, string>> = graph.JuncoGraph.spawn(
+    source, sink, root,
     tasks,
     (task) => {
       const inferred: Task = task;
@@ -213,14 +219,14 @@ export function spawnBuildsTypedStars(
       return child(inferred.label);
     },
   );
-  const explicit: graph.JuncoGraph<number, string> = graph.JuncoGraph.spawn(
-    root,
+  const explicit = graph.JuncoGraph.spawn(
+    source, sink, root,
     tasks,
     (task) => child(task.label),
     new tracer.DummyTracer(),
   );
-  const defaults: graph.JuncoGraph = graph.JuncoGraph.spawn(
-    {
+  const defaults = graph.JuncoGraph.spawn(
+    agentSource, agentSink, {
       state: lead,
       trigger: trigger.TriggerRule.never(),
       policy: tools.LockPolicy,
@@ -233,18 +239,18 @@ export function spawnBuildsTypedStars(
     }),
   );
   // @ts-expect-error the root must be an adapted node, not a bare state
-  graph.JuncoGraph.spawn(bare, tasks, (task) => child(task.label));
+  graph.JuncoGraph.spawn(source, sink, bare, tasks, (task) => child(task.label));
   // @ts-expect-error the factory must return an adapted node, not a bare state
-  graph.JuncoGraph.spawn(root, tasks, () => state);
+  graph.JuncoGraph.spawn(source, sink, root, tasks, () => state);
   // @ts-expect-error the factory must return a node, not an arbitrary value
-  graph.JuncoGraph.spawn(root, tasks, (task) => task.label);
+  graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => task.label);
   // @ts-expect-error a string-message child cannot join a number-wired star
-  graph.JuncoGraph.spawn<Task, number, string>(root, tasks, () => stringChild);
+  graph.JuncoGraph.spawn<Task, number, string>(source, sink, root, tasks, () => stringChild);
   const managed: graph.nodes.AgenticNode<number, string> = {
     state,
     trigger: trigger.TriggerRule.never(),
   };
-  const managedStar = graph.JuncoGraph.spawn(managed, tasks, () => ({
+  const managedStar = graph.JuncoGraph.spawn(source, sink, managed, tasks, () => ({
     state,
     trigger: trigger.TriggerRule.never(),
   }));
@@ -254,7 +260,11 @@ export function spawnBuildsTypedStars(
     trigger: trigger.TriggerRule.never(),
     policy: tools.LockPolicy,
   };
-  return [typed, explicit, defaults, managedStar, owned];
+  const typedGraph: graph.JuncoGraph<number, string> = typed.graph;
+  const defaultGraph: graph.JuncoGraph = defaults.graph;
+  // @ts-expect-error spawn requires both positional ports
+  graph.JuncoGraph.spawn(root, tasks, (task: Task) => child(task.label));
+  return [typed, typedGraph, defaultGraph, explicit, defaults, managedStar, owned];
 }
 
 // --- trigger and tracer ----------------------------------------------------------------------------
@@ -373,6 +383,8 @@ export async function tracerHandlesRetainPayloadTypes(
   id: graph.NodeIdType,
   view: graph.ParentView<number, string>,
   edge: graph.Edge<number, string>,
+  source: graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>,
+  sink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
 ) {
   const counting = new CountingTracer();
   const tui: tracer.TuiTracer = await tracer.TuiTracer.create();
@@ -405,14 +417,13 @@ export async function tracerHandlesRetainPayloadTypes(
   // @ts-expect-error a step phase is "prime" or "resume"
   run.startNode(id, "restart", undefined);
   const traced = new graph.DataflowGraph<Counter, number, string, never>(
-    new schedulers.ParallelScheduler<number, string>(),
     graph.Width.create(1),
     graph.UNBOUNDED,
     counting,
   );
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await graph.JuncoGraph.parallel(tools.LockPolicy).tracer.flush();
+  await new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, tools.LockPolicy).tracer.flush();
   await tui.close();
   await tui[Symbol.asyncDispose]();
   return traced;
@@ -420,186 +431,63 @@ export async function tracerHandlesRetainPayloadTypes(
 
 // --- schedulers ------------------------------------------------------------------------------------
 
-type Cursor = { last: graph.NodeIdType | undefined; batch: number };
-
-export async function typedSchedulerPolicyReadsPerEdge(
-  edge: graph.Edge<number, string>,
-) {
-  const options: schedulers.SchedulerOptions<Cursor, number, string> = {
-    state: { last: undefined, batch: 2 },
-    schedule(available, state, window, threads) {
-      const lanes: schedulers.NodeSchedule[][] = [];
-      for (const [id, candidate] of available) {
-        const node: schedulers.NodeAvailability<number, string> = candidate;
-        const pending: readonly number[] = graph.from(node.view, edge);
-        const read: schedulers.MessageSchedule =
-          node.status === "ready"
-            ? "none"
-            : pending.length > 0
-              ? state.batch
-              : "all";
-        const inputs: schedulers.InputSchedule = new Map<
-          graph.EdgeIdType,
-          schedulers.MessageSchedule
-        >(node.satisfied.map((satisfied) => [satisfied, read]));
-        if (lanes.length < threads)
-          lanes.push(
-            Array.from({ length: Math.min(window, 1) }, () => ({ id, inputs })),
-          );
-        state.last = id;
-      }
-      const plan: schedulers.Schedule = lanes;
-      return plan;
-    },
-    resolveInputs(entry, live, state) {
-      if (live.status === "ready") return entry.inputs;
-      return new Map<graph.EdgeIdType, schedulers.MessageSchedule>([
-        [edge.id, state.batch],
-      ]);
-    },
-  };
-  const policy = new schedulers.Scheduler(options);
-  policy.state.batch = 3;
-  const contract: schedulers.DataflowScheduler<number, string> = policy;
-  const g = new graph.DataflowGraph<
-    Counter,
-    number,
-    string,
-    never,
-    typeof policy
-  >(policy, graph.Width.create(2), graph.Width.create(2));
-  const observed: graph.NodeIdType | undefined = g.scheduler.state.last;
-  const fallback: schedulers.InputSchedule[] = [...g.available().values()].map(
-    schedulers.triggerInputs,
+export async function typedSchedulerPolicyReadsPerEdge(edge: graph.Edge<number, string>) {
+  const g = new graph.DataflowGraph<Counter, number, string, never>(graph.Width.create(1), graph.Width.create(2));
+  const choose: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.choose({
+    where: (snapshot, id) => (snapshot.inputs.get(id)?.messages.get(edge.id)?.length ?? 0) > 0,
+    rank: (snapshot, a, b) => (snapshot.context.get(b)?.priority ?? 0) - (snapshot.context.get(a)?.priority ?? 0),
+    width: (snapshot) => snapshot.threads,
+  });
+  const policy: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.separate(
+    (snapshot, id) => (snapshot.nodes.get(id)?.state.count ?? 0) > 0,
+    choose,
+    schedulers.agent(async (snapshot) => [[...snapshot.available].filter((id) => snapshot.owned.has(id))]),
   );
-  const roundRobin: schedulers.DataflowScheduler<number, string> =
-    new schedulers.RoundRobinScheduler<number, string>();
-
-  // @ts-expect-error a planned entry names a node ID, not a raw string
-  const rawId: schedulers.NodeSchedule = { id: "a", inputs: new Map() };
+  const execution = nativeContext({
+    graph: g, scheduler: policy,
+    describeNode: (_id, candidate) => ({ priority: graph.from(candidate.view, edge).length }),
+    readInputs: (_id, candidate): InputSchedule => candidate.status === "ready"
+      ? new Map()
+      : new Map([[edge.id, 2]]),
+  });
+  const selection: schedulers.Decision = await policy({
+    ...g.observe(), available: new Set(g.available().keys()), owned: new Set(g.observe().nodes.keys()),
+    context: new Map(), history: [], threads: g.threads,
+  });
+  const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run();
+  const reads: InputSchedule[] = [...g.available().values()].map(triggerInputs);
+  const rotation: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.roundRobin();
+  // @ts-expect-error selected IDs are branded native IDs
+  const rawId: schedulers.Decision = { selected: ["a"] };
   // @ts-expect-error a read is a count, "all" or "none"
-  const unknownRead: schedulers.MessageSchedule = "some";
-  const wrongPayload: schedulers.SchedulerOptions<undefined, number, string> = {
-    state: undefined,
-    // @ts-expect-error the policy's callbacks see the graph's numeric payloads
-    schedule: (
-      available: ReadonlyMap<
-        graph.NodeIdType,
-        schedulers.NodeAvailability<string, string>
-      >,
-    ) => [...available.keys()].map((id) => [{ id, inputs: new Map() }]),
-  };
-  return [
-    contract,
-    observed,
-    fallback,
-    roundRobin,
-    rawId,
-    unknownRead,
-    wrongPayload,
-  ];
+  const unknownRead: MessageSchedule = "some";
+  const wrongPayload: schedulers.Scheduler<Counter, string, string, { priority: number }> = () => ({ selected: [] });
+  // @ts-expect-error graph data types are inferred from the graph, not widened by the policy
+  nativeContext({ graph: g, scheduler: wrongPayload, describeNode: () => ({ priority: 1 }) });
+  return [selection, results, reads, rotation, rawId, unknownRead];
 }
 
-export async function piSchedulerTypesFixTheScheduleTool(
-  native: Omit<
-    schedulers.PiSchedulerOptions<number, string, TaggedSkill, TaggedTemplate>,
-    "adapter"
-  >,
-  skill: TaggedSkill,
-  plainTool: AgentTool,
-  edge: graph.Edge<number, string>,
+export function modelPolicyAndRequestPreserveCallerMetadata(
+  options: schedulers.PiOptions,
+  request: schedulers.SchedulerRequest<{ readonly priority: number }>,
+  numeric: graph.JuncoGraph<number, string>,
+  textual: graph.JuncoGraph<string, number>,
 ) {
-  const adapter: schedulers.PiSchedulerAdapter<number, string> = {
-    describeNode: (id, node) => ({
-      id,
-      status: node.status,
-      pending: graph.from(node.view, edge).length,
-    }),
-    readInputs: (_id, node) =>
-      node.status === "ready"
-        ? new Map<graph.EdgeIdType, schedulers.MessageSchedule>()
-        : schedulers.triggerInputs(node),
-    beforeSchedule: () => undefined,
-    abortDependents: async () => undefined,
-    closeDependents: () => undefined,
-  };
-  const options: schedulers.PiSchedulerOptions<
-    number,
-    string,
-    TaggedSkill,
-    TaggedTemplate
-  > = {
-    ...native,
-    prompt: "Run available work.",
-    resources: { skills: [skill] },
-    adapter,
-  };
-  const scheduler: schedulers.PiScheduler<
-    number,
-    string,
-    TaggedSkill,
-    TaggedTemplate
-  > = await schedulers.PiScheduler.make(options);
-  const opus: schedulers.PiScheduler<
-    number,
-    string,
-    TaggedSkill,
-    TaggedTemplate
-  > = await schedulers.PiScheduler.opus(options);
-  const agency = await graph.JuncoGraph.pi<TaggedSkill, TaggedTemplate>({
-    prompt: "Run the agency.",
-    policy: tools.LockPolicy,
-    tracer: tracer.TuiTracer.shared(),
-    window: graph.Width.create(1),
-  });
-  const agencyScheduler: schedulers.PiScheduler<
-    graph.nodes.AgenticInput,
-    AssistantMessage,
-    TaggedSkill,
-    TaggedTemplate
-  > = agency.scheduler;
-  void graph.JuncoGraph.pi({ prompt: "x", policy: tools.LockPolicy });
-  // @ts-expect-error an agency graph requires options
-  void graph.JuncoGraph.pi();
-  const skillTags: ("skill" | undefined)[] = [
-    scheduler,
-    opus,
-    agencyScheduler,
-  ].map((each) => each.getResources().skills?.[0]?.tag);
-
-  const [schedule] = scheduler.getTools();
-  if (schedule === undefined || tools.isComplainTool(schedule))
-    throw new Error("the schedule tool is fixed");
-  const result = await schedule.execute("call-1", {
-    lanes: [["a", "b"], ["c"]],
-  });
-  const info: schedulers.SchedulerInfo = result.details;
-  const window: number | null = info.window;
-  const candidates: string[] = info.nodes.map(
-    (node) => `${node.id}:${node.status === "ready" ? "prime" : "resume"}`,
-  );
-  const details: unknown[] = info.nodes.map((node) => node.details);
-
-  // @ts-expect-error schedule lanes hold string node IDs
-  await schedule.execute("call-2", { lanes: [[1]] });
-  // @ts-expect-error the scheduler's tool set is fixed to `schedule` and `complain`
-  await scheduler.setTools([plainTool]);
-  const replaced: schedulers.PiSchedulerOptions<number, string> = {
-    // @ts-expect-error construction cannot replace the fixed tool set
-    tools: [plainTool],
-  };
-  const finished: schedulers.SchedulerInfo = {
-    window: 1,
-    threads: null,
-    quiescent: false,
-    // @ts-expect-error a snapshot lists only ready or running candidates
-    nodes: [{ id: "a", status: "done" }],
-  };
-  const badReads: schedulers.PiSchedulerAdapter<number, string> = {
-    // @ts-expect-error an adapter's read plan is keyed by edge ID, not a payload
-    readInputs: () => 2,
-  };
-  return [skillTags, window, candidates, details, replaced, finished, badReads];
+  const policy = schedulers.pi(options);
+  const numbers = schedulers.context({ graph: numeric, scheduler: policy });
+  const strings = schedulers.context({ graph: textual, scheduler: policy });
+  const version: number = request.version;
+  const threads: number | null = request.threads;
+  const priorities: readonly (readonly [graph.NodeIdType, { readonly priority: number }])[] = request.context;
+  const selections: readonly schedulers.Decision[] = request.history;
+  const nativeFields: (string | undefined)[] = request.nodes.map((node) => node.description);
+  // @ts-expect-error requests do not expose native state
+  request.nodes[0]?.state;
+  // @ts-expect-error metadata preserves its declared fields
+  request.context[0]?.[1].label;
+  // @ts-expect-error scheduler options are model-call options, not a session or tool harness
+  const invalid: schedulers.PiOptions = { ...options, tools: [] };
+  return [numbers, strings, version, threads, priorities, selections, nativeFields, invalid];
 }
 
 // --- agent -----------------------------------------------------------------------------------------
@@ -1062,6 +950,10 @@ export async function mcpDefinitionsComposeWithAgentFactories(
     .add(server)
     .add({ ...server, name: "second" });
   const connectOptions: mcp.JuncoMcpConnectOptions = { cwd, collection };
+  const connectionLifetime: mcp.JuncoMcpConnectOptions = { cwd, collection, toolLifetime: "connection" };
+  const callLifetime: mcp.JuncoMcpConnectOptions = { cwd, collection, toolLifetime: "call" };
+  // @ts-expect-error only connection and call lifetimes are supported
+  const unknownLifetime: mcp.JuncoMcpConnectOptions = { toolLifetime: "batch" };
   const connection: mcp.JuncoMcpConnection =
     await graft.connect(connectOptions);
   const discovered: AgentTool[] = connection.tools;
@@ -1107,6 +999,9 @@ export async function mcpDefinitionsComposeWithAgentFactories(
   const narrowed: agent.JuncoAgent<Skill, PromptTemplate, TaggedTool> = mixed;
   return [
     chained,
+    connectionLifetime,
+    callLifetime,
+    unknownLifetime,
     discovered,
     mcpOnly,
     resolved,

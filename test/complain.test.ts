@@ -14,10 +14,12 @@ import {
   Deterministic,
   graph,
   JuncoGraph,
+  schedulers,
   MockAgent,
   tools,
   trigger,
 } from "../src/index.ts";
+import { terminalPorts } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
 
 // Real JuncoAgents on faux providers inside real graphs: the always-on complain tool records the
@@ -118,9 +120,11 @@ function wire(
 }
 
 function newGraph(tracer: DummyTracer = new RecordingTracer()) {
-  const flow = JuncoGraph.parallel(LockPolicy, tracer);
+  const ports = terminalPorts();
+  const flow = new JuncoGraph(ports.source, ports.sink, graph.Width.create(1), graph.UNBOUNDED, tracer, LockPolicy);
+  const execution = schedulers.context({ graph: flow, scheduler: schedulers.parallel() });
   closers.push(() => flow.close());
-  return flow;
+  return { execution, ports };
 }
 
 const resultText = (
@@ -131,7 +135,8 @@ const resultText = (
 describe("complaints through real graphs", () => {
   test("a worker's complaint records its node, delivered batch and full request", async () => {
     const tracer = new RecordingTracer();
-    const flow = newGraph(tracer);
+    const { execution: flowContext, ports: flowPorts } = newGraph(tracer);
+    const flow = flowContext.graph;
     const member = await worker("I cannot reach the coordinator.");
     const { edge, workerId } = wire(
       flow,
@@ -139,8 +144,9 @@ describe("complaints through real graphs", () => {
       graph.NodeId.create("worker"),
     );
     const before = tools.issueLog.length;
+    flowPorts.connect(flow, workerId);
 
-    const results = await flow.run();
+    const results = await flowContext.run();
     assert.equal(resultText(results, workerId), "continued");
     const issues = tools.issueLog.snapshot().slice(before);
     assert.equal(issues.length, 1);
@@ -169,16 +175,19 @@ describe("complaints through real graphs", () => {
   test("every agent and graph shares one issue log that survives closing", async () => {
     const first = await worker("first");
     const second = await worker("second");
-    const firstGraph = newGraph();
-    const secondGraph = newGraph();
+    const { execution: firstGraphContext, ports: firstGraphPorts } = newGraph();
+    const firstGraph = firstGraphContext.graph;
+    const { execution: secondGraphContext, ports: secondGraphPorts } = newGraph();
+    const secondGraph = secondGraphContext.graph;
     assert.equal(first.issueLog, tools.issueLog);
     assert.equal(second.issueLog, tools.issueLog);
     assert.equal(firstGraph.issueLog, tools.issueLog);
     assert.equal(secondGraph.issueLog, tools.issueLog);
 
     const before = tools.issueLog.length;
-    wire(firstGraph, first);
-    await firstGraph.run();
+    const firstWiring = wire(firstGraph, first);
+    firstGraphPorts.connect(firstGraph, firstWiring.workerId);
+    await firstGraphContext.run();
     await firstGraph.close();
     await first.return();
     assert.deepEqual(
@@ -191,8 +200,10 @@ describe("complaints through real graphs", () => {
   }, 5_000);
 
   test("auto and empty-string node ids are recorded as registered", async () => {
-    const auto = newGraph();
-    const empty = newGraph();
+    const { execution: autoContext, ports: autoPorts } = newGraph();
+    const auto = autoContext.graph;
+    const { execution: emptyContext, ports: emptyPorts } = newGraph();
+    const empty = emptyContext.graph;
     const autoWorker = wire(auto, await worker("auto"));
     const emptyWorker = wire(
       empty,
@@ -200,8 +211,10 @@ describe("complaints through real graphs", () => {
       graph.NodeId.create(""),
     );
     const before = tools.issueLog.length;
-    await auto.run();
-    await empty.run();
+    autoPorts.connect(auto, autoWorker.workerId);
+    emptyPorts.connect(empty, emptyWorker.workerId);
+    await autoContext.run();
+    await emptyContext.run();
     const issues = tools.issueLog.snapshot().slice(before);
     assert.deepEqual(
       issues.map(({ nodeId, complaint }) => [nodeId, complaint]),
@@ -216,8 +229,10 @@ describe("complaints through real graphs", () => {
   test("concurrent graphs with the same local node id keep their batches, requests and tracers apart", async () => {
     const tracerA = new RecordingTracer();
     const tracerB = new RecordingTracer();
-    const a = newGraph(tracerA);
-    const b = newGraph(tracerB);
+    const { execution: aContext, ports: aPorts } = newGraph(tracerA);
+    const a = aContext.graph;
+    const { execution: bContext, ports: bPorts } = newGraph(tracerB);
+    const b = bContext.graph;
     const id = graph.NodeId.create("worker");
     const inputA = {
       kind: "prompt",
@@ -230,7 +245,9 @@ describe("complaints through real graphs", () => {
     const wiredA = wire(a, await worker("from A", "system A"), id, inputA);
     const wiredB = wire(b, await worker("from B", "system B"), id, inputB);
     const before = tools.issueLog.length;
-    const [ra, rb] = await Promise.all([a.run(), b.run()]);
+    aPorts.connect(a, wiredA.workerId);
+    bPorts.connect(b, wiredB.workerId);
+    const [ra, rb] = await Promise.all([aContext.run(), bContext.run()]);
     assert.equal(resultText(ra, id), "continued");
     assert.equal(resultText(rb, id), "continued");
     assert.deepEqual(tracerA.complaints, [[id, "from A"]]);
@@ -260,13 +277,15 @@ describe("complaints through real graphs", () => {
   }, 5_000);
 
   test("a throwing complaint observer leaves the graph result and issue intact", async () => {
-    const flow = newGraph(new ThrowingTracer());
+    const { execution: flowContext, ports: flowPorts } = newGraph(new ThrowingTracer());
+    const flow = flowContext.graph;
     const { workerId } = wire(flow, await worker("observer throws"));
     const before = tools.issueLog.length;
     const print = console.log;
     console.log = () => {};
     try {
-      const results = await flow.run();
+      flowPorts.connect(flow, workerId);
+      const results = await flowContext.run();
       assert.equal(resultText(results, workerId), "continued");
     } finally {
       console.log = print;
@@ -283,21 +302,24 @@ describe("complaints through real graphs", () => {
   test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
     const innerTracer = new RecordingTracer();
     const outerTracer = new RecordingTracer();
-    const inner = JuncoGraph.parallel(LockPolicy, innerTracer);
+    const { execution: innerContext, ports: innerPorts } = newGraph(innerTracer);
+    const inner = innerContext.graph;
     const { workerId } = wire(
       inner,
       await worker("nested"),
       graph.NodeId.create("inner-worker"),
     );
-    const outer = newGraph(outerTracer);
+    const { execution: outerContext, ports: outerPorts } = newGraph(outerTracer);
+    const outer = outerContext.graph;
+    innerPorts.connect(inner, workerId);
     const wrapper = outer.addNode({
       id: graph.NodeId.create("wrapper"),
       trigger: trigger.TriggerRule.always(),
-      state: inner,
-      result: workerId,
+      state: innerContext,
     });
     const before = tools.issueLog.length;
-    const results = await outer.run();
+    outerPorts.connect(outer, wrapper);
+    const results = await outerContext.run();
     assert.equal(resultText(results, wrapper), "continued");
     assert.deepEqual(innerTracer.complaints, [[workerId, "nested"]]);
     assert.deepEqual(outerTracer.complaints, []);
@@ -321,11 +343,15 @@ describe("complaints through real graphs", () => {
       policy: LockPolicy,
       trigger: trigger.TriggerRule.always(),
     };
-    const a = newGraph(tracerA);
-    const b = newGraph(tracerB);
+    const { execution: aContext, ports: aPorts } = newGraph(tracerA);
+    const a = aContext.graph;
+    const { execution: bContext, ports: bPorts } = newGraph(tracerB);
+    const b = bContext.graph;
     const id = a.addNode(spec);
     b.addNode(spec);
-    const results = await a.run();
+    aPorts.connect(a, id);
+    bPorts.connect(b, id);
+    const results = await aContext.run();
     assert.equal(resultText(results, id), "continued");
     assert.deepEqual(tracerA.complaints, [[id, "shared spec"]]);
     assert.deepEqual(tracerB.complaints, []);
@@ -340,7 +366,7 @@ describe("direct Agentic.complain", () => {
     const mock = new MockAgent({ runs: [] });
     closers.push(() => mock.return());
     const protocols: agentApi.Agentic[] = [real, mock];
-    const graphs = [newGraph(), newGraph()];
+    const graphs = [newGraph().execution.graph, newGraph().execution.graph];
     for (const owner of [real, mock, ...graphs])
       assert.equal(owner.issueLog, tools.issueLog);
 

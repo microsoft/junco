@@ -7,36 +7,41 @@ import {
   DataflowNodeError,
   DummyTracer,
   Edge,
+  EdgeId,
+  type ParentView,
   from,
   Message,
   NodeId,
+  Sink,
+  Source,
   type NodeOptions,
-  type NodeSchedule,
+  type NodeGenerator,
   TriggerEntry,
   TriggerRule,
-  triggerInputs,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
-import { ParallelScheduler, Scheduler } from "junco-scheduler";
+import { parallel, type Decision, type SchedulerContext } from "junco-scheduler";
 import { LockPolicy, type Policy } from "junco-tools";
 import {
+  type Agentic,
   type AgenticInput,
   Deterministic,
   graph as graphApi,
   JuncoGraph,
   MockAgent,
+  schedulers,
   type MockHook,
   type MockRun,
 } from "../src/index.ts";
 import {
   assistant,
-  type PolicyScheduler,
   pause,
-  policyGraph,
+  policyContext,
+  terminalPorts,
   reason,
   requestTexts,
   run,
@@ -50,12 +55,8 @@ import {
 // JuncoGraphs of mock members, coroutines and nested graphs on the real round-robin and parallel
 // policies. Graphs, schedulers, recursive lifecycle and cancellation are real.
 
-type PolicyGraph = JuncoGraph<
-  AgenticInput,
-  AssistantMessage,
-  unknown,
-  PolicyScheduler
->;
+type PolicyGraph = JuncoGraph<AgenticInput, AssistantMessage>;
+type PolicyContext = SchedulerContext<Agentic<AgenticInput, AssistantMessage>, AgenticInput, AssistantMessage, schedulers.AgencyNodeMetadata, PolicyGraph>;
 
 const TIMEOUT_MS = 30_000;
 const invalidState = (error: unknown) =>
@@ -168,15 +169,13 @@ const member = (agent: MockAgent, description = "member", id?: string) => ({
 
 /** A nested-graph node its parent never runs: the test drives `child` itself. */
 const detached = (
-  child: PolicyGraph,
-  result: NodeId,
+  child: PolicyContext,
   description = "nested",
 ) => ({
   description,
   trigger: TriggerRule.always(),
   is_available: () => false,
   state: child,
-  result,
 });
 
 /** The messages currently queued on message edge `edge`. */
@@ -206,7 +205,7 @@ const outcome = (drive: Promise<unknown>): Promise<unknown> =>
 
 /** Step the graph until `done` holds; a bounded loop, so a regression fails instead of spinning. */
 async function stepUntil(
-  graph: Pick<PolicyGraph, "step">,
+  graph: Pick<PolicyContext, "step">,
   done: () => boolean,
 ): Promise<void> {
   for (let windows = 0; windows < 64; windows++) {
@@ -241,7 +240,9 @@ for (const strategy of STRATEGIES) {
         prompt: "child",
         runs: [yieldsThen(0, "child done")],
       });
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const work = Edge.message<AgenticInput, AssistantMessage>(
         "sender->worker",
       );
@@ -268,22 +269,23 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.when(result),
       });
       graph.addEdge(s, w, work).addEdge(w, c, result);
+      graphPorts.connect(graph, c);
       graph.emit(s, Message.create(work, { kind: "prompt", text: "work" }));
 
-      await stepUntil(graph, () => worker.requests.length === 1);
+      await stepUntil(graphContext, () => worker.requests.length === 1);
       assert.deepEqual(queued(work), []);
       assert.equal(worker.status, "suspended");
       assert.ok(graph.available().has(w));
       assert.ok(!graph.available().has(c));
       assert.ok(O.isNone(graph.result(w)));
 
-      await stepUntil(graph, () => worker.requests.length === 2);
+      await stepUntil(graphContext, () => worker.requests.length === 2);
       assert.equal(worker.status, "suspended");
       assert.ok(graph.available().has(w));
       assert.ok(!graph.available().has(c));
       assert.ok(O.isNone(graph.result(w)));
 
-      await graph.run();
+      await graphContext.run();
       assert.equal(resultText(graph, w), "worker done");
       assert.equal(resultText(graph, c), "child done");
       assert.deepEqual(requestTexts(worker.requests), [
@@ -312,7 +314,9 @@ for (const strategy of STRATEGIES) {
           ]),
         ],
       });
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const left = Edge.message<AgenticInput, AssistantMessage>("left");
       const right = Edge.message<AgenticInput, AssistantMessage>("right");
       const s = graph.addNode({
@@ -333,34 +337,35 @@ for (const strategy of STRATEGIES) {
         ),
       });
       graph.addEdge(s, m, left).addEdge(s, m, right);
+      graphPorts.connect(graph, m);
       const followUp = (text: string): AgenticInput => ({
         kind: "followUp",
         text,
       });
       graph.emit(s, Message.create(left, followUp("x1")));
-      await stepUntil(graph, () => queued(left).length === 1);
+      await stepUntil(graphContext, () => queued(left).length === 1);
       assert.ok(!graph.available().has(m));
       assert.equal(gatedMember.status, "ready");
       assert.deepEqual(gatedMember.requests, []);
 
       graph.emit(s, Message.create(right, followUp("y1")));
-      await stepUntil(graph, () => gatedMember.requests.length === 1);
+      await stepUntil(graphContext, () => gatedMember.requests.length === 1);
       assert.deepEqual([queued(left), queued(right)], [[], []]);
       assert.deepEqual(requestTexts(gatedMember.requests), [["start"]]);
 
       graph.emit(s, Message.create(left, followUp("x2")));
-      await stepUntil(graph, () => queued(left).length === 1);
+      await stepUntil(graphContext, () => queued(left).length === 1);
       const before = gatedMember.requests.length;
-      await stepUntil(graph, () => gatedMember.requests.length > before);
+      await stepUntil(graphContext, () => gatedMember.requests.length > before);
       assert.deepEqual([queued(left), queued(right)], [[followUp("x2")], []]);
 
       graph.emit(s, Message.create(right, followUp("y2")));
       await stepUntil(
-        graph,
+        graphContext,
         () => queued(left).length === 0 && queued(right).length === 0,
       );
 
-      await graph.run();
+      await graphContext.run();
       assert.equal(resultText(graph, m), "member done");
       // Delivered messages are retained data for recv, never injected as native follow-ups.
       assert.deepEqual(userTexts(gatedMember.history), ["start"]);
@@ -377,9 +382,20 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(2, "inner done")],
       });
       const consumer = new MockAgent({ runs: [yieldsThen(0, "reviewed")] });
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childSource = new Source<AgenticInput, AssistantMessage>((view) => {
+        assert.deepEqual([...view.messages.keys()], [go.id]);
+        assert.deepEqual(from(view, go), [{ kind: "prompt", text: "go" }]);
+        assert.equal([...view.values.keys()].length, 0);
+        return [];
+      }, { id: NodeId.create("$source") });
+      const childContext = policyContext(childSource, childPorts.sink, strategy);
+      const child = childContext.graph;
       const innerId = child.addNode(member(inner, "inner"));
-      const graph = policyGraph(strategy);
+      childPorts.connect(child, innerId);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const go = Edge.message<AgenticInput, AssistantMessage>("source->nested");
       const selected = Edge.value<AgenticInput, AssistantMessage>(
         "nested=>consumer",
@@ -392,8 +408,7 @@ for (const strategy of STRATEGIES) {
       const n = graph.addNode({
         id: NodeId.create("nested"),
         trigger: TriggerRule.when(go),
-        state: child,
-        result: innerId,
+        state: childContext,
       });
       consumer.stagePrompt("review");
       const c = graph.addNode({
@@ -402,15 +417,16 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.when(selected),
       });
       graph.addEdge(s, n, go).addEdge(n, c, selected);
+      graphPorts.connect(graph, c);
       graph.emit(s, Message.create(go, { kind: "prompt", text: "go" }));
 
-      await stepUntil(graph, () => inner.requests.length === 1);
+      await stepUntil(graphContext, () => inner.requests.length === 1);
       // The one trigger message is consumed, yet the started nested graph keeps running.
       assert.deepEqual(queued(go), []);
       assert.ok(graph.available().has(n));
       assert.ok(O.isNone(graph.result(n)));
 
-      await graph.run();
+      await graphContext.run();
       assert.equal(inner.requests.length, 3);
       assert.equal(resultText(child, innerId), "inner done");
       assert.equal(resultText(graph, n), "inner done");
@@ -430,7 +446,9 @@ for (const strategy of STRATEGIES) {
           ? input.text
           : assert.fail("expected a prompt input");
       for (const kind of ["all", "any"] as const) {
-        const parent = policyGraph(strategy);
+        const parentPorts = terminalPorts();
+        const parentContext = policyContext(parentPorts.source, parentPorts.sink, strategy);
+        const parent = parentContext.graph;
         const left = Edge.message<AgenticInput, AssistantMessage>(
           "left->nested",
         );
@@ -444,34 +462,38 @@ for (const strategy of STRATEGIES) {
           text,
         });
 
-        const childScheduler = new Scheduler<
-          { readonly texts: string[] },
-          AgenticInput,
-          AssistantMessage
-        >({
-          state: { texts: [] },
-          schedule: (available) => {
-            const lanes: NodeSchedule[][] = [];
-            for (const [id, candidate] of available)
-              lanes.push([{ id, inputs: triggerInputs(candidate) }]);
-            return lanes;
-          },
-        });
-        const child = new JuncoGraph(
-          childScheduler,
-          Width.create(1),
-          UNBOUNDED,
-          new DummyTracer(),
-          LockPolicy,
-        );
+        const texts: string[] = [];
+        const deliveries: string[][] = [];
+        const childSource = new Source<AgenticInput, AssistantMessage>((view) => {
+          const batch = [...from(view, left), ...from(view, right)].map(inputText);
+          assert.ok(batch.length > 0);
+          assert.equal([...view.values.keys()].length, 0);
+          deliveries.push(batch);
+          texts.push(...batch);
+          return [];
+        }, { id: NodeId.create("$source") });
+        const final = Edge.value<AgenticInput, AssistantMessage>("inner->$sink");
+        const childSink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (sink): NodeGenerator<AgenticInput, AssistantMessage> {
+          yield [];
+          const retained = child.result(innerId);
+          assert.ok(O.isSome(retained));
+          const answer = textOf(retained.value);
+          sink.send(Message.create(toN3, prompt(`n3: ${answer}`)));
+          sink.send(Message.create(toN4, prompt(`n4: ${answer}`)));
+          return retained.value;
+        }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+        const childContext = schedulers.context({ scheduler: parallel(), graph: new JuncoGraph(
+          childSource, childSink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy,
+        ) });
+        const child: PolicyGraph = childContext.graph;
         const innerId = child.addNode({
           id: NodeId.create("inner"),
           trigger: TriggerRule.always(),
           state: new Deterministic<AgenticInput, AssistantMessage>(
             async function* () {
               yield [];
-              while (childScheduler.state.texts.length < 2) yield [];
-              return assistant(childScheduler.state.texts.join("+"));
+              while (texts.length < 2) yield [];
+              return assistant(texts.join("+"));
             },
             LockPolicy,
           ),
@@ -510,7 +532,7 @@ for (const strategy of STRATEGIES) {
           ),
         });
 
-        const deliveries: string[][] = [];
+        child.addEdge(innerId, childSink.id, final);
         const l = parent.addNode(source(left, "left", 0));
         const r = parent.addNode(source(right, "right", 1));
         const n: NodeId = parent.addNode({
@@ -522,38 +544,24 @@ for (const strategy of STRATEGIES) {
                   TriggerEntry.on(left),
                   TriggerEntry.on(right),
                 ),
-          state: child,
-          result: innerId,
-          receive: (view) => {
-            const batch = [...from(view, left), ...from(view, right)].map(
-              inputText,
-            );
-            if (batch.length === 0) return;
-            deliveries.push(batch);
-            childScheduler.state.texts.push(...batch);
-          },
-          afterStep: () => {
-            const retained = child.result(innerId);
-            if (O.isNone(retained)) return;
-            const answer = textOf(retained.value);
-            parent.emit(n, Message.create(toN3, prompt(`n3: ${answer}`)));
-            parent.emit(n, Message.create(toN4, prompt(`n4: ${answer}`)));
-          },
+          state: childContext,
+
         });
         const n3 = parent.addNode(consumer(toN3, "n3"));
         const n4 = parent.addNode(consumer(toN4, "n4"));
+        parentPorts.connect(parent, n4);
         parent
           .addEdge(l, n, left)
           .addEdge(r, n, right)
           .addEdge(n, n3, toN3)
           .addEdge(n, n4, toN4);
 
-        await stepUntil(parent, () => queued(left).length === 1);
+        await stepUntil(parentContext, () => queued(left).length === 1);
         assert.deepEqual(queued(right), []);
         if (kind === "all") {
-          await stepUntil(parent, () => queued(right).length === 1);
+          await stepUntil(parentContext, () => queued(right).length === 1);
           await stepUntil(
-            parent,
+            parentContext,
             () => parent.getNode(n)!.status === "running",
           );
           // The conjunction held and the node primed, yet neither queue was read.
@@ -562,10 +570,10 @@ for (const strategy of STRATEGIES) {
             [[prompt("left")], [prompt("right")]],
           );
           assert.deepEqual(deliveries, []);
-          await stepUntil(parent, () => deliveries.length === 1);
+          await stepUntil(parentContext, () => deliveries.length === 1);
           assert.deepEqual(deliveries, [["left", "right"]]);
         } else {
-          await stepUntil(parent, () => deliveries.length === 2);
+          await stepUntil(parentContext, () => deliveries.length === 2);
           assert.deepEqual(deliveries, [["left"], ["right"]]);
         }
         assert.deepEqual([queued(left), queued(right)], [[], []]);
@@ -579,7 +587,7 @@ for (const strategy of STRATEGIES) {
             [queued(toN3), queued(toN4), observed.n3, observed.n4],
             [[], [], [], []],
           );
-          await parent.step();
+          await parentContext.step();
         }
         // The completing activation both emitted and published its result: no extra step.
         assert.equal(resultText(parent, n), "left+right");
@@ -589,13 +597,13 @@ for (const strategy of STRATEGIES) {
         );
         assert.deepEqual(observed, { n3: [], n4: [] });
 
-        await parent.run();
+        await parentContext.run();
         assert.deepEqual(observed, {
           n3: [["n3: left+right"]],
           n4: [["n4: left+right"]],
         });
         assert.deepEqual([queued(toN3), queued(toN4)], [[], []]);
-        await parent.run();
+        await parentContext.run();
         assert.deepEqual(observed, {
           n3: [["n3: left+right"]],
           n4: [["n4: left+right"]],
@@ -605,19 +613,23 @@ for (const strategy of STRATEGIES) {
       }
     });
 
-    test("a nested graph quiescent without its selected result fails before its dependent runs", async () => {
+    test("a nested graph quiescent without its sink result fails before its dependent runs", async () => {
       const idle = new MockAgent({ runs: [] });
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const idleId = child.addNode(member(idle, "idle"));
-      const graph = policyGraph(strategy);
+      childPorts.connect(child, idleId);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const selected = Edge.value<AgenticInput, AssistantMessage>(
         "nested=>dependent",
       );
       let ran = false;
       const n = graph.addNode({
         trigger: TriggerRule.always(),
-        state: child,
-        result: idleId,
+        state: childContext,
       });
       const d = graph.addNode({
         trigger: TriggerRule.when(selected),
@@ -631,8 +643,9 @@ for (const strategy of STRATEGIES) {
         ),
       });
       graph.addEdge(n, d, selected);
+      graphPorts.connect(graph, d);
 
-      const error = await outcome(graph.run());
+      const error = await outcome(graphContext.run());
       assert.ok(
         error instanceof DataflowNodeError && invalidState(error.cause),
       );
@@ -642,22 +655,33 @@ for (const strategy of STRATEGIES) {
       await graph.close();
     });
 
-    test("an empty graph runs to an empty result map; a nested node must select a registered result", async () => {
-      const empty = policyGraph(strategy);
-      assert.equal((await empty.run()).size, 0);
-      const parent = policyGraph(strategy);
-      assert.throws(
-        () =>
-          parent.addNode({
-            trigger: TriggerRule.always(),
-            state: empty,
-            result: NodeId.create("missing"),
-          }),
-        (error) => error instanceof DataflowDefinitionError,
-      );
-      let registered = 0;
-      parent.forEachNode(() => registered++);
-      assert.equal(registered, 0);
+    test("dormant ports stay quiescent and invalid boundaries reject before registration", async () => {
+      const emptyPorts = {
+        source: new Source<AgenticInput, AssistantMessage>(() => {
+          throw new DataflowDefinitionError("Empty fixture does not accept external input");
+        }, { id: NodeId.create("$source") }),
+        sink: new Sink<AgenticInput, AssistantMessage>(async function* () {
+          throw new Error("Empty fixture has no output work");
+        }, { id: NodeId.create("$sink"), trigger: TriggerRule.never() }),
+      };
+      const emptyContext = policyContext(emptyPorts.source, emptyPorts.sink, strategy);
+      const empty = emptyContext.graph;
+      assert.equal((await emptyContext.run()).size, 0);
+      const parentPorts = {
+        source: new Source<AgenticInput, AssistantMessage>(() => {
+          throw new DataflowDefinitionError("Boundary rejection fixture does not accept external input");
+        }, { id: NodeId.create("$source") }),
+        sink: new Sink<AgenticInput, AssistantMessage>(async function* () {
+          throw new Error("Boundary rejection fixture has no output work");
+        }, { id: NodeId.create("$sink"), trigger: TriggerRule.never() }),
+      };
+      const parentContext = policyContext(parentPorts.source, parentPorts.sink, strategy);
+      const parent = parentContext.graph;
+      assert.throws(() => Reflect.apply(parent.addNode, parent, [{ trigger: TriggerRule.always(), state: empty }]), TypeError);
+      assert.throws(() => Reflect.construct(JuncoGraph, [emptyPorts.source, parentPorts.sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy]), TypeError);
+      const ids: NodeId[] = [];
+      parent.forEachNode((id) => ids.push(id));
+      assert.deepEqual(ids, [parentPorts.source.id, parentPorts.sink.id]);
       await parent.close();
       await empty.close();
     });
@@ -683,9 +707,14 @@ for (const strategy of STRATEGIES) {
         prompt: "inner",
         runs: [yieldsThen(0, "inner done")],
       });
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const innerId = child.addNode(member(inner, "inner"));
-      const graph = policyGraph(strategy);
+      childPorts.connect(child, innerId);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const a = graph.addNode({
         ...shared,
         id: NodeId.create("agent"),
@@ -700,17 +729,17 @@ for (const strategy of STRATEGIES) {
       const n = graph.addNode({
         ...shared,
         id: NodeId.create("nested"),
-        state: child,
-        result: innerId,
+        state: childContext,
       });
 
-      assert.equal((await graph.run()).size, 0);
+      graphPorts.connect(graph, n);
+      assert.equal((await graphContext.run()).size, 0);
       assert.equal(graph.available().size, 0);
       assert.ok([a, d, n].every((id) => O.isNone(graph.result(id))));
       assert.deepEqual([agent.requests, inner.requests], [[], []]);
 
       admitted = true;
-      await graph.run();
+      await graphContext.run();
       assert.deepEqual(
         [a, d, n].map((id) => resultText(graph, id)),
         ["agent done", "coroutine done", "inner done"],
@@ -733,17 +762,23 @@ for (const strategy of STRATEGIES) {
         new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
         siblingGate,
       );
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const g = child.addNode(member(grandchild, "grandchild"));
-      const root = policyGraph(strategy);
-      root.addNode(detached(child, g, "child graph"));
+      childPorts.connect(child, g);
+      const rootPorts = terminalPorts();
+      const rootContext = policyContext(rootPorts.source, rootPorts.sink, strategy);
+      const root = rootContext.graph;
+      root.addNode(detached(childContext, "child graph"));
       const sb = root.addNode(member(sibling, "sibling"));
+      rootPorts.connect(root, sb);
 
-      await child.step(); // primes the grandchild
-      await root.step(); // primes the sibling; the detached child graph is never available
+      await childContext.step(); // primes the grandchild
+      await rootContext.step(); // primes the sibling; the detached child graph is never available
       const [childSignal, rootSignal] = [child.signal, root.signal];
-      const childWindow = outcome(child.step());
-      const rootWindow = outcome(root.step());
+      const childWindow = outcome(childContext.step());
+      const rootWindow = outcome(rootContext.step());
       await Promise.all([grandchildGate.started, siblingGate.started]);
 
       let aborted = false;
@@ -778,18 +813,24 @@ for (const strategy of STRATEGIES) {
         new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
         siblingGate,
       );
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       // Idle, so never scheduled: only the abort cascade reaches them.
       const nestedId = child.addNode(
         member(failingAbort(nested), "nested failing"),
       );
-      const root = policyGraph(strategy);
+      childPorts.connect(child, nestedId);
+      const rootPorts = terminalPorts();
+      const rootContext = policyContext(rootPorts.source, rootPorts.sink, strategy);
+      const root = rootContext.graph;
       root.addNode(member(failingAbort(first), "failing"));
       const sb = root.addNode(member(sibling, "sibling"));
-      root.addNode(detached(child, nestedId));
-      await root.step(); // primes the sibling
+      rootPorts.connect(root, sb);
+      root.addNode(detached(childContext));
+      await rootContext.step(); // primes the sibling
       const signal = root.signal;
-      const window = outcome(root.step());
+      const window = outcome(rootContext.step());
       await siblingGate.started;
 
       const error = await outcome(root.abort());
@@ -808,12 +849,15 @@ for (const strategy of STRATEGIES) {
         new MockAgent({ prompt: "go", runs: [gatedRun("resumed", 1)] }),
         gate,
       );
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode(member(worker, "worker"));
+      graphPorts.connect(graph, id);
       const controller = new AbortController();
       const cancelled = new Error("drive cancelled");
       let settled = false;
-      const running = graph.run({ signal: controller.signal }).finally(() => {
+      const running = graphContext.run({ signal: controller.signal }).finally(() => {
         settled = true;
       });
 
@@ -829,7 +873,7 @@ for (const strategy of STRATEGIES) {
 
       // Caller cancellation is nonterminal.
       assert.equal(graph.signal.aborted, false);
-      await graph.run();
+      await graphContext.run();
       await graph.close();
     });
 
@@ -839,10 +883,13 @@ for (const strategy of STRATEGIES) {
         new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
         gate,
       );
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const id = graph.addNode(member(worker, "worker"));
+      graphPorts.connect(graph, id);
       const signal = graph.signal;
-      const running = outcome(graph.run());
+      const running = outcome(graphContext.run());
       await gate.started;
 
       const cancelled = new Error("graph aborted");
@@ -858,7 +905,7 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "fresh")],
       });
       const f = graph.addNode(member(fresh, "fresh"));
-      await graph.run();
+      await graphContext.run();
       assert.equal(resultText(graph, f), "fresh");
       await graph.close();
     });
@@ -868,9 +915,12 @@ for (const strategy of STRATEGIES) {
         prompt: "first",
         runs: [yieldsThen(0, "first")],
       });
-      const graph = policyGraph(strategy);
+      const graphPorts = terminalPorts();
+      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graph = graphContext.graph;
       const f = graph.addNode(member(first, "first"));
-      await graph.run();
+      graphPorts.connect(graph, f);
+      await graphContext.run();
       const gate = barrier({ endOnAbort: true });
       const worker = gated(
         new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }),
@@ -878,7 +928,7 @@ for (const strategy of STRATEGIES) {
       );
       graph.addNode(member(worker, "worker"));
       const signal = graph.signal;
-      const running = outcome(graph.run());
+      const running = outcome(graphContext.run());
       await gate.started;
 
       const closing = graph.close();
@@ -891,11 +941,11 @@ for (const strategy of STRATEGIES) {
       await graph[Symbol.asyncDispose]();
       assert.equal(resultText(graph, f), "first");
       await assert.rejects(
-        graph.run(),
+        graphContext.run(),
         (thrown) => thrown === graph.signal.reason,
       );
       await assert.rejects(
-        graph.step(),
+        graphContext.step(),
         (thrown) => thrown === graph.signal.reason,
       );
       await assert.rejects(graph.abort(), closedGraph);
@@ -907,13 +957,19 @@ for (const strategy of STRATEGIES) {
         prompt: "go",
         runs: [yieldsThen(1, "unused")],
       });
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const g = child.addNode(member(grandchild, "grandchild"));
-      const root = policyGraph(strategy);
-      root.addNode(detached(child, g, "child graph"));
-      root.addNode(member(counted, "counted"));
-      await child.step();
-      await child.step();
+      childPorts.connect(child, g);
+      const rootPorts = terminalPorts();
+      const rootContext = policyContext(rootPorts.source, rootPorts.sink, strategy);
+      const root = rootContext.graph;
+      root.addNode(detached(childContext, "child graph"));
+      const countedId = root.addNode(member(counted, "counted"));
+      rootPorts.connect(root, countedId);
+      await childContext.step();
+      await childContext.step();
       assert.equal(grandchild.status, "suspended");
 
       await root.close();
@@ -935,16 +991,20 @@ for (const strategy of STRATEGIES) {
 
     test("cyclic and shared nested graphs are visited once per cascade", async () => {
       const agents = [0, 1, 2].map(() => new Counted({ runs: [] }));
-      const graphs = agents.map(() => policyGraph(strategy));
-      const [a, b, shared] = graphs.map((graph, index) => ({
-        graph,
-        id: graph.addNode(member(agents[index]!, `member ${index}`)),
-      }));
+      const members = agents.map((agent, index) => {
+        const ports = terminalPorts();
+        const context = policyContext(ports.source, ports.sink, strategy);
+        const id = context.graph.addNode(member(agent, `member ${index}`));
+        ports.connect(context.graph, id);
+        return { context, graph: context.graph };
+      });
+      const [a, b, shared] = members;
+      const graphs = members.map(({ graph }) => graph);
       // a ⇄ b form a cycle, and both nest the same shared graph.
-      a!.graph.addNode(detached(b!.graph, b!.id));
-      a!.graph.addNode(detached(shared!.graph, shared!.id));
-      b!.graph.addNode(detached(a!.graph, a!.id));
-      b!.graph.addNode(detached(shared!.graph, shared!.id));
+      a!.graph.addNode(detached(b!.context));
+      a!.graph.addNode(detached(shared!.context));
+      b!.graph.addNode(detached(a!.context));
+      b!.graph.addNode(detached(shared!.context));
       const signals = graphs.map((graph) => graph.signal);
 
       const cancelled = new Error("cyclic abort");
@@ -973,14 +1033,22 @@ for (const strategy of STRATEGIES) {
       "abort and close cascade through 4096 nested graphs without growing the stack",
       async () => {
         const innermost = new MockAgent({ runs: [] });
-        const bottom = policyGraph(strategy);
+        const bottomPorts = terminalPorts();
+        const bottomContext = policyContext(bottomPorts.source, bottomPorts.sink, strategy);
+        const bottom = bottomContext.graph;
+        let context = bottomContext;
         let graph = bottom;
         let selected = graph.addNode(member(innermost, "innermost"));
+        bottomPorts.connect(bottom, selected);
         for (let depth = 0; depth < 4096; depth++) {
-          const parent = policyGraph(strategy);
+          const parentPorts = terminalPorts();
+          const parentContext = policyContext(parentPorts.source, parentPorts.sink, strategy);
+          const parent = parentContext.graph;
           selected = parent.addNode(
-            detached(graph, selected, `level ${depth}`),
+            detached(context, `level ${depth}`),
           );
+          parentPorts.connect(parent, selected);
+          context = parentContext;
           graph = parent;
         }
         const signal = bottom.signal;
@@ -1003,14 +1071,20 @@ for (const strategy of STRATEGIES) {
         siblingGate,
       );
       const inner = new Counted({ runs: [] });
-      const child = policyGraph(strategy);
+      const childPorts = terminalPorts();
+      const childContext = policyContext(childPorts.source, childPorts.sink, strategy);
+      const child = childContext.graph;
       const ii = child.addNode(member(inner, "inner"));
-      const parent = policyGraph(strategy);
-      parent.addNode(detached(child, ii));
+      childPorts.connect(child, ii);
+      const parentPorts = terminalPorts();
+      const parentContext = policyContext(parentPorts.source, parentPorts.sink, strategy);
+      const parent = parentContext.graph;
+      parent.addNode(detached(childContext));
       const sb = parent.addNode(member(sibling, "sibling"));
-      await parent.step(); // primes the sibling
+      parentPorts.connect(parent, sb);
+      await parentContext.step(); // primes the sibling
       const parentSignal = parent.signal;
-      const window = outcome(parent.step());
+      const window = outcome(parentContext.step());
       await siblingGate.started;
 
       const cancelled = new Error("parent abort");
@@ -1044,7 +1118,7 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "fresh")],
       });
       const f = parent.addNode(member(fresh, "fresh"));
-      await parent.run();
+      await parentContext.run();
       assert.equal(resultText(parent, f), "fresh");
       await parent.close();
       assert.deepEqual(inner.lifecycle, ["abort", "return"]);
@@ -1063,8 +1137,11 @@ for (const strategy of STRATEGIES) {
         prompt: "go",
         runs: [yieldsThen(0, "later")],
       });
-      const first = policyGraph(strategy);
-      first.addNode(member(stubborn, "stubborn"));
+      const firstPorts = terminalPorts();
+      const firstContext = policyContext(firstPorts.source, firstPorts.sink, strategy);
+      const first = firstContext.graph;
+      const firstId = first.addNode(member(stubborn, "stubborn"));
+      firstPorts.connect(first, firstId);
       const error = await outcome(first.close());
       assert.ok(error instanceof AggregateError);
       assert.deepEqual(error.errors, [failure]);
@@ -1077,9 +1154,12 @@ for (const strategy of STRATEGIES) {
       );
       assert.equal(attempts, 1);
 
-      const second = policyGraph(strategy);
+      const secondPorts = terminalPorts();
+      const secondContext = policyContext(secondPorts.source, secondPorts.sink, strategy);
+      const second = secondContext.graph;
       const id = second.addNode(member(stubborn, "stubborn"));
-      await second.run();
+      secondPorts.connect(second, id);
+      await secondContext.run();
       assert.equal(resultText(second, id), "later");
       await second.close();
       assert.equal(stubborn.status, "closed");
@@ -1088,116 +1168,68 @@ for (const strategy of STRATEGIES) {
 }
 
 describe("nested graphs", () => {
-  test("a selected undefined result is a present parent value", async () => {
+  test("an undefined sink result is a present parent value", async () => {
     type Maybe = AssistantMessage | undefined;
-    const child = new JuncoGraph<AgenticInput, Maybe>(
-      new ParallelScheduler(),
-      Width.create(1),
-      UNBOUNDED,
-      new DummyTracer(),
-      LockPolicy,
-    );
-    const empty = child.addNode({
-      trigger: TriggerRule.always(),
-      // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-      state: new Deterministic<AgenticInput, Maybe>(async function* () {
-        return undefined;
-      }, LockPolicy),
-    });
-    const parent = new JuncoGraph<AgenticInput, Maybe>(
-      new ParallelScheduler(),
-      Width.create(1),
-      UNBOUNDED,
-      new DummyTracer(),
-      LockPolicy,
-    );
+    const childPorts = terminalPorts<AgenticInput, Maybe>();
+    const childContext = schedulers.context({ scheduler: parallel(), graph: new JuncoGraph(childPorts.source, childPorts.sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy) });
+    const child = childContext.graph;
+    const empty = child.addNode({ trigger: TriggerRule.always(), state: new Deterministic<AgenticInput, Maybe>(async function* () { return undefined; }, LockPolicy) });
+    childPorts.connect(child, empty);
+    const parentPorts = terminalPorts<AgenticInput, Maybe>();
+    const parentContext = schedulers.context({ scheduler: parallel(), graph: new JuncoGraph(parentPorts.source, parentPorts.sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy) });
+    const parent = parentContext.graph;
     const selected = Edge.value<AgenticInput, Maybe>("nested=>reader");
-    let observed:
-      | { readonly delivered: boolean; readonly value: Maybe }
-      | undefined;
-    const n = parent.addNode({
-      trigger: TriggerRule.always(),
-      state: child,
-      result: empty,
-    });
-    const r = parent.addNode({
-      trigger: TriggerRule.when(selected),
-      state: new Deterministic<AgenticInput, Maybe>(async function* () {
-        const view = yield [];
-        observed = {
-          delivered: view.values.has(selected.id),
-          value: view.values.get(selected.id),
-        };
-        return assistant("read");
-      }, LockPolicy),
-    });
+    let observed: { readonly delivered: boolean; readonly value: Maybe } | undefined;
+    const n = parent.addNode({ trigger: TriggerRule.always(), state: childContext });
+    const r = parent.addNode({ trigger: TriggerRule.when(selected), state: new Deterministic<AgenticInput, Maybe>(async function* () {
+      const view = yield [];
+      observed = { delivered: view.values.has(selected.id), value: view.values.get(selected.id) };
+      return assistant("read");
+    }, LockPolicy) });
     parent.addEdge(n, r, selected);
-
-    await parent.run();
+    parentPorts.connect(parent, r);
+    await parentContext.run();
+    assert.deepEqual(child.result(child.sink.id), O.some(undefined));
     assert.deepEqual(parent.result(n), O.some(undefined));
     assert.deepEqual(observed, { delivered: true, value: undefined });
     await parent.close();
   });
 
   test("cancellation uses the activation's captured child signal after abort resets it", async () => {
-    const child = new JuncoGraph<AgenticInput, AssistantMessage>(
-      new ParallelScheduler(),
-      Width.create(1),
-      UNBOUNDED,
-      new DummyTracer(),
-      LockPolicy,
-    );
-    const source = child.addNode({
-      trigger: TriggerRule.always(),
-      state: new Deterministic<AgenticInput, AssistantMessage>(
-        // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-        async function* () {
-          return assistant("child-result");
-        },
-        LockPolicy,
-      ),
-    });
-    const parent = new JuncoGraph<AgenticInput, AssistantMessage>(
-      new ParallelScheduler(),
-      Width.create(1),
-      UNBOUNDED,
-      new DummyTracer(),
-      LockPolicy,
-    );
-    const cancelled = new Error("child cancelled");
-    let captured: AbortSignal | undefined;
-    const nested = parent.addNode({
-      trigger: TriggerRule.always(),
-      state: child,
-      result: source,
-      // Fully settle the child's abort, which gives it a fresh signal, before completion is tested.
-      afterStep: async () => {
-        captured = child.signal;
-        await child.abort(cancelled);
-      },
-    });
-
-    const failure = await parent.run().then(
-      () => assert.fail("the cancelled nested graph published its result"),
-      (error: unknown) => error,
-    );
-    assert.ok(
-      failure instanceof DataflowNodeError &&
-        failure.nodeId === nested &&
-        failure.cause === cancelled,
-    );
-    assert.equal(captured?.reason, cancelled);
-    assert.equal(child.signal.aborted, false);
-    assert.ok(O.isNone(parent.result(nested)));
-    const retained = child.result(source);
-    assert.ok(O.isSome(retained) && textOf(retained.value) === "child-result");
-    await parent.close();
+    const gate = barrier({ endOnAbort: true });
+    const worker = gated(new MockAgent({ prompt: "go", runs: [gatedRun("unused")] }), gate);
+    const childPorts = terminalPorts();
+    const childContext = policyContext(childPorts.source, childPorts.sink, "parallel");
+    const child = childContext.graph;
+    const work = child.addNode(member(worker, "gated child"));
+    childPorts.connect(child, work);
+    const parentPorts = terminalPorts();
+    const parentContext = policyContext(parentPorts.source, parentPorts.sink, "parallel");
+    const parent = parentContext.graph;
+    const nested = parent.addNode({ trigger: TriggerRule.always(), state: childContext });
+    parentPorts.connect(parent, nested);
+    const captured = child.signal;
+    const running = outcome(parentContext.run());
+    try {
+      await gate.started;
+      const cancelled = new Error("child cancelled");
+      await child.abort(cancelled);
+      const failure = await running;
+      assert.ok(failure instanceof DataflowNodeError && failure.nodeId === nested && failure.cause === cancelled);
+      assert.equal(captured.reason, cancelled);
+      assert.notEqual(child.signal, captured);
+      assert.equal(child.signal.aborted, false);
+      assert.ok(O.isNone(parent.result(nested)));
+      assert.ok(O.isNone(child.result(child.sink.id)));
+    } finally { gate.release(); await running; await parent.close(); }
   });
 });
 
 describe("round-robin", () => {
-  test("advances one id per window in string order and keeps its cursor", async () => {
-    const graph = policyGraph("round-robin");
+  test("advances one id per window in string order and derives progress from history", async () => {
+    const graphPorts = terminalPorts();
+    const graphContext = policyContext(graphPorts.source, graphPorts.sink, "round-robin");
+    const graph = graphContext.graph;
     const agents = new Map(
       ["2", "1", "10"].map((id) => [
         id,
@@ -1208,6 +1240,7 @@ describe("round-robin", () => {
       ]),
     );
     for (const [id, agent] of agents) graph.addNode(member(agent, id, id));
+    graphPorts.connect(graph, NodeId.create("2"));
     const statuses = () =>
       [...agents].map(([id, agent]) => [
         id,
@@ -1215,20 +1248,19 @@ describe("round-robin", () => {
         graph.getNode(NodeId.create(id))!.status,
       ]);
 
-    for (let window = 0; window < 4; window++) await graph.step();
+    for (let window = 0; window < 4; window++) await graphContext.step();
 
     assert.deepEqual(statuses(), [
       ["2", "ready", "running"],
       ["1", "suspended", "running"],
       ["10", "ready", "running"],
     ]);
-    assert.equal(graph.scheduler.state, "1");
     assert.deepEqual(
       [...agents.values()].map((agent) => agent.requests.length),
       [0, 1, 0],
     );
 
-    await graph.run();
+    await graphContext.run();
     for (const id of agents.keys())
       assert.equal(resultText(graph, NodeId.create(id)), `done ${id}`);
     assert.deepEqual(
@@ -1257,12 +1289,15 @@ describe("parallel", () => {
       });
       return agent;
     });
-    const graph = policyGraph("parallel");
+    const graphPorts = terminalPorts();
+    const graphContext = policyContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graph = graphContext.graph;
     const ids = agents.map((agent, index) =>
       graph.addNode(member(agent, `member ${index}`)),
     );
 
-    await graph.step();
+    graphPorts.connect(graph, ids[2]!);
+    await graphContext.step();
     assert.deepEqual(
       ids.map((id) => graph.getNode(id)!.status),
       ["running", "running", "running"],
@@ -1272,7 +1307,7 @@ describe("parallel", () => {
       ["ready", "ready", "ready"],
     );
 
-    const window = graph.step();
+    const window = graphContext.step();
     await Promise.all(started);
     assert.ok(ids.every((id) => O.isNone(graph.result(id))));
     gate.resolve();
@@ -1292,13 +1327,16 @@ describe("parallel", () => {
           runs: [yieldsThen(0, `done ${index}`)],
         }),
     );
-    const graph = policyGraph("parallel", { threads: Width.create(2) });
+    const graphPorts = terminalPorts();
+    const graphContext = policyContext(graphPorts.source, graphPorts.sink, "parallel", { threads: Width.create(2) });
+    const graph = graphContext.graph;
     const ids = agents.map((agent, index) =>
       graph.addNode(member(agent, `member ${index}`)),
     );
 
+    graphPorts.connect(graph, ids[2]!);
     await assert.rejects(
-      graph.step(),
+      graphContext.step(),
       (error) => error instanceof DataflowDefinitionError,
     );
     assert.deepEqual(
@@ -1312,4 +1350,325 @@ describe("parallel", () => {
     );
     await graph.close();
   });
+});
+
+describe("source and sink boundaries", () => {
+  test("queued ingress is detached FIFO work and sink delivery acknowledges only successful prefixes", async () => {
+    type Payload = { number: number; tag?: string };
+    type Result = { readonly numbers: readonly number[] } | undefined;
+    const input = Edge.message<Payload, Result>("external input");
+    const empty = Edge.message<Payload, Result>("empty input");
+    const presentUndefined = EdgeId.create("present undefined");
+    const opaqueKey = EdgeId.create("opaque value");
+    const work = Edge.message<Payload, Result>("$source->worker");
+    const final = Edge.value<Payload, Result>("worker->$sink");
+    const external = Edge.message<Payload, Result>("external output");
+    const seven: Payload = { number: 7 };
+    const eight: Payload = { number: 8 };
+    const nine: Payload = { number: 9 };
+    const opaque: Result = { numbers: [99] };
+    const answer: Result = { numbers: [7, 8, 9] };
+    const routed: ParentView<Payload, Result>[] = [];
+    const source = new Source<Payload, Result>((view) => {
+      routed.push(view);
+      return (view.messages.get(input.id) ?? []).map((payload) => Message.create(work, payload));
+    }, { id: NodeId.create("$source") });
+    const sink: Sink<Payload, Result> = new Sink<Payload, Result>(async function* (sink): NodeGenerator<Payload, Result> {
+      yield [];
+      yield [Message.create(external, seven)];
+      const result = graph.result(worker);
+      assert.ok(O.isSome(result));
+      sink.send(Message.create(external, eight));
+      sink.send(Message.create(external, nine));
+      return result.value;
+    }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+    const graph: JuncoGraph<Payload, Result> = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+    const histories: (readonly Decision[])[] = [];
+    const execution = schedulers.context({ graph, scheduler: (snapshot) => {
+      histories.push(snapshot.history);
+      return parallel()(snapshot);
+    } });
+    const received: number[] = [];
+    const worker = graph.addNode({ id: NodeId.create("worker"), trigger: TriggerRule.when(work),
+      state: new Deterministic<Payload, Result>(async function* () {
+        let view = yield [];
+        while (true) {
+          received.push(...from(view, work).map((payload) => payload.number));
+          if (received.length === 3) return answer;
+          view = yield [];
+        }
+      }, LockPolicy),
+    });
+    graph.addEdge(source.id, worker, work).addEdge(worker, sink.id, final);
+    try {
+      const before = graph.observe();
+      source.enqueue({ messages: new Map([[empty.id, []]]), values: new Map() });
+      assert.equal(source.revision, 0);
+      assert.equal(source.peek(), undefined);
+      assert.equal(graph.observe(), before);
+      assert.equal(graph.available().size, 0);
+      const originalBatch = [seven, eight];
+      const messages = new Map([[input.id, originalBatch], [empty.id, [] as Payload[]]]);
+      const values = new Map<EdgeId, Result>([[presentUndefined, undefined], [opaqueKey, opaque]]);
+      source.enqueue({ messages, values });
+      source.enqueue({ messages: new Map([[input.id, [nine]]]), values: new Map() });
+      originalBatch.splice(0, originalBatch.length, nine);
+      messages.delete(empty.id);
+      values.clear();
+      const peeked = source.peek();
+      assert.ok(peeked);
+      assert.deepEqual(peeked.messages.get(input.id), [seven, eight]);
+      assert.equal(peeked.messages.has(empty.id), true);
+      assert.deepEqual(peeked.messages.get(empty.id), []);
+      assert.equal(peeked.values.has(presentUndefined), true);
+      assert.equal(peeked.values.get(presentUndefined), undefined);
+      assert.equal(peeked.values.get(opaqueKey), opaque);
+      assert.equal(peeked.messages.get(input.id)?.[0], seven);
+      assert.ok(Object.isFrozen(peeked));
+      assert.ok(Object.isFrozen(peeked.messages.get(input.id)));
+      const admitted = graph.observe();
+      assert.ok(admitted.version > before.version);
+      assert.equal(source.peek(), peeked);
+      assert.equal(graph.observe(), admitted);
+      await execution.step();
+      assert.equal(routed.length, 1);
+      assert.equal(routed[0], peeked);
+      assert.equal(source.revision, 3);
+      assert.ok(graph.observe().version > admitted.version);
+      assert.deepEqual(source.peek()?.messages.get(input.id), [nine]);
+      const results = await execution.run();
+      assert.deepEqual(routed.map((view) => (view.messages.get(input.id) ?? []).map((payload) => payload.number)), [[7, 8], [9]]);
+      assert.deepEqual(received, [7, 8, 9]);
+      assert.equal(results.get(sink.id), answer);
+      assert.equal(results.get(worker), answer);
+      assert.equal(source.revision, 4);
+      assert.equal(graph.available().size, 0);
+      assert.equal(source.peek(), undefined);
+      assert.equal(graph.getNode(source.id)?.state, source);
+      assert.equal(graph.getNode(sink.id)?.state, sink);
+      assert.deepEqual([...graph.observe().nodes.keys()], [source.id, sink.id, worker]);
+      assert.ok(histories.some((history) => history.some((decision) => decision.selected.includes(source.id))));
+      assert.ok(histories.some((history) => history.some((decision) => decision.selected.includes(sink.id))));
+      const deliveryFailure = new Error("delivery failed");
+      const delivered: Payload[] = [];
+      assert.throws(() => sink.drain((message) => {
+        assert.equal(message.id, external.id);
+        if (message.payload === eight) throw deliveryFailure;
+        delivered.push(message.payload);
+      }), (error) => error === deliveryFailure);
+      assert.deepEqual(delivered, [seven]);
+      sink.drain((message) => delivered.push(message.payload));
+      sink.drain(() => assert.fail("empty drains deliver nothing"));
+      assert.deepEqual(delivered, [seven, eight, nine]);
+    } finally { await graph.close(); }
+  });
+
+  test("source admission invalidates a pending policy but reads and empty ingress do not", async () => {
+    const gate = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const edge = Edge.message<AgenticInput, AssistantMessage>("external");
+    let admitted = 0;
+    let activated = 0;
+    const ports = terminalPorts();
+    const source = new Source<AgenticInput, AssistantMessage>((view) => {
+      assert.deepEqual(from(view, edge), [{ kind: "prompt", text: "go" }]);
+      admitted++;
+      return [];
+    }, { id: NodeId.create("$source") });
+    const graph = new JuncoGraph(source, ports.sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+    let waiting = true;
+    const execution = schedulers.context({ graph, scheduler: async (snapshot) => {
+      if (waiting) { started.resolve(); await gate.promise; }
+      return parallel()(snapshot);
+    } });
+    const work = graph.addNode({ trigger: TriggerRule.always(), state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+      activated++;
+      return assistant("done");
+    }, LockPolicy) });
+    ports.connect(graph, work);
+    const version = graph.observe().version;
+    const running = outcome(execution.step());
+    try {
+      await started.promise;
+      source.peek();
+      source.enqueue({ messages: new Map(), values: new Map() });
+      assert.equal(graph.observe().version, version);
+      source.enqueue({ messages: new Map([[edge.id, [{ kind: "prompt", text: "go" }]]]), values: new Map() });
+      assert.ok(graph.observe().version > version);
+      gate.resolve();
+      assert.ok(await running instanceof DataflowDefinitionError);
+      assert.equal(admitted, 0);
+      assert.equal(activated, 0);
+      waiting = false;
+      const results = await execution.run();
+      assert.equal(admitted, 1);
+      assert.equal(activated, 1);
+      assert.equal(results.get(ports.sink.id), results.get(work));
+    } finally { gate.resolve(); await running; await graph.close(); }
+  });
+
+  test("constructor port identities and prohibited wiring reject before effects", async () => {
+    const ports = terminalPorts<number, string>();
+    const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+    const graphWork = graph.addNode({ trigger: TriggerRule.always(), state: new Deterministic<number, string>(async function* () { return "boundary work"; }, LockPolicy) });
+    ports.connect(graph, graphWork);
+    const extra = terminalPorts<number, string>();
+    const args = [Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy];
+    assert.throws(() => Reflect.construct(JuncoGraph, [{}, extra.sink, ...args]), TypeError);
+    assert.throws(() => Reflect.construct(JuncoGraph, [extra.source, {}, ...args]), TypeError);
+    assert.throws(() => Reflect.construct(JuncoGraph, [ports.source, extra.sink, ...args]), TypeError);
+    assert.throws(() => Reflect.construct(JuncoGraph, [extra.source, ports.sink, ...args]), TypeError);
+    const invalid = Reflect.construct(Source, [() => [], { id: 42 }]);
+    assert.throws(() => Reflect.construct(JuncoGraph, [invalid, extra.sink, ...args]), TypeError);
+    const duplicateSource = new Source<number, string>(() => { throw new DataflowDefinitionError("closed"); }, { id: NodeId.create("") });
+    const duplicateSink = new Sink<number, string>(async function* () { return "unused"; }, { id: NodeId.create(""), trigger: TriggerRule.never() });
+    assert.throws(() => new JuncoGraph(duplicateSource, duplicateSink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy), DataflowDefinitionError);
+    const validSink: Sink<number, string> = new Sink<number, string>(async function* (): NodeGenerator<number, string> { yield []; const retained = valid.result(work); assert.ok(O.isSome(retained)); return retained.value; }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(Edge.value<number, string>("work->$sink")) });
+    const valid: JuncoGraph<number, string> = new JuncoGraph(duplicateSource, validSink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+    const work = valid.addNode({ trigger: TriggerRule.always(), state: new Deterministic<number, string>(async function* () { return "done"; }, LockPolicy) });
+    valid.addEdge(work, validSink.id, Edge.value<number, string>("work->$sink"));
+    const execution = schedulers.context({ graph: valid, scheduler: parallel() });
+    try {
+      const before = graph.observe();
+      assert.throws(() => graph.addEdge(graphWork, ports.source.id, Edge.message<number, string>("inbound")), DataflowDefinitionError);
+      assert.throws(() => graph.addEdge(ports.source.id, graphWork, Edge.value<number, string>("unresolved")), DataflowDefinitionError);
+      assert.throws(() => graph.addEdge(ports.sink.id, graphWork, Edge.message<number, string>("outbound")), DataflowDefinitionError);
+      assert.equal(graph.observe(), before);
+      assert.deepEqual(before.links, [[graphWork, ports.sink.id, "terminal->$sink", "value"]]);
+      assert.equal((await execution.run()).get(validSink.id), "done");
+      assert.equal(valid.source.id, "");
+    } finally { await graph.close(); await valid.close(); }
+  });
+});
+
+describe("nested sink publication", () => {
+  test("a precompleted child publishes its retained sink result and outbox once without a child decision", async () => {
+    const output = Edge.message<AgenticInput, AssistantMessage>("nested->reader");
+    const final = Edge.value<AgenticInput, AssistantMessage>("worker->$sink");
+    const answer = assistant("already complete");
+    const rejectedIngress = new Error("Completed child does not accept external input");
+    let decisions = 0;
+    const source = new Source<AgenticInput, AssistantMessage>(() => {
+      throw rejectedIngress;
+    }, { id: NodeId.create("$source") });
+    const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (sink): NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const retained = child.result(work);
+      assert.ok(O.isSome(retained));
+      sink.send(Message.create(output, { kind: "prompt", text: "final message" }));
+      return retained.value;
+    }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+    const child: PolicyGraph = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+    const childContext = schedulers.context({ graph: child, scheduler: (snapshot) => {
+      decisions++;
+      return parallel()(snapshot);
+    } });
+    const work = child.addNode({ trigger: TriggerRule.always(), state: new Deterministic<AgenticInput, AssistantMessage>(async function* () { return answer; }, LockPolicy) });
+    child.addEdge(work, sink.id, final);
+    await childContext.run();
+    const completedDecisions = decisions;
+    const ports = terminalPorts();
+    const parentContext = policyContext(ports.source, ports.sink, "parallel");
+    const parent = parentContext.graph;
+    const nested = parent.addNode({ trigger: TriggerRule.always(), state: childContext });
+    const observed: AgenticInput[] = [];
+    const reader = parent.addNode({ trigger: TriggerRule.when(output), state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+      const view = yield [];
+      observed.push(...from(view, output));
+      return assistant("read");
+    }, LockPolicy) });
+    parent.addEdge(nested, reader, output);
+    ports.connect(parent, nested);
+    const secondPorts = terminalPorts();
+    const ingress = Edge.message<AgenticInput, AssistantMessage>("new external input");
+    const delivery = Edge.message<AgenticInput, AssistantMessage>("$source->nested");
+    const secondSource = new Source<AgenticInput, AssistantMessage>((view) => {
+      assert.deepEqual([...view.messages.keys()], [ingress.id]);
+      assert.equal([...view.values.keys()].length, 0);
+      return from(view, ingress).map((payload) => Message.create(delivery, payload));
+    }, { id: NodeId.create("$source") });
+    const secondContext = policyContext(secondSource, secondPorts.sink, "parallel");
+    const second = secondContext.graph;
+    try {
+      const results = await parentContext.run();
+      assert.equal(results.get(nested), answer);
+      assert.equal(results.get(ports.sink.id), answer);
+      assert.equal(child.results().get(sink.id), answer);
+      assert.equal(parent.getNode(nested)?.state, child);
+      assert.equal(decisions, completedDecisions);
+      assert.equal(source.revision, 0);
+      assert.deepEqual(observed, [{ kind: "prompt", text: "final message" }]);
+      await parentContext.run();
+      assert.equal(decisions, completedDecisions);
+      assert.equal(observed.length, 1);
+      const freshNested = second.addNode({ trigger: TriggerRule.when(delivery), state: childContext });
+      second.addEdge(secondSource.id, freshNested, delivery);
+      secondPorts.connect(second, freshNested);
+      secondSource.enqueue({ messages: new Map([[ingress.id, [{ kind: "prompt", text: "unexpected" }]]]), values: new Map() });
+      const failure = await outcome(secondContext.run());
+      assert.ok(failure instanceof DataflowNodeError && failure.nodeId === freshNested);
+      assert.ok(failure.cause instanceof DataflowNodeError && failure.cause.nodeId === source.id);
+      assert.equal(failure.cause.cause, rejectedIngress);
+      assert.ok(decisions > completedDecisions);
+      assert.ok(O.isNone(second.result(freshNested)));
+      sink.drain(() => assert.fail("already delivered output must not replay"));
+    } finally { await parent.close(); await second.close(); }
+  });
+
+  for (const mode of ["failure", "abort"] as const) {
+    test(`a child ${mode} retains staged output without publishing it to its parent`, async () => {
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const failure = new Error(`child ${mode}`);
+      const output = Edge.message<AgenticInput, AssistantMessage>("nested->reader");
+      const final = Edge.value<AgenticInput, AssistantMessage>("worker->$sink");
+      const source = new Source<AgenticInput, AssistantMessage>(() => {
+        throw new DataflowDefinitionError("Child does not accept external input");
+      }, { id: NodeId.create("$source") });
+      const message: AgenticInput = { kind: "prompt", text: "staged, not published" };
+      const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (sink): NodeGenerator<AgenticInput, AssistantMessage> {
+        yield [];
+        sink.send(Message.create(output, message));
+        started.resolve();
+        if (mode === "failure") throw failure;
+        await release.promise;
+        const retained = child.result(work);
+        assert.ok(O.isSome(retained));
+        return retained.value;
+      }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+      const child: PolicyGraph = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, new DummyTracer(), LockPolicy);
+      const childContext = schedulers.context({ graph: child, scheduler: parallel() });
+      const work = child.addNode({ trigger: TriggerRule.always(), state: new Deterministic<AgenticInput, AssistantMessage>(async function* () { return assistant("work done"); }, LockPolicy) });
+      child.addEdge(work, sink.id, final);
+      const ports = terminalPorts();
+      const parentContext = policyContext(ports.source, ports.sink, "parallel");
+      const parent = parentContext.graph;
+      const nested = parent.addNode({ trigger: TriggerRule.always(), state: childContext });
+      let consumed = false;
+      const reader = parent.addNode({ trigger: TriggerRule.when(output), state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        yield [];
+        consumed = true;
+        return assistant("unused");
+      }, LockPolicy) });
+      parent.addEdge(nested, reader, output);
+      ports.connect(parent, reader);
+      const running = outcome(parentContext.run());
+      try {
+        await started.promise;
+        if (mode === "abort") {
+          const aborting = child.abort(failure);
+          release.resolve();
+          await aborting;
+        }
+        const error = await running;
+        assert.ok(error instanceof DataflowNodeError && error.nodeId === nested);
+        assert.equal(consumed, false);
+        assert.deepEqual(queued(output), []);
+        assert.ok(O.isNone(parent.result(nested)));
+        const retained: AgenticInput[] = [];
+        sink.drain((outgoing) => retained.push(outgoing.payload));
+        assert.deepEqual(retained, [message]);
+      } finally { release.resolve(); await running; await parent.close(); }
+    });
+  }
 });

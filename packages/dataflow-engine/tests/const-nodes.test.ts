@@ -1,9 +1,8 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import type {
-  DataflowScheduler,
   EdgeIdType,
   MessageSchedule,
   NodeIdType,
@@ -28,7 +27,6 @@ type Payload = { readonly value: number };
 
 const newGraph = <N>(): DataflowGraph<void, N, string, never> =>
   new DataflowGraph<void, N, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
   );
@@ -84,8 +82,8 @@ test("ConstFanout sends the same payload once per captured output, then returns 
     .addEdge(source, addSink(graph, b, seenB), b)
     .addEdge(source, addSink(graph, c, seenC), c);
 
-  const results = await graph.run();
-  await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
+  await context({ graph, scheduler: parallel() }).run();
 
   for (const seen of [seenA, seenB, seenC]) {
     assert.equal(seen.length, 1);
@@ -100,10 +98,10 @@ test("ConstFanout with no outputs emits nothing and completes", async () => {
   const source = graph.addNode(
     new ConstFanout(1, [], { state: undefined, ret: "empty" }),
   );
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
   assert.equal(graph.getNode(source)?.status, "done");
   assert.equal(results.get(source), "empty");
-  assert.equal((await graph.run()).size, 1);
+  assert.equal((await context({ graph, scheduler: parallel() }).run()).size, 1);
 });
 
 test("ConstFanout rejects value edges and repeated output ids", () => {
@@ -150,15 +148,15 @@ test("ConstFanin sends one list in configured input order only after every input
     .addEdge(join, addSink(graph, list, seen), list);
 
   graph.emit(sourceA, Message.create(a, constA));
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen, []);
   graph.emit(sourceB, Message.create(b, constB));
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen, []);
   assert.equal(graph.getNode(join)?.status, "running");
 
   graph.emit(sourceC, Message.create(c, constC));
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
   assert.equal(seen.length, 1);
   const [collected] = seen as Constant[][];
   assert.equal(collected?.length, 3);
@@ -171,7 +169,7 @@ test("ConstFanin sends one list in configured input order only after every input
   graph.emit(sourceA, Message.create(a, [4]));
   graph.emit(sourceB, Message.create(b, [5]));
   graph.emit(sourceC, Message.create(c, [6]));
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.equal(seen.length, 1);
 });
 
@@ -187,24 +185,19 @@ test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => 
     new Map([[a.id, 1]]),
   ];
   let join: NodeIdType | undefined;
-  const scheduler: DataflowScheduler<number | number[], string> = {
-    create(): void {},
-    schedule: (available) =>
-      [...available].map(([id, availability]) => [
-        {
-          id,
-          inputs:
-            id === join && availability.status === "running"
-              ? (scripted.shift() ?? triggerInputs(availability))
-              : triggerInputs(availability),
-        },
-      ]),
-  };
   const graph = new DataflowGraph<void, number | number[], string, never>(
-    scheduler,
     Width.create(1),
     UNBOUNDED,
   );
+  const advance = () => graph.evaluate(async (execute) => {
+    const schedule = [...graph.available()].map(([id, availability]) => [{
+      id,
+      inputs: id === join && availability.status === "running"
+        ? (scripted.shift() ?? triggerInputs(availability))
+        : triggerInputs(availability),
+    }]);
+    await execute(schedule);
+  });
   join = graph.addNode(
     new ConstFanin([a, b, c], list, { state: undefined, ret: "join done" }),
   );
@@ -221,13 +214,13 @@ test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => 
 
   for (let turn = 0; scripted.length > 0; turn++) {
     assert.ok(turn < 10, "scripted reads were never all consumed");
-    await graph.step();
+    await advance();
     if (scripted.length > 0) {
       assert.deepEqual(seen, []);
       assert.ok(E.isLeft(list.transport) && list.transport.left.length === 0);
     }
   }
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen, [[1, 2, 3]]);
   assert.equal(graph.getNode(join)?.status, "done");
   assert.equal(results.get(join), "join done");
@@ -258,14 +251,14 @@ test("separately constructed collectors keep independent progress", async () => 
   graph.emit(source, Message.create(a1, 1));
   graph.emit(source, Message.create(b1, 2));
   graph.emit(source, Message.create(a2, 3));
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen1, [[1, 2]]);
   assert.deepEqual(seen2, []);
   assert.equal(graph.getNode(join1)?.status, "done");
   assert.equal(graph.getNode(join2)?.status, "running");
 
   graph.emit(source, Message.create(b2, 4));
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen2, [[3, 4]]);
   assert.equal(graph.getNode(join2)?.status, "done");
 });
@@ -281,8 +274,8 @@ test("ConstFanin with no inputs sends one empty list and completes", async () =>
   );
   const seen: (number | number[])[] = [];
   graph.addEdge(join, addSink(graph, list, seen), list);
-  const results = await graph.run();
-  await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(seen, [[]]);
   assert.equal(graph.getNode(join)?.status, "done");
   assert.equal(results.get(join), "empty");

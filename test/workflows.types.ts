@@ -1,5 +1,5 @@
 // Compile-only: the public Ralph workflow keeps branded ids and wire types, returns a registration id
-// whose result is an AssistantMessage, and accepts concrete schedulers and specialized agents
+// whose result is an AssistantMessage, and accepts specialized agents
 // without widening the caller's variables. Covered by tsconfig.typecheck.json; never executed.
 
 import type {
@@ -11,7 +11,6 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Edge, NodeId, type NodeIdType } from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import type { JuncoAgent } from "junco-agent";
-import type { PiScheduler } from "junco-scheduler/agent";
 import { EmptyPolicy, isComplainTool, LockPolicy } from "junco-tools";
 import type { AgenticInput, JuncoGraph } from "../src/index.ts";
 import { Ralph, type RalphOptions } from "../src/workflows/index.ts";
@@ -19,10 +18,9 @@ import { Ralph, type RalphOptions } from "../src/workflows/index.ts";
 type TaggedSkill = Skill & { readonly tag: "skill" };
 type TaggedTemplate = PromptTemplate & { readonly tag: "template" };
 type TaggedTool = AgentTool & { readonly tag: "tool" };
-type Scheduler = PiScheduler<AgenticInput, AssistantMessage>;
 
 export function ralphKeepsTypes(
-  parent: JuncoGraph<AgenticInput, AssistantMessage, unknown, Scheduler>,
+  parent: JuncoGraph<AgenticInput, AssistantMessage, unknown>,
   agent: JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
 ) {
   const input = Edge.message<AgenticInput, AssistantMessage>("in");
@@ -43,11 +41,10 @@ export function ralphKeepsTypes(
   });
   const result: O.Option<AssistantMessage> = parent.result(id);
   // The caller's own variables keep their concrete types.
-  const scheduler: Scheduler = parent.scheduler;
   const [first] = agent.getTools();
   const tool: "tool" | undefined =
     first === undefined || isComplainTool(first) ? undefined : first.tag;
-  return [anonymous, result, scheduler, tool];
+  return [anonymous, result, tool];
 }
 
 export function ralphRejectsMistypedOptions(

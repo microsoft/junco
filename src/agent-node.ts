@@ -1,5 +1,6 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import {
+  Edge,
   EdgeId,
   type EdgeIdType,
   type Message,
@@ -11,6 +12,9 @@ import {
   type ParentView,
   type StepFn,
   TriggerRule,
+  TriggerEntry,
+  Source,
+  Sink,
 } from "dataflow-engine";
 import {
   JuncoAgent,
@@ -27,11 +31,14 @@ import type {
   TaskToolHost,
   ToolCollection,
 } from "junco-tools";
+import * as O from "fp-ts/lib/Option.js";
+import type { SchedulerContext } from "junco-scheduler";
 import { cancellation } from "./agent-operations.js";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 import {
+  type AgencyNodeMetadata,
   type NodePolicy,
   type NodeRegistration,
   nodePolicies,
@@ -99,6 +106,9 @@ type DriverBinding = {
 };
 
 const ROOT = NodeId.create("root");
+const SOURCE_WAKE: AgenticInput = { kind: "nextTurn", text: "" };
+const SOURCE_EDGE = EdgeId.create("$source->root");
+type TaskContext = SchedulerContext<Agentic, AgenticInput, AssistantMessage, AgencyNodeMetadata, JuncoGraph>;
 const PROCESS_REPORTS = "Process the queued task reports.";
 /** The unused paired route from the root to a task child. */
 const TASK_EDGE_CONTRACT: Contract = {
@@ -284,6 +294,7 @@ export class AgentDriver {
    * keep using it after promotion makes the agent an inner spawn root.
    */
   registration: NodeRegistration | undefined;
+  #outputSink: Sink<AgenticInput, AssistantMessage> | undefined;
   #messageHost:
     | NonNullable<
         JuncoAgentNodeContext<AgenticInput, AssistantMessage>["messaging"]
@@ -541,7 +552,11 @@ export class AgentDriver {
         const registration = this.registration;
         if (registration === undefined)
           throw new Error("send requires a JuncoGraph host");
-        registration.send(message);
+        if (this.#outputSink === undefined) registration.send(message);
+        else {
+          registration.assertSend(message.id);
+          this.#outputSink.send(message);
+        }
       },
       info: () => {
         const registration = this.registration;
@@ -551,6 +566,21 @@ export class AgentDriver {
       },
     };
     return this.#messageHost;
+  }
+
+  /** Retain original parent edge identities and FIFO batches for the agent's recv tool. */
+  #retain(view: ParentView<AgenticInput, AssistantMessage>): Message<AgenticInput>[] {
+    const messages = deliveredMessages(view);
+    for (const { id, payload } of messages) {
+      const retained = this.messages.get(id);
+      if (retained === undefined) this.messages.set(id, [payload]);
+      else retained.push(payload);
+    }
+    for (const id of view.values.keys()) {
+      const value = view.values.get(id);
+      if (value !== undefined) this.values.set(id, value);
+    }
+    return messages;
   }
 
   /**
@@ -689,7 +719,8 @@ export class AgentDriver {
     };
     const driver = new AgentDriver(agent, policy);
     /** The spawn graph this node's state became, once a task call expanded it. */
-    let spawned: JuncoGraph | undefined;
+    let spawned: TaskContext | undefined;
+    let failureAbort: Promise<{ workError: unknown; abortError: unknown } | undefined> | undefined;
 
     /**
      * Close a failed attempt's node state exactly once, record its failure for the root, and report
@@ -706,7 +737,8 @@ export class AgentDriver {
       // This teardown owns the state's outcome; the owning graph's close must not repeat it.
       nodePolicies.get(node.step)!.closedTaskState = state;
       try {
-        await state[Symbol.asyncDispose]();
+        if (!(state instanceof Source) && !(state instanceof Sink))
+          await state[Symbol.asyncDispose]();
       } catch (cleanupError) {
         if (addsFailure(cleanupError, failure))
           throw new AggregateError(
@@ -766,7 +798,7 @@ export class AgentDriver {
                   ...error,
                 }),
               ];
-            spawned?.signal.throwIfAborted();
+            spawned?.graph.signal.throwIfAborted();
             if (agent.status === "closed") throw closedNode();
             return retire(
               this,
@@ -810,7 +842,7 @@ export class AgentDriver {
      */
     const expand = async (
       node: Node<Agentic, AgenticInput, AssistantMessage>,
-    ): Promise<JuncoGraph> => {
+    ): Promise<TaskContext> => {
       const staged = driver.staged;
       driver.staged = [];
       const rootPolicy: NodePolicy = { agent, inputMode: "all-messages" };
@@ -820,13 +852,27 @@ export class AgentDriver {
           while (true) {
             await driver.activate(this, messages, graph.signal);
             if (driver.result !== undefined) return driver.result;
-            messages = deliveredMessages(yield []);
+            messages = deliveredMessages(yield []).filter(({ id }) => id !== SOURCE_EDGE);
           }
         };
       nodePolicies.set(rootStep, rootPolicy);
+      const source = new Source<AgenticInput, AssistantMessage>((view) => {
+        driver.#retain(view);
+        return [{ id: SOURCE_EDGE, payload: SOURCE_WAKE }];
+      }, { id: NodeId.create("$source") });
+      const output = Edge.value<AgenticInput, AssistantMessage>("root->$sink");
+      const sink = new Sink<AgenticInput, AssistantMessage>(async function* () {
+        yield [];
+        const result = graph.result(ROOT);
+        if (O.isNone(result)) throw new JuncoAgentError("invalid_state", "Task graph stopped before producing its sink result");
+        return result.value;
+      }, { id: NodeId.create("$sink"), trigger: TriggerRule.allOf(TriggerEntry.on(output)) });
       let graph: JuncoGraph;
+      let execution: TaskContext;
       try {
-        graph = JuncoGraph.spawn<StagedChild, AgenticInput, AssistantMessage>(
+        execution = JuncoGraph.spawn<StagedChild, AgenticInput, AssistantMessage>(
+          source,
+          sink,
           {
             id: ROOT,
             trigger: TriggerRule.always(),
@@ -836,6 +882,7 @@ export class AgentDriver {
             is_available: (view) =>
               driver.result === undefined &&
               (hasMessages(view) ||
+                source.peek() !== undefined ||
                 driver.active ||
                 driver.unread.size > 0 ||
                 !driver.answered),
@@ -845,17 +892,13 @@ export class AgentDriver {
             ...(node.on_error === undefined
               ? {}
               : {
-                  async on_error(error, signal) {
+                  on_error(error, signal) {
                     signal?.throwIfAborted();
-                    try {
-                      await graph.abort(error);
-                    } catch (abortError) {
-                      throw new AggregateError(
-                        [error, abortError],
-                        "Task subgraph abort failed",
-                        { cause: error },
-                      );
-                    }
+                    // Public abort joins this evaluation; observe it here, join only after step exits.
+                    failureAbort = graph.abort(error).then(
+                      () => undefined,
+                      (abortError: unknown) => ({ workError: error, abortError }),
+                    );
                     throw error;
                   },
                 }),
@@ -864,6 +907,8 @@ export class AgentDriver {
           childNode,
           registeredNodeContexts.get(node)?.tracer,
         );
+        graph = execution.graph;
+        graph.addEdge(source.id, ROOT, Edge.message<AgenticInput, AssistantMessage>(SOURCE_EDGE)).addEdge(ROOT, sink.id, output);
       } catch (error) {
         return disposeStaged(staged, error);
       }
@@ -872,35 +917,59 @@ export class AgentDriver {
       if (aborted !== undefined) return disposeStaged(staged, aborted.reason);
       if (agent.status === "closed") return disposeStaged(staged, closedNode());
       node.state = graph;
+      driver.#outputSink = sink;
       // The root drives the agent from now on; this body keeps only its external reads.
       nodePolicies.set(step, {
         seenValues,
         ...(inputMode === undefined ? {} : { inputMode }),
       });
       driver.policy = rootPolicy;
-      return graph;
+      return execution;
     };
 
     /** One bounded advance of the expanded graph, then registration of newly accepted tasks. */
-    const advanceGraph = async (graph: JuncoGraph): Promise<void> => {
+    const advanceGraph = async (execution: TaskContext): Promise<void> => {
+      const graph = execution.graph;
       const signal = graph.signal;
       signal.throwIfAborted();
+      const drain = () => graph.sink.drain((message) => {
+        if (driver.registration === undefined) throw new Error("send requires a JuncoGraph host");
+        driver.registration.send(message);
+      });
       if (graph.available().size > 0) {
         try {
-          await graph.step({ signal });
+          await execution.step({ signal });
         } catch (error) {
+          const abort = failureAbort;
+          failureAbort = undefined;
+          const aborted = await abort;
+          if (aborted !== undefined) {
+            if (signal.aborted && signal.reason !== aborted.workError) signal.throwIfAborted();
+            throw new AggregateError([aborted.workError, aborted.abortError], "Task subgraph abort failed", { cause: aborted.workError });
+          }
+          signal.throwIfAborted();
+          try { drain(); } catch (deliveryError) {
+            signal.throwIfAborted();
+            throw new AggregateError([error, deliveryError], "Task graph execution and sink delivery failed");
+          }
           throw cancellation(signal, error);
         }
         signal.throwIfAborted();
       }
+      drain();
+      signal.throwIfAborted();
       await commit(graph);
     };
 
-    /** The final message once the run and every subagent's node finished. */
-    const finished = (): AssistantMessage | undefined =>
-      spawned === undefined || spawned.available().size === 0
-        ? driver.result
-        : undefined;
+    /** Only the designated sink publishes a promoted task's exact final result. */
+    const finished = (): AssistantMessage | undefined => {
+      if (spawned === undefined) return driver.result;
+      const graph = spawned.graph;
+      if (graph.available().size > 0) return undefined;
+      const result = graph.result(graph.sink.id);
+      if (O.isNone(result)) throw new JuncoAgentError("invalid_state", "Task graph stopped before producing its sink result");
+      return result.value;
+    };
 
     const step: StepFn<Agentic, AgenticInput, AssistantMessage> =
       async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
@@ -914,22 +983,16 @@ export class AgentDriver {
             if (reported !== undefined) return reported;
             // Retain the delivery for recv; values are seen once staged, so a postponed recv
             // never lets a permanent result starve a newer message.
-            const messages = deliveredMessages(view);
-            for (const { id, payload } of messages) {
-              const retained = driver.messages.get(id);
-              if (retained === undefined) driver.messages.set(id, [payload]);
-              else retained.push(payload);
-            }
-            const values = unseenValues(view.values, seenValues);
-            for (const id of values.keys())
-              driver.values.set(id, values.get(id) as AssistantMessage);
-            if (finished() === undefined) {
-              if (spawned === undefined) {
+            const fresh = { messages: view.messages, values: unseenValues(view.values, seenValues) };
+            if (spawned === undefined) {
+              const messages = driver.#retain(fresh);
+              if (driver.result === undefined) {
                 await driver.activate(this, messages);
                 if (driver.staged.length > 0) spawned = await expand(this);
-              } else {
-                await advanceGraph(spawned);
               }
+            } else {
+              spawned.graph.source.enqueue(fresh);
+              await advanceGraph(spawned);
             }
             const result = finished();
             if (result !== undefined) {
@@ -966,8 +1029,8 @@ export class AgentDriver {
         ((view, triggered) => {
           if (spawned !== undefined)
             return (
-              driver.result !== undefined ||
-              spawned.available().size > 0 ||
+              O.isSome(spawned.graph.result(spawned.graph.sink.id)) ||
+              spawned.graph.available().size > 0 ||
               (triggered && hasFreshInput(view))
             );
           return (

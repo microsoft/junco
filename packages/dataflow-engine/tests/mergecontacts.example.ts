@@ -4,7 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -77,7 +77,6 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
 
   const tracer = ExampleTracer.create("cookbook/mergecontacts");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -266,7 +265,8 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
   graph.addEdge(nomadsFilterCountId, statsSinkId, nomadsCountEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.equal(tsvRows.length, 5);
 

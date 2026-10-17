@@ -4,72 +4,49 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  type AssistantMessage,
   fauxAssistantMessage,
   fauxToolCall,
   type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { DummyTracer, NodeId, TriggerRule, UNBOUNDED } from "dataflow-engine";
+import { NodeId, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
-import { PiScheduler } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import { type AgenticInput, JuncoGraph, LspTool, tools } from "../src/index.ts";
+import { type JuncoGraph, LspTool, tools } from "../src/index.ts";
+import { terminalPorts } from "./deterministic-support.ts";
 import {
-  agencyGraph,
-  drive,
-  flushMacrotasks,
-  leaf,
-  nativeOptions,
-  type PiGraph,
-  runAvailable,
-  type Script,
-  scheduleCall,
-  settledText,
-  waitingTool,
+  agencyGraph, type AgencyContext, drive, flushMacrotasks, leaf, nativeOptions,
+  runAvailable, type Script, scheduleCall, settledText, waitingTool,
 } from "./support.ts";
 
 const TIMEOUT_MS = 30_000;
 const MEMBER = NodeId.create("0");
 const toolTurn = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
-/** A prompt agent, or a nested graph forwarding its member `0`'s result. */
-const member = (agent: JuncoAgent | JuncoGraph, description = "member") =>
-  agent instanceof JuncoGraph
-    ? {
-        description,
-        trigger: TriggerRule.always(),
-        state: agent,
-        result: MEMBER,
-      }
-    : {
-        state: agent,
-        policy: LockPolicy,
-        description,
-        trigger: TriggerRule.always(),
-      };
+/** Nested consumers retain the context while native node state remains its actual graph. */
+const member = (state: JuncoAgent | AgencyContext, description = "member") =>
+  state instanceof JuncoAgent
+    ? { state, policy: LockPolicy, description, trigger: TriggerRule.always() }
+    : { state, description, trigger: TriggerRule.always() };
 
-/** An agency over `members`, planned by `script`, staged with a prompt unless `idle`. */
 async function agency(
-  members: readonly (JuncoAgent | JuncoGraph)[],
+  members: readonly (JuncoAgent | AgencyContext)[],
   script: Script = runAvailable,
   { idle = false } = {},
 ) {
-  const { graph, scheduler, faux } = await agencyGraph(
-    script,
-    idle ? {} : { prompt: "run the graph" },
-  );
-  for (const [index, agent] of members.entries())
-    graph.addNode(member(agent, `member ${index}`));
-  return { graph, scheduler, faux };
+  const ports = terminalPorts();
+  const fixture = await agencyGraph(ports.source, ports.sink, script,
+    idle ? {} : { prompt: "run the graph" });
+  const graph = fixture.context.graph;
+  for (const [index, state] of members.entries())
+    graph.addNode(member(state, `member ${index}`));
+  ports.connect(graph, MEMBER);
+  return fixture;
 }
 
-/** Planned lanes for the first requests, then every available member. */
-const plan =
-  (...lanes: string[][][]): Script =>
-  (info, request) =>
-    request < lanes.length ? { lanes: lanes[request]! } : runAvailable(info);
+const plan = (...waves: string[][][]): Script => (request, index) =>
+  index < waves.length ? { waves: waves[index]! } : runAvailable(request);
 
 /** The text of member `id`'s result in `graph`. */
 function resultText(graph: JuncoGraph, id = "0"): string | undefined {
@@ -104,284 +81,180 @@ function counting(
   return Counting.make();
 }
 
-test(
-  "thirty-two nested agencies settle while every graph forwards the innermost result",
-  async () => {
-    const innermost = await leaf([fauxAssistantMessage("deep")], {
-      prompt: "go",
-    });
-    const levels: {
-      graph: PiGraph;
-      scheduler: PiScheduler<AgenticInput, AssistantMessage>;
-    }[] = [];
-    let current: JuncoAgent | JuncoGraph = innermost.agent;
-    for (let depth = 0; depth < 32; depth++) {
-      const level = await agency([current]);
-      levels.push(level);
-      current = level.graph;
-    }
-    const root = levels.at(-1)!;
-
-    const last = await drive(root.scheduler);
-    assert.equal(settledText(last), "graph quiescent");
+test("thirty-two nested agencies forward the identical innermost sink result", async () => {
+  const innermost = await leaf([fauxAssistantMessage("deep")], { prompt: "go" });
+  const levels: AgencyContext[] = [];
+  let current: JuncoAgent | AgencyContext = innermost.agent;
+  for (let depth = 0; depth < 32; depth++) {
+    const level = await agency([current]);
+    levels.push(level.context);
+    current = level.context;
+  }
+  const root = levels.at(-1)!;
+  try {
+    await root.run();
     assert.ok(levels.every(({ graph }) => resultText(graph) === "deep"));
-    assert.equal(innermost.faux.state.callCount, 1);
-    await root.graph.close();
-    assert.equal(innermost.agent.status, "closed");
-    assert.ok(levels.every(({ scheduler }) => scheduler.status === "closed"));
-  },
-  TIMEOUT_MS,
-);
-
-test(
-  "abort and close cascade through 4096 idle nested agencies without growing the stack",
-  async () => {
-    const innermost = await leaf([]);
-    let current: JuncoAgent | JuncoGraph = innermost.agent;
-    let root: PiGraph | undefined;
-    for (let depth = 0; depth < 4096; depth++) {
-      root = (await agency([current], runAvailable, { idle: true })).graph;
-      current = root;
+    const final = levels[0]!.graph.result(MEMBER);
+    assert.ok(O.isSome(final));
+    for (const { graph } of levels) {
+      const sink = graph.result(graph.sink.id);
+      assert.ok(O.isSome(sink));
+      assert.equal(sink.value, final.value);
     }
-    assert.ok(root !== undefined);
+    assert.equal(innermost.faux.state.callCount, 1);
+  } finally { await root.graph.close(); }
+  assert.equal(innermost.agent.status, "closed");
+  assert.ok(levels.every(({ graph }) => graph.signal.aborted));
+}, TIMEOUT_MS);
 
-    const aborted = root.signal;
-    await root.abort();
-    assert.ok(aborted.aborted);
-    assert.equal(root.signal.aborted, false);
-    await root.close();
-    assert.ok(root.signal.aborted);
-    assert.equal(root.scheduler.status, "closed");
-    assert.equal(innermost.agent.status, "closed");
-  },
-  TIMEOUT_MS * 4,
-);
+test("abort and close traverse 4096 idle nested agencies without growing the stack", async () => {
+  const innermost = await leaf([]);
+  let current: JuncoAgent | AgencyContext = innermost.agent;
+  let root: AgencyContext | undefined;
+  for (let depth = 0; depth < 4096; depth++) {
+    root = (await agency([current], runAvailable, { idle: true })).context;
+    current = root;
+  }
+  assert.ok(root !== undefined);
+  const aborted = root.graph.signal;
+  await root.graph.abort();
+  assert.ok(aborted.aborted);
+  assert.equal(root.graph.signal.aborted, false);
+  await root.graph.close();
+  assert.ok(root.graph.signal.aborted);
+  assert.equal(innermost.agent.status, "closed");
+}, TIMEOUT_MS * 4);
 
-test(
-  "a direct root scheduler abort reaches a live grandchild while its sibling still runs",
-  async () => {
-    const grandchildTool = waitingTool("grandchild_work", { endOnAbort: true });
-    const grandchild = await leaf(
-      [
-        toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })),
-        fauxAssistantMessage("unused"),
-      ],
-      {
-        prompt: "go",
-        tools: [grandchildTool.tool],
-      },
-    );
-    const siblingTool = waitingTool("sibling_work");
-    const sibling = await leaf(
-      [
-        toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
-        fauxAssistantMessage("unused"),
-      ],
-      {
-        prompt: "go",
-        tools: [siblingTool.tool],
-      },
-    );
-    const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    const { scheduler: root } = await agency(
-      [child.graph, sibling.agent],
-      plan([["0"], ["1"]], [["0"], ["1"]]),
-    );
-    let finalTurn: AssistantMessage | undefined;
-    root.events.on("turn_end", ({ message }) => {
-      finalTurn = message;
-    });
-
-    // One run: the first window primes both members, the second runs the child (which primes and
-    // runs the grandchild within its own run) beside the sibling.
-    const running = root.next();
+test("root graph abort reaches a live grandchild and joins its gated sibling", async () => {
+  const grandchildTool = waitingTool("grandchild_work", { endOnAbort: true });
+  const grandchild = await leaf([
+    toolTurn(fauxToolCall("grandchild_work", {}, { id: "g1" })),
+    fauxAssistantMessage("unused"),
+  ], { prompt: "go", tools: [grandchildTool.tool] });
+  const siblingTool = waitingTool("sibling_work");
+  const sibling = await leaf([
+    toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
+    fauxAssistantMessage("unused"),
+  ], { prompt: "go", tools: [siblingTool.tool] });
+  const child = await agency([grandchild.agent]);
+  const { context: root } = await agency([child.context, sibling.agent],
+    plan([["0", "1"]], [["0"]], [["0", "1"]]));
+  const signal = root.graph.signal;
+  const running = root.run().then(() => undefined, (error: unknown) => error);
+  try {
     await Promise.all([grandchildTool.started, siblingTool.started]);
-
     let aborted = false;
-    const aborting = root.abort().then((result) => {
-      aborted = true;
-      return result;
-    });
-    await grandchildTool.aborted;
-    await siblingTool.aborted;
+    const aborting = root.graph.abort().then(() => { aborted = true; });
+    await Promise.all([grandchildTool.aborted, siblingTool.aborted]);
     await flushMacrotasks();
     assert.equal(aborted, false);
     siblingTool.release();
-    assert.deepEqual(await aborting, { clearedSteer: [], clearedFollowUp: [] });
-    const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
-    if (settled?.kind === "settled")
-      assert.deepEqual(settled.message, finalTurn);
-  },
-  TIMEOUT_MS,
-);
+    await aborting;
+    assert.equal(await running, signal.reason);
+    assert.equal(root.graph.signal.aborted, false);
+  } finally {
+    grandchildTool.release(); siblingTool.release();
+    await running; await root.graph.close();
+  }
+}, TIMEOUT_MS);
 
-test(
-  "a failing member abort never skips its gated sibling, and the root reports it",
-  async () => {
-    const failure = new Error("member abort failed");
-    class FailingAbort extends JuncoAgent {
-      static async make(options: AgenticOptions): Promise<FailingAbort> {
-        const agent = new FailingAbort(options);
-        await agent.initialize();
-        return agent;
-      }
-      protected override abortDependents(): Promise<void> {
-        return Promise.reject(failure);
-      }
+test("a failing member abort never skips its gated sibling", async () => {
+  const failure = new Error("member abort failed");
+  class FailingAbort extends JuncoAgent {
+    static async make(options: AgenticOptions): Promise<FailingAbort> {
+      const agent = new FailingAbort(options); await agent.initialize(); return agent;
     }
-    const failing = await FailingAbort.make({
-      ...(await nativeOptions([])).options,
-      prompt: "go",
-    });
-    const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
-    const sibling = await leaf(
-      [
-        toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })),
-        fauxAssistantMessage("unused"),
-      ],
-      {
-        prompt: "go",
-        tools: [siblingTool.tool],
-      },
-    );
-    const { scheduler: root } = await agency(
-      [failing, sibling.agent],
-      plan([["0"], ["1"]], [["1"]]),
-    );
-    let finalTurn: AssistantMessage | undefined;
-    root.events.on("turn_end", ({ message }) => {
-      finalTurn = message;
-    });
-
-    const running = root.next(); // primes both members, then runs the sibling
+    protected override abortDependents(): Promise<void> { return Promise.reject(failure); }
+  }
+  const failing = await FailingAbort.make((await nativeOptions([])).options);
+  const siblingTool = waitingTool("sibling_work", { endOnAbort: true });
+  const sibling = await leaf([
+    toolTurn(fauxToolCall("sibling_work", {}, { id: "s1" })), fauxAssistantMessage("unused"),
+  ], { prompt: "go", tools: [siblingTool.tool] });
+  const { context: root } = await agency([failing, sibling.agent], plan([["0", "1"]], [["1"]]));
+  const running = root.run().then(() => undefined, (error: unknown) => error);
+  try {
     await siblingTool.started;
-
-    const error = await root.abort().catch((thrown: unknown) => thrown);
+    const error = await root.graph.abort().catch((thrown: unknown) => thrown);
     await siblingTool.aborted;
     assert.ok(error instanceof AggregateError);
     assert.deepEqual(error.errors, [failure]);
-    const settled = (await running).value;
-    assert.ok(settled?.kind === "settled" && finalTurn !== undefined);
-    if (settled?.kind === "settled")
-      assert.deepEqual(settled.message, finalTurn);
-  },
-  TIMEOUT_MS,
-);
-
-test(
-  "closing a running root scheduler closes each member once, without aborting it, and its graph joins",
-  async () => {
-    const calls: string[] = [];
-    const counted = await counting(calls, (await nativeOptions([])).options);
-    const grandchild = await leaf(
-      [
-        toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })),
-        fauxAssistantMessage("unused"),
-      ],
-      { prompt: "go" },
-    );
-    const child = await agency([grandchild.agent], plan([["0"]], [["0"]]));
-    // Two windows (prime, then the child's whole nested run), then a request held until close.
-    const held = Promise.withResolvers<void>();
-    const schedule = (id: string) =>
-      fauxAssistantMessage([scheduleCall([["0"]], id)], {
-        stopReason: "toolUse",
-      });
-    const { graph, scheduler: root } = await agency(
-      [child.graph, counted],
-      [
-        schedule("s1"),
-        schedule("s2"),
-        async (_context, options) => {
-          held.resolve();
-          const closed = Promise.withResolvers<void>();
-          options?.signal?.addEventListener("abort", () => closed.resolve(), {
-            once: true,
-          });
-          await closed.promise;
-          return fauxAssistantMessage("aborted", { stopReason: "aborted" });
-        },
-      ],
-    );
-
-    const running = root.next().catch(() => undefined);
-    await held.promise;
-    assert.equal(root.status, "running");
-    assert.equal(grandchild.faux.state.callCount, 2);
-
-    assert.deepEqual(await root.return(), { value: undefined, done: true });
     await running;
-    assert.deepEqual(calls, ["return"]);
-    for (const agentic of [root, child.scheduler, grandchild.agent, counted])
-      assert.equal(agentic.status, "closed");
-    assert.deepEqual(await root.next(), { value: undefined, done: true });
-    await graph.close();
-    assert.deepEqual(calls, ["return"]);
-    assert.ok(graph.signal.aborted && child.graph.signal.aborted);
-  },
-  TIMEOUT_MS,
-);
+  } finally { siblingTool.release(); await running; await root.graph.close(); }
+}, TIMEOUT_MS);
 
-test("graph.close() after a failed direct scheduler return joins that close without duplicating its errors", async () => {
+test("closing a graph during an oracle joins cleanup and closes each member once", async () => {
+  const calls: string[] = [];
+  const counted = await counting(calls, (await nativeOptions([])).options);
+  const grandchild = await leaf([
+    toolTurn(fauxToolCall("yield", { reason: "hold" }, { id: "y1" })),
+    fauxAssistantMessage("unused"),
+  ], { prompt: "go" });
+  const child = await agency([grandchild.agent]);
+  const held = Promise.withResolvers<void>();
+  const cleaned = Promise.withResolvers<void>();
+  const schedule = (id: string) => fauxAssistantMessage([scheduleCall([["0"]], id)], { stopReason: "toolUse" });
+  const { context: root } = await agency([child.context, counted], [
+    schedule("s1"), schedule("s2"), schedule("s3"),
+    async (_request, options) => {
+      held.resolve();
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      cleaned.resolve();
+      return fauxAssistantMessage("aborted", { stopReason: "aborted" });
+    },
+  ]);
+  const signal = root.graph.signal;
+  const running = root.run().then(() => undefined, (error: unknown) => error);
+  await held.promise;
+  assert.equal(grandchild.agent.status, "suspended");
+  await root.graph.close();
+  await cleaned.promise;
+  assert.equal(await running, signal.reason);
+  assert.deepEqual(calls, ["return"]);
+  for (const agent of [grandchild.agent, counted]) assert.equal(agent.status, "closed");
+  await root.graph.close();
+  assert.deepEqual(calls, ["return"]);
+  assert.ok(root.graph.signal.aborted && child.context.graph.signal.aborted);
+}, TIMEOUT_MS);
+
+test("repeated graph.close joins a failed close without duplicating its error", async () => {
   const failure = new Error("member close failed");
   class FailingClose extends JuncoAgent {
     static async make(options: AgenticOptions): Promise<FailingClose> {
-      const agent = new FailingClose(options);
-      await agent.initialize();
-      return agent;
+      const agent = new FailingClose(options); await agent.initialize(); return agent;
     }
     override return(value?: void | PromiseLike<void>) {
       return super.return(value).then(() => Promise.reject(failure));
     }
   }
   const failing = await FailingClose.make((await nativeOptions([])).options);
-  const { graph, scheduler } = await agency([failing], runAvailable, {
-    idle: true,
-  });
-
-  const direct = await scheduler.return().then(
-    () => assert.fail("the member close failure must surface"),
-    (error: unknown) => error,
-  );
-  assert.equal(scheduler.status, "closed");
-  const joined = await graph.close().then(
-    () => assert.fail("graph close must join the failed close"),
-    (error: unknown) => error,
-  );
-  assert.equal(joined, direct);
-  assert.equal(await graph.close().catch((error: unknown) => error), direct);
+  const { context } = await agency([failing], runAvailable, { idle: true });
+  const direct = await context.graph.close().then(
+    () => assert.fail("member close failure must surface"), (error: unknown) => error);
+  assert.equal(failing.status, "closed");
+  assert.equal(await context.graph.close().catch((error: unknown) => error), direct);
+  assert.equal(await context.graph.close().catch((error: unknown) => error), direct);
 });
 
-test("a JuncoGraph over a plain PiScheduler cascades abort and close to shared and cyclic members once each", async () => {
+test("shared and cyclic native member graphs cascade abort and close once each", async () => {
   const calls: string[] = [];
   const counted = await counting(calls, (await nativeOptions([])).options);
-  const plain = await PiScheduler.make<AgenticInput, AssistantMessage>(
-    (await nativeOptions([])).options,
-  );
-  const root = new JuncoGraph(
-    plain,
-    UNBOUNDED,
-    UNBOUNDED,
-    new DummyTracer(),
-    LockPolicy,
-  );
-  root.addNode(member(counted));
+  const { context: root } = await agency([counted], runAvailable, { idle: true });
   const child = await agency([counted, root], runAvailable, { idle: true });
-  root.addNode(member(child.graph));
-  root.addNode(member(child.graph));
-
-  await root.abort();
+  root.graph.addNode(member(child.context));
+  root.graph.addNode(member(child.context));
+  await root.graph.abort();
   assert.deepEqual(calls, ["abort"]);
-  assert.equal(root.signal.aborted, false);
-  assert.equal(child.graph.signal.aborted, false);
-
-  await root.close();
+  assert.equal(root.graph.signal.aborted, false);
+  assert.equal(child.context.graph.signal.aborted, false);
+  await root.graph.close();
   assert.deepEqual(calls, ["abort", "return"]);
-  for (const actor of [plain, child.scheduler, counted])
-    assert.equal(actor.status, "closed");
-  assert.ok(root.signal.aborted && child.graph.signal.aborted);
-  await root[Symbol.asyncDispose]();
+  assert.equal(counted.status, "closed");
+  assert.ok(root.graph.signal.aborted && child.context.graph.signal.aborted);
+  await root.graph[Symbol.asyncDispose]();
   assert.deepEqual(calls, ["abort", "return"]);
 });
 

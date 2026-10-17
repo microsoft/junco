@@ -27,6 +27,7 @@ import {
 import {
   type AcceptedRefactor,
   applyRefactor,
+  parseSnapshot,
   refreshGraftSnapshot,
   type SourceEdit,
 } from "../examples/yak-shaver.ts";
@@ -60,8 +61,8 @@ type Fixture = {
   readonly seed: string;
   /** The protected `LockPolicy` mux: the applier's. */
   readonly mux: NativeMux;
-  /** The trusted-build `EmptyPolicy` mux: index refresh's. */
-  readonly buildMux: NativeMux;
+  /** The trusted-build `EmptyPolicy` collection: index refresh's. */
+  readonly buildCollection: ToolCollection;
   readonly git: (...args: string[]) => string;
 };
 
@@ -110,7 +111,7 @@ async function withRepository(
     await body({
       seed,
       mux: protectedTools.mux,
-      buildMux: buildTools.mux,
+      buildCollection: buildTools,
       git,
     });
   });
@@ -499,7 +500,7 @@ test("refused proposals change neither source nor index", async () => {
 test("a trusted-build owner's lock denies the LockPolicy applier despite a fresh read", async () => {
   await withRepository({ "claimed.ts": "seed\n" }, async (fixture) => {
     // The EmptyPolicy mux grants its own write; the LockPolicy applier must still respect it.
-    const claim = fixture.buildMux.start(
+    const claim = fixture.buildCollection.mux.start(
       {
         command: "cat claimed.ts > /dev/null; printf 'owned\\n' > claimed.ts",
         cwd: fixture.seed,
@@ -525,7 +526,7 @@ test("a trusted-build owner's lock denies the LockPolicy applier despite a fresh
   });
 }, 60_000);
 
-test("refreshGraftSnapshot sees current source without publishing the Graft cache", async () => {
+test("refreshGraftSnapshot sees current source and publishes the refreshed Graft cache", async () => {
   await withRepository(
     { ".gitignore": "graft/\n", "src/a.ts": "export class Alpha {}\n" },
     async (fixture) => {
@@ -542,19 +543,54 @@ test("refreshGraftSnapshot sees current source without publishing the Graft cach
         ]),
         ["src/a.ts"],
       );
+      const graphPath = join(fixture.seed, "graft/.graph/wiring.json");
+      const stale = parseSnapshot(await readFile(graphPath, "utf8"));
       const before = await state(fixture);
-      const snapshot = await refreshGraftSnapshot(
-        fixture.seed,
-        fixture.buildMux,
+      const aborted = new Error("refresh cancelled");
+      await assert.rejects(
+        refreshGraftSnapshot(fixture.seed, fixture.buildCollection, AbortSignal.abort(aborted)),
+        (error: unknown) => error === aborted,
       );
+      assert.deepEqual(await state(fixture), before);
+
+      await withNativeCleanup(async (defer) => {
+        const failingCollection = await ToolCollection.create(fixture.seed, {
+          native: copyTree,
+          policy: EmptyPolicy,
+          sandbox: "always",
+          bash: {
+            spawnHook: (context) => ({
+              ...context,
+              env: { ...context.env, PATH: join(fixture.seed, "missing-bin") },
+            }),
+          },
+        });
+        defer(() => failingCollection.close());
+        await assert.rejects(refreshGraftSnapshot(fixture.seed, failingCollection));
+        assert.deepEqual(await state(fixture), before);
+        assert.equal(
+          await readFile(join(fixture.seed, "src/a.ts"), "utf8"),
+          "export class Alpha {}\nexport class Beta {}\n",
+        );
+      });
+
+      const snapshot = await refreshGraftSnapshot(fixture.seed, fixture.buildCollection);
       const names = snapshot.nodes
         .filter((node) => node.path === "src/a.ts" && node.kind === "class")
         .map((node) => node.name);
       assert.deepEqual(names.sort(), ["Alpha", "Beta"]);
+      assert.equal(parseSnapshot(await readFile(graphPath, "utf8")).sha256, snapshot.sha256);
+      assert.notEqual(snapshot.sha256, stale.sha256);
+      const after = await state(fixture);
       assert.deepEqual(
-        await state(fixture),
-        before,
-        "the rebuilt cache stays private",
+        Object.fromEntries(Object.entries(after.files).filter(([path]) => !path.startsWith("graft/"))),
+        Object.fromEntries(Object.entries(before.files).filter(([path]) => !path.startsWith("graft/"))),
+      );
+      assert.equal(after.index, before.index);
+      assert.equal(after.status, before.status);
+      assert.equal(
+        await readFile(join(fixture.seed, "src/a.ts"), "utf8"),
+        "export class Alpha {}\nexport class Beta {}\n",
       );
     },
   );

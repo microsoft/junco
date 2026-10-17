@@ -38,49 +38,6 @@ export type NodeAvailability<N, T> = {
   readonly status: "ready" | "running";
 };
 
-/** Pluggable planner deciding which available nodes run, in which lane, at which turn, reading how much. */
-export type DataflowScheduler<N, T> = {
-  /** Configure the planner. Called exactly once, by the graph constructor. */
-  create(window: number, threads: number): void;
-
-  /**
-   * Receive the constructing graph's candidate view and window driver. Called at most once, by the
-   * graph constructor, right after {@link create}; a scheduler that does not need them omits it.
-   *
-   * `available` returns a fresh snapshot of the admitted candidates, exactly what {@link schedule}
-   * would receive. `step` runs one window, like `graph.step({ signal })`, discarding its results.
-   * Neither exposes the graph, other nodes, edges or results.
-   */
-  bind?(
-    available: () => ReadonlyMap<NodeId, NodeAvailability<N, T>>,
-    step: (signal?: AbortSignal) => Promise<void>,
-  ): void;
-
-  /**
-   * Plan the next window from the currently-available nodes and what the runtime knows about each.
-   *
-   * CONTRACT: every returned id MUST be a key of `available`; a lane MUST NOT exceed `window`
-   * entries; there MUST be at most `threads` lanes; no id may repeat within a column. Returning an
-   * empty schedule while `available` is non-empty is a definition error. Liveness is the
-   * scheduler's responsibility — the runtime never forces progress. Each entry's `inputs` keys MUST
-   * be inbound edges of that node, and a numeric count MUST be a positive integer.
-   */
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule;
-
-  /**
-   * Recompute the reads of a planned occurrence of an already-running node from `live`, the
-   * availability snapshot taken just before its column runs. Called once per such occurrence per
-   * column, never for a prime. Absent, the planned `entry.inputs` are used unchanged.
-   *
-   * CONTRACT: SYNCHRONOUS and pure — it MUST NOT mutate the graph or `live`. The result is held to
-   * the same inbound-edge and positive-count rules as {@link schedule}; a violation, or a throw,
-   * rejects the invocation before any node of that column advances.
-   */
-  resolveInputs?(
-    entry: NodeSchedule,
-    live: NodeAvailability<N, T>,
-  ): InputSchedule;
-};
 
 /**
  * The default read plan for a node: every edge an `"all"` rule fires on, or only the first

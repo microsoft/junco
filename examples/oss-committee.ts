@@ -33,11 +33,12 @@ import {
   TriggerRule,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
+import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { type Contract, InfoTool, LockPolicy, SendTool, YieldTool } from "junco-tools";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { type AgenticInput, JuncoGraph, tracer } from "../src/index.ts";
+import { type AgenticInput, graph as graphApi, schedulers, tracer } from "../src/index.ts";
 import { ctrlC } from "./cancellation.ts";
 
 // ## 1. Tools
@@ -239,13 +240,24 @@ const designId = EdgeId.create("Architect->Reducer");
 
 /** One review round's graph and its Reducer node. */
 export interface ReviewRound {
-  graph: JuncoGraph;
+  execution: ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
   reducerId: NodeIdType;
 }
 
 export const ReviewRound = {
   create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: DataflowTracer): ReviewRound {
-    const graph = JuncoGraph.parallel(LockPolicy, observer);
+    const finalResult = Edge.value<AgenticInput, AssistantMessage>("Reducer->$sink");
+    const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>(() => {
+      throw new graphApi.DataflowDefinitionError("OSS committee does not accept external input");
+    }, { id: NodeId.create("$source") });
+    const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> = new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): graphApi.NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const result = graph.result(NodeId.create("Reducer"));
+      if (O.isNone(result)) throw new Error("Reducer did not produce a result");
+      return result.value;
+    }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(finalResult) });
+    const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> = new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1), graphApi.UNBOUNDED, observer, LockPolicy);
+    const execution = schedulers.context({ scheduler: schedulers.parallel(), graph });
     const research = Edge.value<AgenticInput, AssistantMessage>(researchId);
     const partialResearch = Edge.message<AgenticInput, AssistantMessage>(partialResearchId);
     const researchForReducer = Edge.value<AgenticInput, AssistantMessage>(reducerResearchId);
@@ -330,8 +342,9 @@ export const ReviewRound = {
       .addEdge(librarianId, architectId, partialResearch)
       .addEdge(librarianId, architectId, research)
       .addEdge(librarianId, reducerId, researchForReducer)
-      .addEdge(architectId, reducerId, design);
-    return { graph, reducerId };
+      .addEdge(architectId, reducerId, design)
+      .addEdge(reducerId, sink.id, finalResult);
+    return { execution, reducerId };
   },
 };
 
@@ -362,8 +375,8 @@ export async function convene(
   try {
     for (;;) {
       signal?.throwIfAborted();
-      const { graph, reducerId } = ReviewRound.create(request, members, search, feedback, selected);
-      const plan = (await graph.run({ signal })).get(reducerId);
+      const { execution, reducerId } = ReviewRound.create(request, members, search, feedback, selected);
+      const plan = (await execution.run({ signal })).get(reducerId);
       signal?.throwIfAborted();
       const verdict = review.takeVerdict();
       if (verdict === undefined) throw new Error("Reducer did not record a review verdict");

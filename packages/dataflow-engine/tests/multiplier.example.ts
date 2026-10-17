@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
-import { RoundRobinScheduler } from "junco-scheduler";
+import { context, roundRobin } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import type { NodeGenerator } from "../src/index.ts";
 import {
@@ -20,7 +20,6 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   const results: number[] = [];
   const tracer = ExampleTracer.create("cookbook/multiplier");
   const graph = new DataflowGraph<void, number, string, never>(
-    new RoundRobinScheduler<number, string>(),
     Width.create(1),
     Width.create(1),
     tracer,
@@ -70,7 +69,8 @@ test("cookbook: end-to-end three stage multiplier graph", async () => {
   graph.addEdge(multiplierId, sinkId, multiplierToSink);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: roundRobin(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(results, [2, 4, 6]);
     assert.equal(completed.get(sourceId), "source done");

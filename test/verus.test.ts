@@ -147,7 +147,11 @@ describe("Verus loop", () => {
         (error: unknown) => rootCause(error) === reason,
       );
       const expected = ["Verifier", "Reviewer", "Cleanup", "Verifier", "Reviewer", "Cleanup"];
-      assert.deepEqual(observer.completed, expected);
+      // The first output sink completes before the next round; cancellation at the second
+      // Cleanup prevents that round's sink from being admitted.
+      assert.deepEqual(observer.completed, [
+        "Verifier", "Reviewer", "Cleanup", "$sink", "Verifier", "Reviewer", "Cleanup",
+      ]);
       assert.deepEqual(activated, expected);
       assert.deepEqual(verification.observed, [0, 1]);
       assert.match(reviewerResults[0]!, /1 verified, 0 errors/);

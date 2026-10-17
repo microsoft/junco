@@ -37,17 +37,18 @@ const approved: ScriptedReview = {
 };
 test("a round gates each member on the previous member's complete report", async () => {
   await using committee = await scriptedCommittee();
-  const { graph } = ReviewRound.create(
+  const { execution } = ReviewRound.create(
     request,
     committee.members,
     committee.search,
     undefined,
     quiet,
   );
+  const graph = execution.graph;
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
-  await graph.step(); // prime the Librarian without starting its prompt
+  await execution.step(); // prime the Librarian without starting its prompt
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
-  await graph.step(); // the Librarian searches and finishes; its outgoing value edges resolve
+  await execution.step(); // the Librarian searches and finishes; its outgoing value edges resolve
   const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian));
   const librarianReport = textOf(librarian.value);
@@ -59,7 +60,7 @@ test("a round gates each member on the previous member's complete report", async
   assert.match(committee.searchQueries[0]!, /terminal|tui|c#|csharp/i);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
-  await graph.run();
+  await execution.run();
   const architect = graph.result(NodeId.create("Architect"));
   assert.ok(O.isSome(architect));
   assert.equal(committee.memberInputs.Architect.length, 1);
@@ -80,15 +81,16 @@ test("a failed lookup sends partial research to the Architect before the Librari
   await using committee = await scriptedCommittee({
     lookups: [[rateLimited()]],
   });
-  const { graph } = ReviewRound.create(
+  const { execution } = ReviewRound.create(
     request,
     committee.members,
     committee.search,
     undefined,
     quiet,
   );
-  await graph.step(); // prime the Librarian
-  await graph.step(); // failed lookup, then info, send and the real yield tool
+  const graph = execution.graph;
+  await execution.step(); // prime the Librarian
+  await execution.step(); // failed lookup, then info, send and the real yield tool
   assert.equal(committee.search.searches(), 0);
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
@@ -105,14 +107,14 @@ test("a failed lookup sends partial research to the Architect before the Librari
     assert.ok(steps < 10, "the Architect never finished");
     assert.equal(committee.members.Librarian.status, "suspended");
     assert.ok(!graph.available().has(NodeId.create("Librarian")));
-    await graph.step();
+    await execution.step();
   }
   assert.equal(committee.members.Librarian.status, "suspended");
   assert.ok(graph.available().has(NodeId.create("Librarian")));
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Architect[0]?.includes("HTTP 403"));
 
-  await graph.run();
+  await execution.run();
   assert.ok(
     committee.modelRequests.lastIndexOf("Librarian") >
       committee.modelRequests.indexOf("Architect"),
@@ -125,20 +127,21 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     lookups: [[rateLimited()]],
     policyPauseBeforeSend: true,
   });
-  const { graph } = ReviewRound.create(
+  const { execution } = ReviewRound.create(
     request,
     committee.members,
     committee.search,
     undefined,
     quiet,
   );
-  await graph.step(); // prime the Librarian
-  await graph.step(); // failed lookup, then a policy denial pauses the run
+  const graph = execution.graph;
+  await execution.step(); // prime the Librarian
+  await execution.step(); // failed lookup, then a policy denial pauses the run
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
 
-  await graph.run();
+  await execution.run();
   assert.ok(committee.memberInputs.Architect[0]?.includes("Partial research"));
   assert.ok(committee.memberInputs.Reducer[0]?.includes("HTTP 403"));
   assert.deepEqual(committee.review.takeVerdict(), approved);
@@ -167,14 +170,15 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     lookups: [[rateLimited()]],
     librarianStopReason: "length",
   });
-  const { graph } = ReviewRound.create(
+  const { execution } = ReviewRound.create(
     request,
     committee.members,
     committee.search,
     undefined,
     quiet,
   );
-  const error = await graph.run().catch((thrown: unknown) => thrown);
+  const graph = execution.graph;
+  const error = await execution.run().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
   const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
@@ -187,14 +191,15 @@ test("a truncated research report never reaches the Architect", async () => {
   await using committee = await scriptedCommittee({
     librarianStopReason: "length",
   });
-  const { graph } = ReviewRound.create(
+  const { execution } = ReviewRound.create(
     request,
     committee.members,
     committee.search,
     undefined,
     quiet,
   );
-  const error = await graph.run().catch((thrown: unknown) => thrown);
+  const graph = execution.graph;
+  const error = await execution.run().catch((thrown: unknown) => thrown);
   assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
   const librarian = graph.result(NodeId.create("Librarian"));
   assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");

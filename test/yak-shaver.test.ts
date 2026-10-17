@@ -24,7 +24,7 @@ import {
   type SourceEdit,
   VerdictRecorder,
 } from "../examples/yak-shaver.ts";
-import { tracer } from "../src/index.ts";
+import { agent, tracer } from "../src/index.ts";
 import { flushMacrotasks, waitingTool } from "./support.ts";
 import {
   allPass,
@@ -1290,6 +1290,52 @@ describe("candidate batch graph", () => {
     assert.deepEqual(applied.files, ["fx/dup1.ts"]);
     assertClosed(lanes);
   }, 60_000);
+
+  test("a construction failure closes registered and unregistered lanes without applying", async () => {
+    const lanes = await Promise.all(
+      laneWorks().slice(0, 3).map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
+    );
+    await lanes[1]!.lane.judge.return();
+    const recorder = recordingApplier();
+    await assert.rejects(
+      runCandidateBatch({
+        snapshot: laneSnapshot,
+        lanes: lanes.map(({ lane }) => lane),
+        observer: quiet(),
+        apply: recorder.apply,
+      }),
+      (error: unknown) => error instanceof agent.JuncoAgentError && error.code === "closed",
+    );
+    assert.equal(recorder.applied.length, 0);
+    assertClosed(lanes);
+  }, 30_000);
+
+  test("a construction failure retains a disposal failure and still closes every lane", async () => {
+    const lanes = await Promise.all(
+      laneWorks().slice(0, 3).map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
+    );
+    await lanes[1]!.lane.judge.return();
+    const member = lanes[2]!.lane.judge;
+    const dispose = member[Symbol.asyncDispose].bind(member);
+    const cleanupError = new Error("judge cleanup failed");
+    member[Symbol.asyncDispose] = async () => {
+      await dispose();
+      throw cleanupError;
+    };
+    const recorder = recordingApplier();
+    await assert.rejects(
+      runCandidateBatch({
+        snapshot: laneSnapshot,
+        lanes: lanes.map(({ lane }) => lane),
+        observer: quiet(),
+        apply: recorder.apply,
+      }),
+      (error: unknown) => error instanceof SuppressedError && error.error === cleanupError &&
+        error.suppressed instanceof agent.JuncoAgentError && error.suppressed.code === "closed",
+    );
+    assert.equal(recorder.applied.length, 0);
+    assertClosed(lanes);
+  }, 30_000);
 
   test("an application failure stops the batch, keeps the earlier application, and closes every lane", async () => {
     const lanes = await Promise.all(

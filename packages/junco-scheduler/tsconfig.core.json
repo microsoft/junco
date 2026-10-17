@@ -7,6 +7,7 @@
   "include": [
     "src/index.ts",
     "src/scheduler.ts",
+    "src/context.ts",
     "src/parallel.ts",
     "src/round-robin.ts"
   ]

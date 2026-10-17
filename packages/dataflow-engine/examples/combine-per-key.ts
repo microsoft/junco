@@ -2,7 +2,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import {
   DataflowGraph,
   Edge,
@@ -46,7 +46,6 @@ const sums: Result[] = [];
 const products: Result[] = [];
 const tracer = ExampleTracer.create("examples/combine-per-key");
 const graph = new DataflowGraph<void, Msg, string, never>(
-  new ParallelScheduler(),
   Width.create(1),
   UNBOUNDED,
   tracer,
@@ -156,7 +155,8 @@ graph.addEdge(sumCombineId, sumSinkId, sumOutEdge);
 graph.addEdge(multiplyCombineId, multiplySinkId, multiplyOutEdge);
 
 try {
-  await graph.run();
+  const execution = context({ scheduler: parallel(), graph });
+  await execution.run();
 
   console.log(
     JSON.stringify({

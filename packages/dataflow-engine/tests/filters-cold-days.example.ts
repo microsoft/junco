@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -46,7 +46,6 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   const results: Row[] = [];
   const tracer = ExampleTracer.create("cookbook/filters-cold-days");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -154,7 +153,8 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   graph.addEdge(belowMeanFilterId, sinkId, outEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(
       results.map((r) => [r.year, r.month, r.day]),

@@ -1,109 +1,184 @@
-// Compile-only: builder state and payload inference for the deterministic core. Covered by
-// tsconfig.typecheck.json and tsconfig.core.typecheck.json; never executed.
-
+// Compile-only: exact native payloads, metadata inference and external execution capabilities.
 import {
   DataflowGraph,
-  type DataflowScheduler,
   type EdgeIdType,
-  type NodeAvailability,
+  NodeId,
   type NodeIdType,
+  type ParentView,
   triggerInputs,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
 import {
-  ParallelScheduler,
-  RoundRobinScheduler,
-  Scheduler,
+  agent,
+  choose,
+  context,
+  type Decision,
+  parallel,
+  roundRobin,
+  type Scheduler,
+  type SchedulerContext,
+  separate,
+  type Snapshot,
 } from "../src/index.ts";
 
-class Ledger {
-  readonly seen = new Map<NodeIdType, number>();
-  record(id: NodeIdType): number {
-    const count = (this.seen.get(id) ?? 0) + 1;
-    this.seen.set(id, count);
-    return count;
-  }
+type State = Readonly<{ group: "a" | "b" }>;
+type Metadata = { priority: number };
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
+  (<T>() => T extends B ? 1 : 2) ? true : false;
+
+class ConcreteGraph extends DataflowGraph<State, number, string, Error> {
+  concreteOnly(): "concrete" { return "concrete"; }
 }
 
-export function classStateKeepsItsMethods(edge: EdgeIdType) {
-  const scheduler = new Scheduler({
-    state: new Ledger(),
-    schedule(available, state, window, threads) {
-      const capacity: number = window * threads;
-      const counts: number[] = [...available.keys()].map((id) =>
-        state.record(id),
-      );
-      return counts.length > capacity
-        ? []
-        : [...available].map(([id, live]) => [
-            { id, inputs: triggerInputs(live) },
-          ]);
-    },
-    resolveInputs: (_entry, live, state) => {
-      const ledger: Ledger = state;
-      return ledger.seen.size > 0 ? triggerInputs(live) : new Map([[edge, 1]]);
-    },
-  });
-  const count: number = scheduler.state.record("a" as NodeIdType);
-  scheduler.state = new Ledger();
-  // @ts-expect-error the state keeps its inferred class type
-  scheduler.state = { seen: new Map() };
-  // @ts-expect-error nor may it become a primitive
-  scheduler.state = 1;
-  return count;
-}
-
-export function payloadsFlowIntoTheCandidateView(edge: EdgeIdType) {
-  const scheduler = new Scheduler({
-    state: { reads: 0 },
-    schedule(
-      available: ReadonlyMap<NodeIdType, NodeAvailability<number, string>>,
-      state,
-    ) {
-      for (const candidate of available.values()) {
-        const queued: readonly number[] | undefined =
-          candidate.view.messages.get(edge);
-        const result: string | undefined = candidate.view.values.get(edge);
-        // @ts-expect-error message payloads are numbers
-        const wrong: readonly string[] | undefined =
-          candidate.view.messages.get(edge);
-        state.reads +=
-          (queued?.length ?? 0) +
-          (result === undefined ? 0 : 1) +
-          (wrong === undefined ? 0 : 1);
-      }
-      return [...available].map(([id, candidate]) => [
-        { id, inputs: triggerInputs(candidate) },
-      ]);
+export function graphAndHookDetermineAllTypes(edge: EdgeIdType, id: NodeIdType) {
+  const graph = new ConcreteGraph(Width.create(1), UNBOUNDED);
+  const execution = context({
+    graph,
+    describeNode: () => ({ priority: 7 }),
+    scheduler: choose({
+      rank(snapshot, left, right) {
+        const state: State | undefined = snapshot.nodes.get(id)?.state;
+        const queued: readonly number[] | undefined = snapshot.inputs.get(id)?.messages.get(edge);
+        const value: string | undefined = snapshot.inputs.get(id)?.values.get(edge);
+        const result: string | undefined = snapshot.results.get(id);
+        const priority: number | undefined = snapshot.context.get(left)?.priority;
+        // @ts-expect-error native state is not a string
+        const wrongState: string | undefined = snapshot.nodes.get(id)?.state;
+        // @ts-expect-error native messages are numeric
+        const wrongMessages: readonly string[] | undefined = snapshot.inputs.get(id)?.messages.get(edge);
+        // @ts-expect-error native results are textual
+        const wrongResult: number | undefined = snapshot.results.get(id);
+        // @ts-expect-error metadata retains its exact hook-derived fields
+        snapshot.context.get(left)?.label;
+        // @ts-expect-error observation maps are readonly
+        snapshot.nodes.set(id, snapshot.nodes.get(id)!);
+        // @ts-expect-error native field records are readonly
+        snapshot.nodes.get(id)!.status = "done";
+        // @ts-expect-error input containers are readonly
+        snapshot.inputs.get(id)!.messages.set(edge, []);
+        // @ts-expect-error historical selections are readonly
+        snapshot.history[0]!.selected.push(id);
+        // @ts-expect-error ownership is readonly
+        snapshot.owned.add(id);
+        void [state, queued, value, result, priority, wrongState, wrongMessages, wrongResult];
+        return (snapshot.context.get(left)?.priority ?? 0) -
+          (snapshot.context.get(right)?.priority ?? 0);
+      },
+    }),
+    readInputs(_node, candidate) {
+      const messages: readonly number[] | undefined = candidate.view.messages.get(edge);
+      const value: string | undefined = candidate.view.values.get(edge);
+      void [messages, value];
+      return triggerInputs(candidate);
     },
   });
-  const typed: DataflowScheduler<number, string> & {
-    state: { reads: number };
-  } = scheduler;
-  const graph = new DataflowGraph<
-    void,
-    number,
-    string,
-    never,
-    typeof scheduler
-  >(scheduler, Width.create(1), UNBOUNDED);
-  const reads: number = graph.scheduler.state.reads;
-  return [typed, reads];
+  const preserved: "concrete" = execution.graph.concreteOnly();
+  const exact: Equal<typeof execution,
+    SchedulerContext<State, number, string, Metadata, ConcreteGraph>> = true;
+  const values: Promise<ReadonlyMap<NodeIdType, string>> = execution.step();
+  // @ts-expect-error the graph has no policy driver
+  graph.run();
+  // @ts-expect-error the graph has no policy driver
+  graph.step();
+  // @ts-expect-error policies are not stored on native work graphs
+  graph.scheduler;
+  return [execution, exact, preserved, values];
 }
 
-export function shippedStrategiesKeepTheirShapes() {
-  const parallel = new ParallelScheduler<number, string>();
-  const rotation = new RoundRobinScheduler<number, string>();
-  const cursor: NodeIdType | undefined = rotation.state;
-  rotation.state = undefined;
-  // @ts-expect-error the cursor is a branded NodeId, not a raw string
-  rotation.state = "a";
-  const graph = new DataflowGraph<void, number, string, never, typeof rotation>(
-    rotation,
-    Width.create(1),
-    Width.create(1),
+export function omittedAndScalarMetadataAreExact() {
+  const graph = new DataflowGraph<State, number, string, never>(Width.create(1), UNBOUNDED);
+  const omitted = context({
+    graph,
+    scheduler(snapshot) {
+      const exact: Equal<typeof snapshot.context, ReadonlyMap<NodeIdType, never>> = true;
+      return { selected: exact ? [] : [] };
+    },
+  });
+  const numeric = context({ graph, scheduler: parallel(), describeNode: () => 0 });
+  const boolean = context({ graph, scheduler: parallel(), describeNode: () => false });
+  const nullable = context({ graph, scheduler: parallel(), describeNode: () => null });
+  const n: Equal<typeof numeric.scheduler, Scheduler<State, number, string, number>> = true;
+  const b: Equal<typeof boolean.scheduler, Scheduler<State, number, string, boolean>> = true;
+  const z: Equal<typeof nullable.scheduler, Scheduler<State, number, string, null>> = true;
+  const explicit = context<State, number, string, Metadata>({ graph, scheduler: parallel() });
+  return [omitted, numeric, boolean, nullable, explicit, n, b, z];
+}
+
+export function policyCannotWidenGraphOrMetadata() {
+  const graph = new ConcreteGraph(Width.create(1), UNBOUNDED);
+  const wrongMetadata: Scheduler<State, number, string, { label: string }> =
+    () => ({ selected: [] });
+  context({
+    graph,
+    describeNode: () => ({ priority: 7 }),
+    // @ts-expect-error policy metadata cannot widen the hook's metadata
+    scheduler: wrongMetadata,
+  });
+  const wrongData: Scheduler<{ group: "other" }, boolean, number, Metadata> =
+    () => ({ selected: [] });
+  context({
+    graph,
+    describeNode: () => ({ priority: 7 }),
+    // @ts-expect-error policy data cannot widen native S/N/T
+    scheduler: wrongData,
+  });
+}
+
+export function universalPoliciesAndExactComposition(id: NodeIdType) {
+  const all = parallel();
+  const rotation = roundRobin();
+  const one = new DataflowGraph<State, number, string, never>(Width.create(1), UNBOUNDED);
+  const two = new DataflowGraph<Date, boolean, number, never>(Width.create(1), UNBOUNDED);
+  const a = context({ graph: one, scheduler: all, describeNode: () => ({ priority: 1 }) });
+  const b = context({ graph: two, scheduler: all, describeNode: () => "label" });
+  const c = context({ graph: one, scheduler: rotation, describeNode: () => false });
+  const d = context({ graph: two, scheduler: rotation });
+  const deterministic: Scheduler<State, number, string, Metadata> = choose({
+    where: (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
+    rank: (snapshot, left, right) => (snapshot.context.get(left)?.priority ?? 0) -
+      (snapshot.context.get(right)?.priority ?? 0),
+  });
+  const oracle: Scheduler<State, number, string, Metadata> = agent(async (snapshot, signal) => {
+    const input: ParentView<number, string> | undefined = snapshot.inputs.get(id);
+    const metadata: Metadata | undefined = snapshot.context.get(id);
+    signal?.throwIfAborted();
+    void [input, metadata];
+    return [[id]];
+  });
+  const composed: Scheduler<State, number, string, Metadata> = separate(
+    (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
+    deterministic,
+    oracle,
   );
-  const last: NodeIdType | undefined = graph.scheduler.state;
-  return [parallel, cursor, last];
+  const callback: Scheduler<State, number, string, Metadata> = async (snapshot, signal) =>
+    await composed(snapshot, signal);
+  // @ts-expect-error raw strings are not native branded selections
+  const malformed: Decision = { selected: ["a"] };
+  const valid: Decision = { selected: [NodeId.create("a")] };
+  return [a, b, c, d, callback, malformed, valid];
+}
+
+export function metadataConsumerVariance() {
+  const graph = new ConcreteGraph(Width.create(1), UNBOUNDED);
+  const owner = context({ graph, scheduler: parallel(), describeNode: () => ({ priority: 1 }) });
+  const consumer: SchedulerContext<State, number, string, never, ConcreteGraph> = owner;
+  const retained: Equal<typeof owner.scheduler, Scheduler<State, number, string, Metadata>> = true;
+  const empty = context({ graph, scheduler: parallel() });
+  // @ts-expect-error a no-metadata-only policy cannot consume arbitrary rich metadata
+  const reversed: SchedulerContext<State, number, string, Metadata, ConcreteGraph> = empty;
+  // @ts-expect-error a passive graph is not an execution capability
+  const bare: SchedulerContext<State, number, string, never, ConcreteGraph> = graph;
+  // @ts-expect-error a context is not native graph state/topology
+  const work: ConcreteGraph = owner;
+  return [consumer, retained, reversed, bare, work];
+}
+
+export function exactSnapshotContract(snapshot: Snapshot<State, number, string, Metadata>) {
+  const typed: Snapshot<State, number, string, Metadata> = snapshot;
+  // @ts-expect-error all native data parameters and metadata are required
+  const erased: Snapshot<State, number, string> = snapshot;
+  // @ts-expect-error scheduler data/metadata parameters are required
+  const untyped: Scheduler = () => ({ selected: [] });
+  return [typed, erased, untyped];
 }

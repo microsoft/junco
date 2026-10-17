@@ -1,36 +1,37 @@
-import type { PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
   DataflowGraph,
+  type DataflowExecution,
+  type DataflowObservation,
   type DataflowRunOptions,
-  type DataflowScheduler,
   type DataflowTracer,
   Edge,
   type EdgeIdType,
   type Message,
   type NodeGenerator,
+  NodeId,
   type NodeIdType,
   type NodeSpec,
+  Sink,
+  Source,
   type StepFn,
+  TriggerEntry,
+  TriggerRule,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "junco-agent";
-import { ParallelScheduler } from "junco-scheduler";
-import {
-  PiScheduler,
-  type PiSchedulerAdapter,
-  type PiSchedulerOptions,
-} from "junco-scheduler/agent";
+import { JuncoAgent, JuncoAgentError } from "junco-agent";
+import { parallel, type SchedulerContext } from "junco-scheduler";
 import {
   type Contract,
   issueLog,
   ToolCollection,
   type ToolCollectionOptions,
 } from "junco-tools";
+import type { Graph } from "ngraph.graph";
 import { AgentDriver } from "./agent-node.js";
 import { cancellation, settleAll } from "./agent-operations.js";
 import type {
@@ -42,20 +43,28 @@ import type {
 import { Deterministic } from "./deterministic.js";
 import { MockAgent } from "./mock-agent.js";
 import {
+  type AgencyNodeMetadata,
   checkPolicy,
+  context,
   type NodeRegistration,
-  nodeInputs,
   nodePolicies,
   registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
 import { TuiTracer } from "./tui-tracer.js";
 
-/** The step-less nested-graph branch of {@link AgenticNode}. */
-type NestedNode<N, T> = Extract<
-  AgenticNode<N, T>,
-  { readonly state: JuncoGraph<N, T>; readonly step?: never }
->;
+type NestedContext<N, T> = SchedulerContext<Agentic<N, T>, N, T, never, JuncoGraph<N, T>>;
+type NestedNode<N, T> = Extract<AgenticNode<N, T>, { readonly state: NestedContext<N, T>; readonly step?: never }>;
+
+function isNestedContext<N, T>(value: unknown): value is NestedContext<N, T> {
+  return typeof value === "object" && value !== null &&
+    "graph" in value && value.graph instanceof JuncoGraph &&
+    "scheduler" in value && typeof value.scheduler === "function" &&
+    "step" in value && typeof value.step === "function";
+}
+
+/** Identity-only lifetime claims; no graph, policy or payload registry. */
+const claimedPorts = new WeakSet<object>();
 
 /** A complete spec as the native graph registers it, with this graph's policy and contract. */
 type CompleteNode<N, T> = NodeSpec<Agentic<N, T>, N, T> & {
@@ -63,20 +72,10 @@ type CompleteNode<N, T> = NodeSpec<Agentic<N, T>, N, T> & {
   readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
 
-/**
- * Internal entrypoint of an agency scheduler's abort and close callbacks: abort or close this
- * graph's members, except its already-aborting or -closing scheduler. Not exported from the package
- * root.
- */
-export const cascadeMembers: unique symbol = Symbol(
-  "JuncoGraph.cascadeMembers",
-);
-
-/** One recursive abort or close operation, recorded on every graph it visited. */
+/** Resource operations can be awaited inside a drive without joining that drive's own gate. */
 type Cascade = {
   readonly promise: Promise<void>;
-  /** The scheduler whose own lifecycle callback started this cascade. */
-  readonly excluded: PiScheduler<never, never> | undefined;
+  readonly joined: Promise<void>;
 };
 
 /** A prompt agent or coroutine a cascade operates on directly. */
@@ -93,306 +92,206 @@ const FULLNESS_THRESHOLD = 0.4;
 /** One hold on a collection, released once. */
 type Hold = { close(): Promise<void> };
 
-/**
- * A dataflow graph of {@link Agentic} node states that owns its members' lifecycle.
- *
- * Registration, scheduling, inspection and results are the native {@link DataflowGraph}'s. On top,
- * the graph keeps an abort signal that every `step`/`run` observes automatically, and recursive
- * {@link abort}/{@link close} cascades over its members: nested graphs, their `PiScheduler`s,
- * prompt agents and deterministic coroutines. Cancellation inside a running body stays cooperative.
- *
- * The graph has a `policy` and may borrow a `collection`, holding its own lease from construction
- * until close. A close first settles every member's close, then releases the visited graphs'
- * leases and owned creator holds.
- */
+/** A passive native work graph owning its agents, child graphs and coroutines. */
 export class JuncoGraph<
   N = AgenticInput,
   T = AssistantMessage,
-  EH = unknown,
-  Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
-> extends DataflowGraph<Agentic<N, T>, N, T, EH, Q> {
-  /** Graphs inside the synchronous dispatch of an abort or close cascade: their scheduler callbacks no-op. */
-  static readonly #dispatch: Record<Kind, ReadonlySet<object> | undefined> = {
-    abort: undefined,
-    close: undefined,
-  };
+  EH = never,
+> extends DataflowGraph<Agentic<N, T>, N, T, EH> {
 
   #controller = new AbortController();
   /** Default run options, replaced with the controller. */
   #options: DataflowRunOptions = { signal: this.#controller.signal };
-  #evaluating = false;
   #abort: Cascade | undefined;
   /** Terminal once set, even if it failed. */
   #close: Cascade | undefined;
-  /** A root `close()` joining a close its own scheduler started. */
-  #rootClose: Promise<void> | undefined;
   #collection: ToolCollection | undefined;
   #lease: Hold | undefined;
   /** The creator hold this graph owns, when {@link create} built it. */
   #owned: Hold | undefined;
+  #observation: DataflowObservation<Agentic<N, T>, N, T> | undefined;
 
-  /** The execution observer every `run()`/`step()` of this graph reports to. */
+  readonly source: Source<N, T>;
+  readonly sink: Sink<N, T>;
+
+  /** The execution observer, shared by native work and agency members. */
   declare readonly tracer: DataflowTracer;
-  /** Authorization policy of this graph; equals `collection.policy` when one is bound. */
   readonly policy: ToolCollection["policy"];
 
-  /**
-   * @param tracer Required execution observer; `TuiTracer.shared()` selects the shared default.
-   * @param policy Required authorization policy of this graph.
-   * @param collection Borrowed; the graph holds its own lease until close and never closes it.
-   * @throws {TypeError} when `tracer` or `policy` is missing, or `collection` has another policy
-   *   (policies compare by identity).
-   */
   constructor(
-    scheduler: Q,
+    source: Source<N, T>,
+    sink: Sink<NoInfer<N>, NoInfer<T>>,
     window: Width,
     threads: Width,
-    tracer: DataflowTracer,
+    tracer: DataflowTracer | undefined,
     policy: ToolCollection["policy"],
     collection?: ToolCollection,
   ) {
-    if (tracer == null) {
-      throw new TypeError("JuncoGraph requires a tracer");
-    }
+    if (!(source instanceof Source) || !(sink instanceof Sink))
+      throw new TypeError("JuncoGraph requires Source and Sink ports");
+    if (typeof source.id !== "string" || typeof sink.id !== "string")
+      throw new TypeError("Graph port IDs must be strings");
+    if (source.id === sink.id)
+      throw new DataflowDefinitionError("Graph source and sink must have distinct IDs");
+    if (claimedPorts.has(source) || claimedPorts.has(sink))
+      throw new TypeError("Graph ports are already owned by a JuncoGraph");
     checkPolicy(policy, collection);
-    super(scheduler, window, threads, tracer);
+    super(window, threads, tracer ?? TuiTracer.shared());
     this.policy = policy;
+    this.source = source;
+    this.sink = sink;
+    this.addNode(source);
+    this.addNode(sink);
     this.#collection = collection;
     this.#lease = collection?.lease();
+    claimedPorts.add(source);
+    claimedPorts.add(sink);
   }
 
-  /**
-   * Open one collection under `options` (policy default `LockPolicy`), then build a graph whose
-   * members all use it. `build`
-   * receives the collection borrowed: pass it to every agent factory, scheduler, coroutine and
-   * child-graph constructor, but never close it; members take their own leases. Every real agent
-   * and scheduler of the returned graphs must use this collection, and the root its policy; the
-   * root is bound to it if unbound and owns the creator hold, released by its close.
-   *
-   * A thrown `build` releases the creator hold. A rejected graph is closed, then the hold
-   * released; cleanup failures aggregate with the original.
-   *
-   * @throws {TypeError} for a member bound to another collection or policy.
-   */
-  static async create<N, T, EH, Q extends DataflowScheduler<N, T>>(
+  override observe(): DataflowObservation<Agentic<N, T>, N, T> {
+    const base = super.observe();
+    const version = base.version + this.source.revision;
+    if (this.#observation?.version === version) return this.#observation;
+    this.#observation = Object.freeze({ ...base, version });
+    return this.#observation;
+  }
+
+  override addEdge(from: NodeIdType, to: NodeIdType, edge: Edge<N, T>): this {
+    if (to === this.source.id)
+      throw new DataflowDefinitionError("Graph source cannot have inbound edges");
+    if (from === this.sink.id)
+      throw new DataflowDefinitionError("Graph sink cannot have outbound edges");
+    if (from === this.source.id && E.isRight(edge.transport))
+      throw new DataflowDefinitionError("Graph source cannot produce value edges");
+    return super.addEdge(from, to, edge);
+  }
+
+  /** Build and return the caller's context, adopting its graph into one owned collection. */
+  static async create<N, T, EH, C = AgencyNodeMetadata>(
     cwd: string,
     options: ToolCollectionOptions,
-    build: (
-      collection: ToolCollection,
-    ) => JuncoGraph<N, T, EH, Q> | Promise<JuncoGraph<N, T, EH, Q>>,
-  ): Promise<JuncoGraph<N, T, EH, Q>> {
+    build: (collection: ToolCollection) =>
+      SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>> |
+      Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>,
+  ): Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>> {
     const collection = await ToolCollection.create(cwd, options);
     const failures: unknown[] = [];
-    let graph: JuncoGraph<N, T, EH, Q> | undefined;
+    let execution: SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>> | undefined;
     try {
-      graph = await build(collection);
-      graph.#adopt(collection);
-      return graph;
+      execution = await build(collection);
+      execution.graph.#adopt(collection);
+      return execution;
     } catch (error) {
       failures.push(error);
     }
-    try {
-      await graph?.close();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await collection.close();
-    } catch (error) {
-      failures.push(error);
-    }
+    try { await execution?.graph.close(); } catch (error) { failures.push(error); }
+    try { await collection.close(); } catch (error) { failures.push(error); }
     if (failures.length === 1) throw failures[0];
     throw new AggregateError(failures, "Graph construction failed");
   }
 
-  /**
-   * A graph that runs every available node in each window: junco-scheduler's parallel policy with
-   * the one-turn window and unbounded threads that policy requires. A running node re-reads its live
-   * inputs with the agency rule, so a delivered result never starves a newer message. `tracer`
-   * defaults to {@link TuiTracer.shared}. `policy` and the borrowed `collection` are the
-   * constructor's.
-   */
-  static parallel<N = AgenticInput, T = AssistantMessage>(
-    policy: ToolCollection["policy"],
-    tracer: DataflowTracer = TuiTracer.shared(),
-    collection?: ToolCollection,
-  ): JuncoGraph<N, T> {
-    let graph: JuncoGraph<N, T> | undefined;
-    const scheduler = new ParallelScheduler<N, T>();
-    scheduler.resolveInputs = (entry, live) =>
-      nodeInputs(graph?.getNode(entry.id)?.step, live);
-    const constructed = new JuncoGraph<N, T>(
-      scheduler,
-      Width.create(1),
-      UNBOUNDED,
-      tracer,
-      policy,
-      collection,
-    );
-    graph = constructed;
-    return constructed;
+  /** Map work in insertion order, preserving skeleton IDs and allocating fresh transports. */
+  static map<S, L, N = AgenticInput, T = AssistantMessage>(
+    skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
+    f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
+    options: {
+      readonly source: Source<N, T>;
+      readonly sink: Sink<N, T>;
+      readonly policy: ToolCollection["policy"];
+      readonly tracer?: DataflowTracer;
+    },
+  ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>> {
+    const graph = new JuncoGraph(options.source, options.sink, Width.create(1), UNBOUNDED, options.tracer, options.policy);
+    try {
+      const edges = new Map<string, Edge<N, T>>();
+      skeleton.forEachLink((link) => { edges.set(link.id, Edge.message<N, T>(link.id)); });
+      skeleton.forEachNode((node) => {
+        const inputs: TriggerEntry<N, T>[] = [];
+        for (const link of skeleton.getLinks(node.id) ?? [])
+          if (link.toId === node.id) inputs.push(TriggerEntry.on(edges.get(link.id)!));
+        const mapped = f(node.data);
+        if (mapped instanceof JuncoGraph)
+          throw new TypeError("Nested graph node requires a SchedulerContext");
+        const spec = mapped instanceof JuncoAgent || mapped instanceof MockAgent
+          ? { state: mapped, policy: options.policy }
+          : mapped instanceof Deterministic ? { state: mapped } : mapped;
+        graph.addNode({
+          trigger: inputs.length === 0 ? TriggerRule.always<N, T>() : TriggerRule.anyOf(...inputs),
+          ...spec,
+          id: NodeId.create(String(node.id)),
+        } as AgenticNode<N, T>);
+      });
+      skeleton.forEachLink((link) => {
+        graph.addEdge(NodeId.create(String(link.fromId)), NodeId.create(String(link.toId)), edges.get(link.id)!);
+      });
+      return context({ scheduler: parallel(), graph });
+    } catch (error) {
+      claimedPorts.delete(options.source);
+      claimedPorts.delete(options.sink);
+      throw error;
+    }
   }
 
-  /**
-   * A {@link parallel} graph holding `root` and one child per element of `inputs`, built by `child`
-   * in order and wired by {@link appendChildren}. The graph takes the root's registration policy
-   * (a step-less coroutine's or nested graph's own state policy, else the spec's) and borrows no
-   * collection.
-   *
-   * Construction only registers nodes and queues: it never steps a member, sends `inputs` as
-   * messages, or forwards results. Members exchange messages through their own triggers and yields.
-   * Node ids are whatever `addNode` returns, so omitted ids draw the engine's auto ids and a
-   * duplicate explicit id throws its `DataflowDefinitionError`. Any factory or registration error
-   * propagates synchronously; the supplied and already-created members stay caller-owned.
-   */
+  /** Register a root and its paired task children; members remain caller-owned on failure. */
   static spawn<Input, N = AgenticInput, T = AssistantMessage>(
+    source: Source<N, T>,
+    sink: Sink<N, T>,
     root: AgenticNode<N, T>,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
-  ): JuncoGraph<N, T> {
-    const graph = JuncoGraph.parallel<N, T>(JuncoGraph.#nodePolicy(root), tracer);
-    graph.appendChildren(graph.addNode(root), inputs, child);
-    return graph;
-  }
-
-  /**
-   * The policy a spec registers under: a step-less coroutine's or nested graph's own state policy,
-   * which the spec must not supply; otherwise the spec's, which must match a real agent's
-   * collection and any managed state.
-   *
-   * @throws {TypeError} for a supplied managed policy, a missing or malformed policy, or a
-   *   collection or state policy other than the selected one.
-   */
-  static #nodePolicy<N, T>(
-    spec: AgenticNode<N, T> | CompleteNode<N, T>,
-  ): ToolCollection["policy"] {
-    const state = spec.state;
-    let policy: ToolCollection["policy"] | undefined = spec.policy;
-    if (
-      spec.step === undefined &&
-      (state instanceof Deterministic || state instanceof JuncoGraph)
-    ) {
-      if (Object.hasOwn(spec, "policy"))
-        throw new TypeError("Node policy is owned by its state");
-      policy = state.policy;
-    }
-    checkPolicy(
-      policy,
-      state instanceof JuncoAgent ? state.collection : undefined,
-    );
-    if (
-      (state instanceof Deterministic || state instanceof JuncoGraph) &&
-      state.policy !== policy
-    )
-      throw new TypeError("Node policy does not match its state");
-    return policy;
-  }
-
-  /**
-   * A graph driven by a model: a `PiScheduler` whose adapter reads this graph, built by
-   * `PiScheduler.make` when `options.model` is given (requiring `models` and `session`), otherwise
-   * by `PiScheduler.opus` (GitHub Copilot `claude-opus-5.5` through Pi's saved login). The graph
-   * is constructed with `policy`, `window`/`threads` (default `UNBOUNDED`), `tracer` (default
-   * {@link TuiTracer.shared}) and the borrowed `collection`, which the scheduler borrows too.
-   * Drive it through `graph.scheduler`.
-   *
-   * The agency supplies the scheduler's adapter:
-   * - each available node is described by its native `description`, plus a prompt agent's status
-   *   and latest pause reasons, and nothing about any other node;
-   * - an `allOf` node reads everything or nothing, an `anyOf` node reads its first satisfied edge
-   *   whose value it has not already received;
-   * - abort and close cascade to the graph's members, through the graph's own lifecycle.
-   *
-   * When graph construction fails after the scheduler was acquired, the scheduler is returned
-   * (closing a transferred session) and the construction error rethrown; a failed return
-   * aggregates both as `AggregateError("Graph construction failed")`.
-   */
-  static async pi<
-    S extends Skill = Skill,
-    P extends PromptTemplate = PromptTemplate,
-    N = AgenticInput,
-    T = AssistantMessage,
-  >(
-    options: Omit<PiSchedulerOptions<N, T, S, P>, "adapter"> & {
-      readonly policy: ToolCollection["policy"];
-      readonly tracer?: DataflowTracer;
-      readonly window?: Width;
-      readonly threads?: Width;
-    },
-  ): Promise<JuncoGraph<N, T, unknown, PiScheduler<N, T, S, P>>> {
-    const { policy, tracer, window, threads, ...piOptions } = options;
-    let graph: JuncoGraph<N, T, unknown, PiScheduler<N, T, S, P>> | undefined;
-    const adapter: PiSchedulerAdapter<N, T> = {
-      beforeSchedule: () => {
-        if (graph === undefined)
-          throw new JuncoAgentError(
-            "invalid_state",
-            "Agency graph is not constructed",
-          );
-      },
-      describeNode: (id: NodeIdType) => {
-        const node = graph?.getNode(id);
-        if (node === undefined) return undefined;
-        const nodePolicy = nodePolicies.get(node.step);
-        const details = {
-          ...(node.description === undefined
-            ? {}
-            : { description: node.description }),
-          ...(nodePolicy?.agent === undefined
-            ? {}
-            : { agentStatus: nodePolicy.agent.status }),
-          ...(nodePolicy?.lastYield === undefined
-            ? {}
-            : { lastYield: nodePolicy.lastYield }),
-        };
-        return Object.keys(details).length === 0 ? undefined : details;
-      },
-      readInputs: (id, candidate) =>
-        nodeInputs(graph?.getNode(id)?.step, candidate),
-      abortDependents: () => graph?.[cascadeMembers]("abort"),
-      closeDependents: () => graph?.[cascadeMembers]("close"),
-    };
-    // `adapter` last, so no caller-supplied adapter can replace the agency's callbacks.
-    const full = { ...piOptions, adapter };
-    const scheduler =
-      piOptions.model !== undefined
-        ? await PiScheduler.make<N, T, S, P>(full)
-        : await PiScheduler.opus<N, T, S, P>(full);
+  ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>> {
+    const graph = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, JuncoGraph.#nodePolicy(root));
     try {
-      graph = new JuncoGraph<N, T, unknown, PiScheduler<N, T, S, P>>(
-        scheduler,
-        window ?? UNBOUNDED,
-        threads ?? UNBOUNDED,
-        tracer === undefined ? TuiTracer.shared() : tracer,
-        policy,
-        piOptions.collection,
-      );
+      graph.appendChildren(graph.addNode(root), inputs, child);
+      return context({ scheduler: parallel(), graph });
     } catch (error) {
-      try {
-        await scheduler.return();
-      } catch (cleanup) {
-        throw new AggregateError(
-          [error, cleanup],
-          "Graph construction failed",
-          {
-            cause: error,
-          },
-        );
-      }
+      claimedPorts.delete(source);
+      claimedPorts.delete(sink);
       throw error;
     }
-    return graph;
+  }
+
+  /** Resolve managed-state authorization without binding a policy to any graph. */
+  static #nodePolicy<N, T>(
+    spec: AgenticNode<N, T> | CompleteNode<N, T>,
+    graphPolicy?: ToolCollection["policy"],
+  ): ToolCollection["policy"] {
+    const state = spec.state;
+    const nested = isNestedContext<N, T>(state) ? state : undefined;
+    if (state instanceof JuncoGraph || nested !== undefined) {
+      if (Object.hasOwn(spec, "result") || Object.hasOwn(spec, "receive") || Object.hasOwn(spec, "afterStep"))
+        throw new TypeError("Nested graph nodes use source and sink, not result, receive or afterStep");
+      if (spec.step === undefined && nested === undefined)
+        throw new TypeError("Nested graph node requires a SchedulerContext");
+      if (nested !== undefined && spec.step !== undefined)
+        throw new TypeError("Nested graph nodes must not supply a step");
+    }
+    const child = nested?.graph;
+    const managed = state instanceof Deterministic ? state : child;
+    let policy = spec.policy;
+    if ((state instanceof Source || state instanceof Sink) && spec.step === state.step && graphPolicy !== undefined) {
+      if (policy !== undefined && policy !== graphPolicy)
+        throw new TypeError("Builtin port policy does not match its graph");
+      policy = graphPolicy;
+    }
+    if (spec.step === undefined && managed !== undefined) {
+      if (Object.hasOwn(spec, "policy")) throw new TypeError("Node policy is owned by its state");
+      policy = managed.policy;
+    }
+    checkPolicy(policy, state instanceof JuncoAgent ? state.collection : undefined);
+    if ((state instanceof Deterministic || state instanceof JuncoGraph) && state.policy !== policy)
+      throw new TypeError("Node policy does not match its state");
+    return policy;
   }
 
   /**
    * Request compaction of the direct prompt-agent node states of `graph` that `policy` selects.
    * Selection is a snapshot taken when called; each selected agent gets one queued `compact()`
    * request, all dispatched without waiting for one another. An agent with an admitted run compacts
-   * only after that run ends, so keep driving the graph while awaiting the compaction. It never runs
-   * the graph, consumes messages or results, or descends into child graphs; nested graphs and
-   * deterministic coroutines are skipped, and a scheduler is compacted only when it is itself a
-   * node. `graph` may be any native graph of Agentic states.
+   * only after that run ends, so keep driving its context while awaiting compaction. It never runs
+   * the graph, consumes messages or results, or descends into child graphs; nested graphs, ports
+   * and deterministic coroutines are skipped. `graph` may be any native graph of Agentic states.
    *
    * @throws {JuncoAgentError} `invalid_argument` for an unknown policy; `invalid_state` when a
    *   fullness policy cannot measure a candidate's context window.
@@ -402,9 +301,8 @@ export class JuncoGraph<
     N,
     T,
     EH,
-    Q extends DataflowScheduler<N, T>,
   >(
-    graph: DataflowGraph<A, N, T, EH, Q>,
+    graph: DataflowGraph<A, N, T, EH>,
     policy: CompactionPolicy,
   ): Promise<void> {
     let availableOnly: boolean;
@@ -495,31 +393,28 @@ export class JuncoGraph<
     return issueLog;
   }
 
-  /**
-   * Register a node as natively, recording for that registration this graph's tracer, its
-   * outgoing routes and topology (what `send` and `info` reach) and the spec's receiver contract.
-   * A spec with a `step` registers unchanged under its own policy. Without one, this registration
-   * builds the body: a {@link Deterministic} coroutine runs as its own `step`; a nested graph gets
-   * {@link JuncoGraph.#graphNode}'s driver (both under their state's own policy); a prompt agent its
-   * own driver under the spec's policy, which demands the agent's staged prompt.
-   *
-   * @throws {TypeError} when a step-less coroutine or nested graph spec supplies a policy, when a
-   * required policy is missing, when a real agent's collection, or an explicit-step coroutine's or
-   * child graph's policy, is not the spec's policy, when a step-less nested graph names no
-   * `result`, or when a spec without a step holds no supported state.
-   * @throws {DataflowDefinitionError} when a nested graph's `result` names no registered child.
-   */
+  /** Register native work, preserving its actual state and this registration's sender identity. */
   override addNode(spec: AgenticNode<N, T>): NodeIdType;
   // The complete-spec branch alone keeps this override compatible with the native signature.
   override addNode(spec: CompleteNode<N, T>): NodeIdType;
   override addNode(spec: AgenticNode<N, T>): NodeIdType {
     const state = spec.state;
-    const policy = JuncoGraph.#nodePolicy(spec);
+    const nested = isNestedContext<N, T>(state);
+    const policy = JuncoGraph.#nodePolicy(spec, this.policy);
     let complete: CompleteNode<N, T>;
-    if (spec.step !== undefined) complete = spec as CompleteNode<N, T>;
-    else if (state instanceof Deterministic)
-      complete = { ...spec, policy, step: state.step };
-    else if (state instanceof JuncoGraph)
+    if (spec.step !== undefined) {
+      const port = state instanceof Source || state instanceof Sink ? state : undefined;
+      let contract = spec.contract;
+      if (port !== undefined && spec.step === port.step && contract === undefined) {
+        const expect = port.description || (port instanceof Source
+          ? "Externally queued graph input."
+          : "Graph output consumes final work results and publishes messages.");
+        contract = () => ({ expect });
+      }
+      complete = { ...spec, policy, ...(contract === undefined ? {} : { contract }) };
+    } else if (state instanceof Deterministic)
+      complete = { ...spec, policy, state, step: state.step };
+    else if (nested)
       complete = this.#graphNode(spec as NestedNode<N, T>, policy);
     else if (state instanceof JuncoAgent || state instanceof MockAgent)
       // The step-less agent branch exists only on chat wires, where N/T are AgenticInput/AssistantMessage.
@@ -535,6 +430,10 @@ export class JuncoGraph<
       tracer: this.tracer,
       get signal() {
         return current();
+      },
+      assertSend: (edgeId) => {
+        this.signal.throwIfAborted();
+        this.messageQueue(id, edgeId);
       },
       send: (message) => {
         this.signal.throwIfAborted();
@@ -567,132 +466,47 @@ export class JuncoGraph<
     }
   }
 
-  /**
-   * A nested-graph node whose state is the child graph itself and whose result is its selected
-   * child node's.
-   *
-   * The body first yields `[]`. Each later activation calls `receive`, then advances the child once:
-   * a policy-scheduled child takes one `step()`, a `PiScheduler` child one `scheduler.next()`. After
-   * each successful advance it calls `afterStep`, then completes with the selected result once a
-   * policy child is quiescent or a Pi child settled normally with nothing available; otherwise it
-   * yields `[]` and stays resumable. Cancellation through the child's signal captured for the
-   * activation wins over any result. Unless `is_available` replaces it, the node is available once
-   * started or whenever its trigger fires.
-   */
-  #graphNode(
-    spec: NestedNode<N, T>,
-    policy: ToolCollection["policy"],
-  ): CompleteNode<N, T> {
-    const { state: graph, result, receive, afterStep, ...options } = spec;
-    if (result === undefined) {
-      throw new TypeError("A nested graph node requires a result");
-    }
-    if (graph.getNode(result) === undefined) {
-      throw new DataflowDefinitionError(
-        `Unknown graph result node "${result}"`,
-      );
-    }
+  /** Prime without input consumption; each resume admits input and advances one child decision. */
+  #graphNode(spec: NestedNode<N, T>, policy: ToolCollection["policy"]): CompleteNode<N, T> {
+    const { state: execution, ...options } = spec;
+    const graph = execution.graph;
+    const parent = this;
     const seenValues = new Set<EdgeIdType>();
     let started = false;
-
-    /** The selected child's retained result; a nested graph that stopped without one is invalid. */
-    const selected = (): T => {
-      const retained = graph.result(result);
-      if (O.isSome(retained)) return retained.value;
-      throw new JuncoAgentError(
-        "invalid_state",
-        "Nested graph stopped before producing its selected result",
-      );
-    };
-
-    const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<
-      N,
-      T
-    > {
+    const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<N, T> {
       let view = yield [];
       started = true;
       while (true) {
         const signal = graph.signal;
         signal.throwIfAborted();
-        await receive?.({
+        graph.source.enqueue({
           messages: view.messages,
           values: unseenValues(view.values, seenValues),
         });
         signal.throwIfAborted();
-
-        const scheduler: unknown = graph.scheduler;
-        let settled = false;
-        if (scheduler instanceof PiScheduler) {
-          if (scheduler.status === "idle") {
-            const retained = graph.result(result);
-            if (graph.available().size === 0 && O.isSome(retained))
-              return retained.value;
-            throw new JuncoAgentError(
-              "invalid_state",
-              "Nested graph scheduler requires a staged prompt",
-            );
-          }
-          let advanced: IteratorResult<AgenticStep, void>;
-          try {
-            advanced = await scheduler.next();
-          } catch (error) {
-            throw cancellation(signal, error);
-          }
+        if (graph.available().size > 0) {
+          try { await execution.step({ signal }); }
+          catch (error) { throw cancellation(signal, error); }
           signal.throwIfAborted();
-          if (advanced.done === true) {
-            throw new JuncoAgentError(
-              "closed",
-              "Nested graph scheduler closed before settlement",
-            );
-          }
-          const boundary = advanced.value;
-          if (boundary.kind === "failed")
-            throw cancellation(signal, boundary.error);
-          if (boundary.kind === "settled") {
-            if (boundary.message.stopReason !== "stop") {
-              throw new JuncoAgentError(
-                "invalid_state",
-                "Nested graph scheduler did not finish normally",
-              );
-            }
-            settled = true;
-          }
-        } else {
-          if (graph.available().size === 0) return selected();
-          try {
-            await graph.step({ signal });
-          } catch (error) {
-            throw cancellation(signal, error);
-          }
-          signal.throwIfAborted();
-          settled = true;
         }
-
-        await afterStep?.();
         signal.throwIfAborted();
-
-        if (settled) {
-          const quiescent = graph.available().size === 0;
-          if (scheduler instanceof PiScheduler && !quiescent) {
-            throw new JuncoAgentError(
-              "invalid_state",
-              "PiScheduler finished while graph work is available",
-            );
-          }
-          if (quiescent) return selected();
+        graph.sink.drain((message) => parent.emit(this.id, message));
+        signal.throwIfAborted();
+        if (graph.available().size === 0) {
+          const retained = graph.result(graph.sink.id);
+          if (O.isSome(retained)) return retained.value;
+          throw new JuncoAgentError("invalid_state", "Nested graph quiesced without a sink result");
         }
         view = yield [];
       }
     };
     nodePolicies.set(step, { seenValues });
-
     return {
       ...options,
       policy,
       state: graph,
       step,
-      is_available:
-        options.is_available ?? ((_view, triggered) => started || triggered),
+      is_available: options.is_available ?? ((_view, triggered) => started || triggered),
     };
   }
 
@@ -755,7 +569,6 @@ export class JuncoGraph<
       if (member instanceof JuncoGraph) {
         if (seen.has(member)) continue;
         seen.add(member);
-        stack.push(member.scheduler);
         member.forEachNode((_, node) => stack.push(node.state));
       }
       if (
@@ -774,124 +587,66 @@ export class JuncoGraph<
     this.#owned = collection;
   }
 
-  /**
-   * One window, observing {@link signal}. Caller cancellation recursively aborts running members
-   * and joins their cleanup; it does not close the graph.
-   */
-  override step(
+  /** Keep caller cancellation attached through native planning and outstanding-work draining. */
+  override async evaluate<R>(
+    operation: (execute: DataflowExecution<N, T>, signal?: AbortSignal) => R | Promise<R>,
     options?: DataflowRunOptions,
-  ): Promise<ReadonlyMap<NodeIdType, T>> {
-    return this.#evaluate(false, options);
+  ): Promise<R> {
+    if (this.#close !== undefined) {
+      this.signal.throwIfAborted();
+      throw closedGraph();
+    }
+    const caller = options?.signal;
+    const runOptions = this.#runOptions(options);
+    const signal = runOptions.signal;
+    let aborting: Promise<unknown> | undefined;
+    let abortFailed = false;
+    const interrupt = () => {
+      if (this.#abort !== undefined || this.#close !== undefined) return;
+      // joined also waits on the active native gate; cancellation must await only resources here.
+      aborting = this.#cascade("abort", caller?.reason).promise.catch((error: unknown) => {
+        abortFailed = true;
+        return error;
+      });
+    };
+    try {
+      const result = await super.evaluate((execute, signal) => {
+        caller?.throwIfAborted();
+        if (caller !== undefined && caller !== this.signal)
+          caller.addEventListener("abort", interrupt, { once: true });
+        return operation(execute, signal);
+      }, runOptions);
+      signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      caller?.removeEventListener("abort", interrupt);
+      const abortError = await aborting;
+      const failure = signal === undefined ? error : cancellation(signal, error);
+      if (abortFailed)
+        throw new AggregateError([failure, abortError], "Graph evaluation and abort failed");
+      throw failure;
+    } finally {
+      caller?.removeEventListener("abort", interrupt);
+    }
   }
 
-  /** Windows until quiescent, with the same recursive caller cancellation as {@link step}. */
-  override run(
-    options?: DataflowRunOptions,
-  ): Promise<ReadonlyMap<NodeIdType, T>> {
-    return this.#evaluate(true, options);
-  }
-
-  /**
-   * Abort every member, recursively, with one `reason`: graph signals and coroutines receive it,
-   * agents and schedulers their native `abort()`. Settles when every member's abort settles, then
-   * gives this graph a fresh signal. Joins an abort already in progress.
-   *
-   * @throws {JuncoAgentError} `closed` once {@link close} has started.
-   */
+  /** Abort resources and join active planning/work before replacing the graph signals. */
   abort(
     reason: unknown = new DOMException("Graph aborted", "AbortError"),
   ): Promise<void> {
     if (this.#close !== undefined) return Promise.reject(closedGraph());
-    return this.#abortJoin() ?? this.#cascade("abort", reason, undefined);
+    return (this.#abort ?? this.#cascade("abort", reason)).joined;
   }
 
-  /**
-   * Close this graph and every member, recursively and terminally: agents, schedulers and coroutines
-   * through their `Symbol.asyncDispose`, so a subclass's own cleanup is joined. Repeated calls join
-   * the same close, including its failure. Results stay readable; new drives reject.
-   */
+  /** Close resources, join active evaluations, then release owned and borrowed collection holds. */
   close(): Promise<void> {
-    return this.#closeJoin() ?? this.#cascade("close", undefined, undefined);
+    return (this.#close ?? this.#cascade("close", undefined)).joined;
   }
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
   }
 
-  /** Abort or close members except this graph's scheduler, which is already aborting or closing. */
-  [cascadeMembers](kind: Kind): Promise<void> | undefined {
-    if (JuncoGraph.#dispatch[kind]?.has(this) === true) return undefined;
-    if (kind === "close")
-      return (
-        this.#close?.promise ??
-        this.#cascade("close", undefined, this.#piScheduler())
-      );
-    if (this.#close !== undefined) return Promise.reject(closedGraph());
-    return (
-      this.#abort?.promise ??
-      this.#cascade(
-        "abort",
-        new DOMException("Graph aborted", "AbortError"),
-        this.#piScheduler(),
-      )
-    );
-  }
-
-  #piScheduler(): PiScheduler<never, never> | undefined {
-    const scheduler: unknown = this.scheduler;
-    return scheduler instanceof PiScheduler ? scheduler : undefined;
-  }
-
-  /** Bind caller cancellation only while this single-flight evaluation is active. */
-  async #evaluate(
-    untilQuiescent: boolean,
-    options: DataflowRunOptions | undefined,
-  ): Promise<ReadonlyMap<NodeIdType, T>> {
-    if (this.#evaluating)
-      throw new DataflowDefinitionError(
-        "Dataflow execution is already in flight",
-      );
-    this.#evaluating = true;
-    const caller = options?.signal;
-    const runOptions = this.#runOptions(options);
-    let aborting: Promise<unknown> | undefined;
-    let abortFailed = false;
-    const interrupt = () => {
-      // A lifecycle cascade already owns these members; joining it here can wait on this drive.
-      if (this.#abort !== undefined || this.#close !== undefined) return;
-      // Pi windows run inside their scheduler's tool: never join that scheduler from its own drive.
-      aborting = this.#cascade(
-        "abort",
-        caller?.reason,
-        this.#piScheduler(),
-      ).catch((error: unknown) => {
-        abortFailed = true;
-        return error;
-      });
-    };
-    try {
-      caller?.throwIfAborted();
-      if (caller !== undefined && caller !== this.signal)
-        caller.addEventListener("abort", interrupt, { once: true });
-      const results = await (untilQuiescent
-        ? super.run(runOptions)
-        : super.step(runOptions));
-      caller?.throwIfAborted();
-      return results;
-    } catch (error) {
-      caller?.removeEventListener("abort", interrupt);
-      const abortError = await aborting;
-      if (abortFailed)
-        throw new AggregateError(
-          [error, abortError],
-          "Graph evaluation and abort failed",
-        );
-      throw error;
-    } finally {
-      caller?.removeEventListener("abort", interrupt);
-      this.#evaluating = false;
-    }
-  }
 
   #runOptions(options: DataflowRunOptions | undefined): DataflowRunOptions {
     const own = this.#controller.signal;
@@ -907,164 +662,92 @@ export class JuncoGraph<
     this.#options = { signal: controller.signal };
   }
 
-  /** How a caller joins this graph's abort in progress, if any. */
-  #abortJoin(): Promise<void> | undefined {
-    const current = this.#abort;
-    if (current === undefined) return undefined;
-    const excluded = current.excluded;
-    if (excluded === undefined) return current.promise;
-    // A callback-origin abort: join its members and request the scheduler too.
-    return settleAll<() => unknown>(
-      [() => current.promise, () => excluded.abort()],
-      (request) => request(),
-      "Graph abort failed",
-    );
-  }
-
-  /** How a caller joins this graph's close, if one has started. */
-  #closeJoin(): Promise<void> | undefined {
-    const current = this.#close;
-    if (current === undefined) return undefined;
-    const excluded = current.excluded;
-    if (excluded === undefined) return current.promise;
-    // One microtask later: a callback-origin close starts before the scheduler caches its own close.
-    this.#rootClose ??= Promise.resolve().then(() =>
-      excluded[Symbol.asyncDispose](),
-    );
-    return this.#rootClose;
-  }
-
-  /**
-   * Snapshot membership, record the cascade on every newly visited graph, start every resource
-   * operation synchronously (each Pi ancestor before its descendants), then signal the visited
-   * graphs. `excluded` is the scheduler whose callback started this cascade.
-   */
-  #cascade(
-    kind: Kind,
-    reason: unknown,
-    excluded: PiScheduler<never, never> | undefined,
-  ): Promise<void> {
-    const graphs: JuncoGraph<N, T, unknown, DataflowScheduler<N, T>>[] = [];
+  /** Iterative native-state traversal keeps shared and cyclic graph ownership stack-safe. */
+  #cascade(kind: Kind, reason: unknown): Cascade {
+    const graphs: JuncoGraph<N, T, never>[] = [];
     const requests: (() => unknown)[] = [];
+    const gates = new Set<Promise<void>>();
     const seenGraphs = new Set<object>();
-    const seenResources = new Set<object>(
-      excluded === undefined ? [] : [excluded],
-    );
+    const seenResources = new Set<object>();
     const joined = new Set<Promise<void>>();
     const resource = (member: Resource<N, T>): void => {
       if (seenResources.has(member)) return;
       seenResources.add(member);
-      if (kind === "close") {
-        requests.push(() => member[Symbol.asyncDispose]());
-      } else if (member instanceof Deterministic) {
-        requests.push(() => member.abort(reason));
-      } else if (member.status !== "closed") {
-        requests.push(() => member.abort());
-      }
+      if (kind === "close") requests.push(() => member[Symbol.asyncDispose]());
+      else if (member instanceof Deterministic) requests.push(() => member.abort(reason));
+      else if (member.status !== "closed") requests.push(() => member.abort());
     };
-    const stack: JuncoGraph<N, T, unknown, DataflowScheduler<N, T>>[] = [this];
+    const stack: JuncoGraph<N, T, never>[] = [this];
     while (stack.length > 0) {
       const graph = stack.pop()!;
       if (seenGraphs.has(graph)) continue;
       seenGraphs.add(graph);
       if (graph !== this) {
         if (kind === "abort" && graph.#close !== undefined) continue;
-        const join = kind === "abort" ? graph.#abortJoin() : graph.#closeJoin();
-        if (join !== undefined) {
-          if (!joined.has(join)) {
-            joined.add(join);
-            requests.push(() => join);
+        const current = kind === "abort" ? graph.#abort : graph.#close;
+        if (current !== undefined) {
+          if (!joined.has(current.joined)) {
+            joined.add(current.joined);
+            requests.push(() => current.joined);
           }
           continue;
         }
       }
       graphs.push(graph);
-      const scheduler = graph.#piScheduler();
-      if (scheduler !== undefined) resource(scheduler);
-      const children: JuncoGraph<N, T, unknown, DataflowScheduler<N, T>>[] = [];
+      const active = graph.activeEvaluation;
+      if (active !== undefined) gates.add(active);
+      const children: JuncoGraph<N, T, never>[] = [];
       graph.forEachNode((_, node) => {
         const state = node.state;
-        // A failed task's report already carries this state's settled teardown.
-        if (
-          kind === "close" &&
-          nodePolicies.get(node.step)?.closedTaskState === state
-        )
-          return;
+        if (kind === "close" && nodePolicies.get(node.step)?.closedTaskState === state) return;
         if (state instanceof JuncoGraph) children.push(state);
-        else resource(state);
+        else if (state instanceof JuncoAgent || state instanceof MockAgent || state instanceof Deterministic)
+          resource(state);
       });
-      for (let index = children.length - 1; index >= 0; index--)
-        stack.push(children[index]!);
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
     }
 
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    const cascade: Cascade = { promise, excluded };
+    const operations = Promise.withResolvers<void>();
+    const completion = Promise.withResolvers<void>();
+    const cascade: Cascade = { promise: operations.promise, joined: completion.promise };
+    // Internal cancellation awaits promise; keep joined observed without redelivering run errors.
+    void cascade.joined.catch(() => {});
     for (const graph of graphs) {
       if (kind === "abort") graph.#abort = cascade;
       else graph.#close = cascade;
     }
-
-    const previous = JuncoGraph.#dispatch[kind];
-    JuncoGraph.#dispatch[kind] = new Set(graphs);
-    let settled: Promise<void>;
-    try {
-      settled = settleAll(
-        requests,
-        (request) => request(),
-        kind === "abort" ? "Graph abort failed" : "Graph close failed",
-      );
-      if (kind === "abort") {
-        for (const graph of graphs) graph.#controller.abort(reason);
-      } else {
-        const closed = new DOMException("Graph closed", "AbortError");
-        for (const graph of graphs) {
-          if (graph.#controller.signal.aborted)
-            graph.#replaceController(closed);
-          else graph.#controller.abort(closed);
-        }
+    const message = kind === "abort" ? "Graph abort failed" : "Graph close failed";
+    settleAll(requests, (request) => request(), message).then(operations.resolve, operations.reject);
+    if (kind === "abort") {
+      for (const graph of graphs) graph.#controller.abort(reason);
+    } else {
+      const closed = new DOMException("Graph closed", "AbortError");
+      for (const graph of graphs) {
+        if (graph.#controller.signal.aborted) graph.#replaceController(closed);
+        else graph.#controller.abort(closed);
       }
-    } finally {
-      JuncoGraph.#dispatch[kind] = previous;
     }
-    if (kind === "close") {
-      // Second phase, after every member settled: release the visited graphs' collection holds.
-      const members = settled;
-      settled = (async () => {
-        const failures: unknown[] = [];
-        await members.catch((error: AggregateError) =>
-          failures.push(...error.errors),
-        );
-        const holds = new Set(
-          graphs
-            .flatMap((graph) => [graph.#lease, graph.#owned])
-            .filter((hold) => hold !== undefined),
-        );
-        await settleAll([...holds], (hold) => hold.close(), "").catch(
+    const finish = async (): Promise<void> => {
+      const failures: unknown[] = [];
+      await cascade.promise.catch((error: AggregateError) => failures.push(...error.errors));
+      await settleAll([...gates], (gate) => gate, message).catch(
+        (error: AggregateError) => failures.push(...error.errors),
+      );
+      if (kind === "close") {
+        const holds = new Set(graphs.flatMap((graph) => [graph.#lease, graph.#owned]).filter((hold) => hold !== undefined));
+        await settleAll([...holds], (hold) => hold.close(), message).catch(
           (error: AggregateError) => failures.push(...error.errors),
         );
-        if (failures.length > 0)
-          throw new AggregateError(failures, "Graph close failed");
-      })();
-    }
-
-    const finish = (): void => {
-      if (kind !== "abort") return;
-      for (const graph of graphs) {
-        if (graph.#abort !== cascade) continue;
-        graph.#abort = undefined;
-        if (graph.#close === undefined) graph.#replaceController();
+      } else {
+        for (const graph of graphs) {
+          if (graph.#abort !== cascade) continue;
+          graph.#abort = undefined;
+          if (graph.#close === undefined) graph.#replaceController();
+        }
       }
+      if (failures.length > 0) throw new AggregateError(failures, message);
     };
-    settled.then(
-      () => {
-        finish();
-        resolve();
-      },
-      (error: unknown) => {
-        finish();
-        reject(error);
-      },
-    );
-    return promise;
+    finish().then(completion.resolve, completion.reject);
+    return cascade;
   }
 }

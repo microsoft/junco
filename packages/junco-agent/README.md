@@ -137,6 +137,8 @@ Start `pi`, use `/login`, and select the provider before calling `JuncoAgent.cre
 
 Missing credentials for the selected provider, unusable credentials, or a failed OAuth refresh reject with `JuncoAgentError("invalid_state")` and instructions to run `/login` in Pi. Authentication happens before allocating default sessions or tools; a supplied session is closed on failure. Unknown model IDs reject with `invalid_argument` rather than selecting a fallback model, and so does a `thinkingLevel` the model does not support (checked before credentials) rather than being silently clamped.
 
+After authentication, `create` checks Pi's provider-scoped account availability before allocating sessions or tools. A catalog model filtered out for the saved account rejects with `JuncoAgentError("invalid_argument")` and `Model not available: <provider>/<model>`; a transferred session is closed. Provider-filter exceptions propagate unchanged, not as login errors.
+
 Pass `models: ModelRuntime` to reuse Pi's runtime across agents. For explicitly resolved custom or offline models, `fromResolved` remains the low-level path: its caller supplies the `Models` collection and model and owns authentication setup.
 
 ## Verification

@@ -4,7 +4,7 @@ import { pipe } from "fp-ts/lib/function.js";
 import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -45,7 +45,6 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
 
   const tracer = ExampleTracer.create("cookbook/group-with-coder");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -138,7 +137,8 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
   graph.addEdge(sumByPlayerId, sinkId, totalsEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     assert.deepEqual(results, [
       ["Alice", 33],

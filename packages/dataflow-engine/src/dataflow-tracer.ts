@@ -3,9 +3,9 @@ import type { NodeId } from "./identity.js";
 import type { Message, ParentView } from "./node.js";
 
 /**
- * Pluggable execution observer. {@link DataflowGraph.run} and {@link DataflowGraph.step} call
- * `startRun` once per invocation and report every actual generator activation through the returned
- * handle. `complain` receives complaints recorded on behalf of a node, at any time.
+ * Pluggable execution observer. {@link DataflowGraph.evaluate} calls `startRun` once around the
+ * complete planning/execution scope and reports every actual generator activation through the
+ * returned handle. `complain` receives complaints recorded on behalf of a node, at any time.
  *
  * CONTRACT: every run/step/complain callback is a SYNCHRONOUS observer. It MUST NOT mutate the graph,
  * the views, the messages or the results it receives; anything retained past the callback must be
@@ -14,7 +14,7 @@ import type { Message, ParentView } from "./node.js";
  * asynchronous operation and is caller-owned: the graph never awaits it.
  */
 export interface DataflowTracer {
-  /** Begin observing one `run()`/`step()` invocation, after its re-entry check and before execution. */
+  /** Begin observing one evaluation, after its re-entry check and before planning. */
   startRun<S, N, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
@@ -27,7 +27,7 @@ export interface DataflowTracer {
   flush(): Promise<void>;
 }
 
-/** Observer for one `run()`/`step()` invocation. */
+/** Observer for one evaluation scope. */
 export type DataflowRunTrace<N, T> = {
   /**
    * One generator activation is about to advance. `"prime"` activations receive no view;
@@ -39,7 +39,7 @@ export type DataflowRunTrace<N, T> = {
     inputs: ParentView<N, T> | undefined,
   ): DataflowStepTrace<N, T>;
   /**
-   * The invocation finished: `run()` quiesced, or `step()` completed its (at most one) window.
+   * The evaluation and its admitted concrete work finished.
    * `results` is the graph's cumulative completed-node map.
    */
   end(results: ReadonlyMap<NodeId, T>): void;

@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import type { Graph } from "ngraph.graph";
@@ -14,9 +15,10 @@ import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
 import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
+import { snapshotView } from "./node.js";
+import type { Queue } from "./queue.js";
 import type { Pretty } from "./pretty.js";
 import type {
-  DataflowScheduler,
   InputSchedule,
   NodeAvailability,
   NodeSchedule,
@@ -130,7 +132,7 @@ const viewOf = <N, T>(
   values,
 });
 
-/** Options accepted by {@link DataflowGraph.step} and {@link DataflowGraph.run}. */
+/** Cancellation for one scoped evaluation, including planning and concrete execution. */
 export type DataflowRunOptions = {
   /**
    * Stops the invocation between columns: checked before planning, before each column reads its
@@ -140,25 +142,28 @@ export type DataflowRunOptions = {
   readonly signal?: AbortSignal;
 };
 
-/**
- * An async, generator-driven dataflow graph.
- *
- * Nodes are async generators the runtime resumes; edges carry either a FIFO message queue or a
- * write-once return cell; readiness is decided by a declarative `TriggerRule`; and which nodes run
- * each turn is delegated to `scheduler`, which plans `threads` lanes x `window` turns at a time.
- *
- * Execution is resumable: {@link step} runs at most one planned window and {@link run} runs windows
- * until nothing is available. Both leave node status, generators and queues intact, so calling
- * either again after adding nodes or edges continues the same graph.
- *
- * `Q` preserves the concrete scheduler type through `scheduler`; it defaults to the plain contract.
- */
+export type DataflowObservation<S, N, T> = {
+  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>>;
+  readonly links: readonly (readonly [from: NodeId, to: NodeId, id: EdgeId, kind: "message" | "value"])[];
+  readonly inputs: ReadonlyMap<NodeId, ParentView<N, T>>;
+  readonly results: ReadonlyMap<NodeId, T>;
+  readonly version: number;
+};
+
+export type DataflowExecution<N, T> = (
+  schedule: Schedule,
+  options?: {
+    readonly resolveInputs?: (entry: NodeSchedule, live: NodeAvailability<N, T>) => InputSchedule;
+    readonly onColumn?: (selected: readonly NodeId[]) => void;
+  },
+) => Promise<void>;
+
+/** Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. */
 export class DataflowGraph<
   S,
   N,
   T,
   EH,
-  Q extends DataflowScheduler<N, T> = DataflowScheduler<N, T>,
 > implements Pretty
 {
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
@@ -167,29 +172,17 @@ export class DataflowGraph<
   /** Return value of every finished node, accumulated across runs. */
   readonly #results = new Map<NodeId, T>();
   #nextNodeIndex = 0;
-  #inFlight = false;
+  #evaluation: Promise<void> | undefined;
+  #version = 0;
+  #observation: DataflowObservation<S, N, T> | undefined;
 
-  /**
-   * @param scheduler Plans each window; `create` is invoked here, exactly once, followed by its
-   *   optional `bind` with this graph's candidate view and window driver.
-   * @param window Max turns one lane may hold per plan.
-   * @param threads Max concurrent lanes per plan.
-   * @param tracer Optional execution observer; omitted means untraced. Never flushed by the graph.
-   */
+  /** Execution bounds and optional observer; no scheduler is bound to a graph. */
   constructor(
-    readonly scheduler: Q,
     readonly window: Width,
     readonly threads: Width,
     readonly tracer?: DataflowTracer,
   ) {
     this.#graph = createGraph<Node<S, N, T>, Edge<N, T>>({ multigraph: true });
-    this.scheduler.create(window, threads);
-    this.scheduler.bind?.(
-      () => this.#available(),
-      async (signal) => {
-        await this.step({ signal });
-      },
-    );
   }
 
   /**
@@ -233,6 +226,7 @@ export class DataflowGraph<
     };
 
     this.#graph.addNode(id, node);
+    this.#version++;
     return id;
   }
 
@@ -273,6 +267,7 @@ export class DataflowGraph<
     this.#graph.addLink(from, to, edge);
 
     this.#runtime.get(to)!.inbound.set(edge.id, edge);
+    this.#version++;
     return this;
   }
 
@@ -284,6 +279,27 @@ export class DataflowGraph<
   /** The value `id` returned, or `O.none` if it has not finished. */
   result(id: NodeId): O.Option<T> {
     return this.#results.has(id) ? O.some(this.#results.get(id) as T) : O.none;
+  }
+
+  results(): ReadonlyMap<NodeId, T> {
+    return new Map(this.#results);
+  }
+
+  observe(): DataflowObservation<S, N, T> {
+    if (this.#observation?.version === this.#version) return this.#observation;
+    const nodes = new Map<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>>();
+    const inputs = new Map<NodeId, ParentView<N, T>>();
+    this.forEachNode((id, node) => {
+      nodes.set(id, Object.freeze({ id, status: node.status, state: node.state,
+        ...(node.description === undefined ? {} : { description: node.description }) }));
+      inputs.set(id, snapshotView(this.#runtime.get(id)!.probe));
+    });
+    const links: (readonly [NodeId, NodeId, EdgeId, "message" | "value"])[] = [];
+    this.forEachLink((from, to, edge) => {
+      links.push(Object.freeze([from, to, edge.id, E.isLeft(edge.transport) ? "message" : "value"]));
+    });
+    return this.#observation = Object.freeze({ nodes, inputs, links: Object.freeze(links),
+      results: new Map(this.#results), version: this.#version });
   }
 
   /** Visit every registered node in graph iteration order. */
@@ -423,83 +439,73 @@ export class DataflowGraph<
     return batch;
   }
 
-  /**
-   * Execute at most one scheduler window, then resolve to every finished node's return value.
-   * Nothing available resolves immediately without consulting the scheduler.
-   *
-   * @throws {DataflowDefinitionError} when either `step` or `run` is already in flight, or on any
-   *   schedule or wiring violation.
-   * @throws {DataflowNodeError} wrapping whatever a node body threw.
-   * @throws `options.signal.reason` once the signal is observed aborted between columns.
-   */
-  step(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeId, T>> {
-    return this.#drive(false, options?.signal);
+  protected get activeEvaluation(): Promise<void> | undefined {
+    return this.#evaluation;
   }
 
-  /**
-   * Drive the graph until no node is available, then resolve to every finished node's return value.
-   *
-   * @throws {DataflowDefinitionError} when either `step` or `run` is already in flight, or on any
-   *   schedule or wiring violation.
-   * @throws {DataflowNodeError} wrapping whatever a node body threw.
-   * @throws `options.signal.reason` once the signal is observed aborted between columns.
-   */
-  run(options?: DataflowRunOptions): Promise<ReadonlyMap<NodeId, T>> {
-    return this.#drive(true, options?.signal);
-  }
-
-  /** The single-flight, traced invocation shared by {@link step} and {@link run}. */
-  async #drive(
-    untilQuiescent: boolean,
-    signal: AbortSignal | undefined,
-  ): Promise<ReadonlyMap<NodeId, T>> {
-    if (this.#inFlight)
-      throw new DataflowDefinitionError(
-        "Dataflow execution is already in flight",
+  /** Single-flight lifetime scope encompassing external planning and all admitted work. */
+  async evaluate<R>(
+    operation: (execute: DataflowExecution<N, T>, signal?: AbortSignal) => R | Promise<R>,
+    options?: DataflowRunOptions,
+  ): Promise<R> {
+    if (this.#evaluation !== undefined)
+      throw new DataflowDefinitionError("Dataflow execution is already in flight");
+    const gate = Promise.withResolvers<void>();
+    this.#evaluation = gate.promise;
+    let active = true;
+    let executing = false;
+    let running: Promise<void> | undefined;
+    let observed: Promise<PromiseSettledResult<void>> | undefined;
+    let trace: DataflowRunTrace<N, T> | undefined;
+    const execute: DataflowExecution<N, T> = (schedule, executionOptions) => {
+      if (!active) return Promise.reject(new DataflowDefinitionError("Dataflow evaluation is no longer active"));
+      if (executing)
+        return Promise.reject(new DataflowDefinitionError("Dataflow execution is already in flight"));
+      executing = true;
+      const work = this.#window(schedule, executionOptions, trace, options?.signal);
+      running = work;
+      observed = work.then(
+        () => { executing = false; running = undefined; return { status: "fulfilled", value: undefined }; },
+        reason => { executing = false; running = undefined; return { status: "rejected", reason }; },
       );
-    this.#inFlight = true;
-    let execution: DataflowRunTrace<N, T> | undefined;
+      return work;
+    };
     try {
-      const tracer = this.tracer;
-      if (tracer !== undefined)
-        execution = this.#observe(() => tracer.startRun(this));
-      do {
-        signal?.throwIfAborted();
-        const available = this.#available();
-        if (available.size === 0) break;
-        await this.#window(available, execution, signal);
-      } while (untilQuiescent);
-      const run = execution;
-      if (run !== undefined) this.#observe(() => run.end(this.#results));
-      return this.#results;
+      if (this.tracer !== undefined) trace = this.#observe(() => this.tracer!.startRun(this));
+      options?.signal?.throwIfAborted();
+      let outcome: { ok: true; value: R } | { ok: false; error: unknown };
+      try { outcome = { ok: true, value: await operation(execute, options?.signal) }; }
+      catch (error) { outcome = { ok: false, error }; }
+      active = false;
+      const pending = running === undefined ? undefined : observed;
+      const drained = await pending;
+      if (!outcome.ok) {
+        if (drained?.status === "rejected" && drained.reason !== outcome.error)
+          throw new AggregateError([outcome.error, drained.reason], "Graph evaluation and execution failed");
+        throw outcome.error;
+      }
+      if (drained?.status === "rejected") throw drained.reason;
+      if (trace !== undefined) this.#observe(() => trace!.end(this.#results));
+      return outcome.value;
     } catch (error) {
-      const run = execution;
-      if (run !== undefined) this.#observe(() => run.fail(error));
+      if (trace !== undefined) this.#observe(() => trace!.fail(error));
       throw error;
     } finally {
-      this.#inFlight = false;
+      active = false;
+      this.#evaluation = undefined;
+      gate.resolve();
     }
   }
 
-  /**
-   * Plan one window over `available` and execute it column by column: turn `w` runs index `w` of
-   * every lane concurrently. The whole plan is validated before anything runs.
-   *
-   * Each column first takes one live availability snapshot and keeps only its planned nodes that
-   * are still available, so a node that finished or went idle in an earlier column is skipped
-   * rather than re-advanced. A kept running node's reads come from
-   * {@link DataflowScheduler.resolveInputs} when present, else from its plan unchanged; every read
-   * map is validated before any node in the column advances. A column then reads its batches
-   * synchronously in lane order before any body runs, which keeps it deterministic; a later turn
-   * does see messages an earlier turn emitted.
-   */
+  /** Validate a concrete matrix, then drain its columns in order. */
   async #window(
-    available: ReadonlyMap<NodeId, NodeAvailability<N, T>>,
+    schedule: Schedule,
+    options: Parameters<DataflowExecution<N, T>>[1],
     execution: DataflowRunTrace<N, T> | undefined,
     signal: AbortSignal | undefined,
   ): Promise<void> {
-    const schedule = this.scheduler.schedule(available);
-    const turns = this.#assertSchedule(schedule, available);
+    signal?.throwIfAborted();
+    const turns = this.#assertSchedule(schedule, this.#available());
     for (let w = 0; w < turns; w++) {
       signal?.throwIfAborted();
       const live = this.#available();
@@ -511,7 +517,7 @@ export class DataflowGraph<
         if (availability === undefined) continue;
         const inputs =
           this.#graph.getNode(entry.id)!.data.status === "running"
-            ? (this.scheduler.resolveInputs?.(entry, availability) ??
+            ? (options?.resolveInputs?.(entry, availability) ??
               entry.inputs)
             : entry.inputs;
         column.push({ id: entry.id, inputs });
@@ -523,6 +529,7 @@ export class DataflowGraph<
       const settled = await Promise.allSettled(
         column.map((entry) => this.#runNode(entry, execution, signal)),
       );
+      options?.onColumn?.(Object.freeze(column.map(entry => entry.id)));
       const failed = settled.find((outcome) => outcome.status === "rejected");
       if (failed !== undefined) throw failed.reason;
       signal?.throwIfAborted();
@@ -543,7 +550,7 @@ export class DataflowGraph<
   }
 
   /**
-   * Enforce the {@link DataflowScheduler.schedule} contract and return the validated window height.
+   * Enforce the concrete schedule contract and return the validated window height.
    *
    * @throws {DataflowDefinitionError} on too many lanes, an over-long lane, an unavailable id, an
    *   invalid read map (see {@link #assertInputs}), a duplicated id within one column, or a plan
@@ -643,6 +650,7 @@ export class DataflowGraph<
     let activation: DataflowStepTrace<N, T> | undefined;
     /** The current throw, if any, came from the node body. */
     let inBody = false;
+    this.#version++;
 
     try {
       let step: IteratorResult<Message<N>[], T>;
@@ -703,6 +711,8 @@ export class DataflowGraph<
         throw new DataflowNodeError<EH>(id, error as EH);
       }
       for (const message of messages) this.emit(id, message);
+    } finally {
+      this.#version++;
     }
   }
 
@@ -715,19 +725,24 @@ export class DataflowGraph<
    * @throws {DataflowDefinitionError} when no such edge is wired, or when it is a value edge.
    */
   emit(fromId: NodeId, message: Message<N>): void {
+    this.messageQueue(fromId, message.id).push(message.payload);
+    this.#version++;
+  }
+
+  /** Validate sender-local routing without modifying its transport. */
+  protected messageQueue(fromId: NodeId, edgeId: EdgeId): Queue<N> {
     for (const link of this.#graph.getLinks(fromId) ?? []) {
-      if (link.fromId !== fromId || link.data.id !== message.id) continue;
+      if (link.fromId !== fromId || link.data.id !== edgeId) continue;
       const transport = link.data.transport;
       if (E.isRight(transport)) {
         throw new DataflowDefinitionError(
-          `Node ${fromId} emitted a message on value edge "${message.id}"`,
+          `Node ${fromId} emitted a message on value edge "${edgeId}"`,
         );
       }
-      transport.left.push(message.payload);
-      return;
+      return transport.left;
     }
     throw new DataflowDefinitionError(
-      `Node ${fromId} emitted on unwired edge "${message.id}"`,
+      `Node ${fromId} emitted on unwired edge "${edgeId}"`,
     );
   }
 

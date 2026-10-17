@@ -6,6 +6,8 @@ export {
   DataflowDefinitionError,
   DataflowGraph,
   DataflowNodeError,
+  type DataflowExecution,
+  type DataflowObservation,
   type DataflowRunOptions,
   Edge,
   EdgeId,

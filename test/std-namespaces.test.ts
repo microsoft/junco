@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { context } from "junco-scheduler";
 import * as E from "fp-ts/lib/Either.js";
 import { graph, schedulers, tracer, trigger } from "../src/index.ts";
 
@@ -9,11 +10,11 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
   type Payload = number | number[];
   const observer = new tracer.DummyTracer();
   const g = new graph.DataflowGraph<void, Payload, string, never>(
-    new schedulers.RoundRobinScheduler(),
     graph.Width.create(1),
     graph.Width.create(1),
     observer,
   );
+  const execution = context({ graph: g, scheduler: schedulers.roundRobin() });
   const a = graph.Edge.message<number, string>("a");
   const b = graph.Edge.message<number, string>("b");
   const list = graph.Edge.message<number[], string>("list");
@@ -51,7 +52,7 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
   );
   g.addEdge(left, join, a).addEdge(right, join, b).addEdge(join, sink, list);
 
-  const results = await g.run();
+  const results = await execution.run();
   assert.deepEqual(seen, [[2, 1]]);
   assert.equal(results.get(left), "left");
   assert.equal(results.get(right), "right");
@@ -60,7 +61,7 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
   assert.ok(E.isLeft(list.transport));
   assert.deepEqual([...list.transport.left], []);
 
-  const again = await g.run();
+  const again = await execution.run();
   assert.deepEqual(seen, [[2, 1]]);
   assert.deepEqual([...again], [...results]);
   await observer.flush();

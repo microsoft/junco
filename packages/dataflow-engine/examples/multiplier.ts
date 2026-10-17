@@ -1,4 +1,4 @@
-import { RoundRobinScheduler } from "junco-scheduler";
+import { context, roundRobin } from "junco-scheduler";
 import type { NodeGenerator } from "../src/index.ts";
 import {
   DataflowGraph,
@@ -16,7 +16,6 @@ const multiplierToSink = Edge.message<number, string>("multiplierToSink");
 const results: number[] = [];
 const tracer = ExampleTracer.create("examples/multiplier");
 const graph = new DataflowGraph<void, number, string, never>(
-  new RoundRobinScheduler<number, string>(),
   Width.create(1),
   Width.create(1),
   tracer,
@@ -63,7 +62,8 @@ graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
 graph.addEdge(multiplierId, sinkId, multiplierToSink);
 
 try {
-  await graph.run();
+  const execution = context({ scheduler: roundRobin(), graph });
+  await execution.run();
 
   console.log(JSON.stringify(results));
 } finally {

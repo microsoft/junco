@@ -22,7 +22,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { type AssistantMessage, contentText, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type AgenticInput, agent, graph, mcp, tools, tracer } from "junco-agency";
+import * as O from "fp-ts/lib/Option.js";
+import { type AgenticInput, agent, graph, mcp, schedulers, tools, tracer } from "junco-agency";
 import { ctrlC } from "./cancellation.ts";
 
 export type VerusRequest = Readonly<{ source: string; outputDir: string; spec: string }>;
@@ -159,7 +160,7 @@ Check edits with mcp__verus__lsp_diagnostics. Report remaining failures and unre
 
 export type VerusFeedback = Readonly<{ review: string; cleanup: string }>;
 export type VerusRound = Readonly<{
-  graph: graph.JuncoGraph;
+  execution: ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graph.JuncoGraph>>;
   reviewerId: graph.NodeIdType;
   cleanupId: graph.NodeIdType;
 }>;
@@ -176,7 +177,18 @@ function finalText(message: AssistantMessage | undefined, role: VerusRole): stri
 export const VerusRound = {
   create(workspace: VerusWorkspace, members: VerusMembers, verification: { runs(): number },
     feedback?: VerusFeedback, observer?: tracer.DataflowTracer): VerusRound {
-    const round = graph.JuncoGraph.parallel(tools.LockPolicy, observer);
+    const finalResult = graph.Edge.value<AgenticInput, AssistantMessage>("Cleanup->$sink");
+    const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(() => {
+      throw new graph.DataflowDefinitionError("Verus does not accept external input");
+    }, { id: graph.NodeId.create("$source") });
+    const sink: graph.nodes.Sink<AgenticInput, AssistantMessage> = new graph.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): graph.NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const result = round.result(graph.NodeId.create("Cleanup"));
+      if (O.isNone(result)) throw new Error("Cleanup did not produce a result");
+      return result.value;
+    }, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.when(finalResult) });
+    const round: graph.JuncoGraph<AgenticInput, AssistantMessage> = new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, tools.LockPolicy);
+    const execution = schedulers.context({ scheduler: schedulers.parallel(), graph: round });
     const translated = graph.Edge.value<AgenticInput, AssistantMessage>("Verifier->Reviewer");
     const reviewed = graph.Edge.value<AgenticInput, AssistantMessage>("Reviewer->Cleanup");
     const context = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
@@ -212,8 +224,8 @@ export const VerusRound = {
       description: "Simplify code and proofs without weakening obligations", trigger: graph.trigger.TriggerRule.when(reviewed),
       contract: contract(reviewed, "Reviewer"),
     });
-    round.addEdge(verifierId, reviewerId, translated).addEdge(reviewerId, cleanupId, reviewed);
-    return { graph: round, reviewerId, cleanupId };
+    round.addEdge(verifierId, reviewerId, translated).addEdge(reviewerId, cleanupId, reviewed).addEdge(cleanupId, sink.id, finalResult);
+    return { execution, reviewerId, cleanupId };
   },
 };
 
@@ -235,7 +247,7 @@ export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMemb
     for (;;) {
       signal?.throwIfAborted();
       const round = VerusRound.create(workspace, members, verification, feedback, observer);
-      const results = await round.graph.run({ signal });
+      const results = await round.execution.run({ signal });
       signal?.throwIfAborted();
       verification.runs(); // Pi turns tool errors into model feedback; retain operational failures.
       feedback = { review: finalText(results.get(round.reviewerId), "Reviewer"), cleanup: finalText(results.get(round.cleanupId), "Cleanup") };

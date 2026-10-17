@@ -1,25 +1,33 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 import {
-  type DataflowScheduler,
+  DataflowDefinitionError,
+  Edge,
+  NodeId,
+  type NodeIdType,
+  TriggerRule,
   DummyTracer,
+  Source,
+  Sink,
   UNBOUNDED,
   Width,
   type WidthType,
 } from "dataflow-engine";
+import * as O from "fp-ts/lib/Option.js";
 import type { AgenticYieldReason } from "junco-agent";
-import { ParallelScheduler, RoundRobinScheduler } from "junco-scheduler";
+import { context as nativeContext, parallel, roundRobin, type Scheduler } from "junco-scheduler";
 import { LockPolicy } from "junco-tools";
 import {
+  type Agentic,
   type AgenticInput,
-  graph as graphApi,
+  schedulers,
   JuncoGraph,
   type MockFrame,
   type MockRequest,
   type MockRun,
   type MockTerminal,
-} from "../src/index.ts";
-import { nodeInputs } from "../src/node-policy.ts";
+} from "junco-agency";
+import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
 // Deterministic agency scaffolding: real junco-scheduler policies and real JuncoGraphs whose node
 // states are mock agents, coroutines or nested graphs. No provider is involved.
@@ -30,17 +38,11 @@ export const STRATEGIES: readonly Strategy[] = ["round-robin", "parallel"];
 /** These helpers' graphs stay untraced, keeping deterministic output quiet. */
 const quiet = new DummyTracer();
 
-/** A policy scheduler; round robin also exposes its cursor. */
-export type PolicyScheduler = DataflowScheduler<
-  AgenticInput,
-  AssistantMessage
-> & { readonly state?: unknown };
-
-/** The real junco-scheduler policy for `strategy`. */
-export function policy(strategy: Strategy): PolicyScheduler {
-  return strategy === "round-robin"
-    ? new RoundRobinScheduler<AgenticInput, AssistantMessage>()
-    : new ParallelScheduler<AgenticInput, AssistantMessage>();
+/** Stateless policy functions; cursor state comes from each context's history. */
+export function policy<C>(strategy: Strategy): Scheduler<
+  Agentic<AgenticInput, AssistantMessage>, AgenticInput, AssistantMessage, C
+> {
+  return strategy === "round-robin" ? roundRobin() : parallel();
 }
 
 /** The graph bounds each policy is documented for: one entry per lane, one or every lane. */
@@ -54,49 +56,54 @@ function bounds(
   ];
 }
 
-/** A policy-driven graph keeping the policy's native input resolution. */
-export function plainGraph(
+/** Native trigger reads intentionally differ from the agency bridge's retained-value reads. */
+export function plainContext(
+  source: Source<AgenticInput, AssistantMessage>,
+  sink: Sink<AgenticInput, AssistantMessage>,
   strategy: Strategy,
-): JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler> {
+) {
   const [window, threads] = bounds(strategy, undefined);
-  return new JuncoGraph<
-    AgenticInput,
-    AssistantMessage,
-    unknown,
-    PolicyScheduler
-  >(policy(strategy), window, threads, quiet, LockPolicy);
+  const graph = new JuncoGraph(source, sink, window, threads, quiet, LockPolicy);
+  return nativeContext({ graph, scheduler: policy<never>(strategy) });
 }
 
-/**
- * A graph on the real `strategy` policy. The policy keeps its lane and id decisions; each running
- * node re-reads its live inputs with the agency rule, so a delivered result never starves a newer
- * message.
- */
-export function policyGraph(
+/** Agency live reads prevent a retained result from starving newer messages. */
+export function policyContext(
+  source: Source<AgenticInput, AssistantMessage>,
+  sink: Sink<AgenticInput, AssistantMessage>,
   strategy: Strategy,
   { threads }: { readonly threads?: WidthType } = {},
-): JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler> {
-  if (strategy === "parallel" && threads === undefined) {
-    return graphApi.JuncoGraph.parallel<AgenticInput, AssistantMessage>(
-      LockPolicy,
-      quiet,
-    );
-  }
-  let graph:
-    | JuncoGraph<AgenticInput, AssistantMessage, unknown, PolicyScheduler>
-    | undefined;
-  const scheduler = policy(strategy);
-  scheduler.resolveInputs = (entry, live) =>
-    nodeInputs(graph?.getNode(entry.id)?.step, live);
+) {
   const [window, width] = bounds(strategy, threads);
-  const constructed = new JuncoGraph<
-    AgenticInput,
-    AssistantMessage,
-    unknown,
-    PolicyScheduler
-  >(scheduler, window, width, quiet, LockPolicy);
-  graph = constructed;
-  return constructed;
+  const graph = new JuncoGraph(source, sink, window, width, quiet, LockPolicy);
+  return schedulers.context({ graph, scheduler: policy<AgencyNodeMetadata>(strategy) });
+}
+
+/** Fresh closed ingress and a sink explicitly wired to the fixture's chosen terminal work. */
+export function terminalPorts<N = AgenticInput, T = AssistantMessage>() {
+  const edge = Edge.value<N, T>("terminal->$sink");
+  let result: (() => O.Option<T>) | undefined;
+  const source = new Source<N, T>(() => {
+    throw new DataflowDefinitionError("Fixture does not accept external input");
+  }, { id: NodeId.create("$source") });
+  const sink = new Sink<N, T>(async function* () {
+    yield [];
+    const retained = result?.();
+    if (retained === undefined || O.isNone(retained))
+      throw new Error("Fixture terminal work did not produce a result");
+    return retained.value;
+  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(edge) });
+  return {
+    source,
+    sink,
+    connect(graph: {
+      result(id: NodeIdType): O.Option<T>;
+      addEdge(from: NodeIdType, to: NodeIdType, edge: Edge<N, T>): unknown;
+    }, terminal: NodeIdType) {
+      result = () => graph.result(terminal);
+      graph.addEdge(terminal, sink.id, edge);
+    },
+  };
 }
 
 // Transcript builders ------------------------------------------------------------------------------

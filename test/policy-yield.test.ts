@@ -10,7 +10,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DummyTracer, NodeId, TriggerRule } from "dataflow-engine";
+import { NodeId, TriggerRule } from "dataflow-engine";
 import { JuncoAgent } from "junco-agent";
 import {
   BashTool,
@@ -22,7 +22,7 @@ import {
   ToolCollection,
   type ToolCollectionOptions,
 } from "junco-tools";
-import { JuncoGraph } from "../src/index.ts";
+import { policyContext, terminalPorts } from "./deterministic-support.ts";
 import { flushMacrotasks, nativeOptions } from "./support.ts";
 
 // Real Marsh policy through junco-tools' test addon: a CopyTree fixture filesystem with the sandbox
@@ -255,7 +255,9 @@ test(
         collection,
         tools: [],
       });
-      const graph = JuncoGraph.parallel(LockPolicy, new DummyTracer());
+      const ports = terminalPorts();
+      const graphContext = policyContext(ports.source, ports.sink, "parallel");
+      const graph = graphContext.graph;
       try {
         const id = NodeId.create("bound");
         assert.throws(
@@ -275,7 +277,8 @@ test(
           trigger: TriggerRule.always(),
           state: agent,
         });
-        const result = await graph.run();
+        ports.connect(graph, id);
+        const result = await graphContext.run();
         assert.equal(contentText(result.get(id)!.content), "registered");
       } finally {
         await graph.close();

@@ -987,6 +987,52 @@ test("create reuses Pi's saved OAuth login without starting a login flow", async
   }
 });
 
+test("create rejects an account-unavailable model and closes a transferred session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-pi-login-"));
+  const authPath = join(directory, "auth.json");
+  const repo = new MemorySessionRepo();
+  try {
+    await writeFile(
+      authPath,
+      JSON.stringify({
+        "github-copilot": {
+          type: "oauth",
+          access: "pi-fixture-access",
+          refresh: "pi-fixture-refresh",
+          expires: Number.MAX_SAFE_INTEGER,
+          availableModelIds: [],
+        },
+      }),
+    );
+    const models = await ModelRuntime.create({
+      authPath,
+      modelsPath: null,
+      refreshOnCreate: false,
+    });
+    assert.ok(models.getModel("github-copilot", "claude-opus-5.5"));
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    await assert.rejects(
+      JuncoAgent.create({
+        models,
+        provider: "github-copilot",
+        model: "claude-opus-5.5",
+        session,
+        tools: [],
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof JuncoAgentError);
+        assert.equal(error.code, "invalid_argument");
+        assert.match(error.message, /github-copilot\/claude-opus-5\.5/);
+        return true;
+      },
+    );
+    await assert.rejects(session.beginMutation(BACKGROUND_CONTEXT));
+  } finally {
+    await repo.close(BACKGROUND_CONTEXT);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an unrefreshable Pi login fails with login guidance before creating an agent", async () => {
   const credentials = new InMemoryCredentialStore();
   await credentials.modify("github-copilot", async () => ({

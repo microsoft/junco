@@ -15,6 +15,8 @@ import {
   Edge,
   NodeId,
   TriggerRule,
+  Width,
+  UNBOUNDED,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy } from "junco-tools";
@@ -27,7 +29,9 @@ import {
   JuncoGraph,
   tools,
   tracer,
+  schedulers,
 } from "../src/index.ts";
+import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import { leaf, nativeOptions } from "./support.ts";
 
@@ -134,7 +138,9 @@ async function missingBinding(before: string, lazy: boolean) {
       const tui = tracer.TuiTracer.shared();
       assert.ok(tui instanceof tracer.TuiTracer);
       const forgetTui = defer(() => tui.close());
-      const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+      const graphPorts = terminalPorts<string, string>();
+      const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, undefined, LockPolicy);
+      const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
       const forgetGraph = defer(() => graph.close());
       const id = graph.addNode({
         id: NodeId.create("missing-binding"),
@@ -144,8 +150,9 @@ async function missingBinding(before: string, lazy: boolean) {
           return "computed";
         }, LockPolicy),
       });
+      graphPorts.connect(graph, id);
       assert.equal(
-        (await graph.run()).get(id),
+        (await graphContext.run()).get(id),
         "computed",
         "display startup must not affect computation",
       );
@@ -305,7 +312,9 @@ async function renderingFailure(before: string) {
   await withNativeCleanup(async (defer) => {
     const tui = await tracer.TuiTracer.create();
     const forgetTui = defer(() => tui.close());
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy, tui);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, tui, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     const forgetGraph = defer(() => graph.close());
     const failure = new Error("tui retained rendering failure");
     graph.pretty = () => {
@@ -319,7 +328,8 @@ async function renderingFailure(before: string) {
         return "computed";
       }, LockPolicy),
     });
-    assert.equal((await graph.run()).get(id), "computed");
+    graphPorts.connect(graph, id);
+    assert.equal((await graphContext.run()).get(id), "computed");
     await graph.close().finally(forgetGraph);
     phase("active", { stage: "render-failure" });
     await control.next("finish");
@@ -366,7 +376,9 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
       Promise.withResolvers<void>(),
     ];
     const roots = gates.map((gate, index) => {
-      const root = JuncoGraph.parallel<string, string>(LockPolicy, tui);
+      const rootPorts = terminalPorts<string, string>();
+      const root = new JuncoGraph(rootPorts.source, rootPorts.sink, Width.create(1), UNBOUNDED, tui, LockPolicy);
+      const rootContext = schedulers.context({ graph: root, scheduler: schedulers.parallel() });
       defer(() => root.close());
       root.addNode({
         id: NodeId.create("A"),
@@ -378,12 +390,13 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
           return index === 0 ? "left result" : "right result";
         }, LockPolicy),
       });
-      return root;
+      rootPorts.connect(root, NodeId.create("A"));
+      return rootContext;
     });
     defer(() => {
       for (const gate of gates) gate.resolve();
     });
-    const runs = roots.map((root) => root.run({ signal }));
+    const runs = roots.map((execution) => execution.run({ signal }));
     // Attach rejection handlers before waiting for control commands.
     const completion = Promise.all(runs);
     completion.catch(() => {});
@@ -396,8 +409,10 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
     await control.next("right");
     gates[1]!.resolve();
     await completion;
-    for (const root of roots) await root.close();
-    const replacement = JuncoGraph.parallel<string, string>(LockPolicy, tui);
+    for (const execution of roots) await execution.graph.close();
+    const replacementPorts = terminalPorts<string, string>();
+    const replacement = new JuncoGraph(replacementPorts.source, replacementPorts.sink, Width.create(1), UNBOUNDED, tui, LockPolicy);
+    const replacementContext = schedulers.context({ graph: replacement, scheduler: schedulers.parallel() });
     defer(() => replacement.close());
     replacement.addNode({
       id: NodeId.create("Replacement"),
@@ -407,7 +422,8 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
         return "new result";
       }, LockPolicy),
     });
-    await replacement.run({ signal });
+    replacementPorts.connect(replacement, NodeId.create("Replacement"));
+    await replacementContext.run({ signal });
     await replacement.close();
     phase("active", { stage: "replacement" });
   });
@@ -465,7 +481,9 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
     });
     const forgetCaller = defer(() => caller.return());
     caller.stagePrompt("Start");
-    const outer = JuncoGraph.parallel(LockPolicy, tui);
+    const outerPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const outer = new JuncoGraph(outerPorts.source, outerPorts.sink, Width.create(1), UNBOUNDED, tui, LockPolicy);
+    const outerContext = schedulers.context({ graph: outer, scheduler: schedulers.parallel() });
     defer(() => outer.close());
     const id = outer.addNode({
       id: NodeId.create("caller"),
@@ -474,7 +492,8 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
       state: caller,
     });
     forgetCaller();
-    const results = await outer.run({ signal });
+    outerPorts.connect(outer, id);
+    const results = await outerContext.run({ signal });
     assert.equal(
       contentText(results.get(id)!.content),
       "combined: worker done",
@@ -486,7 +505,7 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
     );
     const children: string[] = [];
     inner.forEachNode((childId) => {
-      if (childId !== "root") children.push(childId);
+      if (!["$source", "root", "$sink"].includes(childId)) children.push(childId);
     });
     assert.equal(children.length, 1);
     assert.ok(children[0]!.startsWith("task-"));
@@ -504,9 +523,9 @@ async function agentsScenario(
 ) {
   const explicit = flags.has("--explicit");
   const constructionModes = modes();
-  const graph = explicit
-    ? JuncoGraph.parallel(LockPolicy, selected)
-    : JuncoGraph.parallel(LockPolicy);
+  const graphPorts = terminalPorts();
+  const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, explicit ? selected : undefined, LockPolicy);
+  const graphContext = schedulers.context({ graph, scheduler: schedulers.parallel() });
   assert.equal(
     modes(),
     constructionModes,
@@ -548,6 +567,7 @@ async function agentsScenario(
     });
     forgetBeta();
     graph.addEdge(a, b, edge);
+    graphPorts.connect(graph, b);
     if (flags.has("--fail")) {
       const done = Edge.value<AgenticInput, AssistantMessage>("beta=>failure");
       const fail = graph.addNode({
@@ -565,7 +585,7 @@ async function agentsScenario(
     }
     try {
       while (graph.available().size > 0) {
-        const step = graph.step({ signal });
+        const step = graphContext.step({ signal });
         if (flags.has("--second-session")) {
           await assert.rejects(
             tracer.TuiTracer.create(),
@@ -605,7 +625,9 @@ async function quietTerminal(before: string, dumb: boolean) {
   const selected = tracer.TuiTracer.shared();
   if (dumb) {
     assert.ok(selected instanceof tracer.DummyTracer);
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, undefined, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     await withNativeCleanup(async (defer) => {
       defer(() => graph.close());
       const id = graph.addNode({
@@ -616,7 +638,8 @@ async function quietTerminal(before: string, dumb: boolean) {
           return "done";
         }, LockPolicy),
       });
-      assert.equal((await graph.run()).get(id), "done");
+      graphPorts.connect(graph, id);
+      assert.equal((await graphContext.run()).get(id), "done");
     });
     await assert.rejects(
       tracer.TuiTracer.create(),
@@ -627,7 +650,9 @@ async function quietTerminal(before: string, dumb: boolean) {
     );
   } else {
     assert.ok(selected instanceof tracer.TuiTracer);
-    const graph = JuncoGraph.parallel<string, string>(LockPolicy);
+    const graphPorts = terminalPorts<string, string>();
+    const graph = new JuncoGraph(graphPorts.source, graphPorts.sink, Width.create(1), UNBOUNDED, undefined, LockPolicy);
+    const graphContext = schedulers.context({ graph: graph, scheduler: schedulers.parallel() });
     assert.equal(modes(), before);
     await graph.close();
     await selected.flush();

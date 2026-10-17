@@ -1,193 +1,172 @@
 import {
   DataflowDefinitionError,
-  type DataflowScheduler,
-  type InputSchedule,
-  type NodeAvailability,
-  type NodeIdType as NodeId,
-  type NodeSchedule,
-  type Schedule,
+  type DataflowObservation,
+  type NodeIdType,
 } from "dataflow-engine";
 
-/**
- * A stateful scheduling policy for {@link Scheduler}.
- *
- * `State` is inferred from {@link SchedulerOptions.state}; spell it out (`new Scheduler<Cursor>(...)`)
- * when the initial value is narrower than what the policy later stores, such as `undefined` for a
- * cursor that becomes a `NodeId`. Stateless policies pass `state: undefined`.
- *
- * `N` and `T` are the graph's message and return payloads; they default to `unknown`, and are
- * inferred from annotated callbacks or from the graph the scheduler is passed to.
- */
-export type SchedulerOptions<State, N = unknown, T = unknown> = {
-  /**
-   * The initial scheduler-owned state: the value itself, not a factory.
-   *
-   * It is kept by reference for the scheduler's whole life — never serialized, cloned or reset
-   * between scheduling cycles — so class instances, `Map`s and closures survive as they are. A
-   * shared object is shared: independently constructed schedulers need fresh state values.
-   */
-  readonly state: State;
+export type Decision = { readonly selected: readonly NodeIdType[] };
 
-  /**
-   * Plan one window over the graph's current candidates. Called synchronously by the graph once per
-   * `step`, and once per window of `run`, only while at least one node is available — a quiescent
-   * graph never asks.
-   *
-   * `available` holds exactly the nodes the engine admitted (not done, trigger evaluated,
-   * availability hook passed), in node insertion order, each with its candidate-local facts:
-   * `status`, the live non-destructive `view`, its `trigger` and the `satisfied` rule edges. It is the
-   * engine's own map; do not mutate it.
-   *
-   * `state` is the scheduler's CURRENT `state`, read on every call. `window` and `threads`
-   * are the bounds the graph was constructed with (`Infinity` when unbounded).
-   *
-   * Return the engine's `Schedule`: `schedule[lane][turn]` entries. Turn `w` of every lane forms one
-   * column; the columns run in order and each column's lanes run concurrently. At most `threads`
-   * lanes, at most `window` entries per lane, no id twice within a column, and only ids from
-   * `available`. Each entry names explicit reads: `triggerInputs(candidate)` reads what the trigger
-   * fired on, while a hand-built map such as `new Map([[edgeId, 2]])` reads at most two messages.
-   * A ready node's first occurrence only primes it and reads nothing. Return `[]` only for an empty
-   * `available`; an empty plan while work remains is a definition error. The returned plan is used
-   * as is — no normalization or copy.
-   */
-  readonly schedule: (
-    available: ReadonlyMap<NodeId, NodeAvailability<N, T>>,
-    state: State,
-    window: number,
-    threads: number,
-  ) => Schedule;
-
-  /**
-   * Re-plan the reads of one occurrence of an already-running node, from `live`, the candidate's
-   * availability snapshot taken just before its column runs. Called with the scheduler's CURRENT
-   * `state`, never for a prime.
-   *
-   * MUST be synchronous and pure: no graph mutation, no mutation of `live`. Its result is validated
-   * like a planned read map; an exception rejects the column before any node advances. Omit it to
-   * keep every planned `inputs` map unchanged.
-   */
-  readonly resolveInputs?: (
-    entry: NodeSchedule,
-    live: NodeAvailability<N, T>,
-    state: State,
-  ) => InputSchedule;
+/** Native containers are detached; opaque state, messages, results and metadata are borrowed. */
+export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
+  readonly available: ReadonlySet<NodeIdType>;
+  readonly owned: ReadonlySet<NodeIdType>;
+  readonly context: ReadonlyMap<NodeIdType, C>;
+  readonly history: readonly Decision[];
+  readonly threads: number;
 };
 
+export type Scheduler<S, N, T, C> = (
+  snapshot: Snapshot<S, N, T, C>,
+  signal?: AbortSignal,
+) => Decision | Promise<Decision>;
+
+/** Internal authority check shared by composition and the context driver. */
+export function validateDecision<S, N, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
+  decision: Decision,
+): void {
+  if (
+    decision === null ||
+    typeof decision !== "object" ||
+    Array.isArray(decision) ||
+    !Array.isArray(decision.selected)
+  ) {
+    throw new DataflowDefinitionError(
+      "Scheduler must return a decision with a selected array of node IDs",
+    );
+  }
+  const seen = new Set<NodeIdType>();
+  for (const id of decision.selected) {
+    if (typeof id !== "string")
+      throw new DataflowDefinitionError(
+        "Scheduler must return a decision with a selected array of node IDs",
+      );
+  }
+  for (const id of decision.selected) {
+    if (seen.has(id))
+      throw new DataflowDefinitionError(
+        `Scheduler decision selects node "${id}" more than once`,
+      );
+    if (!snapshot.owned.has(id))
+      throw new DataflowDefinitionError(
+        `Scheduler decision selects unowned node "${id}"`,
+      );
+    if (!snapshot.available.has(id))
+      throw new DataflowDefinitionError(
+        `Scheduler decision selects unavailable node "${id}"`,
+      );
+    seen.add(id);
+  }
+}
+
+/** Rank only available, owned work; equal ranks use raw JavaScript string order. */
+export function choose<S, N, T, C>(options: {
+  readonly where?: (snapshot: Snapshot<S, N, T, C>, node: NodeIdType) => boolean;
+  readonly rank: (
+    snapshot: Snapshot<S, N, T, C>,
+    left: NodeIdType,
+    right: NodeIdType,
+  ) => number;
+  readonly width?: (snapshot: Snapshot<S, N, T, C>) => number;
+}): Scheduler<S, N, T, C> {
+  return (snapshot) => {
+    const width = options.width === undefined ? 1 : options.width(snapshot);
+    if (width !== Infinity && (!Number.isInteger(width) || width < 0))
+      throw new DataflowDefinitionError(
+        "Scheduler width must be a non-negative integer or Infinity",
+      );
+    const candidates: NodeIdType[] = [];
+    for (const id of snapshot.available) {
+      if (snapshot.owned.has(id) && (options.where?.(snapshot, id) ?? true))
+        candidates.push(id);
+    }
+    candidates.sort((left, right) => {
+      const rank = options.rank(snapshot, left, right);
+      if (typeof rank !== "number" || Number.isNaN(rank))
+        throw new DataflowDefinitionError(
+          "Scheduler rank must return a number other than NaN",
+        );
+      return rank === 0 ? (left < right ? -1 : left > right ? 1 : 0) : rank;
+    });
+    return { selected: candidates.slice(0, width) };
+  };
+}
+
+function restrict<S, N, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
+  owned: ReadonlySet<NodeIdType>,
+): Snapshot<S, N, T, C> {
+  const history: Decision[] = [];
+  for (const decision of snapshot.history) {
+    const selected = decision.selected.filter((id) => owned.has(id));
+    if (selected.length > 0)
+      history.push(Object.freeze({ selected: Object.freeze(selected) }));
+  }
+  return Object.freeze({ ...snapshot, owned, history: Object.freeze(history) });
+}
+
 /**
- * A dataflow-engine scheduler built from a policy function and its own mutable state.
- *
- * It implements the engine's `DataflowScheduler` and exposes {@link SchedulerOptions.state} as its
- * own mutable `state` property. Every callback receives the CURRENT `scheduler.state`, so:
- * - mutating a state object (from a callback or from outside) persists into later cycles;
- * - assigning `scheduler.state = next` replaces it for every later call, primitive state included.
- *
- * One scheduler configures exactly one graph: the graph constructor calls `create(window, threads)`
- * once, the bounds are kept and passed to `schedule`. Constructing a second graph with the same
- * scheduler throws `DataflowDefinitionError("Scheduler already configures a graph")`; planning
- * before any graph configured it throws `DataflowDefinitionError("Scheduler is not configured")`.
- * Policy exceptions propagate unchanged; nothing is retried, repaired or rolled back.
- *
- * @example Full parallel: every candidate in its own lane, one turn per window.
- * ```ts
- * import { DataflowGraph, triggerInputs, UNBOUNDED, Width } from "dataflow-engine";
- * import { Scheduler } from "junco-scheduler";
- *
- * const parallel = new Scheduler({
- *   state: undefined,
- *   schedule: (available) =>
- *     [...available].map(([id, candidate]) => [{ id, inputs: triggerInputs(candidate) }]),
- * });
- * const graph = new DataflowGraph<void, number, string, never>(parallel, Width.create(1), UNBOUNDED);
- * ```
- *
- * @example Round robin: one occurrence per window, rotating by id from a mutable cursor.
- * ```ts
- * import { type NodeIdType, triggerInputs } from "dataflow-engine";
- * import { Scheduler } from "junco-scheduler";
- *
- * const rotation = new Scheduler<{ last: NodeIdType | undefined }>({
- *   state: { last: undefined },
- *   schedule(available, state) {
- *     let first: NodeIdType | undefined;
- *     let next: NodeIdType | undefined;
- *     for (const id of available.keys()) {
- *       if (first === undefined || id < first) first = id;
- *       if (state.last !== undefined && id > state.last && (next === undefined || id < next)) next = id;
- *     }
- *     const chosen = next ?? first;
- *     if (chosen === undefined) return [];
- *     state.last = chosen; // persists: the same object is passed to the next cycle
- *     return [[{ id: chosen, inputs: triggerInputs(available.get(chosen)!) }]];
- *   },
- * });
- * rotation.state.last; // the cursor, readable and writable between steps
- * ```
- *
- * @example Fixed-size batches: plan two messages per occurrence, re-planned on the live queue.
- * ```ts
- * const pairs = new Scheduler({
- *   state: { size: 2 },
- *   schedule: (available, state) =>
- *     [...available].map(([id, candidate]) => [
- *       { id, inputs: new Map(candidate.trigger.rule.map((edge) => [edge, state.size])) },
- *     ]),
- *   resolveInputs: (_entry, live, state) => new Map(live.trigger.rule.map((edge) => [edge, state.size])),
- * });
- * ```
- *
- * @example An LLM scheduler: Pi's ready-made Opus 5.5 driver from `junco-scheduler/agent`.
- * Its synchronous `schedule` only consumes the decision its native `schedule` tool staged; the
- * model itself is driven through the Agentic iterator, never by `graph.run()`.
- * ```ts
- * import { DataflowGraph, UNBOUNDED, Width } from "dataflow-engine";
- * import { PiScheduler } from "junco-scheduler/agent";
- *
- * const scheduler = await PiScheduler.opus({ prompt: "Run available work." });
- * try {
- *   const graph = new DataflowGraph(scheduler, Width.create(1), UNBOUNDED); // configures and binds it
- *   // ...graph.addNode(...) / graph.addEdge(...)
- *   while (true) {
- *     const { done, value } = await scheduler.next();
- *     if (done || value.kind !== "yield") break; // settled or failed
- *   }
- * } finally {
- *   await scheduler.return();
- * }
- * ```
+ * Split exclusive selection authority, not work, effects or JavaScript memory.
+ * Shared native observations and metadata stay globally visible. Successful children
+ * conserve authority; safety does not imply thread feasibility, fairness or progress.
+ * Frame/associativity laws require total, deterministic, owned-local callbacks.
  */
-export class Scheduler<State, N = unknown, T = unknown>
-  implements DataflowScheduler<N, T>
-{
-  /** The scheduler-owned state every callback receives; mutate it, or assign a replacement. */
-  state: State;
-  declare bind?: DataflowScheduler<N, T>["bind"];
-  declare resolveInputs?: DataflowScheduler<N, T>["resolveInputs"];
-  readonly #policy: SchedulerOptions<State, N, T>["schedule"];
-  #window: number | undefined;
-  #threads: number | undefined;
+export function separate<S, N, T, C>(
+  leftOwns: (snapshot: Snapshot<S, N, T, C>, node: NodeIdType) => boolean,
+  left: Scheduler<S, N, T, C>,
+  right: Scheduler<S, N, T, C>,
+): Scheduler<S, N, T, C> {
+  return async (snapshot, signal) => {
+    signal?.throwIfAborted();
+    const leftDomain = new Set<NodeIdType>();
+    const rightDomain = new Set<NodeIdType>();
+    for (const id of snapshot.owned)
+      (leftOwns(snapshot, id) ? leftDomain : rightDomain).add(id);
+    const leftSnapshot = restrict(snapshot, leftDomain);
+    const rightSnapshot = restrict(snapshot, rightDomain);
+    const invoke = async (
+      scheduler: Scheduler<S, N, T, C>,
+      scoped: Snapshot<S, N, T, C>,
+    ): Promise<Decision> => {
+      const decision = await scheduler(scoped, signal);
+      validateDecision(scoped, decision);
+      return decision;
+    };
+    // Queue both jobs before invoking either: a synchronous throw cannot suppress its sibling.
+    signal?.throwIfAborted();
+    const outcomes = await Promise.allSettled([
+      Promise.resolve().then(() => invoke(left, leftSnapshot)),
+      Promise.resolve().then(() => invoke(right, rightSnapshot)),
+    ]);
+    signal?.throwIfAborted();
+    const [leftResult, rightResult] = outcomes;
+    if (leftResult.status === "rejected") throw leftResult.reason;
+    if (rightResult.status === "rejected") throw rightResult.reason;
+    return { selected: [...leftResult.value.selected, ...rightResult.value.selected] };
+  };
+}
 
-  constructor(options: SchedulerOptions<State, N, T>) {
-    this.state = options.state;
-    this.#policy = options.schedule;
-    const { resolveInputs } = options;
-    if (resolveInputs !== undefined) {
-      this.resolveInputs = (entry, live) =>
-        resolveInputs(entry, live, this.state);
+/** Normalize this invocation's first applicable speculative wave; retain no future plan. */
+export function agent<S, N, T, C>(invoke: (
+  snapshot: Snapshot<S, N, T, C>,
+  signal?: AbortSignal,
+) => Promise<readonly (readonly NodeIdType[])[]>): Scheduler<S, N, T, C> {
+  return async (snapshot, signal) => {
+    let hasCandidate = false;
+    for (const id of snapshot.available) {
+      if (snapshot.owned.has(id)) {
+        hasCandidate = true;
+        break;
+      }
     }
-  }
-
-  create(window: number, threads: number): void {
-    if (this.#window !== undefined || this.#threads !== undefined) {
-      throw new DataflowDefinitionError("Scheduler already configures a graph");
+    if (!hasCandidate) return { selected: [] };
+    const waves = await invoke(snapshot, signal);
+    for (const wave of waves) {
+      const selected = new Set<NodeIdType>();
+      for (const id of wave)
+        if (snapshot.available.has(id) && snapshot.owned.has(id)) selected.add(id);
+      if (selected.size > 0) return { selected: [...selected] };
     }
-    this.#window = window;
-    this.#threads = threads;
-  }
-
-  schedule(available: ReadonlyMap<NodeId, NodeAvailability<N, T>>): Schedule {
-    if (this.#window === undefined || this.#threads === undefined) {
-      throw new DataflowDefinitionError("Scheduler is not configured");
-    }
-    return this.#policy(available, this.state, this.#window, this.#threads);
-  }
+    return { selected: [] };
+  };
 }

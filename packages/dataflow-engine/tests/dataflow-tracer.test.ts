@@ -1,12 +1,13 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
-import { ParallelScheduler, Scheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import type {
   DataflowRunTrace,
   DataflowTracer,
   EdgeIdType,
   MessageSchedule,
+  NodeAvailability,
   NodeGenerator,
   NodeIdType,
   ParentView,
@@ -99,20 +100,12 @@ class RecordingTracer implements DataflowTracer {
   }
 }
 
-/** One lane per available node, reading `count` off every edge that node's trigger names. */
+/** Read `count` off every edge named by the selected node's trigger. */
 const fixedReader = (count: MessageSchedule) =>
-  new Scheduler<undefined, number, string>({
-    state: undefined,
-    schedule: (available) =>
-      [...available].map(([id, { trigger }]) => [
-        {
-          id,
-          inputs: new Map<EdgeIdType, MessageSchedule>(
-            trigger.rule.map((edgeId) => [edgeId, count]),
-          ),
-        },
-      ]),
-  });
+  (_id: NodeIdType, { trigger }: NodeAvailability<number, string>) =>
+    new Map<EdgeIdType, MessageSchedule>(
+      trigger.rule.map((edgeId) => [edgeId, count]),
+    );
 
 /** Run `body` with `console.warn` silenced, restoring it afterwards. */
 const quietly = async (body: () => Promise<void>): Promise<void> => {
@@ -129,7 +122,6 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
   const feed = Edge.message<number, string>("feed");
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, string, never>(
-    fixedReader(2),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -159,7 +151,7 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
   );
   graph.addEdge(src, sink, feed);
 
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel(), readInputs: fixedReader(2) }).run();
 
   const [run] = tracer.runs;
   assert.equal(tracer.runs.length, 1);
@@ -214,7 +206,6 @@ test("a throwing observer can neither replace a node's return nor its failure", 
     };
 
     const ok = new DataflowGraph<void, number, number, Error>(
-      new ParallelScheduler(),
       Width.create(1),
       UNBOUNDED,
       throwing,
@@ -227,11 +218,10 @@ test("a throwing observer can neither replace a node's return nor its failure", 
         return 42;
       },
     });
-    assert.equal((await ok.run()).get(answer), 42);
+    assert.equal((await context({ graph: ok, scheduler: parallel() }).run()).get(answer), 42);
 
     const boom = new Error("boom");
     const bad = new DataflowGraph<void, number, number, Error>(
-      new ParallelScheduler(),
       Width.create(1),
       UNBOUNDED,
       throwing,
@@ -245,7 +235,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
       },
     });
     await assert.rejects(
-      () => bad.run(),
+      () => context({ graph: bad, scheduler: parallel() }).run(),
       (error: unknown) =>
         error instanceof DataflowNodeError && error.error === boom,
     );
@@ -256,7 +246,6 @@ test("a throwing observer can neither replace a node's return nor its failure", 
 test("a concurrent failure settles the root only after its column settles, keeping the sibling's result", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, string, Error>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -283,7 +272,7 @@ test("a concurrent failure settles the root only after its column settles, keepi
   });
 
   let settled = false;
-  const running = graph.run().finally(() => {
+  const running = context({ graph, scheduler: parallel() }).run().finally(() => {
     settled = true;
   });
   await firstFailed.promise;
@@ -314,7 +303,6 @@ test("a concurrent failure settles the root only after its column settles, keepi
 test("each run snapshots current topology and resumes from resolved values without restarting sources", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, number, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -342,7 +330,7 @@ test("each run snapshots current topology and resumes from resolved values witho
   });
   graph.addEdge(src, dependent, v);
 
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   enabled = true;
   const isolated = graph.addNode(
     new StepNode<void, number, number>(() => [], {
@@ -350,7 +338,7 @@ test("each run snapshots current topology and resumes from resolved values witho
       trigger: TriggerRule.never(),
     }),
   );
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
 
   const [firstRun, secondRun] = tracer.runs;
   assert.equal(tracer.runs.length, 2);
@@ -381,7 +369,6 @@ test("each run snapshots current topology and resumes from resolved values witho
 test("a definition error fails the root trace without inventing activations", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, string, never>(
-    { create() {}, schedule: () => [] },
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -393,7 +380,7 @@ test("a definition error fails the root trace without inventing activations", as
     }),
   );
 
-  const rejection = await graph.run().then(
+  const rejection = await context({ graph, scheduler: () => ({ selected: [] }) }).run().then(
     () => assert.fail("run() must reject"),
     (error: unknown) => error,
   );
@@ -408,7 +395,6 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
     const feed = Edge.message<number, number>("feed");
     const v = Edge.value<number, number>("v");
     const graph = new DataflowGraph<void, number, number, never>(
-      new ParallelScheduler(),
       Width.create(1),
       UNBOUNDED,
       tracer,
@@ -434,7 +420,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
       },
     });
     graph.addEdge(src, dependent, feed).addEdge(src, dependent, v);
-    const results = await graph.run();
+    const results = await context({ graph, scheduler: parallel() }).run();
     return { consumed, results: [...results] };
   };
 
@@ -454,7 +440,6 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   cyclic.self = cyclic;
   const feed = Edge.message<Cyclic, string>("feed");
   const graph = new DataflowGraph<void, Cyclic, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     dummy,
@@ -480,7 +465,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
     },
   });
   graph.addEdge(src, sink, feed);
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
   await dummy.flush();
   assert.equal(received, cyclic);
   assert.deepEqual(
@@ -495,7 +480,6 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
 /** A one-node graph whose node returns 42, observed by `tracer`. */
 const answerGraph = (tracer: DataflowTracer) => {
   const graph = new DataflowGraph<void, number, number, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -534,7 +518,7 @@ test("a failing startRun or startNode observer leaves the node's result intact",
     })();
     for (const tracer of [failingRun, failingNode]) {
       const { graph, answer } = answerGraph(tracer);
-      const results = await graph.run();
+      const results = await context({ graph, scheduler: parallel() }).run();
       assert.equal(results.get(answer), 42);
       assert.deepEqual(graph.result(answer), O.some(42));
     }
@@ -546,7 +530,6 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
   const sentinel = new Error("sentinel");
   const execute = async (tracer: DataflowTracer | undefined) => {
     const graph = new DataflowGraph<void, number, number, Error>(
-      new ParallelScheduler(),
       Width.create(1),
       UNBOUNDED,
       tracer,
@@ -559,7 +542,7 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
         throw sentinel;
       },
     });
-    const error = await graph.run().then(
+    const error = await context({ graph, scheduler: parallel() }).run().then(
       () => assert.fail("run() must reject"),
       (thrown: unknown) => thrown,
     );
@@ -594,7 +577,7 @@ test("run() never flushes the tracer; the caller's explicit flush delivers buffe
     }
   })();
   const { graph, answer } = answerGraph(tracer);
-  await graph.run();
+  await context({ graph, scheduler: parallel() }).run();
   assert.deepEqual(tracer.delivered, []);
   await tracer.flush();
   assert.deepEqual(tracer.delivered, [new Map([[answer, 42]])]);
@@ -604,7 +587,6 @@ test("a handled failure traces one raw activation fail and a normal run end with
   const notice = Edge.message<number, string>("notice");
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, number, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -631,7 +613,7 @@ test("a handled failure traces one raw activation fail and a normal run end with
   });
   graph.addEdge(src, sink, notice);
 
-  const results = await graph.run();
+  const results = await context({ graph, scheduler: parallel() }).run();
 
   const [run] = tracer.runs;
   assert.equal(tracer.runs.length, 1);

@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { ParallelScheduler } from "junco-scheduler";
+import { context, parallel } from "junco-scheduler";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -33,7 +33,6 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
 
   const tracer = ExampleTracer.create("cookbook/or-unified-counter");
   const graph = new DataflowGraph<void, Msg, string, never>(
-    new ParallelScheduler(),
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -146,7 +145,8 @@ test("cookbook: OR-trigger unified word counter from split outputs", async () =>
   graph.addEdge(charSumId, charSumSinkId, charSumEdge);
 
   try {
-    const completed = await graph.run();
+    const execution = context({ scheduler: parallel(), graph });
+    const completed = await execution.run();
 
     const expected: [string, number][] = [
       ["A", 2],
