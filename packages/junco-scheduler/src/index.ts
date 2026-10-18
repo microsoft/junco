@@ -3,3 +3,4 @@ export { agent, choose, separate, type Decision, type Scheduler, type Snapshot }
 export { context, type SchedulerContext } from "./context.js";
 export { parallel } from "./parallel.js";
 export { roundRobin } from "./round-robin.js";
+export { highest, limit, lowest } from "./resources.js";

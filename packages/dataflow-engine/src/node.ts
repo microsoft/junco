@@ -2,6 +2,7 @@ import type { Edge } from "./edges.js";
 import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { TriggerRule } from "./trigger.js";
+import type { Profiles, ProfilesOption, ResourceKind } from "./profile.js";
 
 /** A single datum crossing one message edge. */
 export type Message<N> = { readonly id: EdgeId; readonly payload: N };
@@ -115,26 +116,27 @@ export type AvailabilityFn<N, T> = (
  * availability. Omit `id` to get an auto-assigned one; omit `description` when the node needs no
  * prose. `is_available` defaults to the trigger result.
  */
-export type NodeOptions<N, T> = {
+export type NodeOptions<N, T, K extends ResourceKind = never> = {
   readonly id?: NodeId;
   readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
   readonly is_available?: AvailabilityFn<N, T>;
-};
+} & ProfilesOption<K>;
 
 /** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
-export type Node<S, N, T> = Identifiable<NodeId> &
-  NodeOptions<N, T> & {
+export type Node<S, N, T, K extends ResourceKind = never> = Identifiable<NodeId> &
+  NodeOptions<N, T, K> & {
     state: S;
     status: NodeStatus;
     readonly is_available: AvailabilityFn<N, T>;
+    readonly profiles: Profiles<K>;
     readonly step: StepFn<S, N, T>;
     readonly on_error?: ErrorFn<S, N, T>;
     generator: NodeGenerator<N, T> | undefined;
   };
 
 /** What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. */
-export type NodeSpec<S, N, T> = NodeOptions<N, T> & {
+export type NodeSpec<S, N, T, K extends ResourceKind = never> = NodeOptions<N, T, K> & {
   readonly state: S;
   readonly step: StepFn<S, N, T>;
   readonly on_error?: ErrorFn<S, N, T>;

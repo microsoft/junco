@@ -9,6 +9,7 @@
     "src/scheduler.ts",
     "src/context.ts",
     "src/parallel.ts",
+    "src/resources.ts",
     "src/round-robin.ts"
   ]
 }

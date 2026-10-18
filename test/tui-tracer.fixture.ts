@@ -21,7 +21,7 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy } from "junco-tools";
 import { flushLog, log, redirectLog } from "junco-tools/log";
-import { ctrlC } from "../examples/cancellation.ts";
+import { ctrlC } from "../examples/cancellation/cancellation.ts";
 import {
   type AgenticInput,
   agent,

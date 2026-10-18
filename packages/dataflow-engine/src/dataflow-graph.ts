@@ -18,6 +18,7 @@ import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
 import { snapshotView } from "./node.js";
 import type { Queue } from "./queue.js";
 import type { Pretty } from "./pretty.js";
+import { NO_PROFILES, type ProfileData, type Profiles, type ProfileSet, type ResourceKind } from "./profile.js";
 import type {
   InputSchedule,
   NodeAvailability,
@@ -143,7 +144,7 @@ export type DataflowRunOptions = {
 };
 
 export type DataflowObservation<S, N, T> = {
-  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>>;
+  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & { readonly profiles: ProfileSet }>>;
   readonly links: readonly (readonly [from: NodeId, to: NodeId, id: EdgeId, kind: "message" | "value"])[];
   readonly inputs: ReadonlyMap<NodeId, ParentView<N, T>>;
   readonly results: ReadonlyMap<NodeId, T>;
@@ -164,8 +165,10 @@ export class DataflowGraph<
   N,
   T,
   EH,
+  K extends ResourceKind = never,
 > implements Pretty
 {
+  // Keep ngraph's mutable storage kind-erased; addNode enforces K at the public boundary.
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
   readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
@@ -192,7 +195,7 @@ export class DataflowGraph<
    *
    * @throws {DataflowDefinitionError} on an explicit duplicate id.
    */
-  addNode(spec: NodeSpec<S, N, T>): NodeId {
+  addNode(spec: NodeSpec<S, N, T, K>): NodeId {
     let id: NodeId;
     if (spec.id === undefined) {
       id = NodeId.create(String(this.#nextNodeIndex++));
@@ -208,11 +211,19 @@ export class DataflowGraph<
       }
     }
 
+    // `profiles` is optional only for K = never; re-assert the resolved branch.
+    const profiles = (spec.profiles ?? NO_PROFILES) as Profiles<K>;
+    for (const [kind, profile] of Object.entries(profiles) as [string, ProfileData][])
+      if (profile.resource !== kind)
+        throw new DataflowDefinitionError(
+          `Dataflow node "${id}" maps resource "${kind}" to a profile for "${profile.resource}"`);
+
     const inbound = new Map<EdgeId, Edge<N, T>>();
     this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
 
-    const node: Node<S, N, T> = {
+    const node: Node<S, N, T, K> = {
       id,
+      profiles,
       state: spec.state,
       status: "ready",
       trigger: spec.trigger,
@@ -272,8 +283,8 @@ export class DataflowGraph<
   }
 
   /** The node registered under `id`, or `undefined` if none. */
-  getNode(id: NodeId): Node<S, N, T> | undefined {
-    return this.#graph.getNode(id)?.data;
+  getNode(id: NodeId): Node<S, N, T, K> | undefined {
+    return this.#graph.getNode(id)?.data as Node<S, N, T, K> | undefined;
   }
 
   /** The value `id` returned, or `O.none` if it has not finished. */
@@ -287,10 +298,10 @@ export class DataflowGraph<
 
   observe(): DataflowObservation<S, N, T> {
     if (this.#observation?.version === this.#version) return this.#observation;
-    const nodes = new Map<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>>();
+    const nodes = new Map<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & { readonly profiles: ProfileSet }>>();
     const inputs = new Map<NodeId, ParentView<N, T>>();
     this.forEachNode((id, node) => {
-      nodes.set(id, Object.freeze({ id, status: node.status, state: node.state,
+      nodes.set(id, Object.freeze({ id, status: node.status, state: node.state, profiles: node.profiles,
         ...(node.description === undefined ? {} : { description: node.description }) }));
       inputs.set(id, snapshotView(this.#runtime.get(id)!.probe));
     });
@@ -303,9 +314,9 @@ export class DataflowGraph<
   }
 
   /** Visit every registered node in graph iteration order. */
-  forEachNode(callback: (id: NodeId, node: Node<S, N, T>) => void): void {
+  forEachNode(callback: (id: NodeId, node: Node<S, N, T, K>) => void): void {
     this.#graph.forEachNode((graphNode) => {
-      callback(graphNode.id as NodeId, graphNode.data);
+      callback(graphNode.id as NodeId, graphNode.data as Node<S, N, T, K>);
     });
   }
 
@@ -332,8 +343,8 @@ export class DataflowGraph<
       document.push(PP.lineBreak, `${"  ".repeat(depth)}${statement}`);
     };
 
-    function appendGraph<GS, GN, GT, GEH>(
-      graph: DataflowGraph<GS, GN, GT, GEH>,
+    function appendGraph<GS, GN, GT, GEH, GK extends ResourceKind>(
+      graph: DataflowGraph<GS, GN, GT, GEH, GK>,
       depth: number,
     ): boolean {
       const synthetic = new Map<NodeId, string>();
@@ -439,6 +450,23 @@ export class DataflowGraph<
     return batch;
   }
 
+  #assertProfiles(): void {
+    this.forEachNode((id, node) => {
+      const inbound = this.#runtime.get(id)!.inbound;
+      for (const profile of Object.values(node.profiles) as ProfileData[]) {
+        for (const feature of profile.features) {
+          const ports = "port" in feature ? [feature.port] : feature.ports;
+          for (const port of ports) {
+            const edge = inbound.get(port);
+            if (edge === undefined || !E.isLeft(edge.transport))
+              throw new DataflowDefinitionError(
+                `Dataflow node "${id}" profile "${profile.resource}" reads port "${port}", which is not one of its inbound message edges`);
+          }
+        }
+      }
+    });
+  }
+
   protected get activeEvaluation(): Promise<void> | undefined {
     return this.#evaluation;
   }
@@ -450,6 +478,7 @@ export class DataflowGraph<
   ): Promise<R> {
     if (this.#evaluation !== undefined)
       throw new DataflowDefinitionError("Dataflow execution is already in flight");
+    this.#assertProfiles();
     const gate = Promise.withResolvers<void>();
     this.#evaluation = gate.promise;
     let active = true;

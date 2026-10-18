@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   type Context,
@@ -10,7 +11,8 @@ import {
 import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
-import { goalsPrompt, MixedGraph, memberOptions } from "../examples/mixed.ts";
+import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
+import type { AgentSpec } from "junco-syntax";
 import { Deterministic } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
 
@@ -83,26 +85,26 @@ async function mixedWorkflow(
   ];
 
   const agents: JuncoAgent[] = [];
-  const agent = async (role: Role, responses: readonly FauxResponseStep[]) => {
+  const createAgent = async (spec: AgentSpec) => {
+    const responses = spec.node === "Ralph"
+      ? ralphResponses
+      : spec.node === "Direct"
+        ? receiving("Direct", directAnswer)
+        : [recording("Reviewer", () => fauxAssistantMessage("Ralph: clearer coverage."))];
     const { options } = await nativeOptions(responses);
     const created = await JuncoAgent.fromResolved({
       ...options,
-      ...memberOptions[role],
+      systemPrompt: spec.systemPrompt,
+      tools: spec.tools as AgentTool[],
     });
     agents.push(created);
     return created;
   };
   try {
-    const members = {
-      Ralph: await agent("Ralph", ralphResponses),
-      Direct: await agent("Direct", receiving("Direct", directAnswer)),
-      Reviewer: await agent("Reviewer", [
-        recording("Reviewer", () =>
-          fauxAssistantMessage("Ralph: clearer coverage."),
-        ),
-      ]),
-    };
-    const { execution, reviewerId } = MixedGraph.create(members, new DummyTracer());
+    const { execution, reviewerId } = await MixedGraph.create({
+      tracer: new DummyTracer(),
+      createAgent,
+    });
     return {
       execution,
       reviewerId,

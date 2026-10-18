@@ -57,6 +57,7 @@ jobs:
             "dist",
             "packages/dataflow-engine/dist",
             "packages/dataflow-engine-opik/dist",
+            "packages/dataflow-profile/dist",
             "packages/junco-agent/dist",
             "packages/junco-mcp/dist",
             "packages/junco-scheduler/dist",
@@ -93,6 +94,8 @@ jobs:
             [2, 4, 6],
             { counts: [["A", 2], ["fantastic", 1], ["new", 2], ["of", 1], ["point", 1], ["view", 1], ["whole", 1], ["world", 1]], totalCharacters: 46 },
             { sums: [["a", 6], ["b", 30], ["c", 100]], products: [["a", 6], ["b", 200], ["c", 100]] },
+            [["source"], ["source", "A", "D"], ["A", "D"], ["B"], ["B"], ["C"], ["C"]],
+            { winner: "R2", waves: [["R2"], ["join"], ["join"], ["R2"]] },
           ]);
           assertNoProducers();
           console.log("deterministic-examples: ok");
@@ -122,11 +125,11 @@ jobs:
               ]);
               return { stdout, stderr, code };
             }
-            const recursive = await run("recursive-agency.js");
+            const recursive = await run("recursive-agency/recursive-agency.js");
             assert.equal(recursive.code, 0, recursive.stderr);
             assert.equal(recursive.stderr, "");
             assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 11 root decisions\n");
-            const committee = await run("oss-committee.js");
+            const committee = await run("oss-committee/oss-committee.js");
             assert.equal(committee.code, 1);
             assert.equal(committee.stdout, "");
             assert.match(committee.stderr, /^Usage:/);
@@ -150,7 +153,14 @@ jobs:
         run: |
           bun run build:core
           bun run typecheck:core
-          bun test ./test/scheduler.test.ts ./test/scheduler-dsl.property.test.ts ./test/agent.test.ts
+          bun test ./test/scheduler.test.ts ./test/scheduler-dsl.property.test.ts ./test/agent.test.ts ./test/resources.test.ts
+
+      - name: Build, typecheck and test dataflow-profile
+        working-directory: junco-agency/packages/dataflow-profile
+        run: |
+          bun run build
+          bun run typecheck
+          bun run test
 
       - name: Build, typecheck and test dataflow-engine-opik
         working-directory: junco-agency/packages/dataflow-engine-opik
@@ -396,6 +406,9 @@ jobs:
       - name: Build and test junco-agency
         run: |
           bun run build
+          bun run --cwd packages/junco-syntax build
+          bun run --cwd packages/junco-syntax typecheck
+          bun run --cwd packages/junco-syntax test
           bun run typecheck
           bun run test:coverage
           bun run smoke

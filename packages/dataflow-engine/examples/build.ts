@@ -8,6 +8,8 @@ export const standaloneNames = [
   "multiplier",
   "word-count",
   "combine-per-key",
+  "memory-limit",
+  "token-race",
 ] as const;
 
 const examplesDir = import.meta.dir;

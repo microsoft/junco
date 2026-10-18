@@ -1,0 +1,2632 @@
+{
+  "type": "object",
+  "required": [
+    "version",
+    "nodes"
+  ],
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "measured": {
+      "type": "object",
+      "required": [
+        "metric",
+        "host",
+        "fittedAt"
+      ],
+      "properties": {
+        "metric": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "fittedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "nodes": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "properties": {
+            "memory": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "memory"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "B"
+                        },
+                        {
+                          "type": "string",
+                          "const": "kB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "KiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GiB"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "runtime"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "ms"
+                        },
+                        {
+                          "type": "string",
+                          "const": "s"
+                        },
+                        {
+                          "type": "string",
+                          "const": "min"
+                        },
+                        {
+                          "type": "string",
+                          "const": "h"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "tokens"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "tok"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "runtime": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "memory"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "B"
+                        },
+                        {
+                          "type": "string",
+                          "const": "kB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "KiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GiB"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "runtime"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "ms"
+                        },
+                        {
+                          "type": "string",
+                          "const": "s"
+                        },
+                        {
+                          "type": "string",
+                          "const": "min"
+                        },
+                        {
+                          "type": "string",
+                          "const": "h"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "tokens"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "tok"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "memory"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "B"
+                        },
+                        {
+                          "type": "string",
+                          "const": "kB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "KiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "MiB"
+                        },
+                        {
+                          "type": "string",
+                          "const": "GiB"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "runtime"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "ms"
+                        },
+                        {
+                          "type": "string",
+                          "const": "s"
+                        },
+                        {
+                          "type": "string",
+                          "const": "min"
+                        },
+                        {
+                          "type": "string",
+                          "const": "h"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "resource",
+                    "unit",
+                    "features",
+                    "model",
+                    "fit",
+                    "range",
+                    "bound"
+                  ],
+                  "properties": {
+                    "resource": {
+                      "type": "string",
+                      "const": "tokens"
+                    },
+                    "unit": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "tok"
+                        }
+                      ]
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "required": [
+                              "port",
+                              "measure"
+                            ],
+                            "properties": {
+                              "port": {
+                                "type": "string"
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "derived",
+                              "measure",
+                              "ports"
+                            ],
+                            "properties": {
+                              "derived": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "sum"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "max"
+                                  }
+                                ]
+                              },
+                              "measure": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "bytes"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "count"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "const": "tokens"
+                                  }
+                                ]
+                              },
+                              "ports": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "constant"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "base",
+                            "coef"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "linear"
+                            },
+                            "base": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "coef": {
+                              "type": "array",
+                              "items": {
+                                "type": "number",
+                                "minimum": -1.7976931348623157e+308,
+                                "maximum": 1.7976931348623157e+308
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "coef",
+                            "exp"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "power"
+                            },
+                            "coef": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            },
+                            "exp": {
+                              "type": "number",
+                              "minimum": -1.7976931348623157e+308,
+                              "maximum": 1.7976931348623157e+308
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "points"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "table"
+                            },
+                            "points": {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "items": [
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  },
+                                  {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1.7976931348623157e+308
+                                  }
+                                ],
+                                "minItems": 2
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "fit": {
+                      "type": "object",
+                      "required": [
+                        "n",
+                        "residP95",
+                        "fittedAt"
+                      ],
+                      "properties": {
+                        "n": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "r2": {
+                          "type": "number",
+                          "minimum": -1.7976931348623157e+308,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "residP95": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1.7976931348623157e+308
+                        },
+                        "fittedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "range": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "additionalItems": false,
+                        "items": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          },
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1.7976931348623157e+308
+                          }
+                        ],
+                        "minItems": 2
+                      }
+                    },
+                    "bound": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1.7976931348623157e+308
+                    },
+                    "shape": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": -1.7976931348623157e+308,
+                        "maximum": 1.7976931348623157e+308
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

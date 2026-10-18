@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "nodes": {
+    "rerank": {
+      "runtime": {
+        "model": "power",
+        "features": [
+          {
+            "port": "candidates",
+            "measure": "count"
+          }
+        ]
+      }
+    }
+  }
+}

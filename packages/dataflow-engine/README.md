@@ -183,7 +183,9 @@ The engine evaluates each node's trigger first, then consults its `is_available(
 
 `NodeSpec<S, N, T>` is `NodeOptions<N, T>` plus `state`, `step` and the optional `on_error`. `NodeOptions` holds the registration fields every node kind shares: optional `id`, optional `description` (free prose, kept on the registered `Node` when given and never used for scheduling), the required `trigger` and the optional `is_available` hook. Libraries building node specs reuse this type rather than declaring their own.
 
-The sibling package `junco-scheduler` supplies three semantic operators and derived policies; the engine's `Schedule` is only a concrete execution format.
+`DataflowGraph<S, N, T, EH, K = never>` optionally declares resource kinds (`"memory"`, `"runtime"`, `"tokens"`). Every node in a profiled graph must supply `profiles: Profiles<K>`; the default keeps existing unprofiled specs unchanged. Each `ProfileData<R>` binds its kind to a physical dimension, chooses a `@buge/ts-units` unit, and predicts `{ value, safe, source, reason? }` in that unit. Information units (`bytes` through `gigabytes`, plus `kibibytes`/`mebibytes`/`gibibytes`) and `tokens` are exported here; time units come from `@buge/ts-units/time`. Profile feature ports must be inbound message-edge IDs; `evaluate()` checks wiring before starting a run. Concrete models, validated JSON persistence, and fitting live in the sibling `dataflow-profile` package.
+
+The sibling package `junco-scheduler` supplies selection operators and resource policies; the engine's `Schedule` is only a concrete execution format.
 
 | Policy | Decision |
 |---|---|
@@ -192,6 +194,8 @@ The sibling package `junco-scheduler` supplies three semantic operators and deri
 | `choose({ where?, rank, width? })` | Filters available owned IDs, sorts by comparator with raw string-ID ties, and takes the requested width (default 1). |
 | `separate(leftOwns, left, right)` | Gives complementary disjoint authority/history to both children, drains both, validates scoped selections and concatenates left then right. |
 | `agent(invoke)` | Calls a typed oracle once, then chooses only the first non-empty currently applicable stable-deduplicated wave. |
+| `limit({ memory }, scheduler)` | Keeps inner order, skipping nodes whose safe memory estimate would exceed the concurrent column's allowance; throws if none fits. |
+| `lowest(kind)` / `highest(kind)` | Comparators for `choose`, ordering safe resource predictions in base units; ties use raw string IDs. |
 
 ```ts
 import { choose, context } from "junco-scheduler";
@@ -203,6 +207,8 @@ const results = await execution.run(); // ties choose by string ID, not registra
 `Scheduler<S,N,T,C>` is one sync/async function type returning `{ selected }`; all native data and metadata remain typed. `parallel()` and `roundRobin()` are universally callable across graph/data domains. Priority/FIFO ranks, nondeterminism and fallback are ordinary TypeScript callbacks, not extra operators. Optional `pi` is imported from `junco-scheduler/agent`, never required by the core entrypoint.
 
 `triggerInputs` reads each fired edge whole. A context's optional pure `readInputs(id, candidate)` instead returns counts (`n`, `"all"` or `"none"`) per edge, and is reused for live reads of running nodes. Native execution validates bounds, availability and all read maps before starting a column; invalid decisions or reads consume nothing and throw `DataflowDefinitionError`. Wiring mistakes throw the same error.
+
+Resource policies use each node's profiles and planned input batch, including priming activations. Only `count` features are supported (`n` is capped by queue length, `"all"` reads the queue, absent/`"none"` reads zero); `bytes`/`tokens` features throw rather than inspecting payloads. Every selected node needs a memory profile for `limit`; every compared node needs the ranked profile. Wrap the outermost scheduler so `separate` branches share one allowance. Memory retained across yields is not tracked: leave headroom. Small-work-first policies can delay larger nodes indefinitely.
 
 A `Schedule` is **lanes × turns**: `schedule[lane][turn]`. Turn `w` runs index `w` of every lane concurrently, and the next turn starts only after all of them settle. So `[[A, A], [B]]` runs A and B together, then A alone. A ready node's first occurrence primes its generator and counts as a turn.
 
@@ -224,11 +230,11 @@ Context drives return cumulative completed-node results, available separately th
 
 ### Typed observations and selection authority
 
-`graph.observe(): DataflowObservation<S,N,T>` captures **all** native nodes, including done/unavailable work, with only `id`, `status`, defined `description` and native `state`; insertion-ordered link tuples retain direction, parallel links and self-loops. It also contains all-node detached `ParentView` input containers, retained results and a monotone native version. Reads never invoke readiness hooks, consume inputs or activate work. Cached containers are reused until a tracked mutation, activation admission or settlement advances that version; direct writes through retained nodes/transports or opaque values are not tracked.
+`graph.observe(): DataflowObservation<S,N,T>` captures **all** native nodes, including done/unavailable work, with `id`, `status`, defined `description`, native `state` and a readonly kind-erased `profiles` record; insertion-ordered link tuples retain direction, parallel links and self-loops. It also contains all-node detached `ParentView` input containers, retained results and a monotone native version. Reads never invoke readiness hooks, consume inputs or activate work. Cached containers are reused until a tracked mutation, activation admission or settlement advances that version; direct writes through retained nodes/transports or opaque values are not tracked.
 
 Containers, queue arrays, primitive fields and membership/order are detached. Opaque `S/N/T` identities are borrowed, never deep-cloned or frozen: policies must only read them, and applications needing historical object contents must use immutable data. External `describeNode` metadata is captured freshly per decision, not cached with native observations; omission gives an empty `ReadonlyMap<NodeIdType,never>`, while `0`, `false`, `null` and `""` are valid values. A mutation during planning/read lowering rejects the stale decision before execution, without a retry.
 
-`Snapshot<S,N,T,C>` adds available/owned ID sets, typed external context, local committed `Decision[]` history and the graph's thread bound. `separate` partitions only exclusive **selection authority** over existing work IDs and projects historical selections to each branch, dropping empty events. Native maps, links, metadata and threads remain shared observations. This CSL contract does not partition JavaScript memory, effects, payloads, queues or external services, and authority safety alone promises neither capacity, progress nor fairness. The frame rule requires owned-local readonly callbacks; it is not a sandbox for arbitrary TypeScript.
+`Snapshot<S,N,T,C>` adds available/owned ID sets, typed external context, local committed `Decision[]` history, the graph's thread bound, and `plans: ReadonlyMap<NodeIdType, InputSchedule>` for the current available nodes. The context computes those read plans before invoking the scheduler and reuses them when lowering the decision; live reads still use the pure read hook. `separate` partitions only exclusive **selection authority** over existing work IDs and projects historical selections to each branch, dropping empty events. Native maps, links, metadata, plans and threads remain shared observations. This CSL contract does not partition JavaScript memory, effects, payloads, queues or external services, and authority safety alone promises neither capacity, progress nor fairness. The frame rule requires owned-local readonly callbacks; it is not a sandbox for arbitrary TypeScript.
 
 ### Deterministic source and sink ports
 
@@ -241,6 +247,24 @@ A Sink delegates an ordinary generator, intercepts yielded messages into its ord
 ### Emitting from outside a node body
 
 `graph.emit(fromId, Message.create(edge, payload))` synchronously appends one payload to the message edge wired out of `fromId` in this graph, exactly as a yielded message is routed. It only enqueues: it does not drive the graph, consume inputs, complete or start `fromId`, or resolve a value edge; the next availability and read decision observes the message. Calls and yields append in invocation order, and an enqueued message is never rolled back. An edge not wired out of `fromId` (including an incoming-only edge) and a value edge both throw `DataflowDefinitionError`. Call it on the graph that owns the outgoing edge: a nested graph's own `emit` addresses only its internal edges.
+
+## Profile data and fitting
+
+Use `constantProfile("memory", megabytes(3000))` from `dataflow-engine` for fixed per-activation costs, without fitted records. The quantity must be finite and non-negative (zero is valid), and its dimension must match the resource. Each profile retains the supplied unit and reuses one frozen `{ value, safe, source: "fallback", reason: "constant" }` estimate; input vectors are ignored. Persisted profiles still validate their records and prediction vectors in `dataflow-profile`.
+
+Load user-supplied JSON profiles with `parseProfiles(readFileSync(path, "utf8"))`, then `profilesOf(file, "rerank", ["memory", "runtime"])` from `dataflow-profile`. Requested kinds are required; extra kinds are ignored. Features describe input batches using inbound message-edge IDs and `count`, `bytes` or `tokens` measures. The package supplies profile data and predictions, not a resource-aware scheduling policy.
+
+Fit JSONL samples without a recorder:
+
+```sh
+cd packages/dataflow-profile
+bun run fit fixtures/samples.jsonl /tmp/profiles.json --pins fixtures/pins.json
+bun run schemas
+```
+
+Each sample has `node`, `features: { port: { count?, bytes?, tokens? } }`, `resources: { memory?, runtime?, tokens? }`, and `units` with one symbol per reported resource. Memory symbols: `B`, `kB`, `MB`, `GB`, `KiB`, `MiB`, `GiB`; runtime: `ms`, `s`, `min`, `h`; tokens: `tok`. Mixed-unit rows convert into the first row's unit for that node/resource. JSON schemas are shipped in `packages/dataflow-profile/schemas/`.
+
+The deterministic fitter considers constants, single-feature linear/power/table models, and a multi-port count-only linear model. Pins select an exact model/features combination, including mixed measures or derived `sum`/`max` features. Fewer than five samples, R² below 0.7, or features outside the fitted range plus 10% tolerance use fallback safety `max(bound, prediction)`; otherwise safety adds the positive residual 95th percentile. Constants always use their bound. `shape` is reserved metadata, not time-segmented scheduling. Automatic mixed-measure model search and sample recording are deliberately absent.
 
 ## Rendering graph topology
 
@@ -256,9 +280,11 @@ Pass a `DataflowTracer` as the third constructor argument to observe execution; 
 
 ## Examples and development
 
-`bun run examples` runs four fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (with `junco-scheduler`'s round-robin scheduler), `word-count` (split outputs merged by an `anyOf` fan-in) and `combine-per-key` (fan-out to two reducers). The `tests/*.example.ts` files are larger cookbook graphs.
+`bun run examples` runs six fixed-input graphs, each printing one JSON line: `fibonacci`, `multiplier` (round-robin), `word-count` (`anyOf` fan-in), `combine-per-key` (two reducers), `memory-limit` (4 GB concurrent allowance) and `token-race` (cheapest predicted racer wins). Run the new programs with `bun run example:memory-limit --no-tracing` and `bun run example:token-race --no-tracing`. The `tests/*.example.ts` files are cookbook graphs.
 
-Tests and examples take their schedulers from the workspace's [`junco-scheduler`](../junco-scheduler), a `workspace:*` development dependency (also of `examples/`; `src/` never imports it). The examples bundle from workspace sources and need no build. The typecheck scripts read the scheduler's emitted declarations: after one `bun install --frozen-lockfile` at the workspace root, build this engine, then the scheduler's deterministic root against it:
+The memory and token cookbook tests share the side-effect-free `examples/resource-scenarios.ts` runners with the standalone entrypoints. Each invocation creates a fresh graph, returns actual execution observations and borrows an optional caller-owned tracer without flushing it.
+
+Tests and examples take their schedulers from the workspace's [`junco-scheduler`](../junco-scheduler), a `workspace:*` development dependency (also a dependency of `examples/`; `src/` never imports it). Fixed resource costs use the engine's `constantProfile`; fitted-profile integration coverage lives in [`dataflow-profile`](../dataflow-profile). Examples bundle workspace sources and need no build. Typechecks read emitted declarations: after `bun install --frozen-lockfile` at the workspace root, build the engine and scheduler:
 
 ```sh
 bun run build
@@ -269,7 +295,7 @@ bun run build
 
 The workspace links `dataflow-engine` to this package for every consumer, the scheduler included, so classes such as `DataflowDefinitionError` thrown by the scheduler here are this engine's own; downstream consumers that depend on `dataflow-engine` share one instance.
 
-Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` bundles all sixteen programs from workspace sources into `examples/dist/{opik,dummy}` and runs nothing unless that bundle succeeds, so a missing source or dependency fails before any example runs. Bundling does not typecheck: `bun run typecheck` checks every example with the Dummy tracer and `bun run examples:typecheck` checks the default Opik route. A traced program constructs the Opik SDK client when it starts, so an invalid Opik configuration fails that program before its graph runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
+Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` bundles all standalone and cookbook programs from workspace sources into `examples/dist/{opik,dummy}` and runs nothing unless that bundle succeeds, so a missing source or dependency fails before any example runs. Bundling does not typecheck: `bun run typecheck` checks every example with the Dummy tracer and `bun run examples:typecheck` checks the default Opik route. A traced program constructs the Opik SDK client when it starts, so an invalid Opik configuration fails that program before its graph runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 
 The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; the engine and adapter are bundled from source, so neither needs a build. Configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
 
@@ -279,7 +305,7 @@ The Opik build needs the examples workspace's optional dependencies (`dataflow-e
 | `bun run typecheck` | Checks `src`, `tests` and `examples` with the Dummy tracer selected, including the compile-only `Width` cases |
 | `bun run test` / `test:coverage` | Tests and cookbook fixtures with the Dummy tracer; the coverage run writes a text report and `coverage/lcov.info` |
 | `bun run examples` / `example:<name>` | Build and run the standalone examples (Opik; add `--no-tracing` for Dummy) |
-| `bun run examples:cookbook` | Build and run the twelve cookbook fixtures (Opik; add `--no-tracing` for Dummy) |
+| `bun run examples:cookbook` | Build and run the cookbook fixtures (Opik; add `--no-tracing` for Dummy) |
 | `bun run examples:build` | Bundle only, without typechecking (`--no-tracing` for Dummy) |
 | `bun run examples:typecheck` | Checks the examples with the default Opik tracer selected, against the engine, scheduler-core and Opik adapter declarations |
 | `bun run check` / `format` | Biome lint and format |

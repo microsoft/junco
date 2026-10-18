@@ -21,7 +21,7 @@ import {
   runVerusLoop,
   type VerusRole,
   type VerusWorkspace,
-} from "../examples/verus.ts";
+} from "../examples/verus/verus.ts";
 import { Type } from "typebox";
 import { leaf, waitingTool } from "./support.ts";
 

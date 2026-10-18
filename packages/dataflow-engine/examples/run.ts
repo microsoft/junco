@@ -1,8 +1,7 @@
 import { resolve } from "node:path";
 import { buildExamples, standaloneNames } from "./build.ts";
 
-const USAGE =
-  "Invalid example arguments. Use [fibonacci|multiplier|word-count|combine-per-key|--cookbook] [--no-tracing].";
+const USAGE = `Invalid example arguments. Use [${[...standaloneNames, "--cookbook"].join("|")}] [--no-tracing].`;
 
 /** Where traced examples export unless the caller sets `OPIK_URL_OVERRIDE`: a local Opik UI's API. */
 const DEFAULT_OPIK_URL = "http://localhost:8888/api";
