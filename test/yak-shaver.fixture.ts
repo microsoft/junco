@@ -21,7 +21,7 @@ import {
   type RefactorVerdict,
   type SearchReport,
   VerdictRecorder,
-} from "../examples/yak-shaver.ts";
+} from "../examples/yak-shaver/yak-shaver.ts";
 import { agent as agentApi, tools as toolsApi } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
 

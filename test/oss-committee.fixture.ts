@@ -24,7 +24,7 @@ import {
   type Members,
   OssSearchTool,
   ReviewTool,
-} from "../examples/oss-committee.ts";
+} from "../examples/oss-committee/oss-committee.ts";
 import { scripted } from "./support.ts";
 
 export const request = "Design a C# TUI for committee decision history.";

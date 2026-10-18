@@ -46,3 +46,9 @@ export {
 } from "./trigger.js";
 export type { ValidWidth, Width as WidthType } from "./width.js";
 export { UNBOUNDED, Width } from "./width.js";
+export type {
+  DimensionOf, Estimate, FeatureVector, Measure, PortFeature, ProfileData, Profiles,
+  ProfilesOption, ProfileSet, ResourceKind, ResourceQuantity, ResourceUnit,
+} from "./profile.js";
+export { COMPOSE, constantProfile, NO_PROFILES, RESOURCES, RESOURCE_KINDS } from "./profile.js";
+export { Information, Tokens, bytes, kilobytes, megabytes, gigabytes, kibibytes, mebibytes, gibibytes, tokens } from "./units.js";

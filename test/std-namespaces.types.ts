@@ -452,7 +452,7 @@ export async function typedSchedulerPolicyReadsPerEdge(edge: graph.Edge<number, 
   });
   const selection: schedulers.Decision = await policy({
     ...g.observe(), available: new Set(g.available().keys()), owned: new Set(g.observe().nodes.keys()),
-    context: new Map(), history: [], threads: g.threads,
+    context: new Map(), plans: new Map(), history: [], threads: g.threads,
   });
   const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run();
   const reads: InputSchedule[] = [...g.available().values()].map(triggerInputs);

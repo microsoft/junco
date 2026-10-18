@@ -30,7 +30,7 @@ import {
   parseSnapshot,
   refreshGraftSnapshot,
   type SourceEdit,
-} from "../examples/yak-shaver.ts";
+} from "../examples/yak-shaver/yak-shaver.ts";
 import { withNativeCleanup } from "./native-support.ts";
 
 // Real Marsh publication through junco-tools' test addon: a CopyTree fixture with the sandbox

@@ -2,6 +2,7 @@ import {
   DataflowDefinitionError,
   type DataflowObservation,
   type NodeIdType,
+  type InputSchedule,
 } from "dataflow-engine";
 
 export type Decision = { readonly selected: readonly NodeIdType[] };
@@ -11,6 +12,8 @@ export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
   readonly available: ReadonlySet<NodeIdType>;
   readonly owned: ReadonlySet<NodeIdType>;
   readonly context: ReadonlyMap<NodeIdType, C>;
+  /** Input consumption planned for each available node in this decision. */
+  readonly plans: ReadonlyMap<NodeIdType, InputSchedule>;
   readonly history: readonly Decision[];
   readonly threads: number;
 };

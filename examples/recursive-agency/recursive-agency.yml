@@ -1,0 +1,35 @@
+graph:
+  name: root
+  nodes:
+    "0":
+      kind: graph
+      trigger: always
+      description: root member 0
+      graph:
+        name: child
+        nodes:
+          "0":
+            kind: graph
+            trigger: always
+            description: child member 0
+            graph:
+              name: grandchild
+              nodes:
+                "0":
+                  model: faux/leaf
+                  system: leaf
+                  prompt: Do your part.
+                  description: grandchild member 0
+                  trigger: always
+              edges:
+                - { from: "0", to: $sink }
+        edges:
+          - { from: "0", to: $sink }
+    "1":
+      model: faux/sibling
+      system: leaf
+      prompt: Do your part.
+      description: root member 1
+      trigger: always
+  edges:
+    - { from: "0", to: $sink }

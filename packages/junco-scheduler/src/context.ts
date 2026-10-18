@@ -43,6 +43,7 @@ export function context<
         const candidates = graph.available();
         if (candidates.size === 0) break;
         const observation = graph.observe();
+        const plans = new Map([...candidates].map(([id, candidate]) => [id, inputs(id, candidate)]));
         const metadata = new Map<NodeIdType, C>();
         if (describeNode !== undefined) {
           for (const [id, candidate] of candidates) {
@@ -55,6 +56,7 @@ export function context<
           available: new Set(candidates.keys()),
           owned: new Set(observation.nodes.keys()),
           context: metadata,
+          plans,
           history: Object.freeze([...history]),
           threads: graph.threads,
         });
@@ -70,7 +72,7 @@ export function context<
         validateDecision(snapshot, decision);
         const schedule = decision.selected.map((id) => [{
           id,
-          inputs: inputs(id, candidates.get(id)!),
+          inputs: plans.get(id)!,
         }]);
         const live = graph.available();
         if (

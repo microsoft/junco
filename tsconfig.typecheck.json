@@ -1,10 +1,12 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "module": "ESNext",
     "noEmit": true,
     "paths": {
       "junco-agency": ["./src/index.ts"],
-      "junco-agency/workflows": ["./src/workflows/index.ts"]
+      "junco-agency/workflows": ["./src/workflows/index.ts"],
+      "junco-syntax": ["./packages/junco-syntax/src/index.ts"]
     },
     "declaration": false,
     "rootDir": ".",

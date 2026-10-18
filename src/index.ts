@@ -27,7 +27,11 @@ export {
   type MockRun,
   type MockTerminal,
   type MockTranscript,
+  type MockUsage,
+  constantProfiles,
+  NO_USAGE,
 } from "./mock-agent.js";
+export { MockJuncoGraph } from "./mock-junco-graph.js";
 export * as graph from "./std/graph.js";
 export * as schedulers from "./std/schedulers.js";
 export * as tracer from "./std/tracer.js";

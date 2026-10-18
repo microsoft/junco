@@ -72,8 +72,8 @@ function snapshot(
     readonly history?: readonly (readonly string[])[];
   } = {},
 ): View {
-  const nodes: Map<NodeIdType, { readonly id: NodeIdType; readonly status: "running"; readonly state: void }> = new Map();
-  for (const node of ids(names)) nodes.set(node, Object.freeze({ id: node, status: "running", state: undefined }));
+  const nodes: View["nodes"] extends ReadonlyMap<NodeIdType, infer V> ? Map<NodeIdType, V> : never = new Map();
+  for (const node of ids(names)) nodes.set(node, Object.freeze({ id: node, status: "running", state: undefined, profiles: {} }));
   return Object.freeze({
     nodes,
     inputs: new Map<NodeIdType, ParentView<number, string>>(),
@@ -83,6 +83,7 @@ function snapshot(
     available: new Set(ids(options.available ?? names)),
     owned: new Set(ids(options.owned ?? names)),
     context: new Map<NodeIdType, never>(),
+    plans: new Map(),
     history: Object.freeze((options.history ?? []).map((event) => Object.freeze({ selected: Object.freeze(ids(event)) }))),
     threads: Infinity,
   });
@@ -381,13 +382,10 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   const feed = Edge.message<number, string>("feed");
   let target = id("P");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-  const reads: string[] = [];
   const execution = context({
     graph, scheduler: () => ({ selected: [target] }),
-    readInputs: (node, candidate) => {
-      reads.push(`${node}:${candidate.status}`);
-      return new Map<EdgeIdType, MessageSchedule>(candidate.trigger.rule.map((edge) => [edge, 2]));
-    },
+    readInputs: (_node, candidate) =>
+      new Map<EdgeIdType, MessageSchedule>(candidate.trigger.rule.map((edge) => [edge, 2])),
   });
   const producer = graph.addNode(new EmitOnce<void, number, string>(
     () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)), "p",
@@ -406,7 +404,6 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   for (let turn = 0; turn < 3; turn++) await execution.step();
   assert.deepEqual(batches, [[1, 2], [3, 4], [5]]);
   assert.equal(graph.available().has(consumer), false);
-  assert.deepEqual(reads, ["P:ready", "C:ready", ...Array<string>(6).fill("C:running")]);
 });
 
 for (const [name, make] of [["parallel", parallel], ["round robin", roundRobin]] as const) {

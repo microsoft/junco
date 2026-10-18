@@ -12,7 +12,7 @@ import {
   convene,
   OssSearchTool,
   ReviewRound,
-} from "../examples/oss-committee.ts";
+} from "../examples/oss-committee/oss-committee.ts";
 import {
   request,
   type ScriptedReview,
@@ -37,7 +37,7 @@ const approved: ScriptedReview = {
 };
 test("a round gates each member on the previous member's complete report", async () => {
   await using committee = await scriptedCommittee();
-  const { execution } = ReviewRound.create(
+  const { execution } = await ReviewRound.create(
     request,
     committee.members,
     committee.search,
@@ -81,7 +81,7 @@ test("a failed lookup sends partial research to the Architect before the Librari
   await using committee = await scriptedCommittee({
     lookups: [[rateLimited()]],
   });
-  const { execution } = ReviewRound.create(
+  const { execution } = await ReviewRound.create(
     request,
     committee.members,
     committee.search,
@@ -127,7 +127,7 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     lookups: [[rateLimited()]],
     policyPauseBeforeSend: true,
   });
-  const { execution } = ReviewRound.create(
+  const { execution } = await ReviewRound.create(
     request,
     committee.members,
     committee.search,
@@ -170,7 +170,7 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     lookups: [[rateLimited()]],
     librarianStopReason: "length",
   });
-  const { execution } = ReviewRound.create(
+  const { execution } = await ReviewRound.create(
     request,
     committee.members,
     committee.search,
@@ -191,7 +191,7 @@ test("a truncated research report never reaches the Architect", async () => {
   await using committee = await scriptedCommittee({
     librarianStopReason: "length",
   });
-  const { execution } = ReviewRound.create(
+  const { execution } = await ReviewRound.create(
     request,
     committee.members,
     committee.search,

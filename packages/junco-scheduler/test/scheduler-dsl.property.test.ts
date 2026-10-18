@@ -64,12 +64,13 @@ const cases = fixtures.chain(f => fc.tuple(leaves(f.ids), leaves(f.ids), leaves(
 
 function snapshot(f: Fixture): View {
   return Object.freeze({
-    nodes: new Map(f.ids.map((node, i) => [node, Object.freeze({ id: node, status: "running" as const, state: Object.freeze({ priority: f.priorities[i]! }) })])),
+    nodes: new Map(f.ids.map((node, i) => [node, Object.freeze({ id: node, status: "running" as const, profiles: {}, state: Object.freeze({ priority: f.priorities[i]! }) })])),
     links: Object.freeze([]),
     inputs: new Map(f.ids.map(node => [node, Object.freeze({ messages: new Map(), values: new Map() })])),
     results: new Map<Id, string>(),
     context: new Map(f.ids.flatMap((node, i) => f.biases[i] === undefined ? [] : [[node, Object.freeze({ bias: f.biases[i]! })] as const])),
     available: new Set(f.available), owned: new Set(f.owned),
+    plans: new Map(),
     history: Object.freeze(f.history.map(selected => Object.freeze({ selected: Object.freeze([...selected]) }))),
     version: f.version, threads: f.threads,
   });

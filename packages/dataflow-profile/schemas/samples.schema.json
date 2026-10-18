@@ -1,0 +1,149 @@
+{
+  "type": "object",
+  "required": [
+    "node",
+    "features",
+    "resources",
+    "units"
+  ],
+  "properties": {
+    "node": {
+      "type": "string"
+    },
+    "features": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1.7976931348623157e+308
+            },
+            "count": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1.7976931348623157e+308
+            },
+            "tokens": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1.7976931348623157e+308
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "memory": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.7976931348623157e+308
+        },
+        "runtime": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.7976931348623157e+308
+        },
+        "tokens": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.7976931348623157e+308
+        }
+      },
+      "additionalProperties": false
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "memory": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "B"
+            },
+            {
+              "type": "string",
+              "const": "kB"
+            },
+            {
+              "type": "string",
+              "const": "MB"
+            },
+            {
+              "type": "string",
+              "const": "GB"
+            },
+            {
+              "type": "string",
+              "const": "KiB"
+            },
+            {
+              "type": "string",
+              "const": "MiB"
+            },
+            {
+              "type": "string",
+              "const": "GiB"
+            }
+          ]
+        },
+        "runtime": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "ms"
+            },
+            {
+              "type": "string",
+              "const": "s"
+            },
+            {
+              "type": "string",
+              "const": "min"
+            },
+            {
+              "type": "string",
+              "const": "h"
+            }
+          ]
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "tok"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runId": {
+      "type": "string"
+    },
+    "firedAt": {
+      "type": "string"
+    },
+    "host": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {}
+      },
+      "additionalProperties": false
+    },
+    "measurement": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

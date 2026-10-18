@@ -35,5 +35,6 @@ export {
   type WidthType,
 } from "dataflow-engine";
 export { JuncoGraph } from "../junco-graph.js";
+export { MockJuncoGraph } from "../mock-junco-graph.js";
 export * as nodes from "./nodes.js";
 export * as trigger from "./trigger.js";

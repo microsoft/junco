@@ -13,6 +13,8 @@
     "src/context.ts",
     "src/parallel.ts",
     "src/round-robin.ts",
+    "src/resources.ts",
+    "test/resources.test.ts",
     "test/scheduler.test.ts",
     "test/scheduler.types.ts",
     "test/scheduler-dsl.property.test.ts"

@@ -38,6 +38,8 @@
     "example:multiplier": "bun run examples/run.ts multiplier",
     "example:word-count": "bun run examples/run.ts word-count",
     "example:combine-per-key": "bun run examples/run.ts combine-per-key",
+    "example:memory-limit": "bun run examples/run.ts memory-limit",
+    "example:token-race": "bun run examples/run.ts token-race",
     "examples": "bun run examples/run.ts",
     "examples:cookbook": "bun run examples/run.ts --cookbook",
     "examples:build": "bun run examples/build.ts",
@@ -48,6 +50,7 @@
     "check:ci": "bun run --bun biome ci ."
   },
   "dependencies": {
+    "@buge/ts-units": "^1.2.3",
     "fp-ts": "^2.16.11",
     "ngraph.graph": "^20.1.2",
     "prettier-printer": "^1.1.4",
