@@ -13,7 +13,8 @@
  *    distinct-caller count (zero callers last). Unrooted candidates follow. Nothing is cut off.
  * 3. **Batches (§5–8).** `refactorCandidates` admits four initially ranked candidates at a time,
  *    resolved against the current snapshot. One batch is one `JuncoGraph` of parallel lanes
- *    `Proposer:r ==proposal:r==> Judge:r`; every proposer expands at runtime into a native Spawn
+ *    `Proposer:r ==proposal:r==> Judge:r`; both roles feed the deterministic `FinalizeBatch` node.
+ *    Every proposer expands at runtime into a native Spawn
  *    star of up to three read-only researchers (`Search1`–`Search3`) that split the whole indexed
  *    file list far-first. Each proposer's research batch is fixed by `setTaskBatch`; the model only
  *    launches it with `task({})`. Failed research follows `taskFailurePolicy` (default `"ignore"`:
@@ -23,8 +24,8 @@
  * 4. **Application (§9).** As soon as a lane's review completes with all four criteria, at least one new
  *    caller definition, and a positive projected net of removed nonblank source lines, its edits
  *    are applied in place and exactly its paths are released (`release -- <path>`) inside one managed
- *    command, so the lane's owner both edits and releases its files. Completed applications drain
- *    one at a time; research and review stay parallel. After a batch that applied anything, the same
+ *    command, so the lane's owner both edits and releases its files. `FinalizeBatch` drains completed
+ *    applications one at a time; research and review stay parallel. After a batch that applied anything, the same
  *    trusted sandboxed Bash build publishes Graft's generated cache and refreshes the next admission.
  * 5. **Output (§10).** `runYakShaver` acquires everything, runs `graft build .` through the trusted
  *    collection's sandboxed `bash` tool so every run starts from a current index, awaits
@@ -56,16 +57,18 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { OpikTracer } from "dataflow-engine-opik";
-import { agent, graph, mcp, schedulers, tools, tracer } from "junco-agency";
+import { agent, graph, mcp, schedules, tools, tracer } from "junco-agency";
 import { build, createJuncoAgent, type JuncoDocument, parse, resolveAgents } from "junco-syntax";
 import { Opik } from "opik";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { ctrlC } from "../cancellation/cancellation.ts";
+import { CRITERIA, type CandidateGraphLane, type FinalizeBatchContext, finalText, gateFailures } from "./code.ts";
 import source from "./yak-shaver.yml" with { type: "text" };
 
 const document = parse(source);
@@ -920,7 +923,6 @@ const verdictParameters = Type.Object(
 );
 
 export type RefactorVerdict = Static<typeof verdictParameters>;
-const CRITERIA = ["minimalAugmentation", "preservesExistingCallers", "semanticCoherence", "dependencyImprovement"] as const;
 
 /** A judge's `judge_refactor` tool and its single-verdict slot. */
 export class VerdictRecorder {
@@ -958,14 +960,6 @@ export class VerdictRecorder {
     this.#taken = this.#taken || verdict !== undefined;
     return verdict;
   }
-}
-
-/** Every failed gate of a reviewed proposal: failed criteria, no new caller, or no net removal. */
-function gateFailures(proposal: CheckedProposal, verdict: RefactorVerdict): string[] {
-  const failures = CRITERIA.filter((name) => !verdict[name].pass).map((name) => `${name} failed: ${verdict[name].evidence}`);
-  if (proposal.metrics.addedCallerDefinitions <= 0) failures.push("no new caller definitions");
-  if (proposal.metrics.netLinesRemoved <= 0) failures.push(`projected net nonblank lines removed is ${proposal.metrics.netLinesRemoved}`);
-  return failures;
 }
 
 // ## 6. Prompts
@@ -1076,11 +1070,6 @@ function judgePrompt(snapshot: GraftSnapshot, work: CandidateWork, proposal: Che
 // current snapshot. A lane applies its refactor as soon as its review completes and passes all four
 // criteria, a new caller definition, and a positive projected net line removal. Lanes never arbitrate
 // between each other: competing writes are decided by the native capability system.
-
-/** One completed lane's structured result: a `none` result, or a proposal with its verdict. */
-type CandidateAnalysis =
-  | { readonly proposal: NoProposal }
-  | { readonly proposal: CheckedProposal; readonly verdict: RefactorVerdict };
 
 /** A reviewed proposal that passed every gate; not proof that it was applied. */
 export type AcceptedRefactor = {
@@ -1259,52 +1248,6 @@ type CandidateBatchRunOptions = {
   readonly collection?: tools.ToolCollection;
 };
 
-type CandidateGraphLane = Omit<CandidateLane, "proposer" | "judge"> & {
-  readonly proposerId: graph.NodeIdType;
-  readonly judgeId: graph.NodeIdType;
-};
-
-/** A member's answer counts only when its run finished normally with text. */
-function finalText(message: AssistantMessage | undefined, member: string): string {
-  if (message?.stopReason !== "stop") {
-    const detail = message?.errorMessage ? `: ${message.errorMessage}` : "";
-    throw new Error(`${member} did not finish normally: ${message?.stopReason ?? "no final message"}${detail}`);
-  }
-  const text = contentText(message.content).trim();
-  if (!text) throw new Error(`${member} produced an empty final message`);
-  return text;
-}
-
-/**
- * A lane's structured results once it completed: `undefined` while its proposer (or, for a
- * proposal, its judge) is still working. At quiescence an incomplete lane is a protocol error, as is
- * a missing final message, proposal, or required verdict. Consumes the lane's recorders.
- */
-function completedAnalysis(
-  lane: CandidateGraphLane,
-  results: ReadonlyMap<graph.NodeIdType, AssistantMessage>,
-  quiescent: boolean,
-): CandidateAnalysis | undefined {
-  const rank = lane.work.rank;
-  const proposerMessage = results.get(lane.proposerId);
-  if (proposerMessage === undefined && !quiescent) return undefined;
-  finalText(proposerMessage, `Proposer:${rank}`);
-  const recorded = lane.proposal.peek();
-  if (recorded === undefined) throw new Error(`Proposer:${rank} finished without recording ${lane.proposal.tool.name}`);
-  if (recorded.kind === "none") {
-    if (results.has(lane.judgeId) || lane.verdict.takeVerdict() !== undefined) throw new Error(`Judge:${rank} ran for a no-proposal result`);
-    lane.proposal.takeProposal();
-    return { proposal: recorded };
-  }
-  const judgeMessage = results.get(lane.judgeId);
-  if (judgeMessage === undefined && !quiescent) return undefined;
-  finalText(judgeMessage, `Judge:${rank}`);
-  const verdict = lane.verdict.takeVerdict();
-  if (verdict === undefined) throw new Error(`Judge:${rank} finished without recording ${lane.verdict.tool.name}`);
-  lane.proposal.takeProposal();
-  return { proposal: recorded, verdict };
-}
-
 /** Expand the declarative role template into this batch's ranked lanes. */
 function laneDocument(lanes: readonly CandidateLane[]): JuncoDocument {
   const proposer = document.graph.nodes.Proposer!;
@@ -1312,7 +1255,12 @@ function laneDocument(lanes: readonly CandidateLane[]): JuncoDocument {
   if ((proposer.kind !== undefined && proposer.kind !== "agent") || (judge.kind !== undefined && judge.kind !== "agent")) {
     throw new Error("Yak shaver needs agent role templates");
   }
-  const nodes: JuncoDocument["graph"]["nodes"] = {};
+  const nodes: JuncoDocument["graph"]["nodes"] = {
+    FinalizeBatch: {
+      ...document.graph.nodes.FinalizeBatch!,
+      trigger: { any: lanes.flatMap(({ work }) => [`Proposer:${work.rank}->FinalizeBatch`, `Judge:${work.rank}->FinalizeBatch`]) },
+    },
+  };
   const edges: NonNullable<JuncoDocument["graph"]["edges"]> = [];
   for (const { work } of lanes) {
     const proposerId = `Proposer:${work.rank}`;
@@ -1328,19 +1276,24 @@ function laneDocument(lanes: readonly CandidateLane[]): JuncoDocument {
       trigger: proposal,
       contracts: { [proposal]: judge.contracts!.proposal! },
     };
-    edges.push({ from: proposerId, to: judgeId, id: proposal }, { from: proposerId, to: "$sink" });
+    edges.push(
+      { from: proposerId, to: judgeId, id: proposal },
+      { from: proposerId, to: "FinalizeBatch" },
+      { from: judgeId, to: "FinalizeBatch" },
+    );
   }
-  const last = lanes.reduce((last, lane) => lane.work.rank > last.work.rank ? lane : last);
-  return parse({ ...document, graph: { ...document.graph, nodes, edges, sink: { returns: `Proposer:${last.work.rank}` } } });
+  edges.push({ from: "FinalizeBatch", to: "$sink" });
+  return parse({
+    ...document,
+    code: { ...document.code, FinalizeBatch: fileURLToPath(new URL("./code.js", import.meta.url)) },
+    graph: { ...document.graph, nodes, edges },
+  });
 }
 
 /**
- * Construct one batch graph and drive it one step at a time. After every successful step each newly
- * completed lane is finalized once: a `none` result needs no judge; a reviewed proposal that passes
- * every gate is applied and released at once through `options.apply`, without waiting for other
- * lanes. Completed applications drain one at a time, in lane order, before the next step. The graph,
- * with every native descendant and unrun judge, is closed before the outcomes return; on a failure
- * application stops and earlier applications remain published.
+ * Run one batch; its code node applies and releases ready lanes sequentially without waiting for
+ * slower lanes. The graph, with every native descendant and unrun judge, closes before outcomes
+ * return. On a failure application stops and earlier applications remain published.
  */
 export async function runCandidateBatch(options: CandidateBatchRunOptions, signal?: AbortSignal): Promise<readonly CandidateOutcome[]> {
   const { snapshot, lanes } = options;
@@ -1387,60 +1340,22 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     }
     const execution = await build(doc, {
       cwd: process.cwd(),
-      scheduler: () => schedulers.parallel(),
+      scheduler: () => schedules.parallel(),
       tracer: options.observer,
       collection: options.collection,
       policy: tools.LockPolicy,
       createAgent: async (spec) => byNode.get(spec.node)!,
-      available: {
-        ...available,
-        $sink: () => (_view, triggered) => triggered && lanes.every((lane) => outcomes.has(lane.work.rank)),
-      },
+      context: { lanes: graphLanes, outcomes, apply: options.apply, signal } satisfies FinalizeBatchContext,
+      available,
     });
     const workflow = execution.graph;
     acquired = workflow;
     unregistered.clear();
     signal?.throwIfAborted();
-    let results: ReadonlyMap<graph.NodeIdType, AssistantMessage> = new Map();
+    // Keep a cancellation boundary after each completed column, before finalizing its results.
     while (workflow.available().size > 0) {
-      results = await execution.step(signal === undefined ? {} : { signal });
+      await execution.step(signal === undefined ? {} : { signal });
       signal?.throwIfAborted();
-      const completed: [CandidateWork, CandidateAnalysis][] = [];
-      for (const lane of graphLanes) {
-        if (outcomes.has(lane.work.rank)) continue;
-        const analysis = completedAnalysis(lane, results, false);
-        if (analysis !== undefined) completed.push([lane.work, analysis]);
-      }
-      for (const [work, analysis] of completed) {
-        const { rank, candidate } = work;
-        const base = { rank, candidateId: candidate.definition.id, depth: candidate.depth, callerCount: candidate.callerIds.length };
-        if (!("verdict" in analysis)) {
-          const { proposal } = analysis;
-          outcomes.set(rank, { ...base, status: "no-proposal", proposal, reason: proposal.reason });
-          continue;
-        }
-        const { proposal, verdict } = analysis;
-        const failures = gateFailures(proposal, verdict);
-        if (failures.length > 0) {
-          outcomes.set(rank, { ...base, status: "rejected", proposal, verdict, reason: failures.join("; ") });
-          continue;
-        }
-        signal?.throwIfAborted();
-        const files = await options.apply({ rank, candidate, proposal, verdict }, signal);
-        outcomes.set(rank, {
-          ...base,
-          status: "applied",
-          proposal,
-          verdict,
-          files,
-          reason: `All four criteria passed; applied and released ${files.join(", ")}; +${proposal.metrics.addedCallerDefinitions} caller definitions, ${proposal.metrics.netLinesRemoved} projected net nonblank lines removed`,
-        });
-      }
-    }
-    for (const lane of graphLanes) {
-      if (outcomes.has(lane.work.rank)) continue;
-      completedAnalysis(lane, results, true);
-      throw new Error(`Lane ${lane.work.rank} completed without being finalized`);
     }
   } catch (error) {
     let failure = error;

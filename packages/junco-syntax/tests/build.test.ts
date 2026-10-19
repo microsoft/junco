@@ -21,9 +21,10 @@ import {
   MockAgent,
   type MockFrame,
   type MockRun,
-  schedulers,
+  schedules,
   tools,
   tracer,
+  workflows,
 } from "junco-agency";
 import { Type } from "typebox";
 import { type BuildOptions, build, resolveAgents } from "../src/build.ts";
@@ -100,13 +101,13 @@ const document = () =>
   });
 const options = () => ({
   cwd: process.cwd(),
-  scheduler: () => schedulers.parallel(),
+  scheduler: () => schedules.parallel(),
   tracer: new tracer.DummyTracer(),
 });
 
 type AvailabilityFactory = NonNullable<BuildOptions["available"]>[string];
 const requestTexts = (instance: MockAgent) =>
-  instance.requests.flatMap((r) => userTexts(r.messages));
+  instance.requests.map((r) => userTexts(r.messages).at(-1));
 /** Reads a settled result's text, failing the test when `id` has none. */
 function resultText(
   g: graph.JuncoGraph,
@@ -587,6 +588,240 @@ test("availability can prevent final activation", async () => {
       execution.graph.result(graph.NodeId.create("Final"))._tag,
       "None",
     );
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+for (const decline of [false, true])
+  test(`sink availability ${decline ? "can decline a graph level" : "gates publication after work completes"}`, async () => {
+    let allowed = false;
+    const execution = await build(document(), {
+      ...options(),
+      createAgent: async (spec) =>
+        mock(spec.node, spec.node === "Worker" ? "work" : undefined),
+      available: {
+        $sink: ({ edges }) =>
+          decline || !edges.has("Final->$sink")
+            ? undefined
+            : (_view, triggered) => allowed && triggered,
+      },
+    });
+    try {
+      await execution.run();
+      assert.equal(
+        resultText(execution.graph, graph.NodeId.create("Final")),
+        "Final",
+      );
+      if (!decline) {
+        assert.equal(
+          execution.graph.result(execution.graph.sink.id)._tag,
+          "None",
+        );
+        allowed = true;
+        await execution.run();
+      }
+      assert.equal(resultText(execution.graph), "Final");
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+const ralphDoc = () =>
+  parse(workflows.ralph, { params: { model: "faux/ralph" } });
+const revision = (previous: string) =>
+  `assignment\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
+
+test("a value self-loop runs Ralph once per round and publishes only the last", async () => {
+  const instance = new MockAgent({
+    runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
+      run([settle(assistant(text))]),
+    ),
+  });
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({ rounds: 3 }),
+  });
+  try {
+    enqueuePrompts(execution, "assignment", {
+      kind: "prompt",
+      text: "assignment",
+    });
+    await execution.run();
+    assert.deepEqual(requestTexts(instance), [
+      "assignment",
+      revision("draft-1"),
+      revision("draft-2"),
+    ]);
+    assert.equal(
+      resultText(execution.graph, graph.NodeId.create("Ralph")),
+      "draft-3",
+    );
+    assert.equal(resultText(execution.graph), "draft-3");
+    assert.equal(execution.graph.available().size, 0);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("default rounds is two and a staged round survives graph steps", async () => {
+  const instance = new MockAgent({
+    runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
+      run([settle(assistant(text))]),
+    ),
+  });
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph(),
+  });
+  try {
+    enqueuePrompts(execution, "assignment", {
+      kind: "prompt",
+      text: "assignment",
+    });
+    for (let step = 0; instance.requests.length === 0 && step < 100; step++)
+      await execution.step();
+    assert.deepEqual(requestTexts(instance), ["assignment"]);
+    assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
+    await execution.run();
+    assert.deepEqual(requestTexts(instance), [
+      "assignment",
+      revision("draft-1"),
+    ]);
+    assert.equal(resultText(execution.graph), "draft-2");
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+for (const [name, draft, error] of [
+  ["blank", assistant("   "), /^Ralph produced an empty report$/],
+  [
+    "length",
+    { ...assistant("truncated"), stopReason: "length" as const },
+    /^Ralph did not finish normally: length$/,
+  ],
+] as const)
+  test(`an invalid intermediate draft (${name}) fails Ralph before the next round`, async () => {
+    const instance = new MockAgent({
+      runs: [assistant("draft-1"), draft, assistant("draft-3")].map((message) =>
+        run([settle(message)]),
+      ),
+    });
+    const execution = await build(ralphDoc(), {
+      ...options(),
+      createAgent: async () => instance,
+      ...schedules.ralph({ rounds: 3 }),
+    });
+    try {
+      enqueuePrompts(execution, "assignment", {
+        kind: "prompt",
+        text: "assignment",
+      });
+      await assert.rejects(execution.run(), nodeFailure(error));
+      assert.equal(
+        execution.graph.result(execution.graph.sink.id)._tag,
+        "None",
+      );
+      assert.deepEqual(requestTexts(instance), [
+        "assignment",
+        revision("draft-1"),
+      ]);
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+for (const [name, payloads] of [
+  [
+    "two prompts",
+    [
+      { kind: "prompt", text: "assignment" },
+      { kind: "prompt", text: "extra" },
+    ],
+  ],
+  ["followUp", [{ kind: "followUp", text: "assignment" }]],
+  [
+    "images",
+    [
+      {
+        kind: "prompt",
+        text: "assignment",
+        images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      },
+    ],
+  ],
+] satisfies readonly (readonly [string, AgenticInput[]])[])
+  test(`Ralph assignment admission rejects ${name}`, async () => {
+    const instance = mock("unused");
+    const execution = await build(ralphDoc(), {
+      ...options(),
+      createAgent: async () => instance,
+      ...schedules.ralph(),
+    });
+    try {
+      enqueuePrompts(execution, "assignment", ...payloads);
+      await assert.rejects(
+        execution.run(),
+        nodeFailure(/^Ralph requires exactly one prompt assignment$/),
+      );
+      assert.equal(instance.requests.length, 0);
+      assert.equal(
+        execution.graph.result(execution.graph.sink.id)._tag,
+        "None",
+      );
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+test("ralph rejects an invalid round count before building", () => {
+  for (const rounds of [0, -1, 1.5, NaN, Infinity, 2 ** 53])
+    assert.throws(() => schedules.ralph({ rounds }), {
+      name: "RangeError",
+      message: "Ralph rounds must be a positive safe integer",
+    });
+});
+
+test("a nested Ralph level is driven while the outer sink is untouched", async () => {
+  const inner = ralphDoc().graph;
+  inner.source = { routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
+  const instance = new MockAgent({
+    runs: ["draft-1", "draft-2"].map((text) => run([settle(assistant(text))])),
+  });
+  const final = mock("final reply");
+  const execution = await build(
+    parse({
+      graph: {
+        source: { routes: { seed: ["$source~>Wrapper"] } },
+        nodes: {
+          Wrapper: { kind: "graph", graph: inner },
+          Final: { model: "faux/final", prompt: "{{ Wrapper~>Final }}" },
+        },
+        edges: [
+          { from: "$source", to: "Wrapper", kind: "message" },
+          { from: "Wrapper", to: "Final", kind: "message" },
+          { from: "Final", to: "$sink" },
+        ],
+      },
+    }),
+    {
+      ...options(),
+      createAgent: async (spec) => (spec.node === "Ralph" ? instance : final),
+      ...schedules.ralph({ rounds: 2 }),
+    },
+  );
+  try {
+    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    await execution.run();
+    assert.deepEqual(requestTexts(instance), [
+      "assignment",
+      revision("draft-1"),
+    ]);
+    assert.deepEqual(requestTexts(final), ["draft-2"]);
+    assert.equal(resultText(execution.graph), "final reply");
   } finally {
     await execution.graph.close();
   }
@@ -1107,52 +1342,6 @@ for (const nested of [false, true])
     }
   });
 
-test("a custom MockAgent factory is rejected for Ralph and retains cleanup ownership", async () => {
-  const ralph = mock("unused");
-  const acquisitions: string[] = [];
-  try {
-    await assert.rejects(
-      build(
-        parse({
-          graph: {
-            nodes: {
-              Emit: { kind: "emit", text: "assignment" },
-              Ralph: { kind: "ralph", model: "faux/faux-1" },
-              Final: { model: "faux/faux-1", prompt: "{{ report }}" },
-            },
-            edges: [
-              { from: "Emit", to: "Ralph", kind: "message", id: "assignment" },
-              { from: "Ralph", to: "Final", kind: "message", id: "report" },
-              { from: "Final", to: "$sink" },
-            ],
-          },
-        }),
-        {
-          ...options(),
-          createAgent: async (spec) => {
-            acquisitions.push(spec.node);
-            assert.equal(spec.node, "Ralph");
-            return ralph;
-          },
-        },
-      ),
-      (error: unknown) =>
-        error instanceof TypeError &&
-        error.message === "ralph node requires a JuncoAgent",
-    );
-    assert.deepEqual(acquisitions, ["Ralph"]);
-    assert.equal(
-      ralph.status,
-      "idle",
-      "build must not dispose caller-created agents when construction rejects",
-    );
-    assert.equal(ralph.requests.length, 0);
-  } finally {
-    await ralph.return();
-  }
-  assert.equal(ralph.status, "closed");
-});
-
 test("default build uses real offline agents and releases only borrowed collection holds", async () => {
   const { models, faux } = await fauxRuntime([
     fauxAssistantMessage("offline result"),
@@ -1347,184 +1536,6 @@ for (const row of [
       }
     }
   });
-for (const rounds of [undefined, 3] as const)
-  test(`real Ralph runs ${rounds ?? "the default two"} rounds, gates availability and closes through its root`, async () => {
-    const roundCount = rounds ?? 2;
-    const assignment = "Cover correctness, ownership, and cancellation.";
-    const requests: string[][] = [];
-    const responses: FauxResponseStep[] = [];
-    for (let round = 0; round < roundCount; round++)
-      responses.push((context) => {
-        requests.push(userTexts(context.messages));
-        return fauxAssistantMessage(`draft-${round + 1}`);
-      });
-    responses.push((context) => {
-      const users = userTexts(context.messages);
-      requests.push(users);
-      assert.deepEqual(users, [`draft-${roundCount}`]);
-      return fauxAssistantMessage("FINAL");
-    });
-    const { models, faux } = await fauxRuntime(responses);
-    const { collection, events, active } = countedCollection();
-    let execution: Awaited<ReturnType<typeof build>> | undefined;
-    let emitAllowed = false;
-    let ralphAllowed = false;
-    let sinkAllowed = false;
-    try {
-      execution = await build(
-        parse({
-          graph: {
-            nodes: {
-              Emit: { kind: "emit", text: assignment },
-              Ralph: {
-                kind: "ralph",
-                model: "faux/faux-1",
-                ...(rounds === undefined ? {} : { rounds }),
-              },
-              Final: { model: "faux/faux-1", prompt: "{{ report }}" },
-            },
-            edges: [
-              { from: "Emit", to: "Ralph", kind: "message", id: "assignment" },
-              { from: "Ralph", to: "Final", kind: "message", id: "report" },
-              { from: "Final", to: "$sink" },
-            ],
-          },
-        }),
-        {
-          ...options(),
-          models,
-          collection,
-          available: {
-            Emit: () => () => emitAllowed,
-            Ralph: resumable("Ralph", (t) => ralphAllowed && t),
-            $sink: resumable("$sink", (t) => sinkAllowed && t),
-          },
-        },
-      );
-      const root = execution.graph;
-      const ralph = root.getNode(graph.NodeId.create("Ralph"))!.state;
-      assert.ok(ralph instanceof graph.JuncoGraph);
-      const worker = ralph.getNode(graph.NodeId.create("RalphStep"))!.state;
-      assert.ok(worker instanceof agent.JuncoAgent);
-      assert.deepEqual(active, { leases: 2, bindings: 2, creatorCloses: 0 });
-
-      await execution.run();
-      assert.equal(faux.state.callCount, 0);
-      assert.equal(root.result(root.sink.id)._tag, "None");
-      assert.deepEqual(
-        root
-          .observe()
-          .inputs.get(graph.NodeId.create("Ralph"))
-          ?.messages.get(graph.EdgeId.create("assignment")) ?? [],
-        [],
-      );
-
-      emitAllowed = true;
-      for (
-        let steps = 0;
-        !root
-          .observe()
-          .inputs.get(graph.NodeId.create("Ralph"))
-          ?.messages.get(graph.EdgeId.create("assignment"))?.length;
-        steps++
-      ) {
-        assert.ok(steps < 16, "gated emit did not publish its assignment");
-        await execution.step();
-      }
-      // The emit body is open-ended; stop its gate after its first observed publication.
-      emitAllowed = false;
-      assert.deepEqual(
-        root
-          .observe()
-          .inputs.get(graph.NodeId.create("Ralph"))
-          ?.messages.get(graph.EdgeId.create("assignment")),
-        [{ kind: "prompt", text: assignment }],
-      );
-      await execution.run();
-      assert.equal(
-        faux.state.callCount,
-        0,
-        "queued input must not bypass Ralph's availability gate",
-      );
-
-      ralphAllowed = true;
-      await execution.step();
-      assert.equal(
-        root.getNode(graph.NodeId.create("Ralph"))!.status,
-        "running",
-      );
-      ralphAllowed = false;
-      for (let steps = 0; requests.length === 0; steps++) {
-        assert.ok(
-          steps < 32,
-          "an admitted Ralph must remain resumable after its gate closes",
-        );
-        await execution.step();
-      }
-      assert.equal(requests.length, 1);
-      assert.deepEqual(requests[0], [assignment]);
-      assert.equal(root.result(graph.NodeId.create("Ralph"))._tag, "None");
-      assert.deepEqual(
-        root
-          .observe()
-          .inputs.get(graph.NodeId.create("Final"))
-          ?.messages.get(graph.EdgeId.create("report")) ?? [],
-        [],
-      );
-
-      await execution.run();
-      assert.equal(requests.length, roundCount + 1);
-      for (let round = 1; round < roundCount; round++) {
-        assert.equal(requests[round]![0], assignment);
-        assert.ok(requests[round]!.at(-1)!.startsWith(assignment));
-        assert.ok(requests[round]!.at(-1)!.includes(`draft-${round}`));
-      }
-      assert.deepEqual(requests.at(-1), [`draft-${roundCount}`]);
-      assert.equal(
-        resultText(root, graph.NodeId.create("Ralph")),
-        `draft-${roundCount}`,
-      );
-      assert.equal(root.result(graph.NodeId.create("Final"))._tag, "Some");
-      assert.equal(
-        root.result(root.sink.id)._tag,
-        "None",
-        "the sink must honor its availability gate even after Final returns",
-      );
-      await execution.run();
-      assert.equal(
-        faux.state.callCount,
-        roundCount + 1,
-        "emit publishes once and Final receives only the last draft",
-      );
-
-      sinkAllowed = true;
-      await execution.step();
-      assert.equal(root.getNode(root.sink.id)!.status, "running");
-      sinkAllowed = false;
-      await execution.run();
-      assert.equal(resultText(root), "FINAL");
-      assert.equal(faux.getPendingResponseCount(), 0);
-
-      await root.close();
-      await root.close();
-      assert.equal(worker.status, "closed");
-      assert.equal(ralph.signal.aborted, true);
-      assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
-      assert.deepEqual([...events].sort(), [
-        "bind-close:1",
-        "bind-close:2",
-        "lease-close:1",
-        "lease-close:2",
-      ]);
-    } finally {
-      try {
-        await execution?.graph.close();
-      } finally {
-        await collection.close();
-      }
-    }
-    assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 1 });
-  });
 
 for (const advertised of [true, false])
   test(`builtin info exposes ${advertised ? "the receiver's declared contract" : "a missing-edge error for an empty contract map"}`, async () => {
@@ -1715,7 +1726,7 @@ const codeDocument = (code: Record<string, string>, name = "Emitter") =>
   });
 const codeOptions = (log: string[]) => ({
   cwd: join(import.meta.dir, ".."),
-  scheduler: () => schedulers.roundRobin(),
+  scheduler: () => schedules.roundRobin(),
   policy: tools.EmptyPolicy,
   context: { log },
 });

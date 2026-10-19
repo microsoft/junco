@@ -1,6 +1,6 @@
 // # Mixed workflow: one agent against a nested graph
 //
-// mixed.yml declares Goals, Direct, the two-round Ralph workflow, and their joined Reviewer.
+// mixed.yml declares Goals, Direct, the two-round Ralph workflow (a nested `Ralph -> Ralph` loop driven by `schedules.ralph`), and their joined Reviewer.
 // Goals sends the same assignment to both competitors; only Ralph's final draft reaches Reviewer.
 // Install workspace dependencies, then run after `pi` → `/login` → GitHub Copilot:
 //
@@ -8,18 +8,16 @@
 //
 // The exports exist for the offline tests in test/mixed.test.ts.
 
+import { fileURLToPath } from "node:url";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, schedulers } from "junco-agency";
+import { graph, schedules } from "junco-agency";
 import { build, parse, type BuildOptions } from "junco-syntax";
 import { ctrlC } from "../cancellation/cancellation.ts";
 import source from "./mixed.yml" with { type: "text" };
 
 const document = parse(source);
-const goalsNode = document.graph.nodes.Goals!;
-if (goalsNode.kind !== "emit") throw new Error("Goals must be an emit node");
-export const goalsPrompt = goalsNode.text;
-export const goals = goalsPrompt.split("\n").map((goal) => goal.replace(/^\d+\. /, ""));
+document.code = { Goals: fileURLToPath(new URL("./code.js", import.meta.url)) };
 
 /** A member's answer counts only when its run finished normally with text. */
 export function finalText(message: AssistantMessage | undefined, member: string): string {
@@ -41,7 +39,8 @@ export const MixedGraph = {
   async create(options: Pick<BuildOptions, "createAgent" | "tracer" | "models">): Promise<MixedGraph> {
     const execution = await build(document, {
       cwd: process.cwd(),
-      scheduler: () => schedulers.parallel(),
+      scheduler: () => schedules.parallel(),
+      ...schedules.ralph({ rounds: 2 }),
       ...options,
     });
     return { execution, reviewerId: graph.NodeId.create("Reviewer") };

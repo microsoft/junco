@@ -2,6 +2,8 @@
 # https://www.anthropic.com/claude-sonnet-5-5
 # https://developers.openai.com/api/docs/guides/latest-model#gpt-61-sol
 # https://docs.github.com/en/copilot/reference/ai-models/supported-models
+code:
+  FinalizeBatch: examples/yak-shaver/code.ts
 graph:
   name: Yak shaver
   nodes:
@@ -27,9 +29,19 @@ graph:
         Judge each criterion independently, record them with exactly one judge_refactor call, then reply with a brief plain-text summary.
       contracts:
         proposal: The proposer's normally completed, non-empty final message with a recorded checked proposal of kind proposal, used to prepare the judge's assignment.
+    FinalizeBatch:
+      kind: code
+      name: FinalizeBatch
+      description: Applies and releases completed approved lanes sequentially, without waiting for slower lanes.
+      trigger:
+        any: ["Proposer->FinalizeBatch", "Judge->FinalizeBatch"]
   edges:
     - from: Proposer
       to: Judge
       id: proposal
     - from: Proposer
+      to: FinalizeBatch
+    - from: Judge
+      to: FinalizeBatch
+    - from: FinalizeBatch
       to: $sink

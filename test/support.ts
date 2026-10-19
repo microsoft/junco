@@ -28,7 +28,7 @@ import {
   type AgenticInput,
   agent as agentApi,
   JuncoGraph,
-  schedulers,
+  schedules,
   tools as toolsApi,
 } from "junco-agency";
 import type {
@@ -229,7 +229,7 @@ export async function agencyGraph(
     new DummyTracer(),
     LockPolicy,
   );
-  const context = schedulers.context({
+  const context = schedules.context({
     graph,
     scheduler: pi({
       models,

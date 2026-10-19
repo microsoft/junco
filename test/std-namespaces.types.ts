@@ -1,4 +1,4 @@
-// Compile-only: every type exported through the root `graph`, `trigger`, `tracer`, `schedulers`,
+// Compile-only: every type exported through the root `graph`, `trigger`, `tracer`, `schedules`,
 // `agent`, `tools` and `mcp` namespaces, plus the flat LSP types, used as a consumer would: typed
 // construction, callbacks and narrowing, with deliberate rejections. Detailed generic rules stay in
 // the engine and scheduler fixtures. Covered by tsconfig.typecheck.json; never executed.
@@ -24,7 +24,7 @@ import {
   type LspToolInput,
   type LspToolOptions,
   mcp,
-  schedulers,
+  schedules,
   tools,
   tracer,
   trigger,
@@ -140,7 +140,7 @@ export async function graphTypesBuildAndReadTypedNodes(
   };
   const execution = nativeContext({
     graph: g,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   const results: ReadonlyMap<graph.NodeIdType, string> =
     await execution.run(runOptions);
@@ -217,11 +217,11 @@ export function spawnBuildsTypedStars(
   agentSink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
 ) {
   const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
-  const typed: schedulers.SchedulerContext<
+  const typed: schedules.SchedulerContext<
     graph.nodes.Agentic<number, string>,
     number,
     string,
-    schedulers.AgencyNodeMetadata,
+    schedules.AgencyNodeMetadata,
     graph.JuncoGraph<number, string>
   > = graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => {
     const inferred: Task = task;
@@ -472,7 +472,7 @@ export async function tracerHandlesRetainPayloadTypes(
   return traced;
 }
 
-// --- schedulers ------------------------------------------------------------------------------------
+// --- schedules ------------------------------------------------------------------------------------
 
 export async function typedSchedulerPolicyReadsPerEdge(
   edge: graph.Edge<number, string>,
@@ -481,12 +481,12 @@ export async function typedSchedulerPolicyReadsPerEdge(
     graph.Width.create(1),
     graph.Width.create(2),
   );
-  const choose: schedulers.Scheduler<
+  const choose: schedules.Scheduler<
     Counter,
     number,
     string,
     { priority: number }
-  > = schedulers.choose({
+  > = schedules.choose({
     where: (snapshot, id) =>
       (snapshot.inputs.get(id)?.messages.get(edge.id)?.length ?? 0) > 0,
     rank: (snapshot, a, b) =>
@@ -494,15 +494,15 @@ export async function typedSchedulerPolicyReadsPerEdge(
       (snapshot.context.get(a)?.priority ?? 0),
     width: (snapshot) => snapshot.threads,
   });
-  const policy: schedulers.Scheduler<
+  const policy: schedules.Scheduler<
     Counter,
     number,
     string,
     { priority: number }
-  > = schedulers.separate(
+  > = schedules.separate(
     (snapshot, id) => (snapshot.nodes.get(id)?.state.count ?? 0) > 0,
     choose,
-    schedulers.agent(async (snapshot) => [
+    schedules.agent(async (snapshot) => [
       [...snapshot.available].filter((id) => snapshot.owned.has(id)),
     ]),
   );
@@ -515,7 +515,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
     readInputs: (_id, candidate): InputSchedule =>
       candidate.status === "ready" ? new Map() : new Map([[edge.id, 2]]),
   });
-  const selection: schedulers.Decision = await policy({
+  const selection: schedules.Decision = await policy({
     ...g.observe(),
     available: new Set(g.available().keys()),
     owned: new Set(g.observe().nodes.keys()),
@@ -526,17 +526,17 @@ export async function typedSchedulerPolicyReadsPerEdge(
   });
   const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run();
   const reads: InputSchedule[] = [...g.available().values()].map(triggerInputs);
-  const rotation: schedulers.Scheduler<
+  const rotation: schedules.Scheduler<
     Counter,
     number,
     string,
     { priority: number }
-  > = schedulers.roundRobin();
+  > = schedules.roundRobin();
   // @ts-expect-error selected IDs are branded native IDs
-  const rawId: schedulers.Decision = { selected: ["a"] };
+  const rawId: schedules.Decision = { selected: ["a"] };
   // @ts-expect-error a read is a count, "all" or "none"
   const unknownRead: MessageSchedule = "some";
-  const wrongPayload: schedulers.Scheduler<
+  const wrongPayload: schedules.Scheduler<
     Counter,
     string,
     string,
@@ -552,21 +552,21 @@ export async function typedSchedulerPolicyReadsPerEdge(
 }
 
 export function modelPolicyAndRequestPreserveCallerMetadata(
-  options: schedulers.PiOptions,
-  request: schedulers.SchedulerRequest<{ readonly priority: number }>,
+  options: schedules.PiOptions,
+  request: schedules.SchedulerRequest<{ readonly priority: number }>,
   numeric: graph.JuncoGraph<number, string>,
   textual: graph.JuncoGraph<string, number>,
 ) {
-  const policy = schedulers.pi(options);
-  const numbers = schedulers.context({ graph: numeric, scheduler: policy });
-  const strings = schedulers.context({ graph: textual, scheduler: policy });
+  const policy = schedules.pi(options);
+  const numbers = schedules.context({ graph: numeric, scheduler: policy });
+  const strings = schedules.context({ graph: textual, scheduler: policy });
   const version: number = request.version;
   const threads: number | null = request.threads;
   const priorities: readonly (readonly [
     graph.NodeIdType,
     { readonly priority: number },
   ])[] = request.context;
-  const selections: readonly schedulers.Decision[] = request.history;
+  const selections: readonly schedules.Decision[] = request.history;
   const nativeFields: (string | undefined)[] = request.nodes.map(
     (node) => node.description,
   );
@@ -575,7 +575,7 @@ export function modelPolicyAndRequestPreserveCallerMetadata(
   // @ts-expect-error metadata preserves its declared fields
   request.context[0]?.[1].label;
   // @ts-expect-error scheduler options are model-call options, not a session or tool harness
-  const invalid: schedulers.PiOptions = { ...options, tools: [] };
+  const invalid: schedules.PiOptions = { ...options, tools: [] };
   return [
     numbers,
     strings,

@@ -6,8 +6,8 @@ import { Queue } from "./queue.js";
 
 /**
  * A graph edge. Its `transport` is `Either<Queue<N>, Option<T>>`: **Left = message queue**, drained
- * per the destination node's trigger rule, **Right = return-value cell**, written once when the
- * source node returns.
+ * per the destination node's trigger rule, **Right = return-value cell**, holding the source
+ * node's latest return value.
  *
  * `transport` is mutable because fp-ts `Right<A>.right` is readonly — resolving a value edge
  * replaces the whole `Either`; the queue side is mutated in place and never replaced, which is what
@@ -24,7 +24,7 @@ export const Edge = {
     id: EdgeId.create(id),
     transport: E.left(Queue.empty<N>()),
   }),
-  /** Mint a value edge: a write-once cell holding the source node's return value `T`. */
+  /** Mint a value edge: a cell holding the source node's latest return value `T`. */
   value: <N, T>(id: string): Edge<N, T> => ({
     id: EdgeId.create(id),
     transport: E.right(O.none),

@@ -5,8 +5,14 @@ import {
   contentText,
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
-import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
+import {
+  DataflowNodeError,
+  DummyTracer,
+  EdgeId,
+  NodeId,
+} from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
+import { type AgenticInput, Deterministic } from "junco-agency";
 import {
   approvedPlan,
   convene,
@@ -45,6 +51,9 @@ test("a round gates each member on the previous member's complete report", async
     quiet,
   );
   const graph = execution.graph;
+  assert.deepEqual([...graph.available().keys()], ["ResearchAssignment"]);
+  assert.equal(committee.modelRequests.length, 0);
+  await execution.step(); // the code node publishes the research assignment
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
   await execution.step(); // prime the Librarian without starting its prompt
   assert.deepEqual([...graph.available().keys()], ["Librarian"]);
@@ -54,6 +63,10 @@ test("a round gates each member on the previous member's complete report", async
   const librarianReport = textOf(librarian.value);
   assert.ok(librarianReport.includes(repositoryUrl));
   assert.ok(librarianReport.includes("GitHub-reported stars: 10000"));
+  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  await execution.step(); // prime the validator without consuming the report
+  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
+  await execution.step(); // validate the report and publish the design assignment
   assert.deepEqual([...graph.available().keys()], ["Architect"]);
   assert.equal(committee.searchQueries.length, 1);
   assert.ok(!committee.searchQueries[0]!.includes(request));
@@ -64,11 +77,18 @@ test("a round gates each member on the previous member's complete report", async
   const architect = graph.result(NodeId.create("Architect"));
   assert.ok(O.isSome(architect));
   assert.equal(committee.memberInputs.Architect.length, 1);
-  assert.ok(committee.memberInputs.Architect[0]!.includes(librarianReport));
+  assert.equal(
+    committee.memberInputs.Librarian[0],
+    `Original request:\n${request}\n\nSearch public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps.`,
+  );
+  assert.equal(
+    committee.memberInputs.Architect[0],
+    `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}`,
+  );
   assert.equal(committee.memberInputs.Reducer.length, 1);
-  assert.ok(committee.memberInputs.Reducer[0]!.includes(librarianReport));
-  assert.ok(
-    committee.memberInputs.Reducer[0]!.includes(textOf(architect.value)),
+  assert.equal(
+    committee.memberInputs.Reducer[0],
+    `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}\n\nArchitect report:\n${textOf(architect.value)}`,
   );
   assert.ok(
     committee.modelRequests.indexOf("Reducer") >
@@ -89,13 +109,14 @@ test("a failed lookup sends partial research to the Architect before the Librari
     quiet,
   );
   const graph = execution.graph;
+  await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then info, send and the real yield tool
   assert.equal(committee.search.searches(), 0);
   assert.equal(committee.search.failures(), 1);
   assert.equal(committee.members.Librarian.status, "suspended");
   assert.ok(O.isNone(graph.result(NodeId.create("Librarian"))));
-  assert.deepEqual([...graph.available().keys()], ["Architect"]);
+  assert.deepEqual([...graph.available().keys()], ["DesignAssignment"]);
   assert.ok(!committee.modelRequests.includes("Architect"));
 
   // The Librarian stays paused until the Architect returns from the partial research.
@@ -135,6 +156,7 @@ test("a policy pause before any partial send leaves the Librarian resumable", as
     quiet,
   );
   const graph = execution.graph;
+  await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then a policy denial pauses the run
   assert.equal(committee.search.failures(), 1);
@@ -179,9 +201,16 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
   );
   const graph = execution.graph;
   const error = await execution.run().catch((thrown: unknown) => thrown);
-  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Reducer");
+  assert.ok(
+    error instanceof DataflowNodeError && error.nodeId === "ReviewAssignment",
+  );
+  assert.match(
+    String(error.cause),
+    /Librarian did not finish normally: length/,
+  );
   const librarian = graph.result(NodeId.create("Librarian"));
-  assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
+  assert.ok(O.isSome(librarian));
+  assert.equal(librarian.value.stopReason, "length");
   assert.ok(O.isSome(graph.result(NodeId.create("Architect"))));
   assert.deepEqual(committee.memberInputs.Reducer, []);
   assert.ok(!committee.modelRequests.includes("Reducer"));
@@ -200,12 +229,87 @@ test("a truncated research report never reaches the Architect", async () => {
   );
   const graph = execution.graph;
   const error = await execution.run().catch((thrown: unknown) => thrown);
-  assert.ok(error instanceof DataflowNodeError && error.nodeId === "Architect");
+  assert.ok(
+    error instanceof DataflowNodeError && error.nodeId === "DesignAssignment",
+  );
+  assert.match(
+    String(error.cause),
+    /Librarian did not finish normally: length/,
+  );
   const librarian = graph.result(NodeId.create("Librarian"));
-  assert.ok(O.isSome(librarian) && librarian.value.stopReason !== "stop");
+  assert.ok(O.isSome(librarian));
+  assert.equal(librarian.value.stopReason, "length");
   assert.ok(!committee.modelRequests.includes("Architect"));
   assert.ok(!committee.modelRequests.includes("Reducer"));
 }, 5_000);
+
+test("the design code node rejects missing searches and malformed partial handoffs before any model starts", async () => {
+  const cases: { batch?: AgenticInput[]; failed?: boolean; error: RegExp }[] = [
+    { error: /Librarian did not complete a valid GitHub OSS search/ },
+    {
+      batch: [],
+      error: /Librarian must send exactly one partial research prompt/,
+    },
+    {
+      batch: [{ kind: "followUp", text: "partial" }],
+      error: /Librarian must send exactly one partial research prompt/,
+    },
+    {
+      batch: [
+        { kind: "prompt", text: "first" },
+        { kind: "prompt", text: "second" },
+      ],
+      error: /Librarian must send exactly one partial research prompt/,
+    },
+    {
+      failed: true,
+      error:
+        /Librarian must send its partial research after a failed GitHub lookup/,
+    },
+  ];
+  for (const entry of cases) {
+    await using committee = await scriptedCommittee({
+      lookups: [[rateLimited()]],
+    });
+    const { execution } = await ReviewRound.create(
+      request,
+      committee.members,
+      committee.search,
+      undefined,
+      quiet,
+    );
+    if (entry.failed)
+      await assert.rejects(
+        committee.search.tool.execute("failed-search", {
+          query: "terminal UI",
+        }),
+      );
+    const state = execution.graph.getNode(
+      NodeId.create("DesignAssignment"),
+    )!.state;
+    assert.ok(state instanceof Deterministic);
+    const body = state.step();
+    await body.next(); // prime the actual registered code node, not a replacement test implementation
+    await assert.rejects(
+      body.next({
+        messages:
+          entry.batch === undefined
+            ? new Map()
+            : new Map([
+                [EdgeId.create("Librarian~>DesignAssignment"), entry.batch],
+              ]),
+        values: new Map([
+          [
+            EdgeId.create("Librarian->DesignAssignment"),
+            fauxAssistantMessage("Unsearched research"),
+          ],
+        ]),
+      }),
+      entry.error,
+    );
+    assert.equal(committee.modelRequests.length, 0);
+  }
+});
 
 test("a valid empty search is reported without inventing a candidate", async () => {
   await using committee = await scriptedCommittee({
@@ -393,10 +497,17 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
   assert.equal(committee.searchQueries.length, 3);
   const { Librarian, Architect, Reducer } = committee.memberInputs;
   assert.ok(!Librarian[0]!.includes("Review feedback:"));
-  assert.ok(Librarian[1]!.includes(markdownFeedback));
-  assert.ok(Librarian[2]!.includes(cacheFeedback));
-  assert.ok(Architect[1]!.includes(markdownFeedback));
-  assert.ok(Architect[2]!.includes(cacheFeedback));
+  for (const [index, feedback] of [markdownFeedback, cacheFeedback].entries()) {
+    assert.equal(
+      Librarian[index + 1],
+      `Original request:\n${request}\n\nReview feedback:\n${feedback}\n\nContinue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.`,
+    );
+    assert.ok(
+      Architect[index + 1]!.startsWith(
+        `Original request:\n${request}\n\nReview feedback:\n${feedback}\n\nLibrarian report:\n`,
+      ),
+    );
+  }
   assert.equal(Reducer.length, 3);
 }, 5_000);
 

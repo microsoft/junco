@@ -27,8 +27,8 @@ import type { MockAgent } from "./mock-agent.js";
 export type NodePolicy = {
   /** The prompt agent a prompt-agent body drives. */
   readonly agent?: JuncoAgent | MockAgent;
-  /** Value edges whose result has already been delivered to the body. */
-  readonly seenValues?: Set<EdgeId>;
+  /** Resolved value edges already delivered to the body, with the value delivered; a re-resolved edge is fresh again. */
+  readonly seenValues?: Map<EdgeId, unknown>;
   /**
    * `all-messages`: every activation reads every nonempty inbound message queue, whatever the
    * trigger, and no value edge. Used by task-spawn members, whose return queues are added later.
@@ -93,11 +93,12 @@ export function checkPolicy(
 /** Only the resolved parent results `seen` has not recorded, recording them now. */
 export function unseenValues<T>(
   values: Lookup<EdgeId, T>,
-  seen: Set<EdgeId>,
+  seen: Map<EdgeId, unknown>,
 ): Lookup<EdgeId, T> {
   const fresh = new Set<EdgeId>();
-  for (const id of values.keys()) if (!seen.has(id)) fresh.add(id);
-  for (const id of fresh) seen.add(id);
+  for (const id of values.keys())
+    if (!seen.has(id) || seen.get(id) !== values.get(id)) fresh.add(id);
+  for (const id of fresh) seen.set(id, values.get(id));
   return {
     get: (id) => (fresh.has(id) ? values.get(id) : undefined),
     has: (id) => fresh.has(id),
@@ -126,7 +127,11 @@ export function nodeInputs<N, T>(
   }
   if (candidate.trigger.kind === "all") return triggerInputs(candidate);
   const seen = policy?.seenValues;
-  const first = candidate.satisfied.find((edgeId) => !seen?.has(edgeId));
+  const first = candidate.satisfied.find(
+    (edgeId) =>
+      !seen?.has(edgeId) ||
+      seen.get(edgeId) !== candidate.view.values.get(edgeId),
+  );
   return first === undefined ? new Map() : new Map([[first, "all"]]);
 }
 

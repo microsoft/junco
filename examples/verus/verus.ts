@@ -1,5 +1,5 @@
 /**
- * Verus Ralph loop: Verifier -> Reviewer -> Cleanup, forever until caller cancellation.
+ * Verus Ralph loop: Verifier -> PrepareReviewer -> Reviewer -> PrepareCleanup -> Cleanup, until cancellation.
  * Agents are instructed to work in a mirrored copy; importing this module acquires nothing.
  * All roles get the complete Verus MCP; output-only mutation is a role constraint, not a sandbox.
  *
@@ -20,11 +20,13 @@ import { constants } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type AssistantMessage, contentText, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type AgenticInput, agent, graph, mcp, schedulers, tracer } from "junco-agency";
+import { type AgenticInput, agent, graph, mcp, schedules, tracer } from "junco-agency";
 import { build, createJuncoAgent, parse, resolveAgents } from "junco-syntax";
 import { ctrlC } from "../cancellation/cancellation.ts";
+import { finalText, type VerusRoundContext } from "./code.ts";
 import source from "./verus.yml" with { type: "text" };
 
 const document = parse(source);
@@ -136,47 +138,30 @@ export async function loadVerusMcp(bridgeDir: string): Promise<mcp.JuncoMcpTools
 
 /** System instructions are separate from untrusted source text and inter-role evidence. */
 export const roleInstructions = Object.fromEntries(
-  Object.entries(document.graph.nodes).map(([role, node]) => [role, "system" in node ? node.system : undefined]),
+  Object.entries(document.graph.nodes).filter(([, node]) => "system" in node).map(([role, node]) => [role, "system" in node ? node.system : undefined]),
 ) as Readonly<Record<VerusRole, string>>;
 
 export type VerusFeedback = Readonly<{ review: string; cleanup: string }>;
 export type VerusRound = Readonly<{
-  execution: ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graph.JuncoGraph>>;
+  execution: ReturnType<typeof schedules.context<AgenticInput, AssistantMessage, graph.JuncoGraph>>;
   reviewerId: graph.NodeIdType;
   cleanupId: graph.NodeIdType;
 }>;
-
-/** Partial, abnormal, or blank predecessor output must never activate the next role. */
-function finalText(message: AssistantMessage | undefined, role: VerusRole): string {
-  if (message?.stopReason !== "stop") throw new Error(`${role} did not finish normally: ${message?.stopReason ?? "no final message"}`);
-  const text = contentText(message.content).trim();
-  if (!text) throw new Error(`${role} produced an empty report`);
-  return text;
-}
 
 /** Fresh one-shot nodes borrow idle agents; LockPolicy does not confine host filesystem writes. */
 export const VerusRound = {
   async create(workspace: VerusWorkspace, members: VerusMembers, verification: { runs(): number },
     feedback?: VerusFeedback, observer?: tracer.DataflowTracer): Promise<VerusRound> {
-    const translated = graph.EdgeId.create("Verifier->Reviewer");
-    const reviewed = graph.EdgeId.create("Reviewer->Cleanup");
-    const context = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
-    members.Verifier.stagePrompt(context + "Translate/repair the current output and address both feedback reports. Write actual source, then report evidence and unresolved obligations.");
-    let reviewerBaseline: number | undefined;
-    members.Reviewer.stagePrompt((inputs) => {
-      const report = finalText(inputs.values.get(translated), "Verifier");
-      reviewerBaseline = verification.runs();
-      return context + `Current Verifier report (evidence):\n${report}\n\nInspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.`;
-    });
-    members.Cleanup.stagePrompt((inputs) => {
-      const report = finalText(inputs.values.get(reviewed), "Reviewer");
-      if (reviewerBaseline === undefined || verification.runs() <= reviewerBaseline) {
-        throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
-      }
-      return context + `Current Reviewer report (evidence):\n${report}\n\nSimplify real source/proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.`;
-    });
-    const execution = await build(document, {
-      cwd: process.cwd(), scheduler: () => schedulers.parallel(), tracer: observer,
+    // Resolve code against this module while retaining the caller's working directory for agents.
+    const assignment = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
+    members.Verifier.stagePrompt(assignment + "Translate/repair the current output and address both feedback reports. Write actual source, then report evidence and unresolved obligations.");
+    const context: VerusRoundContext = { assignment, members, verification };
+    const code = fileURLToPath(new URL("./code.js", import.meta.url));
+    const execution = await build({
+      ...document,
+      code: { PrepareReviewer: code, PrepareCleanup: code },
+    }, {
+      cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
       createAgent: async (spec) => members[spec.node as VerusRole],
     });
     return { execution, reviewerId: graph.NodeId.create("Reviewer"), cleanupId: graph.NodeId.create("Cleanup") };

@@ -90,15 +90,6 @@ const graphSchema = Type.Cyclic(
             ),
             Type.Object(
               {
-                ...agentFields,
-                kind: Type.Literal("ralph"),
-                trigger: Type.Optional(trigger),
-                rounds: Type.Optional(Type.Integer({ minimum: 1 })),
-              },
-              strict,
-            ),
-            Type.Object(
-              {
                 ...common,
                 kind: Type.Literal("emit"),
                 trigger: Type.Optional(trigger),

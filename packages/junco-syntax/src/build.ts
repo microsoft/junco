@@ -26,11 +26,10 @@ import {
   JuncoGraph,
   type MockAgent,
   mcp,
-  schedulers,
+  schedules,
   tools,
   type tracer,
 } from "junco-agency";
-import { Ralph } from "junco-agency/workflows";
 import {
   edgeId,
   inboundEdges,
@@ -46,11 +45,11 @@ import {
 } from "./schema.js";
 
 type Edge = graph.Edge<AgenticInput, AssistantMessage>;
-type Execution = schedulers.SchedulerContext<
+type Execution = schedules.SchedulerContext<
   Agentic,
   AgenticInput,
   AssistantMessage,
-  schedulers.AgencyNodeMetadata,
+  schedules.AgencyNodeMetadata,
   JuncoGraph
 >;
 export type AgentSpec = {
@@ -89,11 +88,11 @@ export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   readonly scheduler: (
     graph: string,
-  ) => schedulers.Scheduler<
+  ) => schedules.Scheduler<
     Agentic,
     AgenticInput,
     AssistantMessage,
-    schedulers.AgencyNodeMetadata
+    schedules.AgencyNodeMetadata
   >;
   readonly policy?: tools.Policy;
   readonly collection?: tools.ToolCollection;
@@ -109,7 +108,7 @@ export type BuildOptions<C = unknown> = {
       (context: {
         graph: JuncoGraph;
         edges: ReadonlyMap<string, Edge>;
-      }) => graph.AvailabilityFn<AgenticInput, AssistantMessage>
+      }) => graph.AvailabilityFn<AgenticInput, AssistantMessage> | undefined
     >
   >;
   readonly context?: C;
@@ -387,8 +386,6 @@ async function registerAgent(
   id: string,
   node: Extract<NodeSpec, { model: string }>,
   registration: Registration,
-  outbound: readonly Edge[],
-  edges: ReadonlyMap<string, Edge>,
 ): Promise<void> {
   const resolved = c.specs.next().value!;
   const instance = c.options.createAgent
@@ -409,27 +406,13 @@ async function registerAgent(
             );
           return { expect: byEdge[edgeId]! };
         };
-  if (node.kind === "ralph") {
-    if (!(instance instanceof agent.JuncoAgent))
-      throw new TypeError("ralph node requires a JuncoAgent");
-    const registered = Ralph.register(g, instance, {
-      id: registration.id,
-      description: node.description,
-      input: edges.get(edgeId(inboundEdges(spec, id)[0]!))!,
-      output: outbound[0]!,
-      rounds: node.rounds,
-      policy: c.policy,
-    });
-    const is_available = registration.is_available;
-    if (is_available) Object.assign(g.getNode(registered)!, { is_available });
-  } else
-    g.addNode({
-      ...registration,
-      trigger: resolveTrigger(spec, id, node.trigger),
-      state: instance,
-      policy: c.policy,
-      ...(contract ? { contract } : {}),
-    });
+  g.addNode({
+    ...registration,
+    trigger: resolveTrigger(spec, id, node.trigger),
+    state: instance,
+    policy: c.policy,
+    ...(contract ? { contract } : {}),
+  });
 }
 
 async function buildGraph(
@@ -447,7 +430,9 @@ async function buildGraph(
     spec,
     parentOutputs,
     (id) => g.result(graph.NodeId.create(id)),
-    c.options.available?.$sink ? (v, t) => sinkHook!(v, t) : undefined,
+    c.options.available?.$sink
+      ? (v, t) => (sinkHook ? sinkHook(v, t) : t)
+      : undefined,
   );
   // parse validated these dynamic integers; Width.create only accepts numeric literals.
   const g: JuncoGraph = new JuncoGraph(
@@ -464,7 +449,7 @@ async function buildGraph(
   if (c.options.createAgent === undefined) c.partialRoots.add(g);
   const hook = (id: string) => c.options.available?.[id]?.({ graph: g, edges });
   sinkHook = hook("$sink");
-  const execution = schedulers.context({
+  const execution = schedules.context({
     scheduler: c.options.scheduler(label),
     graph: g,
   });
@@ -514,7 +499,7 @@ async function buildGraph(
         ...(created.contract ? { contract: created.contract } : {}),
       });
     } else {
-      await registerAgent(c, g, spec, id, node, registration, outbound, edges);
+      await registerAgent(c, g, spec, id, node, registration);
     }
   }
   for (const edge of spec.edges ?? [])

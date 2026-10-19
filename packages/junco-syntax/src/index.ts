@@ -8,7 +8,7 @@ export {
   type DeterministicNode,
   resolveAgents,
 } from "./build.js";
-export { parse } from "./parse.js";
+export { type ParseOptions, parse } from "./parse.js";
 export {
   BUILTIN_TOOL_NAMES,
   type EdgeSpec,

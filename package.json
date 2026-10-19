@@ -16,11 +16,6 @@
       "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "import": "./dist/index.js"
-    },
-    "./workflows": {
-      "types": "./dist/workflows/index.d.ts",
-      "bun": "./src/workflows/index.ts",
-      "import": "./dist/workflows/index.js"
     }
   },
   "files": [
@@ -29,14 +24,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build ./src/index.ts ./src/workflows/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
-    "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/mixed/mixed.ts ./examples/oss-committee/oss-committee.ts ./examples/mcp/mcp.ts ./examples/yak-shaver/yak-shaver.ts ./examples/verus/verus.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
+    "build": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/recursive-agency/code.ts ./examples/mixed/mixed.ts ./examples/mixed/code.ts ./examples/oss-committee/oss-committee.ts ./examples/oss-committee/code.ts ./examples/mcp/mcp.ts ./examples/mcp/code.ts ./examples/yak-shaver/yak-shaver.ts ./examples/yak-shaver/code.ts ./examples/verus/verus.ts ./examples/verus/code.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
     "check:ci": "bun run --bun biome ci .",
     "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-graph.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/graft-preprocessing.test.ts ./test/resource-schedulers.test.ts",
     "test:coverage": "bun run test --coverage",
-    "test:integration": "bun test ./test/junco-agency.test.ts ./test/scheduler-dsl.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/ralph-workflow.test.ts ./test/yak-shaver.test.ts ./test/verus.test.ts",
+    "test:integration": "bun test ./test/junco-agency.test.ts ./test/scheduler-dsl.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/std-workflows.test.ts ./test/yak-shaver.test.ts ./test/verus.test.ts",
     "test:native": "bun test ./test/policy-yield.test.ts ./test/mcp-graphs.test.ts ./test/yak-shaver-native.test.ts ./test/tui-tracer.test.ts",
     "test:all": "bun run test && bun run test:integration && bun run test:native",
     "smoke": "bun run test/deterministic-agency.fixture.ts",

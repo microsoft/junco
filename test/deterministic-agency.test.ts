@@ -39,7 +39,7 @@ import {
   MockAgent,
   type MockHook,
   type MockRun,
-  schedulers,
+  schedules,
 } from "../src/index.ts";
 import {
   assistant,
@@ -57,14 +57,14 @@ import {
 } from "./deterministic-support.ts";
 
 // JuncoGraphs of mock members, coroutines and nested graphs on the real round-robin and parallel
-// policies. Graphs, schedulers, recursive lifecycle and cancellation are real.
+// policies. Graphs, schedules, recursive lifecycle and cancellation are real.
 
 type PolicyGraph = JuncoGraph<AgenticInput, AssistantMessage>;
 type PolicyContext = SchedulerContext<
   Agentic<AgenticInput, AssistantMessage>,
   AgenticInput,
   AssistantMessage,
-  schedulers.AgencyNodeMetadata,
+  schedules.AgencyNodeMetadata,
   PolicyGraph
 >;
 
@@ -527,7 +527,7 @@ for (const strategy of STRATEGIES) {
           },
           { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) },
         );
-        const childContext = schedulers.context({
+        const childContext = schedules.context({
           scheduler: parallel(),
           graph: new JuncoGraph(
             childSource,
@@ -1340,7 +1340,7 @@ describe("nested graphs", () => {
   test("an undefined sink result is a present parent value", async () => {
     type Maybe = AssistantMessage | undefined;
     const childPorts = terminalPorts<AgenticInput, Maybe>();
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       scheduler: parallel(),
       graph: new JuncoGraph(
         childPorts.source,
@@ -1360,7 +1360,7 @@ describe("nested graphs", () => {
     });
     childPorts.connect(child, empty);
     const parentPorts = terminalPorts<AgenticInput, Maybe>();
-    const parentContext = schedulers.context({
+    const parentContext = schedules.context({
       scheduler: parallel(),
       graph: new JuncoGraph(
         parentPorts.source,
@@ -1639,7 +1639,7 @@ describe("source and sink boundaries", () => {
       LockPolicy,
     );
     const histories: (readonly Decision[])[] = [];
-    const execution = schedulers.context({
+    const execution = schedules.context({
       graph,
       scheduler: (snapshot) => {
         histories.push(snapshot.history);
@@ -1781,7 +1781,7 @@ describe("source and sink boundaries", () => {
       LockPolicy,
     );
     let waiting = true;
-    const execution = schedulers.context({
+    const execution = schedules.context({
       graph,
       scheduler: async (snapshot) => {
         if (waiting) {
@@ -1925,7 +1925,7 @@ describe("source and sink boundaries", () => {
       validSink.id,
       Edge.value<number, string>("work->$sink"),
     );
-    const execution = schedulers.context({
+    const execution = schedules.context({
       graph: valid,
       scheduler: parallel(),
     });
@@ -2011,7 +2011,7 @@ describe("nested sink publication", () => {
       new DummyTracer(),
       LockPolicy,
     );
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       graph: child,
       scheduler: (snapshot) => {
         decisions++;
@@ -2161,7 +2161,7 @@ describe("nested sink publication", () => {
         new DummyTracer(),
         LockPolicy,
       );
-      const childContext = schedulers.context({
+      const childContext = schedules.context({
         graph: child,
         scheduler: parallel(),
       });

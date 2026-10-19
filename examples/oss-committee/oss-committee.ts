@@ -5,8 +5,8 @@
 // 1. Tools are ordinary Pi `AgentTool`s. The Librarian searches GitHub; the Reducer records a verdict;
 //    graph tools (`send`, `info`) carry partial research.
 // 2. Members are `JuncoAgent`s, created from provider/model IDs through Pi's saved login.
-// 3. A review round is a dataflow graph. Each registered member agent runs once; the Architect's and
-//    the Reducer's staged prompt callbacks validate upstream reports and compose their assignments.
+// 3. A review round is a YAML dataflow graph. Code nodes prepare assignments and validate upstream
+//    reports; each persistent member runs once from the prepared prompt.
 // 4. Rounds repeat over the same members, whose sessions keep every earlier round, until the Reducer
 //    approves.
 // 5. The command line owns everything it creates and writes only an approved plan.
@@ -19,17 +19,19 @@
 
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type DataflowTracer, EdgeId, NodeId, type NodeIdType } from "dataflow-engine";
+import { type DataflowTracer, NodeId, type NodeIdType } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import type { JuncoAgent } from "junco-agent";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { type AgenticInput, graph as graphApi, schedulers, tracer } from "junco-agency";
+import { type AgenticInput, graph as graphApi, schedules, tracer } from "junco-agency";
 import { build, createJuncoAgent, parse, resolveAgents } from "junco-syntax";
 import { ctrlC } from "../cancellation/cancellation.ts";
+import { finalText, type RoundContext, type SearchCounts } from "./code.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
 const document = parse(source);
@@ -161,81 +163,41 @@ export type Members = Readonly<Record<MemberId, JuncoAgent>>;
 
 // ## 3. One review round
 //
-// A round is a dataflow graph over the persistent members. Each registered member runs once from
-// its staged prompt. The Architect's and the Reducer's prompt callbacks validate the final reports
-// they receive (value edges) and compose their assignments. If a lookup fails, the Librarian finds
-// the partial-research message route with `info`, `send`s its partial research there and yields;
-// the Architect starts from it while the Librarian waits, paused, until the Architect returns. The
-// Reducer always waits for both final reports.
-
-type SearchCounts = Pick<OssSearchTool, "searches" | "failures">;
-
-/** A member's report counts only when its run finished normally with text. */
-function finalText(message: AssistantMessage | undefined, member: MemberId): string {
-  if (message?.stopReason !== "stop") {
-    throw new Error(`${member} did not finish normally: ${message?.stopReason ?? "no final message"}`);
-  }
-  const text = contentText(message.content).trim();
-  if (!text) throw new Error(`${member} produced an empty report`);
-  return text;
-}
-
-const partialResearchId = EdgeId.create("Librarian~>Architect");
-const researchId = EdgeId.create("Librarian->Architect");
-const reducerResearchId = EdgeId.create("Librarian->Reducer");
-const designId = EdgeId.create("Architect->Reducer");
+// A round is a dataflow graph over the persistent members. Assignment code nodes validate the
+// reports they receive and send the exact prompts declared on each member's message route. If a
+// lookup fails, the Librarian finds the partial-research message route with `info`, `send`s its
+// partial research there and yields; the Architect starts from it while the Librarian waits,
+// paused, until the Architect returns. The review assignment always joins both final reports.
 
 /** One review round's graph and its Reducer node. */
 export interface ReviewRound {
-  execution: ReturnType<typeof schedulers.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
+  execution: ReturnType<typeof schedules.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
   reducerId: NodeIdType;
 }
 
 export const ReviewRound = {
   async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: DataflowTracer): Promise<ReviewRound> {
-    const failuresBefore = search.failures();
-    const lookupFailed = () => search.failures() > failuresBefore;
-    const context = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}`;
-
-    members.Librarian.stagePrompt(
-      context + (feedback === undefined
-        ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
-        : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps."),
-    );
-    let architectStarted = false;
-    members.Architect.stagePrompt((inputs) => {
-      const partial = inputs.messages.get(partialResearchId);
-      let report: string;
-      if (partial !== undefined) {
-        const [snapshot, ...extra] = partial;
-        if (snapshot?.kind !== "prompt" || extra.length > 0)
-          throw new Error("Librarian must send exactly one partial research prompt");
-        report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
-      } else {
-        if (lookupFailed()) throw new Error("Librarian must send its partial research after a failed GitHub lookup");
-        if (search.searches() === 0) throw new Error("Librarian did not complete a valid GitHub OSS search");
-        report = finalText(inputs.values.get(researchId), "Librarian");
-      }
-      architectStarted = true;
-      return `${context}Librarian report:\n${report}`;
-    });
-    members.Reducer.stagePrompt(
-      (inputs) =>
-        `Original request:\n${request}\n\nLibrarian report:\n${finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${finalText(inputs.values.get(designId), "Architect")}`,
-    );
-    const execution = await build(document, {
-      cwd: process.cwd(), scheduler: () => schedulers.parallel(), tracer: observer,
+    const context: RoundContext = {
+      request, feedback, members, search, failuresBefore: search.failures(), architectStarted: false,
+    };
+    const execution = await build({
+      ...document,
+      // The example also runs outside the repo cwd; YAML paths remain root-relative for readers.
+      code: Object.fromEntries(Object.keys(document.code!).map((name) => [name, fileURLToPath(new URL("./code.js", import.meta.url))])),
+    }, {
+      cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
       tools: {
         search: members.Librarian.getTools().find((tool) => tool.name === "search_oss")!,
         review: members.Reducer.getTools().find((tool) => tool.name === "review")!,
       },
       createAgent: async (spec) => members[spec.node as MemberId],
       available: {
-        Librarian: ({ graph, edges }) => () => {
-          const partial = edges.get(partialResearchId)!;
+        Librarian: ({ graph, edges }) => (_view, triggered) => {
+          if (!triggered && graph.getNode(NodeId.create("Librarian"))!.status !== "running") return false;
+          const partial = edges.get("Librarian~>DesignAssignment")!;
           // Hold the paused Librarian until the Architect finishes its partial research.
-          return !lookupFailed() ||
-            !((E.isLeft(partial.transport) && partial.transport.left.length > 0) || architectStarted) ||
+          return search.failures() <= context.failuresBefore ||
+            !((E.isLeft(partial.transport) && partial.transport.left.length > 0) || context.architectStarted) ||
             graph.getNode(NodeId.create("Architect"))!.status === "done";
         },
       },

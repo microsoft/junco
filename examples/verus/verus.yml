@@ -1,3 +1,8 @@
+# Deterministic gates prepare assignments; exactly three persistent agents perform model work.
+code:
+  PrepareReviewer: examples/verus/code.ts
+  PrepareCleanup: examples/verus/code.ts
+
 graph:
   name: Verus
   nodes:
@@ -19,6 +24,11 @@ graph:
         Address both previous Reviewer recommendations and Cleanup observations every subsequent cycle. Check translated source with the Verus MCP diagnostics tools; preserve full diagnostics in your report.
       description: "Translate Rust and infer local specifications"
       trigger: "always"
+    PrepareReviewer:
+      kind: code
+      name: PrepareReviewer
+      description: Validate the Verifier report and sample the per-round Reviewer diagnostics baseline.
+      trigger: "Verifier->PrepareReviewer"
     Reviewer:
       model: "github-copilot/gpt-6.1-sol"
       thinking: "high"
@@ -35,9 +45,14 @@ graph:
         Review vacuity, missing behavior/error cases, unjustified preconditions, weakened postconditions, uncovered modules/definitions, trusted boundaries, name/architecture drift, and semantic changes. Explicitly inspect assume, admit, external_body, and axiom annotations, reporting any preexisting boundary.
         Recommend concrete stronger guarantees/invariants, shorter proofs, and idiomatic semantically equivalent code with file/definition anchors and real diagnostics. Do not declare overall completion merely because Verus exits zero.
       description: "Run Verus and review specification adequacy"
-      trigger: "Verifier->Reviewer"
+      trigger: "PrepareReviewer->Reviewer"
       contracts:
-        "Verifier->Reviewer": "Normally completed, nonblank Verifier report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
+        "PrepareReviewer->Reviewer": "Normally completed, nonblank Verifier report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
+    PrepareCleanup:
+      kind: code
+      name: PrepareCleanup
+      description: Validate the Reviewer report and require fresh diagnostics before preparing Cleanup.
+      trigger: "Reviewer->PrepareCleanup"
     Cleanup:
       model: "github-copilot/gpt-6.1-sol"
       thinking: "high"
@@ -53,13 +68,17 @@ graph:
         Do not weaken accepted contracts, strengthen preconditions to exclude valid original behavior, inflate executable code to game a proof/code ratio, or remove obligations just to shorten code. Preserve existing names and architecture.
         Check edits with mcp__verus__lsp_diagnostics. Report remaining failures and unresolved stricter-spec recommendations for the next Verifier. The proof/code ratio is an optimization goal, not a fabricated exact metric or a guarantee of monotonic decrease.
       description: "Simplify code and proofs without weakening obligations"
-      trigger: "Reviewer->Cleanup"
+      trigger: "PrepareCleanup->Cleanup"
       contracts:
-        "Reviewer->Cleanup": "Normally completed, nonblank Reviewer report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
+        "PrepareCleanup->Cleanup": "Normally completed, nonblank Reviewer report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
   edges:
     - from: Verifier
+      to: PrepareReviewer
+    - from: PrepareReviewer
       to: Reviewer
     - from: Reviewer
+      to: PrepareCleanup
+    - from: PrepareCleanup
       to: Cleanup
     - from: Cleanup
       to: $sink

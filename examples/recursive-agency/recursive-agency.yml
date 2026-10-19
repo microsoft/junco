@@ -1,3 +1,5 @@
+code:
+  Join: examples/recursive-agency/code.ts
 graph:
   name: root
   nodes:
@@ -33,6 +35,14 @@ graph:
       prompt: Do your part.
       description: root member 1
       trigger: always
+    Join:
+      kind: code
+      name: Join
+      description: Validates both root branches and retains the child's exact result.
   edges:
     - from: "0"
+      to: Join
+    - from: "1"
+      to: Join
+    - from: Join
       to: $sink

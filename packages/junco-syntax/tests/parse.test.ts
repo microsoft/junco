@@ -133,22 +133,6 @@ for (const mode of ["input", "value", "empty"])
         d.graph.edges.push({ from: "B", to: "A", kind: "message" });
       if (mode === "empty") d.graph.edges.shift();
     }, 'Node "A" (emit) must have no inbound edges and only message outbound edges (at least one)'));
-for (const mode of ["missing", "value", "trigger", "extra"])
-  test(`invalid ralph ${mode}`, () =>
-    rejects((d) => {
-      d.graph.nodes.B.kind = "ralph";
-      d.graph.edges[0].kind = mode === "value" ? "value" : "message";
-      d.graph.edges[1].kind = "message";
-      if (mode === "missing") d.graph.edges.shift();
-      if (mode === "trigger") d.graph.nodes.B.trigger = "A~>B";
-      if (mode === "extra")
-        d.graph.edges.push({
-          from: "A",
-          to: "B",
-          kind: "message",
-          id: "second",
-        });
-    }, 'Node "B" (ralph) needs exactly one inbound message edge and one outbound message edge, and no trigger'));
 test("code node with registry name, trigger and description", () => {
   const doc = parse(
     variant((d) => {
@@ -208,6 +192,24 @@ test("YAML and object parsing, default ids", () => {
   ).graph.nodes.A;
   assert.ok(node && "model" in node);
   assert.equal(node.model, "p/m");
+});
+test("params substitute into YAML text before parsing", () => {
+  const source =
+    'graph:\n  nodes:\n    A:\n      model: "{{ params.model }}"\n  edges:\n    - from: A\n      to: $sink\n';
+  for (const text of [
+    source,
+    source.replace("{{ params.model }}", "{{params.model}}"),
+  ]) {
+    const node = parse(text, { params: { model: "p/m", unused: true } }).graph
+      .nodes.A!;
+    assert.ok("model" in node);
+    assert.equal(node.model, "p/m");
+  }
+  assert.throws(() => parse(source), /junco-syntax: missing param "model"/);
+  assert.throws(
+    () => parse(base(), { params: {} }),
+    /params apply to YAML text/,
+  );
 });
 test("invalid YAML and strict shape", () => {
   assert.throws(() => parse("graph: ["), /junco-syntax: invalid YAML:/);
@@ -276,7 +278,6 @@ graph:
         ingress: external prompt
         seed: seed prompt
     Ralph:
-      kind: ralph
       description: revises the seeded assignment
       model: faux/ralph
       thinking: max
@@ -284,7 +285,6 @@ graph:
       tools: [custom]
       mcp: [full]
       skills: [guide]
-      rounds: 3
       prompt: "{{ ralph-input }}"
       contracts:
         ralph-input: complete assignment
@@ -404,7 +404,6 @@ graph:
           contracts: { ingress: "external prompt", seed: "seed prompt" },
         },
         Ralph: {
-          kind: "ralph",
           description: "revises the seeded assignment",
           model: "faux/ralph",
           thinking: "max",
@@ -412,7 +411,6 @@ graph:
           tools: ["custom"],
           mcp: ["full"],
           skills: ["guide"],
-          rounds: 3,
           prompt: "{{ ralph-input }}",
           contracts: { "ralph-input": "complete assignment" },
         },
@@ -537,21 +535,6 @@ test("numeric grammar preserves positive widths and unrestricted integer MCP tim
       { ...base(), mcp: { server: { command: "unused", timeout } } },
       "/mcp/server/timeout",
     );
-  for (const rounds of [1, 2, 3]) {
-    const doc = variant((d) => {
-      d.graph.nodes.B = { kind: "ralph", model: "p/m", rounds };
-      for (const e of d.graph.edges) e.kind = "message";
-    });
-    assert.equal((parse(doc).graph.nodes.B as any).rounds, rounds);
-  }
-  for (const rounds of [0, -1, 1.5, "2", null, false]) {
-    rejectsAt(
-      variant((d) => {
-        d.graph.nodes.B = { kind: "ralph", model: "p/m", rounds };
-      }),
-      "/graph/nodes/B",
-    );
-  }
 });
 
 test("model and thinking grammar accepts every documented choice", () => {
@@ -585,7 +568,7 @@ test("strict object boundaries and malformed list/map entries", () => {
     ["/graph/source/extra", (d) => (d.graph.source = { extra: true })],
     ["/graph/sink/extra", (d) => (d.graph.sink = { extra: true })],
     ["/graph/edges/0/extra", (d) => (d.graph.edges[0].extra = true)],
-    ...["agent", "ralph", "emit", "graph"].map(
+    ...["agent", "emit", "graph"].map(
       (kind) =>
         [
           "/graph/nodes/A",
@@ -771,34 +754,14 @@ test("recursive validation and ports do not impose connectivity or acyclicity", 
   );
 });
 
-test("emit fan-out and Ralph message degrees including extra value output", () => {
+test("emit fan-out degrees", () => {
   const doc = variant((d) => {
     d.graph.nodes.A = { kind: "emit", text: "go" };
-    d.graph.nodes.B = { kind: "ralph", model: "p/m" };
     for (const e of d.graph.edges) e.kind = "message";
     d.graph.nodes.C = { model: "p/m" };
-    d.graph.edges.push(
-      { from: "A", to: "C", kind: "message" },
-      { from: "B", to: "C", kind: "value" },
-    );
+    d.graph.edges.push({ from: "A", to: "C", kind: "message" });
   });
   assert.equal(parse(doc), doc);
-  for (const outgoing of [
-    [],
-    [
-      { from: "B", to: "$sink", kind: "message" },
-      { from: "B", to: "C", kind: "message" },
-    ],
-  ]) {
-    const bad = structuredClone(doc);
-    bad.graph.edges = bad.graph.edges
-      .filter((e: any) => e.from !== "B")
-      .concat(outgoing);
-    // Preserve a valid sink so this reaches Ralph's degree check.
-    bad.graph.edges.push({ from: "C", to: "$sink" });
-    bad.graph.sink = { returns: "C" };
-    rejectsAt(bad, "/graph/nodes/B");
-  }
 });
 
 test("trigger forms and defaults mirror engine", () => {

@@ -570,7 +570,7 @@ export class JuncoGraph<
     const { state: execution, ...options } = spec;
     const graph = execution.graph;
     const parent = this;
-    const seenValues = new Set<EdgeIdType>();
+    const seenValues = new Map<EdgeIdType, unknown>();
     let started = false;
     const step: StepFn<Agentic<N, T>, N, T> = async function* (): NodeGenerator<
       N,

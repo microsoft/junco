@@ -25,15 +25,15 @@ import {
   JuncoGraph,
   MockAgent,
   MockJuncoGraph,
-  schedulers,
+  schedules,
 } from "../src/index.ts";
 import { terminalPorts, textOf, yieldsThen } from "./deterministic-support.ts";
 
-type Policy = schedulers.Scheduler<
+type Policy = schedules.Scheduler<
   Agentic<AgenticInput, AssistantMessage>,
   AgenticInput,
   AssistantMessage,
-  schedulers.AgencyNodeMetadata
+  schedules.AgencyNodeMetadata
 >;
 const member = (
   name: string,
@@ -148,15 +148,15 @@ for (const Graph of [MockJuncoGraph, JuncoGraph]) {
           }),
         );
         ports.connect(graph, members[3]!);
-        const limited: Policy = schedulers.limit<
+        const limited: Policy = schedules.limit<
           Agentic<AgenticInput, AssistantMessage>,
           AgenticInput,
           AssistantMessage,
-          schedulers.AgencyNodeMetadata
-        >({ memory: gigabytes(4) }, schedulers.parallel());
+          schedules.AgencyNodeMetadata
+        >({ memory: gigabytes(4) }, schedules.parallel());
         if (mocked) {
           const { waves, scheduler } = recorded(limited);
-          const results = await schedulers.context({ graph, scheduler }).run();
+          const results = await schedules.context({ graph, scheduler }).run();
           assert.deepEqual(memberWaves(waves, names), [
             ["A", "D"],
             ["A", "D"],
@@ -174,7 +174,7 @@ for (const Graph of [MockJuncoGraph, JuncoGraph]) {
           assert.equal(textOf(results.get(ports.sink.id)!), "D");
         } else {
           await assert.rejects(
-            () => schedulers.context({ graph, scheduler: limited }).run(),
+            () => schedules.context({ graph, scheduler: limited }).run(),
             (error: unknown) =>
               error instanceof DataflowDefinitionError &&
               error.message.includes('"$sink"') &&
@@ -245,14 +245,14 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
     });
     ports.connect(graph, joinId);
     const { waves, scheduler } = recorded(
-      schedulers.choose<
+      schedules.choose<
         Agentic<AgenticInput, AssistantMessage>,
         AgenticInput,
         AssistantMessage,
-        schedulers.AgencyNodeMetadata
-      >({ rank: schedulers.lowest("tokens"), width: () => 1 }),
+        schedules.AgencyNodeMetadata
+      >({ rank: schedules.lowest("tokens"), width: () => 1 }),
     );
-    const results = await schedulers.context({ graph, scheduler }).run();
+    const results = await schedules.context({ graph, scheduler }).run();
     assert.deepEqual(memberWaves(waves, [...names, "join"]), [
       ["R2"],
       ["R2"],
