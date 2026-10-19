@@ -101,7 +101,8 @@ class RecordingTracer implements DataflowTracer {
 }
 
 /** Read `count` off every edge named by the selected node's trigger. */
-const fixedReader = (count: MessageSchedule) =>
+const fixedReader =
+  (count: MessageSchedule) =>
   (_id: NodeIdType, { trigger }: NodeAvailability<number, string>) =>
     new Map<EdgeIdType, MessageSchedule>(
       trigger.rule.map((edgeId) => [edgeId, count]),
@@ -151,7 +152,11 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
   );
   graph.addEdge(src, sink, feed);
 
-  const results = await context({ graph, scheduler: parallel(), readInputs: fixedReader(2) }).run();
+  const results = await context({
+    graph,
+    scheduler: parallel(),
+    readInputs: fixedReader(2),
+  }).run();
 
   const [run] = tracer.runs;
   assert.equal(tracer.runs.length, 1);
@@ -218,7 +223,10 @@ test("a throwing observer can neither replace a node's return nor its failure", 
         return 42;
       },
     });
-    assert.equal((await context({ graph: ok, scheduler: parallel() }).run()).get(answer), 42);
+    assert.equal(
+      (await context({ graph: ok, scheduler: parallel() }).run()).get(answer),
+      42,
+    );
 
     const boom = new Error("boom");
     const bad = new DataflowGraph<void, number, number, Error>(
@@ -272,9 +280,11 @@ test("a concurrent failure settles the root only after its column settles, keepi
   });
 
   let settled = false;
-  const running = context({ graph, scheduler: parallel() }).run().finally(() => {
-    settled = true;
-  });
+  const running = context({ graph, scheduler: parallel() })
+    .run()
+    .finally(() => {
+      settled = true;
+    });
   await firstFailed.promise;
   assert.equal(settled, false);
   assert.equal(tracer.runs[0]!.error, undefined);
@@ -380,10 +390,15 @@ test("a definition error fails the root trace without inventing activations", as
     }),
   );
 
-  const rejection = await context({ graph, scheduler: () => ({ selected: [] }) }).run().then(
-    () => assert.fail("run() must reject"),
-    (error: unknown) => error,
-  );
+  const rejection = await context({
+    graph,
+    scheduler: () => ({ selected: [] }),
+  })
+    .run()
+    .then(
+      () => assert.fail("run() must reject"),
+      (error: unknown) => error,
+    );
   assert.ok(rejection instanceof DataflowDefinitionError);
   assert.equal(tracer.runs.length, 1);
   assert.equal(tracer.runs[0]!.error, rejection);
@@ -542,10 +557,12 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
         throw sentinel;
       },
     });
-    const error = await context({ graph, scheduler: parallel() }).run().then(
-      () => assert.fail("run() must reject"),
-      (thrown: unknown) => thrown,
-    );
+    const error = await context({ graph, scheduler: parallel() })
+      .run()
+      .then(
+        () => assert.fail("run() must reject"),
+        (thrown: unknown) => thrown,
+      );
     assert.ok(error instanceof DataflowNodeError);
     return {
       nodeId: error.nodeId,

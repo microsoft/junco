@@ -22,9 +22,11 @@ graph:
                   description: grandchild member 0
                   trigger: always
               edges:
-                - { from: "0", to: $sink }
+                - from: "0"
+                  to: $sink
         edges:
-          - { from: "0", to: $sink }
+          - from: "0"
+            to: $sink
     "1":
       model: faux/sibling
       system: leaf
@@ -32,4 +34,5 @@ graph:
       description: root member 1
       trigger: always
   edges:
-    - { from: "0", to: $sink }
+    - from: "0"
+      to: $sink

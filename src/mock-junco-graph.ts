@@ -10,11 +10,19 @@ import { MockAgent, NO_USAGE } from "./mock-agent.js";
  * graphs, real agents) gets zero memory and zero tokens. Strict resource schedulers
  * (`schedulers.limit`, `schedulers.lowest`) therefore accept the whole graph.
  */
-export class MockJuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never> extends JuncoGraph<N, T, EH> {
+export class MockJuncoGraph<
+  N = AgenticInput,
+  T = AssistantMessage,
+  EH = never,
+> extends JuncoGraph<N, T, EH> {
   override addNode(spec: AgenticNode<N, T>): NodeIdType {
-    if (spec.profiles !== undefined && Object.keys(spec.profiles).length > 0) return super.addNode(spec);
-    const profiles = spec.state instanceof MockAgent && Object.keys(spec.state.profiles).length > 0
-      ? spec.state.profiles : NO_USAGE;
+    if (spec.profiles !== undefined && Object.keys(spec.profiles).length > 0)
+      return super.addNode(spec);
+    const profiles =
+      spec.state instanceof MockAgent &&
+      Object.keys(spec.state.profiles).length > 0
+        ? spec.state.profiles
+        : NO_USAGE;
     return super.addNode({ ...spec, profiles } as AgenticNode<N, T>);
   }
 }

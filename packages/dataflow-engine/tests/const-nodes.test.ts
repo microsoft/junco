@@ -2,11 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import { context, parallel } from "junco-scheduler";
-import type {
-  EdgeIdType,
-  MessageSchedule,
-  NodeIdType,
-} from "../src/index.ts";
+import type { EdgeIdType, MessageSchedule, NodeIdType } from "../src/index.ts";
 import {
   ConstFanin,
   ConstFanout,
@@ -26,10 +22,7 @@ import {
 type Payload = { readonly value: number };
 
 const newGraph = <N>(): DataflowGraph<void, N, string, never> =>
-  new DataflowGraph<void, N, string, never>(
-    Width.create(1),
-    UNBOUNDED,
-  );
+  new DataflowGraph<void, N, string, never>(Width.create(1), UNBOUNDED);
 
 /** Register a never-finishing sink on `edge` that records every payload it receives. */
 const addSink = <N>(
@@ -189,15 +182,19 @@ test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => 
     Width.create(1),
     UNBOUNDED,
   );
-  const advance = () => graph.evaluate(async (execute) => {
-    const schedule = [...graph.available()].map(([id, availability]) => [{
-      id,
-      inputs: id === join && availability.status === "running"
-        ? (scripted.shift() ?? triggerInputs(availability))
-        : triggerInputs(availability),
-    }]);
-    await execute(schedule);
-  });
+  const advance = () =>
+    graph.evaluate(async (execute) => {
+      const schedule = [...graph.available()].map(([id, availability]) => [
+        {
+          id,
+          inputs:
+            id === join && availability.status === "running"
+              ? (scripted.shift() ?? triggerInputs(availability))
+              : triggerInputs(availability),
+        },
+      ]);
+      await execute(schedule);
+    });
   join = graph.addNode(
     new ConstFanin([a, b, c], list, { state: undefined, ret: "join done" }),
   );

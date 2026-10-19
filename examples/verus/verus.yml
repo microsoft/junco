@@ -57,6 +57,9 @@ graph:
       contracts:
         "Reviewer->Cleanup": "Normally completed, nonblank Reviewer report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
   edges:
-    - { from: Verifier, to: Reviewer }
-    - { from: Reviewer, to: Cleanup }
-    - { from: Cleanup, to: $sink }
+    - from: Verifier
+      to: Reviewer
+    - from: Reviewer
+      to: Cleanup
+    - from: Cleanup
+      to: $sink

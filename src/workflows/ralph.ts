@@ -9,8 +9,8 @@ import {
   type NodeIdType,
   type NodeOptions,
   type ParentView,
-  Source,
   Sink,
+  Source,
   TriggerRule,
   UNBOUNDED,
   Width,
@@ -74,7 +74,6 @@ class RalphState {
 
   constructor(readonly rounds: number) {}
 
-
   /** The assignment itself for the first round; afterwards the assignment plus the previous draft. */
   nextPrompt(): string {
     const assignment = this.assignment;
@@ -90,7 +89,10 @@ function createRalphGraph(
   rounds: number,
   policy: ToolCollection["policy"],
   tracer: DataflowTracer,
-  admit: (view: ParentView<AgenticInput, AssistantMessage>, state: RalphState) => void,
+  admit: (
+    view: ParentView<AgenticInput, AssistantMessage>,
+    state: RalphState,
+  ) => void,
   output?: Edge<AgenticInput, AssistantMessage>,
   initialize?: (state: RalphState) => void,
 ) {
@@ -101,18 +103,28 @@ function createRalphGraph(
   const state = new RalphState(rounds);
   const workerId = NodeId.create("RalphStep");
   const final = Edge.value<AgenticInput, AssistantMessage>("RalphStep->$sink");
-  const source = new Source<AgenticInput, AssistantMessage>((view) => {
-    admit(view, state);
-    return [];
-  }, { id: NodeId.create("$source") });
-  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (port): NodeGenerator<AgenticInput, AssistantMessage> {
-    yield [];
-    const retained = child.result(workerId);
-    if (O.isNone(retained)) throw new Error("Ralph stopped without a final result");
-    const text = finalText(retained.value);
-    if (output) port.send(Message.create(output, { kind: "prompt", text }));
-    return retained.value;
-  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
+  const source = new Source<AgenticInput, AssistantMessage>(
+    (view) => {
+      admit(view, state);
+      return [];
+    },
+    { id: NodeId.create("$source") },
+  );
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<
+    AgenticInput,
+    AssistantMessage
+  >(
+    async function* (port): NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const retained = child.result(workerId);
+      if (O.isNone(retained))
+        throw new Error("Ralph stopped without a final result");
+      const text = finalText(retained.value);
+      if (output) port.send(Message.create(output, { kind: "prompt", text }));
+      return retained.value;
+    },
+    { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) },
+  );
   const child: JuncoGraph<AgenticInput, AssistantMessage> = new JuncoGraph(
     source,
     sink,
@@ -167,7 +179,9 @@ function createRalphGraph(
     policy,
     trigger: TriggerRule.always(),
     step,
-    is_available: () => source.peek() === undefined && (state.assignment !== undefined || initialize !== undefined),
+    is_available: () =>
+      source.peek() === undefined &&
+      (state.assignment !== undefined || initialize !== undefined),
   });
   child.addEdge(workerId, sink.id, final);
   return { execution: context({ graph: child, scheduler: parallel() }), state };
@@ -181,14 +195,24 @@ export const Ralph = {
     options: RalphNodeOptions,
   ): AgenticNode<AgenticInput, AssistantMessage> {
     const { assignment, rounds = 2, policy, tracer, ...nodeOptions } = options;
-    const admit = (view: ParentView<AgenticInput, AssistantMessage>, state: RalphState) => {
+    const admit = (
+      view: ParentView<AgenticInput, AssistantMessage>,
+      state: RalphState,
+    ) => {
       if (state.assignment !== undefined) return;
-      const text = typeof assignment === "function" ? assignment(view) : assignment;
-      if (typeof text !== "string") throw new TypeError("Ralph assignment must be a string");
+      const text =
+        typeof assignment === "function" ? assignment(view) : assignment;
+      if (typeof text !== "string")
+        throw new TypeError("Ralph assignment must be a string");
       state.assignment = text;
     };
     const { execution } = createRalphGraph(
-      agent, rounds, policy, tracer, admit, undefined,
+      agent,
+      rounds,
+      policy,
+      tracer,
+      admit,
+      undefined,
       (state) => admit({ messages: new Map(), values: new Map() }, state),
     );
     return { ...nodeOptions, state: execution };
@@ -223,11 +247,15 @@ export const Ralph = {
       (view, state) => {
         const inputs = from(view, input);
         const [assignment] = inputs;
-        if ([...view.values.keys()].length !== 0 ||
+        if (
+          [...view.values.keys()].length !== 0 ||
           [...view.messages.keys()].some((id) => id !== input.id) ||
-          inputs.length !== 1 || assignment?.kind !== "prompt" ||
+          inputs.length !== 1 ||
+          assignment?.kind !== "prompt" ||
           (assignment.images !== undefined && assignment.images.length > 0) ||
-          state.assignment !== undefined) throw assignmentError();
+          state.assignment !== undefined
+        )
+          throw assignmentError();
         state.assignment = assignment.text;
       },
       output,

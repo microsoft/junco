@@ -17,6 +17,7 @@ export type {
 export { Deterministic } from "./deterministic.js";
 export { JuncoGraph } from "./junco-graph.js";
 export {
+  constantProfiles,
   MockAgent,
   type MockCall,
   type MockFrame,
@@ -28,7 +29,6 @@ export {
   type MockTerminal,
   type MockTranscript,
   type MockUsage,
-  constantProfiles,
   NO_USAGE,
 } from "./mock-agent.js";
 export { MockJuncoGraph } from "./mock-junco-graph.js";

@@ -11,8 +11,8 @@ import {
 import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
-import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import type { AgentSpec } from "junco-syntax";
+import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import { Deterministic } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
 
@@ -86,11 +86,16 @@ async function mixedWorkflow(
 
   const agents: JuncoAgent[] = [];
   const createAgent = async (spec: AgentSpec) => {
-    const responses = spec.node === "Ralph"
-      ? ralphResponses
-      : spec.node === "Direct"
-        ? receiving("Direct", directAnswer)
-        : [recording("Reviewer", () => fauxAssistantMessage("Ralph: clearer coverage."))];
+    const responses =
+      spec.node === "Ralph"
+        ? ralphResponses
+        : spec.node === "Direct"
+          ? receiving("Direct", directAnswer)
+          : [
+              recording("Reviewer", () =>
+                fauxAssistantMessage("Ralph: clearer coverage."),
+              ),
+            ];
     const { options } = await nativeOptions(responses);
     const created = await JuncoAgent.fromResolved({
       ...options,
@@ -182,7 +187,7 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
 test("a failed second Ralph round rejects the graph and never reaches the Reviewer", async () => {
   await using flow = await mixedWorkflow(true);
   const { execution, reviewerId, prompts } = flow;
-    const graph = execution.graph;
+  const graph = execution.graph;
 
   await assert.rejects(() => execution.run());
   assert.equal(prompts.Ralph.length, 2);
@@ -194,7 +199,7 @@ test("a failed second Ralph round rejects the graph and never reaches the Review
 test("a blank Direct answer fails the Reviewer before any Reviewer request", async () => {
   await using flow = await mixedWorkflow(false, " ");
   const { execution, reviewerId, prompts } = flow;
-    const graph = execution.graph;
+  const graph = execution.graph;
 
   const failure = await execution.run().then(
     () => assert.fail("graph should reject"),

@@ -12,21 +12,21 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
-  DataflowGraph,
   DataflowDefinitionError,
-  type NodeSpec,
-  type NodeGenerator,
+  DataflowGraph,
   type DataflowTracer,
   Edge,
   EdgeId,
   type EdgeIdType,
   Message,
+  type NodeGenerator,
   NodeId,
-  Source,
-  Sink,
   type NodeIdType,
   type NodeOptions,
+  type NodeSpec,
   type ParentView,
+  Sink,
+  Source,
   TriggerRule,
   UNBOUNDED,
   Width,
@@ -34,12 +34,22 @@ import {
 } from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import {
-  JuncoAgent,
   type AgenticStep,
+  JuncoAgent,
   type Agentic as JuncoAgentProtocol,
 } from "junco-agent";
-import { agent as oracleAgent, choose, context as nativeContext, parallel, roundRobin, separate, type Scheduler, type SchedulerContext, type Snapshot } from "junco-scheduler";
-import { pi, type PiOptions } from "junco-scheduler/agent";
+import {
+  choose,
+  context as nativeContext,
+  agent as oracleAgent,
+  parallel,
+  roundRobin,
+  type Scheduler,
+  type SchedulerContext,
+  type Snapshot,
+  separate,
+} from "junco-scheduler";
+import { type PiOptions, pi } from "junco-scheduler/agent";
 import {
   type Contract,
   EmptyPolicy,
@@ -49,6 +59,7 @@ import {
   type Policy,
   type ToolCollection,
 } from "junco-tools";
+import type { Graph } from "ngraph.graph";
 import {
   type Agentic,
   type AgenticInput,
@@ -58,7 +69,6 @@ import {
   graph as graphApi,
   JuncoGraph,
   MockAgent,
-  schedulers,
   type MockCall,
   type MockFrame,
   type MockHook,
@@ -68,15 +78,21 @@ import {
   type MockRun,
   type MockTerminal,
   type MockTranscript,
+  schedulers,
 } from "../src/index.ts";
-import type { Graph } from "ngraph.graph";
 import type { NodePolicy } from "../src/node-policy.ts";
 
 type TaggedSkill = Skill & { readonly tag: "skill" };
 type TaggedTemplate = PromptTemplate & { readonly tag: "template" };
 type TaggedTool = AgentTool & { readonly tag: "tool" };
 type TaggedTranscript = MockTranscript<TaggedSkill, TaggedTemplate, TaggedTool>;
-type NestedContext<N = AgenticInput, T = AssistantMessage> = SchedulerContext<Agentic<N, T>, N, T, never, JuncoGraph<N, T>>;
+type NestedContext<N = AgenticInput, T = AssistantMessage> = SchedulerContext<
+  Agentic<N, T>,
+  N,
+  T,
+  never,
+  JuncoGraph<N, T>
+>;
 
 export function protocolComplainTakesCompleteIssues(
   protocol: JuncoAgentProtocol<TaggedSkill, TaggedTemplate, TaggedTool>,
@@ -141,40 +157,109 @@ export async function factoriesKeepSpecializations(
   tracer: DataflowTracer,
   collection: ToolCollection,
 ) {
-  const graph = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, LockPolicy, collection);
+  const graph = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+    collection,
+  );
   const execution = schedulers.context({ scheduler: pi(options), graph });
   const retained: JuncoGraph = execution.graph;
-  const bounds: readonly [WidthType, WidthType, DataflowTracer] = [graph.window, graph.threads, graph.tracer];
+  const bounds: readonly [WidthType, WidthType, DataflowTracer] = [
+    graph.window,
+    graph.threads,
+    graph.tracer,
+  ];
   // @ts-expect-error source and sink are mandatory positional ports
   void new JuncoGraph(Width.create(1), UNBOUNDED, tracer, LockPolicy);
-  // @ts-expect-error ports cannot be reversed
-  void new JuncoGraph(sink, source, Width.create(1), UNBOUNDED, tracer, LockPolicy);
+  void new JuncoGraph(
+    // @ts-expect-error ports cannot be reversed
+    sink,
+    source,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
   // @ts-expect-error a direct graph requires its policy
   void new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer);
-  // @ts-expect-error a policy is an object, not its name
-  void new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, "gitpolicy");
+  void new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    // @ts-expect-error a policy is an object, not its name
+    "gitpolicy",
+  );
   // @ts-expect-error a coroutine requires a policy
   void new Deterministic(async function* () {});
-  const created: Promise<SchedulerContext<Agentic, AgenticInput, AssistantMessage, schedulers.AgencyNodeMetadata, JuncoGraph>> = JuncoGraph.create(
-    ".", { policy: EmptyPolicy, sandbox: "always" }, (shared) => schedulers.context({
+  const created: Promise<
+    SchedulerContext<
+      Agentic,
+      AgenticInput,
+      AssistantMessage,
+      schedulers.AgencyNodeMetadata,
+      JuncoGraph
+    >
+  > = JuncoGraph.create(
+    ".",
+    { policy: EmptyPolicy, sandbox: "always" },
+    (shared) =>
+      schedulers.context({
+        scheduler: parallel(),
+        graph: new JuncoGraph(
+          source,
+          sink,
+          Width.create(1),
+          UNBOUNDED,
+          undefined,
+          shared.policy,
+          shared,
+        ),
+      }),
+  );
+  const custom = JuncoGraph.create<
+    AgenticInput,
+    AssistantMessage,
+    never,
+    { priority: number }
+  >(".", {}, (shared) =>
+    nativeContext({
+      graph: new JuncoGraph(
+        source,
+        sink,
+        Width.create(1),
+        UNBOUNDED,
+        tracer,
+        shared.policy,
+        shared,
+      ),
       scheduler: parallel(),
-      graph: new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, undefined, shared.policy, shared),
+      describeNode: () => ({ priority: 7 }),
     }),
   );
-  const custom = JuncoGraph.create<AgenticInput, AssistantMessage, never, { priority: number }>(
-    ".", {}, (shared) => nativeContext({
-      graph: new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, shared.policy, shared),
-      scheduler: parallel(), describeNode: () => ({ priority: 7 }),
-    }),
-  );
-  const exactCustom: SchedulerContext<Agentic, AgenticInput, AssistantMessage, { priority: number }, JuncoGraph> = await custom;
+  const exactCustom: SchedulerContext<
+    Agentic,
+    AgenticInput,
+    AssistantMessage,
+    { priority: number },
+    JuncoGraph
+  > = await custom;
   // @ts-expect-error collection builders return contexts, not bare graphs
   void JuncoGraph.create(".", {}, () => graph);
-  const injected = new Deterministic<AgenticInput, string>(async function* (signal, borrowed) {
-    signal.throwIfAborted();
-    yield [];
-    return borrowed === undefined ? "pure" : "borrowed";
-  }, LockPolicy, collection);
+  const injected = new Deterministic<AgenticInput, string>(
+    async function* (signal, borrowed) {
+      signal.throwIfAborted();
+      yield [];
+      return borrowed === undefined ? "pure" : "borrowed";
+    },
+    LockPolicy,
+    collection,
+  );
   return [execution, retained, bounds, created, exactCustom, injected];
 }
 
@@ -210,7 +295,6 @@ export function everyKindSharesOneNodeOptions(
     ...policy,
     state: mock,
     contract,
-    // biome-ignore lint/correctness/useYield: compile-only step that completes without yielding.
     step: async function* () {
       return message;
     },
@@ -347,7 +431,10 @@ export function bindingsStayOutOfNodeOptions(
   });
   const nested: AgenticNode = { trigger: TriggerRule.always(), state: child };
   // @ts-expect-error step-less nesting requires a context rather than a bare graph
-  const unbound: AgenticNode = { trigger: TriggerRule.always(), state: child.graph };
+  const unbound: AgenticNode = {
+    trigger: TriggerRule.always(),
+    state: child.graph,
+  };
   // @ts-expect-error a trigger is required
   const untriggered: NodeOptions<AgenticInput, AssistantMessage> = {
     description: "no trigger",
@@ -372,22 +459,53 @@ export function wireTypesAndContextsArePreserved(
     view = yield [];
     return `${counts.length}:${[...view.values.keys()].length}`;
   }, LockPolicy);
-  const ports: { source: Source<number, string>; sink: Sink<number, string> } = { source: new Source<number, string>(() => { throw new DataflowDefinitionError("Typed fixture does not accept external input"); }, { id: NodeId.create("$source") }), sink: new Sink<number, string>(async function* (): NodeGenerator<number, string> { yield []; const value = child.result(childId); if (value._tag === "None") throw new Error("Missing terminal result"); return value.value; }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(Edge.value<number, string>("member->$sink")) }) };
+  const ports: { source: Source<number, string>; sink: Sink<number, string> } =
+    {
+      source: new Source<number, string>(
+        () => {
+          throw new DataflowDefinitionError(
+            "Typed fixture does not accept external input",
+          );
+        },
+        { id: NodeId.create("$source") },
+      ),
+      sink: new Sink<number, string>(
+        async function* (): NodeGenerator<number, string> {
+          yield [];
+          const value = child.result(childId);
+          if (value._tag === "None") throw new Error("Missing terminal result");
+          return value.value;
+        },
+        {
+          id: NodeId.create("$sink"),
+          trigger: TriggerRule.when(
+            Edge.value<number, string>("member->$sink"),
+          ),
+        },
+      ),
+    };
   const child: JuncoGraph<number, string> = new JuncoGraph<number, string>(
-    ports.source, ports.sink,
+    ports.source,
+    ports.sink,
     Width.create(1),
     UNBOUNDED,
     tracer,
     LockPolicy,
   );
   const childId = child.addNode({ ...options, state: fibonacci });
-  child.addEdge(childId, child.sink.id, Edge.value<number, string>("member->$sink"));
-  const childContext = schedulers.context({ graph: child, scheduler: parallel() });
+  child.addEdge(
+    childId,
+    child.sink.id,
+    Edge.value<number, string>("member->$sink"),
+  );
+  const childContext = schedulers.context({
+    graph: child,
+    scheduler: parallel(),
+  });
   const raw: AgenticNode<number, string> = {
     ...options,
     policy: LockPolicy,
     state: mock,
-    // biome-ignore lint/correctness/useYield: compile-only step that completes without yielding.
     step: async function* () {
       return "raw";
     },
@@ -434,7 +552,6 @@ export function wireTypesAndContextsArePreserved(
     state: mock,
     policy: LockPolicy,
     trigger: TriggerRule.always(),
-    // biome-ignore lint/correctness/useYield: compile-only step that completes without yielding.
     step: async function* () {
       return "custom";
     },
@@ -454,13 +571,22 @@ export function juncoGraphIsTheRuntimeGraphState(
   sink: Sink<AgenticInput, AssistantMessage>,
 ) {
   const constructed = new JuncoGraph(
-    source, sink,
+    source,
+    sink,
     Width.create(1),
     UNBOUNDED,
     tracer,
     EmptyPolicy,
   );
-  const states: Agentic[] = [junco, mock, coroutine, graph, constructed, source, sink];
+  const states: Agentic[] = [
+    junco,
+    mock,
+    coroutine,
+    graph,
+    constructed,
+    source,
+    sink,
+  ];
   const native: DataflowGraph<
     Agentic,
     AgenticInput,
@@ -765,14 +891,29 @@ export function namespacedNodeBindingsKeepWireTypes(
   sink: Sink<number, string>,
   tracer: DataflowTracer,
 ) {
-  const options: NodeOptions<number, string> = { trigger: graphApi.trigger.TriggerRule.always() };
-  const graph = new graphApi.JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, LockPolicy);
-  const coroutine = new graphApi.nodes.Deterministic<number, string>(async function* () {
-    const view = yield [];
-    return `${[...view.messages.keys()].length}`;
-  }, LockPolicy);
+  const options: NodeOptions<number, string> = {
+    trigger: graphApi.trigger.TriggerRule.always(),
+  };
+  const graph = new graphApi.JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
+  const coroutine = new graphApi.nodes.Deterministic<number, string>(
+    async function* () {
+      const view = yield [];
+      return `${[...view.messages.keys()].length}`;
+    },
+    LockPolicy,
+  );
   const nodes: graphApi.nodes.AgenticNode<number, string>[] = [
-    { ...options, state: child }, { ...options, state: coroutine }, source, sink,
+    { ...options, state: child },
+    { ...options, state: coroutine },
+    source,
+    sink,
   ];
   const rejected: graphApi.nodes.AgenticNode<number, string>[] = [
     // @ts-expect-error a step-less coroutine owns its policy
@@ -781,133 +922,309 @@ export function namespacedNodeBindingsKeepWireTypes(
     { ...options, state: child, policy: LockPolicy },
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
-  const states: graphApi.nodes.Agentic<number, string>[] = [child.graph, coroutine, source, sink];
+  const states: graphApi.nodes.Agentic<number, string>[] = [
+    child.graph,
+    coroutine,
+    source,
+    sink,
+  ];
   mock.stagePrompt("go");
   // @ts-expect-error chat-typed agents cannot join a numeric graph
-  graph.addNode({ state: mock, trigger: graphApi.trigger.TriggerRule.always(), policy: LockPolicy });
+  graph.addNode({
+    state: mock,
+    trigger: graphApi.trigger.TriggerRule.always(),
+    policy: LockPolicy,
+  });
   // @ts-expect-error a bare graph is not a nested execution context
-  const unbound: graphApi.nodes.AgenticNode<number, string> = { ...options, state: child.graph };
+  const unbound: graphApi.nodes.AgenticNode<number, string> = {
+    ...options,
+    state: child.graph,
+  };
   return [ids, states, unbound, rejected];
 }
 
 export function typedContextsPreserveNativeAndCallerData(id: NodeIdType) {
   type State = Readonly<{ group: "a" | "b" }>;
   class SpecializedGraph extends DataflowGraph<State, number, string, Error> {
-    subtypeOnly(): "specialized" { return "specialized"; }
+    subtypeOnly(): "specialized" {
+      return "specialized";
+    }
   }
   const graph = new SpecializedGraph(Width.create(1), UNBOUNDED);
-  const ranked: Scheduler<State, number, string, { priority: number }> = choose({
-    rank: (snapshot, left, right) => {
-      const state: State | undefined = snapshot.nodes.get(left)?.state;
-      const inputs: readonly number[] | undefined = snapshot.inputs.get(left)?.messages.get(EdgeId.create("input"));
-      const result: string | undefined = snapshot.results.get(left);
-      const priority: number | undefined = snapshot.context.get(left)?.priority;
-      // @ts-expect-error native state is exact, not an erased object
-      const wrongState: string | undefined = state;
-      // @ts-expect-error native input payloads are numbers
-      const wrongInput: readonly string[] | undefined = inputs;
-      // @ts-expect-error native retained results are strings
-      const wrongResult: number | undefined = result;
-      // @ts-expect-error caller metadata retains its declared fields
-      snapshot.context.get(left)?.label;
-      // @ts-expect-error native node maps are read-only
-      snapshot.nodes.set(left, snapshot.nodes.get(left)!);
-      // @ts-expect-error input queues are read-only
-      inputs?.push(1);
-      // @ts-expect-error retained result maps are read-only
-      snapshot.results.set(left, "changed");
-      // @ts-expect-error metadata maps are read-only
-      snapshot.context.set(left, { priority: 0 });
-      void [wrongState, wrongInput, wrongResult];
-      return (priority ?? 0) - (snapshot.context.get(right)?.priority ?? 0);
+  const ranked: Scheduler<State, number, string, { priority: number }> = choose(
+    {
+      rank: (snapshot, left, right) => {
+        const state: State | undefined = snapshot.nodes.get(left)?.state;
+        const inputs: readonly number[] | undefined = snapshot.inputs
+          .get(left)
+          ?.messages.get(EdgeId.create("input"));
+        const result: string | undefined = snapshot.results.get(left);
+        const priority: number | undefined =
+          snapshot.context.get(left)?.priority;
+        // @ts-expect-error native state is exact, not an erased object
+        const wrongState: string | undefined = state;
+        // @ts-expect-error native input payloads are numbers
+        const wrongInput: readonly string[] | undefined = inputs;
+        // @ts-expect-error native retained results are strings
+        const wrongResult: number | undefined = result;
+        // @ts-expect-error caller metadata retains its declared fields
+        snapshot.context.get(left)?.label;
+        // @ts-expect-error native node maps are read-only
+        snapshot.nodes.set(left, snapshot.nodes.get(left)!);
+        // @ts-expect-error input queues are read-only
+        inputs?.push(1);
+        // @ts-expect-error retained result maps are read-only
+        snapshot.results.set(left, "changed");
+        // @ts-expect-error metadata maps are read-only
+        snapshot.context.set(left, { priority: 0 });
+        void [wrongState, wrongInput, wrongResult];
+        return (priority ?? 0) - (snapshot.context.get(right)?.priority ?? 0);
+      },
+    },
+  );
+  const execution = nativeContext({
+    graph,
+    scheduler: ranked,
+    describeNode: () => ({ priority: 7 }),
+  });
+  const exact: SchedulerContext<
+    State,
+    number,
+    string,
+    { priority: number },
+    SpecializedGraph
+  > = execution;
+  const concrete: "specialized" = execution.graph.subtypeOnly();
+  const absent = nativeContext({
+    graph,
+    scheduler: (snapshot) => {
+      const metadata: ReadonlyMap<NodeIdType, never> = snapshot.context;
+      void metadata;
+      return { selected: [] };
     },
   });
-  const execution = nativeContext({ graph, scheduler: ranked, describeNode: () => ({ priority: 7 }) });
-  const exact: SchedulerContext<State, number, string, { priority: number }, SpecializedGraph> = execution;
-  const concrete: "specialized" = execution.graph.subtypeOnly();
-  const absent = nativeContext({ graph, scheduler: (snapshot) => {
-    const metadata: ReadonlyMap<NodeIdType, never> = snapshot.context;
-    void metadata;
-    return { selected: [] };
-  } });
-  const defaultMetadata: SchedulerContext<State, number, string, never, SpecializedGraph> = absent;
-  const zero: SchedulerContext<State, number, string, number, SpecializedGraph> = nativeContext({ graph, scheduler: parallel(), describeNode: () => 0 });
-  const falsy: SchedulerContext<State, number, string, boolean, SpecializedGraph> = nativeContext({ graph, scheduler: parallel(), describeNode: () => false });
-  const nullable: SchedulerContext<State, number, string, null, SpecializedGraph> = nativeContext({ graph, scheduler: parallel(), describeNode: () => null });
-  const explicitlyEmpty = nativeContext<State, number, string, { priority: number }, SpecializedGraph>({ graph, scheduler: ranked });
-  const wrongMetadata: Scheduler<State, number, string, { label: string }> = () => ({ selected: [] });
-  // @ts-expect-error a policy cannot widen the hook's metadata domain
-  nativeContext({ graph, scheduler: wrongMetadata, describeNode: () => ({ priority: 7 }) });
-  const wrongData: Scheduler<State, string, number, { priority: number }> = () => ({ selected: [] });
-  // @ts-expect-error a policy cannot widen native message/result domains
-  nativeContext({ graph, scheduler: wrongData, describeNode: () => ({ priority: 7 }) });
+  const defaultMetadata: SchedulerContext<
+    State,
+    number,
+    string,
+    never,
+    SpecializedGraph
+  > = absent;
+  const zero: SchedulerContext<
+    State,
+    number,
+    string,
+    number,
+    SpecializedGraph
+  > = nativeContext({ graph, scheduler: parallel(), describeNode: () => 0 });
+  const falsy: SchedulerContext<
+    State,
+    number,
+    string,
+    boolean,
+    SpecializedGraph
+  > = nativeContext({
+    graph,
+    scheduler: parallel(),
+    describeNode: () => false,
+  });
+  const nullable: SchedulerContext<
+    State,
+    number,
+    string,
+    null,
+    SpecializedGraph
+  > = nativeContext({ graph, scheduler: parallel(), describeNode: () => null });
+  const explicitlyEmpty = nativeContext<
+    State,
+    number,
+    string,
+    { priority: number },
+    SpecializedGraph
+  >({ graph, scheduler: ranked });
+  const wrongMetadata: Scheduler<
+    State,
+    number,
+    string,
+    { label: string }
+  > = () => ({ selected: [] });
+  nativeContext({
+    graph,
+    // @ts-expect-error a policy cannot widen the hook's metadata domain
+    scheduler: wrongMetadata,
+    describeNode: () => ({ priority: 7 }),
+  });
+  const wrongData: Scheduler<
+    State,
+    string,
+    number,
+    { priority: number }
+  > = () => ({ selected: [] });
+  nativeContext({
+    graph,
+    // @ts-expect-error a policy cannot widen native message/result domains
+    scheduler: wrongData,
+    describeNode: () => ({ priority: 7 }),
+  });
   const all = parallel();
   const rotation = roundRobin();
-  const other = new DataflowGraph<boolean, string, number, never>(Width.create(1), UNBOUNDED);
+  const other = new DataflowGraph<boolean, string, number, never>(
+    Width.create(1),
+    UNBOUNDED,
+  );
   const reuse = [
     nativeContext({ graph, scheduler: all, describeNode: () => 0 }),
-    nativeContext({ graph: other, scheduler: all, describeNode: () => "metadata" }),
+    nativeContext({
+      graph: other,
+      scheduler: all,
+      describeNode: () => "metadata",
+    }),
     nativeContext({ graph, scheduler: rotation, describeNode: () => false }),
-    nativeContext({ graph: other, scheduler: rotation, describeNode: () => null }),
+    nativeContext({
+      graph: other,
+      scheduler: rotation,
+      describeNode: () => null,
+    }),
   ];
-  const composed: Scheduler<State, number, string, { priority: number }> = separate(
-    (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
-    ranked,
-    oracleAgent(async (snapshot, signal) => { signal?.throwIfAborted(); return [[...snapshot.owned].filter((node) => snapshot.available.has(node))]; }),
-  );
-  const ordinary: Scheduler<State, number, string, { priority: number }> = async () => ({ selected: [id] });
-  // @ts-expect-error selections use branded native IDs
-  const unbranded: Scheduler<State, number, string, { priority: number }> = () => ({ selected: ["raw"] });
+  const composed: Scheduler<State, number, string, { priority: number }> =
+    separate(
+      (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
+      ranked,
+      oracleAgent(async (snapshot, signal) => {
+        signal?.throwIfAborted();
+        return [
+          [...snapshot.owned].filter((node) => snapshot.available.has(node)),
+        ];
+      }),
+    );
+  const ordinary: Scheduler<
+    State,
+    number,
+    string,
+    { priority: number }
+  > = async () => ({ selected: [id] });
+  const unbranded: Scheduler<
+    State,
+    number,
+    string,
+    { priority: number }
+    // @ts-expect-error selections use branded native IDs
+  > = () => ({ selected: ["raw"] });
   // @ts-expect-error policy association is external
   graph.scheduler;
   // @ts-expect-error passive native graphs do not drive policies
   graph.run();
   // @ts-expect-error passive native graphs do not drive policies
   graph.step();
-  return [exact, concrete, defaultMetadata, zero, falsy, nullable, explicitlyEmpty, reuse, composed, ordinary, unbranded];
+  return [
+    exact,
+    concrete,
+    defaultMetadata,
+    zero,
+    falsy,
+    nullable,
+    explicitlyEmpty,
+    reuse,
+    composed,
+    ordinary,
+    unbranded,
+  ];
 }
 
 export function typedPortsAndNestedContexts(
-  source: Source<number, string>, sink: Sink<number, string>,
-  wrongSink: Sink<string, string>, wrongResult: Sink<number, number>,
+  source: Source<number, string>,
+  sink: Sink<number, string>,
+  wrongSink: Sink<string, string>,
+  wrongResult: Sink<number, number>,
   tracer: DataflowTracer,
 ) {
-  const graph = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, tracer, LockPolicy);
+  const graph = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
   const sourceSpec: NodeSpec<Agentic<number, string>, number, string> = source;
   const sinkSpec: NodeSpec<Agentic<number, string>, number, string> = sink;
   const sourceState: Source<number, string> = source.state;
   const sinkState: Sink<number, string> = sink.state;
   const view: ParentView<number, string> | undefined = source.peek();
   const result: O.Option<string> = graph.result(sink.id);
-  const owner = nativeContext({ graph, scheduler: parallel(), describeNode: () => ({ priority: 7 }) });
+  const owner = nativeContext({
+    graph,
+    scheduler: parallel(),
+    describeNode: () => ({ priority: 7 }),
+  });
   const nested: NestedContext<number, string> = owner;
-  const exactOwner: SchedulerContext<Agentic<number, string>, number, string, { priority: number }, JuncoGraph<number, string>> = owner;
+  const exactOwner: SchedulerContext<
+    Agentic<number, string>,
+    number,
+    string,
+    { priority: number },
+    JuncoGraph<number, string>
+  > = owner;
   const nativeState: Agentic<number, string> = owner.graph;
   const advance: Promise<ReadonlyMap<NodeIdType, string>> = owner.step();
   // @ts-expect-error contexts are execution capabilities, not native node state
   const contextState: Agentic<number, string> = owner;
   // @ts-expect-error a passive graph is not an execution capability
   const bare: NestedContext<number, string> = graph;
-  const metadataFree: Scheduler<Agentic<number, string>, number, string, never> = () => ({ selected: [] });
+  const metadataFree: Scheduler<
+    Agentic<number, string>,
+    number,
+    string,
+    never
+  > = () => ({ selected: [] });
   // @ts-expect-error the reverse assignment cannot promise rich metadata
-  const metadataRich: Scheduler<Agentic<number, string>, number, string, { priority: number }> = metadataFree;
+  const metadataRich: Scheduler<
+    Agentic<number, string>,
+    number,
+    string,
+    { priority: number }
+  > = metadataFree;
   // @ts-expect-error result domains remain exact through nested contexts
   const incompatibleResult: NestedContext<number, number> = owner;
-  // @ts-expect-error message types must agree at both ports
-  new JuncoGraph(source, wrongSink, Width.create(1), UNBOUNDED, tracer, LockPolicy);
-  // @ts-expect-error result types must agree at both ports
-  new JuncoGraph(source, wrongResult, Width.create(1), UNBOUNDED, tracer, LockPolicy);
+  new JuncoGraph(
+    source,
+    // @ts-expect-error message types must agree at both ports
+    wrongSink,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
+  new JuncoGraph(
+    source,
+    // @ts-expect-error result types must agree at both ports
+    wrongResult,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
   // @ts-expect-error source IDs must be branded
   new Source<number, string>(() => [], { id: "raw" });
-  // @ts-expect-error sink IDs are mandatory
-  new Sink<number, string>(async function* () { return "unused"; }, { trigger: TriggerRule.never() });
-  const agency = schedulers.context({ graph, scheduler: (snapshot) => {
-    const metadata: ReadonlyMap<NodeIdType, schedulers.AgencyNodeMetadata> = snapshot.context;
-    const inputs: ParentView<number, string> | undefined = snapshot.inputs.get(source.id);
-    const output: string | undefined = snapshot.results.get(sink.id);
-    void [metadata, inputs, output];
-    return { selected: [] };
-  } });
+  new Sink<number, string>(
+    async function* () {
+      return "unused";
+    },
+    // @ts-expect-error sink IDs are mandatory
+    { trigger: TriggerRule.never() },
+  );
+  const agency = schedulers.context({
+    graph,
+    scheduler: (snapshot) => {
+      const metadata: ReadonlyMap<NodeIdType, schedulers.AgencyNodeMetadata> =
+        snapshot.context;
+      const inputs: ParentView<number, string> | undefined =
+        snapshot.inputs.get(source.id);
+      const output: string | undefined = snapshot.results.get(sink.id);
+      void [metadata, inputs, output];
+      return { selected: [] };
+    },
+  });
   const concrete: JuncoGraph<number, string> = agency.graph;
   // @ts-expect-error agency graphs also keep policy association external
   agency.graph.scheduler;
@@ -915,31 +1232,79 @@ export function typedPortsAndNestedContexts(
   agency.graph.run();
   // @ts-expect-error policy driving lives on the external context
   agency.graph.step();
-  return [sourceSpec, sinkSpec, sourceState, sinkState, view, result, nested, exactOwner, nativeState, advance, contextState, bare, metadataRich, incompatibleResult, concrete];
+  return [
+    sourceSpec,
+    sinkSpec,
+    sourceState,
+    sinkState,
+    view,
+    result,
+    nested,
+    exactOwner,
+    nativeState,
+    advance,
+    contextState,
+    bare,
+    metadataRich,
+    incompatibleResult,
+    concrete,
+  ];
 }
 
 export function mappingRetainsLinkTypesAndRequiresPorts(
-  skeleton: Pick<Graph<{ readonly value: number }, { readonly tag: string }>, "forEachNode" | "forEachLink" | "getLinks">,
-  source: Source<number, string>, sink: Sink<number, string>,
+  skeleton: Pick<
+    Graph<{ readonly value: number }, { readonly tag: string }>,
+    "forEachNode" | "forEachLink" | "getLinks"
+  >,
+  source: Source<number, string>,
+  sink: Sink<number, string>,
   wrongSink: Sink<string, string>,
 ) {
-  const execution = JuncoGraph.map(skeleton, (state) => new Deterministic<number, string>(async function* () {
-    yield [];
-    return String(state.value);
-  }, LockPolicy), { source, sink, policy: LockPolicy });
-  const exact: SchedulerContext<Agentic<number, string>, number, string, schedulers.AgencyNodeMetadata, JuncoGraph<number, string>> = execution;
-  const link: { readonly tag: string } | undefined = skeleton.getLinks("member")?.values().next().value?.data;
+  const execution = JuncoGraph.map(
+    skeleton,
+    (state) =>
+      new Deterministic<number, string>(async function* () {
+        yield [];
+        return String(state.value);
+      }, LockPolicy),
+    { source, sink, policy: LockPolicy },
+  );
+  const exact: SchedulerContext<
+    Agentic<number, string>,
+    number,
+    string,
+    schedulers.AgencyNodeMetadata,
+    JuncoGraph<number, string>
+  > = execution;
+  const link: { readonly tag: string } | undefined = skeleton
+    .getLinks("member")
+    ?.values()
+    .next().value?.data;
   // @ts-expect-error map requires explicit source and sink nodes
   JuncoGraph.map(skeleton, () => source, { policy: LockPolicy });
-  // @ts-expect-error the sink payload domain cannot widen the mapped source
-  JuncoGraph.map(skeleton, () => source, { source, sink: wrongSink, policy: LockPolicy });
-  // @ts-expect-error a bare graph is not a mapped nested execution capability
-  JuncoGraph.map(skeleton, () => ({ state: execution.graph, trigger: TriggerRule.always<number, string>() }), { source, sink, policy: LockPolicy });
+  JuncoGraph.map(skeleton, () => source, {
+    source,
+    // @ts-expect-error the sink payload domain cannot widen the mapped source
+    sink: wrongSink,
+    policy: LockPolicy,
+  });
+  JuncoGraph.map(
+    skeleton,
+    () => ({
+      // @ts-expect-error a bare graph is not a mapped nested execution capability
+      state: execution.graph,
+      trigger: TriggerRule.always<number, string>(),
+    }),
+    { source, sink, policy: LockPolicy },
+  );
   return [exact, link];
 }
 
-export function agencyMetadataIsSourceExact(metadata: schedulers.AgencyNodeMetadata) {
-  const status: NonNullable<NodePolicy["agent"]>["status"] | undefined = metadata.agentStatus;
+export function agencyMetadataIsSourceExact(
+  metadata: schedulers.AgencyNodeMetadata,
+) {
+  const status: NonNullable<NodePolicy["agent"]>["status"] | undefined =
+    metadata.agentStatus;
   const lastYield: NodePolicy["lastYield"] = metadata.lastYield;
   // @ts-expect-error statuses retain the actual agent status domain
   const numericStatus: number | undefined = metadata.agentStatus;

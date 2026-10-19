@@ -5,15 +5,15 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import fc from "fast-check";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { context, parallel, roundRobin, separate } from "junco-scheduler";
 import type { Decision, Snapshot } from "junco-scheduler";
+import { context, parallel, roundRobin, separate } from "junco-scheduler";
 import type {
   DataflowExecution,
   DataflowRunOptions,
-  InputSchedule,
-  NodeAvailability,
   EdgeIdType,
+  InputSchedule,
   MessageSchedule,
+  NodeAvailability,
   NodeGenerator,
   NodeIdType,
   ParentView,
@@ -39,18 +39,19 @@ import {
 type Graph = DataflowGraph<void, number, string, never>;
 
 const newGraph = (): Graph =>
-  new DataflowGraph<void, number, string, never>(
-    Width.create(1),
-    UNBOUNDED,
-  );
+  new DataflowGraph<void, number, string, never>(Width.create(1), UNBOUNDED);
 
 /** The live backlog still queued on `edge`, for asserting what a firing did and did not consume. */
 const queued = (edge: Edge<number, string>): readonly number[] =>
   E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
 /** Read `count` off every edge named by the candidate's trigger. */
-const fixedReader = (count: MessageSchedule) =>
-  (_id: NodeIdType, { trigger }: NodeAvailability<number, string>): InputSchedule =>
+const fixedReader =
+  (count: MessageSchedule) =>
+  (
+    _id: NodeIdType,
+    { trigger }: NodeAvailability<number, string>,
+  ): InputSchedule =>
     new Map<EdgeIdType, MessageSchedule>(
       trigger.rule.map((edgeId) => [edgeId, count]),
     );
@@ -352,9 +353,11 @@ test("definition error: an invalid plan rejects before any node advances or cons
   const columns: (readonly NodeIdType[])[] = [];
   for (const candidate of invalid) {
     await assert.rejects(
-      graph.evaluate((execute) => execute(candidate, {
-        onColumn: (selected) => columns.push([...selected]),
-      })),
+      graph.evaluate((execute) =>
+        execute(candidate, {
+          onColumn: (selected) => columns.push([...selected]),
+        }),
+      ),
       DataflowDefinitionError,
     );
     assert.deepEqual(advances, { S: 0, C: 0, D: 0 });
@@ -505,7 +508,11 @@ test("public emit enqueues FIFO without driving, consuming, or completing any no
     Width.create(1),
     UNBOUNDED,
   );
-  const execution = context({ graph, scheduler: parallel(), readInputs: fixedReader(2) });
+  const execution = context({
+    graph,
+    scheduler: parallel(),
+    readInputs: fixedReader(2),
+  });
   const batches: number[][] = [];
   const source = graph.addNode(
     new EmitOnce<void, number, string>(() => [], "source", {
@@ -619,7 +626,11 @@ test("one firing reads exactly its planned count and leaves the rest queued", as
           Width.create(1),
           UNBOUNDED,
         );
-        const execution = context({ graph, scheduler: parallel(), readInputs: fixedReader(count) });
+        const execution = context({
+          graph,
+          scheduler: parallel(),
+          readInputs: fixedReader(count),
+        });
         const consumed: number[] = [];
 
         const producer = graph.addNode(
@@ -663,7 +674,11 @@ test("the scheduler sizes each read: a pair-reading plan drains an `all` trigger
     Width.create(1),
     UNBOUNDED,
   );
-  const execution = context({ graph, scheduler: parallel(), readInputs: fixedReader(2) });
+  const execution = context({
+    graph,
+    scheduler: parallel(),
+    readInputs: fixedReader(2),
+  });
   const srcId = graph.addNode(
     new EmitOnce<void, number, string>(
       () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)),
@@ -735,7 +750,10 @@ test("the graph evaluates triggers before availability: unfired and finished nod
   const empty = Edge.message<number, string>("empty");
   const unfed = Edge.message<number, string>("unfed");
   const planned: string[][] = [];
-  const graph = new DataflowGraph<void, number, string, never>(UNBOUNDED, UNBOUNDED);
+  const graph = new DataflowGraph<void, number, string, never>(
+    UNBOUNDED,
+    UNBOUNDED,
+  );
   const execution = context({
     graph,
     scheduler(snapshot) {
@@ -822,9 +840,14 @@ test("every trigger edge is validated even when the availability hook would refu
 /** Concrete matrix fixture: one lexical plan per evaluation, with no policy binding. */
 const scripted = (
   windows: readonly (readonly (readonly string[])[])[],
-  resolveInputs?: NonNullable<Parameters<DataflowExecution<number, string>>[1]>["resolveInputs"],
+  resolveInputs?: NonNullable<
+    Parameters<DataflowExecution<number, string>>[1]
+  >["resolveInputs"],
 ) => {
-  const graph = new DataflowGraph<void, number, string, never>(UNBOUNDED, UNBOUNDED);
+  const graph = new DataflowGraph<void, number, string, never>(
+    UNBOUNDED,
+    UNBOUNDED,
+  );
   let planned = 0;
   const columns: (readonly NodeIdType[])[] = [];
   const drive = (repeat: boolean, options?: DataflowRunOptions) =>
@@ -835,16 +858,19 @@ const scripted = (
         if (available.size === 0) break;
         const lanes = windows[planned++];
         assert.ok(lanes !== undefined, "unscripted window");
-        const schedule = lanes.map((lane) => lane.map((name) => {
-          const id = NodeId.create(name);
-          const candidate = available.get(id);
-          return {
-            id,
-            inputs: candidate === undefined
-              ? new Map<EdgeIdType, MessageSchedule>()
-              : triggerInputs(candidate),
-          };
-        }));
+        const schedule = lanes.map((lane) =>
+          lane.map((name) => {
+            const id = NodeId.create(name);
+            const candidate = available.get(id);
+            return {
+              id,
+              inputs:
+                candidate === undefined
+                  ? new Map<EdgeIdType, MessageSchedule>()
+                  : triggerInputs(candidate),
+            };
+          }),
+        );
         await execute(schedule, {
           ...(resolveInputs === undefined ? {} : { resolveInputs }),
           onColumn: (selected) => columns.push([...selected]),
@@ -854,7 +880,9 @@ const scripted = (
     }, options);
   return {
     graph,
-    get planned() { return planned; },
+    get planned() {
+      return planned;
+    },
     columns,
     step: (options?: DataflowRunOptions) => drive(false, options),
     run: (options?: DataflowRunOptions) => drive(true, options),
@@ -1341,7 +1369,10 @@ test("a throwing schedule callback rejects the invocation without node work; the
 
 test("without resolveInputs every occurrence keeps its planned partial read", async () => {
   const feed = Edge.message<number, string>("feed");
-  const graph = new DataflowGraph<void, number, string, never>(Width.create(3), UNBOUNDED);
+  const graph = new DataflowGraph<void, number, string, never>(
+    Width.create(3),
+    UNBOUNDED,
+  );
   const seen: Record<string, number[]>[] = [];
   const p = graph.addNode(
     new EmitOnce<void, number, string>(
@@ -1368,13 +1399,17 @@ test("without resolveInputs every occurrence keeps its planned partial read", as
   graph.addEdge(p, c, feed);
 
   await graph.evaluate(async (execute) => {
-    await execute([...graph.available().keys()].map((id) => [{ id, inputs: new Map() }]));
+    await execute(
+      [...graph.available().keys()].map((id) => [{ id, inputs: new Map() }]),
+    );
     const one = new Map<EdgeIdType, MessageSchedule>([[feed.id, 1]]);
-    await execute([[
-      { id: c, inputs: one },
-      { id: c, inputs: one },
-      { id: c, inputs: one },
-    ]]);
+    await execute([
+      [
+        { id: c, inputs: one },
+        { id: c, inputs: one },
+        { id: c, inputs: one },
+      ],
+    ]);
   });
   assert.deepEqual(seen, [{ feed: [1] }, { feed: [2] }]);
   assert.deepEqual(queued(feed), [3]);
@@ -1460,7 +1495,11 @@ test("on_error after a resume throw emits its batch in order and leaves the valu
     string,
     never
   >(Width.create(1), UNBOUNDED);
-  const execution = context({ graph, scheduler: parallel(), readInputs: fixedReader(1) });
+  const execution = context({
+    graph,
+    scheduler: parallel(),
+    readInputs: fixedReader(1),
+  });
   const cause = new Error("resume");
   let handled = 0;
   let afterValue = 0;
@@ -1636,7 +1675,10 @@ test("a body DataflowDefinitionError and a running node without a generator bypa
   await assert.rejects(execution.run(), (thrown) => thrown === definition);
 
   const orphanGraph = newGraph();
-  const orphanExecution = context({ graph: orphanGraph, scheduler: parallel() });
+  const orphanExecution = context({
+    graph: orphanGraph,
+    scheduler: parallel(),
+  });
   const orphan = orphanGraph.addNode(
     new StepNode<void, number, string>(() => [], {
       state: undefined,
@@ -1829,7 +1871,10 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   type State = { label: string };
   type Payload = { value: number };
   type Result = { text: string } | undefined;
-  const graph = new DataflowGraph<State, Payload, Result, never>(Width.create(1), UNBOUNDED);
+  const graph = new DataflowGraph<State, Payload, Result, never>(
+    Width.create(1),
+    UNBOUNDED,
+  );
   assert.equal(graph.observe().version, 0);
   const state = { label: "source" };
   const payload = { value: 7 };
@@ -1848,7 +1893,10 @@ test("observations detach native containers, preserve borrowed payloads, and nev
     id: NodeId.create("target"),
     state: { label: "target" },
     trigger: TriggerRule.never(),
-    is_available: () => { probes += 1; return false; },
+    is_available: () => {
+      probes += 1;
+      return false;
+    },
     step: async function* (): NodeGenerator<Payload, Result> {
       yield [];
       return { text: "unreachable" };
@@ -1887,19 +1935,36 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   assert.equal(inputs.values.has(value.id), false);
   const initialResults = graph.results();
   const version = before.version;
-  assert.throws(() => graph.emit(target, Message.create(feed, payload)), DataflowDefinitionError);
-  assert.throws(() => graph.addNode({
-    id: source, state, trigger: TriggerRule.always(),
-    step: async function* (): NodeGenerator<Payload, Result> { yield []; return undefined; },
-  }), DataflowDefinitionError);
+  assert.throws(
+    () => graph.emit(target, Message.create(feed, payload)),
+    DataflowDefinitionError,
+  );
+  assert.throws(
+    () =>
+      graph.addNode({
+        id: source,
+        state,
+        trigger: TriggerRule.always(),
+        step: async function* (): NodeGenerator<Payload, Result> {
+          yield [];
+          return undefined;
+        },
+      }),
+    DataflowDefinitionError,
+  );
   assert.equal(graph.observe().version, version);
   graph.available();
   graph.results();
   assert.equal(graph.observe().version, version);
   const reports: (readonly NodeIdType[])[] = [];
-  await assert.rejects(graph.evaluate((execute) => execute([], {
-    onColumn: (selected) => reports.push([...selected]),
-  })), DataflowDefinitionError);
+  await assert.rejects(
+    graph.evaluate((execute) =>
+      execute([], {
+        onColumn: (selected) => reports.push([...selected]),
+      }),
+    ),
+    DataflowDefinitionError,
+  );
   assert.equal(graph.observe().version, version);
   assert.equal(reports.length, 0);
   await graph.evaluate(async (execute) => {
@@ -1945,8 +2010,12 @@ test("activation settlement invalidates observations captured while work is pend
       },
     });
     const before = graph.observe();
-    const outcome = graph.evaluate((execute) => execute([[{ id, inputs: new Map() }]]))
-      .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    const outcome = graph
+      .evaluate((execute) => execute([[{ id, inputs: new Map() }]]))
+      .then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
     try {
       await started.promise;
       const during = graph.observe();
@@ -1976,25 +2045,38 @@ test("activation settlement invalidates observations captured while work is pend
 });
 
 test("external composition observes native work and ordered links without adding policy members", async () => {
-  const graph = new DataflowGraph<void, number, string, never>(Width.create(1), Width.create(2));
+  const graph = new DataflowGraph<void, number, string, never>(
+    Width.create(1),
+    Width.create(2),
+  );
   const snapshots: Snapshot<void, number, string, never>[] = [];
   const policy = separate<void, number, string, never>(
-    (_snapshot, id) => id === "0", roundRobin(), parallel(),
+    (_snapshot, id) => id === "0",
+    roundRobin(),
+    parallel(),
   );
-  const execution = context({ graph, scheduler: (snapshot, signal) => {
-    snapshots.push(snapshot);
-    return policy(snapshot, signal);
-  } });
+  const execution = context({
+    graph,
+    scheduler: (snapshot, signal) => {
+      snapshots.push(snapshot);
+      return policy(snapshot, signal);
+    },
+  });
   const zero = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
-    step: async function* (): NodeGenerator<number, string> { yield []; return "0"; },
+    step: async function* (): NodeGenerator<number, string> {
+      yield [];
+      return "0";
+    },
   });
   const one = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: this node finishes on its first selection.
-    step: async function* (): NodeGenerator<number, string> { return "1"; },
+    step: async function* (): NodeGenerator<number, string> {
+      return "1";
+    },
   });
   assert.deepEqual([zero, one], ["0", "1"]);
   graph.addEdge(zero, one, Edge.message<number, string>("shared"));
@@ -2009,15 +2091,27 @@ test("external composition observes native work and ordered links without adding
   ];
   const completed = await execution.run();
   assert.deepEqual(new Set(completed.keys()), new Set([zero, one]));
-  assert.deepEqual([...graph.results()], [[one, "1"], [zero, "0"]]);
+  assert.deepEqual(
+    [...graph.results()],
+    [
+      [one, "1"],
+      [zero, "0"],
+    ],
+  );
   assert.equal(snapshots.length, 2);
   for (const snapshot of snapshots) {
     assert.deepEqual([...snapshot.nodes.keys()], [zero, one]);
     assert.deepEqual(snapshot.links, links);
     assert.equal(snapshot.context.size, 0);
   }
-  assert.deepEqual([...snapshots[0]!.nodes.values()].map((node) => node.status), ["ready", "ready"]);
-  assert.deepEqual([...snapshots[1]!.nodes.values()].map((node) => node.status), ["running", "done"]);
+  assert.deepEqual(
+    [...snapshots[0]!.nodes.values()].map((node) => node.status),
+    ["ready", "ready"],
+  );
+  assert.deepEqual(
+    [...snapshots[1]!.nodes.values()].map((node) => node.status),
+    ["running", "done"],
+  );
   assert.deepEqual(snapshots[0]!.history, []);
   assert.deepEqual(snapshots[1]!.history, [{ selected: [zero, one] }]);
   assert.ok(Object.isFrozen(snapshots[1]!.history));
@@ -2025,41 +2119,64 @@ test("external composition observes native work and ordered links without adding
   assert.ok(Object.isFrozen(snapshots[1]!.history[0]!.selected));
   assert.ok(snapshots[1]!.version > snapshots[0]!.version);
   const nativeIds: NodeIdType[] = [];
-  graph.forEachNode((id) => { nativeIds.push(id); });
+  graph.forEachNode((id) => {
+    nativeIds.push(id);
+  });
   assert.deepEqual(nativeIds, [zero, one]);
-  assert.equal(graph.addNode({
-    state: undefined, trigger: TriggerRule.never(),
-    step: async function* (): NodeGenerator<number, string> { yield []; return "2"; },
-  }), "2");
+  assert.equal(
+    graph.addNode({
+      state: undefined,
+      trigger: TriggerRule.never(),
+      step: async function* (): NodeGenerator<number, string> {
+        yield [];
+        return "2";
+      },
+    }),
+    "2",
+  );
   assert.deepEqual([...snapshots[0]!.nodes.keys()], [zero, one]);
 });
 
 test("contexts sharing one native graph exclude planning and keep independent committed history", async () => {
   const graph = newGraph();
   const a = graph.addNode({
-    id: NodeId.create("a"), state: undefined, trigger: TriggerRule.always(),
+    id: NodeId.create("a"),
+    state: undefined,
+    trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: finish in one activation.
-    step: async function* (): NodeGenerator<number, string> { return "a"; },
+    step: async function* (): NodeGenerator<number, string> {
+      return "a";
+    },
   });
   const b = graph.addNode({
-    id: NodeId.create("b"), state: undefined, trigger: TriggerRule.always(),
+    id: NodeId.create("b"),
+    state: undefined,
+    trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: finish in one activation.
-    step: async function* (): NodeGenerator<number, string> { return "b"; },
+    step: async function* (): NodeGenerator<number, string> {
+      return "b";
+    },
   });
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const seenA: Snapshot<void, number, string, never>[] = [];
   const seenB: Snapshot<void, number, string, never>[] = [];
-  const first = context({ graph, scheduler: async (snapshot) => {
-    seenA.push(snapshot);
-    started.resolve();
-    await release.promise;
-    return { selected: [a] };
-  } });
-  const second = context({ graph, scheduler: (snapshot) => {
-    seenB.push(snapshot);
-    return parallel()(snapshot);
-  } });
+  const first = context({
+    graph,
+    scheduler: async (snapshot) => {
+      seenA.push(snapshot);
+      started.resolve();
+      await release.promise;
+      return { selected: [a] };
+    },
+  });
+  const second = context({
+    graph,
+    scheduler: (snapshot) => {
+      seenB.push(snapshot);
+      return parallel()(snapshot);
+    },
+  });
   const outcome = first.step().then(
     (results) => ({ ok: true as const, results }),
     (error: unknown) => ({ ok: false as const, error }),
@@ -2072,7 +2189,13 @@ test("contexts sharing one native graph exclude planning and keep independent co
     release.resolve();
     const settled = await outcome;
     assert.equal(settled.ok, true);
-    assert.deepEqual([...await second.step()], [[a, "a"], [b, "b"]]);
+    assert.deepEqual(
+      [...(await second.step())],
+      [
+        [a, "a"],
+        [b, "b"],
+      ],
+    );
     assert.deepEqual(seenA[0]!.history, []);
     assert.deepEqual(seenB[0]!.history, []);
     assert.equal(seenB[0]!.nodes.get(a)?.status, "done");
@@ -2089,7 +2212,9 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
   for (const definition of [false, true]) {
     const graph = newGraph();
     const operationError = new Error("operation");
-    const nodeError = definition ? new DataflowDefinitionError("node") : new Error("node");
+    const nodeError = definition
+      ? new DataflowDefinitionError("node")
+      : new Error("node");
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const operationStopped = Promise.withResolvers<void>();
@@ -2100,12 +2225,19 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
     let lateStarts = 0;
     const reports: Decision[] = [];
     const other = graph.addNode({
-      id: NodeId.create("other"), state: undefined, trigger: TriggerRule.always(),
+      id: NodeId.create("other"),
+      state: undefined,
+      trigger: TriggerRule.always(),
       // biome-ignore lint/correctness/useYield: finish on first selection.
-      step: async function* (): NodeGenerator<number, string> { otherStarts += 1; return "other"; },
+      step: async function* (): NodeGenerator<number, string> {
+        otherStarts += 1;
+        return "other";
+      },
     });
     const failing = graph.addNode({
-      id: NodeId.create("failing"), state: undefined, trigger: TriggerRule.always(),
+      id: NodeId.create("failing"),
+      state: undefined,
+      trigger: TriggerRule.always(),
       // biome-ignore lint/correctness/useYield: this body checks synchronous executor re-entry.
       step: async function* (): NodeGenerator<number, string> {
         try {
@@ -2115,32 +2247,55 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
           await assert.rejects(reentry, DataflowDefinitionError);
           await release.promise;
           throw nodeError;
-        } finally { cleaned = true; }
+        } finally {
+          cleaned = true;
+        }
       },
     });
     let settled = false;
-    const outcome = graph.evaluate(async (execute) => {
-      captured = execute;
-      const work = execute([[{ id: failing, inputs: new Map() }]], {
-        onColumn: (selected) => { reports.push({ selected: [...selected] }); },
-      });
-      void work.then(() => executionOutcome.resolve(undefined), executionOutcome.resolve);
-      try {
-        await started.promise;
-        await assert.rejects(execute([[{ id: other, inputs: new Map() }]]), DataflowDefinitionError);
-        throw operationError;
-      } finally { operationStopped.resolve(); }
-    }).then(
-      () => { settled = true; return { ok: true as const }; },
-      (error: unknown) => { settled = true; return { ok: false as const, error }; },
-    );
+    const outcome = graph
+      .evaluate(async (execute) => {
+        captured = execute;
+        const work = execute([[{ id: failing, inputs: new Map() }]], {
+          onColumn: (selected) => {
+            reports.push({ selected: [...selected] });
+          },
+        });
+        void work.then(
+          () => executionOutcome.resolve(undefined),
+          executionOutcome.resolve,
+        );
+        try {
+          await started.promise;
+          await assert.rejects(
+            execute([[{ id: other, inputs: new Map() }]]),
+            DataflowDefinitionError,
+          );
+          throw operationError;
+        } finally {
+          operationStopped.resolve();
+        }
+      })
+      .then(
+        () => {
+          settled = true;
+          return { ok: true as const };
+        },
+        (error: unknown) => {
+          settled = true;
+          return { ok: false as const, error };
+        },
+      );
     try {
       await operationStopped.promise;
       await nextTurn();
       assert.equal(settled, false);
       assert.equal(cleaned, false);
       assert.equal(otherStarts, 0);
-      await assert.rejects(graph.evaluate(() => undefined), DataflowDefinitionError);
+      await assert.rejects(
+        graph.evaluate(() => undefined),
+        DataflowDefinitionError,
+      );
       release.resolve();
       const result = await outcome;
       assert.equal(result.ok, false);
@@ -2161,12 +2316,19 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
       assert.equal(cleaned, true);
       assert.deepEqual(reports, [{ selected: [failing] }]);
       const late = graph.addNode({
-        state: undefined, trigger: TriggerRule.always(),
+        state: undefined,
+        trigger: TriggerRule.always(),
         // biome-ignore lint/correctness/useYield: expired executors must never start this body.
-        step: async function* (): NodeGenerator<number, string> { lateStarts += 1; return "late"; },
+        step: async function* (): NodeGenerator<number, string> {
+          lateStarts += 1;
+          return "late";
+        },
       });
       assert.ok(captured);
-      await assert.rejects(captured([[{ id: late, inputs: new Map() }]]), DataflowDefinitionError);
+      await assert.rejects(
+        captured([[{ id: late, inputs: new Map() }]]),
+        DataflowDefinitionError,
+      );
       assert.equal(lateStarts, 0);
       assert.equal(otherStarts, 0);
     } finally {

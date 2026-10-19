@@ -28,5 +28,8 @@ graph:
       contracts:
         proposal: The proposer's normally completed, non-empty final message with a recorded checked proposal of kind proposal, used to prepare the judge's assignment.
   edges:
-    - { from: Proposer, to: Judge, id: proposal }
-    - { from: Proposer, to: $sink }
+    - from: Proposer
+      to: Judge
+      id: proposal
+    - from: Proposer
+      to: $sink

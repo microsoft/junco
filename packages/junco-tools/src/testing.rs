@@ -28,9 +28,9 @@ static PANIC_HOOK_MUTEX: Mutex<()> = Mutex::new(());
 /// lock) so a single failing test does not cascade into every later test
 /// panicking on `Mutex::lock`.
 pub fn lock_panic_hook() -> MutexGuard<'static, ()> {
-	PANIC_HOOK_MUTEX
-		.lock()
-		.unwrap_or_else(|poisoned| poisoned.into_inner())
+    PANIC_HOOK_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Boxed panic hook signature, factored out so the [`SilenceHook`] wrapper
@@ -46,24 +46,30 @@ type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'sta
 /// permanently install the noop hook, muting crash diagnostics for every later
 /// test in the crate.
 pub struct SilenceHook {
-	prev:   Option<PanicHook>,
-	_guard: MutexGuard<'static, ()>,
+    prev: Option<PanicHook>,
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl SilenceHook {
-	#[allow(clippy::new_without_default, reason = "Default acquiring a global lock would surprise")]
-	pub fn new() -> Self {
-		let guard = lock_panic_hook();
-		let prev = std::panic::take_hook();
-		std::panic::set_hook(Box::new(|_| {}));
-		Self { prev: Some(prev), _guard: guard }
-	}
+    #[allow(
+        clippy::new_without_default,
+        reason = "Default acquiring a global lock would surprise"
+    )]
+    pub fn new() -> Self {
+        let guard = lock_panic_hook();
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        Self {
+            prev: Some(prev),
+            _guard: guard,
+        }
+    }
 }
 
 impl Drop for SilenceHook {
-	fn drop(&mut self) {
-		if let Some(prev) = self.prev.take() {
-			std::panic::set_hook(prev);
-		}
-	}
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            std::panic::set_hook(prev);
+        }
+    }
 }

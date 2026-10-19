@@ -39,7 +39,7 @@ import {
   type AgenticInput,
   agent as agentApi,
   Deterministic,
-  JuncoGraph,
+  type JuncoGraph,
   MockAgent,
   tools as toolsApi,
 } from "../src/index.ts";
@@ -48,12 +48,12 @@ import {
   assistant,
   failed,
   plainContext,
-  terminalPorts,
   policyContext,
   requestTexts,
   run,
   STRATEGIES,
   settle,
+  terminalPorts,
   textOf,
   userTexts,
   yieldsThen,
@@ -239,8 +239,12 @@ function queued(graph: Graph, edgeId: EdgeIdType): number {
 }
 
 /** Step `graph` until `reached` holds; fails rather than spin forever. */
-async function stepUntil(graphContext: { step(): Promise<unknown> }, reached: () => boolean): Promise<void> {
-  for (let steps = 0; steps < 50 && !reached(); steps++) await graphContext.step();
+async function stepUntil(
+  graphContext: { step(): Promise<unknown> },
+  reached: () => boolean,
+): Promise<void> {
+  for (let steps = 0; steps < 50 && !reached(); steps++)
+    await graphContext.step();
   assert.ok(reached(), "the graph never reached the expected state");
 }
 
@@ -256,7 +260,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(2, "dependent done")],
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>(
         "upstream->dependent",
@@ -329,7 +337,11 @@ for (const strategy of STRATEGIES) {
       ]);
       const bystander = new MockAgent({ runs: [yieldsThen(0, "never")] });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const s = graph.addNode({
@@ -373,7 +385,11 @@ for (const strategy of STRATEGIES) {
     test("a member with neither a staged nor a received prompt is quiescent", async () => {
       const idle = new MockAgent({ runs: [yieldsThen(0, "never")] });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const idleId = graph.addNode({
         state: idle,
@@ -407,7 +423,11 @@ for (const strategy of STRATEGIES) {
       );
       const member = new MockAgent({ runs: [yieldsThen(0, "later")] });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const s = graph.addNode({
         description: "sender",
@@ -443,7 +463,11 @@ for (const strategy of STRATEGIES) {
           ],
         });
         const graphPorts = terminalPorts();
-        const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+        const graphContext = plainContext(
+          graphPorts.source,
+          graphPorts.sink,
+          strategy,
+        );
         const graph = graphContext.graph;
         const id = graph.addNode({
           state: erring,
@@ -472,7 +496,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "never")],
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>("failing->child");
       const f = graph.addNode({
@@ -503,7 +531,11 @@ for (const strategy of STRATEGIES) {
     test("an exhausted transcript fails its node instead of hanging", async () => {
       const exhausted = new MockAgent({ prompt: "go", runs: [] });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const id = graph.addNode({
         state: exhausted,
@@ -525,7 +557,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(1, "never")],
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const id = graph.addNode({
         state: member,
@@ -539,7 +575,9 @@ for (const strategy of STRATEGIES) {
       await graphContext.step(); // starts the run, which pauses
       assert.equal(member.status, "suspended");
       assert.deepEqual(await member.return(), { value: undefined, done: true });
-      const error = await graphContext.step().catch((thrown: unknown) => thrown);
+      const error = await graphContext
+        .step()
+        .catch((thrown: unknown) => thrown);
       assert.ok(error instanceof DataflowNodeError && error.nodeId === id);
       assert.ok(
         error.error instanceof JuncoAgentError && error.error.code === "closed",
@@ -560,7 +598,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(1, "first"), yieldsThen(0, "second")],
       });
       const firstPorts = terminalPorts();
-      const firstContext = plainContext(firstPorts.source, firstPorts.sink, strategy);
+      const firstContext = plainContext(
+        firstPorts.source,
+        firstPorts.sink,
+        strategy,
+      );
       const first = firstContext.graph;
       const edge = Edge.value<AgenticInput, AssistantMessage>(
         "upstream->member",
@@ -587,7 +629,11 @@ for (const strategy of STRATEGIES) {
       assert.equal(seen.length, 1);
 
       const secondPorts = terminalPorts();
-      const secondContext = plainContext(secondPorts.source, secondPorts.sink, strategy);
+      const secondContext = plainContext(
+        secondPorts.source,
+        secondPorts.sink,
+        strategy,
+      );
       const second = secondContext.graph;
       member.stagePrompt((inputs) => {
         seen.push(inputs);
@@ -629,7 +675,11 @@ for (const strategy of STRATEGIES) {
       );
       assert.equal(member.status, "ready");
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const id = graph.addNode({
         state: member,
@@ -669,7 +719,11 @@ for (const strategy of STRATEGIES) {
         },
       );
       const graphPorts = terminalPorts();
-      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = policyContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const seedId = graph.addNode({
@@ -734,7 +788,11 @@ for (const strategy of STRATEGIES) {
         },
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const id = graph.addNode({
@@ -758,7 +816,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "never")],
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const id = graph.addNode({
         state: mock,
@@ -795,10 +857,18 @@ for (const strategy of STRATEGIES) {
       );
 
       const rejectedPorts = terminalPorts();
-      const rejectedGraph = plainContext(rejectedPorts.source, rejectedPorts.sink, strategy).graph;
+      const rejectedGraph = plainContext(
+        rejectedPorts.source,
+        rejectedPorts.sink,
+        strategy,
+      ).graph;
       for (const state of [rejectedGraph, undefined]) {
         const targetPorts = terminalPorts();
-        const targetContext = plainContext(targetPorts.source, targetPorts.sink, strategy);
+        const targetContext = plainContext(
+          targetPorts.source,
+          targetPorts.sink,
+          strategy,
+        );
         const target = targetContext.graph;
         const nodeId = NodeId.create("stepless");
         assert.throws(
@@ -830,7 +900,11 @@ for (const strategy of STRATEGIES) {
         runs: [yieldsThen(0, "inner done")],
       });
       const childPorts = terminalPorts();
-      const childContext = plainContext(childPorts.source, childPorts.sink, strategy);
+      const childContext = plainContext(
+        childPorts.source,
+        childPorts.sink,
+        strategy,
+      );
       const child = childContext.graph;
       const innerId = child.addNode({
         state: inner,
@@ -849,7 +923,11 @@ for (const strategy of STRATEGIES) {
       );
       const consumer = new MockAgent({ runs: [yieldsThen(0, "consumed")] });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const fromAgent = Edge.value<AgenticInput, AssistantMessage>(
         "agent->consumer",
@@ -987,7 +1065,11 @@ for (const strategy of STRATEGIES) {
         },
       );
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const sourceId = graph.addNode({
@@ -1018,7 +1100,10 @@ for (const strategy of STRATEGIES) {
       const policy = nodePolicies.get(graph.getNode(agentId)!.step)!;
 
       graphPorts.connect(graph, agentId);
-      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
+      await stepUntil(
+        graphContext,
+        () => receiver.agent.status === "suspended",
+      );
       // The first public pause is the explicit Yield: every earlier tool ran in the same run.
       assert.deepEqual(
         policy.lastYield?.map(({ kind, toolName }) => [kind, toolName]),
@@ -1061,7 +1146,13 @@ for (const strategy of STRATEGIES) {
           kind: "message",
           expect: "Forwarded notes, kept in order.",
         },
-        { id: graph.sink.id, edgeId: "terminal->$sink", kind: "value", expect: "Graph output consumes final work results and publishes messages." },
+        {
+          id: graph.sink.id,
+          edgeId: "terminal->$sink",
+          kind: "value",
+          expect:
+            "Graph output consumes final work results and publishes messages.",
+        },
       ]);
       // info consumed nothing: the first recv holds every delivery, and the second is empty.
       assert.deepEqual(resultOf(receiver.results, "recv-1").details, {
@@ -1075,7 +1166,10 @@ for (const strategy of STRATEGIES) {
       // send admitted exactly one message before the run resumed.
       assert.equal(queued(graph, toSink.id) + out.delivered.length, 1);
 
-      await stepUntil(graphContext, () => policy.lastYield?.[0]?.kind === "policy");
+      await stepUntil(
+        graphContext,
+        () => policy.lastYield?.[0]?.kind === "policy",
+      );
       assert.equal(receiver.agent.status, "suspended");
       assert.equal(receiver.faux.state.callCount, 7);
       assert.deepEqual(
@@ -1108,7 +1202,11 @@ for (const strategy of STRATEGIES) {
         fauxAssistantMessage("done"),
       ]);
       const graphPorts = terminalPorts();
-      const graphContext = policyContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = policyContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const seedId = graph.addNode({
@@ -1139,11 +1237,17 @@ for (const strategy of STRATEGIES) {
       graphPorts.connect(graph, agentId);
       graph.emit(notesId, Message.create(notes, note("n1")));
       graph.emit(notesId, Message.create(notes, note("n2")));
-      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
+      await stepUntil(
+        graphContext,
+        () => receiver.agent.status === "suspended",
+      );
       assert.ok(O.isSome(graph.result(seedId)));
       // Another batch arrives while the model postpones recv.
       graph.emit(notesId, Message.create(notes, note("n3")));
-      await stepUntil(graphContext, () => policy.lastYield?.[0]?.reason === "again");
+      await stepUntil(
+        graphContext,
+        () => policy.lastYield?.[0]?.reason === "again",
+      );
       graph.emit(notesId, Message.create(notes, note("n4")));
       await graphContext.run();
 
@@ -1201,7 +1305,11 @@ for (const strategy of STRATEGIES) {
         { tools: [copy] },
       );
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const ids = [p, q, r].map((agent, index) => {
@@ -1252,7 +1360,11 @@ for (const strategy of STRATEGIES) {
 
     test("a closed graph's registration rejects info and send instead of admitting", async () => {
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       const edge = Edge.message<AgenticInput, AssistantMessage>("a->b");
       const a = inert(graph, { id: NodeId.create("a") });
@@ -1316,7 +1428,11 @@ for (const strategy of STRATEGIES) {
         },
       });
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
       const a = inert(graph, { id: NodeId.create("A") });
@@ -1333,7 +1449,11 @@ for (const strategy of STRATEGIES) {
       });
       // The wrapper's contract, not its selected inner result node's, describes its edge.
       const innerPorts = terminalPorts();
-      const innerContext = plainContext(innerPorts.source, innerPorts.sink, strategy);
+      const innerContext = plainContext(
+        innerPorts.source,
+        innerPorts.sink,
+        strategy,
+      );
       const inner = innerContext.graph;
       const innerId = inert(inner, {
         contract: contracts({ [bw.id]: "inner: unrelated." }),
@@ -1385,7 +1505,13 @@ for (const strategy of STRATEGIES) {
         },
       ];
       const children = [
-        { id: graph.sink.id, edgeId: "terminal->$sink", kind: "value", expect: "Graph output consumes final work results and publishes messages." },
+        {
+          id: graph.sink.id,
+          edgeId: "terminal->$sink",
+          kind: "value",
+          expect:
+            "Graph output consumes final work results and publishes messages.",
+        },
         {
           id: bId,
           edgeId: self.id,
@@ -1457,7 +1583,11 @@ for (const strategy of STRATEGIES) {
 
     test("info fails without a partial result when a receiver lacks, throws or breaks its contract", () => {
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, strategy);
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        strategy,
+      );
       const graph = graphContext.graph;
       let contract: Contract | Error = { expect: "Anything." };
       const s = inert(graph, { id: NodeId.create("S") });
@@ -1547,7 +1677,11 @@ test("a collectionless real agent uses its node's policy", async () => {
     tools: [],
   });
   const graphPorts = terminalPorts();
-  const graphContext = policyContext(graphPorts.source, graphPorts.sink, "parallel");
+  const graphContext = policyContext(
+    graphPorts.source,
+    graphPorts.sink,
+    "parallel",
+  );
   const graph = graphContext.graph;
   try {
     const id = NodeId.create("free");

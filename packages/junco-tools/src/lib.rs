@@ -23,6 +23,7 @@ mod utils;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
 use marsh_core::shellmux::ShellMux;
@@ -30,7 +31,7 @@ use napi::bindgen_prelude::{Buffer, PromiseRaw};
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
-use frontend::{OutputCallback, PolicyCallback};
+use frontend::{OutputCallback, PolicyCallback, ResourceCallback};
 use mux::{RunState, Session};
 use policy::NativePolicy;
 use process::{CloseTimeout, ProcessState};
@@ -49,6 +50,51 @@ pub struct NativeMuxOptions {
     pub policy: Option<policy::PolicyArg>,
     /// Also deliver granted capabilities to `onPolicyDecision`; violations always are.
     pub policy_debug: Option<bool>,
+    /// Resource limits and monitoring of this mux's commands; none when omitted.
+    pub resources: Option<NativeResourceOptions>,
+}
+
+/// Resource limits and monitoring of every shell command and persistent process this mux
+/// runs, enforced per outermost pipeline with Linux cgroup v2 (delegated cpu/memory/pids
+/// controllers). Without them a command fails closed, reporting `cgroup resource control
+/// unavailable` on its standard error instead of running unlimited. File tools spawn no
+/// pipelines and are unaffected.
+#[napi(object, object_to_js = false)]
+pub struct NativeResourceOptions {
+    /// Memory ceiling in bytes, swap disabled; a positive integer.
+    pub memory_bytes: Option<f64>,
+    /// CPU quota in CPUs, for example `0.5`; positive.
+    pub cpus: Option<f64>,
+    /// Maximum task count; a positive integer no greater than 4294967295.
+    pub pids: Option<f64>,
+    /// Sampling interval, in milliseconds, of the monitor whose events `onResourceEvent`
+    /// receives; positive. Each requires the other.
+    pub monitor_interval_ms: Option<f64>,
+}
+
+/// Cumulative accounting of one pipeline's cgroup; durations in milliseconds.
+#[napi(object)]
+pub struct NativeResourceSample {
+    pub elapsed_ms: f64,
+    pub memory_bytes: f64,
+    pub memory_peak_bytes: f64,
+    pub cpu_usage_ms: f64,
+    pub cpu_user_ms: f64,
+    pub cpu_system_ms: f64,
+    pub cpu_throttled_ms: f64,
+    pub pids: u32,
+    pub oom_kills: f64,
+}
+
+/// One monitor event of a pipeline this mux ran. `started` carries `command` (the pipeline's
+/// source text); `sample` (periodic, lossy) and `finished` (always delivered) carry `sample`.
+#[napi(object)]
+pub struct NativeResourceEvent {
+    #[napi(ts_type = "\"started\" | \"sample\" | \"finished\"")]
+    pub kind: String,
+    pub pipeline_id: f64,
+    pub command: Option<String>,
+    pub sample: Option<NativeResourceSample>,
 }
 
 /// One junco-policy capability decision, as `Authority::check` made it. A grant is tentative: a
@@ -65,20 +111,35 @@ pub struct NativePolicyDecision {
     pub allowed_fixes: Option<Vec<String>>,
 }
 
-/// The routing mode and authorization policy `options` select, refused before anything is
-/// discovered, and the policy log a supplied callback receives decisions through.
+type ResourceEvents = (
+    tokio::sync::mpsc::Receiver<marsh_core::ResourceEvent>,
+    Arc<frontend::ResourceLog>,
+);
+
+/// What `NativeMuxOptions` and the open callbacks select, refused before anything is discovered.
+pub(crate) struct MuxSetup {
+    pub(crate) sandbox: SandboxMode,
+    pub(crate) shell_policy: Arc<dyn marsh_core::Policy>,
+    pub(crate) policy_log: Option<Arc<frontend::PolicyLog>>,
+    pub(crate) pipeline_options: marsh_core::PipelineOptions,
+    /// The monitor's receiver and the sink forwarding it, when monitoring is on.
+    pub(crate) resource_events: Option<ResourceEvents>,
+}
+
 fn mux_options(
     options: Option<NativeMuxOptions>,
     on_policy_decision: Option<PolicyCallback>,
-) -> Result<(
-    SandboxMode,
-    Arc<dyn marsh_core::Policy>,
-    Option<Arc<frontend::PolicyLog>>,
-)> {
-    let (sandbox, policy, debug) = options.map_or((None, None, None), |options| {
-        (options.sandbox, options.policy, options.policy_debug)
+    on_resource_event: Option<ResourceCallback>,
+) -> Result<MuxSetup> {
+    let (sandbox, policy, debug, resources) = options.map_or((None, None, None, None), |options| {
+        (
+            options.sandbox,
+            options.policy,
+            options.policy_debug,
+            options.resources,
+        )
     });
-    let mode = match sandbox.as_deref() {
+    let sandbox = match sandbox.as_deref() {
         None | Some("shared") => SandboxMode::Shared,
         Some("always") => SandboxMode::Always,
         Some(value) => {
@@ -87,10 +148,105 @@ fn mux_options(
             )));
         }
     };
-    let policy = policy.map_or_else(|| NativePolicy::lock().0, |policy| policy.0);
-    let log = on_policy_decision
+    let shell_policy = policy.map_or_else(|| NativePolicy::lock().0, |policy| policy.0);
+    let policy_log = on_policy_decision
         .map(|callback| frontend::PolicyLog::new(callback, debug.unwrap_or(false)));
-    Ok((mode, policy, log))
+    let (pipeline_options, resource_events) = pipeline_options(resources, on_resource_event)?;
+    Ok(MuxSetup {
+        sandbox,
+        shell_policy,
+        policy_log,
+        pipeline_options,
+        resource_events,
+    })
+}
+
+fn pipeline_options(
+    resources: Option<NativeResourceOptions>,
+    on_resource_event: Option<ResourceCallback>,
+) -> Result<(marsh_core::PipelineOptions, Option<ResourceEvents>)> {
+    use marsh_core::{
+        CpuLimit, MemoryLimit, PipelineOptions, ResourceLimits, ResourceMonitorConfig,
+    };
+
+    let mut limits = ResourceLimits::default();
+    let mut interval = None;
+    if let Some(resources) = resources {
+        if let Some(value) = resources.memory_bytes {
+            if !value.is_finite()
+                || value <= 0.0
+                || value.fract() != 0.0
+                || value > 9_007_199_254_740_992.0
+            {
+                return Err(Error::from_reason(
+                    "Invalid resources option: memoryBytes must be a positive integer",
+                ));
+            }
+            limits.memory = Some(MemoryLimit::new(value as u64));
+        }
+        if let Some(value) = resources.cpus {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(Error::from_reason(
+                    "Invalid resources option: cpus must be a positive number",
+                ));
+            }
+            limits.cpu = Some(CpuLimit::new(value));
+        }
+        if let Some(value) = resources.pids {
+            if !value.is_finite()
+                || value <= 0.0
+                || value.fract() != 0.0
+                || value > f64::from(u32::MAX)
+            {
+                return Err(Error::from_reason(
+                    "Invalid resources option: pids must be positive and an integer no greater than 4294967295",
+                ));
+            }
+            limits.pids = Some(value as u32);
+        }
+        if let Some(value) = resources.monitor_interval_ms {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(Error::from_reason(
+                    "Invalid resources option: monitorIntervalMs must be a positive number",
+                ));
+            }
+            let duration = Duration::try_from_secs_f64(value / 1000.0).map_err(|_| {
+                Error::from_reason("Invalid resources option: monitorIntervalMs is out of range")
+            })?;
+            if duration.is_zero() {
+                return Err(Error::from_reason(
+                    "Invalid resources option: monitorIntervalMs is out of range",
+                ));
+            }
+            interval = Some(duration);
+        }
+    }
+    let mut options = PipelineOptions::default();
+    if limits != ResourceLimits::default() {
+        options = options.with_resource_limits(limits);
+    }
+    let events = match (interval, on_resource_event) {
+        (Some(_), None) => {
+            return Err(Error::from_reason(
+                "Invalid resources option: monitorIntervalMs requires an onResourceEvent callback",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(Error::from_reason(
+                "onResourceEvent requires resources.monitorIntervalMs",
+            ));
+        }
+        (Some(interval), Some(callback)) => {
+            let monitor = ResourceMonitorConfig::new(interval);
+            let receiver = monitor
+                .events()
+                .ok_or_else(|| Error::from_reason("resource monitor receiver already taken"))?;
+            options = options.with_resource_monitor(monitor);
+            Some((receiver, frontend::ResourceLog::new(callback)))
+        }
+        (None, None) => None,
+    };
+    Ok((options, events))
 }
 
 #[napi(object)]
@@ -227,8 +383,11 @@ impl NativeMux {
         options: Option<NativeMuxOptions>,
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
+        #[napi(ts_arg_type = "(error: Error | null, data: NativeResourceEvent) => void")]
+        on_resource_event: Option<ResourceCallback>,
     ) -> Result<Self> {
-        let (sandbox, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
+        let setup = mux_options(options, on_policy_decision, on_resource_event)?;
+        let sandbox = setup.sandbox;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let filesystem: Arc<dyn Subvolumes> = Arc::new(LibBtrfs);
             // Discovery only. Materialization, the seed's exclusive lease, its log recovery
@@ -240,15 +399,8 @@ impl NativeMux {
         })
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
-        let session = Session::new(
-            seed,
-            filesystem,
-            tool::sandbox_policy(sandbox),
-            shell_policy,
-            policy_log,
-            ShellMux::new,
-        )
-        .map_err(Error::from_reason)?;
+        let session =
+            Session::new(seed, filesystem, setup, ShellMux::new).map_err(Error::from_reason)?;
         Ok(Self {
             session,
             sandbox,
@@ -380,8 +532,11 @@ impl NativeMux {
         options: Option<NativeMuxOptions>,
         #[napi(ts_arg_type = "(error: Error | null, data: NativePolicyDecision) => void")]
         on_policy_decision: Option<PolicyCallback>,
+        #[napi(ts_arg_type = "(error: Error | null, data: NativeResourceEvent) => void")]
+        on_resource_event: Option<ResourceCallback>,
     ) -> Result<Self> {
-        let (sandbox, shell_policy, policy_log) = mux_options(options, on_policy_decision)?;
+        let setup = mux_options(options, on_policy_decision, on_resource_event)?;
+        let sandbox = setup.sandbox;
         let (seed, filesystem) = tokio::task::spawn_blocking(move || {
             let seed = Path::new(&seed)
                 .canonicalize()
@@ -412,16 +567,9 @@ impl NativeMux {
         .await
         .map_err(|error| Error::from_reason(error.to_string()))??;
         let execution_filesystem = Arc::clone(&filesystem);
-        let session = Session::new(
-            seed,
-            filesystem,
-            tool::sandbox_policy(sandbox),
-            shell_policy,
-            policy_log,
-            move |profile, frontend| {
-                marsh_core::test_support::mux(profile, frontend, execution_filesystem)
-            },
-        )
+        let session = Session::new(seed, filesystem, setup, move |profile, frontend| {
+            marsh_core::test_support::mux(profile, frontend, execution_filesystem)
+        })
         .map_err(Error::from_reason)?;
         Ok(Self {
             session,

@@ -29,12 +29,12 @@ import {
   graph,
   JuncoGraph,
   schedulers,
-  tracer,
   tools as toolsApi,
+  tracer,
   trigger,
 } from "../src/index.ts";
-import { type AgencyContext, waitingTool } from "./support.ts";
 import { registeredNodeContexts } from "../src/node-policy.ts";
+import { type AgencyContext, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call expands the caller's node into a Spawn graph whose workers report back through queues.
@@ -284,17 +284,37 @@ function callerNode(caller: Agent, prompt = "Start") {
 }
 
 function taskExecution(observer: tracer.DataflowTracer): AgencyContext {
-  const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(() => {
-    throw new graph.DataflowDefinitionError("Task fixture does not accept external input");
-  }, { id: graph.NodeId.create("$source") });
-  const edge = graph.Edge.value<AgenticInput, AssistantMessage>("caller->$sink");
-  const sink = new graph.nodes.Sink<AgenticInput, AssistantMessage>(async function* () {
-    const view = yield [];
-    const result = view.values.get(edge.id);
-    assert.ok(result);
-    return result;
-  }, { id: graph.NodeId.create("$sink"), trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(edge)) });
-  const work = new JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, LockPolicy);
+  const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(
+    () => {
+      throw new graph.DataflowDefinitionError(
+        "Task fixture does not accept external input",
+      );
+    },
+    { id: graph.NodeId.create("$source") },
+  );
+  const edge = graph.Edge.value<AgenticInput, AssistantMessage>(
+    "caller->$sink",
+  );
+  const sink = new graph.nodes.Sink<AgenticInput, AssistantMessage>(
+    async function* () {
+      const view = yield [];
+      const result = view.values.get(edge.id);
+      assert.ok(result);
+      return result;
+    },
+    {
+      id: graph.NodeId.create("$sink"),
+      trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(edge)),
+    },
+  );
+  const work = new JuncoGraph(
+    source,
+    sink,
+    graph.Width.create(1),
+    graph.UNBOUNDED,
+    observer,
+    LockPolicy,
+  );
   return schedulers.context({ graph: work, scheduler: schedulers.parallel() });
 }
 
@@ -319,7 +339,11 @@ function linksOf(g: JuncoGraph): string[] {
 }
 
 const pairedLinks = (ids: readonly string[]) =>
-  ["$source->root", "root->$sink", ...ids.flatMap((id) => [`root->${id}`, `${id}->root`])].sort();
+  [
+    "$source->root",
+    "root->$sink",
+    ...ids.flatMap((id) => [`root->${id}`, `${id}->root`]),
+  ].sort();
 
 /** The ids of every batch-completion marker among `context`'s user messages. */
 const markersIn = (context: Context): string[][] =>
@@ -427,7 +451,8 @@ async function failingCaller(
 function taskNodes(outer: JuncoGraph): string[] {
   const ids: string[] = [];
   innerOf(outer).forEachNode((child) => {
-    if (child !== "root" && child !== "$source" && child !== "$sink") ids.push(child);
+    if (child !== "root" && child !== "$source" && child !== "$sink")
+      ids.push(child);
   });
   return ids;
 }
@@ -450,7 +475,9 @@ describe("task tool through a graph-driven agent", () => {
   test("failed promoted work preserves accepted sends and orders delivery failures", async () => {
     for (const failDelivery of [false, true]) {
       const r = registry("caller", "worker");
-      const outbound = graph.Edge.message<AgenticInput, AssistantMessage>("accepted");
+      const outbound = graph.Edge.message<AgenticInput, AssistantMessage>(
+        "accepted",
+      );
       const workError = new Error("work failed after accepting send");
       const deliveryError = new Error("delivery failed");
       const accepted = Promise.withResolvers<void>();
@@ -458,10 +485,23 @@ describe("task tool through a graph-driven agent", () => {
       r.script("caller", [
         toolUse(taskCall([taskOn(r, "worker")])),
         toolUse(yieldCall("promote before sending")),
-        toolUse(fauxToolCall("send", { id: outbound.id, payload: { kind: "followUp", text: "accepted" } }, { id: "accepted-send" })),
+        toolUse(
+          fauxToolCall(
+            "send",
+            {
+              id: outbound.id,
+              payload: { kind: "followUp", text: "accepted" },
+            },
+            { id: "accepted-send" },
+          ),
+        ),
         fauxAssistantMessage("unreachable"),
       ]);
-      const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool(), new toolsApi.YieldTool(), new toolsApi.SendTool()]);
+      const caller = await newCaller(r.models, "caller", [
+        new toolsApi.TaskTool(),
+        new toolsApi.YieldTool(),
+        new toolsApi.SendTool(),
+      ]);
       caller.hooks.on("after_tool", ({ toolCallId }) => {
         if (toolCallId === "accepted-send") accepted.resolve();
         return undefined;
@@ -475,19 +515,37 @@ describe("task tool through a graph-driven agent", () => {
         id: graph.NodeId.create("receiver"),
         trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(outbound)),
         contract: () => ({ expect: "accepted sends" }),
-        state: new Deterministic<AgenticInput, AssistantMessage>(async function* () { yield []; return fauxAssistantMessage("receiver"); }, LockPolicy),
+        state: new Deterministic<AgenticInput, AssistantMessage>(
+          async function* () {
+            yield [];
+            return fauxAssistantMessage("receiver");
+          },
+          LockPolicy,
+        ),
       });
       outer.addEdge(id, receiver, outbound);
       if (failDelivery) {
         const node = outer.getNode(id)!;
         const registration = registeredNodeContexts.get(node)!;
-        registeredNodeContexts.set(node, { ...registration, get signal() { return outer.signal; }, send: () => { throw deliveryError; } });
+        registeredNodeContexts.set(node, {
+          ...registration,
+          get signal() {
+            return outer.signal;
+          },
+          send: () => {
+            throw deliveryError;
+          },
+        });
       }
-      while (!(outer.getNode(id)?.state instanceof JuncoGraph)) await execution.step();
-      const failing = new Deterministic<AgenticInput, AssistantMessage>(async function* () {
-        await accepted.promise;
-        throw workError;
-      }, LockPolicy);
+      while (!(outer.getNode(id)?.state instanceof JuncoGraph))
+        await execution.step();
+      const failing = new Deterministic<AgenticInput, AssistantMessage>(
+        async function* () {
+          await accepted.promise;
+          throw workError;
+        },
+        LockPolicy,
+      );
       innerOf(outer).addNode({
         id: graph.NodeId.create("$failure"),
         trigger: trigger.TriggerRule.always(),
@@ -495,19 +553,31 @@ describe("task tool through a graph-driven agent", () => {
         state: failing,
         step: failing.step,
       });
-      const failure = await execution.run().then(() => assert.fail("work must fail"), (error: unknown) => error);
+      const failure = await execution.run().then(
+        () => assert.fail("work must fail"),
+        (error: unknown) => error,
+      );
       assert.ok(causesOf(failure).includes(workError));
       const pending: string[] = [];
-      innerOf(outer).sink.drain(({ payload }) => { if ("text" in payload) pending.push(payload.text); });
+      innerOf(outer).sink.drain(({ payload }) => {
+        if ("text" in payload) pending.push(payload.text);
+      });
       if (failDelivery) {
-        const aggregate = causesOf(failure).find((cause) => cause instanceof AggregateError && cause.message === "Task graph execution and sink delivery failed");
+        const aggregate = causesOf(failure).find(
+          (cause) =>
+            cause instanceof AggregateError &&
+            cause.message === "Task graph execution and sink delivery failed",
+        );
         assert.ok(aggregate instanceof AggregateError);
         assert.ok(causesOf(aggregate.errors[0]).includes(workError));
         assert.equal(aggregate.errors[1], deliveryError);
         assert.deepEqual(pending, ["accepted"]);
       } else {
         assert.deepEqual(pending, []);
-        assert.deepEqual(outer.observe().inputs.get(receiver)?.messages.get(outbound.id), [{ kind: "followUp", text: "accepted" }]);
+        assert.deepEqual(
+          outer.observe().inputs.get(receiver)?.messages.get(outbound.id),
+          [{ kind: "followUp", text: "accepted" }],
+        );
       }
     }
   });
@@ -654,11 +724,15 @@ describe("task tool through a graph-driven agent", () => {
       const member = inner.getNode(graph.NodeId.create(child));
       assert.ok(child.startsWith("task-"), "the worker has its real task ID");
       assert.ok(
-        activations.some((event) => event.graph === inner && event.id === child),
+        activations.some(
+          (event) => event.graph === inner && event.id === child,
+        ),
         `the promoted graph observed activation of ${child}`,
       );
       assert.ok(
-        completions.some((event) => event.graph === inner && event.id === child),
+        completions.some(
+          (event) => event.graph === inner && event.id === child,
+        ),
         `the promoted graph observed completion of ${child}`,
       );
       assert.ok(member && member.state !== caller);
@@ -745,11 +819,20 @@ describe("task tool through a graph-driven agent", () => {
         );
       if (infos.length === 1)
         return toolUse(fauxToolCall("info", {}, { id: "info-2" }));
-      const sendResults = context.messages.filter((message) => message.role === "toolResult").filter((message) => message.toolName === "send");
-      if (sendResults.length < 2) return toolUse(fauxToolCall("send", {
-        id: sendResults.length === 0 ? "missing" : resultEdge.id,
-        payload: { kind: "followUp", text: "must not stage" },
-      }, { id: `invalid-send-${sendResults.length}` }));
+      const sendResults = context.messages
+        .filter((message) => message.role === "toolResult")
+        .filter((message) => message.toolName === "send");
+      if (sendResults.length < 2)
+        return toolUse(
+          fauxToolCall(
+            "send",
+            {
+              id: sendResults.length === 0 ? "missing" : resultEdge.id,
+              payload: { kind: "followUp", text: "must not stage" },
+            },
+            { id: `invalid-send-${sendResults.length}` },
+          ),
+        );
       if (sendResults.length === 2) {
         callerInfos.push(...infos);
         const route = infos
@@ -806,12 +889,21 @@ describe("task tool through a graph-driven agent", () => {
 
     const sourceColumns: graph.NodeIdType[][] = [];
     const observer: tracer.DataflowTracer = {
-      startRun<S, N, T, EH>(work: graph.DataflowGraph<S, N, T, EH>): tracer.DataflowRunTrace<N, T> {
+      startRun<S, N, T, EH>(
+        work: graph.DataflowGraph<S, N, T, EH>,
+      ): tracer.DataflowRunTrace<N, T> {
         const started: graph.NodeIdType[] = [];
         return {
-          startNode(id) { started.push(id); return { end() {}, fail() {} }; },
+          startNode(id) {
+            started.push(id);
+            return { end() {}, fail() {} };
+          },
           end() {
-            if (work.getNode(graph.NodeId.create("root")) !== undefined && started.includes(graph.NodeId.create("$source"))) sourceColumns.push(started);
+            if (
+              work.getNode(graph.NodeId.create("root")) !== undefined &&
+              started.includes(graph.NodeId.create("$source"))
+            )
+              sourceColumns.push(started);
           },
           fail() {},
         };
@@ -838,9 +930,13 @@ describe("task tool through a graph-driven agent", () => {
       is_available: () => alphaStarted,
       state: new Deterministic<AgenticInput, AssistantMessage>(
         async function* () {
-          for (let n = 1; n <= 5; n++) yield [
-            { id: notesEdge.id, payload: { kind: "followUp", text: `note-${n}` } },
-          ];
+          for (let n = 1; n <= 5; n++)
+            yield [
+              {
+                id: notesEdge.id,
+                payload: { kind: "followUp", text: `note-${n}` },
+              },
+            ];
           return fauxAssistantMessage("notes done");
         },
         LockPolicy,
@@ -922,7 +1018,9 @@ describe("task tool through a graph-driven agent", () => {
       ),
       [[sourceEdge.id, "upstream value"]],
     );
-    const sendResults = finalContext.messages.filter((message) => message.role === "toolResult").filter((message) => message.toolName === "send");
+    const sendResults = finalContext.messages
+      .filter((message) => message.role === "toolResult")
+      .filter((message) => message.toolName === "send");
     assert.equal(sendResults.length, 3);
     assert.equal(sendResults[0]?.isError, true);
     assert.equal(sendResults[1]?.isError, true);
@@ -987,10 +1085,21 @@ describe("task tool through a graph-driven agent", () => {
       final,
       "only the final caller result reaches downstream",
     );
-    assert.equal(sourceColumns.length, 5, "each consecutive external delivery runs its Source once");
+    assert.equal(
+      sourceColumns.length,
+      5,
+      "each consecutive external delivery runs its Source once",
+    );
     for (const column of sourceColumns) {
-      assert.ok(column.includes(graph.NodeId.create("root")), "queued ingress cannot starve the root");
-      assert.ok(column.indexOf(graph.NodeId.create("$source")) < column.indexOf(graph.NodeId.create("root")), "routing precedes the same-column root activation");
+      assert.ok(
+        column.includes(graph.NodeId.create("root")),
+        "queued ingress cannot starve the root",
+      );
+      assert.ok(
+        column.indexOf(graph.NodeId.create("$source")) <
+          column.indexOf(graph.NodeId.create("root")),
+        "routing precedes the same-column root activation",
+      );
     }
   });
 
@@ -1040,12 +1149,14 @@ describe("task tool through a graph-driven agent", () => {
     const inner = innerOf(outer);
     const children: string[] = [];
     inner.forEachNode((child, member) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink") children.push(member.description ?? "");
+      if (child !== "root" && child !== "$source" && child !== "$sink")
+        children.push(member.description ?? "");
     });
     assert.deepEqual(children, ["alpha", "beta", "gamma"]);
     const ids: string[] = [];
     inner.forEachNode((child) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink") ids.push(child);
+      if (child !== "root" && child !== "$source" && child !== "$sink")
+        ids.push(child);
     });
     assert.deepEqual(linksOf(inner), pairedLinks(ids));
     assert.deepEqual(
@@ -1125,7 +1236,8 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(nested[0]!.getNode(graph.NodeId.create("root"))?.state, alpha);
     let grandFound = false;
     nested[0]!.forEachNode((child, member) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink") grandFound = member.state === grand;
+      if (child !== "root" && child !== "$source" && child !== "$sink")
+        grandFound = member.state === grand;
     });
     assert.ok(grandFound);
     assert.equal(r.calls("grand"), 1);
@@ -1535,9 +1647,19 @@ describe("task tool through a graph-driven agent", () => {
       fauxAssistantMessage("child must not answer"),
     ]);
     r.script("fast", [fauxAssistantMessage("fast-report")]);
-    r.script("slow", Array.from({ length: 16 }, (_, turn) => () =>
-      toolUse(yieldCall("wait for the root's failing drive", `slow-yield-${turn}`)),
-    ));
+    r.script(
+      "slow",
+      Array.from(
+        { length: 16 },
+        (_, turn) => () =>
+          toolUse(
+            yieldCall(
+              "wait for the root's failing drive",
+              `slow-yield-${turn}`,
+            ),
+          ),
+      ),
+    );
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
       new toolsApi.YieldTool(),
@@ -1546,11 +1668,16 @@ describe("task tool through a graph-driven agent", () => {
     caller.setTaskFailurePolicy("ignore");
     const created = trackSubagents(caller, (parent, child, index) => {
       if (parent !== caller) {
-        if (index === 1) child.hooks.on("after_tool", async ({ toolName }, context) => {
-          if (toolName === "yield" && rootFailing)
-            await waiting.tool.execute("slow-live-wait", {}, context.abortSignal);
-          return undefined;
-        });
+        if (index === 1)
+          child.hooks.on("after_tool", async ({ toolName }, context) => {
+            if (toolName === "yield" && rootFailing)
+              await waiting.tool.execute(
+                "slow-live-wait",
+                {},
+                context.abortSignal,
+              );
+            return undefined;
+          });
         return;
       }
       let runs = 0;

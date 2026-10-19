@@ -1,5 +1,5 @@
-import { type NodeIdType } from "dataflow-engine";
-import { type Decision, type Snapshot } from "./scheduler.js";
+import type { NodeIdType } from "dataflow-engine";
+import type { Decision, Snapshot } from "./scheduler.js";
 
 /** Select every available owned node in candidate order; native capacity stays authoritative. */
 export function parallel(): <S, N, T, C>(

@@ -8,7 +8,7 @@ import {
   fauxToolCall,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import { pi, type PiOptions, type SchedulerRequest } from "../src/agent.ts";
+import { type PiOptions, pi, type SchedulerRequest } from "../src/agent.ts";
 
 let providers = 0;
 
@@ -30,16 +30,21 @@ export const userTexts = (context: Context): string[] =>
   context.messages.flatMap((message) =>
     message.role !== "user"
       ? []
-      : [typeof message.content === "string"
-          ? message.content
-          : message.content.map((block) => block.type === "text" ? block.text : "").join("")],
+      : [
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .map((block) => (block.type === "text" ? block.text : ""))
+                .join(""),
+        ],
   );
 
 /** Parse only the request-local snapshot, retaining the caller's metadata contract. */
 export function schedulerRequestOf<C>(context: Context): SchedulerRequest<C> {
   for (let index = context.messages.length - 1; index >= 0; index--) {
     const message = context.messages[index];
-    if (message?.role !== "user" || typeof message.content !== "string") continue;
+    if (message?.role !== "user" || typeof message.content !== "string")
+      continue;
     if (message.content.startsWith("SchedulerSnapshot:\n"))
       return JSON.parse(message.content.slice("SchedulerSnapshot:\n".length));
   }
@@ -51,8 +56,10 @@ export const runAvailable = <C>(request: SchedulerRequest<C>): Plan => ({
   waves: [request.nodes.map((node) => node.id)],
 });
 
-export const scheduleCall = (waves: readonly (readonly string[])[], id: string) =>
-  fauxToolCall("schedule", { waves }, { id });
+export const scheduleCall = (
+  waves: readonly (readonly string[])[],
+  id: string,
+) => fauxToolCall("schedule", { waves }, { id });
 
 export const toolTurn = (...calls: ToolCall[]) =>
   fauxAssistantMessage(calls, { stopReason: "toolUse" });
@@ -66,11 +73,14 @@ export function newScheduler<C = never>(
 ) {
   let requests = 0;
   const respond: FauxResponseFactory = (context) => {
-    if (typeof script !== "function") throw new Error("expected a decision callback");
+    if (typeof script !== "function")
+      throw new Error("expected a decision callback");
     faux.appendResponses([respond]);
     const decision = script(schedulerRequestOf<C>(context), requests++);
     return toolTurn(scheduleCall(decision.waves, `schedule-${requests}`));
   };
-  const { faux, options } = nativeOptions(typeof script === "function" ? [respond] : script);
+  const { faux, options } = nativeOptions(
+    typeof script === "function" ? [respond] : script,
+  );
   return { scheduler: pi({ ...options, ...extra }), faux };
 }

@@ -16,9 +16,15 @@ import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
 import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
 import { snapshotView } from "./node.js";
-import type { Queue } from "./queue.js";
 import type { Pretty } from "./pretty.js";
-import { NO_PROFILES, type ProfileData, type Profiles, type ProfileSet, type ResourceKind } from "./profile.js";
+import {
+  NO_PROFILES,
+  type ProfileData,
+  type ProfileSet,
+  type Profiles,
+  type ResourceKind,
+} from "./profile.js";
+import type { Queue } from "./queue.js";
 import type {
   InputSchedule,
   NodeAvailability,
@@ -144,8 +150,20 @@ export type DataflowRunOptions = {
 };
 
 export type DataflowObservation<S, N, T> = {
-  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & { readonly profiles: ProfileSet }>>;
-  readonly links: readonly (readonly [from: NodeId, to: NodeId, id: EdgeId, kind: "message" | "value"])[];
+  readonly nodes: ReadonlyMap<
+    NodeId,
+    Readonly<
+      Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & {
+        readonly profiles: ProfileSet;
+      }
+    >
+  >;
+  readonly links: readonly (readonly [
+    from: NodeId,
+    to: NodeId,
+    id: EdgeId,
+    kind: "message" | "value",
+  ])[];
   readonly inputs: ReadonlyMap<NodeId, ParentView<N, T>>;
   readonly results: ReadonlyMap<NodeId, T>;
   readonly version: number;
@@ -154,19 +172,17 @@ export type DataflowObservation<S, N, T> = {
 export type DataflowExecution<N, T> = (
   schedule: Schedule,
   options?: {
-    readonly resolveInputs?: (entry: NodeSchedule, live: NodeAvailability<N, T>) => InputSchedule;
+    readonly resolveInputs?: (
+      entry: NodeSchedule,
+      live: NodeAvailability<N, T>,
+    ) => InputSchedule;
     readonly onColumn?: (selected: readonly NodeId[]) => void;
   },
 ) => Promise<void>;
 
 /** Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. */
-export class DataflowGraph<
-  S,
-  N,
-  T,
-  EH,
-  K extends ResourceKind = never,
-> implements Pretty
+export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
+  implements Pretty
 {
   // Keep ngraph's mutable storage kind-erased; addNode enforces K at the public boundary.
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
@@ -213,10 +229,14 @@ export class DataflowGraph<
 
     // `profiles` is optional only for K = never; re-assert the resolved branch.
     const profiles = (spec.profiles ?? NO_PROFILES) as Profiles<K>;
-    for (const [kind, profile] of Object.entries(profiles) as [string, ProfileData][])
+    for (const [kind, profile] of Object.entries(profiles) as [
+      string,
+      ProfileData,
+    ][])
       if (profile.resource !== kind)
         throw new DataflowDefinitionError(
-          `Dataflow node "${id}" maps resource "${kind}" to a profile for "${profile.resource}"`);
+          `Dataflow node "${id}" maps resource "${kind}" to a profile for "${profile.resource}"`,
+        );
 
     const inbound = new Map<EdgeId, Edge<N, T>>();
     this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
@@ -298,19 +318,50 @@ export class DataflowGraph<
 
   observe(): DataflowObservation<S, N, T> {
     if (this.#observation?.version === this.#version) return this.#observation;
-    const nodes = new Map<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & { readonly profiles: ProfileSet }>>();
+    const nodes = new Map<
+      NodeId,
+      Readonly<
+        Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & {
+          readonly profiles: ProfileSet;
+        }
+      >
+    >();
     const inputs = new Map<NodeId, ParentView<N, T>>();
     this.forEachNode((id, node) => {
-      nodes.set(id, Object.freeze({ id, status: node.status, state: node.state, profiles: node.profiles,
-        ...(node.description === undefined ? {} : { description: node.description }) }));
+      nodes.set(
+        id,
+        Object.freeze({
+          id,
+          status: node.status,
+          state: node.state,
+          profiles: node.profiles,
+          ...(node.description === undefined
+            ? {}
+            : { description: node.description }),
+        }),
+      );
       inputs.set(id, snapshotView(this.#runtime.get(id)!.probe));
     });
-    const links: (readonly [NodeId, NodeId, EdgeId, "message" | "value"])[] = [];
+    const links: (readonly [NodeId, NodeId, EdgeId, "message" | "value"])[] =
+      [];
     this.forEachLink((from, to, edge) => {
-      links.push(Object.freeze([from, to, edge.id, E.isLeft(edge.transport) ? "message" : "value"]));
+      links.push(
+        Object.freeze([
+          from,
+          to,
+          edge.id,
+          E.isLeft(edge.transport) ? "message" : "value",
+        ]),
+      );
     });
-    return this.#observation = Object.freeze({ nodes, inputs, links: Object.freeze(links),
-      results: new Map(this.#results), version: this.#version });
+    this.#observation = Object.freeze({
+      nodes,
+      inputs,
+      links: Object.freeze(links),
+      results: new Map(this.#results),
+      version: this.#version,
+    });
+    return this.#observation;
   }
 
   /** Visit every registered node in graph iteration order. */
@@ -460,7 +511,8 @@ export class DataflowGraph<
             const edge = inbound.get(port);
             if (edge === undefined || !E.isLeft(edge.transport))
               throw new DataflowDefinitionError(
-                `Dataflow node "${id}" profile "${profile.resource}" reads port "${port}", which is not one of its inbound message edges`);
+                `Dataflow node "${id}" profile "${profile.resource}" reads port "${port}", which is not one of its inbound message edges`,
+              );
           }
         }
       }
@@ -473,11 +525,16 @@ export class DataflowGraph<
 
   /** Single-flight lifetime scope encompassing external planning and all admitted work. */
   async evaluate<R>(
-    operation: (execute: DataflowExecution<N, T>, signal?: AbortSignal) => R | Promise<R>,
+    operation: (
+      execute: DataflowExecution<N, T>,
+      signal?: AbortSignal,
+    ) => R | Promise<R>,
     options?: DataflowRunOptions,
   ): Promise<R> {
     if (this.#evaluation !== undefined)
-      throw new DataflowDefinitionError("Dataflow execution is already in flight");
+      throw new DataflowDefinitionError(
+        "Dataflow execution is already in flight",
+      );
     this.#assertProfiles();
     const gate = Promise.withResolvers<void>();
     this.#evaluation = gate.promise;
@@ -487,30 +544,62 @@ export class DataflowGraph<
     let observed: Promise<PromiseSettledResult<void>> | undefined;
     let trace: DataflowRunTrace<N, T> | undefined;
     const execute: DataflowExecution<N, T> = (schedule, executionOptions) => {
-      if (!active) return Promise.reject(new DataflowDefinitionError("Dataflow evaluation is no longer active"));
+      if (!active)
+        return Promise.reject(
+          new DataflowDefinitionError(
+            "Dataflow evaluation is no longer active",
+          ),
+        );
       if (executing)
-        return Promise.reject(new DataflowDefinitionError("Dataflow execution is already in flight"));
+        return Promise.reject(
+          new DataflowDefinitionError(
+            "Dataflow execution is already in flight",
+          ),
+        );
       executing = true;
-      const work = this.#window(schedule, executionOptions, trace, options?.signal);
+      const work = this.#window(
+        schedule,
+        executionOptions,
+        trace,
+        options?.signal,
+      );
       running = work;
       observed = work.then(
-        () => { executing = false; running = undefined; return { status: "fulfilled", value: undefined }; },
-        reason => { executing = false; running = undefined; return { status: "rejected", reason }; },
+        () => {
+          executing = false;
+          running = undefined;
+          return { status: "fulfilled", value: undefined };
+        },
+        (reason) => {
+          executing = false;
+          running = undefined;
+          return { status: "rejected", reason };
+        },
       );
       return work;
     };
     try {
-      if (this.tracer !== undefined) trace = this.#observe(() => this.tracer!.startRun(this));
+      if (this.tracer !== undefined)
+        trace = this.#observe(() => this.tracer!.startRun(this));
       options?.signal?.throwIfAborted();
       let outcome: { ok: true; value: R } | { ok: false; error: unknown };
-      try { outcome = { ok: true, value: await operation(execute, options?.signal) }; }
-      catch (error) { outcome = { ok: false, error }; }
+      try {
+        outcome = {
+          ok: true,
+          value: await operation(execute, options?.signal),
+        };
+      } catch (error) {
+        outcome = { ok: false, error };
+      }
       active = false;
       const pending = running === undefined ? undefined : observed;
       const drained = await pending;
       if (!outcome.ok) {
         if (drained?.status === "rejected" && drained.reason !== outcome.error)
-          throw new AggregateError([outcome.error, drained.reason], "Graph evaluation and execution failed");
+          throw new AggregateError(
+            [outcome.error, drained.reason],
+            "Graph evaluation and execution failed",
+          );
         throw outcome.error;
       }
       if (drained?.status === "rejected") throw drained.reason;
@@ -546,8 +635,7 @@ export class DataflowGraph<
         if (availability === undefined) continue;
         const inputs =
           this.#graph.getNode(entry.id)!.data.status === "running"
-            ? (options?.resolveInputs?.(entry, availability) ??
-              entry.inputs)
+            ? (options?.resolveInputs?.(entry, availability) ?? entry.inputs)
             : entry.inputs;
         column.push({ id: entry.id, inputs });
       }
@@ -558,7 +646,7 @@ export class DataflowGraph<
       const settled = await Promise.allSettled(
         column.map((entry) => this.#runNode(entry, execution, signal)),
       );
-      options?.onColumn?.(Object.freeze(column.map(entry => entry.id)));
+      options?.onColumn?.(Object.freeze(column.map((entry) => entry.id)));
       const failed = settled.find((outcome) => outcome.status === "rejected");
       if (failed !== undefined) throw failed.reason;
       signal?.throwIfAborted();

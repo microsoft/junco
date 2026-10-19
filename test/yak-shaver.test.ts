@@ -1293,7 +1293,9 @@ describe("candidate batch graph", () => {
 
   test("a construction failure closes registered and unregistered lanes without applying", async () => {
     const lanes = await Promise.all(
-      laneWorks().slice(0, 3).map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
+      laneWorks()
+        .slice(0, 3)
+        .map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
     );
     await lanes[1]!.lane.judge.return();
     const recorder = recordingApplier();
@@ -1304,7 +1306,8 @@ describe("candidate batch graph", () => {
         observer: quiet(),
         apply: recorder.apply,
       }),
-      (error: unknown) => error instanceof agent.JuncoAgentError && error.code === "closed",
+      (error: unknown) =>
+        error instanceof agent.JuncoAgentError && error.code === "closed",
     );
     assert.equal(recorder.applied.length, 0);
     assertClosed(lanes);
@@ -1312,7 +1315,9 @@ describe("candidate batch graph", () => {
 
   test("a construction failure retains a disposal failure and still closes every lane", async () => {
     const lanes = await Promise.all(
-      laneWorks().slice(0, 3).map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
+      laneWorks()
+        .slice(0, 3)
+        .map((work) => scriptedLane(work, laneSnapshot, laneSources, {})),
     );
     await lanes[1]!.lane.judge.return();
     const member = lanes[2]!.lane.judge;
@@ -1330,8 +1335,11 @@ describe("candidate batch graph", () => {
         observer: quiet(),
         apply: recorder.apply,
       }),
-      (error: unknown) => error instanceof SuppressedError && error.error === cleanupError &&
-        error.suppressed instanceof agent.JuncoAgentError && error.suppressed.code === "closed",
+      (error: unknown) =>
+        error instanceof SuppressedError &&
+        error.error === cleanupError &&
+        error.suppressed instanceof agent.JuncoAgentError &&
+        error.suppressed.code === "closed",
     );
     assert.equal(recorder.applied.length, 0);
     assertClosed(lanes);

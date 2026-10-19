@@ -1,20 +1,20 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { graph, tracer } from "junco-agency";
 import { LockPolicy } from "junco-tools";
-import { terminalPorts } from "./deterministic-support.ts";
 import {
-  graftCheckpoints,
-  loadGraftGraph,
-  parseGraftGraph,
   type GraftCheckpoint,
   type GraftEdge,
   type GraftMetadata,
   type GraftTopology,
+  graftCheckpoints,
+  loadGraftGraph,
+  parseGraftGraph,
 } from "../skills/junco-graph-create/scripts/graft.ts";
+import { terminalPorts } from "./deterministic-support.ts";
 
 function node(id: string): GraftMetadata {
   return {
@@ -133,10 +133,30 @@ test("parser rejects malformed complete input even outside selected scope", () =
         input.meta.languages = [7];
       },
     ],
-    ["meta.languages[0]", (input) => { delete input.meta.languages[0]; }],
-    ["meta.scopes[0]", (input) => { delete input.meta.scopes[0]; }],
-    ["nodes[0]", (input) => { delete input.nodes[0]; }],
-    ["edges[0]", (input) => { delete input.edges[0]; }],
+    [
+      "meta.languages[0]",
+      (input) => {
+        delete input.meta.languages[0];
+      },
+    ],
+    [
+      "meta.scopes[0]",
+      (input) => {
+        delete input.meta.scopes[0];
+      },
+    ],
+    [
+      "nodes[0]",
+      (input) => {
+        delete input.nodes[0];
+      },
+    ],
+    [
+      "edges[0]",
+      (input) => {
+        delete input.edges[0];
+      },
+    ],
     [
       "meta.scopes",
       (input) => {
@@ -185,7 +205,12 @@ test("parser rejects malformed complete input even outside selected scope", () =
         input.nodes[1].path = "C:\\outside.ts";
       },
     ],
-    ["nodes[1].path", (input) => { input.nodes[1].path = "C:outside.ts"; }],
+    [
+      "nodes[1].path",
+      (input) => {
+        input.nodes[1].path = "C:outside.ts";
+      },
+    ],
     [
       "nodes[1].path",
       (input) => {
@@ -481,15 +506,20 @@ test("checkpoints wait for every region member and async validation/reporting, n
           metadata.id === "a" ? 3 : metadata.id === "z" ? 9 : 0,
         ),
       ),
-    { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: observer },
+    {
+      source: ports.source,
+      sink: ports.sink,
+      policy: LockPolicy,
+      tracer: observer,
+    },
   );
   ports.connect(workflow.graph, graph.NodeId.create("z"));
   try {
     const results = await controller.run(workflow);
-    assert.deepEqual(
-      [...results].sort(),
-      [["$sink", "z"], ...["a", "b", "c", "d", "e", "z"].map((id) => [id, id])],
-    );
+    assert.deepEqual([...results].sort(), [
+      ["$sink", "z"],
+      ...["a", "b", "c", "d", "e", "z"].map((id) => [id, id]),
+    ]);
     assert.ok(events.indexOf("start:b") < events.indexOf("validate:a"));
     assert.ok(events.indexOf("validated:a") < events.indexOf("progress:a"));
     assert.ok(events.indexOf("progress:a") < events.indexOf("start:c"));
@@ -549,7 +579,12 @@ test("joining region waits for every predecessor while disconnected roots run in
           metadata.id === "b" ? 4 : 0,
         ),
       ),
-    { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: observer },
+    {
+      source: ports.source,
+      sink: ports.sink,
+      policy: LockPolicy,
+      tracer: observer,
+    },
   );
   ports.connect(workflow.graph, graph.NodeId.create("x"));
   try {
@@ -593,7 +628,12 @@ test("validator cause and progress failure stop successors and never report fals
           metadata,
           work(metadata.id, () => started.push(metadata.id)),
         ),
-      { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: observer },
+      {
+        source: ports.source,
+        sink: ports.sink,
+        policy: LockPolicy,
+        tracer: observer,
+      },
     );
     ports.connect(workflow.graph, graph.NodeId.create("b"));
     try {
@@ -635,7 +675,12 @@ test("quiescence is an unfinished-node error, triggers are checked, and empty to
         ...work(metadata.id),
         is_available: () => false,
       }),
-    { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: observer },
+    {
+      source: ports.source,
+      sink: ports.sink,
+      policy: LockPolicy,
+      tracer: observer,
+    },
   );
   ports.connect(workflow.graph, graph.NodeId.create("b"));
   try {
@@ -650,16 +695,32 @@ test("quiescence is an unfinished-node error, triggers are checked, and empty to
     validate: () => assert.fail(),
     progress: () => assert.fail(),
   });
-  const emptySource = new graph.nodes.Source<never, string>(() => {
-    throw new graph.DataflowDefinitionError("Empty mapped graph does not accept external input");
-  }, { id: graph.NodeId.create("$source") });
-  const emptySink = new graph.nodes.Sink<never, string>(async function* () {
-    throw new Error("Empty mapped graph has no terminal result");
-  }, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.never() });
+  const emptySource = new graph.nodes.Source<never, string>(
+    () => {
+      throw new graph.DataflowDefinitionError(
+        "Empty mapped graph does not accept external input",
+      );
+    },
+    { id: graph.NodeId.create("$source") },
+  );
+  const emptySink = new graph.nodes.Sink<never, string>(
+    async function* () {
+      throw new Error("Empty mapped graph has no terminal result");
+    },
+    {
+      id: graph.NodeId.create("$sink"),
+      trigger: graph.trigger.TriggerRule.never(),
+    },
+  );
   const emptyWorkflow = graph.JuncoGraph.map(
     empty.skeleton,
     (metadata) => emptyController.gate(metadata, work("unused")),
-    { source: emptySource, sink: emptySink, policy: LockPolicy, tracer: observer },
+    {
+      source: emptySource,
+      sink: emptySink,
+      policy: LockPolicy,
+      tracer: observer,
+    },
   );
   try {
     assert.equal((await emptyController.run(emptyWorkflow)).size, 0);

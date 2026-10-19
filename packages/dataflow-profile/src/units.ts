@@ -1,4 +1,4 @@
-import { hours, milliseconds, minutes, seconds } from "@buge/ts-units/time";
+import { hours, milliseconds, minutes, seconds } from "@buge/ts-units/time/index.js";
 import { DataflowDefinitionError, bytes, gibibytes, gigabytes, kibibytes, kilobytes, mebibytes, megabytes, tokens, type ResourceKind, type ResourceUnit } from "dataflow-engine";
 
 export const UNITS = {

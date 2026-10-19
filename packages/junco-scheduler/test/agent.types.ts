@@ -1,19 +1,56 @@
 // Compile-only oracle contracts; included by tsconfig.typecheck.json.
 import type { Api, Model, Models } from "@earendil-works/pi-ai";
-import { DataflowGraph, NodeId, type NodeIdType, UNBOUNDED, Width } from "dataflow-engine";
-import { pi, type PiOptions, type SchedulerRequest } from "../src/agent.ts";
-import { agent, context, type Decision, type Scheduler, type Snapshot } from "../src/index.ts";
+import {
+  DataflowGraph,
+  NodeId,
+  type NodeIdType,
+  UNBOUNDED,
+  Width,
+} from "dataflow-engine";
+import { type PiOptions, pi, type SchedulerRequest } from "../src/agent.ts";
+import {
+  agent,
+  context,
+  type Decision,
+  type Scheduler,
+  type Snapshot,
+} from "../src/index.ts";
 
 export function universalModelPolicy(options: PiOptions) {
   const scheduler = pi(options);
-  const numeric = new DataflowGraph<Readonly<{ group: "a" | "b" }>, number, string, Error>(Width.create(1), UNBOUNDED);
-  const textual = new DataflowGraph<boolean, string, number, never>(Width.create(1), UNBOUNDED);
-  const first = context({ graph: numeric, scheduler, describeNode: () => ({ priority: 7 }) });
-  const second = context({ graph: textual, scheduler, describeNode: () => false });
+  const numeric = new DataflowGraph<
+    Readonly<{ group: "a" | "b" }>,
+    number,
+    string,
+    Error
+  >(Width.create(1), UNBOUNDED);
+  const textual = new DataflowGraph<boolean, string, number, never>(
+    Width.create(1),
+    UNBOUNDED,
+  );
+  const first = context({
+    graph: numeric,
+    scheduler,
+    describeNode: () => ({ priority: 7 }),
+  });
+  const second = context({
+    graph: textual,
+    scheduler,
+    describeNode: () => false,
+  });
   const empty = context({ graph: textual, scheduler });
   const scalar = context({ graph: numeric, scheduler, describeNode: () => 0 });
-  const nullable = context({ graph: numeric, scheduler, describeNode: () => null });
-  const firstPolicy: Scheduler<Readonly<{ group: "a" | "b" }>, number, string, { priority: number }> = scheduler;
+  const nullable = context({
+    graph: numeric,
+    scheduler,
+    describeNode: () => null,
+  });
+  const firstPolicy: Scheduler<
+    Readonly<{ group: "a" | "b" }>,
+    number,
+    string,
+    { priority: number }
+  > = scheduler;
   const secondPolicy: Scheduler<boolean, string, number, boolean> = scheduler;
   // @ts-expect-error Model policies are not resources, iterators or sessions.
   scheduler.return();
@@ -28,11 +65,14 @@ export function universalModelPolicy(options: PiOptions) {
 export function genericOracle() {
   async function invoke<S, N, T, C>(snapshot: Snapshot<S, N, T, C>) {
     const contextPairs: (readonly [NodeIdType, C])[] = [];
-    for (const [id, metadata] of snapshot.context) contextPairs.push([id, metadata]);
+    for (const [id, metadata] of snapshot.context)
+      contextPairs.push([id, metadata]);
     const request: SchedulerRequest<C> = {
       version: snapshot.version,
       threads: snapshot.threads === Infinity ? null : snapshot.threads,
-      nodes: [...snapshot.nodes.values()].map(({ id, status, description }) => ({ id, status, description })),
+      nodes: [...snapshot.nodes.values()].map(
+        ({ id, status, description }) => ({ id, status, description }),
+      ),
       context: contextPairs,
       history: snapshot.history,
     };
@@ -46,7 +86,9 @@ export function genericOracle() {
 }
 
 export function exactRequest(
-  request: SchedulerRequest<Readonly<{ trigger: "all" | "any"; satisfied: number }>>,
+  request: SchedulerRequest<
+    Readonly<{ trigger: "all" | "any"; satisfied: number }>
+  >,
 ) {
   const metadata = request.context[0]?.[1];
   const satisfied: number | undefined = metadata?.satisfied;
@@ -75,8 +117,16 @@ export function exactRequest(
   return [satisfied, trigger, decision];
 }
 
-export function requiredModelOptions(models: Pick<Models, "completeSimple">, model: Model<Api>) {
-  const options: PiOptions = { models, model, prompt: "Run current work.", streamOptions: { temperature: 0 } };
+export function requiredModelOptions(
+  models: Pick<Models, "completeSimple">,
+  model: Model<Api>,
+) {
+  const options: PiOptions = {
+    models,
+    model,
+    prompt: "Run current work.",
+    streamOptions: { temperature: 0 },
+  };
   // @ts-expect-error No default-model acquisition or optional native dependencies.
   pi({ models });
   // @ts-expect-error The caller supplies its model service.

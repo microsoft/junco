@@ -263,6 +263,7 @@ impl ProcessTask {
                     environment: Some(environment),
                     force_sandbox: true,
                     policy_owner: owner,
+                    pipeline_options: backend.pipeline_options.clone(),
                     ..Default::default()
                 },
             )

@@ -14,37 +14,37 @@
 //! formatting, notebook decoding).
 
 use std::{
-	collections::HashSet,
-	path::{Path, PathBuf},
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use napi::{
-	bindgen_prelude::Result,
-	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
+    bindgen_prelude::Result,
+    threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditMode, PathPolicy, Session,
-	diff_string::{BlockContextSource, generate_diff_string},
-	modes::{hashline, sloppy},
-	path_policy::canonical_key,
-	session::{PreviewBatch, SessionConfig},
-	store,
-	stream_json::snapshot_from_text,
-	text::normalize_to_lf,
+    EditMode, PathPolicy, Session,
+    diff_string::{BlockContextSource, generate_diff_string},
+    modes::{hashline, sloppy},
+    path_policy::canonical_key,
+    session::{PreviewBatch, SessionConfig},
+    store,
+    stream_json::snapshot_from_text,
+    text::normalize_to_lf,
 };
 
 fn parse_mode(mode: &str) -> Result<EditMode> {
-	EditMode::parse(mode)
-		.ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
+    EditMode::parse(mode)
+        .ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
 }
 
 fn reason(err: impl std::fmt::Display) -> napi::Error {
-	napi::Error::from_reason(err.to_string())
+    napi::Error::from_reason(err.to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -54,132 +54,132 @@ fn reason(err: impl std::fmt::Display) -> napi::Error {
 /// A cached `vault://` root.
 #[napi(object)]
 pub struct EditVaultRoot {
-	/// Vault name; `_` is the active vault.
-	pub name: String,
-	pub root: String,
+    /// Vault name; `_` is the active vault.
+    pub name: String,
+    pub root: String,
 }
 
 /// Session-wide policy; TypeScript builds it once per tool call.
 #[napi(object)]
 pub struct EditPolicy {
-	pub cwd:                  String,
-	/// `replace` | `patch` | `apply_patch` | `hashline` | `sloppy`.
-	pub mode:                 String,
-	pub allow_fuzzy:          bool,
-	pub fuzzy_threshold:      f64,
-	pub enforce_seen_lines:   bool,
-	pub block_auto_generated: bool,
-	pub plan_active:          bool,
-	/// Root of the `local://` artifact sandbox; null when the session has none.
-	pub local_sandbox_root:   Option<String>,
-	/// Cached vault roots; null when the vault protocol is disabled.
-	pub vault_roots:          Option<Vec<EditVaultRoot>>,
-	pub home_dir:             String,
-	/// The payload is a verbatim custom-format string, not JSON.
-	pub raw_input:            bool,
+    pub cwd: String,
+    /// `replace` | `patch` | `apply_patch` | `hashline` | `sloppy`.
+    pub mode: String,
+    pub allow_fuzzy: bool,
+    pub fuzzy_threshold: f64,
+    pub enforce_seen_lines: bool,
+    pub block_auto_generated: bool,
+    pub plan_active: bool,
+    /// Root of the `local://` artifact sandbox; null when the session has none.
+    pub local_sandbox_root: Option<String>,
+    /// Cached vault roots; null when the vault protocol is disabled.
+    pub vault_roots: Option<Vec<EditVaultRoot>>,
+    pub home_dir: String,
+    /// The payload is a verbatim custom-format string, not JSON.
+    pub raw_input: bool,
 }
 
 impl EditPolicy {
-	pub(crate) fn into_config(self) -> Result<SessionConfig> {
-		Ok(SessionConfig {
-			mode:               parse_mode(&self.mode)?,
-			policy:             PathPolicy {
-				cwd:                  PathBuf::from(self.cwd),
-				home_dir:             PathBuf::from(self.home_dir),
-				local_sandbox_root:   self.local_sandbox_root.map(PathBuf::from),
-				vault_roots:          self.vault_roots.map(|roots| {
-					roots
-						.into_iter()
-						.map(|r| (r.name, PathBuf::from(r.root)))
-						.collect()
-				}),
-				plan_active:          self.plan_active,
-				block_auto_generated: self.block_auto_generated,
-			},
-			allow_fuzzy:        self.allow_fuzzy,
-			fuzzy_threshold:    self.fuzzy_threshold,
-			enforce_seen_lines: self.enforce_seen_lines,
-			raw_input:          self.raw_input,
-		})
-	}
+    pub(crate) fn into_config(self) -> Result<SessionConfig> {
+        Ok(SessionConfig {
+            mode: parse_mode(&self.mode)?,
+            policy: PathPolicy {
+                cwd: PathBuf::from(self.cwd),
+                home_dir: PathBuf::from(self.home_dir),
+                local_sandbox_root: self.local_sandbox_root.map(PathBuf::from),
+                vault_roots: self.vault_roots.map(|roots| {
+                    roots
+                        .into_iter()
+                        .map(|r| (r.name, PathBuf::from(r.root)))
+                        .collect()
+                }),
+                plan_active: self.plan_active,
+                block_auto_generated: self.block_auto_generated,
+            },
+            allow_fuzzy: self.allow_fuzzy,
+            fuzzy_threshold: self.fuzzy_threshold,
+            enforce_seen_lines: self.enforce_seen_lines,
+            raw_input: self.raw_input,
+        })
+    }
 }
 
 /// One file's streamed diff preview.
 #[napi(object)]
 pub struct EditFilePreview {
-	/// Display path as authored (after suffix recovery).
-	pub path:               String,
-	/// Numbered unified diff; mutually exclusive with `error`.
-	pub diff:               Option<String>,
-	pub first_changed_line: Option<u32>,
-	/// Model-facing error text.
-	pub error:              Option<String>,
-	/// `create` | `update` | `delete`.
-	pub op:                 Option<String>,
-	pub rename:             Option<String>,
+    /// Display path as authored (after suffix recovery).
+    pub path: String,
+    /// Numbered unified diff; mutually exclusive with `error`.
+    pub diff: Option<String>,
+    pub first_changed_line: Option<u32>,
+    /// Model-facing error text.
+    pub error: Option<String>,
+    /// `create` | `update` | `delete`.
+    pub op: Option<String>,
+    pub rename: Option<String>,
 }
 
 /// A batch of previews for one session generation.
 #[napi(object)]
 pub struct EditPreviewBatch {
-	/// Monotonically increasing per session.
-	pub generation: u32,
-	/// False for the final untrimmed pass after `finish()`.
-	pub streaming:  bool,
-	pub files:      Vec<EditFilePreview>,
+    /// Monotonically increasing per session.
+    pub generation: u32,
+    /// False for the final untrimmed pass after `finish()`.
+    pub streaming: bool,
+    pub files: Vec<EditFilePreview>,
 }
 
 impl From<PreviewBatch> for EditPreviewBatch {
-	fn from(batch: PreviewBatch) -> Self {
-		Self {
-			generation: batch.generation,
-			streaming:  batch.streaming,
-			files:      batch
-				.files
-				.into_iter()
-				.map(|file| EditFilePreview {
-					path:               file.display,
-					diff:               file.diff,
-					first_changed_line: file.first_changed_line,
-					error:              file.error,
-					op:                 file.op.map(|op| op.as_str().to_owned()),
-					rename:             file.rename,
-				})
-				.collect(),
-		}
-	}
+    fn from(batch: PreviewBatch) -> Self {
+        Self {
+            generation: batch.generation,
+            streaming: batch.streaming,
+            files: batch
+                .files
+                .into_iter()
+                .map(|file| EditFilePreview {
+                    path: file.display,
+                    diff: file.diff,
+                    first_changed_line: file.first_changed_line,
+                    error: file.error,
+                    op: file.op.map(|op| op.as_str().to_owned()),
+                    rename: file.rename,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
-	/// Absolute path.
-	pub path:               String,
-	pub display_path:       String,
-	/// `create` | `update` | `delete`.
-	pub op:                 String,
-	pub move_to:            Option<String>,
-	pub diff:               String,
-	pub first_changed_line: Option<u32>,
-	pub old_text:           Option<String>,
-	pub new_text:           Option<String>,
-	pub snapshots_pruned:   bool,
-	pub diagnostics_json:   Option<String>,
-	/// Engine warnings (already rendered into `text`).
-	pub warnings:           Vec<String>,
-	/// Model-facing text for this file.
-	pub text:               String,
-	/// The file parsed before the edit and no longer does.
-	pub parse_regressed:    bool,
+    /// Absolute path.
+    pub path: String,
+    pub display_path: String,
+    /// `create` | `update` | `delete`.
+    pub op: String,
+    pub move_to: Option<String>,
+    pub diff: String,
+    pub first_changed_line: Option<u32>,
+    pub old_text: Option<String>,
+    pub new_text: Option<String>,
+    pub snapshots_pruned: bool,
+    pub diagnostics_json: Option<String>,
+    /// Engine warnings (already rendered into `text`).
+    pub warnings: Vec<String>,
+    /// Model-facing text for this file.
+    pub text: String,
+    /// The file parsed before the edit and no longer does.
+    pub parse_regressed: bool,
 }
 
 /// Whole-call apply outcome. `is_error` carries the model-facing failure in
 /// `text` with no files.
 #[napi(object)]
 pub struct EditApplyOutcome {
-	pub text:     String,
-	pub files:    Vec<EditFileOutcome>,
-	pub is_error: bool,
+    pub text: String,
+    pub files: Vec<EditFileOutcome>,
+    pub is_error: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -190,116 +190,110 @@ pub struct EditApplyOutcome {
 #[napi]
 #[derive(Default)]
 pub struct EditStore {
-	pub(crate) inner: pi_edit::EditStore,
-	/// Canonical keys, as callers name them, that snapshots were ever recorded
-	/// under: a routed edit moves exactly these into its private view.
-	pub(crate) keys:  Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
+    pub(crate) inner: pi_edit::EditStore,
+    /// Canonical keys, as callers name them, that snapshots were ever recorded
+    /// under: a routed edit moves exactly these into its private view.
+    pub(crate) keys: Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
 }
 
 #[napi]
 impl EditStore {
-	#[napi(constructor)]
-	pub fn new() -> Self {
-		Self::default()
-	}
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-	/// Record `text` (any line endings) as the current snapshot of
-	/// `absolutePath` and return its 4-hex tag.
-	#[napi]
-	pub fn record_snapshot(
-		&self,
-		absolute_path: String,
-		text: String,
-		seen_lines: Option<Vec<u32>>,
-	) -> String {
-		let key = canonical_key(Path::new(&absolute_path));
-		let (_, body) = pi_edit::text::strip_bom(&text);
-		let tag = self
-			.inner
-			.record(&key, &normalize_to_lf(body), seen_lines.as_deref());
-		self.keys.lock().insert(key);
-		tag
-	}
+    /// Record `text` (any line endings) as the current snapshot of
+    /// `absolutePath` and return its 4-hex tag.
+    #[napi]
+    pub fn record_snapshot(
+        &self,
+        absolute_path: String,
+        text: String,
+        seen_lines: Option<Vec<u32>>,
+    ) -> String {
+        let key = canonical_key(Path::new(&absolute_path));
+        let (_, body) = pi_edit::text::strip_bom(&text);
+        let tag = self
+            .inner
+            .record(&key, &normalize_to_lf(body), seen_lines.as_deref());
+        self.keys.lock().insert(key);
+        tag
+    }
 
-	/// Merge displayed lines into the snapshot tagged `tag`.
-	#[napi]
-	pub fn record_seen_lines(&self, absolute_path: String, tag: String, lines: Vec<u32>) {
-		self
-			.inner
-			.record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
-	}
+    /// Merge displayed lines into the snapshot tagged `tag`.
+    #[napi]
+    pub fn record_seen_lines(&self, absolute_path: String, tag: String, lines: Vec<u32>) {
+        self.inner
+            .record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
+    }
 
-	/// Merge the lines a hashline-formatted `body` displays into the
-	/// snapshot tagged `tag`.
-	#[napi]
-	pub fn record_seen_lines_from_body(&self, absolute_path: String, tag: String, body: String) {
-		let lines = store::seen_lines_from_body(&body);
-		if !lines.is_empty() {
-			self
-				.inner
-				.record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
-		}
-	}
+    /// Merge the lines a hashline-formatted `body` displays into the
+    /// snapshot tagged `tag`.
+    #[napi]
+    pub fn record_seen_lines_from_body(&self, absolute_path: String, tag: String, body: String) {
+        let lines = store::seen_lines_from_body(&body);
+        if !lines.is_empty() {
+            self.inner
+                .record_seen_lines(&canonical_key(Path::new(&absolute_path)), &tag, &lines);
+        }
+    }
 
-	/// Latest recorded text for `absolutePath`.
-	#[napi]
-	pub fn head_text(&self, absolute_path: String) -> Option<String> {
-		self
-			.inner
-			.head(&canonical_key(Path::new(&absolute_path)))
-			.map(|s| s.text.to_string())
-	}
+    /// Latest recorded text for `absolutePath`.
+    #[napi]
+    pub fn head_text(&self, absolute_path: String) -> Option<String> {
+        self.inner
+            .head(&canonical_key(Path::new(&absolute_path)))
+            .map(|s| s.text.to_string())
+    }
 
-	/// Latest recorded tag for `absolutePath`.
-	#[napi]
-	pub fn head_hash(&self, absolute_path: String) -> Option<String> {
-		self
-			.inner
-			.head(&canonical_key(Path::new(&absolute_path)))
-			.map(|s| s.hash)
-	}
+    /// Latest recorded tag for `absolutePath`.
+    #[napi]
+    pub fn head_hash(&self, absolute_path: String) -> Option<String> {
+        self.inner
+            .head(&canonical_key(Path::new(&absolute_path)))
+            .map(|s| s.hash)
+    }
 
-	/// Recorded text of `absolutePath` tagged `hash`.
-	#[napi]
-	pub fn by_hash_text(&self, absolute_path: String, hash: String) -> Option<String> {
-		self
-			.inner
-			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
-			.map(|s| s.text.to_string())
-	}
+    /// Recorded text of `absolutePath` tagged `hash`.
+    #[napi]
+    pub fn by_hash_text(&self, absolute_path: String, hash: String) -> Option<String> {
+        self.inner
+            .by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
+            .map(|s| s.text.to_string())
+    }
 
-	/// Displayed lines recorded for the snapshot tagged `hash`; null when no
-	/// provenance was recorded.
-	#[napi]
-	pub fn seen_lines(&self, absolute_path: String, hash: String) -> Option<Vec<u32>> {
-		self
-			.inner
-			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
-			.and_then(|s| s.seen_lines.map(|set| set.into_iter().collect()))
-	}
+    /// Displayed lines recorded for the snapshot tagged `hash`; null when no
+    /// provenance was recorded.
+    #[napi]
+    pub fn seen_lines(&self, absolute_path: String, hash: String) -> Option<Vec<u32>> {
+        self.inner
+            .by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
+            .and_then(|s| s.seen_lines.map(|set| set.into_iter().collect()))
+    }
 
-	#[napi]
-	pub fn invalidate(&self, absolute_path: String) {
-		let key = canonical_key(Path::new(&absolute_path));
-		self.inner.invalidate(&key);
-		self.keys.lock().remove(&key);
-	}
+    #[napi]
+    pub fn invalidate(&self, absolute_path: String) {
+        let key = canonical_key(Path::new(&absolute_path));
+        self.inner.invalidate(&key);
+        self.keys.lock().remove(&key);
+    }
 
-	#[napi]
-	pub fn relocate(&self, from: String, to: String) {
-		let from = canonical_key(Path::new(&from));
-		let to = canonical_key(Path::new(&to));
-		self.inner.relocate(&from, &to);
-		let mut keys = self.keys.lock();
-		keys.remove(&from);
-		keys.insert(to);
-	}
+    #[napi]
+    pub fn relocate(&self, from: String, to: String) {
+        let from = canonical_key(Path::new(&from));
+        let to = canonical_key(Path::new(&to));
+        self.inner.relocate(&from, &to);
+        let mut keys = self.keys.lock();
+        keys.remove(&from);
+        keys.insert(to);
+    }
 
-	#[napi]
-	pub fn clear(&self) {
-		self.inner.clear();
-		self.keys.lock().clear();
-	}
+    #[napi]
+    pub fn clear(&self) {
+        self.inner.clear();
+        self.keys.lock().clear();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -311,93 +305,95 @@ type PreviewCallback = ThreadsafeFunction<EditPreviewBatch, UnknownReturnValue>;
 /// Argument mutations queued on the JS thread and drained into the session
 /// under its lock, preserving arrival order without ever blocking JS.
 enum ArgOp {
-	Push(String),
-	SetArgs(String),
-	Finish,
+    Push(String),
+    SetArgs(String),
+    Finish,
 }
 
 struct Shared {
-	session: napi::tokio::sync::Mutex<Session>,
-	queue:   parking_lot::Mutex<Vec<ArgOp>>,
-	closed:  AtomicBool,
-	wake:    flume::Sender<()>,
+    session: napi::tokio::sync::Mutex<Session>,
+    queue: parking_lot::Mutex<Vec<ArgOp>>,
+    closed: AtomicBool,
+    wake: flume::Sender<()>,
 }
 
 impl Shared {
-	fn enqueue(&self, op: ArgOp) {
-		self.queue.lock().push(op);
-		let _ = self.wake.try_send(());
-	}
+    fn enqueue(&self, op: ArgOp) {
+        self.queue.lock().push(op);
+        let _ = self.wake.try_send(());
+    }
 
-	/// Apply every queued mutation to the locked session.
-	fn drain_into(&self, session: &mut Session) {
-		let ops = std::mem::take(&mut *self.queue.lock());
-		for op in ops {
-			match op {
-				ArgOp::Push(delta) => session.push(&delta),
-				ArgOp::SetArgs(json) => session.set_args_json(&json),
-				ArgOp::Finish => session.finish(),
-			}
-		}
-	}
+    /// Apply every queued mutation to the locked session.
+    fn drain_into(&self, session: &mut Session) {
+        let ops = std::mem::take(&mut *self.queue.lock());
+        for op in ops {
+            match op {
+                ArgOp::Push(delta) => session.push(&delta),
+                ArgOp::SetArgs(json) => session.set_args_json(&json),
+                ArgOp::Finish => session.finish(),
+            }
+        }
+    }
 }
 
 /// One edit tool call's streaming session.
 #[napi]
 pub struct EditSession {
-	shared: Arc<Shared>,
+    shared: Arc<Shared>,
 }
 
 #[napi]
 impl EditSession {
-	/// Open a session. `onPreview` (optional) receives every settled preview
-	/// batch; batches are delivered one at a time, in generation order.
-	#[napi(constructor)]
-	pub fn new(
-		store: &EditStore,
-		policy: EditPolicy,
-		#[napi(ts_arg_type = "((error: Error | null, batch: EditPreviewBatch) => void) | \
-		                      undefined | null")]
-		on_preview: Option<PreviewCallback>,
-	) -> Result<Self> {
-		let config = policy.into_config()?;
-		let (wake, rx) = flume::bounded::<()>(1);
-		let shared = Arc::new(Shared {
-			session: napi::tokio::sync::Mutex::new(Session::new(config, store.inner.clone())),
-			queue: parking_lot::Mutex::new(Vec::new()),
-			closed: AtomicBool::new(false),
-			wake,
-		});
-		if let Some(on_preview) = on_preview {
-			napi::bindgen_prelude::spawn(preview_pump(Arc::clone(&shared), rx, on_preview));
-		}
-		Ok(Self { shared })
-	}
+    /// Open a session. `onPreview` (optional) receives every settled preview
+    /// batch; batches are delivered one at a time, in generation order.
+    #[napi(constructor)]
+    pub fn new(
+        store: &EditStore,
+        policy: EditPolicy,
+        #[napi(
+            ts_arg_type = "((error: Error | null, batch: EditPreviewBatch) => void) | \
+		                      undefined | null"
+        )]
+        on_preview: Option<PreviewCallback>,
+    ) -> Result<Self> {
+        let config = policy.into_config()?;
+        let (wake, rx) = flume::bounded::<()>(1);
+        let shared = Arc::new(Shared {
+            session: napi::tokio::sync::Mutex::new(Session::new(config, store.inner.clone())),
+            queue: parking_lot::Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
+            wake,
+        });
+        if let Some(on_preview) = on_preview {
+            napi::bindgen_prelude::spawn(preview_pump(Arc::clone(&shared), rx, on_preview));
+        }
+        Ok(Self { shared })
+    }
 
-	/// Append a raw streamed argument fragment.
-	#[napi]
-	pub fn push(&self, delta: String) {
-		self.shared.enqueue(ArgOp::Push(delta));
-	}
+    /// Append a raw streamed argument fragment.
+    #[napi]
+    pub fn push(&self, delta: String) {
+        self.shared.enqueue(ArgOp::Push(delta));
+    }
 
-	/// Replace the buffer with the complete argument JSON (no-delta path).
-	#[napi]
-	pub fn set_args_json(&self, args_json: String) {
-		self.shared.enqueue(ArgOp::SetArgs(args_json));
-	}
+    /// Replace the buffer with the complete argument JSON (no-delta path).
+    #[napi]
+    pub fn set_args_json(&self, args_json: String) {
+        self.shared.enqueue(ArgOp::SetArgs(args_json));
+    }
 
-	/// Arguments are complete; triggers the final untrimmed preview.
-	#[napi]
-	pub fn finish(&self) {
-		self.shared.enqueue(ArgOp::Finish);
-	}
+    /// Arguments are complete; triggers the final untrimmed preview.
+    #[napi]
+    pub fn finish(&self) {
+        self.shared.enqueue(ArgOp::Finish);
+    }
 
-	/// Stop the preview pump and release buffers.
-	#[napi]
-	pub fn close(&self) {
-		self.shared.closed.store(true, Ordering::Release);
-		let _ = self.shared.wake.try_send(());
-	}
+    /// Stop the preview pump and release buffers.
+    #[napi]
+    pub fn close(&self) {
+        self.shared.closed.store(true, Ordering::Release);
+        let _ = self.shared.wake.try_send(());
+    }
 }
 
 /// Preview pump: wait for a wake, compute the preview for the newest
@@ -406,40 +402,40 @@ impl EditSession {
 /// flight at a time so the JS event loop's consumption rate backpressures
 /// preview work.
 async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: PreviewCallback) {
-	while rx.recv_async().await.is_ok() {
-		while rx.try_recv().is_ok() {}
-		if shared.closed.load(Ordering::Acquire) {
-			return;
-		}
-		let compute = Arc::clone(&shared);
-		let batch = napi::bindgen_prelude::spawn_blocking(move || {
-			let mut session = compute.session.blocking_lock();
-			compute.drain_into(&mut session);
-			if !session.preview_pending() {
-				return None;
-			}
-			Some(session.preview())
-		})
-		.await;
-		let Ok(Some(batch)) = batch else {
-			continue;
-		};
-		let is_final = !batch.streaming;
-		if shared.closed.load(Ordering::Acquire) {
-			return;
-		}
-		if !batch.files.is_empty() || is_final {
-			let delivered = on_preview
-				.call_async(Ok(EditPreviewBatch::from(batch)))
-				.await;
-			if delivered.is_err() {
-				return;
-			}
-		}
-		if is_final {
-			return;
-		}
-	}
+    while rx.recv_async().await.is_ok() {
+        while rx.try_recv().is_ok() {}
+        if shared.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let compute = Arc::clone(&shared);
+        let batch = napi::bindgen_prelude::spawn_blocking(move || {
+            let mut session = compute.session.blocking_lock();
+            compute.drain_into(&mut session);
+            if !session.preview_pending() {
+                return None;
+            }
+            Some(session.preview())
+        })
+        .await;
+        let Ok(Some(batch)) = batch else {
+            continue;
+        };
+        let is_final = !batch.streaming;
+        if shared.closed.load(Ordering::Acquire) {
+            return;
+        }
+        if !batch.files.is_empty() || is_final {
+            let delivered = on_preview
+                .call_async(Ok(EditPreviewBatch::from(batch)))
+                .await;
+            if delivered.is_err() {
+                return;
+            }
+        }
+        if is_final {
+            return;
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -449,89 +445,101 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 /// `(path, added-lines digest)` for stream matchers.
 #[napi(object)]
 pub struct EditMatcherEntry {
-	pub path:   String,
-	pub digest: String,
+    pub path: String,
+    pub digest: String,
 }
 
 /// A destructive file operation a payload declares.
 #[napi(object)]
 pub struct EditFileOpIntent {
-	/// `delete` | `move`.
-	pub kind: String,
-	pub path: String,
-	pub to:   Option<String>,
+    /// `delete` | `move`.
+    pub kind: String,
+    pub path: String,
+    pub to: Option<String>,
 }
 
 /// Static projection of a payload: target paths, per-file digests, and
 /// delete/move intents.
 #[napi(object)]
 pub struct EditInspection {
-	pub paths:    Vec<String>,
-	pub entries:  Vec<EditMatcherEntry>,
-	pub file_ops: Vec<EditFileOpIntent>,
+    pub paths: Vec<String>,
+    pub entries: Vec<EditMatcherEntry>,
+    pub file_ops: Vec<EditFileOpIntent>,
 }
 
 /// Inspect `argsJson` (the JSON-serialized, possibly partial tool args)
 /// without touching the filesystem.
 #[napi]
 pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
-	let mode = parse_mode(&mode)?;
-	let snapshot = snapshot_from_text(&args_json, false, true);
-	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false);
-	let inspection = engine.inspect(&snapshot);
-	Ok(EditInspection {
-		paths:    inspection.paths,
-		entries:  inspection
-			.entries
-			.into_iter()
-			.map(|(path, digest)| EditMatcherEntry { path, digest })
-			.collect(),
-		file_ops: inspection
-			.file_ops
-			.into_iter()
-			.map(|op| match op {
-				pi_edit::FileOpIntent::Delete { path } => {
-					EditFileOpIntent { kind: "delete".into(), path, to: None }
-				},
-				pi_edit::FileOpIntent::Move { from, to } => {
-					EditFileOpIntent { kind: "move".into(), path: from, to: Some(to) }
-				},
-			})
-			.collect(),
-	})
+    let mode = parse_mode(&mode)?;
+    let snapshot = snapshot_from_text(&args_json, false, true);
+    let engine = pi_edit::modes::engine_for(mode, true, 0.95, false);
+    let inspection = engine.inspect(&snapshot);
+    Ok(EditInspection {
+        paths: inspection.paths,
+        entries: inspection
+            .entries
+            .into_iter()
+            .map(|(path, digest)| EditMatcherEntry { path, digest })
+            .collect(),
+        file_ops: inspection
+            .file_ops
+            .into_iter()
+            .map(|op| match op {
+                pi_edit::FileOpIntent::Delete { path } => EditFileOpIntent {
+                    kind: "delete".into(),
+                    path,
+                    to: None,
+                },
+                pi_edit::FileOpIntent::Move { from, to } => EditFileOpIntent {
+                    kind: "move".into(),
+                    path: from,
+                    to: Some(to),
+                },
+            })
+            .collect(),
+    })
 }
 
 /// Numbered unified diff plus the first changed line.
 #[napi(object)]
 pub struct EditDiffResult {
-	pub diff:               String,
-	pub first_changed_line: Option<u32>,
+    pub diff: String,
+    pub first_changed_line: Option<u32>,
 }
 
 /// Numbered unified diff between two texts (`generateDiffString`).
 #[napi]
 pub fn edit_diff_string(
-	old_text: String,
-	new_text: String,
-	path: Option<String>,
+    old_text: String,
+    new_text: String,
+    path: Option<String>,
 ) -> EditDiffResult {
-	let output = generate_diff_string(&old_text, &new_text, None, &BlockContextSource {
-		path: path.as_deref(),
-		lang: None,
-	});
-	EditDiffResult { diff: output.diff, first_changed_line: output.first_changed_line }
+    let output = generate_diff_string(
+        &old_text,
+        &new_text,
+        None,
+        &BlockContextSource {
+            path: path.as_deref(),
+            lang: None,
+        },
+    );
+    EditDiffResult {
+        diff: output.diff,
+        first_changed_line: output.first_changed_line,
+    }
 }
 
 /// Tool description markdown for `mode`.
 #[napi]
 pub fn edit_description(mode: String) -> Result<String> {
-	Ok(pi_edit::description(parse_mode(&mode)?).to_owned())
+    Ok(pi_edit::description(parse_mode(&mode)?).to_owned())
 }
 
 /// Lark grammar for `mode`, when it has a custom wire format.
 #[napi]
 pub fn edit_grammar(mode: String) -> Result<Option<String>> {
-	Ok(pi_edit::grammar(parse_mode(&mode)?).map(str::to_owned))
+    Ok(pi_edit::grammar(parse_mode(&mode)?).map(str::to_owned))
 }
 
 /// Auto-generated-file guard: the rejection message when `absolutePath`
@@ -539,110 +547,110 @@ pub fn edit_grammar(mode: String) -> Result<Option<String>> {
 /// unreadable files are editable.
 #[napi]
 pub fn edit_auto_generated_message(absolute_path: String, display_path: String) -> Option<String> {
-	let policy = PathPolicy {
-		cwd:                  PathBuf::new(),
-		home_dir:             PathBuf::new(),
-		local_sandbox_root:   None,
-		vault_roots:          None,
-		plan_active:          false,
-		block_auto_generated: true,
-	};
-	let mut head = [0u8; 1024];
-	let read = std::fs::File::open(&absolute_path)
-		.and_then(|mut file| {
-			use std::io::Read;
-			let mut total = 0;
-			loop {
-				let n = file.read(&mut head[total..])?;
-				if n == 0 {
-					break;
-				}
-				total += n;
-				if total == head.len() {
-					break;
-				}
-			}
-			Ok(total)
-		})
-		.ok()?;
-	policy.auto_generated_message(&display_path, &head[..read])
+    let policy = PathPolicy {
+        cwd: PathBuf::new(),
+        home_dir: PathBuf::new(),
+        local_sandbox_root: None,
+        vault_roots: None,
+        plan_active: false,
+        block_auto_generated: true,
+    };
+    let mut head = [0u8; 1024];
+    let read = std::fs::File::open(&absolute_path)
+        .and_then(|mut file| {
+            use std::io::Read;
+            let mut total = 0;
+            loop {
+                let n = file.read(&mut head[total..])?;
+                if n == 0 {
+                    break;
+                }
+                total += n;
+                if total == head.len() {
+                    break;
+                }
+            }
+            Ok(total)
+        })
+        .ok()?;
+    policy.auto_generated_message(&display_path, &head[..read])
 }
 
 /// One stray sloppy payload region inside prose (UTF-16 offsets).
 #[napi(object)]
 pub struct InlineSloppyRegion {
-	pub start:   u32,
-	pub end:     u32,
-	pub payload: String,
+    pub start: u32,
+    pub end: u32,
+    pub payload: String,
 }
 
 /// Locate `*** SM:EDIT path` payloads the model emitted as plain text.
 #[napi]
 pub fn extract_inline_sloppy_regions(text: String) -> Vec<InlineSloppyRegion> {
-	sloppy::parse::extract_inline_sloppy_regions(&text)
-		.into_iter()
-		.map(|r| InlineSloppyRegion {
-			start:   r.start as u32,
-			end:     r.end as u32,
-			payload: r.payload,
-		})
-		.collect()
+    sloppy::parse::extract_inline_sloppy_regions(&text)
+        .into_iter()
+        .map(|r| InlineSloppyRegion {
+            start: r.start as u32,
+            end: r.end as u32,
+            payload: r.payload,
+        })
+        .collect()
 }
 
 /// 4-hex hashline content tag for `text`.
 #[napi]
 pub fn hashline_file_hash(text: String) -> String {
-	let (_, body) = pi_edit::text::strip_bom(&text);
-	store::file_hash(&normalize_to_lf(body))
+    let (_, body) = pi_edit::text::strip_bom(&text);
+    store::file_hash(&normalize_to_lf(body))
 }
 
 /// `[path#TAG]` section header.
 #[napi]
 pub fn hashline_format_header(path: String, tag: String) -> String {
-	hashline::format::format_hashline_header(&path, &tag)
+    hashline::format::format_hashline_header(&path, &tag)
 }
 
 /// `N:line` numbered display rows starting at `startLine` (default 1).
 #[napi]
 pub fn hashline_format_numbered_lines(text: String, start_line: Option<u32>) -> String {
-	hashline::format::format_numbered_lines(&text, start_line.unwrap_or(1))
+    hashline::format::format_numbered_lines(&text, start_line.unwrap_or(1))
 }
 
 /// Strip hashline display prefixes (`N:` / `+N:` …) from pasted rows.
 #[napi]
 pub fn hashline_strip_prefixes(lines: Vec<String>) -> Vec<String> {
-	hashline::prefixes::strip_hashline_prefixes(&lines)
+    hashline::prefixes::strip_hashline_prefixes(&lines)
 }
 
 /// Whether a row is a truncation notice emitted by `read`.
 #[napi]
 pub fn hashline_is_read_truncation_notice(line: String) -> bool {
-	hashline::prefixes::is_read_truncation_notice(&line)
+    hashline::prefixes::is_read_truncation_notice(&line)
 }
 
 /// Count of one canonical hashline op header shape in a payload.
 #[napi(object)]
 pub struct HashlineOpCount {
-	pub label: String,
-	pub count: u32,
+    pub label: String,
+    pub count: u32,
 }
 
 /// Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
 /// a payload; empty when it carries no hashline ops.
 #[napi]
 pub fn hashline_count_ops(input: String) -> Vec<HashlineOpCount> {
-	let mut counts: Vec<HashlineOpCount> = Vec::new();
-	for label in hashline::tokenizer::op_labels(&input) {
-		match counts.iter_mut().find(|entry| entry.label == label) {
-			Some(entry) => entry.count += 1,
-			None => counts.push(HashlineOpCount { label, count: 1 }),
-		}
-	}
-	counts
+    let mut counts: Vec<HashlineOpCount> = Vec::new();
+    for label in hashline::tokenizer::op_labels(&input) {
+        match counts.iter_mut().find(|entry| entry.label == label) {
+            Some(entry) => entry.count += 1,
+            None => counts.push(HashlineOpCount { label, count: 1 }),
+        }
+    }
+    counts
 }
 
 /// Decode notebook JSON into the editable cell-marker text.
 #[napi]
 pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<String> {
-	pi_edit::notebook::notebook_to_editable_text(&json, &display_path).map_err(reason)
+    pi_edit::notebook::notebook_to_editable_text(&json, &display_path).map_err(reason)
 }

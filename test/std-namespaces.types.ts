@@ -9,9 +9,13 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import {
+  type InputSchedule,
+  type MessageSchedule,
+  triggerInputs,
+} from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import { context as nativeContext } from "junco-scheduler";
-import { triggerInputs, type InputSchedule, type MessageSchedule } from "dataflow-engine";
 import {
   agent,
   graph,
@@ -134,8 +138,12 @@ export async function graphTypesBuildAndReadTypedNodes(
   const runOptions: graph.DataflowRunOptions = {
     signal: new AbortController().signal,
   };
-  const execution = nativeContext({ graph: g, scheduler: schedulers.parallel() });
-  const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run(runOptions);
+  const execution = nativeContext({
+    graph: g,
+    scheduler: schedulers.parallel(),
+  });
+  const results: ReadonlyMap<graph.NodeIdType, string> =
+    await execution.run(runOptions);
   const result: O.Option<string> = g.result(id);
   const finalStatus: graph.NodeStatus | undefined = node?.status;
 
@@ -209,24 +217,30 @@ export function spawnBuildsTypedStars(
   agentSink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
 ) {
   const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
-  const typed: schedulers.SchedulerContext<graph.nodes.Agentic<number, string>, number, string, schedulers.AgencyNodeMetadata, graph.JuncoGraph<number, string>> = graph.JuncoGraph.spawn(
-    source, sink, root,
-    tasks,
-    (task) => {
-      const inferred: Task = task;
-      // @ts-expect-error the factory input is the list's element type
-      task.missing;
-      return child(inferred.label);
-    },
-  );
+  const typed: schedulers.SchedulerContext<
+    graph.nodes.Agentic<number, string>,
+    number,
+    string,
+    schedulers.AgencyNodeMetadata,
+    graph.JuncoGraph<number, string>
+  > = graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => {
+    const inferred: Task = task;
+    // @ts-expect-error the factory input is the list's element type
+    task.missing;
+    return child(inferred.label);
+  });
   const explicit = graph.JuncoGraph.spawn(
-    source, sink, root,
+    source,
+    sink,
+    root,
     tasks,
     (task) => child(task.label),
     new tracer.DummyTracer(),
   );
   const defaults = graph.JuncoGraph.spawn(
-    agentSource, agentSink, {
+    agentSource,
+    agentSink,
+    {
       state: lead,
       trigger: trigger.TriggerRule.never(),
       policy: tools.LockPolicy,
@@ -239,21 +253,35 @@ export function spawnBuildsTypedStars(
     }),
   );
   // @ts-expect-error the root must be an adapted node, not a bare state
-  graph.JuncoGraph.spawn(source, sink, bare, tasks, (task) => child(task.label));
+  graph.JuncoGraph.spawn(source, sink, bare, tasks, (task) =>
+    child(task.label),
+  );
   // @ts-expect-error the factory must return an adapted node, not a bare state
   graph.JuncoGraph.spawn(source, sink, root, tasks, () => state);
   // @ts-expect-error the factory must return a node, not an arbitrary value
   graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => task.label);
-  // @ts-expect-error a string-message child cannot join a number-wired star
-  graph.JuncoGraph.spawn<Task, number, string>(source, sink, root, tasks, () => stringChild);
+  graph.JuncoGraph.spawn<Task, number, string>(
+    source,
+    sink,
+    root,
+    tasks,
+    // @ts-expect-error a string-message child cannot join a number-wired star
+    () => stringChild,
+  );
   const managed: graph.nodes.AgenticNode<number, string> = {
     state,
     trigger: trigger.TriggerRule.never(),
   };
-  const managedStar = graph.JuncoGraph.spawn(source, sink, managed, tasks, () => ({
-    state,
-    trigger: trigger.TriggerRule.never(),
-  }));
+  const managedStar = graph.JuncoGraph.spawn(
+    source,
+    sink,
+    managed,
+    tasks,
+    () => ({
+      state,
+      trigger: trigger.TriggerRule.never(),
+    }),
+  );
   // @ts-expect-error a step-less coroutine's policy is owned by its state
   const owned: graph.nodes.AgenticNode<number, string> = {
     state,
@@ -264,7 +292,15 @@ export function spawnBuildsTypedStars(
   const defaultGraph: graph.JuncoGraph = defaults.graph;
   // @ts-expect-error spawn requires both positional ports
   graph.JuncoGraph.spawn(root, tasks, (task: Task) => child(task.label));
-  return [typed, typedGraph, defaultGraph, explicit, defaults, managedStar, owned];
+  return [
+    typed,
+    typedGraph,
+    defaultGraph,
+    explicit,
+    defaults,
+    managedStar,
+    owned,
+  ];
 }
 
 // --- trigger and tracer ----------------------------------------------------------------------------
@@ -423,7 +459,14 @@ export async function tracerHandlesRetainPayloadTypes(
   );
   await Promise.all(tracers.map((each) => each.flush()));
   // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, tools.LockPolicy).tracer.flush();
+  await new graph.JuncoGraph(
+    source,
+    sink,
+    graph.Width.create(1),
+    graph.UNBOUNDED,
+    undefined,
+    tools.LockPolicy,
+  ).tracer.flush();
   await tui.close();
   await tui[Symbol.asyncDispose]();
   return traced;
@@ -431,39 +474,80 @@ export async function tracerHandlesRetainPayloadTypes(
 
 // --- schedulers ------------------------------------------------------------------------------------
 
-export async function typedSchedulerPolicyReadsPerEdge(edge: graph.Edge<number, string>) {
-  const g = new graph.DataflowGraph<Counter, number, string, never>(graph.Width.create(1), graph.Width.create(2));
-  const choose: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.choose({
-    where: (snapshot, id) => (snapshot.inputs.get(id)?.messages.get(edge.id)?.length ?? 0) > 0,
-    rank: (snapshot, a, b) => (snapshot.context.get(b)?.priority ?? 0) - (snapshot.context.get(a)?.priority ?? 0),
+export async function typedSchedulerPolicyReadsPerEdge(
+  edge: graph.Edge<number, string>,
+) {
+  const g = new graph.DataflowGraph<Counter, number, string, never>(
+    graph.Width.create(1),
+    graph.Width.create(2),
+  );
+  const choose: schedulers.Scheduler<
+    Counter,
+    number,
+    string,
+    { priority: number }
+  > = schedulers.choose({
+    where: (snapshot, id) =>
+      (snapshot.inputs.get(id)?.messages.get(edge.id)?.length ?? 0) > 0,
+    rank: (snapshot, a, b) =>
+      (snapshot.context.get(b)?.priority ?? 0) -
+      (snapshot.context.get(a)?.priority ?? 0),
     width: (snapshot) => snapshot.threads,
   });
-  const policy: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.separate(
+  const policy: schedulers.Scheduler<
+    Counter,
+    number,
+    string,
+    { priority: number }
+  > = schedulers.separate(
     (snapshot, id) => (snapshot.nodes.get(id)?.state.count ?? 0) > 0,
     choose,
-    schedulers.agent(async (snapshot) => [[...snapshot.available].filter((id) => snapshot.owned.has(id))]),
+    schedulers.agent(async (snapshot) => [
+      [...snapshot.available].filter((id) => snapshot.owned.has(id)),
+    ]),
   );
   const execution = nativeContext({
-    graph: g, scheduler: policy,
-    describeNode: (_id, candidate) => ({ priority: graph.from(candidate.view, edge).length }),
-    readInputs: (_id, candidate): InputSchedule => candidate.status === "ready"
-      ? new Map()
-      : new Map([[edge.id, 2]]),
+    graph: g,
+    scheduler: policy,
+    describeNode: (_id, candidate) => ({
+      priority: graph.from(candidate.view, edge).length,
+    }),
+    readInputs: (_id, candidate): InputSchedule =>
+      candidate.status === "ready" ? new Map() : new Map([[edge.id, 2]]),
   });
   const selection: schedulers.Decision = await policy({
-    ...g.observe(), available: new Set(g.available().keys()), owned: new Set(g.observe().nodes.keys()),
-    context: new Map(), plans: new Map(), history: [], threads: g.threads,
+    ...g.observe(),
+    available: new Set(g.available().keys()),
+    owned: new Set(g.observe().nodes.keys()),
+    context: new Map(),
+    plans: new Map(),
+    history: [],
+    threads: g.threads,
   });
   const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run();
   const reads: InputSchedule[] = [...g.available().values()].map(triggerInputs);
-  const rotation: schedulers.Scheduler<Counter, number, string, { priority: number }> = schedulers.roundRobin();
+  const rotation: schedulers.Scheduler<
+    Counter,
+    number,
+    string,
+    { priority: number }
+  > = schedulers.roundRobin();
   // @ts-expect-error selected IDs are branded native IDs
   const rawId: schedulers.Decision = { selected: ["a"] };
   // @ts-expect-error a read is a count, "all" or "none"
   const unknownRead: MessageSchedule = "some";
-  const wrongPayload: schedulers.Scheduler<Counter, string, string, { priority: number }> = () => ({ selected: [] });
-  // @ts-expect-error graph data types are inferred from the graph, not widened by the policy
-  nativeContext({ graph: g, scheduler: wrongPayload, describeNode: () => ({ priority: 1 }) });
+  const wrongPayload: schedulers.Scheduler<
+    Counter,
+    string,
+    string,
+    { priority: number }
+  > = () => ({ selected: [] });
+  nativeContext({
+    graph: g,
+    // @ts-expect-error graph data types are inferred from the graph, not widened by the policy
+    scheduler: wrongPayload,
+    describeNode: () => ({ priority: 1 }),
+  });
   return [selection, results, reads, rotation, rawId, unknownRead];
 }
 
@@ -478,16 +562,30 @@ export function modelPolicyAndRequestPreserveCallerMetadata(
   const strings = schedulers.context({ graph: textual, scheduler: policy });
   const version: number = request.version;
   const threads: number | null = request.threads;
-  const priorities: readonly (readonly [graph.NodeIdType, { readonly priority: number }])[] = request.context;
+  const priorities: readonly (readonly [
+    graph.NodeIdType,
+    { readonly priority: number },
+  ])[] = request.context;
   const selections: readonly schedulers.Decision[] = request.history;
-  const nativeFields: (string | undefined)[] = request.nodes.map((node) => node.description);
+  const nativeFields: (string | undefined)[] = request.nodes.map(
+    (node) => node.description,
+  );
   // @ts-expect-error requests do not expose native state
   request.nodes[0]?.state;
   // @ts-expect-error metadata preserves its declared fields
   request.context[0]?.[1].label;
   // @ts-expect-error scheduler options are model-call options, not a session or tool harness
   const invalid: schedulers.PiOptions = { ...options, tools: [] };
-  return [numbers, strings, version, threads, priorities, selections, nativeFields, invalid];
+  return [
+    numbers,
+    strings,
+    version,
+    threads,
+    priorities,
+    selections,
+    nativeFields,
+    invalid,
+  ];
 }
 
 // --- agent -----------------------------------------------------------------------------------------
@@ -950,8 +1048,16 @@ export async function mcpDefinitionsComposeWithAgentFactories(
     .add(server)
     .add({ ...server, name: "second" });
   const connectOptions: mcp.JuncoMcpConnectOptions = { cwd, collection };
-  const connectionLifetime: mcp.JuncoMcpConnectOptions = { cwd, collection, toolLifetime: "connection" };
-  const callLifetime: mcp.JuncoMcpConnectOptions = { cwd, collection, toolLifetime: "call" };
+  const connectionLifetime: mcp.JuncoMcpConnectOptions = {
+    cwd,
+    collection,
+    toolLifetime: "connection",
+  };
+  const callLifetime: mcp.JuncoMcpConnectOptions = {
+    cwd,
+    collection,
+    toolLifetime: "call",
+  };
   // @ts-expect-error only connection and call lifetimes are supported
   const unknownLifetime: mcp.JuncoMcpConnectOptions = { toolLifetime: "batch" };
   const connection: mcp.JuncoMcpConnection =

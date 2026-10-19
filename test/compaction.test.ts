@@ -8,7 +8,15 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { DataflowDefinitionError, Edge, NodeId, type NodeIdType, Source, Sink, TriggerRule } from "dataflow-engine";
+import {
+  DataflowDefinitionError,
+  Edge,
+  NodeId,
+  type NodeIdType,
+  Sink,
+  Source,
+  TriggerRule,
+} from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import { LockPolicy } from "junco-tools";
@@ -24,9 +32,9 @@ import {
 import {
   assistant,
   plainContext,
-  terminalPorts,
   run,
   settle,
+  terminalPorts,
   textOf,
   user,
   userTexts,
@@ -104,7 +112,11 @@ const flushMacrotask = () =>
  */
 async function compactionFixture() {
   const graphPorts = terminalPorts();
-  const graphContext = plainContext(graphPorts.source, graphPorts.sink, "round-robin");
+  const graphContext = plainContext(
+    graphPorts.source,
+    graphPorts.sink,
+    "round-robin",
+  );
   const graph = graphContext.graph;
   const finished = assistant("e done");
   const e = member(90 - estimateTokens(user("e")) - estimateTokens(finished), {
@@ -205,17 +217,32 @@ describe("policy selection", () => {
 describe("policy boundaries", () => {
   test("an empty graph or selection completes without requests", async () => {
     for (const [policy] of POLICIES) {
-      const source = new Source<AgenticInput, AssistantMessage>(() => {
-        throw new DataflowDefinitionError("Empty compaction graph does not accept external input");
-      }, { id: NodeId.create("$source") });
-      const sink = new Sink<AgenticInput, AssistantMessage>(async function* () {
-        throw new Error("Empty compaction graph has no terminal result");
-      }, { id: NodeId.create("$sink"), trigger: TriggerRule.never() });
+      const source = new Source<AgenticInput, AssistantMessage>(
+        () => {
+          throw new DataflowDefinitionError(
+            "Empty compaction graph does not accept external input",
+          );
+        },
+        { id: NodeId.create("$source") },
+      );
+      const sink = new Sink<AgenticInput, AssistantMessage>(
+        async function* () {
+          throw new Error("Empty compaction graph has no terminal result");
+        },
+        { id: NodeId.create("$sink"), trigger: TriggerRule.never() },
+      );
       const execution = plainContext(source, sink, "parallel");
-      assert.equal(await JuncoGraph.compact(execution.graph, policy), undefined);
+      assert.equal(
+        await JuncoGraph.compact(execution.graph, policy),
+        undefined,
+      );
     }
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "parallel",
+    );
     const graph = graphContext.graph;
     // No compaction record: a wrongly selected member would reject.
     const quiet = member(40, { maintenance: [] });
@@ -231,7 +258,11 @@ describe("policy boundaries", () => {
 
   test("an unknown policy rejects before inspecting the graph", async () => {
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "parallel",
+    );
     const graph = graphContext.graph;
     const full = member(90);
     const fullId = graph.addNode(node(full, "full"));
@@ -253,13 +284,17 @@ describe("policy boundaries", () => {
   test("an unknown context window rejects a threshold policy before any history changes", async () => {
     for (const window of [null, 0, -1, Number.POSITIVE_INFINITY, Number.NaN]) {
       const graphPorts = terminalPorts();
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        "parallel",
+      );
       const graph = graphContext.graph;
       // Staged prompts make both members available.
       const full = member(90, { prompt: "go" });
       const unknown = member(90, { prompt: "go" }, window);
       const fullId = graph.addNode(node(full, "full"));
-    graphPorts.connect(graph, fullId);
+      graphPorts.connect(graph, fullId);
       graph.addNode(node(unknown, "unknown"));
       for (const policy of [
         "more-than-forty",
@@ -288,7 +323,11 @@ describe("policy boundaries", () => {
       }
     }
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "parallel",
+    );
     const graph = graphContext.graph;
     const available = member(90, {
       prompt: "go",
@@ -333,7 +372,11 @@ describe("policy boundaries", () => {
     });
     const late = member(90, { prompt: "go" });
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "parallel",
+    );
     const graph = graphContext.graph;
     const earlyId = graph.addNode({
       ...node(early, "early"),
@@ -356,7 +399,11 @@ describe("policy boundaries", () => {
 
   test("a later idle member compacts while an earlier selected member is still yielded", async () => {
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "round-robin");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "round-robin",
+    );
     const graph = graphContext.graph;
     const held = member(50, {
       prompt: "hold",
@@ -394,7 +441,11 @@ describe("policy boundaries", () => {
         ],
       });
     const graphPorts = terminalPorts();
-    const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+    const graphContext = plainContext(
+      graphPorts.source,
+      graphPorts.sink,
+      "parallel",
+    );
     const graph = graphContext.graph;
     const a = failing(first);
     const b = member(90);
@@ -429,9 +480,7 @@ describe("policy boundaries", () => {
      * Adds a nested graph whose full, available member would reject any compaction, and a
      * coroutine, to `graph`.
      */
-    const addSkipped = (
-      graph: JuncoGraph<AgenticInput, AssistantMessage>,
-    ) => {
+    const addSkipped = (graph: JuncoGraph<AgenticInput, AssistantMessage>) => {
       const inner = new Measured({
         prompt: "inner",
         history: seeded(90),
@@ -441,7 +490,11 @@ describe("policy boundaries", () => {
         runs: [yieldsThen(0, "inner done")],
       });
       const childPorts = terminalPorts();
-      const childContext = plainContext(childPorts.source, childPorts.sink, "parallel");
+      const childContext = plainContext(
+        childPorts.source,
+        childPorts.sink,
+        "parallel",
+      );
       const child = childContext.graph;
       const innerId = child.addNode(node(inner, "inner"));
       const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
@@ -470,7 +523,11 @@ describe("policy boundaries", () => {
     for (const [name, expected] of POLICIES) {
       // Without a compactable direct state, nothing is measured or requested.
       const barePorts = terminalPorts();
-      const bareContext = plainContext(barePorts.source, barePorts.sink, "parallel");
+      const bareContext = plainContext(
+        barePorts.source,
+        barePorts.sink,
+        "parallel",
+      );
       const bare = bareContext.graph;
       const alone = addSkipped(bare);
       barePorts.connect(bare, alone.childId);
@@ -481,7 +538,11 @@ describe("policy boundaries", () => {
 
       const graphPorts = terminalPorts();
 
-      const graphContext = plainContext(graphPorts.source, graphPorts.sink, "parallel");
+      const graphContext = plainContext(
+        graphPorts.source,
+        graphPorts.sink,
+        "parallel",
+      );
 
       const graph = graphContext.graph;
       const nested = addSkipped(graph);

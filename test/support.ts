@@ -17,12 +17,20 @@ import {
 import {
   DummyTracer,
   type EdgeIdType,
-  Source,
-  Sink,
+  type Sink,
+  type Source,
   UNBOUNDED,
   Width,
   type WidthType,
 } from "dataflow-engine";
+import {
+  type Agentic,
+  type AgenticInput,
+  agent as agentApi,
+  JuncoGraph,
+  schedulers,
+  tools as toolsApi,
+} from "junco-agency";
 import type {
   AgenticStep,
   JuncoAgent,
@@ -32,14 +40,6 @@ import type { SchedulerContext } from "junco-scheduler";
 import { pi, type SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
-import {
-  type Agentic,
-  type AgenticInput,
-  agent as agentApi,
-  JuncoGraph,
-  schedulers,
-  tools as toolsApi,
-} from "junco-agency";
 
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
@@ -148,15 +148,22 @@ export function waitingTool(
 }
 
 /** The typed snapshot appended to the model request. */
-export function schedulerRequestOf(context: Context): SchedulerRequest<AgencyNodeMetadata> {
+export function schedulerRequestOf(
+  context: Context,
+): SchedulerRequest<AgencyNodeMetadata> {
   for (let index = context.messages.length - 1; index >= 0; index--) {
     const message = context.messages[index]!;
     if (message.role !== "user") continue;
-    const content = typeof message.content === "string"
-      ? message.content
-      : message.content.map((block) => block.type === "text" ? block.text : "").join("");
+    const content =
+      typeof message.content === "string"
+        ? message.content
+        : message.content
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join("");
     if (content.startsWith("SchedulerSnapshot:\n")) {
-      return JSON.parse(content.slice("SchedulerSnapshot:\n".length)) as SchedulerRequest<AgencyNodeMetadata>;
+      return JSON.parse(
+        content.slice("SchedulerSnapshot:\n".length),
+      ) as SchedulerRequest<AgencyNodeMetadata>;
     }
   }
   throw new Error("request carries no SchedulerSnapshot");
@@ -164,12 +171,17 @@ export function schedulerRequestOf(context: Context): SchedulerRequest<AgencyNod
 
 export type Decision = { readonly waves: readonly (readonly string[])[] };
 
-export const runAvailable = (request: SchedulerRequest<AgencyNodeMetadata>): Decision => ({
+export const runAvailable = (
+  request: SchedulerRequest<AgencyNodeMetadata>,
+): Decision => ({
   waves: [request.nodes.map((node) => node.id)],
 });
 
 export function schedulerModel(
-  decide: (request: SchedulerRequest<AgencyNodeMetadata>, index: number) => Decision = runAvailable,
+  decide: (
+    request: SchedulerRequest<AgencyNodeMetadata>,
+    index: number,
+  ) => Decision = runAvailable,
 ) {
   const { faux, models, model } = scripted();
   const decisions: Decision[] = [];
@@ -209,10 +221,21 @@ export async function agencyGraph(
 ): Promise<{ context: AgencyContext; faux: FauxProviderHandle }> {
   const { faux, models, model } =
     typeof script === "function" ? schedulerModel(script) : scripted(script);
-  const graph = new JuncoGraph(source, sink, Width.create(1), threads, new DummyTracer(), LockPolicy);
+  const graph = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    threads,
+    new DummyTracer(),
+    LockPolicy,
+  );
   const context = schedulers.context({
     graph,
-    scheduler: pi({ models, model, ...(prompt === undefined ? {} : { prompt }) }),
+    scheduler: pi({
+      models,
+      model,
+      ...(prompt === undefined ? {} : { prompt }),
+    }),
   });
   return { context, faux };
 }

@@ -49,7 +49,9 @@ graph:
       contracts:
         Research->Dependencies: Normally completed, non-empty research report selecting five classes, embedded as untrusted data in the dependency-analysis prompt.
   edges:
-    - { from: Research, to: Dependencies }
-    - { from: Dependencies, to: $sink }
+    - from: Research
+      to: Dependencies
+    - from: Dependencies
+      to: $sink
   sink:
     returns: Dependencies

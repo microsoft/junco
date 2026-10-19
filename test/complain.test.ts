@@ -14,8 +14,8 @@ import {
   Deterministic,
   graph,
   JuncoGraph,
-  schedulers,
   MockAgent,
+  schedulers,
   tools,
   trigger,
 } from "../src/index.ts";
@@ -121,8 +121,18 @@ function wire(
 
 function newGraph(tracer: DummyTracer = new RecordingTracer()) {
   const ports = terminalPorts();
-  const flow = new JuncoGraph(ports.source, ports.sink, graph.Width.create(1), graph.UNBOUNDED, tracer, LockPolicy);
-  const execution = schedulers.context({ graph: flow, scheduler: schedulers.parallel() });
+  const flow = new JuncoGraph(
+    ports.source,
+    ports.sink,
+    graph.Width.create(1),
+    graph.UNBOUNDED,
+    tracer,
+    LockPolicy,
+  );
+  const execution = schedulers.context({
+    graph: flow,
+    scheduler: schedulers.parallel(),
+  });
   closers.push(() => flow.close());
   return { execution, ports };
 }
@@ -177,7 +187,8 @@ describe("complaints through real graphs", () => {
     const second = await worker("second");
     const { execution: firstGraphContext, ports: firstGraphPorts } = newGraph();
     const firstGraph = firstGraphContext.graph;
-    const { execution: secondGraphContext, ports: secondGraphPorts } = newGraph();
+    const { execution: secondGraphContext, ports: secondGraphPorts } =
+      newGraph();
     const secondGraph = secondGraphContext.graph;
     assert.equal(first.issueLog, tools.issueLog);
     assert.equal(second.issueLog, tools.issueLog);
@@ -277,7 +288,9 @@ describe("complaints through real graphs", () => {
   }, 5_000);
 
   test("a throwing complaint observer leaves the graph result and issue intact", async () => {
-    const { execution: flowContext, ports: flowPorts } = newGraph(new ThrowingTracer());
+    const { execution: flowContext, ports: flowPorts } = newGraph(
+      new ThrowingTracer(),
+    );
     const flow = flowContext.graph;
     const { workerId } = wire(flow, await worker("observer throws"));
     const before = tools.issueLog.length;
@@ -302,14 +315,16 @@ describe("complaints through real graphs", () => {
   test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
     const innerTracer = new RecordingTracer();
     const outerTracer = new RecordingTracer();
-    const { execution: innerContext, ports: innerPorts } = newGraph(innerTracer);
+    const { execution: innerContext, ports: innerPorts } =
+      newGraph(innerTracer);
     const inner = innerContext.graph;
     const { workerId } = wire(
       inner,
       await worker("nested"),
       graph.NodeId.create("inner-worker"),
     );
-    const { execution: outerContext, ports: outerPorts } = newGraph(outerTracer);
+    const { execution: outerContext, ports: outerPorts } =
+      newGraph(outerTracer);
     const outer = outerContext.graph;
     innerPorts.connect(inner, workerId);
     const wrapper = outer.addNode({

@@ -403,7 +403,14 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
 test("a round without a review verdict publishes nothing", async () => {
   await using committee = await scriptedCommittee({ reviews: ["skip"] });
   await assert.rejects(
-    convene(request, committee.members, committee.search, committee.review, undefined, quiet),
+    convene(
+      request,
+      committee.members,
+      committee.search,
+      committee.review,
+      undefined,
+      quiet,
+    ),
   );
   assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);

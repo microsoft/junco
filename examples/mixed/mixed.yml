@@ -46,8 +46,16 @@ graph:
         Direct->Reviewer: Direct's normally completed, non-empty final answer for the joined review.
         Ralph~>Reviewer: Exactly one prompt message containing Ralph's final normal, non-empty draft for the joined review.
   edges:
-    - { from: Goals, to: Direct, kind: message }
-    - { from: Goals, to: Ralph, kind: message }
-    - { from: Direct, to: Reviewer }
-    - { from: Ralph, to: Reviewer, kind: message }
-    - { from: Reviewer, to: $sink }
+    - from: Goals
+      to: Direct
+      kind: message
+    - from: Goals
+      to: Ralph
+      kind: message
+    - from: Direct
+      to: Reviewer
+    - from: Ralph
+      to: Reviewer
+      kind: message
+    - from: Reviewer
+      to: $sink

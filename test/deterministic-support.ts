@@ -2,31 +2,36 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
+  DummyTracer,
   Edge,
   NodeId,
   type NodeIdType,
-  TriggerRule,
-  DummyTracer,
-  Source,
   Sink,
+  Source,
+  TriggerRule,
   UNBOUNDED,
   Width,
   type WidthType,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import type { AgenticYieldReason } from "junco-agent";
-import { context as nativeContext, parallel, roundRobin, type Scheduler } from "junco-scheduler";
-import { LockPolicy } from "junco-tools";
 import {
   type Agentic,
   type AgenticInput,
-  schedulers,
   JuncoGraph,
   type MockFrame,
   type MockRequest,
   type MockRun,
   type MockTerminal,
+  schedulers,
 } from "junco-agency";
+import type { AgenticYieldReason } from "junco-agent";
+import {
+  context as nativeContext,
+  parallel,
+  roundRobin,
+  type Scheduler,
+} from "junco-scheduler";
+import { LockPolicy } from "junco-tools";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
 // Deterministic agency scaffolding: real junco-scheduler policies and real JuncoGraphs whose node
@@ -39,8 +44,13 @@ export const STRATEGIES: readonly Strategy[] = ["round-robin", "parallel"];
 const quiet = new DummyTracer();
 
 /** Stateless policy functions; cursor state comes from each context's history. */
-export function policy<C>(strategy: Strategy): Scheduler<
-  Agentic<AgenticInput, AssistantMessage>, AgenticInput, AssistantMessage, C
+export function policy<C>(
+  strategy: Strategy,
+): Scheduler<
+  Agentic<AgenticInput, AssistantMessage>,
+  AgenticInput,
+  AssistantMessage,
+  C
 > {
   return strategy === "round-robin" ? roundRobin() : parallel();
 }
@@ -63,7 +73,14 @@ export function plainContext(
   strategy: Strategy,
 ) {
   const [window, threads] = bounds(strategy, undefined);
-  const graph = new JuncoGraph(source, sink, window, threads, quiet, LockPolicy);
+  const graph = new JuncoGraph(
+    source,
+    sink,
+    window,
+    threads,
+    quiet,
+    LockPolicy,
+  );
   return nativeContext({ graph, scheduler: policy<never>(strategy) });
 }
 
@@ -76,30 +93,44 @@ export function policyContext(
 ) {
   const [window, width] = bounds(strategy, threads);
   const graph = new JuncoGraph(source, sink, window, width, quiet, LockPolicy);
-  return schedulers.context({ graph, scheduler: policy<AgencyNodeMetadata>(strategy) });
+  return schedulers.context({
+    graph,
+    scheduler: policy<AgencyNodeMetadata>(strategy),
+  });
 }
 
 /** Fresh closed ingress and a sink explicitly wired to the fixture's chosen terminal work. */
 export function terminalPorts<N = AgenticInput, T = AssistantMessage>() {
   const edge = Edge.value<N, T>("terminal->$sink");
   let result: (() => O.Option<T>) | undefined;
-  const source = new Source<N, T>(() => {
-    throw new DataflowDefinitionError("Fixture does not accept external input");
-  }, { id: NodeId.create("$source") });
-  const sink = new Sink<N, T>(async function* () {
-    yield [];
-    const retained = result?.();
-    if (retained === undefined || O.isNone(retained))
-      throw new Error("Fixture terminal work did not produce a result");
-    return retained.value;
-  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(edge) });
+  const source = new Source<N, T>(
+    () => {
+      throw new DataflowDefinitionError(
+        "Fixture does not accept external input",
+      );
+    },
+    { id: NodeId.create("$source") },
+  );
+  const sink = new Sink<N, T>(
+    async function* () {
+      yield [];
+      const retained = result?.();
+      if (retained === undefined || O.isNone(retained))
+        throw new Error("Fixture terminal work did not produce a result");
+      return retained.value;
+    },
+    { id: NodeId.create("$sink"), trigger: TriggerRule.when(edge) },
+  );
   return {
     source,
     sink,
-    connect(graph: {
-      result(id: NodeIdType): O.Option<T>;
-      addEdge(from: NodeIdType, to: NodeIdType, edge: Edge<N, T>): unknown;
-    }, terminal: NodeIdType) {
+    connect(
+      graph: {
+        result(id: NodeIdType): O.Option<T>;
+        addEdge(from: NodeIdType, to: NodeIdType, edge: Edge<N, T>): unknown;
+      },
+      terminal: NodeIdType,
+    ) {
       result = () => graph.result(terminal);
       graph.addEdge(terminal, sink.id, edge);
     },

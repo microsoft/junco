@@ -17,9 +17,11 @@ import type {
   AssistantMessage,
   ImageContent,
   Model,
+  Usage,
 } from "@earendil-works/pi-ai";
 import type { EdgeIdType, ParentView } from "dataflow-engine";
 import type { ComplainToolHost, Contract, ToolCollection } from "junco-tools";
+import type { JuncoAgent } from "./junco-agent.js";
 
 /**
  * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
@@ -163,6 +165,23 @@ export interface Agentic<
 }
 
 /**
+ * Reports growth of the agent's session usage (Pi's cumulative `usage` event totals). Fires when
+ * tokens or dollars accumulated since the previous report reach a threshold, then re-marks.
+ */
+export type TokenMonitorConfig = {
+  /** Report once `totalTokens` grown since the last report reaches this many; omit to ignore tokens. */
+  readonly tokenThreshold?: number;
+  /** Report once `cost.total` (dollars) grown since the last report reaches this amount; omit to ignore cost. */
+  readonly costThreshold?: number;
+  /** Must not throw: a throw is isolated by Pi and surfaces only as a `handler_error` event. */
+  readonly onThreshold: (
+    agent: JuncoAgent,
+    totals: Usage,
+    delta: { readonly tokens: number; readonly cost: number },
+  ) => void;
+};
+
+/**
  * Native harness options plus an optional initial prompt staged until the first `next()`. A prompt
  * function runs once, synchronously, on that `next(inputs)`'s graph view.
  */
@@ -188,4 +207,6 @@ export type AgenticOptions<
   readonly collection?: ToolCollection;
   /** This agent's receiver contract per incoming graph edge; see {@link Agentic.contract}. */
   readonly contract?: (edgeId: EdgeIdType) => Contract;
+  /** Usage growth reports for this agent and every subagent it creates; see {@link TokenMonitorConfig}. */
+  readonly tokenMonitor?: TokenMonitorConfig;
 };

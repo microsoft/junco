@@ -2,17 +2,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use marsh_core::shellmux::{FrontendEvent, OutputChannel, ShellFrontend, ShellMux};
-use marsh_core::{Action, Event, PolicyDecision, Principal};
-use napi::Status;
+use marsh_core::{Action, Event, PolicyDecision, Principal, ResourceEvent, ResourceSample};
 use napi::bindgen_prelude::Buffer;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Status, bindgen_prelude::ToNapiValue};
 use tokio::sync::{oneshot, watch};
 
-use crate::NativePolicyDecision;
+use crate::{NativePolicyDecision, NativeResourceEvent, NativeResourceSample};
 
 pub(crate) type OutputCallback = ThreadsafeFunction<Buffer, ()>;
 pub(crate) type PolicyCallback =
     ThreadsafeFunction<NativePolicyDecision, (), NativePolicyDecision, Status, true, true>;
+pub(crate) type ResourceCallback =
+    ThreadsafeFunction<NativeResourceEvent, (), NativeResourceEvent, Status, true, true>;
 
 #[derive(Default)]
 struct RouteProgress {
@@ -74,7 +76,10 @@ impl OutputRoute {
     pub(crate) async fn failed(&self) -> String {
         let mut progress = self.progress.subscribe();
         match progress.wait_for(|state| state.failure.is_some()).await {
-            Ok(state) => state.failure.clone().expect("failure predicate is satisfied"),
+            Ok(state) => state
+                .failure
+                .clone()
+                .expect("failure predicate is satisfied"),
             Err(_) => "ShellMux output route ended before reporting a failure".to_owned(),
         }
     }
@@ -153,24 +158,68 @@ impl OutputRoute {
     }
 }
 
-/// One mux's policy-decision log: the JavaScript sink, whether grants are delivered, and the
-/// pending/failure record close drains. A failed callback is reported at close and never
-/// affects authorization or execution. The callback is weak: a mux-lifetime logger never keeps
-/// Node alive; close's own promise does until every enqueued decision returned. The close task
-/// owns the last reference and releases the callback once drained.
-pub(crate) struct PolicyLog {
-    callback: PolicyCallback,
-    grants: bool,
+/// One mux's JavaScript record sink: a weak callback that never keeps Node alive, the pending
+/// count close drains, and the first callback failure.
+pub(crate) struct RecordSink<T: ToNapiValue + 'static> {
+    callback: ThreadsafeFunction<T, (), T, Status, true, true>,
     progress: Arc<watch::Sender<RouteProgress>>,
+}
+
+impl<T: ToNapiValue + 'static> RecordSink<T> {
+    fn new(callback: ThreadsafeFunction<T, (), T, Status, true, true>) -> Self {
+        let (progress, _) = watch::channel(RouteProgress::default());
+        Self {
+            callback,
+            progress: Arc::new(progress),
+        }
+    }
+
+    /// Enqueues one record; never waits for JavaScript.
+    fn enqueue(&self, data: T, label: &'static str) {
+        self.progress.send_modify(|state| state.pending += 1);
+        let completion = Arc::new(CallbackCompletion {
+            progress: Arc::downgrade(&self.progress),
+            receipt: Mutex::new(Some(CallbackReceipt::Record(label))),
+        });
+        let returned = Arc::clone(&completion);
+        let status = self.callback.call_with_return_value(
+            Ok(data),
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                returned.complete(
+                    result.map_err(|error| format!("ShellMux {label} callback failed: {error}")),
+                );
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            completion.complete(Err(format!(
+                "ShellMux {label} callback enqueue failed: {status}"
+            )));
+        }
+    }
+
+    async fn drained(&self, label: &'static str) -> Result<(), String> {
+        let mut progress = self.progress.subscribe();
+        let state = progress
+            .wait_for(|state| state.pending == 0)
+            .await
+            .map_err(|_| format!("ShellMux {label} ended before draining"))?;
+        state.failure.clone().map_or(Ok(()), Err)
+    }
+}
+
+/// One mux's policy log. Callback failures are reported at close, never to authorization.
+pub(crate) struct PolicyLog {
+    sink: RecordSink<NativePolicyDecision>,
+    grants: bool,
 }
 
 impl PolicyLog {
     pub(crate) fn new(callback: PolicyCallback, grants: bool) -> Arc<Self> {
-        let (progress, _) = watch::channel(RouteProgress::default());
         Arc::new(Self {
-            callback,
+            sink: RecordSink::new(callback),
             grants,
-            progress: Arc::new(progress),
         })
     }
 
@@ -196,37 +245,66 @@ impl PolicyLog {
             failed_precondition,
             allowed_fixes,
         };
-        self.progress.send_modify(|state| state.pending += 1);
-        let completion = Arc::new(CallbackCompletion {
-            progress: Arc::downgrade(&self.progress),
-            receipt: Mutex::new(Some(CallbackReceipt::Policy)),
-        });
-        let returned = Arc::clone(&completion);
-        let status = self.callback.call_with_return_value(
-            Ok(data),
-            ThreadsafeFunctionCallMode::NonBlocking,
-            move |result, _env| {
-                returned.complete(
-                    result.map_err(|error| format!("ShellMux policy log callback failed: {error}")),
-                );
-                Ok(())
-            },
-        );
-        if status != Status::Ok {
-            completion.complete(Err(format!(
-                "ShellMux policy log callback enqueue failed: {status}"
-            )));
-        }
+        self.sink.enqueue(data, "policy log");
     }
 
-    /// Resolves once every enqueued decision returned, with the first callback failure.
     pub(crate) async fn drained(&self) -> Result<(), String> {
-        let mut progress = self.progress.subscribe();
-        let state = progress
-            .wait_for(|state| state.pending == 0)
-            .await
-            .map_err(|_| "ShellMux policy log ended before draining".to_owned())?;
-        state.failure.clone().map_or(Ok(()), Err)
+        self.sink.drained("policy log").await
+    }
+}
+
+/// One mux's resource-event sink; the session forwards its monitor's channel into it.
+pub(crate) struct ResourceLog(RecordSink<NativeResourceEvent>);
+
+impl ResourceLog {
+    pub(crate) fn new(callback: ResourceCallback) -> Arc<Self> {
+        Arc::new(Self(RecordSink::new(callback)))
+    }
+
+    /// Enqueues one event; never waits for JavaScript. Unknown future variants are ignored.
+    pub(crate) fn observe(&self, event: ResourceEvent) {
+        let (kind, pipeline_id, command, sample) = match event {
+            ResourceEvent::Started {
+                pipeline_id,
+                command,
+            } => ("started", pipeline_id, Some(command), None),
+            ResourceEvent::Sample {
+                pipeline_id,
+                sample,
+            } => ("sample", pipeline_id, None, Some(sample)),
+            ResourceEvent::Finished {
+                pipeline_id,
+                sample,
+            } => ("finished", pipeline_id, None, Some(sample)),
+            _ => return,
+        };
+        self.0.enqueue(
+            NativeResourceEvent {
+                kind: kind.to_owned(),
+                pipeline_id: pipeline_id as f64,
+                command,
+                sample: sample.map(resource_sample),
+            },
+            "resource event",
+        );
+    }
+
+    pub(crate) async fn drained(&self) -> Result<(), String> {
+        self.0.drained("resource event").await
+    }
+}
+
+fn resource_sample(sample: ResourceSample) -> NativeResourceSample {
+    NativeResourceSample {
+        elapsed_ms: sample.elapsed.as_secs_f64() * 1000.0,
+        memory_bytes: sample.memory_bytes as f64,
+        memory_peak_bytes: sample.memory_peak_bytes as f64,
+        cpu_usage_ms: sample.cpu_usage.as_secs_f64() * 1000.0,
+        cpu_user_ms: sample.cpu_user.as_secs_f64() * 1000.0,
+        cpu_system_ms: sample.cpu_system.as_secs_f64() * 1000.0,
+        cpu_throttled_ms: sample.cpu_throttled.as_secs_f64() * 1000.0,
+        pids: sample.pids,
+        oom_kills: sample.oom_kills as f64,
     }
 }
 
@@ -240,10 +318,10 @@ const fn action_name(action: &Action) -> &'static str {
 }
 
 /// What a settled callback releases: an output chunk's acknowledgement, or nothing for a
-/// policy record, which no producer waits on.
+/// record, which no producer waits on.
 enum CallbackReceipt {
     Output(oneshot::Sender<()>),
-    Policy,
+    Record(&'static str),
 }
 
 // Queued completions must not own the route, its TSFN, or a mux. In particular, napi 3.9 can
@@ -292,13 +370,13 @@ impl Drop for CallbackCompletion {
         {
             None => return,
             Some(CallbackReceipt::Output(_)) => {
-                "ShellMux output callback was dropped before returning"
+                "ShellMux output callback was dropped before returning".to_owned()
             }
-            Some(CallbackReceipt::Policy) => {
-                "ShellMux policy log callback was dropped before returning"
+            Some(CallbackReceipt::Record(label)) => {
+                format!("ShellMux {label} callback was dropped before returning")
             }
         };
-        self.complete(Err(dropped.to_owned()));
+        self.complete(Err(dropped));
     }
 }
 

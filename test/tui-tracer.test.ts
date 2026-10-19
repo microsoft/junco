@@ -189,7 +189,8 @@ class Terminal {
         if (parameters.startsWith("?") && values.includes(25)) {
           this.cursorVisible = code === "h";
           // Native draws end with cursor-hide; a PTY read may stop halfway through a draw.
-          if (!this.cursorVisible && this.alternate) this.completedFrame = this.screen();
+          if (!this.cursorVisible && this.alternate)
+            this.completedFrame = this.screen();
         }
         break;
     }
@@ -509,8 +510,10 @@ for (const [flag, level, marker] of [
           await pty.phase("active");
           const completeTopology = (screen: Screen) => {
             const canvas = graphText(screen);
-            return canvas.includes("terminal->$sink (value)") &&
-              canvas.includes("alpha=>beta (value)");
+            return (
+              canvas.includes("terminal->$sink (value)") &&
+              canvas.includes("alpha=>beta (value)")
+            );
           };
           const alpha = await pty.screen(
             (screen) => green(screen, "Alpha") && completeTopology(screen),
@@ -526,7 +529,8 @@ for (const [flag, level, marker] of [
           const betaTitle = await pty.screen(
             (screen) =>
               screen.rows[0]!.includes("active: [g1:Beta]") &&
-              !green(screen, "Alpha") && completeTopology(screen),
+              !green(screen, "Alpha") &&
+              completeTopology(screen),
             "Beta scheduled after Alpha ends",
           );
           assert.equal(
@@ -546,19 +550,23 @@ for (const [flag, level, marker] of [
               screen.rows[0]!.includes("complete") &&
               !screen.rows[0]!.includes("active:") &&
               !green(screen, "Alpha") &&
-              graphText(screen).includes("Alpha") && completeTopology(screen),
+              graphText(screen).includes("Alpha") &&
+              completeTopology(screen),
             "final inactive topology restored to its original viewport",
           );
           assert.equal(graphText(final), graphText(alpha));
           if (flag === "--fail") await pty.input("\t\x1b[H\x1b[6~");
           const messages = await pty.screen(
-            (screen) => screen.rows[0]!.includes("complete") &&
+            (screen) =>
+              screen.rows[0]!.includes("complete") &&
               !screen.rows[0]!.includes("active:") &&
               nodeTraces(screen, "[g1:Beta]").includes("beta done"),
             "finalized Beta message remains in trace history",
           );
           assert.equal(
-            nodeTraces(messages, "[g1:Beta]").replace(/\s+/gu, "").split("betadone").length - 1,
+            nodeTraces(messages, "[g1:Beta]")
+              .replace(/\s+/gu, "")
+              .split("betadone").length - 1,
             1,
             "Beta stream finalization must not duplicate Beta's message in another Beta record",
           );
@@ -638,9 +646,16 @@ test(
         const task = active.rows[0]!.match(/\[(g\d+):(task-[^\]]+)\]/u);
         const taskScope = task?.[1];
         const taskId = task?.[2];
-        assert.ok(taskScope && taskId, "active title identifies the actual promoted task and scope");
+        assert.ok(
+          taskScope && taskId,
+          "active title identifies the actual promoted task and scope",
+        );
         let childScene = active;
-        while (!occurrences(childScene, taskId, 1, 11).some(({ cell }) => cell.color !== "default")) {
+        while (
+          !occurrences(childScene, taskId, 1, 11).some(
+            ({ cell }) => cell.color !== "default",
+          )
+        ) {
           const previous = graphText(childScene);
           await pty.input("\x1b[6~");
           childScene = await pty.screen(
@@ -672,34 +687,62 @@ test(
           "completed promoted-agent scene retains the parent geometry",
         );
         const wrapperText = nodeTraces(finalized, "[g1:caller]");
-        assert.ok(wrapperText.includes("return"), "the parent wrapper publishes its native return");
-        assert.equal(wrapperText.replace(/\s+/gu, "").split("combined:workerdone").length - 1, 0,
-          "the wrapper return does not replay the inner root's streamed message");
+        assert.ok(
+          wrapperText.includes("return"),
+          "the parent wrapper publishes its native return",
+        );
+        assert.equal(
+          wrapperText.replace(/\s+/gu, "").split("combined:workerdone").length -
+            1,
+          0,
+          "the wrapper return does not replay the inner root's streamed message",
+        );
         await pty.input("\t");
         let tracePage = finalized;
-        const revealMessage = async (node: string, message: string): Promise<Screen> => {
+        const revealMessage = async (
+          node: string,
+          message: string,
+        ): Promise<Screen> => {
           const previous = traces(tracePage);
           await pty.input("\x1b[H");
-          tracePage = await pty.screen((screen) => traces(screen) !== previous, "trace history at Home");
+          tracePage = await pty.screen(
+            (screen) => traces(screen) !== previous,
+            "trace history at Home",
+          );
           const expected = message.replace(/\s+/gu, "");
-          while (!nodeTraces(tracePage, node).replace(/\s+/gu, "").includes(expected)) {
+          while (
+            !nodeTraces(tracePage, node).replace(/\s+/gu, "").includes(expected)
+          ) {
             const before = traces(tracePage);
             await pty.input("\x1b[6~");
-            tracePage = await pty.screen((screen) => traces(screen) !== before,
-              `panning to ${node}'s retained message`);
+            tracePage = await pty.screen(
+              (screen) => traces(screen) !== before,
+              `panning to ${node}'s retained message`,
+            );
           }
           return tracePage;
         };
-        const rootMessage = await revealMessage(`[${taskScope}:root]`, "assistant: combined: worker done");
+        const rootMessage = await revealMessage(
+          `[${taskScope}:root]`,
+          "assistant: combined: worker done",
+        );
         assert.equal(
-          nodeTraces(rootMessage, `[${taskScope}:root]`).replace(/\s+/gu, "").split("combined:workerdone").length - 1,
+          nodeTraces(rootMessage, `[${taskScope}:root]`)
+            .replace(/\s+/gu, "")
+            .split("combined:workerdone").length - 1,
           1,
           "promotion finalizes the actual root's streamed assistant message once",
         );
-        const workerMessage = await revealMessage(`[${taskScope}:${taskId}]`, "assistant: worker done");
-        assert.ok(occurrences(workerMessage, `${taskId}]`, 13, 29).some(
-          ({ cell }) => cell.color !== "default",
-        ), "worker text retains its actual scoped task identity");
+        const workerMessage = await revealMessage(
+          `[${taskScope}:${taskId}]`,
+          "assistant: worker done",
+        );
+        assert.ok(
+          occurrences(workerMessage, `${taskId}]`, 13, 29).some(
+            ({ cell }) => cell.color !== "default",
+          ),
+          "worker text retains its actual scoped task identity",
+        );
         assert.equal(pty.exited, false);
         await pty.input("q");
         await pty.done("TUI_TASKS_OK");

@@ -197,15 +197,23 @@ async function loggerScenario(source, level) {
   const env = { ...process.env };
   if (level === undefined) delete env.LOG_LEVEL;
   else env.LOG_LEVEL = level;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", `
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `
     import assert from "node:assert/strict";
     ${source}
-  `], {
-    cwd: new URL("../", import.meta.url),
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 15_000,
-  });
+  `,
+    ],
+    {
+      cwd: new URL("../", import.meta.url),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
+    },
+  );
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -238,13 +246,17 @@ test("LOG_LEVEL defaults to INFO, accepts trimmed case-insensitive names, and re
   assert.deepEqual(await loggerScenario(source), info);
   assert.deepEqual(await loggerScenario(source, "   "), info);
   assert.deepEqual(await loggerScenario(source, "  dEbUg  "), [
-    { level: "DEBUG", marker: "level-debug" }, ...info,
+    { level: "DEBUG", marker: "level-debug" },
+    ...info,
   ]);
   assert.deepEqual(await loggerScenario(source, "WARN"), info.slice(1));
   for (const level of ["2", "BOGUS"]) {
-    await loggerScenario(`
+    await loggerScenario(
+      `
       await assert.rejects(import("./dist/log.js"), Error);
-    `, level);
+    `,
+      level,
+    );
   }
 });
 
@@ -265,13 +277,17 @@ test("complaint observer failures keep issues and admit warnings at WARN but not
     process.stdout.write(JSON.stringify(records));
   `;
   assert.deepEqual(await loggerScenario(source, "WARN"), [
-    { level: "WARN", marker: "[dataflow-engine] DataflowTracer callback failed" },
+    {
+      level: "WARN",
+      marker: "[dataflow-engine] DataflowTracer callback failed",
+    },
   ]);
   assert.deepEqual(await loggerScenario(source, "ERROR"), []);
 });
 
 test("redirectLog exclusively owns output, restores the exact table, and flushLog fences only the sink", async () => {
-  await loggerScenario(`
+  await loggerScenario(
+    `
     const { log, redirectLog, flushLog } = await import("./dist/log.js");
     const previousLines = [];
     const previous = { "*": (line) => previousLines.push(line) };
@@ -323,7 +339,9 @@ test("redirectLog exclusively owns output, restores the exact table, and flushLo
       fail();
     }
     assert.equal(log.settings.prettyLogLevelMethod, previous);
-  `, "INFO");
+  `,
+    "INFO",
+  );
 });
 
 /**
@@ -443,8 +461,7 @@ test("policy decisions reach the shared stdout logger: grants at DEBUG, violatio
   timeout: 90_000,
 }, async () => {
   for (const level of ["DEBUG", "INFO", "WARN"]) {
-    const { stderr, shutdown, records } =
-      await policyLogScenario(level);
+    const { stderr, shutdown, records } = await policyLogScenario(level);
     assert.equal(shutdown, "ok");
     assert.equal(stderr, "");
     if (level === "WARN") {

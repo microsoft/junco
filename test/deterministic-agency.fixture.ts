@@ -17,9 +17,9 @@ import * as O from "fp-ts/lib/Option.js";
 import { type AgenticInput, tools } from "junco-agency";
 import {
   policyContext,
-  terminalPorts,
   STRATEGIES,
   type Strategy,
+  terminalPorts,
   textOf,
 } from "./deterministic-support.ts";
 import { leaf } from "./support.ts";
@@ -204,10 +204,15 @@ export async function runDeterministicFixture(
     [...(infos.worker[0]?.parents ?? [])].sort(byEdge),
     routes.map((route) => ({ ...route, id: p })).sort(byEdge),
   );
-  assert.deepEqual(infos.worker[0]?.children, [{
-    id: graph.sink.id, edgeId: "terminal->$sink", kind: "value",
-    expect: "Graph output consumes final work results and publishes messages.",
-  }]);
+  assert.deepEqual(infos.worker[0]?.children, [
+    {
+      id: graph.sink.id,
+      edgeId: "terminal->$sink",
+      kind: "value",
+      expect:
+        "Graph output consumes final work results and publishes messages.",
+    },
+  ]);
 
   // Parent result first, then message FIFO, from what recv actually returned.
   const inputs = [

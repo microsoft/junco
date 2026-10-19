@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { context } from "junco-scheduler";
 import * as E from "fp-ts/lib/Either.js";
+import { context } from "junco-scheduler";
 import { graph, schedulers, tracer, trigger } from "../src/index.ts";
 
 // The root `graph`, `schedulers`, `tracer` and `trigger` namespaces compose into one runnable graph:

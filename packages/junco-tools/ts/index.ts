@@ -10,6 +10,9 @@ export type {
   NativePolicy,
   NativeProcess,
   NativeProcessOptions,
+  NativeResourceEvent,
+  NativeResourceOptions,
+  NativeResourceSample,
   NativeRunResult,
 } from "../native/index.js";
 export { AstEditTool, AstGrepTool } from "./ast.js";

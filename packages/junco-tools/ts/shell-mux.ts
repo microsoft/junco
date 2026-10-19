@@ -1,5 +1,9 @@
 import { DefaultLogLevels } from "tslog";
-import type { NativeMux } from "../native/index.js";
+import type {
+  NativeMux,
+  NativeResourceEvent,
+  NativeResourceOptions,
+} from "../native/index.js";
 import { flushLog, log, logPolicyDecision } from "./log.js";
 import type { NativeModule } from "./native.js";
 import { LockPolicy, type Policy } from "./policy.js";
@@ -13,8 +17,8 @@ export interface ShellMuxLease {
   /** True once release began. */
   readonly closed: boolean;
   /**
-   * Closes the mux, then flushes the policy log so its last record is observable. Every call
-   * returns the same terminal result.
+   * Closes the mux after every resource callback returns, then flushes the policy log so its
+   * last record is observable. Every call returns the same terminal result.
    */
   release(): Promise<void>;
 }
@@ -69,6 +73,17 @@ export const ShellMuxLease = {
       readonly native?: NativeModule;
       readonly sandbox?: "shared" | "always";
       readonly policy?: Policy;
+      /**
+       * Resource limits and monitoring of every command and persistent process on this mux
+       * (Linux cgroup v2; a command fails closed without delegated controllers).
+       */
+      readonly resources?: NativeResourceOptions;
+      /**
+       * Receives each monitor event of this mux's pipelines; required by and requiring
+       * `resources.monitorIntervalMs`. A throw is reported by `release()`. The stream ends with
+       * the mux: `release()` resolves only after the last event returned.
+       */
+      readonly onResourceEvent?: (event: NativeResourceEvent) => void;
     } = {},
   ): Promise<ShellMuxLease> {
     const { policy = LockPolicy, sandbox = "shared" } = options;
@@ -83,8 +98,15 @@ export const ShellMuxLease = {
         sandbox,
         policy: policy.toNative(native),
         policyDebug: level <= DefaultLogLevels.DEBUG,
+        resources: options.resources,
       },
       level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
+      options.onResourceEvent === undefined
+        ? undefined
+        : (error: Error | null, event: NativeResourceEvent) => {
+            if (error !== null) throw error;
+            options.onResourceEvent!(event);
+          },
     );
     const lease = new Lease(mux, native, policy);
     try {

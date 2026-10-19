@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import type { NativeMux, NativeRun } from "../native/index.js";
+import type {
+  NativeMux,
+  NativeResourceEvent,
+  NativeResourceOptions,
+  NativeRun,
+} from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import type { Policy } from "./policy.js";
 import { ShellMuxLease } from "./shell-mux.js";
@@ -40,6 +45,8 @@ export class ShellMuxOperations implements BashOperations {
     readonly native?: NativeModule;
     readonly sandbox?: "shared" | "always";
     readonly policy?: Policy;
+    readonly resources?: NativeResourceOptions;
+    readonly onResourceEvent?: (event: NativeResourceEvent) => void;
   };
   #mux: NativeMux | undefined;
   #owned: ShellMuxLease | undefined;
@@ -53,6 +60,8 @@ export class ShellMuxOperations implements BashOperations {
     readonly mux?: NativeMux;
     readonly sandbox?: "shared" | "always";
     readonly policy?: Policy;
+    readonly resources?: NativeResourceOptions;
+    readonly onResourceEvent?: (event: NativeResourceEvent) => void;
     principal?: string;
   }) {
     const borrowed = options?.mux;
@@ -65,6 +74,14 @@ export class ShellMuxOperations implements BashOperations {
       if (options.policy !== undefined) {
         throw new Error(
           "ShellMuxOperations: a borrowed mux keeps the policy it was opened with",
+        );
+      }
+      if (
+        options.resources !== undefined ||
+        options.onResourceEvent !== undefined
+      ) {
+        throw new Error(
+          "ShellMuxOperations: a borrowed mux keeps the resources it was opened with",
         );
       }
       if (
@@ -82,6 +99,8 @@ export class ShellMuxOperations implements BashOperations {
       native: options?.native,
       sandbox: options?.sandbox,
       policy: options?.policy,
+      resources: options?.resources,
+      onResourceEvent: options?.onResourceEvent,
     };
   }
 

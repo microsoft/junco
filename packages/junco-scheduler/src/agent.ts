@@ -57,7 +57,9 @@ export function pi(options: PiOptions): ReturnType<typeof parallel> {
       nodes.push({
         id: node.id,
         status: node.status,
-        ...(node.description === undefined ? {} : { description: node.description }),
+        ...(node.description === undefined
+          ? {}
+          : { description: node.description }),
       });
       const details = snapshot.context.get(node.id);
       if (details !== undefined) context.push([node.id, details]);
@@ -71,7 +73,11 @@ export function pi(options: PiOptions): ReturnType<typeof parallel> {
     };
     const messages: Context["messages"] = [];
     if (options.prompt !== undefined)
-      messages.push({ role: "user", content: options.prompt, timestamp: Date.now() });
+      messages.push({
+        role: "user",
+        content: options.prompt,
+        timestamp: Date.now(),
+      });
     messages.push({
       role: "user",
       content: `SchedulerSnapshot:\n${JSON.stringify(request)}`,
@@ -85,18 +91,22 @@ export function pi(options: PiOptions): ReturnType<typeof parallel> {
             ? INSTRUCTION
             : `${options.systemPrompt}\n${INSTRUCTION}`,
         messages,
-        tools: [{
-          name: "schedule",
-          description: "Select speculative waves of simultaneous work-node IDs.",
-          parameters: scheduleParameters,
-        }],
+        tools: [
+          {
+            name: "schedule",
+            description:
+              "Select speculative waves of simultaneous work-node IDs.",
+            parameters: scheduleParameters,
+          },
+        ],
       },
       { ...options.streamOptions, signal },
     );
     signal?.throwIfAborted();
     if (response.stopReason === "error" || response.stopReason === "aborted")
       throw new Error(
-        response.errorMessage ?? `Scheduler model stopped with ${response.stopReason}`,
+        response.errorMessage ??
+          `Scheduler model stopped with ${response.stopReason}`,
       );
     const calls = response.content.filter((block) => block.type === "toolCall");
     if (
@@ -109,7 +119,9 @@ export function pi(options: PiOptions): ReturnType<typeof parallel> {
       );
     const parameters = calls[0].arguments;
     if (!Value.Check(scheduleParameters, parameters))
-      throw new DataflowDefinitionError("Scheduler model returned invalid waves");
+      throw new DataflowDefinitionError(
+        "Scheduler model returned invalid waves",
+      );
     return parameters.waves.map((wave) => wave.map(NodeId.create));
   }
   return agent(invoke);

@@ -4,9 +4,9 @@
 export {
   type AvailabilityFn,
   DataflowDefinitionError,
+  type DataflowExecution,
   DataflowGraph,
   DataflowNodeError,
-  type DataflowExecution,
   type DataflowObservation,
   type DataflowRunOptions,
   Edge,
