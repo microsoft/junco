@@ -53,6 +53,8 @@ The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`.
 
 The junco-agency workspace's `.github/workflows/ci.yml` `test` job covers this package. It needs no secrets: Cargo fetches the public marsh and junco-policy repositories. It sets `CARGO_TARGET_DIR` to this package's `target/cargo`, and its root `bun install --frozen-lockfile` builds the production addon through the `postinstall`. It checks rustfmt on the routed bridge (`src/tool.rs`), whose formatting is already rustfmt-compatible; older native modules and marsh retain their existing layouts. Clippy denies warnings except `dead_code` (napi exports are reached from JavaScript) and `too_many_arguments` (two pre-existing grep helpers). It runs Rust unit tests with `test-fs`, then `bun run build`, `bun run build:native:test`, and `bun run test`. The JavaScript suite uses the real CopyTree-enabled addon without a Btrfs mount or live model credentials.
 
+Pinned Marsh classifies kernel-proven process creation before descendant effects and resumes irreversible thread exit stops. Multithreaded stdio servers can close independently without leaving sibling cleanup blocked; unresolved completed filesystem evidence still fails closed.
+
 ## Run with `pi -e`
 
 Production execution requires an **existing dedicated btrfs seed subvolume**, a writable parent directory, and the `user_subvol_rm_allowed` mount option. Start Pi in that seed or a directory beneath it. junco-tools discovers the enclosing seed; it does not create or migrate subvolumes.

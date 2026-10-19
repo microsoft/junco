@@ -19,8 +19,8 @@ test-fs = ["marsh-core/testing"]
 [dependencies]
 napi = { version = "=3.13.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
 napi-derive = "=3.6.9"
-marsh-core = { git = "https://github.com/junco-org/marsh.git", rev = "6c694e34654221dbf1477c502910baebe1b7b78f" }
-marsh-btrfs = { git = "https://github.com/junco-org/marsh.git", rev = "6c694e34654221dbf1477c502910baebe1b7b78f" }
+marsh-core = { git = "https://github.com/junco-org/marsh.git", rev = "080d611b0a5b7d3db145026485880e5428cf497a" }
+marsh-btrfs = { git = "https://github.com/junco-org/marsh.git", rev = "080d611b0a5b7d3db145026485880e5428cf497a" }
 brush-core = "=0.5.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
@@ -53,5 +53,5 @@ libc = "0.2"
 napi-build = "=2.5.0"
 
 [patch.crates-io]
-brush-core = { git = "https://github.com/junco-org/marsh.git", rev = "6c694e34654221dbf1477c502910baebe1b7b78f" }
-brush-interactive = { git = "https://github.com/junco-org/marsh.git", rev = "6c694e34654221dbf1477c502910baebe1b7b78f" }
+brush-core = { git = "https://github.com/junco-org/marsh.git", rev = "080d611b0a5b7d3db145026485880e5428cf497a" }
+brush-interactive = { git = "https://github.com/junco-org/marsh.git", rev = "080d611b0a5b7d3db145026485880e5428cf497a" }
