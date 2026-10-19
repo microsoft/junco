@@ -976,28 +976,32 @@ test(
 test(
   "graph rendering failure retains computation, diagnostic and original error through restored flush/close",
   async () => {
-    await withPty(["--display-failure"], async (pty) => {
-      await pty.phase("active", "render-failure");
-      await pty.screen(
-        (screen) =>
-          graphText(screen).includes("(graph rendering failed)") &&
-          screen.rows
-            .slice(13, 29)
-            .map((row) => row.trim())
-            .join(" ")
-            .replace(/\s+/g, " ")
-            .includes("tui retained rendering failure") &&
-          occurrences(screen, "tui retained", 13, 29).some(
-            ({ cell }) => cell.color === "red",
-          ),
-        "real graph-render failure diagnostic across wrapped lines",
-      );
-      pty.command("finish");
-      await pty.phase("awaiting-dismissal");
-      assert.equal(pty.exited, false);
-      await pty.input("q");
-      await pty.done("TUI_DISPLAY_FAILURE_OK");
-    });
+    await withPty(
+      ["--display-failure"],
+      async (pty) => {
+        await pty.phase("active", "render-failure");
+        // Checkout paths change stack wrapping; inspect retained history, not its tail.
+        await pty.input("\t\x1b[H");
+        await pty.screen(
+          (screen) =>
+            graphText(screen).includes("(graph rendering failed)") &&
+            nodeTraces(screen, "[system]")
+              .replace(/\s+/gu, "")
+              .includes("tuiretainedrenderingfailure") &&
+            occurrences(screen, "tui retained", 13, 29).some(
+              ({ cell }) => cell.color === "red",
+            ),
+          "real graph-render failure diagnostic across wrapped lines",
+        );
+        pty.command("finish");
+        await pty.phase("awaiting-dismissal");
+        assert.equal(pty.exited, false);
+        await pty.input("q");
+        await pty.done("TUI_DISPLAY_FAILURE_OK");
+      },
+      {},
+      60,
+    );
   },
   deadlineMs + 1_000,
 );

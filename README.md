@@ -168,7 +168,7 @@ For a scripted end-to-end run without model credentials, run `bun run test/oss-c
 
 `liveRunner` borrows the root's research `AsyncDisposableStack` for lazy acquisition. Root cleanup explicitly attempts research close, tracer flush, trusted build close, then protected collection close; body and cleanup failures remain in `SuppressedError` chains. Each batch explicitly closes its graph on success or failure; construction failures also dispose every supplied but unregistered agent. Failed lane acquisition disposes its acquired agents in reverse order. Scheduler-context steps retain the apply-before-next-window barrier; neither a tracer nor a graph-wide `run()` publishes refactors.
 
-Prerequisites: `graft` 0.21.1-compatible on `PATH`, the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
+Prerequisites: `graft` 0.21.1-compatible on `PATH` (`bun run` supplies the pinned development CLI), the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
 
 ```sh
 bun run examples/yak-shaver/yak-shaver.ts /path/to/repo

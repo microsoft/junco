@@ -290,7 +290,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -328,7 +328,7 @@ dependencies = [
 [[package]]
 name = "brush-interactive"
 version = "0.4.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "bon",
  "brush-core",
@@ -1814,7 +1814,7 @@ dependencies = [
 [[package]]
 name = "marsh-btrfs"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "btrfsutil",
  "hex",
@@ -1828,7 +1828,7 @@ dependencies = [
 [[package]]
 name = "marsh-core"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "brush-builtins",
  "brush-core",
@@ -1856,7 +1856,7 @@ dependencies = [
 [[package]]
 name = "marsh-instrument"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "libc",
  "lurk-cli",
@@ -1869,7 +1869,7 @@ dependencies = [
 [[package]]
 name = "marsh-lib"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "tokio",
 ]
@@ -1877,7 +1877,7 @@ dependencies = [
 [[package]]
 name = "marsh-wal"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/marsh.git?rev=080d611b0a5b7d3db145026485880e5428cf497a#080d611b0a5b7d3db145026485880e5428cf497a"
+source = "git+https://github.com/junco-org/marsh.git?rev=1f2b85cea55e2ebf9670fa627d82e3b20ea55954#1f2b85cea55e2ebf9670fa627d82e3b20ea55954"
 dependencies = [
  "hex",
  "marsh-lib",
