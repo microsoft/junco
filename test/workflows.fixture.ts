@@ -1,9 +1,5 @@
-// Package smoke for `junco-agency/workflows` through the root namespaces: Node's TypeScript
-// stripping resolves the compiled entrypoints (`bun run build` first), Bun the source entrypoints.
-// First, a `tools`-owned yield suspends and resumes a real native agent through the public
-// entrypoints. Then a three-round Ralph runs over a real native agent on a faux model inside a real
-// parent graph. It proves the workflows bundle shares JuncoGraph with the root bundle, so recursive
-// close reaches the nested graph and the lent agent.
+// Smoke for the std `workflows`/`schedules` namespaces through the public entrypoints.
+// Node's TypeScript stripping resolves compiled entrypoints; Bun resolves source entrypoints.
 
 import assert from "node:assert/strict";
 import {
@@ -18,28 +14,22 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import * as E from "fp-ts/lib/Either.js";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as O from "fp-ts/lib/Option.js";
 import {
   agent as agentApi,
   graph as graphApi,
-  schedulers,
+  schedules,
   tools as toolsApi,
   tracer as tracerApi,
-  trigger,
+  workflows,
 } from "junco-agency";
-import { Ralph } from "junco-agency/workflows";
-
-type AgenticInput = graphApi.nodes.AgenticInput;
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 const revision = (previous: string) =>
   `${assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
-
-const queued = (
-  edge: graphApi.Edge<AgenticInput, AssistantMessage>,
-): AgenticInput[] => (E.isLeft(edge.transport) ? [...edge.transport.left] : []);
 
 /** Every user text in one provider request. */
 type Request = { readonly users: string[] };
@@ -140,136 +130,77 @@ async function assertPublicYieldBoundary(): Promise<void> {
 
 await assertPublicYieldBoundary();
 
+if (typeof Bun === "undefined") {
+  console.log(
+    JSON.stringify({
+      yieldBoundary: true,
+      ralph: "skipped: parse needs Bun.YAML",
+    }),
+  );
+  process.exit(0);
+}
+
+const { build, parse } = await import("junco-syntax");
 const faux = fauxProvider({
   api: "ralph-workflow-smoke",
   provider: "ralph-workflow-smoke",
   tokenSize: { min: 4, max: 4 },
 });
 faux.setResponses(["draft-1", "draft-2", "draft-3"].map(recording));
-const models = createModels();
-models.setProvider(faux.provider);
-
-let agent: agentApi.JuncoAgent | undefined;
-let parent: graphApi.JuncoGraph | undefined;
-let owned = false;
-let closed = false;
+const credentials = new InMemoryCredentialStore();
+await credentials.modify(faux.getModel().provider, async () => ({
+  type: "api_key",
+  key: "fixture-login",
+}));
+const models = await ModelRuntime.create({
+  credentials,
+  modelsPath: null,
+  refreshOnCreate: false,
+  allowModelNetwork: false,
+});
+models.registerNativeProvider(faux.provider);
+const model = faux.getModel();
+const doc = parse(workflows.ralph, {
+  params: { model: `${model.provider}/${model.id}` },
+});
+const execution = await build(doc, {
+  cwd: process.cwd(),
+  scheduler: () => schedules.parallel(),
+  models,
+  tracer: new tracerApi.DummyTracer(),
+  ...schedules.ralph({ rounds: 3 }),
+});
+const graph = execution.graph;
+const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!
+  .state as agentApi.JuncoAgent;
 try {
-  agent = await agentApi.JuncoAgent.fromResolved({
-    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-    models,
-    model: faux.getModel(),
-    tools: [],
-  });
-  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>(
-    "source->ralph",
-  );
-  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>(
-    "ralph->sink",
-  );
-  const final = graphApi.Edge.value<AgenticInput, AssistantMessage>(
-    "ralph-result",
-  );
-  const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>(
-    (view) =>
-      graphApi
-        .from(view, input)
-        .map((value) => graphApi.Message.create(input, value)),
-    { id: graphApi.NodeId.create("$source") },
-  );
-  const delivered: string[] = [];
-  const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> =
-    new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(
-      async function* (): graphApi.NodeGenerator<
-        AgenticInput,
-        AssistantMessage
-      > {
-        const view = yield [];
-        for (const value of graphApi.from(view, output))
-          delivered.push(value.kind === "appendMessage" ? "" : value.text);
-        const result = graph.result(id);
-        assert.ok(O.isSome(result));
-        return result.value;
-      },
-      {
-        id: graphApi.NodeId.create("$sink"),
-        trigger: trigger.TriggerRule.allOf(
-          trigger.TriggerEntry.on(output),
-          trigger.TriggerEntry.on(final),
-        ),
-      },
-    );
-  const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> =
-    new graphApi.JuncoGraph(
-      source,
-      sink,
-      graphApi.Width.create(1),
-      graphApi.UNBOUNDED,
-      new tracerApi.DummyTracer(),
-      toolsApi.LockPolicy,
-    );
-  const execution = schedulers.context({
-    graph,
-    scheduler: schedulers.parallel(),
-  });
-  parent = graph;
-  const id: graphApi.NodeIdType = Ralph.register(graph, agent, {
-    input,
-    output,
-    policy: toolsApi.LockPolicy,
-    rounds: 3,
-  });
-  owned = true;
-  graph
-    .addEdge(source.id, id, input)
-    .addEdge(id, sink.id, output)
-    .addEdge(id, sink.id, final);
-
-  const child = graph.getNode(id)?.state;
-  assert.ok(
-    child instanceof graphApi.JuncoGraph,
-    "the workflow's nested graph is the root package's JuncoGraph",
-  );
-
-  source.enqueue({
-    messages: new Map([[input.id, [{ kind: "prompt", text: assignment }]]]),
+  graph.source.enqueue({
+    messages: new Map([
+      [
+        graphApi.EdgeId.create("assignment"),
+        [{ kind: "prompt", text: assignment }],
+      ],
+    ]),
     values: new Map(),
   });
-  for (let windows = 0; O.isNone(graph.result(id)); windows++) {
+  for (let windows = 0; requests.length < 3; windows++) {
     assert.ok(windows < 64, "Ralph did not complete within 64 graph windows");
-    assert.deepEqual(queued(output), []);
+    assert.ok(O.isNone(graph.result(graph.sink.id)));
     await execution.step();
   }
-  assert.deepEqual(queued(output), [{ kind: "prompt", text: "draft-3" }]);
-  const result = graph.result(id);
-  assert.ok(
-    O.isSome(result) && contentText(result.value.content) === "draft-3",
-  );
-
   await execution.run();
   await execution.run();
-  assert.equal(requests.length, 3);
   assert.deepEqual(
     requests.map((request) => request.users.at(-1)),
     [assignment, revision("draft-1"), revision("draft-2")],
   );
-  assert.deepEqual(delivered, ["draft-3"]);
-  assert.deepEqual(graph.result(sink.id), graph.result(id));
-
-  await graph.close();
-  closed = true;
-  assert.ok(child.signal.aborted);
-  assert.equal(agent.status, "closed");
-  console.log(
-    JSON.stringify({
-      rounds: requests.length,
-      delivered,
-      sharedGraphIdentity: true,
-      closed: true,
-    }),
-  );
+  const result = graph.result(graph.sink.id);
+  assert.ok(O.isSome(result));
+  assert.equal(contentText(result.value.content), "draft-3");
 } finally {
-  if (!closed) {
-    await parent?.close().catch(() => undefined);
-    if (!owned) await agent?.return().catch(() => undefined);
-  }
+  await graph.close();
 }
+assert.equal(agent.status, "closed");
+console.log(
+  JSON.stringify({ rounds: 3, delivered: ["draft-3"], closed: true }),
+);

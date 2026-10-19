@@ -34,7 +34,7 @@ import {
   TaskTool,
   ToolCollection,
 } from "junco-tools";
-import { JuncoGraph, schedulers } from "../src/index.ts";
+import { JuncoGraph, schedules } from "../src/index.ts";
 import { TriggerRule } from "../src/std/trigger.ts";
 import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
@@ -133,9 +133,9 @@ function single(agent: JuncoAgent, collection: ToolCollection) {
     LockPolicy,
     collection,
   );
-  const context = schedulers.context({
+  const context = schedules.context({
     graph,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   agent.stagePrompt("go");
   const id = graph.addNode({
@@ -192,9 +192,9 @@ test(
             LockPolicy,
             collection,
           );
-          const execution = schedulers.context({
+          const execution = schedules.context({
             graph,
-            scheduler: schedulers.parallel(),
+            scheduler: schedules.parallel(),
           });
           const forgetGraph = defer(() => graph.close());
           rootMember.stagePrompt("go");
@@ -367,7 +367,7 @@ test(
             LockPolicy,
             collection,
           );
-          const execution = schedulers.context({
+          const execution = schedules.context({
             graph,
             scheduler: pi({
               models: decider.models,

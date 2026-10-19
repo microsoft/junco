@@ -2,9 +2,9 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import { context } from "junco-scheduler";
-import { graph, schedulers, tracer, trigger } from "../src/index.ts";
+import { graph, schedules, tracer, trigger } from "../src/index.ts";
 
-// The root `graph`, `schedulers`, `tracer` and `trigger` namespaces compose into one runnable graph:
+// The root `graph`, `schedules`, `tracer` and `trigger` namespaces compose into one runnable graph:
 // constant fan-out sources feed an ordered fan-in, a persistent sink and a one-shot marker.
 test("root namespaces compose a fan-out/fan-in graph that runs once to quiescence", async () => {
   type Payload = number | number[];
@@ -14,7 +14,7 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
     graph.Width.create(1),
     observer,
   );
-  const execution = context({ graph: g, scheduler: schedulers.roundRobin() });
+  const execution = context({ graph: g, scheduler: schedules.roundRobin() });
   const a = graph.Edge.message<number, string>("a");
   const b = graph.Edge.message<number, string>("b");
   const list = graph.Edge.message<number[], string>("list");

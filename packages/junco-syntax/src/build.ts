@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   type AgentTool,
   formatSkillsForSystemPrompt,
@@ -25,11 +26,10 @@ import {
   JuncoGraph,
   type MockAgent,
   mcp,
-  schedulers,
+  schedules,
   tools,
   type tracer,
 } from "junco-agency";
-import { Ralph } from "junco-agency/workflows";
 import {
   edgeId,
   inboundEdges,
@@ -45,11 +45,11 @@ import {
 } from "./schema.js";
 
 type Edge = graph.Edge<AgenticInput, AssistantMessage>;
-type Execution = schedulers.SchedulerContext<
+type Execution = schedules.SchedulerContext<
   Agentic,
   AgenticInput,
   AssistantMessage,
-  schedulers.AgencyNodeMetadata,
+  schedules.AgencyNodeMetadata,
   JuncoGraph
 >;
 export type AgentSpec = {
@@ -64,15 +64,35 @@ export type AgentSpec = {
   readonly cwd: string;
   readonly collection?: tools.ToolCollection;
 };
-export type BuildOptions = {
+/** What a `kind: code` definition sees when its node is registered. */
+export type CodeContext<C = unknown> = {
+  readonly graph: JuncoGraph;
+  readonly label: string;
+  readonly node: string;
+  readonly edges: ReadonlyMap<string, Edge>;
+  readonly policy: tools.Policy;
+  readonly collection?: tools.ToolCollection;
+  readonly context: C;
+  readonly signal?: AbortSignal;
+};
+export type CodeRegistration = {
+  readonly state: Deterministic<AgenticInput, AssistantMessage>;
+  readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;
+  readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
+};
+/** Module export named by a `code:` registry key; backs every `kind: code` node using it. */
+export interface DeterministicNode<C = unknown> {
+  create(context: CodeContext<C>): CodeRegistration | Promise<CodeRegistration>;
+}
+export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   readonly scheduler: (
     graph: string,
-  ) => schedulers.Scheduler<
+  ) => schedules.Scheduler<
     Agentic,
     AgenticInput,
     AssistantMessage,
-    schedulers.AgencyNodeMetadata
+    schedules.AgencyNodeMetadata
   >;
   readonly policy?: tools.Policy;
   readonly collection?: tools.ToolCollection;
@@ -88,9 +108,10 @@ export type BuildOptions = {
       (context: {
         graph: JuncoGraph;
         edges: ReadonlyMap<string, Edge>;
-      }) => graph.AvailabilityFn<AgenticInput, AssistantMessage>
+      }) => graph.AvailabilityFn<AgenticInput, AssistantMessage> | undefined
     >
   >;
+  readonly context?: C;
   readonly signal?: AbortSignal;
 };
 
@@ -173,7 +194,7 @@ export async function resolveAgents(
         await visit(node.graph, node.graph.name ?? id);
         continue;
       }
-      if (node.kind === "emit") continue;
+      if (node.kind === "emit" || node.kind === "code") continue;
       const skills: Skill[] = [];
       for (const name of node.skills ?? []) {
         const skill =
@@ -246,7 +267,9 @@ export function createJuncoAgent(
 
 function hasAgents(spec: GraphSpec): boolean {
   return Object.values(spec.nodes).some((node) =>
-    node.kind === "graph" ? hasAgents(node.graph) : node.kind !== "emit",
+    node.kind === "graph"
+      ? hasAgents(node.graph)
+      : node.kind !== "emit" && node.kind !== "code",
   );
 }
 
@@ -363,8 +386,6 @@ async function registerAgent(
   id: string,
   node: Extract<NodeSpec, { model: string }>,
   registration: Registration,
-  outbound: readonly Edge[],
-  edges: ReadonlyMap<string, Edge>,
 ): Promise<void> {
   const resolved = c.specs.next().value!;
   const instance = c.options.createAgent
@@ -385,27 +406,13 @@ async function registerAgent(
             );
           return { expect: byEdge[edgeId]! };
         };
-  if (node.kind === "ralph") {
-    if (!(instance instanceof agent.JuncoAgent))
-      throw new TypeError("ralph node requires a JuncoAgent");
-    const registered = Ralph.register(g, instance, {
-      id: registration.id,
-      description: node.description,
-      input: edges.get(edgeId(inboundEdges(spec, id)[0]!))!,
-      output: outbound[0]!,
-      rounds: node.rounds,
-      policy: c.policy,
-    });
-    const is_available = registration.is_available;
-    if (is_available) Object.assign(g.getNode(registered)!, { is_available });
-  } else
-    g.addNode({
-      ...registration,
-      trigger: resolveTrigger(spec, id, node.trigger),
-      state: instance,
-      policy: c.policy,
-      ...(contract ? { contract } : {}),
-    });
+  g.addNode({
+    ...registration,
+    trigger: resolveTrigger(spec, id, node.trigger),
+    state: instance,
+    policy: c.policy,
+    ...(contract ? { contract } : {}),
+  });
 }
 
 async function buildGraph(
@@ -423,7 +430,9 @@ async function buildGraph(
     spec,
     parentOutputs,
     (id) => g.result(graph.NodeId.create(id)),
-    c.options.available?.$sink ? (v, t) => sinkHook!(v, t) : undefined,
+    c.options.available?.$sink
+      ? (v, t) => (sinkHook ? sinkHook(v, t) : t)
+      : undefined,
   );
   // parse validated these dynamic integers; Width.create only accepts numeric literals.
   const g: JuncoGraph = new JuncoGraph(
@@ -440,7 +449,7 @@ async function buildGraph(
   if (c.options.createAgent === undefined) c.partialRoots.add(g);
   const hook = (id: string) => c.options.available?.[id]?.({ graph: g, edges });
   sinkHook = hook("$sink");
-  const execution = schedulers.context({
+  const execution = schedules.context({
     scheduler: c.options.scheduler(label),
     graph: g,
   });
@@ -471,8 +480,26 @@ async function buildGraph(
         state: child,
       });
       c.partialRoots.delete(child.graph);
+    } else if (node.kind === "code") {
+      const created = await c.code.get(node.name)!.create({
+        graph: g,
+        label,
+        node: id,
+        edges,
+        policy: c.policy,
+        collection: c.collection,
+        context: c.options.context,
+        signal: c.options.signal,
+      });
+      g.addNode({
+        ...registration,
+        ...(created.is_available ? { is_available: created.is_available } : {}),
+        trigger: resolveTrigger(spec, id, node.trigger),
+        state: created.state,
+        ...(created.contract ? { contract: created.contract } : {}),
+      });
     } else {
-      await registerAgent(c, g, spec, id, node, registration, outbound, edges);
+      await registerAgent(c, g, spec, id, node, registration);
     }
   }
   for (const edge of spec.edges ?? [])
@@ -525,9 +552,50 @@ function compilePrompt(
     });
 }
 
+function codeNames(spec: GraphSpec, names: Set<string>): Set<string> {
+  for (const node of Object.values(spec.nodes))
+    if (node.kind === "graph") codeNames(node.graph, names);
+    else if (node.kind === "code") names.add(node.name);
+  return names;
+}
+
+async function resolveCode(
+  doc: JuncoDocument,
+  cwd: string,
+): Promise<ReadonlyMap<string, DeterministicNode>> {
+  const resolved = new Map<string, DeterministicNode>();
+  for (const name of codeNames(doc.graph, new Set())) {
+    const path = resolve(cwd, doc.code![name]!);
+    let module: Record<string, unknown>;
+    try {
+      // Module path comes from the document's `code:` registry at runtime.
+      module = await import(pathToFileURL(path).href);
+    } catch (error) {
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: code "${name}": cannot import ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const definition = module[name];
+    if (
+      !definition ||
+      typeof definition !== "object" ||
+      !("create" in definition) ||
+      typeof definition.create !== "function"
+    )
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: code "${name}": ${path} has no DeterministicNode export "${name}"`,
+      );
+    // Shape checked above; the context type C is the document author's contract.
+    const node: DeterministicNode = definition as DeterministicNode;
+    resolved.set(name, node);
+  }
+  return resolved;
+}
+
 /** Per-build state shared by every graph level; agents/graphs here are released on failure. */
 type Construction = {
   readonly options: BuildOptions;
+  readonly code: ReadonlyMap<string, DeterministicNode>;
   readonly policy: tools.Policy;
   readonly collection: tools.ToolCollection | undefined;
   readonly specs: Iterator<AgentSpec>;
@@ -543,16 +611,18 @@ type Registration = {
 };
 type Available = graph.AvailabilityFn<AgenticInput, AssistantMessage>;
 
-export async function build(
+export async function build<C = unknown>(
   doc: JuncoDocument,
-  options: BuildOptions,
+  options: BuildOptions<C>,
 ): Promise<Execution> {
+  const code = await resolveCode(doc, options.cwd);
   const policy = options.policy ?? tools.LockPolicy;
   const construct = async (
     collection?: tools.ToolCollection,
   ): Promise<Execution> => {
     const c: Construction = {
       options,
+      code,
       policy,
       collection,
       specs: (await resolveAgents(doc, { ...options, collection }))[

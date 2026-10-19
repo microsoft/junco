@@ -56,6 +56,66 @@ const fixedReader =
       trigger.rule.map((edgeId) => [edgeId, count]),
     );
 
+test("a value self-edge re-arms its node: each return re-resolves outputs and the node runs again until its availability declines", async () => {
+  const graph = newGraph();
+  const execution = context({ graph, scheduler: parallel() });
+  const seed = Edge.message<number, string>("seed");
+  const loop = Edge.value<number, string>("loop");
+  const out = Edge.value<number, string>("out");
+  const tap = Edge.value<number, string>("tap");
+  let primes = 0;
+  let activations = 0;
+  const source = graph.addNode(
+    new EmitOnce<void, number, string>(
+      () => [Message.create(seed, 1)],
+      "seed",
+      { state: undefined, trigger: TriggerRule.always() },
+    ),
+  );
+  const aId = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop)),
+    is_available: (_view, triggered) =>
+      triggered && (graph.getNode(aId)!.status === "running" || primes < 3),
+    step: async function* () {
+      primes++;
+      const view = yield [];
+      return String(Number(view.values.get(loop.id) ?? "0") + 1);
+    },
+  });
+  const bId = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.when(out),
+    is_available: (_view, triggered) =>
+      triggered && O.toUndefined(graph.result(aId)) === "3",
+    step: async function* () {
+      const view = yield [];
+      return view.values.get(out.id)!;
+    },
+  });
+  const cId = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.when(tap),
+    step: async function* () {
+      activations++;
+      const view = yield [];
+      return view.values.get(tap.id)!;
+    },
+  });
+  graph
+    .addEdge(source, aId, seed)
+    .addEdge(aId, aId, loop)
+    .addEdge(aId, bId, out)
+    .addEdge(aId, cId, tap);
+  const results = await execution.run();
+  assert.equal(primes, 3);
+  assert.equal(results.get(aId), "3");
+  assert.equal(results.get(bId), "3");
+  assert.equal(results.get(cId), "1");
+  assert.equal(activations, 1);
+  assert.equal(graph.available().size, 0);
+});
+
 test("value edge signals end-of-input: the squarer drains messages, then returns once the source's value lands", async () => {
   const e1 = Edge.message<number, string>("e1");
   const v = Edge.value<number, string>("v");

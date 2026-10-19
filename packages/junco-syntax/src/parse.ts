@@ -44,16 +44,37 @@ const fail = (path: string, message: string): never => {
   throw new graph.DataflowDefinitionError(`junco-syntax: ${path}: ${message}`);
 };
 
-export function parse(source: string | unknown): JuncoDocument {
+export type ParseOptions = {
+  /** Values spliced verbatim into `{{ params.<name> }}` placeholders before YAML parsing. */
+  readonly params?: Readonly<Record<string, string | number | boolean>>;
+};
+export const PARAM = /\{\{\s*params\.([A-Za-z_]\w*)\s*\}\}/g;
+
+export function parse(
+  source: string | unknown,
+  options: ParseOptions = {},
+): JuncoDocument {
+  const params = options.params ?? {};
   let value: unknown = source;
   if (typeof source === "string") {
+    const text = source.replace(PARAM, (_, name: string) => {
+      if (!Object.hasOwn(params, name))
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: missing param "${name}"`,
+        );
+      return String(params[name]);
+    });
     try {
-      value = Bun.YAML.parse(source);
+      value = Bun.YAML.parse(text);
     } catch (error) {
       throw new graph.DataflowDefinitionError(
         `junco-syntax: invalid YAML: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  } else if (options.params !== undefined) {
+    throw new graph.DataflowDefinitionError(
+      "junco-syntax: params apply to YAML text, not to parsed objects",
+    );
   }
   if (!Value.Check(JuncoDocumentSchema, value)) {
     const [error] = Value.Errors(JuncoDocumentSchema, value);
@@ -131,7 +152,7 @@ export function parse(source: string | unknown): JuncoDocument {
       const nodePath = `${path}/nodes/${pointer(id)}`;
       const inbound = inboundEdges(spec, id);
       const outbound = outboundEdges(spec, id);
-      if (node.kind !== "ralph") checkTrigger(id, node.trigger);
+      checkTrigger(id, node.trigger);
       if (node.kind === "graph")
         checkGraph(node.graph, `${nodePath}/graph`, node.graph.name ?? id, {
           inbound,
@@ -147,18 +168,10 @@ export function parse(source: string | unknown): JuncoDocument {
             nodePath,
             `Node "${id}" (emit) must have no inbound edges and only message outbound edges (at least one)`,
           );
+      } else if (node.kind === "code") {
+        if (!Object.hasOwn(doc.code ?? {}, node.name))
+          fail(nodePath, `Node "${id}" references unknown code "${node.name}"`);
       } else {
-        if (
-          node.kind === "ralph" &&
-          (inbound.length !== 1 ||
-            inbound[0]!.kind !== "message" ||
-            outbound.filter((e) => e.kind === "message").length !== 1 ||
-            Object.hasOwn(node, "trigger"))
-        )
-          fail(
-            nodePath,
-            `Node "${id}" (ralph) needs exactly one inbound message edge and one outbound message edge, and no trigger`,
-          );
         const inboundIds = new Set(inbound.map(edgeId));
         for (const [field, refs] of [
           ["contracts", Object.keys(node.contracts ?? {})],

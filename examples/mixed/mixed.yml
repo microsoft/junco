@@ -1,13 +1,12 @@
+code:
+  Goals: examples/mixed/code.ts
 graph:
   name: Mixed
   nodes:
     Goals:
-      kind: emit
+      kind: code
+      name: Goals
       description: Publishes the assignment once to both competitors.
-      text: |-
-        1. Explain what a dataflow graph is in two sentences.
-        2. Give one concrete example that combines a single agent with a nested graph.
-        3. Add one practical limitation of this design.
     Direct:
       model: github-copilot/claude-sonnet-5.5
       thinking: medium
@@ -18,12 +17,29 @@ graph:
       contracts:
         Goals~>Direct: One prompt message containing the complete numbered goals assignment, consumed through recv to produce one complete answer.
     Ralph:
-      kind: ralph
-      rounds: 2
-      model: github-copilot/claude-sonnet-5.5
-      thinking: medium
-      system: Complete every goal in the full assignment. Return a complete draft on each run; the second run revises the first.
+      kind: graph
       description: Runs two full-assignment rounds and sends only the final answer.
+      graph:
+        name: Ralph
+        source:
+          routes:
+            "Goals~>Ralph": ["$source~>Ralph"]
+        nodes:
+          Ralph:
+            model: github-copilot/claude-sonnet-5.5
+            thinking: medium
+            system: Complete every goal in the full assignment. Return a complete draft on each run; the second run revises the first.
+            description: Revises its complete answer each round; only the final round reaches Reviewer.
+            trigger:
+              any: ["$source~>Ralph", "Ralph->Ralph"]
+        edges:
+          - from: $source
+            to: Ralph
+            kind: message
+          - from: Ralph
+            to: Ralph
+          - from: Ralph
+            to: $sink
     Reviewer:
       model: github-copilot/claude-sonnet-5.5
       thinking: medium

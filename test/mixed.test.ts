@@ -12,7 +12,8 @@ import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import type { AgentSpec } from "junco-syntax";
-import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
+import { goalsPrompt } from "../examples/mixed/code.ts";
+import { MixedGraph } from "../examples/mixed/mixed.ts";
 import { Deterministic } from "../src/index.ts";
 import { nativeOptions } from "./support.ts";
 

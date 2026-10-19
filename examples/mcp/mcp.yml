@@ -1,3 +1,5 @@
+code:
+  Reports: examples/mcp/code.ts
 mcp:
   graft:
     command: npx
@@ -48,10 +50,18 @@ graph:
         Do not substitute inbound callers, do not omit any of the five classes, and do not treat a missing indexed edge as proof that no dependency exists.
       contracts:
         Research->Dependencies: Normally completed, non-empty research report selecting five classes, embedded as untrusted data in the dependency-analysis prompt.
+    Reports:
+      kind: code
+      name: Reports
+      description: Validates both completed reports and publishes the dependency analysis.
   edges:
     - from: Research
       to: Dependencies
+    - from: Research
+      to: Reports
     - from: Dependencies
+      to: Reports
+    - from: Reports
       to: $sink
   sink:
-    returns: Dependencies
+    returns: Reports

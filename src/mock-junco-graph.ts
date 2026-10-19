@@ -7,8 +7,8 @@ import { MockAgent, NO_USAGE } from "./mock-agent.js";
 /**
  * A JuncoGraph whose every node is profiled: a MockAgent member gets the constant profiles of
  * its transcript's `usage`, any other node without `profiles` (ports, coroutines, nested
- * graphs, real agents) gets zero memory and zero tokens. Strict resource schedulers
- * (`schedulers.limit`, `schedulers.lowest`) therefore accept the whole graph.
+ * graphs, real agents) gets zero memory and zero tokens. Strict resource schedules
+ * (`schedules.limit`, `schedules.lowest`) therefore accept the whole graph.
  */
 export class MockJuncoGraph<
   N = AgenticInput,

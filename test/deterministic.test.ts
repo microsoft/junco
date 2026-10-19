@@ -26,7 +26,7 @@ import {
   graph as graphApi,
   JuncoGraph,
   MockAgent,
-  schedulers,
+  schedules,
 } from "../src/index.ts";
 
 import { terminalPorts } from "./deterministic-support.ts";
@@ -106,9 +106,9 @@ describe("abort", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const result = Edge.value<string, string>("waiting-result");
     const entered = Promise.withResolvers<void>();
@@ -175,9 +175,9 @@ describe("abort", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
@@ -223,9 +223,9 @@ describe("abort", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const broken = new Error("body failed");
     let cleaned = 0;
@@ -270,9 +270,9 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
     quiet,
     LockPolicy,
   );
-  const parentContext = schedulers.context({
+  const parentContext = schedules.context({
     graph: parent,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   const childPorts = terminalPorts<string, string>();
   const child = new JuncoGraph(
@@ -283,9 +283,9 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
     quiet,
     LockPolicy,
   );
-  const childContext = schedulers.context({
+  const childContext = schedules.context({
     graph: child,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   const caller = new AbortController();
   const reason = new Error("caller stopped");
@@ -355,9 +355,9 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const input = Edge.message<string, string>("input");
     const suspendedCleanup = Edge.message<string, string>("suspended-cleanup");
@@ -463,9 +463,9 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const failure = new Error("finally failed");
     const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
@@ -520,9 +520,9 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
@@ -604,9 +604,9 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       graph: child,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const result = child.addNode({
       trigger: TriggerRule.always(),
@@ -621,9 +621,9 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const parentContext = schedulers.context({
+    const parentContext = schedules.context({
       graph: parent,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     parent.addNode({
       trigger: TriggerRule.always(),
@@ -679,9 +679,9 @@ describe("single consumer", () => {
       quiet,
       LockPolicy,
     );
-    const firstContext = schedulers.context({
+    const firstContext = schedules.context({
       graph: first,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
     const shared = new Deterministic<string, string>(async function* () {
@@ -706,9 +706,9 @@ describe("single consumer", () => {
       LockPolicy,
     );
 
-    const secondContext = schedulers.context({
+    const secondContext = schedules.context({
       graph: second,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const value = Edge.value<string, string>("shared-result");
     const downstream = consumer("downstream");
@@ -750,9 +750,9 @@ describe("single consumer", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const value = Edge.value<string, string>("closed-result");
     let bodyRan = false;
@@ -800,9 +800,9 @@ describe("single consumer", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const value = Edge.value<string, string | undefined>("undefined-result");
     const source = new Deterministic<string, string | undefined>(
@@ -1001,9 +1001,9 @@ describe("policy and borrowed collections", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const coroutine = new Deterministic<string, string>(async function* () {
       yield [];
@@ -1018,9 +1018,9 @@ describe("policy and borrowed collections", () => {
       quiet,
       EmptyPolicy,
     );
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       graph: child,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const childId = child.addNode({
       trigger: TriggerRule.always(),
@@ -1094,9 +1094,9 @@ describe("policy and borrowed collections", () => {
       quiet,
       LockPolicy,
     );
-    const agentsContext = schedulers.context({
+    const agentsContext = schedules.context({
       graph: agents,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const agentId = agents.addNode({
       state: new MockAgent({ runs: [] }),
@@ -1126,9 +1126,9 @@ describe("policy and borrowed collections", () => {
       quiet,
       EmptyPolicy,
     );
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       graph: child,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const answer = child.addNode({ state, trigger: TriggerRule.always() });
     childPorts.connect(child, answer);
@@ -1141,9 +1141,9 @@ describe("policy and borrowed collections", () => {
       quiet,
       LockPolicy,
     );
-    const parentContext = schedulers.context({
+    const parentContext = schedules.context({
       graph: parent,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const nested = parent.addNode({
       state: childContext,
@@ -1198,9 +1198,9 @@ describe("policy and borrowed collections", () => {
       LockPolicy,
       collection,
     );
-    const rootContext = schedulers.context({
+    const rootContext = schedules.context({
       graph: root,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const childPorts = terminalPorts<string, string>();
     const child = new JuncoGraph(
@@ -1212,9 +1212,9 @@ describe("policy and borrowed collections", () => {
       LockPolicy,
       collection,
     );
-    const childContext = schedulers.context({
+    const childContext = schedules.context({
       graph: child,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const coroutine = new Deterministic<string, string>(
       async function* () {

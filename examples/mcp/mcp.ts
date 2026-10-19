@@ -21,14 +21,15 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { agent, graph, schedulers, tools } from "junco-agency";
+import { agent, graph, schedules, tools } from "junco-agency";
 import { build, parse } from "junco-syntax";
 import { ctrlC } from "../cancellation/cancellation.ts";
 import source from "./mcp.yml" with { type: "text" };
 
 const document = parse(source);
+document.code = { Reports: fileURLToPath(new URL("./code.js", import.meta.url)) };
 
 // ## 1. Where the repository is
 //
@@ -60,18 +61,6 @@ const requiredTools = [
   "mcp__graft__graft_trace_calls",
 ] as const;
 
-/** A member's answer counts only when its run finished normally with text. */
-function finalText(message: AssistantMessage | undefined, member: string): string {
-  if (message?.stopReason !== "stop") {
-    const detail = message?.errorMessage ? `: ${message.errorMessage}` : "";
-    throw new Error(
-      `${member} did not finish normally: ${message?.stopReason ?? "no final message"}${detail}`,
-    );
-  }
-  const text = contentText(message.content).trim();
-  if (!text) throw new Error(`${member} produced an empty report`);
-  return text;
-}
 
 /**
  * GitHub's supported-models table lists Claude Sonnet 5.5 for Copilot (checked 2026-10-04,
@@ -117,7 +106,7 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
     execution = await build(document, {
       cwd: repositoryRoot,
       models,
-      scheduler: () => schedulers.parallel(),
+      scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,
       signal,
     });
@@ -135,8 +124,8 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     const results = await execution.run({ signal });
     signal?.throwIfAborted();
-    researchText = finalText(results.get(graph.NodeId.create("Research")), "Research");
-    dependencyText = finalText(results.get(graph.NodeId.create("Dependencies")), "Dependencies");
+    researchText = contentText(results.get(graph.NodeId.create("Research"))!.content).trim();
+    dependencyText = contentText(results.get(execution.graph.sink.id)!.content).trim();
   } catch (error) {
     failures.push(error);
   }

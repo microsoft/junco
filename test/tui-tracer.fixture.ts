@@ -27,7 +27,7 @@ import {
   agent,
   Deterministic,
   JuncoGraph,
-  schedulers,
+  schedules,
   tools,
   tracer,
 } from "../src/index.ts";
@@ -147,9 +147,9 @@ async function missingBinding(before: string, lazy: boolean) {
         undefined,
         LockPolicy,
       );
-      const graphContext = schedulers.context({
+      const graphContext = schedules.context({
         graph: graph,
-        scheduler: schedulers.parallel(),
+        scheduler: schedules.parallel(),
       });
       const forgetGraph = defer(() => graph.close());
       const id = graph.addNode({
@@ -331,9 +331,9 @@ async function renderingFailure(before: string) {
       tui,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     const forgetGraph = defer(() => graph.close());
     const failure = new Error("tui retained rendering failure");
@@ -405,9 +405,9 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
         tui,
         LockPolicy,
       );
-      const rootContext = schedulers.context({
+      const rootContext = schedules.context({
         graph: root,
-        scheduler: schedulers.parallel(),
+        scheduler: schedules.parallel(),
       });
       defer(() => root.close());
       root.addNode({
@@ -449,9 +449,9 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
       tui,
       LockPolicy,
     );
-    const replacementContext = schedulers.context({
+    const replacementContext = schedules.context({
       graph: replacement,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     defer(() => replacement.close());
     replacement.addNode({
@@ -530,9 +530,9 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
       tui,
       LockPolicy,
     );
-    const outerContext = schedulers.context({
+    const outerContext = schedules.context({
       graph: outer,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     defer(() => outer.close());
     const id = outer.addNode({
@@ -583,9 +583,9 @@ async function agentsScenario(
     explicit ? selected : undefined,
     LockPolicy,
   );
-  const graphContext = schedulers.context({
+  const graphContext = schedules.context({
     graph,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   assert.equal(
     modes(),
@@ -695,9 +695,9 @@ async function quietTerminal(before: string, dumb: boolean) {
       undefined,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     await withNativeCleanup(async (defer) => {
       defer(() => graph.close());
@@ -730,9 +730,9 @@ async function quietTerminal(before: string, dumb: boolean) {
       undefined,
       LockPolicy,
     );
-    const graphContext = schedulers.context({
+    const graphContext = schedules.context({
       graph: graph,
-      scheduler: schedulers.parallel(),
+      scheduler: schedules.parallel(),
     });
     assert.equal(modes(), before);
     await graph.close();

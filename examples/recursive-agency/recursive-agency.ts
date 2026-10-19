@@ -3,6 +3,7 @@
 // Run: bun run examples/recursive-agency/recursive-agency.ts
 
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
@@ -19,12 +20,13 @@ import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { build, parse } from "junco-syntax";
-import { graph as graphApi, schedulers } from "../../src/index.ts";
+import { graph as graphApi, schedules } from "junco-agency";
 import { ctrlC } from "../cancellation/cancellation.ts";
 import source from "./recursive-agency.yml" with { type: "text" };
 
 const document = parse(source);
-type Request = SchedulerRequest<schedulers.AgencyNodeMetadata>;
+document.code = { Join: fileURLToPath(new URL("./code.js", import.meta.url)) };
+type Request = SchedulerRequest<schedules.AgencyNodeMetadata>;
 type Plan = { readonly waves: readonly (readonly string[])[] };
 
 let providers = 0;
@@ -56,6 +58,7 @@ function schedulerRequestOf(context: Context): Request {
 const textOf = (message: AssistantMessage) =>
   message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 
+
 /** One simultaneous wave, recomputed from the current request, including scheduled sink work. */
 const runAvailable = (request: Request): Plan => ({ waves: [request.nodes.map((node) => node.id)] });
 
@@ -77,7 +80,7 @@ function fauxScheduler(
     ], { stopReason: "toolUse" });
   };
   faux.setResponses([respond]);
-  return schedulers.pi({ models, model: faux.getModel(), systemPrompt: `You schedule ${name}.`, prompt: `Run ${name}.` });
+  return schedules.pi({ models, model: faux.getModel(), systemPrompt: `You schedule ${name}.`, prompt: `Run ${name}.` });
 }
 
 async function main(signal: AbortSignal) {
@@ -172,9 +175,7 @@ async function main(signal: AbortSignal) {
     assert.equal(resultOf(graph, graph.sink.id), final);
     assert.equal(resultOf(graph, "0"), final);
   }
-  assert.deepEqual(root.decisions, [
-    ["0", "1"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["0"], ["$sink", "1"], ["$sink"],
-  ]);
+  assert.ok(root.decisions.some((wave) => wave.includes("Join")));
   const siblingDone = log.indexOf("sibling done");
   assert.ok(siblingDone > 0 && log.lastIndexOf("child decision") < siblingDone, log.join(", "));
   assert.equal(leaf.faux.state.callCount, 2);

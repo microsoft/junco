@@ -16,7 +16,7 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy } from "junco-tools";
 import createGraph from "ngraph.graph";
-import { Deterministic, JuncoGraph, schedulers } from "../src/index.ts";
+import { Deterministic, JuncoGraph, schedules } from "../src/index.ts";
 
 const options = { policy: LockPolicy, tracer: new DummyTracer() };
 
@@ -131,8 +131,8 @@ test("mapped node specs seed cycles and preserve nested sink results", async () 
     },
     { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) },
   );
-  const child = schedulers.context({
-    scheduler: schedulers.parallel(),
+  const child = schedules.context({
+    scheduler: schedules.parallel(),
     graph: new JuncoGraph(
       childSource,
       childSink,

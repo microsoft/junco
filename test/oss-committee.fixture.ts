@@ -170,9 +170,14 @@ export async function scriptedCommittee(
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);
     if (last?.role === "toolResult" && last.toolName === "yield") {
-      return fauxAssistantMessage(librarianReport, {
-        stopReason: librarianStopReason,
-      });
+      return fauxAssistantMessage(
+        librarianStopReason === "length"
+          ? librarianReport.slice(0, 4)
+          : librarianReport,
+        {
+          stopReason: librarianStopReason,
+        },
+      );
     }
     if (last?.role === "toolResult" && last.toolName === "guarded") {
       return fauxAssistantMessage(
@@ -301,9 +306,14 @@ export async function scriptedCommittee(
       throw new Error("Librarian did not receive its search result");
     librarianReport = reports.join("\n\n");
     if (!failed)
-      return fauxAssistantMessage(librarianReport, {
-        stopReason: librarianStopReason,
-      });
+      return fauxAssistantMessage(
+        librarianStopReason === "length"
+          ? librarianReport.slice(0, 4)
+          : librarianReport,
+        {
+          stopReason: librarianStopReason,
+        },
+      );
     return fauxAssistantMessage(
       [
         script.policyPauseBeforeSend
@@ -433,6 +443,9 @@ export async function scriptedCommittee(
     tools: Parameters<typeof JuncoAgent.fromResolved>[0]["tools"],
   ) => {
     const { models, model } = scripted(Array.from({ length: 32 }, () => turn));
+    // Match the truncated final's one-token usage; a shorter-than-budget `length` is native overflow recovery.
+    if (id === "Librarian" && librarianStopReason === "length")
+      model.maxTokens = 1;
     const agent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,

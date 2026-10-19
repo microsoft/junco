@@ -863,15 +863,23 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
     );
   }
 
-  /** Record `nodeId`'s return value and fan it into every unresolved outbound value edge. */
+  /** Record `nodeId`'s return value and fan it into every outbound value edge; a self-edge re-arms it. */
   #recordReturn(nodeId: NodeId, value: T): void {
     this.#results.set(nodeId, value);
     for (const link of this.#graph.getLinks(nodeId) ?? []) {
       if (link.fromId !== nodeId) continue;
       const edge = link.data;
       if (E.isLeft(edge.transport)) continue; // message edge
-      if (O.isSome(edge.transport.right)) continue; // write-once: never overwrite
       edge.transport = E.right(O.some(value));
+      if (link.toId === nodeId) this.#rearm(nodeId);
     }
+  }
+
+  /** A delivery on a node's own feedback edge after it returned starts another run of the node. */
+  #rearm(nodeId: NodeId): void {
+    const node = this.#graph.getNode(nodeId)!.data;
+    if (node.status !== "done") return;
+    node.status = "ready";
+    node.generator = undefined;
   }
 }

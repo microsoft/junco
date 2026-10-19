@@ -28,7 +28,7 @@ import {
   Deterministic,
   graph,
   JuncoGraph,
-  schedulers,
+  schedules,
   tools as toolsApi,
   tracer,
   trigger,
@@ -315,7 +315,7 @@ function taskExecution(observer: tracer.DataflowTracer): AgencyContext {
     observer,
     LockPolicy,
   );
-  return schedulers.context({ graph: work, scheduler: schedulers.parallel() });
+  return schedules.context({ graph: work, scheduler: schedules.parallel() });
 }
 
 function wireOutput(work: JuncoGraph, id: graph.NodeIdType): void {

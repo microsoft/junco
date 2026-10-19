@@ -24,7 +24,7 @@ import {
   type SourceEdit,
   VerdictRecorder,
 } from "../examples/yak-shaver/yak-shaver.ts";
-import { agent, tracer } from "../src/index.ts";
+import { agent, Deterministic, graph, tracer } from "../src/index.ts";
 import { flushMacrotasks, waitingTool } from "./support.ts";
 import {
   allPass,
@@ -1264,10 +1264,51 @@ describe("candidate batch graph", () => {
         handles: delayed.log.handles.length,
       });
     });
+    const inner = quiet();
+    let finalizerState: unknown;
+    let lastProposer: unknown;
+    let finalized: unknown;
+    let sink: unknown;
+    let earlySink = false;
+    const observer: tracer.DataflowTracer = {
+      startRun: (workflow) => {
+        const run = inner.startRun(workflow);
+        if (
+          workflow.getNode(graph.NodeId.create("FinalizeBatch")) === undefined
+        )
+          return run;
+        finalizerState ??= workflow.getNode(
+          graph.NodeId.create("FinalizeBatch"),
+        )?.state;
+        return {
+          ...run,
+          end: (results) => {
+            run.end(results);
+            lastProposer = results.get(graph.NodeId.create("Proposer:4"));
+            finalized = results.get(graph.NodeId.create("FinalizeBatch"));
+            sink = results.get(graph.NodeId.create("$sink"));
+            if (
+              sink !== undefined &&
+              [
+                "Proposer:1",
+                "Proposer:2",
+                "Proposer:3",
+                "Proposer:4",
+                "Judge:1",
+                "Judge:2",
+              ].some((id) => !results.has(graph.NodeId.create(id)))
+            )
+              earlySink = true;
+          },
+        };
+      },
+      complain: () => {},
+      flush: () => inner.flush(),
+    };
     const outcomes = await runCandidateBatch({
       snapshot: laneSnapshot,
       lanes: lanes.map(({ lane }) => lane),
-      observer: quiet(),
+      observer,
       apply: recorder.apply,
     });
     assert.equal(
@@ -1288,6 +1329,19 @@ describe("candidate batch graph", () => {
     const [applied] = outcomes;
     assert.ok(applied?.status === "applied");
     assert.deepEqual(applied.files, ["fx/dup1.ts"]);
+    assert.ok(finalizerState instanceof Deterministic);
+    assert.notEqual(lastProposer, undefined);
+    assert.equal(
+      finalized,
+      lastProposer,
+      "the code node returns the exact last proposer's message",
+    );
+    assert.equal(sink, finalized, "the sink receives the finalizer's result");
+    assert.equal(
+      earlySink,
+      false,
+      "the sink waits for every lane to be finalized",
+    );
     assertClosed(lanes);
   }, 60_000);
 
@@ -1365,11 +1419,62 @@ describe("candidate batch graph", () => {
         observer: quiet(),
         apply: recorder.apply,
       }),
-      /stage failed/,
+      (error: unknown) =>
+        error instanceof graph.DataflowNodeError &&
+        error.nodeId === graph.NodeId.create("FinalizeBatch") &&
+        error.error instanceof Error &&
+        error.error.message === "stage failed",
     );
     assert.equal(recorder.applied.length, 1);
     assertClosed(lanes);
   }, 30_000);
+
+  for (const { name, script, message, judgeCalls } of [
+    {
+      name: "missing proposal",
+      script: { skipProposal: true },
+      message: /Proposer:1 finished without recording submit_refactor/,
+      judgeCalls: 0,
+    },
+    {
+      name: "missing verdict",
+      script: { proposal: dupProposal(1), skipVerdict: true },
+      message: /Judge:1 finished without recording judge_refactor/,
+      judgeCalls: 1,
+    },
+    {
+      name: "empty final answer",
+      script: { proposerFinal: "" },
+      message: /Proposer:1 produced an empty final message/,
+      judgeCalls: 0,
+    },
+  ]) {
+    test(`${name} fails in the code node and closes every lane`, async () => {
+      const scripted = await scriptedLane(
+        laneWorks()[0]!,
+        laneSnapshot,
+        laneSources,
+        script,
+      );
+      const recorder = recordingApplier();
+      await assert.rejects(
+        runCandidateBatch({
+          snapshot: laneSnapshot,
+          lanes: [scripted.lane],
+          observer: quiet(),
+          apply: recorder.apply,
+        }),
+        (error: unknown) =>
+          error instanceof graph.DataflowNodeError &&
+          error.nodeId === graph.NodeId.create("FinalizeBatch") &&
+          error.error instanceof Error &&
+          message.test(error.error.message),
+      );
+      assert.equal(scripted.log.judgeCalls, judgeCalls);
+      assert.equal(recorder.applied.length, 0);
+      assertClosed([scripted]);
+    }, 30_000);
+  }
 
   test("cancelling right after a step recorded a completed review applies nothing", async () => {
     const [work] = laneWorks();
@@ -1450,7 +1555,13 @@ describe("candidate batch graph", () => {
         },
         noRefresh,
       ),
-      /Proposer:1|proposer exploded/,
+      (error: unknown) =>
+        error instanceof graph.DataflowNodeError &&
+        error.nodeId === graph.NodeId.create("FinalizeBatch") &&
+        error.error instanceof Error &&
+        /Proposer:1 did not finish normally: error: proposer exploded/.test(
+          error.error.message,
+        ),
     );
     assert.equal(calls, 1);
     assert.equal(recorder.applied.length, 0);

@@ -22,7 +22,7 @@ import {
   type MockRequest,
   type MockRun,
   type MockTerminal,
-  schedulers,
+  schedules,
 } from "junco-agency";
 import type { AgenticYieldReason } from "junco-agent";
 import {
@@ -93,7 +93,7 @@ export function policyContext(
 ) {
   const [window, width] = bounds(strategy, threads);
   const graph = new JuncoGraph(source, sink, window, width, quiet, LockPolicy);
-  return schedulers.context({
+  return schedules.context({
     graph,
     scheduler: policy<AgencyNodeMetadata>(strategy),
   });

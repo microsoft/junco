@@ -1070,7 +1070,7 @@ import "junco-mcp";
 const listeners = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal));
 const addons = Object.keys(require.cache).filter((path) => path.endsWith(".node"));
 // Loading-boundary test: static root import would execute before the captured baselines.
-const { JuncoGraph, Deterministic, tracer, graph, trigger, schedulers } = await import("junco-agency");
+const { JuncoGraph, Deterministic, tracer, graph, trigger, schedules } = await import("junco-agency");
 import { LockPolicy } from "junco-tools";
 assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal)), listeners);
 assert.deepEqual(Object.keys(require.cache).filter((path) => path.endsWith(".node")), addons);
@@ -1079,7 +1079,7 @@ const resultEdge = graph.Edge.value("quiet->$sink");
 const source = new graph.nodes.Source(() => { throw new graph.DataflowDefinitionError("Portable graph does not accept external input"); }, { id: graph.NodeId.create("$source") });
 const sink = new graph.nodes.Sink(async function* () { yield []; const result = flow.result(graph.NodeId.create("quiet")); if (result._tag !== "Some") throw new Error("quiet result is absent"); return result.value; }, { id: graph.NodeId.create("$sink"), trigger: trigger.TriggerRule.when(resultEdge) });
 const flow = new JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, LockPolicy);
-const execution = schedulers.context({ graph: flow, scheduler: schedulers.parallel() });
+const execution = schedules.context({ graph: flow, scheduler: schedules.parallel() });
 const id = flow.addNode({ id: graph.NodeId.create("quiet"), trigger: trigger.TriggerRule.always(), state: new Deterministic(async function* () { yield []; return "done"; }, LockPolicy) });
 flow.addEdge(id, sink.id, resultEdge);
 assert.equal((await execution.run()).get(id), "done");

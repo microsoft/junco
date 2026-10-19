@@ -206,6 +206,12 @@ export type LaneScript = {
   readonly hang?: { readonly shard: string; readonly tool: string };
   /** The proposer fails instead of researching. */
   readonly proposerFails?: boolean;
+  /** Finish normally after research without using the required result tool. */
+  readonly skipProposal?: boolean;
+  /** Finish normally without recording the required verdict. */
+  readonly skipVerdict?: boolean;
+  /** The proposer's final answer after recording its structured result. */
+  readonly proposerFinal?: string;
   /**
    * Native `yield` calls the proposer makes, one per turn, before it researches (or fails): each
    * pauses its node, so the lane spans at least this many more scheduler windows.
@@ -402,7 +408,8 @@ export async function scriptedLane(
       log.submitErrors.push(submitted.text);
       return fauxAssistantMessage("waiting for researchers");
     }
-    if (submitted !== undefined) return fauxAssistantMessage("result recorded");
+    if (submitted !== undefined)
+      return fauxAssistantMessage(script.proposerFinal ?? "result recorded");
     const reports = reportsIn(context);
     const decided = new Set(log.decisions);
     const question = reports.find(
@@ -434,6 +441,7 @@ export async function scriptedLane(
         return [];
       }
     });
+    if (script.skipProposal) return fauxAssistantMessage("proposal omitted");
     const missing = work.shards
       .map((shard) => shard.name)
       .filter(
@@ -466,6 +474,7 @@ export async function scriptedLane(
       script.onJudge?.();
       // The judge's input is the staged prompt its callback composed.
       log.judgeInputs.push(userTexts(context));
+      if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
       return toolUse(call("judge_refactor", script.verdict ?? allPass));
     },
     fauxAssistantMessage("verdict recorded"),

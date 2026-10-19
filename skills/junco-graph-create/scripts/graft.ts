@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, posix, win32 } from "node:path";
 import createGraph, { type Graph, type Link } from "ngraph.graph";
-import { graph, type schedulers } from "junco-agency";
+import { graph, type schedules } from "junco-agency";
 
 export type GraphMetaV1 = {
   readonly version: 1;
@@ -282,7 +282,7 @@ export function graftCheckpoints<N, T>(topology: GraftTopology, options: {
   readonly progress: (checkpoint: GraftCheckpoint<T>) => void | Promise<void>;
 }): {
   gate(metadata: GraftMetadata, spec: graph.nodes.AgenticNode<N, T>): graph.nodes.AgenticNode<N, T>;
-  run(workflow: schedulers.SchedulerContext<graph.nodes.Agentic<N, T>, N, T, never, graph.JuncoGraph<N, T>>): Promise<ReadonlyMap<graph.NodeIdType, T>>;
+  run(workflow: schedules.SchedulerContext<graph.nodes.Agentic<N, T>, N, T, never, graph.JuncoGraph<N, T>>): Promise<ReadonlyMap<graph.NodeIdType, T>>;
 } {
   const membership = new Map<string, GraftRegion>();
   const unlocked = new Set<string>();

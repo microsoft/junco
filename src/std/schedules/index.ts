@@ -1,4 +1,4 @@
-// Policies select work; contexts pair a policy with a passive native graph.
+// Policies select work; contexts pair a policy with a passive native graph; `ralph` drives the Ralph workflow.
 export {
   type InputSchedule,
   type MessageSchedule,
@@ -27,4 +27,5 @@ export {
   pi,
   type SchedulerRequest,
 } from "junco-scheduler/agent";
-export { type AgencyNodeMetadata, context } from "../node-policy.js";
+export { type AgencyNodeMetadata, context } from "../../node-policy.js";
+export { type RalphOptions, ralph } from "./ralph.js";

@@ -78,7 +78,7 @@ import {
   type MockRun,
   type MockTerminal,
   type MockTranscript,
-  schedulers,
+  schedules,
 } from "../src/index.ts";
 import type { NodePolicy } from "../src/node-policy.ts";
 
@@ -166,7 +166,7 @@ export async function factoriesKeepSpecializations(
     LockPolicy,
     collection,
   );
-  const execution = schedulers.context({ scheduler: pi(options), graph });
+  const execution = schedules.context({ scheduler: pi(options), graph });
   const retained: JuncoGraph = execution.graph;
   const bounds: readonly [WidthType, WidthType, DataflowTracer] = [
     graph.window,
@@ -202,14 +202,14 @@ export async function factoriesKeepSpecializations(
       Agentic,
       AgenticInput,
       AssistantMessage,
-      schedulers.AgencyNodeMetadata,
+      schedules.AgencyNodeMetadata,
       JuncoGraph
     >
   > = JuncoGraph.create(
     ".",
     { policy: EmptyPolicy, sandbox: "always" },
     (shared) =>
-      schedulers.context({
+      schedules.context({
         scheduler: parallel(),
         graph: new JuncoGraph(
           source,
@@ -498,7 +498,7 @@ export function wireTypesAndContextsArePreserved(
     child.sink.id,
     Edge.value<number, string>("member->$sink"),
   );
-  const childContext = schedulers.context({
+  const childContext = schedules.context({
     graph: child,
     scheduler: parallel(),
   });
@@ -528,7 +528,7 @@ export function wireTypesAndContextsArePreserved(
   );
   // @ts-expect-error a chat message cannot be emitted on a numeric graph
   graph.emit(ids[0]!, chat);
-  const execution = schedulers.context({ graph, scheduler: parallel() });
+  const execution = schedules.context({ graph, scheduler: parallel() });
   const selected: O.Option<string> = child.result(childId);
   const results: Promise<ReadonlyMap<NodeIdType, string>>[] = [
     execution.run(),
@@ -1213,10 +1213,10 @@ export function typedPortsAndNestedContexts(
     // @ts-expect-error sink IDs are mandatory
     { trigger: TriggerRule.never() },
   );
-  const agency = schedulers.context({
+  const agency = schedules.context({
     graph,
     scheduler: (snapshot) => {
-      const metadata: ReadonlyMap<NodeIdType, schedulers.AgencyNodeMetadata> =
+      const metadata: ReadonlyMap<NodeIdType, schedules.AgencyNodeMetadata> =
         snapshot.context;
       const inputs: ParentView<number, string> | undefined =
         snapshot.inputs.get(source.id);
@@ -1273,7 +1273,7 @@ export function mappingRetainsLinkTypesAndRequiresPorts(
     Agentic<number, string>,
     number,
     string,
-    schedulers.AgencyNodeMetadata,
+    schedules.AgencyNodeMetadata,
     JuncoGraph<number, string>
   > = execution;
   const link: { readonly tag: string } | undefined = skeleton
@@ -1301,7 +1301,7 @@ export function mappingRetainsLinkTypesAndRequiresPorts(
 }
 
 export function agencyMetadataIsSourceExact(
-  metadata: schedulers.AgencyNodeMetadata,
+  metadata: schedules.AgencyNodeMetadata,
 ) {
   const status: NonNullable<NodePolicy["agent"]>["status"] | undefined =
     metadata.agentStatus;

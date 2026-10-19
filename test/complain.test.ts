@@ -15,7 +15,7 @@ import {
   graph,
   JuncoGraph,
   MockAgent,
-  schedulers,
+  schedules,
   tools,
   trigger,
 } from "../src/index.ts";
@@ -129,9 +129,9 @@ function newGraph(tracer: DummyTracer = new RecordingTracer()) {
     tracer,
     LockPolicy,
   );
-  const execution = schedulers.context({
+  const execution = schedules.context({
     graph: flow,
-    scheduler: schedulers.parallel(),
+    scheduler: schedules.parallel(),
   });
   closers.push(() => flow.close());
   return { execution, ports };

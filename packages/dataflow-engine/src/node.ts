@@ -58,7 +58,7 @@ export function snapshotView<N, T>(view: ParentView<N, T>): ParentView<N, T> {
   return Object.freeze({ messages, values });
 }
 
-/** Lifecycle of a node: never activated, mid-generator, or terminated. */
+/** Lifecycle of a node: never activated, mid-generator, or returned (a value self-edge delivery re-arms it to `ready`). */
 export type NodeStatus = "ready" | "running" | "done";
 
 /** The generator a node body returns: yields message batches, is resumed with views, returns `T`. */

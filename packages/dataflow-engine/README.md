@@ -11,7 +11,7 @@ Each node is an `async function*`. The graph owns work, topology, concrete execu
 flowchart TB
   subgraph Definition["new DataflowGraph#lt;S, N, T, EH#gt;(window, threads, tracer?) — passive work graph"]
     N["addNode(NodeSpec#lt;S, N, T#gt;): NodeIdType<br/>trigger: TriggerRule; step: async generator"]
-    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>message: FIFO queue; value: write-once result"]
+    E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>message: FIFO queue; value: latest return"]
   end
   subgraph Context["context({ graph, scheduler }) — external policy and local history"]
     A["available() + observe()<br/>typed native data and external metadata"] --> P["Scheduler(snapshot, signal?)<br/>Decision: ordered selected work IDs"]
@@ -35,7 +35,7 @@ flowchart TB
 | Part | Role |
 |---|---|
 | `DataflowGraph<S, N, T, EH>` | Owns native nodes/edges (an `ngraph.graph` multigraph), observations and concrete execution via `evaluate`. `S`, `N`, `T` retain native state, message and result types; `EH` is the node-body error type. Construction takes only window/thread bounds and an optional tracer. |
-| `Edge.message` / `Edge.value` | A FIFO queue of `N`, or a write-once cell that holds the source node's return value. |
+| `Edge.message` / `Edge.value` | A FIFO queue of `N`, or a cell holding the source node's latest return value. |
 | Triggers | Decide **which** inbound edges must have something before a node can run: `always`, `when`, `allOf`, `anyOf`, `never`. |
 | `SchedulerContext<S,N,T,C,G>` | Externally pairs a graph with a typed policy, application metadata `C` and independent history; its `step()`/`run()` drive the graph. Policies and contexts are never work members. |
 
@@ -97,17 +97,17 @@ const results = await execution.run();
 
 A node body has the type `NodeGenerator<N, T> = AsyncGenerator<Message<N>[], T, ParentView<N, T>>`. Each activation advances its generator exactly once:
 
-1. **Prime.** On a node's first activation, the runtime calls `step()` and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
+1. **Prime.** On a node's first activation (or its first activation after re-arming), the runtime calls `step()` to create a fresh generator and then `next()` without consuming any input. A dependent node therefore starts with `let view = yield []`, while a source can yield real output straight away.
 2. **Deliver.** Every later activation pops the scheduled inputs and calls `next(view)`. `from(view, edge)` (or `view.messages.get(edge.id)`) is this turn's batch from that edge. A key exists only for an edge that actually delivered something, which is how an `anyOf` body tells which branch fired. `view.values` holds the value edges that have resolved.
 3. **Emit.** Each `yield` is the full list of messages for this turn, routed in order. `yield []` emits nothing and keeps the node alive.
-4. **Finish.** `return value` marks the node `done`, records `value` in `graph.results()` and the context drive's result map, and resolves every outbound value edge. A node that never returns, such as a streaming sink or any `StepNode`, is absent from the results.
+4. **Finish.** `return value` marks the node `done`, replaces its retained value in `graph.results()` and the context drive's result map, and re-resolves every outbound value edge with that latest return. A value edge from the node to itself immediately re-arms it to `ready`, discarding the finished generator but retaining the same node state. Its next activation starts a new generator. A node that never returns, such as a streaming sink or any `StepNode`, is absent from the results.
 5. **Fail.** A throw terminates the node and rejects execution with `DataflowNodeError` (`nodeId`, `error: EH`) — unless the node has an `on_error` hook (below).
 
 An optional `on_error(error, signal)` (`ErrorFn<S, N, T>`) on the spec recovers a body failure: a throw from `step()` or the generator's `next()`. The node is `done` first; the hook then runs once, as a method with the node as `this`, in the same activation, and its returned messages are routed in order like a yield (`[]` routes nothing). The node records no result and its value edges stay unresolved; the tracer sees the activation's `fail(error)` and, if nothing else fails, a normal run `end`. A body that threw exactly the aborted signal's reason propagates it without calling the hook. Wiring, scheduling and routing errors (`DataflowDefinitionError`) never reach it. A hook that throws rejects the invocation with `DataflowNodeError` carrying its own error (or a `DataflowDefinitionError`/the aborted signal's reason unchanged) and is never run again; an unwired returned message rejects after earlier ones were queued.
 
 A non-arrow body receives its `Node` as `this`, so it can read and write `this.state`.
 
-Local variables in a generator persist across activations. Here, taken from `examples/fibonacci.ts`, a node feeds itself through a self-loop and stops after ten turns:
+Local variables in a generator persist across activations, but not across re-armed runs; retain cross-run data in the node's state. Here, taken from `examples/fibonacci.ts`, a node feeds itself through a message self-loop within one generator and stops after ten turns:
 
 ```ts
 const fib = graph.addNode({
@@ -140,7 +140,7 @@ const report = graph.addNode({
 graph.addEdge(source, report, done);
 ```
 
-A value edge is never consumed: once resolved, it satisfies its trigger on every later turn. A node triggered only by value edges must therefore return, or `run()` never settles.
+A value edge is never consumed: once resolved, it satisfies its trigger on every later turn and carries the source's latest return. Only a **value self-edge** re-arms a returned node: re-resolution on a non-self edge never re-arms a finished consumer, and message self-edges do not re-arm it either. A value-feedback loop must bound its runs with `is_available` (for example, a retained round counter); returning alone no longer stops such a loop. More generally, a node triggered only by resolved value edges must return without self-feedback or eventually decline availability, or `run()` never settles.
 
 ### Constant fan-out and fan-in
 

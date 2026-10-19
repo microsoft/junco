@@ -722,7 +722,7 @@ export class AgentDriver {
     Pick<ToolCollection, "policy"> &
     Pick<AgenticNode, "contract"> {
     const { complete, inputMode } = binding;
-    const seenValues = new Set<EdgeIdType>();
+    const seenValues = new Map<EdgeIdType, unknown>();
     const policy: NodePolicy = {
       agent,
       seenValues,
@@ -1032,6 +1032,17 @@ export class AgentDriver {
       async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
         // Captured once, at priming: a promoted agent keeps this node's routes and topology.
         driver.registration = registeredNodeContexts.get(this);
+        // A later run of a re-armed node: same agent and retained inbox, a fresh settlement.
+        if (driver.result !== undefined) {
+          if (spawned !== undefined)
+            throw new JuncoAgentError(
+              "invalid_state",
+              "A promoted task node cannot run again",
+            );
+          driver.result = undefined;
+          driver.started = false;
+          driver.active = false;
+        }
         let view = yield [];
         /** The result already reported; a failed attempt's state is closed by then. */
         let reported: AssistantMessage | undefined;
@@ -1075,7 +1086,9 @@ export class AgentDriver {
       view: ParentView<AgenticInput, AssistantMessage>,
     ): boolean => {
       if (hasMessages(view)) return true;
-      for (const id of view.values.keys()) if (!seenValues.has(id)) return true;
+      for (const id of view.values.keys())
+        if (!seenValues.has(id) || seenValues.get(id) !== view.values.get(id))
+          return true;
       return false;
     };
 
