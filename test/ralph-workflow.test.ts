@@ -14,21 +14,25 @@ import {
   DataflowNodeError,
   DummyTracer,
   Edge,
-  NodeId,
-  Source, Sink, Width, UNBOUNDED, TriggerEntry,
-  type TriggerEntry as TriggerEntryType,
-  type NodeIdType,
   type NodeGenerator,
+  NodeId,
+  type NodeIdType,
+  Sink,
+  Source,
+  TriggerEntry,
+  type TriggerEntry as TriggerEntryType,
   TriggerRule,
+  UNBOUNDED,
+  Width,
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
-import { LockPolicy, YieldTool } from "junco-tools";
 import { parallel } from "junco-scheduler";
-import { context } from "../src/node-policy.ts";
+import { LockPolicy, YieldTool } from "junco-tools";
 import createGraph from "ngraph.graph";
 import { type AgenticInput, JuncoGraph } from "../src/index.ts";
+import { context } from "../src/node-policy.ts";
 import { Ralph } from "../src/workflows/index.ts";
 import { nativeOptions, waitingTool } from "./support.ts";
 
@@ -127,38 +131,81 @@ type Boundary = {
 const boundaries = new WeakMap<JuncoGraph, Boundary>();
 function parentContext() {
   const config: Boundary = { entries: [], results: [], recorders: new Map() };
-  const source = new Source<AgenticInput, AssistantMessage>((view) =>
-    [...view.messages.keys()].flatMap((id) => (view.messages.get(id) ?? []).map((payload) => ({ id, payload }))),
-    { id: NodeId.create("$source") });
-  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-    const view = yield [];
-    for (const edge of view.messages.keys()) config.recorders.get(edge)?.(view.messages.get(edge) ?? []);
-    const result = graph.result(config.results.at(-1)!);
-    assert.ok(O.isSome(result));
-    return result.value;
-  }, { id: NodeId.create("$sink"), trigger: { kind: "all", rule: config.entries },
-    is_available: (_view, triggered) => triggered && config.results.length > 0 });
-  const graph: JuncoGraph<AgenticInput, AssistantMessage> = new JuncoGraph(source, sink, Width.create(1), UNBOUNDED, quiet, LockPolicy);
+  const source = new Source<AgenticInput, AssistantMessage>(
+    (view) =>
+      [...view.messages.keys()].flatMap((id) =>
+        (view.messages.get(id) ?? []).map((payload) => ({ id, payload })),
+      ),
+    { id: NodeId.create("$source") },
+  );
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<
+    AgenticInput,
+    AssistantMessage
+  >(
+    async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+      const view = yield [];
+      for (const edge of view.messages.keys())
+        config.recorders.get(edge)?.(view.messages.get(edge) ?? []);
+      const result = graph.result(config.results.at(-1)!);
+      assert.ok(O.isSome(result));
+      return result.value;
+    },
+    {
+      id: NodeId.create("$sink"),
+      trigger: { kind: "all", rule: config.entries },
+      is_available: (_view, triggered) =>
+        triggered && config.results.length > 0,
+    },
+  );
+  const graph: JuncoGraph<AgenticInput, AssistantMessage> = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    quiet,
+    LockPolicy,
+  );
   boundaries.set(graph, config);
   const work = parallel();
-  return context({ graph, scheduler: (snapshot, signal) => {
-    // Admit external batches before advancing controllers whose native inbox was still empty
-    // when this column's reads were planned.
-    if (snapshot.available.has(source.id)) return { selected: [source.id] };
-    return work(snapshot, signal);
-  } });
+  return context({
+    graph,
+    scheduler: (snapshot, signal) => {
+      // Admit external batches before advancing controllers whose native inbox was still empty
+      // when this column's reads were planned.
+      if (snapshot.available.has(source.id)) return { selected: [source.id] };
+      return work(snapshot, signal);
+    },
+  });
 }
 function mappedPorts() {
   let graph: JuncoGraph;
   const final = Edge.value<AgenticInput, AssistantMessage>("work->$sink");
-  const source = new Source<AgenticInput, AssistantMessage>(() => { throw new Error("No external input"); }, { id: NodeId.create("$source") });
-  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<AgenticInput, AssistantMessage>(async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
-    yield [];
-    const result = graph.result(NodeId.create("work"));
-    assert.ok(O.isSome(result));
-    return result.value;
-  }, { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) });
-  return { source, sink, wire(value: JuncoGraph) { graph = value; graph.addEdge(NodeId.create("work"), sink.id, final); } };
+  const source = new Source<AgenticInput, AssistantMessage>(
+    () => {
+      throw new Error("No external input");
+    },
+    { id: NodeId.create("$source") },
+  );
+  const sink: Sink<AgenticInput, AssistantMessage> = new Sink<
+    AgenticInput,
+    AssistantMessage
+  >(
+    async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
+      yield [];
+      const result = graph.result(NodeId.create("work"));
+      assert.ok(O.isSome(result));
+      return result.value;
+    },
+    { id: NodeId.create("$sink"), trigger: TriggerRule.when(final) },
+  );
+  return {
+    source,
+    sink,
+    wire(value: JuncoGraph) {
+      graph = value;
+      graph.addEdge(NodeId.create("work"), sink.id, final);
+    },
+  };
 }
 
 let edges = 0;
@@ -177,12 +224,15 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
   );
   const delivered: string[] = [];
   let sinkRuns = 0;
-  const final = Edge.value<AgenticInput, AssistantMessage>(`ralph-result-${tag}`);
+  const final = Edge.value<AgenticInput, AssistantMessage>(
+    `ralph-result-${tag}`,
+  );
   const config = boundaries.get(parent)!;
   config.entries.push(TriggerEntry.on(output), TriggerEntry.on(final));
   config.recorders.set(output.id, (values) => {
     sinkRuns++;
-    for (const value of values) delivered.push(value.kind === "appendMessage" ? "" : value.text);
+    for (const value of values)
+      delivered.push(value.kind === "appendMessage" ? "" : value.text);
   });
   let id: NodeIdType;
   try {
@@ -196,8 +246,10 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     void agent.return();
     throw error;
   }
-  parent.addEdge(parent.source.id, id, input)
-    .addEdge(id, parent.sink.id, output).addEdge(id, parent.sink.id, final);
+  parent
+    .addEdge(parent.source.id, id, input)
+    .addEdge(id, parent.sink.id, output)
+    .addEdge(id, parent.sink.id, final);
   config.results.push(id);
   return {
     id,
@@ -206,7 +258,10 @@ function attach(parent: JuncoGraph, agent: JuncoAgent, rounds?: number) {
     delivered,
     sinkRuns: () => sinkRuns,
     send: (...inputs: AgenticInput[]) => {
-      parent.source.enqueue({ messages: new Map([[input.id, inputs]]), values: new Map() });
+      parent.source.enqueue({
+        messages: new Map([[input.id, inputs]]),
+        values: new Map(),
+      });
     },
   };
 }
@@ -216,25 +271,37 @@ const revision = (previous: string) =>
 
 describe("ralph workflow", () => {
   for (const invalid of ["foreign message", "value input"] as const) {
-    test(`rejects ${invalid} at the scheduled source before provider work`, async () => {
-      const execution = parentContext();
-      await using parent = execution.graph;
-      const { agent, requests } = await member(["unused"]);
-      const flow = attach(parent, agent);
-      const child = parent.getNode(flow.id)?.state;
-      assert.ok(child instanceof JuncoGraph);
-      const foreign = Edge.message<AgenticInput, AssistantMessage>("foreign");
-      child.source.enqueue(invalid === "foreign message" ? {
-        messages: new Map([[foreign.id, [prompt(assignment)]]]), values: new Map(),
-      } : {
-        messages: new Map(), values: new Map([[foreign.id, fauxAssistantMessage("invalid")]]),
-      });
-      flow.send(prompt(assignment));
-      await assert.rejects(execution.run(), DataflowNodeError);
-      assert.equal(requests.length, 0);
-      assert.ok(O.isNone(parent.result(flow.id)));
-      assert.deepEqual(flow.delivered, []);
-    }, TIMEOUT_MS);
+    test(
+      `rejects ${invalid} at the scheduled source before provider work`,
+      async () => {
+        const execution = parentContext();
+        await using parent = execution.graph;
+        const { agent, requests } = await member(["unused"]);
+        const flow = attach(parent, agent);
+        const child = parent.getNode(flow.id)?.state;
+        assert.ok(child instanceof JuncoGraph);
+        const foreign = Edge.message<AgenticInput, AssistantMessage>("foreign");
+        child.source.enqueue(
+          invalid === "foreign message"
+            ? {
+                messages: new Map([[foreign.id, [prompt(assignment)]]]),
+                values: new Map(),
+              }
+            : {
+                messages: new Map(),
+                values: new Map([
+                  [foreign.id, fauxAssistantMessage("invalid")],
+                ]),
+              },
+        );
+        flow.send(prompt(assignment));
+        await assert.rejects(execution.run(), DataflowNodeError);
+        assert.equal(requests.length, 0);
+        assert.ok(O.isNone(parent.result(flow.id)));
+        assert.deepEqual(flow.delivered, []);
+      },
+      TIMEOUT_MS,
+    );
   }
 
   test(
@@ -271,13 +338,16 @@ describe("ralph workflow", () => {
         policy: LockPolicy,
         tracer: quiet,
       });
-      assert.ok("graph" in spec.state && spec.state.graph instanceof JuncoGraph);
+      assert.ok(
+        "graph" in spec.state && spec.state.graph instanceof JuncoGraph,
+      );
       assert.equal("policy" in spec, false);
       assert.equal("step" in spec, false);
       assert.equal(spec.state.graph.tracer, quiet);
       const ports = mappedPorts();
       const execution = JuncoGraph.map(skeleton, () => spec, {
-        source: ports.source, sink: ports.sink,
+        source: ports.source,
+        sink: ports.sink,
         policy: LockPolicy,
         tracer: quiet,
       });
@@ -331,7 +401,12 @@ describe("ralph workflow", () => {
               policy: LockPolicy,
               tracer: quiet,
             }),
-          { source: ports.source, sink: ports.sink, policy: LockPolicy, tracer: quiet },
+          {
+            source: ports.source,
+            sink: ports.sink,
+            policy: LockPolicy,
+            tracer: quiet,
+          },
         );
         const parent = execution.graph;
         ports.wire(parent);
@@ -413,7 +488,7 @@ describe("ralph workflow", () => {
       `rounds: ${rounds} runs exactly ${rounds} full rounds and publishes only the last`,
       async () => {
         const execution = parentContext();
-      await using parent = execution.graph;
+        await using parent = execution.graph;
         const drafts = Array.from(
           { length: rounds },
           (_, index) => `draft-${index + 1}`,
@@ -468,7 +543,10 @@ describe("ralph workflow", () => {
         parent.forEachNode((id) => ids.push(id));
         return ids;
       };
-      assert.deepEqual(nodes(), [NodeId.create("$source"), NodeId.create("$sink")]);
+      assert.deepEqual(nodes(), [
+        NodeId.create("$source"),
+        NodeId.create("$sink"),
+      ]);
       for (const rounds of [
         0,
         -1,
@@ -521,7 +599,7 @@ describe("ralph workflow", () => {
       `rejects ${name} before any model work`,
       async () => {
         const execution = parentContext();
-      await using parent = execution.graph;
+        await using parent = execution.graph;
         const { agent, requests } = await member(["draft-1", "draft-2"]);
         const flow = attach(parent, agent);
 
@@ -582,7 +660,7 @@ describe("ralph workflow", () => {
       `${name} rejects without publishing an earlier draft`,
       async () => {
         const execution = parentContext();
-      await using parent = execution.graph;
+        await using parent = execution.graph;
         const { agent, requests } = await member(replies);
         const flow = attach(parent, agent);
 

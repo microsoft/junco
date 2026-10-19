@@ -1,5 +1,9 @@
 export { EmitOnce, from, StepNode } from "./builders.js";
-export type { DataflowRunOptions, DataflowObservation, DataflowExecution } from "./dataflow-graph.js";
+export type {
+  DataflowExecution,
+  DataflowObservation,
+  DataflowRunOptions,
+} from "./dataflow-graph.js";
 export { DataflowGraph } from "./dataflow-graph.js";
 export type {
   DataflowRunTrace,
@@ -27,6 +31,27 @@ export type {
 export { Message } from "./node.js";
 export type { Pretty } from "./pretty.js";
 export { renderPretty } from "./pretty.js";
+export type {
+  DimensionOf,
+  Estimate,
+  FeatureVector,
+  Measure,
+  PortFeature,
+  ProfileData,
+  ProfileSet,
+  Profiles,
+  ProfilesOption,
+  ResourceKind,
+  ResourceQuantity,
+  ResourceUnit,
+} from "./profile.js";
+export {
+  COMPOSE,
+  constantProfile,
+  NO_PROFILES,
+  RESOURCE_KINDS,
+  RESOURCES,
+} from "./profile.js";
 export { Queue } from "./queue.js";
 export type {
   InputSchedule,
@@ -36,7 +61,7 @@ export type {
   Schedule,
 } from "./scheduler.js";
 export { triggerInputs } from "./scheduler.js";
-export { ConstFanin, ConstFanout, Source, Sink } from "./stdlib.js";
+export { ConstFanin, ConstFanout, Sink, Source } from "./stdlib.js";
 export type { TriggerKind } from "./trigger.js";
 export {
   evaluateTrigger,
@@ -44,11 +69,17 @@ export {
   TriggerEntry,
   TriggerRule,
 } from "./trigger.js";
+export {
+  bytes,
+  gibibytes,
+  gigabytes,
+  Information,
+  kibibytes,
+  kilobytes,
+  mebibytes,
+  megabytes,
+  Tokens,
+  tokens,
+} from "./units.js";
 export type { ValidWidth, Width as WidthType } from "./width.js";
 export { UNBOUNDED, Width } from "./width.js";
-export type {
-  DimensionOf, Estimate, FeatureVector, Measure, PortFeature, ProfileData, Profiles,
-  ProfilesOption, ProfileSet, ResourceKind, ResourceQuantity, ResourceUnit,
-} from "./profile.js";
-export { COMPOSE, constantProfile, NO_PROFILES, RESOURCES, RESOURCE_KINDS } from "./profile.js";
-export { Information, Tokens, bytes, kilobytes, megabytes, gigabytes, kibibytes, mebibytes, gibibytes, tokens } from "./units.js";

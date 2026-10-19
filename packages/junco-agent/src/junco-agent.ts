@@ -80,6 +80,7 @@ import type {
   AgenticStatus,
   AgenticStep,
   AgenticYieldReason,
+  TokenMonitorConfig,
 } from "./agentic.js";
 
 export class JuncoAgentError extends Error {
@@ -209,13 +210,14 @@ type OwnedResources = {
 
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
+  const { binding, collection, repo } = owned;
   for (const release of [
     ...[...(owned.mcp ?? [])]
       .reverse()
       .map((connection) => () => connection.close()),
-    owned.binding && (() => owned.binding!.close()),
-    owned.collection && (() => owned.collection!.close()),
-    owned.repo && (() => owned.repo!.close(BACKGROUND_CONTEXT)),
+    binding && (() => binding.close()),
+    collection && (() => collection.close()),
+    repo && (() => repo.close(BACKGROUND_CONTEXT)),
   ]) {
     if (release === undefined) continue;
     try {
@@ -287,6 +289,26 @@ async function resolveToolSources(
     }
   }
   return tools;
+}
+
+/** A monitor needs at least one threshold, and every supplied threshold positive and finite. */
+function validateTokenMonitor({
+  tokenThreshold,
+  costThreshold,
+}: TokenMonitorConfig): void {
+  const thresholds = [tokenThreshold, costThreshold].filter(
+    (threshold) => threshold !== undefined,
+  );
+  if (
+    thresholds.length === 0 ||
+    !thresholds.every(
+      (threshold) => Number.isFinite(threshold) && threshold > 0,
+    )
+  )
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "tokenMonitor needs a positive finite tokenThreshold or costThreshold",
+    );
 }
 
 function validateActiveTools(
@@ -411,7 +433,7 @@ class RunRecord implements AgenticRun {
         readonly executedYields: Map<string, AgentTool>;
       }
     | undefined;
-  held: Boundary | undefined;
+  held: HeldBoundary | undefined;
   /** The latest model request of this run, snapshotted at the provider boundary. */
   prompt: Prompt | undefined;
   /** Why the latest request could not be snapshotted, when it could not. */
@@ -425,13 +447,17 @@ class RunRecord implements AgenticRun {
   }
 }
 
-type Boundary = {
+type BoundaryBase = {
   readonly step: AgenticStep;
   readonly run?: RunRecord;
-  readonly gate?: PromiseWithResolvers<void>;
   /** A turn_end yield becomes readable only after the complete public event has been delivered. */
   ready?: boolean;
 };
+/** A pause: the run resumes once `gate` resolves. */
+type HeldBoundary = BoundaryBase & {
+  readonly gate: PromiseWithResolvers<void>;
+};
+type Boundary = (BoundaryBase & { readonly gate?: undefined }) | HeldBoundary;
 type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
   acted: boolean;
   /** The graph view this `next` carried, read only by a staged prompt function. */
@@ -587,7 +613,8 @@ export class JuncoAgent<
       const available = await models.getAvailable(provider);
       if (
         !available.some(
-          (candidate) => candidate.provider === provider && candidate.id === modelId,
+          (candidate) =>
+            candidate.provider === provider && candidate.id === modelId,
         )
       ) {
         throw new JuncoAgentError(
@@ -668,6 +695,14 @@ export class JuncoAgent<
       );
     return this.#lane;
   }
+  get #nativeHarness(): AgentHarness<undefined> {
+    if (this.#harness === undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        "JuncoAgent harness is not initialized",
+      );
+    return this.#harness;
+  }
   /** This agent's identity for complaints made outside a bound graph node. */
   readonly nodeId: NodeIdType = NodeId.create(`agent-${crypto.randomUUID()}`);
   /** The always-on complaint tool this agent owns; supplied genuine ones are rebound to it. */
@@ -684,7 +719,7 @@ export class JuncoAgent<
   readonly #drives = new Set<Promise<unknown>>();
   readonly #operations = new Set<Promise<unknown>>();
   readonly #boundaries: Boundary[] = [];
-  readonly #held: Boundary[] = [];
+  readonly #held: HeldBoundary[] = [];
   readonly #demands: Demand[] = [];
   /** FIFO of queued compactions; never rejects, so one failure cannot poison later requests. */
   #compactionTail: Promise<void> = Promise.resolve();
@@ -714,6 +749,8 @@ export class JuncoAgent<
     options: AgenticOptions<S, P, T>,
     owned: OwnedResources = {},
   ) {
+    if (options.tokenMonitor !== undefined)
+      validateTokenMonitor(options.tokenMonitor);
     this.#options = options;
     this.collection = options.collection;
     this.#owned = owned;
@@ -750,6 +787,7 @@ export class JuncoAgent<
       resources: _resources,
       collection: _collection,
       contract: _contract,
+      tokenMonitor,
       activeToolNames,
       ...native
     } = this.#options;
@@ -800,9 +838,11 @@ export class JuncoAgent<
         if (lane !== "main") return undefined;
         const run = this.#runForOperation(runId);
         this.#readyYield(run);
-        if (run?.held !== undefined) await run.held.gate!.promise;
+        if (run?.held !== undefined) await run.held.gate.promise;
         return undefined;
       });
+      if (tokenMonitor !== undefined)
+        await this.#monitorUsage(harness, tokenMonitor);
     } catch (error) {
       this.#closing = true;
       const failures: unknown[] = [];
@@ -825,11 +865,37 @@ export class JuncoAgent<
     }
   }
 
+  /**
+   * Reports session usage to `onThreshold` whenever tokens or dollars gained since the previous
+   * report reach a threshold. The baseline moves before the callback runs, so a throwing callback
+   * (isolated by Pi as a `handler_error` event) never re-reports the same growth.
+   */
+  async #monitorUsage(
+    harness: AgentHarness<undefined>,
+    {
+      tokenThreshold = Infinity,
+      costThreshold = Infinity,
+      onThreshold,
+    }: TokenMonitorConfig,
+  ): Promise<void> {
+    // A reopened session already carries history: report growth from here, not from zero.
+    let mark = (await this.#options.session.getStats(BACKGROUND_CONTEXT)).usage;
+    harness.events.on("usage", ({ totals }) => {
+      const delta = {
+        tokens: totals.totalTokens - mark.totalTokens,
+        cost: totals.cost.total - mark.cost.total,
+      };
+      if (delta.tokens < tokenThreshold && delta.cost < costThreshold) return;
+      mark = totals;
+      onThreshold(this, totals, delta);
+    });
+  }
+
   get events(): AgentHarness<undefined>["events"] {
-    return this.#harness!.events;
+    return this.#nativeHarness.events;
   }
   get hooks(): AgentHarness<undefined>["hooks"] {
-    return this.#harness!.hooks;
+    return this.#nativeHarness.hooks;
   }
   get status(): AgenticStatus {
     if (this.#closing) return "closed";
@@ -1069,7 +1135,7 @@ export class JuncoAgent<
       if (reason !== undefined) reasons.push(reason);
     }
     if (reasons.length === 0) return;
-    const boundary: Boundary = {
+    const boundary: HeldBoundary = {
       step: { kind: "yield", reasons },
       run,
       gate: Promise.withResolvers<void>(),
@@ -1287,8 +1353,8 @@ export class JuncoAgent<
     return [...this.#tools];
   }
   getActiveTools(): (T | ComplainTool)[] {
-    return this.#activeNames.map(
-      (name) => this.#tools.find((tool) => tool.name === name)!,
+    return this.#activeNames.flatMap((name) =>
+      this.#tools.filter((tool) => tool.name === name),
     );
   }
   getResources(): AgentHarnessResources<S, P> {
@@ -1296,7 +1362,7 @@ export class JuncoAgent<
   }
   setResources(resources: AgentHarnessResources<S, P>): Promise<void> {
     return this.#operation(async () => {
-      await this.#harness!.setResources(resources, BACKGROUND_CONTEXT);
+      await this.#nativeHarness.setResources(resources, BACKGROUND_CONTEXT);
       this.#resources = resources;
     });
   }
@@ -1339,11 +1405,12 @@ export class JuncoAgent<
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(nextTools, names);
-      const previousTools = await this.#harness!.getTools(BACKGROUND_CONTEXT);
+      const previousTools =
+        await this.#nativeHarness.getTools(BACKGROUND_CONTEXT);
       const previousActive =
         await this.#nativeLane.getActiveTools(BACKGROUND_CONTEXT);
       try {
-        await this.#harness!.setTools(
+        await this.#nativeHarness.setTools(
           nextTools.map((tool) => this.#adaptTool(tool)),
           BACKGROUND_CONTEXT,
         );
@@ -1352,7 +1419,7 @@ export class JuncoAgent<
         if (this.#closing) throw error;
         const failures: unknown[] = [];
         for (const restore of [
-          () => this.#harness!.setTools(previousTools, BACKGROUND_CONTEXT),
+          () => this.#nativeHarness.setTools(previousTools, BACKGROUND_CONTEXT),
           () =>
             this.#nativeLane.setActiveTools(previousActive, BACKGROUND_CONTEXT),
         ]) {
@@ -1550,7 +1617,7 @@ export class JuncoAgent<
       const observer = this.#subagentObserver;
       observer?.acquiring?.(requests);
       const lane = this.#nativeLane;
-      const harness = this.#harness!;
+      const harness = this.#nativeHarness;
       const models = this.#options.models;
       const active: AgentTool[] = this.getActiveTools();
       const resources = this.#resources;
@@ -1622,20 +1689,23 @@ export class JuncoAgent<
           );
         const names = request.tools ?? active.map((tool) => tool.name);
         validateActiveTools(active, names);
-        const selection = names.map((name): Selection => {
-          const tool = active.find((candidate) => candidate.name === name)!;
-          const occurrence = registrations.findIndex(({ tools }) =>
-            tools.includes(tool),
-          );
-          if (occurrence === -1) return { tool };
-          const identity = getJuncoMcpToolIdentity(tool);
-          if (identity === undefined)
-            throw new JuncoAgentError(
-              "invalid_argument",
-              `Inherited MCP tool unavailable: ${name}`,
+        const selection = names
+          .flatMap((name) =>
+            active.filter((candidate) => candidate.name === name),
+          )
+          .map((tool): Selection => {
+            const occurrence = registrations.findIndex(({ tools }) =>
+              tools.includes(tool),
             );
-          return { tool, mcp: { occurrence, identity } };
-        });
+            if (occurrence === -1) return { tool };
+            const identity = getJuncoMcpToolIdentity(tool);
+            if (identity === undefined)
+              throw new JuncoAgentError(
+                "invalid_argument",
+                `Inherited MCP tool unavailable: ${tool.name}`,
+              );
+            return { tool, mcp: { occurrence, identity } };
+          });
         plans.push({ model, selection });
       }
 
@@ -1643,24 +1713,26 @@ export class JuncoAgent<
       try {
         for (const { model, selection } of plans) {
           live();
+          const repo = new MemorySessionRepo();
           const owned: OwnedResources = {
-            repo: new MemorySessionRepo(),
+            repo,
             toolCollection: this.collection,
           };
           let session: Session | undefined;
           let child: JuncoAgent<S, P, AgentTool>;
           try {
-            session = await owned.repo!.create({}, BACKGROUND_CONTEXT);
+            session = await repo.create({}, BACKGROUND_CONTEXT);
             for (const { source, cwd } of registrations)
               await resolveToolSources(source, cwd, owned, signal);
             live();
             // Rebind each selected MCP tool to the one fresh wrapper of the same operation; an
             // assigned batch belongs to this agent, so a child gets an ordinary task tool.
+            const reconnected = owned.mcpSources ?? [];
             const tools = selection.map(({ tool, mcp }) => {
               if (mcp === undefined)
                 return isAssignedTaskTool(tool) ? new TaskTool() : tool;
               const { serverName, originalToolName } = mcp.identity;
-              const fresh = owned.mcpSources![mcp.occurrence]!.tools.filter(
+              const fresh = reconnected[mcp.occurrence].tools.filter(
                 (candidate) => {
                   const identity = getJuncoMcpToolIdentity(candidate);
                   return (
@@ -1674,7 +1746,7 @@ export class JuncoAgent<
                   "invalid_argument",
                   `Inherited MCP tool unavailable: ${tool.name}`,
                 );
-              return fresh[0]!;
+              return fresh[0];
             });
             const activeToolNames = tools.map((tool) => tool.name);
             validateActiveTools(tools, activeToolNames);
@@ -1696,6 +1768,7 @@ export class JuncoAgent<
                 tools,
                 activeToolNames,
                 resources,
+                tokenMonitor: this.#options.tokenMonitor,
               },
               owned,
             );
@@ -1789,17 +1862,17 @@ export class JuncoAgent<
   }
   setStreamOptions(options: AgentHarnessStreamOptions): Promise<void> {
     return this.#operation(() =>
-      this.#harness!.setStreamOptions(options, BACKGROUND_CONTEXT),
+      this.#nativeHarness.setStreamOptions(options, BACKGROUND_CONTEXT),
     );
   }
   setSteeringMode(mode: QueueMode): Promise<void> {
     return this.#operation(() =>
-      this.#harness!.setSteeringMode(mode, BACKGROUND_CONTEXT),
+      this.#nativeHarness.setSteeringMode(mode, BACKGROUND_CONTEXT),
     );
   }
   setFollowUpMode(mode: QueueMode): Promise<void> {
     return this.#operation(() =>
-      this.#harness!.setFollowUpMode(mode, BACKGROUND_CONTEXT),
+      this.#nativeHarness.setFollowUpMode(mode, BACKGROUND_CONTEXT),
     );
   }
   context_size(): Promise<number> {
@@ -1994,7 +2067,7 @@ export class JuncoAgent<
     if (unread !== -1) this.#boundaries.splice(unread, 1);
     const consumed = this.#held.indexOf(held);
     if (consumed !== -1) this.#held.splice(consumed, 1);
-    held.gate!.resolve();
+    held.gate.resolve();
   }
   #markStopping(): void {
     const run = this.#currentRun;
@@ -2136,7 +2209,7 @@ export class JuncoAgent<
       const held = this.#held.shift();
       if (held !== undefined) {
         if (held.run?.held === held) held.run.held = undefined;
-        held.gate!.resolve();
+        held.gate.resolve();
       } else if (this.#staged !== undefined) {
         const { text, images } = this.#staged;
         this.#staged = undefined;
@@ -2205,9 +2278,9 @@ export class JuncoAgent<
     const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
     const dependents = this.#startDependents("close");
     this.#cancelRuns();
-    for (const boundary of this.#held.splice(0)) boundary.gate!.resolve();
+    for (const boundary of this.#held.splice(0)) boundary.gate.resolve();
     for (let index = this.#boundaries.length - 1; index >= 0; index--) {
-      const boundary = this.#boundaries[index]!;
+      const boundary = this.#boundaries[index];
       if (boundary.gate === undefined) continue;
       this.#boundaries.splice(index, 1);
       boundary.gate.resolve();
@@ -2236,7 +2309,7 @@ export class JuncoAgent<
     while (this.#operations.size > 0)
       await Promise.allSettled([...this.#operations]);
     try {
-      await this.#harness!.close(BACKGROUND_CONTEXT);
+      await this.#nativeHarness.close(BACKGROUND_CONTEXT);
     } catch (error) {
       failures.push(error);
     }
@@ -2252,7 +2325,7 @@ export class JuncoAgent<
       );
       if (index !== -1)
         demand.resolve({
-          value: this.#boundaries.splice(index, 1)[0]!.step,
+          value: this.#boundaries.splice(index, 1)[0].step,
           done: false,
         });
       else if (failure !== undefined) demand.reject(failure);

@@ -1,7 +1,12 @@
-import { choose, context, parallel, roundRobin } from "junco-scheduler";
 import type { Scheduler } from "junco-scheduler";
+import { choose, context, parallel, roundRobin } from "junco-scheduler";
+import type {
+  EdgeIdType,
+  Message,
+  NodeIdType,
+  ParentView,
+} from "../src/index.ts";
 import { DataflowGraph, Width } from "../src/index.ts";
-import type { EdgeIdType, Message, NodeIdType, ParentView } from "../src/index.ts";
 
 // Exported so `noUnusedLocals` does not report the fixtures as dead. Nothing imports this file; it
 // exists to be compiled.
@@ -32,7 +37,8 @@ export function observationKeepsNativeTypes(
   const observation = graph.observe();
   const node = observation.nodes.get(id);
   const state: State | undefined = node?.state;
-  const view: ParentView<number, string> | undefined = observation.inputs.get(id);
+  const view: ParentView<number, string> | undefined =
+    observation.inputs.get(id);
   const messages: readonly number[] | undefined = view?.messages.get(edge);
   const value: string | undefined = view?.values.get(edge);
   const result: string | undefined = observation.results.get(id);
@@ -73,7 +79,9 @@ export function observationKeepsNativeTypes(
 }
 
 export class ConcreteGraph extends DataflowGraph<State, number, string, Error> {
-  concrete(): "concrete" { return "concrete"; }
+  concrete(): "concrete" {
+    return "concrete";
+  }
 }
 
 /** Graph and metadata inference are independent of the selected policy. */
@@ -84,20 +92,33 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
     scheduler: choose({
       rank(snapshot, left, right) {
         const state: State | undefined = snapshot.nodes.get(left)?.state;
-        const view: ParentView<number, string> | undefined = snapshot.inputs.get(left);
+        const view: ParentView<number, string> | undefined =
+          snapshot.inputs.get(left);
         const result: string | undefined = snapshot.results.get(left);
-        const metadata: { priority: number } | undefined = snapshot.context.get(left);
+        const metadata: { priority: number } | undefined =
+          snapshot.context.get(left);
         // @ts-expect-error native state stays exact.
         const wrongState: string | undefined = snapshot.nodes.get(left)?.state;
         // @ts-expect-error input payloads stay numeric.
-        const wrongView: ParentView<string, string> | undefined = snapshot.inputs.get(left);
+        const wrongView: ParentView<string, string> | undefined =
+          snapshot.inputs.get(left);
         // @ts-expect-error retained results stay textual.
         const wrongResult: number | undefined = snapshot.results.get(left);
         // @ts-expect-error metadata has no fabricated label field.
         void snapshot.context.get(left)?.label;
-        void [state, view, result, metadata, wrongState, wrongView, wrongResult];
-        return (snapshot.context.get(left)?.priority ?? 0)
-          - (snapshot.context.get(right)?.priority ?? 0);
+        void [
+          state,
+          view,
+          result,
+          metadata,
+          wrongState,
+          wrongView,
+          wrongResult,
+        ];
+        return (
+          (snapshot.context.get(left)?.priority ?? 0) -
+          (snapshot.context.get(right)?.priority ?? 0)
+        );
       },
     }),
   });
@@ -108,9 +129,21 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
     const metadata: ReadonlyMap<NodeIdType, never> = snapshot.context;
     void metadata;
   };
-  const numeric = context({ graph, scheduler: parallel(), describeNode: () => 0 });
-  const boolean = context({ graph, scheduler: parallel(), describeNode: () => false });
-  const nullable = context({ graph, scheduler: parallel(), describeNode: () => null });
+  const numeric = context({
+    graph,
+    scheduler: parallel(),
+    describeNode: () => 0,
+  });
+  const boolean = context({
+    graph,
+    scheduler: parallel(),
+    describeNode: () => false,
+  });
+  const nullable = context({
+    graph,
+    scheduler: parallel(),
+    describeNode: () => null,
+  });
   const inspectScalars = (
     n: Parameters<typeof numeric.scheduler>[0],
     b: Parameters<typeof boolean.scheduler>[0],
@@ -121,20 +154,34 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
     const nullMetadata: ReadonlyMap<NodeIdType, null> = z.context;
     void [numberMetadata, booleanMetadata, nullMetadata];
   };
-  const explicitEmpty = context<State, number, string, { priority: number }, ConcreteGraph>({
+  const explicitEmpty = context<
+    State,
+    number,
+    string,
+    { priority: number },
+    ConcreteGraph
+  >({
     graph,
     scheduler: parallel(),
   });
-  const wrongData: Scheduler<State, string, string, { priority: number }> =
-    () => ({ selected: [] });
+  const wrongData: Scheduler<
+    State,
+    string,
+    string,
+    { priority: number }
+  > = () => ({ selected: [] });
   context({
     graph,
     describeNode: () => ({ priority: 7 }),
     // @ts-expect-error the policy cannot widen the graph's numeric messages.
     scheduler: wrongData,
   });
-  const wrongMetadata: Scheduler<State, number, string, { label: string }> =
-    () => ({ selected: [] });
+  const wrongMetadata: Scheduler<
+    State,
+    number,
+    string,
+    { label: string }
+  > = () => ({ selected: [] });
   context({
     graph,
     describeNode: () => ({ priority: 7 }),
@@ -148,9 +195,19 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
 export function universalPolicyReuse(): void {
   const all = parallel();
   const rotating = roundRobin();
-  const numbers = new DataflowGraph<State, number, string, never>(Width.create(1), Width.create(1));
-  const text = new DataflowGraph<boolean, string, number, never>(Width.create(1), Width.create(1));
-  context({ graph: numbers, scheduler: all, describeNode: () => ({ priority: 7 }) });
+  const numbers = new DataflowGraph<State, number, string, never>(
+    Width.create(1),
+    Width.create(1),
+  );
+  const text = new DataflowGraph<boolean, string, number, never>(
+    Width.create(1),
+    Width.create(1),
+  );
+  context({
+    graph: numbers,
+    scheduler: all,
+    describeNode: () => ({ priority: 7 }),
+  });
   context({ graph: text, scheduler: all, describeNode: () => false });
   context({ graph: numbers, scheduler: rotating });
   context({ graph: text, scheduler: rotating, describeNode: () => null });

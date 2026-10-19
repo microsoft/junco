@@ -11,11 +11,14 @@ import type {
   JuncoAgent,
   JuncoAgentNodeContext,
 } from "junco-agent";
+import {
+  type Scheduler,
+  type SchedulerContext,
+  context as schedulerContext,
+} from "junco-scheduler";
 import type { ToolCollection } from "junco-tools";
-import { context as schedulerContext, type Scheduler, type SchedulerContext } from "junco-scheduler";
-import type { Agentic } from "./agentic.js";
+import type { Agentic, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
-import type { AgenticNode } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 
 // Internal execution bookkeeping of adapter-built node bodies; not part of the public surface.
@@ -129,20 +132,32 @@ export function nodeInputs<N, T>(
 
 /** Pair a passive agency graph with policy, sidecar metadata and agency input semantics. */
 export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
-  readonly scheduler: Scheduler<NoInfer<Agentic<N, T>>, NoInfer<N>, NoInfer<T>, AgencyNodeMetadata>;
+  readonly scheduler: Scheduler<
+    NoInfer<Agentic<N, T>>,
+    NoInfer<N>,
+    NoInfer<T>,
+    AgencyNodeMetadata
+  >;
   readonly graph: G & JuncoGraph<N, T, never>;
 }): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G> {
   const { graph } = options;
   return schedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G>({
     ...options,
-    readInputs: (id, candidate) => nodeInputs(graph.getNode(id)?.step, candidate),
+    readInputs: (id, candidate) =>
+      nodeInputs(graph.getNode(id)?.step, candidate),
     describeNode: (id): AgencyNodeMetadata | undefined => {
       const node = graph.getNode(id);
-      const policy = node === undefined ? undefined : nodePolicies.get(node.step);
-      if (policy?.agent === undefined && policy?.lastYield === undefined) return undefined;
+      const policy =
+        node === undefined ? undefined : nodePolicies.get(node.step);
+      if (policy?.agent === undefined && policy?.lastYield === undefined)
+        return undefined;
       return {
-        ...(policy.agent === undefined ? {} : { agentStatus: policy.agent.status }),
-        ...(policy.lastYield === undefined ? {} : { lastYield: policy.lastYield }),
+        ...(policy.agent === undefined
+          ? {}
+          : { agentStatus: policy.agent.status }),
+        ...(policy.lastYield === undefined
+          ? {}
+          : { lastYield: policy.lastYield }),
       };
     },
   });

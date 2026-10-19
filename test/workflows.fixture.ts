@@ -24,10 +24,10 @@ import * as O from "fp-ts/lib/Option.js";
 import {
   agent as agentApi,
   graph as graphApi,
+  schedulers,
   tools as toolsApi,
   tracer as tracerApi,
   trigger,
-  schedulers,
 } from "junco-agency";
 import { Ralph } from "junco-agency/workflows";
 
@@ -160,25 +160,57 @@ try {
     model: faux.getModel(),
     tools: [],
   });
-  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>("source->ralph");
-  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>("ralph->sink");
-  const final = graphApi.Edge.value<AgenticInput, AssistantMessage>("ralph-result");
-  const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>((view) =>
-    graphApi.from(view, input).map((value) => graphApi.Message.create(input, value)),
-    { id: graphApi.NodeId.create("$source") });
+  const input = graphApi.Edge.message<AgenticInput, AssistantMessage>(
+    "source->ralph",
+  );
+  const output = graphApi.Edge.message<AgenticInput, AssistantMessage>(
+    "ralph->sink",
+  );
+  const final = graphApi.Edge.value<AgenticInput, AssistantMessage>(
+    "ralph-result",
+  );
+  const source = new graphApi.nodes.Source<AgenticInput, AssistantMessage>(
+    (view) =>
+      graphApi
+        .from(view, input)
+        .map((value) => graphApi.Message.create(input, value)),
+    { id: graphApi.NodeId.create("$source") },
+  );
   const delivered: string[] = [];
-  const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> = new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(async function* (): graphApi.NodeGenerator<AgenticInput, AssistantMessage> {
-    const view = yield [];
-    for (const value of graphApi.from(view, output))
-      delivered.push(value.kind === "appendMessage" ? "" : value.text);
-    const result = graph.result(id);
-    assert.ok(O.isSome(result));
-    return result.value;
-  }, { id: graphApi.NodeId.create("$sink"), trigger: trigger.TriggerRule.allOf(
-    trigger.TriggerEntry.on(output), trigger.TriggerEntry.on(final)) });
-  const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> = new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1),
-    graphApi.UNBOUNDED, new tracerApi.DummyTracer(), toolsApi.LockPolicy);
-  const execution = schedulers.context({ graph, scheduler: schedulers.parallel() });
+  const sink: graphApi.nodes.Sink<AgenticInput, AssistantMessage> =
+    new graphApi.nodes.Sink<AgenticInput, AssistantMessage>(
+      async function* (): graphApi.NodeGenerator<
+        AgenticInput,
+        AssistantMessage
+      > {
+        const view = yield [];
+        for (const value of graphApi.from(view, output))
+          delivered.push(value.kind === "appendMessage" ? "" : value.text);
+        const result = graph.result(id);
+        assert.ok(O.isSome(result));
+        return result.value;
+      },
+      {
+        id: graphApi.NodeId.create("$sink"),
+        trigger: trigger.TriggerRule.allOf(
+          trigger.TriggerEntry.on(output),
+          trigger.TriggerEntry.on(final),
+        ),
+      },
+    );
+  const graph: graphApi.JuncoGraph<AgenticInput, AssistantMessage> =
+    new graphApi.JuncoGraph(
+      source,
+      sink,
+      graphApi.Width.create(1),
+      graphApi.UNBOUNDED,
+      new tracerApi.DummyTracer(),
+      toolsApi.LockPolicy,
+    );
+  const execution = schedulers.context({
+    graph,
+    scheduler: schedulers.parallel(),
+  });
   parent = graph;
   const id: graphApi.NodeIdType = Ralph.register(graph, agent, {
     input,
@@ -187,7 +219,10 @@ try {
     rounds: 3,
   });
   owned = true;
-  graph.addEdge(source.id, id, input).addEdge(id, sink.id, output).addEdge(id, sink.id, final);
+  graph
+    .addEdge(source.id, id, input)
+    .addEdge(id, sink.id, output)
+    .addEdge(id, sink.id, final);
 
   const child = graph.getNode(id)?.state;
   assert.ok(
@@ -195,7 +230,10 @@ try {
     "the workflow's nested graph is the root package's JuncoGraph",
   );
 
-  source.enqueue({ messages: new Map([[input.id, [{ kind: "prompt", text: assignment }]]]), values: new Map() });
+  source.enqueue({
+    messages: new Map([[input.id, [{ kind: "prompt", text: assignment }]]]),
+    values: new Map(),
+  });
   for (let windows = 0; O.isNone(graph.result(id)); windows++) {
     assert.ok(windows < 64, "Ralph did not complete within 64 graph windows");
     assert.deepEqual(queued(output), []);

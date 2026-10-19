@@ -5,9 +5,9 @@
 
 /// Saturating cast from `u64` to `u32`, clamping at [`u32::MAX`].
 pub const fn clamp_u32(value: u64) -> u32 {
-	if value > u32::MAX as u64 {
-		u32::MAX
-	} else {
-		value as u32
-	}
+    if value > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        value as u32
+    }
 }

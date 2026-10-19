@@ -28,7 +28,8 @@ graph:
       contracts:
         "Librarian~>Architect": "Exactly one prompt carrying partial research: available evidence, the failed lookup/error, and remaining gaps, used to prepare the Architect's assignment."
         "Librarian->Architect": "Normally completed, non-empty Librarian research after a valid OSS search and no unhanded failed lookup, used to prepare the Architect's assignment."
-      trigger: {"any": ["Librarian~>Architect", "Librarian->Architect"]}
+      trigger:
+        any: ["Librarian~>Architect", "Librarian->Architect"]
     Reducer:
       model: "github-copilot/claude-sonnet-5.5"
       thinking: "xhigh"
@@ -45,10 +46,17 @@ graph:
       contracts:
         "Librarian->Reducer": "The Librarian's normally completed, non-empty closing report for the joined review."
         "Architect->Reducer": "The Architect's normally completed, non-empty design report for the joined review."
-      trigger: {"all": ["Librarian->Reducer", "Architect->Reducer"]}
+      trigger:
+        all: ["Librarian->Reducer", "Architect->Reducer"]
   edges:
-    - { from: Librarian, to: Architect, kind: message }
-    - { from: Librarian, to: Architect }
-    - { from: Librarian, to: Reducer }
-    - { from: Architect, to: Reducer }
-    - { from: Reducer, to: $sink }
+    - from: Librarian
+      to: Architect
+      kind: message
+    - from: Librarian
+      to: Architect
+    - from: Librarian
+      to: Reducer
+    - from: Architect
+      to: Reducer
+    - from: Reducer
+      to: $sink

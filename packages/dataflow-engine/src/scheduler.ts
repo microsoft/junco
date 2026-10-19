@@ -38,7 +38,6 @@ export type NodeAvailability<N, T> = {
   readonly status: "ready" | "running";
 };
 
-
 /**
  * The default read plan for a node: every edge an `"all"` rule fires on, or only the first
  * satisfied edge of an `"any"` rule, each read WHOLE. The usual input plan for scheduler policies.

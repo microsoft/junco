@@ -56,7 +56,9 @@ export function redirectLog(output: LogOutput): () => void {
   }
   const previous = log.settings.prettyLogLevelMethod;
   outputRegistry[OUTPUT_SLOT] = output;
-  log.settings.prettyLogLevelMethod = { "*": (line) => output.write(line as string) };
+  log.settings.prettyLogLevelMethod = {
+    "*": (line) => output.write(line as string),
+  };
   let released = false;
   return () => {
     if (released) return;

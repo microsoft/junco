@@ -43,5 +43,26 @@
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "javascript": { "formatter": { "quoteStyle": "double" } },
-  "linter": { "enabled": true, "rules": { "recommended": true } }
+  "linter": { "enabled": true, "rules": { "recommended": true } },
+  "overrides": [
+    {
+      "includes": ["**/test/**", "**/tests/**"],
+      "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
+    },
+    {
+      "includes": [
+        "**/tests/profile.typecheck.ts",
+        "packages/junco-scheduler/test/agent.test.ts",
+        "packages/junco-scheduler/test/scheduler-dsl.property.test.ts",
+        "packages/junco-scheduler/test/scheduler.test.ts",
+        "test/agency.test.ts",
+        "test/agentic.types.ts",
+        "test/compaction.test.ts",
+        "test/deterministic-agency.test.ts",
+        "test/graft-preprocessing.test.ts",
+        "test/task.test.ts"
+      ],
+      "linter": { "rules": { "correctness": { "useYield": "off" } } }
+    }
+  ]
 }

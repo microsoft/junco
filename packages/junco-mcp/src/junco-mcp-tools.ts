@@ -5,8 +5,8 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   McpAbortError,
   McpClient,
-  McpConnectionClosedError,
   type McpClientOptions,
+  McpConnectionClosedError,
   type StdioTransportOptions,
   type Tool,
 } from "@earendil-works/pi-mcp";
@@ -389,9 +389,13 @@ export class JuncoMcpTools {
               );
               await lease.close().catch((error) => failures.push(error));
               if (failures.length > 0) {
-                throw new AggregateError(failures, "JuncoMcpTools close failed", {
-                  cause: failures[0],
-                });
+                throw new AggregateError(
+                  failures,
+                  "JuncoMcpTools close failed",
+                  {
+                    cause: failures[0],
+                  },
+                );
               }
             });
           }

@@ -25,7 +25,12 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { isComplainTool, issueLog, YieldTool } from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
+import {
+  type AgenticStep,
+  JuncoAgent,
+  JuncoAgentError,
+  type TokenMonitorConfig,
+} from "../src/index.ts";
 import { countingTool, nativeOptions, newAgent, scripted } from "./harness.ts";
 
 const TIMEOUT = 5_000;
@@ -2476,6 +2481,138 @@ test(
         `sys\n\n${RELEASE}`,
         `sys\n\n${RELEASE}`,
       ]);
+    } finally {
+      await restored.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "tokenMonitor: reports usage growth since the last report, per agent, including restored sessions and children",
+  async () => {
+    const reports: {
+      agent: JuncoAgent;
+      tokens: number;
+      cost: number;
+      total: number;
+    }[] = [];
+    const record = (tokenThreshold: number): TokenMonitorConfig => ({
+      tokenThreshold,
+      onThreshold: (agent, totals, delta) => {
+        reports.push({ agent, ...delta, total: totals.totalTokens });
+      },
+    });
+    const { onThreshold } = record(1);
+    await assert.rejects(
+      JuncoAgent.fromResolved({
+        ...(await nativeOptions([])),
+        tokenMonitor: { onThreshold },
+      }),
+      isCode("invalid_argument"),
+    );
+    await assert.rejects(
+      JuncoAgent.fromResolved({
+        ...(await nativeOptions([])),
+        tokenMonitor: { tokenThreshold: 0, onThreshold },
+      }),
+      isCode("invalid_argument"),
+    );
+    await assert.rejects(
+      JuncoAgent.fromResolved({
+        ...(await nativeOptions([])),
+        tokenMonitor: {
+          tokenThreshold: 5,
+          costThreshold: Number.NaN,
+          onThreshold,
+        },
+      }),
+      isCode("invalid_argument"),
+    );
+
+    const repo = new MemorySessionRepo();
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const { faux, models, model } = scripted([
+      fauxAssistantMessage("one"),
+      fauxAssistantMessage("two"),
+    ]);
+    const first = await JuncoAgent.fromResolved({
+      session,
+      models,
+      model,
+      systemPrompt: "sys",
+      tokenMonitor: record(1),
+    });
+    try {
+      await first.prompt("a");
+      assert.equal(reports.length, 1);
+      assert.equal(reports[0]!.agent, first);
+      assert.equal(reports[0]!.tokens, reports[0]!.total);
+      assert.ok(reports[0]!.tokens > 0);
+      assert.equal(reports[0]!.cost, 0);
+      await first.prompt("b");
+      assert.equal(reports.length, 2);
+      assert.equal(reports[1]!.tokens, reports[1]!.total - reports[0]!.total);
+      assert.ok(reports[1]!.tokens > 0);
+    } finally {
+      await first.return();
+    }
+
+    const { agent: accumulated } = await newAgent(
+      [fauxAssistantMessage("one"), fauxAssistantMessage("two")],
+      { tokenMonitor: record(reports[1]!.total) },
+    );
+    try {
+      await accumulated.prompt("a");
+      assert.equal(reports.length, 2);
+      await accumulated.prompt("b");
+      assert.equal(reports.length, 3);
+      assert.equal(reports[2]!.tokens, reports[2]!.total);
+      assert.equal(reports[2]!.total, reports[1]!.total);
+      assert.equal(reports[2]!.cost, 0);
+    } finally {
+      await accumulated.return();
+    }
+
+    const { agent: costOnly } = await newAgent([fauxAssistantMessage("free")], {
+      tokenMonitor: { costThreshold: 0.001, onThreshold },
+    });
+    try {
+      assert.equal((await costOnly.prompt("go")).stopReason, "stop");
+      assert.equal(reports.length, 3);
+    } finally {
+      await costOnly.return();
+    }
+
+    const reopened = await repo.open(session.metadata, BACKGROUND_CONTEXT);
+    faux.setResponses([
+      fauxAssistantMessage("three"),
+      fauxAssistantMessage("child"),
+    ]);
+    const restored = await JuncoAgent.fromResolved({
+      session: reopened,
+      models,
+      model,
+      systemPrompt: "sys",
+      tokenMonitor: record(1),
+    });
+    try {
+      assert.equal(reports.length, 3);
+      await restored.prompt("c");
+      assert.equal(reports.length, 4);
+      assert.equal(reports[3]!.agent, restored);
+      assert.equal(reports[3]!.tokens, reports[3]!.total - reports[1]!.total);
+      assert.ok(reports[3]!.total > reports[3]!.tokens);
+      const [child] = await restored.createSubagents([{ tools: [] }]);
+      try {
+        await child!.prompt("child task");
+        assert.equal(reports.length, 5);
+        assert.equal(reports[4]!.agent, child);
+        assert.equal(reports[4]!.tokens, reports[4]!.total);
+        assert.equal(settledText(await child!.next()), "child");
+      } finally {
+        await child!.return();
+      }
     } finally {
       await restored.return();
     }

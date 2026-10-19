@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EdgeIdType, NodeSpec, Sink, Source } from "dataflow-engine";
-import type { SchedulerContext } from "junco-scheduler";
 import type { AgenticInput, JuncoAgent } from "junco-agent";
+import type { SchedulerContext } from "junco-scheduler";
 import type { Contract, ToolCollection } from "junco-tools";
 import type { Deterministic } from "./deterministic.js";
 import type { JuncoGraph } from "./junco-graph.js";
@@ -41,7 +41,13 @@ export type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
       readonly policy?: never;
     })
   | (StepLess<N, T> & {
-      readonly state: SchedulerContext<Agentic<N, T>, N, T, never, JuncoGraph<N, T>>;
+      readonly state: SchedulerContext<
+        Agentic<N, T>,
+        N,
+        T,
+        never,
+        JuncoGraph<N, T>
+      >;
       readonly step?: never;
       readonly policy?: never;
     })

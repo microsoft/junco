@@ -1,42 +1,94 @@
 import {
   DataflowDefinitionError,
-  type EdgeIdType, type InputSchedule, type Measure, type NodeIdType, type ParentView,
-  type ResourceKind, type ResourceQuantity,
+  type EdgeIdType,
+  type InputSchedule,
+  type Measure,
+  type NodeIdType,
+  type ParentView,
+  type ResourceKind,
+  type ResourceQuantity,
 } from "dataflow-engine";
-import { type Scheduler, type Snapshot, validateDecision } from "./scheduler.js";
+import {
+  type Scheduler,
+  type Snapshot,
+  validateDecision,
+} from "./scheduler.js";
 
-function countPort<N, T>(id: NodeIdType, resource: ResourceKind, port: EdgeIdType, measure: Measure, view: ParentView<N, T>, plan: InputSchedule): number {
+function countPort<N, T>(
+  id: NodeIdType,
+  resource: ResourceKind,
+  port: EdgeIdType,
+  measure: Measure,
+  view: ParentView<N, T>,
+  plan: InputSchedule,
+): number {
   if (measure !== "count")
-    throw new DataflowDefinitionError(`estimate: node "${id}" profile "${resource}" measures "${measure}" on port "${port}"; only "count" features can be estimated from a planned batch`);
+    throw new DataflowDefinitionError(
+      `estimate: node "${id}" profile "${resource}" measures "${measure}" on port "${port}"; only "count" features can be estimated from a planned batch`,
+    );
   const queue = view.messages.get(port);
   const n = plan.get(port);
-  return queue === undefined || n === undefined || n === "none" ? 0 : n === "all" ? queue.length : Math.min(n, queue.length);
+  return queue === undefined || n === undefined || n === "none"
+    ? 0
+    : n === "all"
+      ? queue.length
+      : Math.min(n, queue.length);
 }
 
 function safeCost<S, N, T, C>(
-  snapshot: Snapshot<S, N, T, C>, id: NodeIdType, kind: ResourceKind,
+  snapshot: Snapshot<S, N, T, C>,
+  id: NodeIdType,
+  kind: ResourceKind,
   who: "limit" | "lowest" | "highest",
 ): number {
   const profile = snapshot.nodes.get(id)?.profiles[kind];
-  if (profile === undefined) throw new DataflowDefinitionError(`${who}: node "${id}" has no ${kind} profile`);
+  if (profile === undefined)
+    throw new DataflowDefinitionError(
+      `${who}: node "${id}" has no ${kind} profile`,
+    );
   const plan = snapshot.plans.get(id);
-  if (plan === undefined) throw new DataflowDefinitionError(`${who}: node "${id}" is not available`);
+  if (plan === undefined)
+    throw new DataflowDefinitionError(`${who}: node "${id}" is not available`);
   const view = snapshot.inputs.get(id)!;
-  const features = profile.features.map(feature => {
-    if ("port" in feature) return countPort(id, profile.resource, feature.port, feature.measure, view, plan);
+  const features = profile.features.map((feature) => {
+    if ("port" in feature)
+      return countPort(
+        id,
+        profile.resource,
+        feature.port,
+        feature.measure,
+        view,
+        plan,
+      );
     let value = 0;
     for (const port of feature.ports) {
-      const count = countPort(id, profile.resource, port, feature.measure, view, plan);
-      value = feature.derived === "sum" ? value + count : Math.max(value, count);
+      const count = countPort(
+        id,
+        profile.resource,
+        port,
+        feature.measure,
+        view,
+        plan,
+      );
+      value =
+        feature.derived === "sum" ? value + count : Math.max(value, count);
     }
     return value;
   });
   return profile.predict(features).safe * profile.unit.scale;
 }
 
-type Rank = <S, N, T, C>(snapshot: Snapshot<S, N, T, C>, left: NodeIdType, right: NodeIdType) => number;
+type Rank = <S, N, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
+  left: NodeIdType,
+  right: NodeIdType,
+) => number;
 
-function ranked(kind: ResourceKind, order: 1 | -1, who: "lowest" | "highest"): Rank {
+function ranked(
+  kind: ResourceKind,
+  order: 1 | -1,
+  who: "lowest" | "highest",
+): Rank {
   const cache = new WeakMap<object, Map<NodeIdType, number>>();
   return (snapshot, left, right) => {
     let costs = cache.get(snapshot);
@@ -81,7 +133,9 @@ export function limit<S, N, T, C>(
 ): Scheduler<S, N, T, C> {
   const { memory } = limits;
   if (!(Number.isFinite(memory.amount) && memory.amount > 0))
-    throw new DataflowDefinitionError("limit: memory must be a positive quantity");
+    throw new DataflowDefinitionError(
+      "limit: memory must be a positive quantity",
+    );
   const limitBase = memory.amount * memory.unit.scale;
   return async (snapshot, signal) => {
     signal?.throwIfAborted();
@@ -101,7 +155,9 @@ export function limit<S, N, T, C>(
       }
     }
     if (selected.length === 0 && smallest !== undefined)
-      throw new DataflowDefinitionError(`limit: node "${smallest.id}" needs memory=${memory.unit(smallest.need / memory.unit.scale).toString()} alone, exceeding ${memory.toString()}`);
+      throw new DataflowDefinitionError(
+        `limit: node "${smallest.id}" needs memory=${memory.unit(smallest.need / memory.unit.scale).toString()} alone, exceeding ${memory.toString()}`,
+      );
     return { selected };
   };
 }

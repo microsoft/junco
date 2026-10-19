@@ -153,6 +153,126 @@ test("two collections over one seed keep their own policies and lifetimes", {
   }
 });
 
+test("a collection's resources limit and monitor only its own commands", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const native = await copyTreeNative();
+  const probe =
+    "/bin/sh -c 'd=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); cat $d/pids.max'";
+  const base = { native, policy: LockPolicy, sandbox: "always" };
+  const bash = (collection, command) =>
+    tool(collection, "bash").execute("bash", { command }, undefined);
+  const collections = [];
+  const events = [];
+  try {
+    // Refused before anything opens, with or without cgroup delegation.
+    await assert.rejects(
+      ToolCollection.create(seed, {
+        ...base,
+        resources: { monitorIntervalMs: 100 },
+      }),
+      /monitorIntervalMs requires an onResourceEvent callback/,
+    );
+    await assert.rejects(
+      ToolCollection.create(seed, { ...base, onResourceEvent: () => {} }),
+      /onResourceEvent requires resources\.monitorIntervalMs/,
+    );
+    for (const pids of [0, -1, 1.5, 2 ** 32, NaN, Infinity]) {
+      await assert.rejects(
+        ToolCollection.create(seed, { ...base, resources: { pids } }),
+        /pids must be positive/,
+      );
+    }
+    await assert.rejects(
+      ToolCollection.create(seed, { ...base, resources: { memoryBytes: 1.5 } }),
+      /memoryBytes must be a positive integer/,
+    );
+    await assert.rejects(
+      ToolCollection.create(seed, {
+        ...base,
+        resources: { monitorIntervalMs: Number.MIN_VALUE },
+        onResourceEvent: () => {},
+      }),
+      /monitorIntervalMs is out of range/,
+    );
+
+    const limited = await ToolCollection.create(seed, {
+      ...base,
+      principal: "limited",
+      resources: { pids: 4, monitorIntervalMs: 100 },
+      onResourceEvent: (event) => events.push(event),
+    });
+    collections.push(limited);
+    assert.throws(
+      () =>
+        new ShellMuxOperations({
+          native,
+          mux: limited.mux,
+          resources: { pids: 1 },
+        }),
+      /keeps the resources/,
+    );
+    const first = await bash(limited, probe);
+    if (text(first).includes("cgroup resource control unavailable")) {
+      // Fail-closed without delegation: the command never ran, and said why.
+      assert.equal(first.isError, true);
+      assert.doesNotMatch(text(first), /^\d+$/m);
+      console.log("skipping: cgroup delegation unavailable");
+      return;
+    }
+    assert.equal(text(first), "4\n");
+
+    const plain = await ToolCollection.create(seed, {
+      ...base,
+      principal: "plain",
+      resources: { pids: 5 },
+    });
+    collections.push(plain);
+    assert.equal(text(await bash(plain, probe)), "5\n");
+
+    const free = await ToolCollection.create(seed, {
+      ...base,
+      principal: "free",
+    });
+    collections.push(free);
+    assert.doesNotMatch(
+      text(await bash(free, "/bin/cat /proc/self/cgroup")),
+      /\/brush-/,
+    );
+
+    // An owned operations mux takes the same options.
+    const owned = new ShellMuxOperations({
+      native,
+      principal: "owned",
+      resources: { pids: 6 },
+    });
+    try {
+      assert.equal((await run(owned, probe, seed)).output, "6\n");
+    } finally {
+      await owned.close();
+    }
+
+    // Final release drains the stream: every event of the one pipeline, then nothing.
+    await limited.close();
+    const started = events.filter((event) => event.kind === "started");
+    const finished = events.filter((event) => event.kind === "finished");
+    assert.equal(started.length, 1, JSON.stringify(events));
+    assert.equal(started[0].command, probe);
+    assert.equal(finished.length, 1, JSON.stringify(events));
+    assert.equal(finished[0].pipelineId, started[0].pipelineId);
+    assert.equal(finished[0].sample.pids, 0);
+    assert.ok(
+      events.every((event) => event.pipelineId === started[0].pipelineId),
+    );
+  } finally {
+    await cleanup(
+      ...collections.map((collection) => () => collection.close()),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
 test("policies compose under and, or and not", {
   timeout: 60_000,
 }, async () => {

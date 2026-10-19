@@ -1,8 +1,8 @@
 import type { Edge } from "./edges.js";
 import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
-import type { TriggerRule } from "./trigger.js";
 import type { Profiles, ProfilesOption, ResourceKind } from "./profile.js";
+import type { TriggerRule } from "./trigger.js";
 
 /** A single datum crossing one message edge. */
 export type Message<N> = { readonly id: EdgeId; readonly payload: N };
@@ -124,7 +124,12 @@ export type NodeOptions<N, T, K extends ResourceKind = never> = {
 } & ProfilesOption<K>;
 
 /** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
-export type Node<S, N, T, K extends ResourceKind = never> = Identifiable<NodeId> &
+export type Node<
+  S,
+  N,
+  T,
+  K extends ResourceKind = never,
+> = Identifiable<NodeId> &
   NodeOptions<N, T, K> & {
     state: S;
     status: NodeStatus;
@@ -136,7 +141,11 @@ export type Node<S, N, T, K extends ResourceKind = never> = Identifiable<NodeId>
   };
 
 /** What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. */
-export type NodeSpec<S, N, T, K extends ResourceKind = never> = NodeOptions<N, T, K> & {
+export type NodeSpec<S, N, T, K extends ResourceKind = never> = NodeOptions<
+  N,
+  T,
+  K
+> & {
   readonly state: S;
   readonly step: StepFn<S, N, T>;
   readonly on_error?: ErrorFn<S, N, T>;

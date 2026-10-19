@@ -42,6 +42,8 @@ bun run smoke
 - `bun run test:native` (root, `junco-mcp` and `junco-agent`) and junco-tools' Node suite additionally need junco-tools' CopyTree native test addon (`bun run build:native:test` in `packages/junco-tools`, loaded from `packages/junco-tools/target/native-test/index.js`). They run on CopyTree workspaces, not a Btrfs mount; only junco-tools' opt-in `bun run test:btrfs` needs Btrfs.
 - `bun run check` runs Biome `2.5.15` (pinned at the root; `bun run check:ci` is the non-writing CI form) over one policy from the root `biome.json`: the agency's `src/` and `test/`, the whole `packages/dataflow-engine` (whose nested `biome.json` extends the root, so its own `check`/`check:ci` keep the same scope), the `src/` and `test/` of `junco-agent`, `junco-mcp` and `junco-scheduler`, junco-tools' `ts/` and `tests/`, and those packages' `package.json`/`tsconfig*.json`. Git-ignored and generated trees (`node_modules`, `dist`, `target`, `native`, `coverage`) and the `graft` graph are excluded; Rust stays with rustfmt and Clippy.
 
+Return-only and throw-only `AsyncGenerator` protocol fixtures are exempt from Biome's `useYield` rule in explicitly listed test files: first-activation completion or failure is intentional, and inserting a yield would change the schedule.
+
 ## Tracing (local only)
 
 A `JuncoGraph` takes fresh source and sink nodes, window and thread bounds, a tracer (or `undefined`), and its authorization policy, in that order. Its tracer defaults to `tracer.TuiTracer.shared()`: one shared lazy TUI named `JuncoGraph.run` when stdin and stdout are TTYs and `TERM !== "dumb"`, otherwise a silent, stateless `DummyTracer`. Explicit Dummy, custom and Opik tracers always win. Construction and `spawn` remain synchronous; imports, factory construction and shared selection do not load native bindings, enter terminal modes, install handlers or write output. The first observer callback starts the lazy display.
@@ -166,7 +168,7 @@ For a scripted end-to-end run without model credentials, run `bun run test/oss-c
 
 `liveRunner` borrows the root's research `AsyncDisposableStack` for lazy acquisition. Root cleanup explicitly attempts research close, tracer flush, trusted build close, then protected collection close; body and cleanup failures remain in `SuppressedError` chains. Each batch explicitly closes its graph on success or failure; construction failures also dispose every supplied but unregistered agent. Failed lane acquisition disposes its acquired agents in reverse order. Scheduler-context steps retain the apply-before-next-window barrier; neither a tracer nor a graph-wide `run()` publishes refactors.
 
-Prerequisites: `graft` 0.21.1-compatible on `PATH`, the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
+Prerequisites: `graft` 0.21.1-compatible on `PATH` (`bun run` supplies the pinned development CLI), the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
 
 ```sh
 bun run examples/yak-shaver/yak-shaver.ts /path/to/repo

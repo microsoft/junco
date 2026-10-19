@@ -10,6 +10,7 @@ export {
 export {
   agent,
   choose,
+  type DataflowObservation,
   type Decision,
   highest,
   limit,
@@ -18,9 +19,12 @@ export {
   roundRobin,
   type Scheduler,
   type SchedulerContext,
-  separate,
   type Snapshot,
-  type DataflowObservation,
+  separate,
 } from "junco-scheduler";
-export { pi, type PiOptions, type SchedulerRequest } from "junco-scheduler/agent";
-export { context, type AgencyNodeMetadata } from "../node-policy.js";
+export {
+  type PiOptions,
+  pi,
+  type SchedulerRequest,
+} from "junco-scheduler/agent";
+export { type AgencyNodeMetadata, context } from "../node-policy.js";

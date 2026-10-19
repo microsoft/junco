@@ -1,6 +1,10 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
-import type { NativeMux } from "../native/index.js";
+import type {
+  NativeMux,
+  NativeResourceEvent,
+  NativeResourceOptions,
+} from "../native/index.js";
 import { AstEditTool, AstGrepTool } from "./ast.js";
 import { BashTool } from "./bash.js";
 import { DiffTool } from "./diff.js";
@@ -23,6 +27,13 @@ export interface ToolCollectionOptions {
   sandbox?: "shared" | "always";
   /** Authorization policy of this collection's mux (default `LockPolicy`). */
   policy?: Policy;
+  /**
+   * Resource limits and monitoring of every bash command and persistent process on this
+   * collection's mux; file tools spawn no pipelines. See `ShellMuxLease.create`.
+   */
+  resources?: NativeResourceOptions;
+  /** Receives each resource monitor event; see `ShellMuxLease.create`. */
+  onResourceEvent?: (event: NativeResourceEvent) => void;
   /** Display/ordering label for the default bash operations; never a policy identity. */
   principal?: string;
 }
@@ -148,6 +159,8 @@ export class ToolCollection {
       native: options.native,
       sandbox: options.sandbox,
       policy: options.policy,
+      resources: options.resources,
+      onResourceEvent: options.onResourceEvent,
     });
     const { native } = lease;
     let operations: ShellMuxOperations | undefined;

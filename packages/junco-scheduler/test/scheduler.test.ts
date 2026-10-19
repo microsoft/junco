@@ -31,8 +31,8 @@ import {
   parallel,
   roundRobin,
   type Scheduler,
-  separate,
   type Snapshot,
+  separate,
 } from "../src/index.ts";
 
 type Graph = DataflowGraph<void, number, string, never>;
@@ -40,7 +40,8 @@ type Policy = Scheduler<void, number, string, never>;
 type View = Snapshot<void, number, string, never>;
 const id = NodeId.create;
 const ids = (names: readonly string[]) => names.map(id);
-const selections = (snapshot: View) => snapshot.history.map((event) => [...event.selected]);
+const selections = (snapshot: View) =>
+  snapshot.history.map((event) => [...event.selected]);
 
 const actor = (ran: string[]): StepFn<void, number, string> =>
   async function* (this) {
@@ -53,14 +54,21 @@ const actor = (ran: string[]): StepFn<void, number, string> =>
 function actors(
   scheduler: Policy,
   names: readonly string[],
-  { window = Width.create(1), threads = UNBOUNDED }:
-    { readonly window?: WidthType; readonly threads?: WidthType } = {},
+  {
+    window = Width.create(1),
+    threads = UNBOUNDED,
+  }: { readonly window?: WidthType; readonly threads?: WidthType } = {},
 ) {
   const ran: string[] = [];
   const graph: Graph = new DataflowGraph(window, threads);
   const execution = context({ graph, scheduler });
   for (const name of names)
-    graph.addNode({ id: id(name), state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+    graph.addNode({
+      id: id(name),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      step: actor(ran),
+    });
   return { graph, execution, ran };
 }
 
@@ -72,8 +80,19 @@ function snapshot(
     readonly history?: readonly (readonly string[])[];
   } = {},
 ): View {
-  const nodes: View["nodes"] extends ReadonlyMap<NodeIdType, infer V> ? Map<NodeIdType, V> : never = new Map();
-  for (const node of ids(names)) nodes.set(node, Object.freeze({ id: node, status: "running", state: undefined, profiles: {} }));
+  const nodes: View["nodes"] extends ReadonlyMap<NodeIdType, infer V>
+    ? Map<NodeIdType, V>
+    : never = new Map();
+  for (const node of ids(names))
+    nodes.set(
+      node,
+      Object.freeze({
+        id: node,
+        status: "running",
+        state: undefined,
+        profiles: {},
+      }),
+    );
   return Object.freeze({
     nodes,
     inputs: new Map<NodeIdType, ParentView<number, string>>(),
@@ -84,7 +103,11 @@ function snapshot(
     owned: new Set(ids(options.owned ?? names)),
     context: new Map<NodeIdType, never>(),
     plans: new Map(),
-    history: Object.freeze((options.history ?? []).map((event) => Object.freeze({ selected: Object.freeze(ids(event)) }))),
+    history: Object.freeze(
+      (options.history ?? []).map((event) =>
+        Object.freeze({ selected: Object.freeze(ids(event)) }),
+      ),
+    ),
     threads: Infinity,
   });
 }
@@ -93,16 +116,23 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
   const seen: string[] = [];
   let widths = 0;
   const policy: Policy = choose({
-    where: (_snapshot, node) => { seen.push(node); return true; },
+    where: (_snapshot, node) => {
+      seen.push(node);
+      return true;
+    },
     rank: (_snapshot, left, right) => {
       assert.ok(["1", "10", "2"].includes(left));
       assert.ok(["1", "10", "2"].includes(right));
       return 0;
     },
-    width: () => { widths++; return Infinity; },
+    width: () => {
+      widths++;
+      return Infinity;
+    },
   });
   const view = snapshot(["foreign", "2", "1", "10", "unavailable"], {
-    available: ["foreign", "2", "1", "10"], owned: ["2", "1", "10", "unavailable"],
+    available: ["foreign", "2", "1", "10"],
+    owned: ["2", "1", "10", "unavailable"],
   });
   assert.deepEqual(await policy(view), { selected: ids(["1", "10", "2"]) });
   assert.deepEqual(seen, ["2", "1", "10"]);
@@ -112,20 +142,32 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
     choose({ rank: () => 0, width: () => 0 }),
     parallel(),
   );
-  assert.deepEqual(await composed(snapshot(["1", "2"])), { selected: ids(["2"]) });
+  assert.deepEqual(await composed(snapshot(["1", "2"])), {
+    selected: ids(["2"]),
+  });
 });
 
 test("invalid widths and ranks reject before any work", async () => {
   for (const width of [-1, 0.5, NaN, -Infinity]) {
-    const { execution, ran } = actors(choose({ rank: () => 0, width: () => width }), ["a", "b"]);
+    const { execution, ran } = actors(
+      choose({ rank: () => 0, width: () => width }),
+      ["a", "b"],
+    );
     await assert.rejects(execution.step(), DataflowDefinitionError);
     assert.deepEqual(ran, []);
   }
-  // @ts-expect-error runtime malformed callback declaration, not an asserted payload
-  const missingWidth: Policy = choose({ rank: () => 0, width: () => undefined });
+  const missingWidth: Policy = choose({
+    rank: () => 0,
+    // @ts-expect-error runtime malformed callback declaration, not an asserted payload
+    width: () => undefined,
+  });
   // @ts-expect-error runtime malformed callback declaration, not an asserted payload
   const textualRank: Policy = choose({ rank: () => "first" });
-  for (const policy of [missingWidth, textualRank, choose<void, number, string, never>({ rank: () => NaN })]) {
+  for (const policy of [
+    missingWidth,
+    textualRank,
+    choose<void, number, string, never>({ rank: () => NaN }),
+  ]) {
     const { execution, ran } = actors(policy, ["a", "b"]);
     await assert.rejects(execution.step(), DataflowDefinitionError);
     assert.deepEqual(ran, []);
@@ -141,7 +183,9 @@ test("parallel starts every candidate concurrently and advances exactly once", a
   const execution = context({ graph, scheduler: parallel() });
   for (const node of ["a", "b", "c"])
     graph.addNode({
-      id: id(node), state: undefined, trigger: TriggerRule.always(),
+      id: id(node),
+      state: undefined,
+      trigger: TriggerRule.always(),
       step: async function* () {
         started.push(node);
         if (started.length === 3) allStarted.resolve();
@@ -160,16 +204,21 @@ test("parallel starts every candidate concurrently and advances exactly once", a
     await stepping;
   }
   assert.deepEqual(advanced, ["a", "b", "c"]);
-  for (const node of ids(started)) assert.equal(graph.getNode(node)!.status, "running");
+  for (const node of ids(started))
+    assert.equal(graph.getNode(node)!.status, "running");
 });
 
 test("parallel does not throttle finite capacity and rejected plans commit no history", async () => {
   const captured: View[] = [];
   let policy: Policy = parallel();
-  const { graph, execution, ran } = actors((view, signal) => {
-    captured.push(view);
-    return policy(view, signal);
-  }, ["a", "b", "c"], { threads: Width.create(2) });
+  const { graph, execution, ran } = actors(
+    (view, signal) => {
+      captured.push(view);
+      return policy(view, signal);
+    },
+    ["a", "b", "c"],
+    { threads: Width.create(2) },
+  );
   const version = graph.observe().version;
   await assert.rejects(execution.step(), DataflowDefinitionError);
   assert.deepEqual(ran, []);
@@ -187,7 +236,10 @@ test("parallel does not throttle finite capacity and rejected plans commit no hi
 
 test("round robin uses committed string-order history, not shared mutable state", async () => {
   const policy = roundRobin();
-  const one = actors(policy, ["2", "1", "10"], { window: Width.create(8), threads: Width.create(8) });
+  const one = actors(policy, ["2", "1", "10"], {
+    window: Width.create(8),
+    threads: Width.create(8),
+  });
   const two = actors(policy, ["2", "1", "10"]);
   await one.execution.step();
   await two.execution.step();
@@ -203,34 +255,65 @@ test("round robin preserves selection order, unavailable cursor IDs and explicit
   const order = ids(["a", "b", "c"]);
   const rotation = roundRobin(order);
   order.reverse(); // construction copied caller storage
-  assert.deepEqual(await rotation(snapshot(["a", "b", "c"], { history: [["a", "b"]] })), { selected: ids(["c"]) });
-  assert.deepEqual(await rotation(snapshot(["a", "b", "c"], { history: [["b", "a"]] })), { selected: ids(["b"]) });
-  assert.deepEqual(await rotation(snapshot(["a", "b", "c"], { available: ["a", "c"], history: [["b"]] })), { selected: ids(["c"]) });
+  assert.deepEqual(
+    await rotation(snapshot(["a", "b", "c"], { history: [["a", "b"]] })),
+    { selected: ids(["c"]) },
+  );
+  assert.deepEqual(
+    await rotation(snapshot(["a", "b", "c"], { history: [["b", "a"]] })),
+    { selected: ids(["b"]) },
+  );
+  assert.deepEqual(
+    await rotation(
+      snapshot(["a", "b", "c"], { available: ["a", "c"], history: [["b"]] }),
+    ),
+    { selected: ids(["c"]) },
+  );
   assert.deepEqual(await roundRobin([])(snapshot(["a"])), { selected: [] });
   assert.throws(() => roundRobin(ids(["", ""])), DataflowDefinitionError);
   const pairs = roundRobin(ids(["1", "10", "2"]), 2);
   const history: string[][] = [];
-  for (const expected of [["1", "10"], ["2", "1"], ["10", "2"]]) {
+  for (const expected of [
+    ["1", "10"],
+    ["2", "1"],
+    ["10", "2"],
+  ]) {
     const decision = await pairs(snapshot(["2", "1", "10"], { history }));
     assert.deepEqual(decision.selected, expected);
     history.push([...decision.selected]);
   }
   const { graph, execution, ran } = actors(roundRobin(), ["a", "c"]);
   await execution.step();
-  graph.addNode({ id: id("b"), state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+  graph.addNode({
+    id: id("b"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: actor(ran),
+  });
   await execution.step();
   await execution.step();
   assert.deepEqual(ran, ["a", "b", "c"]);
 });
 
 test("separate projects authority/history only and prevents sibling authority escapes", async () => {
-  const ambient = snapshot(["a", "b", "c"], { history: [["b"], ["a", "b"], ["c", "a"]] });
+  const ambient = snapshot(["a", "b", "c"], {
+    history: [["b"], ["a", "b"], ["c", "a"]],
+  });
   const probed: View[] = [];
   let partitions = 0;
   const policy: Policy = separate(
-    (_snapshot, node) => { partitions++; return node !== id("b"); },
-    (view, signal) => { probed.push(view); return roundRobin()(view, signal); },
-    (view) => { probed.push(view); return { selected: [] }; },
+    (_snapshot, node) => {
+      partitions++;
+      return node !== id("b");
+    },
+    (view, signal) => {
+      probed.push(view);
+      return roundRobin()(view, signal);
+    },
+    (view) => {
+      probed.push(view);
+      return { selected: [] };
+    },
   );
   assert.deepEqual(await policy(ambient), { selected: ids(["c"]) });
   assert.equal(partitions, 3);
@@ -247,10 +330,24 @@ test("separate projects authority/history only and prevents sibling authority es
     assert.equal(view.version, ambient.version);
     assert.equal(view.threads, ambient.threads);
   }
-  const escape: Policy = separate((_s, node) => node === id("a"), () => ({ selected: ids(["b"]) }), parallel());
-  await assert.rejects(Promise.resolve(escape(ambient)), DataflowDefinitionError);
-  const local: Policy = separate((_s, node) => node !== id("b"), roundRobin(), () => ({ selected: [] }));
-  assert.deepEqual(await local(snapshot(["a", "b", "c"], { history: [["b"]] })), { selected: ids(["a"]) });
+  const escaping: Policy = separate(
+    (_s, node) => node === id("a"),
+    () => ({ selected: ids(["b"]) }),
+    parallel(),
+  );
+  await assert.rejects(
+    Promise.resolve(escaping(ambient)),
+    DataflowDefinitionError,
+  );
+  const local: Policy = separate(
+    (_s, node) => node !== id("b"),
+    roundRobin(),
+    () => ({ selected: [] }),
+  );
+  assert.deepEqual(
+    await local(snapshot(["a", "b", "c"], { history: [["b"]] })),
+    { selected: ids(["a"]) },
+  );
 });
 
 test("separate starts and drains both children, with leftmost failure and cancellation precedence", async () => {
@@ -265,16 +362,31 @@ test("separate starts and drains both children, with leftmost failure and cancel
     let settled = false;
     const policy: Policy = separate(
       () => false, // the empty-domain child must still run and may fail
-      () => { started.push("left"); throw leftError; },
+      () => {
+        started.push("left");
+        throw leftError;
+      },
       async () => {
         started.push("right");
-        try { await gate.promise; throw rightError; }
-        finally { cleaned.push("right"); }
+        try {
+          await gate.promise;
+          throw rightError;
+        } finally {
+          cleaned.push("right");
+        }
       },
     );
-    const observed = Promise.resolve(policy(snapshot(["a"]), controller.signal)).then(
-      () => { settled = true; return { ok: true as const }; },
-      (error: unknown) => { settled = true; return { ok: false as const, error }; },
+    const observed = Promise.resolve(
+      policy(snapshot(["a"]), controller.signal),
+    ).then(
+      () => {
+        settled = true;
+        return { ok: true as const };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { ok: false as const, error };
+      },
     );
     try {
       await nextTurn();
@@ -298,14 +410,25 @@ test("agent normalizes each current response and never invokes an exhausted orac
   let calls = 0;
   const policy: Policy = agent(async () => {
     calls++;
-    return calls === 1 ? [ids(["missing"]), ids(["b", "b", "a"]), ids(["a"])] : [ids(["a"])];
+    return calls === 1
+      ? [ids(["missing"]), ids(["b", "b", "a"]), ids(["a"])]
+      : [ids(["a"])];
   });
-  const first = await policy(snapshot(["a", "b", "unowned"], { owned: ["a", "b"] }));
+  const first = await policy(
+    snapshot(["a", "b", "unowned"], { owned: ["a", "b"] }),
+  );
   assert.deepEqual(first, { selected: ids(["b", "a"]) });
-  assert.deepEqual(await policy(snapshot(["a", "b"], { history: [first.selected] })), { selected: ids(["a"]) });
+  assert.deepEqual(
+    await policy(snapshot(["a", "b"], { history: [first.selected] })),
+    { selected: ids(["a"]) },
+  );
   assert.equal(calls, 2);
-  const never: Policy = agent(async () => { throw new Error("must not invoke"); });
-  assert.deepEqual(await never(snapshot(["a"], { owned: [] })), { selected: [] });
+  const never: Policy = agent(async () => {
+    throw new Error("must not invoke");
+  });
+  assert.deepEqual(await never(snapshot(["a"], { owned: [] })), {
+    selected: [],
+  });
   assert.deepEqual(await policy(snapshot([""])), { selected: [] });
   const emptyId: Policy = agent(async () => [ids(["", "", "missing"])]);
   assert.deepEqual(await emptyId(snapshot([""])), { selected: ids([""]) });
@@ -322,15 +445,37 @@ test("context validates malformed, duplicate, unavailable and unowned decisions 
   const duplicates: Policy = () => ({ selected: ids(["a", "a"]) });
   const foreign: Policy = () => ({ selected: ids(["missing"]) });
   const unavailable: Policy = () => ({ selected: ids(["dormant"]) });
-  const escaped: Policy = separate((_s, node) => node === id("a"), () => ({ selected: ids(["b"]) }), parallel());
-  for (const bad of [missing, numeric, absent, sparse, duplicates, foreign, unavailable, escaped]) {
+  const escaped: Policy = separate(
+    (_s, node) => node === id("a"),
+    () => ({ selected: ids(["b"]) }),
+    parallel(),
+  );
+  for (const bad of [
+    missing,
+    numeric,
+    absent,
+    sparse,
+    duplicates,
+    foreign,
+    unavailable,
+    escaped,
+  ]) {
     const captured: View[] = [];
     let policy = bad;
-    const { graph, execution, ran } = actors((view, signal) => {
-      captured.push(view);
-      return policy(view, signal);
-    }, ["a", "b"]);
-    graph.addNode({ id: id("dormant"), state: undefined, trigger: TriggerRule.always(), is_available: () => false, step: actor(ran) });
+    const { graph, execution, ran } = actors(
+      (view, signal) => {
+        captured.push(view);
+        return policy(view, signal);
+      },
+      ["a", "b"],
+    );
+    graph.addNode({
+      id: id("dormant"),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      is_available: () => false,
+      step: actor(ran),
+    });
     const version = graph.observe().version;
     await assert.rejects(execution.step(), DataflowDefinitionError);
     assert.deepEqual(ran, []);
@@ -349,16 +494,25 @@ test("top-level abstention rejects while a quiescent context does not invoke its
   assert.deepEqual(ran, []);
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   let calls = 0;
-  const empty = context({ graph, scheduler: () => { calls++; throw new Error("quiescent"); } });
-  assert.deepEqual([...await empty.step()], []);
-  assert.deepEqual([...await empty.run()], []);
+  const empty = context({
+    graph,
+    scheduler: () => {
+      calls++;
+      throw new Error("quiescent");
+    },
+  });
+  assert.deepEqual([...(await empty.step())], []);
+  assert.deepEqual([...(await empty.run())], []);
   assert.equal(calls, 0);
 });
 
 test("context construction is a passive reusable pair with no provider or observation work", () => {
   class ObservedGraph extends DataflowGraph<void, number, string, never> {
     observations = 0;
-    override observe() { this.observations++; return super.observe(); }
+    override observe() {
+      this.observations++;
+      return super.observe();
+    }
   }
   const graph = new ObservedGraph(Width.create(1), UNBOUNDED);
   let policies = 0;
@@ -367,8 +521,22 @@ test("context construction is a passive reusable pair with no provider or observ
     policies++;
     return { selected: [] };
   };
-  const first = context({ graph, scheduler, describeNode: () => { descriptions++; return 0; } });
-  const second = context({ graph, scheduler, describeNode: () => { descriptions++; return 0; } });
+  const first = context({
+    graph,
+    scheduler,
+    describeNode: () => {
+      descriptions++;
+      return 0;
+    },
+  });
+  const second = context({
+    graph,
+    scheduler,
+    describeNode: () => {
+      descriptions++;
+      return 0;
+    },
+  });
   assert.equal(first.graph, graph);
   assert.equal(second.graph, graph);
   assert.equal(first.scheduler, scheduler);
@@ -383,19 +551,30 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   let target = id("P");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const execution = context({
-    graph, scheduler: () => ({ selected: [target] }),
+    graph,
+    scheduler: () => ({ selected: [target] }),
     readInputs: (_node, candidate) =>
-      new Map<EdgeIdType, MessageSchedule>(candidate.trigger.rule.map((edge) => [edge, 2])),
+      new Map<EdgeIdType, MessageSchedule>(
+        candidate.trigger.rule.map((edge) => [edge, 2]),
+      ),
   });
-  const producer = graph.addNode(new EmitOnce<void, number, string>(
-    () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)), "p",
-    { id: id("P"), state: undefined, trigger: TriggerRule.always() },
-  ));
+  const producer = graph.addNode(
+    new EmitOnce<void, number, string>(
+      () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)),
+      "p",
+      { id: id("P"), state: undefined, trigger: TriggerRule.always() },
+    ),
+  );
   const batches: number[][] = [];
-  const consumer = graph.addNode(new StepNode<void, number, string>((_state, view) => {
-    batches.push([...from(view, feed)]);
-    return [];
-  }, { id: id("C"), state: undefined, trigger: TriggerRule.when(feed) }));
+  const consumer = graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) => {
+        batches.push([...from(view, feed)]);
+        return [];
+      },
+      { id: id("C"), state: undefined, trigger: TriggerRule.when(feed) },
+    ),
+  );
   graph.addEdge(producer, consumer, feed);
   await execution.step();
   target = consumer;
@@ -406,28 +585,46 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   assert.equal(graph.available().has(consumer), false);
 });
 
-for (const [name, make] of [["parallel", parallel], ["round robin", roundRobin]] as const) {
+for (const [name, make] of [
+  ["parallel", parallel],
+  ["round robin", roundRobin],
+] as const) {
   test(`${name}: anyOf consumes only the first satisfied edge, leaving its sibling queued`, async () => {
     const a = Edge.message<number, string>("a");
     const b = Edge.message<number, string>("b");
     const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
     const execution = context({ graph, scheduler: make() });
-    const source = graph.addNode(new EmitOnce<void, number, string>(
-      () => [Message.create(a, 1), Message.create(b, 2)], "p",
-      { id: id("P"), state: undefined, trigger: TriggerRule.always() },
-    ));
+    const source = graph.addNode(
+      new EmitOnce<void, number, string>(
+        () => [Message.create(a, 1), Message.create(b, 2)],
+        "p",
+        { id: id("P"), state: undefined, trigger: TriggerRule.always() },
+      ),
+    );
     const seen: { a: number[]; b: number[] }[] = [];
-    const sink = graph.addNode(new StepNode<void, number, string>((_state, view) => {
-      seen.push({ a: [...from(view, a)], b: [...from(view, b)] });
-      return [];
-    }, { id: id("S"), state: undefined, trigger: TriggerRule.anyOf(TriggerEntry.on(b), TriggerEntry.on(a)) }));
+    const sink = graph.addNode(
+      new StepNode<void, number, string>(
+        (_state, view) => {
+          seen.push({ a: [...from(view, a)], b: [...from(view, b)] });
+          return [];
+        },
+        {
+          id: id("S"),
+          state: undefined,
+          trigger: TriggerRule.anyOf(TriggerEntry.on(b), TriggerEntry.on(a)),
+        },
+      ),
+    );
     graph.addEdge(source, sink, a);
     graph.addEdge(source, sink, b);
     while (seen.length === 0) await execution.step();
     assert.deepEqual(seen, [{ a: [], b: [2] }]);
     assert.ok(graph.available().has(sink));
     await execution.step();
-    assert.deepEqual(seen, [{ a: [], b: [2] }, { a: [1], b: [] }]);
+    assert.deepEqual(seen, [
+      { a: [], b: [2] },
+      { a: [1], b: [] },
+    ]);
     assert.equal(graph.available().has(sink), false);
   });
 }
@@ -436,10 +633,20 @@ test("allOf waits for the atomic join and observations/planning do not consume i
   const a = Edge.message<number, string>("a");
   const b = Edge.message<number, string>("b");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-  const source = graph.addNode({ id: id("source"), state: undefined, trigger: TriggerRule.always(), is_available: () => false, step: async function* () { return "source"; } });
+  const source = graph.addNode({
+    id: id("source"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    is_available: () => false,
+    step: async function* () {
+      return "source";
+    },
+  });
   const received: number[][] = [];
   const sink = graph.addNode({
-    id: id("sink"), state: undefined, trigger: TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b)),
+    id: id("sink"),
+    state: undefined,
+    trigger: TriggerRule.allOf(TriggerEntry.on(a), TriggerEntry.on(b)),
     step: async function* () {
       const view = yield [];
       received.push([...from(view, a), ...from(view, b)]);
@@ -449,13 +656,19 @@ test("allOf waits for the atomic join and observations/planning do not consume i
   graph.addEdge(source, sink, a);
   graph.addEdge(source, sink, b);
   const captured: View[] = [];
-  const execution = context({ graph, scheduler: (view, signal) => { captured.push(view); return parallel()(view, signal); } });
+  const execution = context({
+    graph,
+    scheduler: (view, signal) => {
+      captured.push(view);
+      return parallel()(view, signal);
+    },
+  });
   graph.emit(source, Message.create(a, 1));
   await execution.run();
   assert.equal(captured.length, 0);
   assert.deepEqual(graph.observe().inputs.get(sink)!.messages.get(a.id), [1]);
   graph.emit(source, Message.create(b, 2));
-  assert.deepEqual([...await execution.run()], [[sink, "both"]]);
+  assert.deepEqual([...(await execution.run())], [[sink, "both"]]);
   assert.deepEqual(received, [[1, 2]]);
   assert.deepEqual(captured[0]!.inputs.get(sink)!.messages.get(a.id), [1]);
   assert.deepEqual(captured[0]!.inputs.get(sink)!.messages.get(b.id), [2]);
@@ -471,14 +684,21 @@ test("invalid read maps reject the entire column before primes or queue consumpt
   graph.emit(id("a"), Message.create(feed, 7));
   const execution = context({
     graph,
-    scheduler: (view, signal) => { captured.push(view); return parallel()(view, signal); },
-    readInputs: () => invalid ? new Map([[EdgeId.create("not-an-edge"), 1]]) : new Map(),
+    scheduler: (view, signal) => {
+      captured.push(view);
+      return parallel()(view, signal);
+    },
+    readInputs: () =>
+      invalid ? new Map([[EdgeId.create("not-an-edge"), 1]]) : new Map(),
   });
   const version = graph.observe().version;
   await assert.rejects(execution.step(), DataflowDefinitionError);
   assert.deepEqual(ran, []);
   assert.equal(graph.observe().version, version);
-  assert.deepEqual(graph.observe().inputs.get(id("b"))!.messages.get(feed.id), [7]);
+  assert.deepEqual(
+    graph.observe().inputs.get(id("b"))!.messages.get(feed.id),
+    [7],
+  );
   invalid = false;
   await execution.step();
   assert.deepEqual(selections(captured[1]!), []);
@@ -490,10 +710,31 @@ test("external pairing excludes overlapping planners without binding policies or
   const graph: Graph = new DataflowGraph(Width.create(1), Width.create(2));
   const ran: string[] = [];
   for (const node of ["a", "b"])
-    graph.addNode({ id: id(node), state: undefined, trigger: TriggerRule.always(), step: async function* () { ran.push(node); return node; } });
-  const first = context({ graph, scheduler: async () => { entered.resolve(); await gate.promise; return { selected: ids(["a"]) }; } });
+    graph.addNode({
+      id: id(node),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      step: async function* () {
+        ran.push(node);
+        return node;
+      },
+    });
+  const first = context({
+    graph,
+    scheduler: async () => {
+      entered.resolve();
+      await gate.promise;
+      return { selected: ids(["a"]) };
+    },
+  });
   const snapshots: View[] = [];
-  const second = context({ graph, scheduler: (view) => { snapshots.push(view); return { selected: ids(["b"]) }; } });
+  const second = context({
+    graph,
+    scheduler: (view) => {
+      snapshots.push(view);
+      return { selected: ids(["b"]) };
+    },
+  });
   const pending = first.step();
   try {
     await entered.promise;
@@ -504,7 +745,13 @@ test("external pairing excludes overlapping planners without binding policies or
     gate.resolve();
     await pending;
   }
-  assert.deepEqual([...await second.step()], [[id("a"), "a"], [id("b"), "b"]]);
+  assert.deepEqual(
+    [...(await second.step())],
+    [
+      [id("a"), "a"],
+      [id("b"), "b"],
+    ],
+  );
   assert.deepEqual(selections(snapshots[0]!), []);
   assert.equal(snapshots[0]!.nodes.get(id("a"))!.status, "done");
   assert.deepEqual([...graph.observe().nodes.keys()], ids(["a", "b"]));
@@ -518,21 +765,37 @@ for (const mutation of ["addNode", "emit"] as const) {
     const { graph, ran } = actors(parallel(), ["a", "b"]);
     const feed = Edge.message<number, string>("feed");
     graph.addEdge(id("a"), id("b"), feed);
-    const execution = context({ graph, scheduler: async (view) => {
-      captured.push(view); entered.resolve(); await gate.promise;
-      return { selected: ids(["a"]) };
-    } });
+    const execution = context({
+      graph,
+      scheduler: async (view) => {
+        captured.push(view);
+        entered.resolve();
+        await gate.promise;
+        return { selected: ids(["a"]) };
+      },
+    });
     const pending = execution.step();
     const rejected = assert.rejects(pending, DataflowDefinitionError);
     try {
       await entered.promise;
-      if (mutation === "addNode") graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+      if (mutation === "addNode")
+        graph.addNode({
+          state: undefined,
+          trigger: TriggerRule.always(),
+          step: actor(ran),
+        });
       else graph.emit(id("a"), Message.create(feed, 9));
-    } finally { gate.resolve(); }
+    } finally {
+      gate.resolve();
+    }
     await rejected;
     assert.deepEqual(ran, []);
     assert.ok(graph.observe().version > captured[0]!.version);
-    if (mutation === "emit") assert.deepEqual(graph.observe().inputs.get(id("b"))!.messages.get(feed.id), [9]);
+    if (mutation === "emit")
+      assert.deepEqual(
+        graph.observe().inputs.get(id("b"))!.messages.get(feed.id),
+        [9],
+      );
     await execution.step();
     assert.deepEqual(selections(captured[1]!), []);
     assert.deepEqual(ran, ["a"]);
@@ -547,12 +810,29 @@ test("live availability and mutation inside read lowering also invalidate a deci
     let mutate = loweringMutation;
     const ran: string[] = [];
     const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-    graph.addNode({ id: id("a"), state: undefined, trigger: TriggerRule.always(), is_available: () => available, step: actor(ran) });
+    graph.addNode({
+      id: id("a"),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      is_available: () => available,
+      step: actor(ran),
+    });
     const execution = context({
       graph,
-      scheduler: async () => { entered.resolve(); await gate.promise; return { selected: ids(["a"]) }; },
+      scheduler: async () => {
+        entered.resolve();
+        await gate.promise;
+        return { selected: ids(["a"]) };
+      },
       readInputs: () => {
-        if (mutate) { mutate = false; graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: actor(ran) }); }
+        if (mutate) {
+          mutate = false;
+          graph.addNode({
+            state: undefined,
+            trigger: TriggerRule.always(),
+            step: actor(ran),
+          });
+        }
         return new Map();
       },
     });
@@ -571,14 +851,26 @@ test("fresh external metadata is detached independently of native version and fa
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const ran: string[] = [];
   for (const node of ["a", "b"])
-    graph.addNode({ id: id(node), state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
-  const priorities = new Map([[id("a"), 0], [id("b"), 1]]);
+    graph.addNode({
+      id: id(node),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      step: actor(ran),
+    });
+  const priorities = new Map([
+    [id("a"), 0],
+    [id("b"), 1],
+  ]);
   const captured: Snapshot<void, number, string, number>[] = [];
   const sentinel = new Error("planning failed");
   let fail = true;
-  const ascending: Scheduler<void, number, string, number> = choose({ rank: (view, left, right) => view.context.get(left)! - view.context.get(right)! });
+  const ascending: Scheduler<void, number, string, number> = choose({
+    rank: (view, left, right) =>
+      view.context.get(left)! - view.context.get(right)!,
+  });
   const execution = context({
-    graph, describeNode: (node) => priorities.get(node),
+    graph,
+    describeNode: (node) => priorities.get(node),
     scheduler: (view, signal) => {
       captured.push(view);
       if (fail) throw sentinel;
@@ -592,22 +884,59 @@ test("fresh external metadata is detached independently of native version and fa
   await execution.step();
   assert.deepEqual(ran, ["b"]);
   assert.equal(captured[0]!.version, captured[1]!.version);
-  assert.deepEqual(captured.map((view) => view.history), [[], []]);
-  assert.deepEqual([...captured[0]!.context], [[id("a"), 0], [id("b"), 1]]);
-  assert.deepEqual([...captured[1]!.context], [[id("a"), 1], [id("b"), 0]]);
+  assert.deepEqual(
+    captured.map((view) => view.history),
+    [[], []],
+  );
+  assert.deepEqual(
+    [...captured[0]!.context],
+    [
+      [id("a"), 0],
+      [id("b"), 1],
+    ],
+  );
+  assert.deepEqual(
+    [...captured[1]!.context],
+    [
+      [id("a"), 1],
+      [id("b"), 0],
+    ],
+  );
 });
 
 test("metadata preserves falsy domains and borrowed opaque identity without freezing application objects", async () => {
   type State = { count: number };
   type Metadata = 0 | false | null | "";
   const state: State = { count: 0 };
-  const graph = new DataflowGraph<State, number, string, never>(Width.create(1), UNBOUNDED);
+  const graph = new DataflowGraph<State, number, string, never>(
+    Width.create(1),
+    UNBOUNDED,
+  );
   const names = ["zero", "false", "null", "empty", "absent"];
   for (const node of names)
-    graph.addNode({ id: id(node), state, trigger: TriggerRule.always(), step: async function* () { return node; } });
-  const metadata = new Map<NodeIdType, Metadata>([[id("zero"), 0], [id("false"), false], [id("null"), null], [id("empty"), ""]]);
+    graph.addNode({
+      id: id(node),
+      state,
+      trigger: TriggerRule.always(),
+      step: async function* () {
+        return node;
+      },
+    });
+  const metadata = new Map<NodeIdType, Metadata>([
+    [id("zero"), 0],
+    [id("false"), false],
+    [id("null"), null],
+    [id("empty"), ""],
+  ]);
   const captured: Snapshot<State, number, string, Metadata>[] = [];
-  const execution = context({ graph, describeNode: (node) => metadata.get(node), scheduler: (view, signal) => { captured.push(view); return parallel()(view, signal); } });
+  const execution = context({
+    graph,
+    describeNode: (node) => metadata.get(node),
+    scheduler: (view, signal) => {
+      captured.push(view);
+      return parallel()(view, signal);
+    },
+  });
   await execution.run();
   assert.deepEqual([...captured[0]!.context], [...metadata]);
   assert.equal(captured[0]!.nodes.get(id("zero"))!.state, state);
@@ -621,14 +950,43 @@ test("drained failed columns commit actual lane-order history before propagating
   const entered = Promise.withResolvers<void>();
   const sentinel = new DataflowDefinitionError("work failed");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-  graph.addNode({ id: id("bad"), state: undefined, trigger: TriggerRule.always(), step: async function* () { throw sentinel; } });
-  graph.addNode({ id: id("slow"), state: undefined, trigger: TriggerRule.always(), step: async function* () { entered.resolve(); await gate.promise; yield []; return "slow"; } });
+  graph.addNode({
+    id: id("bad"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* () {
+      throw sentinel;
+    },
+  });
+  graph.addNode({
+    id: id("slow"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* () {
+      entered.resolve();
+      await gate.promise;
+      yield [];
+      return "slow";
+    },
+  });
   const captured: View[] = [];
-  const execution = context({ graph, scheduler: (view, signal) => { captured.push(view); return parallel()(view, signal); } });
+  const execution = context({
+    graph,
+    scheduler: (view, signal) => {
+      captured.push(view);
+      return parallel()(view, signal);
+    },
+  });
   let settled = false;
   const observed = execution.step().then(
-    () => { settled = true; return undefined; },
-    (error: unknown) => { settled = true; return error; },
+    () => {
+      settled = true;
+      return undefined;
+    },
+    (error: unknown) => {
+      settled = true;
+      return error;
+    },
   );
   try {
     await entered.promise;
@@ -639,7 +997,7 @@ test("drained failed columns commit actual lane-order history before propagating
     await observed;
   }
   assert.equal(await observed, sentinel);
-  assert.deepEqual([...await execution.run()], [[id("slow"), "slow"]]);
+  assert.deepEqual([...(await execution.run())], [[id("slow"), "slow"]]);
   assert.deepEqual(selections(captured[0]!), []);
   assert.deepEqual(selections(captured[1]!), [["bad", "slow"]]);
   assert.equal(Object.isFrozen(captured[1]!.history), true);
@@ -656,13 +1014,22 @@ test("cancellation after either policy settlement wins without committing work",
     let waiting = true;
     const captured: View[] = [];
     const { graph, ran } = actors(parallel(), ["a"]);
-    const execution = context({ graph, scheduler: async (view) => {
-      captured.push(view);
-      if (waiting) { entered.resolve(); return gate.promise; }
-      return { selected: ids(["a"]) };
-    } });
+    const execution = context({
+      graph,
+      scheduler: async (view) => {
+        captured.push(view);
+        if (waiting) {
+          entered.resolve();
+          return gate.promise;
+        }
+        return { selected: ids(["a"]) };
+      },
+    });
     const version = graph.observe().version;
-    const rejected = assert.rejects(execution.step({ signal: controller.signal }), (error) => error === reason);
+    const rejected = assert.rejects(
+      execution.step({ signal: controller.signal }),
+      (error) => error === reason,
+    );
     await entered.promise;
     controller.abort(reason);
     if (rejectedPolicy) gate.reject(new Error("provider error"));
@@ -679,10 +1046,34 @@ test("cancellation after either policy settlement wins without committing work",
 test("policies/compositions remain outside native topology, identities and retained results", async () => {
   const graph: Graph = new DataflowGraph(Width.create(1), Width.create(2));
   const captured: View[] = [];
-  const hybrid: Policy = separate((_s, node) => node === id("0"), roundRobin(), parallel());
-  const execution = context({ graph, scheduler: (view, signal) => { captured.push(view); return hybrid(view, signal); } });
-  const zero = graph.addNode({ description: "", state: undefined, trigger: TriggerRule.always(), step: async function* () { yield []; return "0"; } });
-  const one = graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: async function* () { return "1"; } });
+  const hybrid: Policy = separate(
+    (_s, node) => node === id("0"),
+    roundRobin(),
+    parallel(),
+  );
+  const execution = context({
+    graph,
+    scheduler: (view, signal) => {
+      captured.push(view);
+      return hybrid(view, signal);
+    },
+  });
+  const zero = graph.addNode({
+    description: "",
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* () {
+      yield [];
+      return "0";
+    },
+  });
+  const one = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* () {
+      return "1";
+    },
+  });
   assert.deepEqual([zero, one], ids(["0", "1"]));
   graph.addEdge(zero, one, Edge.message<number, string>("shared"));
   graph.addEdge(one, zero, Edge.value<number, string>("shared"));
@@ -690,10 +1081,30 @@ test("policies/compositions remain outside native topology, identities and retai
   graph.addEdge(zero, one, Edge.value<number, string>("parallel"));
   const result = await execution.run();
   assert.deepEqual(new Set(result.keys()), new Set(ids(["0", "1"])));
-  assert.deepEqual([...captured[1]!.nodes].map(([node, fields]) => [node, fields.status]), [["0", "running"], ["1", "done"]]);
+  assert.deepEqual(
+    [...captured[1]!.nodes].map(([node, fields]) => [node, fields.status]),
+    [
+      ["0", "running"],
+      ["1", "done"],
+    ],
+  );
   assert.equal(captured[0]!.nodes.get(zero)!.description, "");
-  assert.deepEqual(captured[1]!.links, [["0", "1", "shared", "message"], ["1", "0", "shared", "value"], ["0", "0", "self", "message"], ["0", "1", "parallel", "value"]]);
+  assert.deepEqual(captured[1]!.links, [
+    ["0", "1", "shared", "message"],
+    ["1", "0", "shared", "value"],
+    ["0", "0", "self", "message"],
+    ["0", "1", "parallel", "value"],
+  ]);
   assert.deepEqual(selections(captured[1]!), [["0", "1"]]);
-  assert.equal(graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: async function* () { return "2"; } }), id("2"));
+  assert.equal(
+    graph.addNode({
+      state: undefined,
+      trigger: TriggerRule.always(),
+      step: async function* () {
+        return "2";
+      },
+    }),
+    id("2"),
+  );
   assert.deepEqual([...captured[0]!.nodes.keys()], ids(["0", "1"]));
 });

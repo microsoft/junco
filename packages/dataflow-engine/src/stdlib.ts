@@ -222,35 +222,50 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
   readonly #pending: ParentView<N, T>[] = [];
   #revision = 0;
 
-  constructor(route: (view: ParentView<N, T>) => Message<N>[],
-    options: Pick<NodeOptions<N, T>, "description"> & { readonly id: NodeId }) {
+  constructor(
+    route: (view: ParentView<N, T>) => Message<N>[],
+    options: Pick<NodeOptions<N, T>, "description"> & { readonly id: NodeId },
+  ) {
     this.id = options.id;
-    if (options.description !== undefined) this.description = options.description;
+    if (options.description !== undefined)
+      this.description = options.description;
     const source = this;
     this.step = async function* (): NodeGenerator<N, T> {
       while (true) {
         const view = source.#pending.shift();
-        if (view === undefined) throw new DataflowDefinitionError("Source has no queued input");
+        if (view === undefined)
+          throw new DataflowDefinitionError("Source has no queued input");
         source.#revision++;
         yield route(view);
       }
     };
   }
 
-  get revision(): number { return this.#revision; }
+  get revision(): number {
+    return this.#revision;
+  }
 
   enqueue(view: ParentView<N, T>): void {
     const detached = snapshotView(view);
     let nonempty = false;
     for (const id of detached.messages.keys())
-      if ((detached.messages.get(id)?.length ?? 0) > 0) { nonempty = true; break; }
-    if (!nonempty) for (const _id of detached.values.keys()) { nonempty = true; break; }
+      if ((detached.messages.get(id)?.length ?? 0) > 0) {
+        nonempty = true;
+        break;
+      }
+    if (!nonempty)
+      for (const _id of detached.values.keys()) {
+        nonempty = true;
+        break;
+      }
     if (!nonempty) return;
     this.#pending.push(detached);
     this.#revision++;
   }
 
-  peek(): ParentView<N, T> | undefined { return this.#pending[0]; }
+  peek(): ParentView<N, T> | undefined {
+    return this.#pending[0];
+  }
 }
 
 /** Native egress: yielded and explicitly sent messages await acknowledged external delivery. */
@@ -263,12 +278,16 @@ export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
   readonly step: () => NodeGenerator<N, T>;
   readonly #outbox: Message<N>[] = [];
 
-  constructor(body: (sink: Sink<N, T>) => NodeGenerator<N, T>,
-    options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId }) {
+  constructor(
+    body: (sink: Sink<N, T>) => NodeGenerator<N, T>,
+    options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId },
+  ) {
     this.id = options.id;
     this.trigger = options.trigger;
-    if (options.description !== undefined) this.description = options.description;
-    if (options.is_available !== undefined) this.is_available = options.is_available;
+    if (options.description !== undefined)
+      this.description = options.description;
+    if (options.is_available !== undefined)
+      this.is_available = options.is_available;
     const sink = this;
     this.step = async function* (): NodeGenerator<N, T> {
       const generator = body(sink);
@@ -282,7 +301,9 @@ export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
     };
   }
 
-  send(message: Message<N>): void { this.#outbox.push(message); }
+  send(message: Message<N>): void {
+    this.#outbox.push(message);
+  }
 
   drain(deliver: (message: Message<N>) => void): void {
     while (this.#outbox.length > 0) {

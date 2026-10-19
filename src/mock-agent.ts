@@ -27,7 +27,16 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import { type DataflowTracer, type EdgeIdType, type ParentView, type ProfileSet, type ResourceQuantity, bytes, constantProfile, tokens } from "dataflow-engine";
+import {
+  bytes,
+  constantProfile,
+  type DataflowTracer,
+  type EdgeIdType,
+  type ParentView,
+  type ProfileSet,
+  type ResourceQuantity,
+  tokens,
+} from "dataflow-engine";
 import {
   type AgenticInput,
   type AgenticOptions,
@@ -180,19 +189,32 @@ const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
 const invalidTranscript = () =>
   new JuncoAgentError("invalid_argument", "Invalid MockAgent transcript");
 
-export type MockUsage = { readonly [R in "memory" | "tokens"]?: ResourceQuantity<R> };
+export type MockUsage = {
+  readonly [R in "memory" | "tokens"]?: ResourceQuantity<R>;
+};
 
 /** Constant per-activation profiles for declared mock usage; no runtime measurement. */
 export function constantProfiles(usage: MockUsage): ProfileSet {
   for (const quantity of [usage.memory, usage.tokens])
-    if (quantity !== undefined && (!Number.isFinite(quantity.amount) || quantity.amount < 0)) throw invalidTranscript();
+    if (
+      quantity !== undefined &&
+      (!Number.isFinite(quantity.amount) || quantity.amount < 0)
+    )
+      throw invalidTranscript();
   return Object.freeze({
-    ...(usage.memory === undefined ? {} : { memory: constantProfile("memory", usage.memory) }),
-    ...(usage.tokens === undefined ? {} : { tokens: constantProfile("tokens", usage.tokens) }),
+    ...(usage.memory === undefined
+      ? {}
+      : { memory: constantProfile("memory", usage.memory) }),
+    ...(usage.tokens === undefined
+      ? {}
+      : { tokens: constantProfile("tokens", usage.tokens) }),
   });
 }
 
-export const NO_USAGE: ProfileSet = constantProfiles({ memory: bytes(0), tokens: tokens(0) });
+export const NO_USAGE: ProfileSet = constantProfiles({
+  memory: bytes(0),
+  tokens: tokens(0),
+});
 
 function track<R>(
   pending: Set<Promise<unknown>>,

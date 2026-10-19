@@ -548,7 +548,11 @@ test("refreshGraftSnapshot sees current source and publishes the refreshed Graft
       const before = await state(fixture);
       const aborted = new Error("refresh cancelled");
       await assert.rejects(
-        refreshGraftSnapshot(fixture.seed, fixture.buildCollection, AbortSignal.abort(aborted)),
+        refreshGraftSnapshot(
+          fixture.seed,
+          fixture.buildCollection,
+          AbortSignal.abort(aborted),
+        ),
         (error: unknown) => error === aborted,
       );
       assert.deepEqual(await state(fixture), before);
@@ -566,7 +570,9 @@ test("refreshGraftSnapshot sees current source and publishes the refreshed Graft
           },
         });
         defer(() => failingCollection.close());
-        await assert.rejects(refreshGraftSnapshot(fixture.seed, failingCollection));
+        await assert.rejects(
+          refreshGraftSnapshot(fixture.seed, failingCollection),
+        );
         assert.deepEqual(await state(fixture), before);
         assert.equal(
           await readFile(join(fixture.seed, "src/a.ts"), "utf8"),
@@ -574,17 +580,31 @@ test("refreshGraftSnapshot sees current source and publishes the refreshed Graft
         );
       });
 
-      const snapshot = await refreshGraftSnapshot(fixture.seed, fixture.buildCollection);
+      const snapshot = await refreshGraftSnapshot(
+        fixture.seed,
+        fixture.buildCollection,
+      );
       const names = snapshot.nodes
         .filter((node) => node.path === "src/a.ts" && node.kind === "class")
         .map((node) => node.name);
       assert.deepEqual(names.sort(), ["Alpha", "Beta"]);
-      assert.equal(parseSnapshot(await readFile(graphPath, "utf8")).sha256, snapshot.sha256);
+      assert.equal(
+        parseSnapshot(await readFile(graphPath, "utf8")).sha256,
+        snapshot.sha256,
+      );
       assert.notEqual(snapshot.sha256, stale.sha256);
       const after = await state(fixture);
       assert.deepEqual(
-        Object.fromEntries(Object.entries(after.files).filter(([path]) => !path.startsWith("graft/"))),
-        Object.fromEntries(Object.entries(before.files).filter(([path]) => !path.startsWith("graft/"))),
+        Object.fromEntries(
+          Object.entries(after.files).filter(
+            ([path]) => !path.startsWith("graft/"),
+          ),
+        ),
+        Object.fromEntries(
+          Object.entries(before.files).filter(
+            ([path]) => !path.startsWith("graft/"),
+          ),
+        ),
       );
       assert.equal(after.index, before.index);
       assert.equal(after.status, before.status);

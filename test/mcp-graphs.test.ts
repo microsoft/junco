@@ -17,7 +17,13 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DummyTracer, NodeId, type NodeIdType, UNBOUNDED, Width } from "dataflow-engine";
+import {
+  DummyTracer,
+  NodeId,
+  type NodeIdType,
+  UNBOUNDED,
+  Width,
+} from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { JuncoMcpTools } from "junco-mcp";
@@ -30,11 +36,11 @@ import {
 } from "junco-tools";
 import { JuncoGraph, schedulers } from "../src/index.ts";
 import { TriggerRule } from "../src/std/trigger.ts";
-import { withNativeCleanup } from "./native-support.ts";
 import { terminalPorts } from "./deterministic-support.ts";
+import { withNativeCleanup } from "./native-support.ts";
 import {
-  nativeOptions,
   type AgencyContext,
+  nativeOptions,
   schedulerModel,
 } from "./support.ts";
 
@@ -118,13 +124,25 @@ async function member(collection: ToolCollection): Promise<JuncoAgent> {
 
 function single(agent: JuncoAgent, collection: ToolCollection) {
   const ports = terminalPorts();
-  const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
-    new DummyTracer(), LockPolicy, collection);
-  const context = schedulers.context({ graph, scheduler: schedulers.parallel() });
+  const graph = new JuncoGraph(
+    ports.source,
+    ports.sink,
+    Width.create(1),
+    UNBOUNDED,
+    new DummyTracer(),
+    LockPolicy,
+    collection,
+  );
+  const context = schedulers.context({
+    graph,
+    scheduler: schedulers.parallel(),
+  });
   agent.stagePrompt("go");
   const id = graph.addNode({
-    id: NodeId.create("member"), policy: LockPolicy,
-    trigger: TriggerRule.always(), state: agent,
+    id: NodeId.create("member"),
+    policy: LockPolicy,
+    trigger: TriggerRule.always(),
+    state: agent,
   });
   ports.connect(graph, id);
   return { context, id };
@@ -165,9 +183,19 @@ test(
           forgetNestedMember();
           const forgetNested = defer(() => nested.context.graph.close());
           const ports = terminalPorts();
-          const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
-            new DummyTracer(), LockPolicy, collection);
-          const execution = schedulers.context({ graph, scheduler: schedulers.parallel() });
+          const graph = new JuncoGraph(
+            ports.source,
+            ports.sink,
+            Width.create(1),
+            UNBOUNDED,
+            new DummyTracer(),
+            LockPolicy,
+            collection,
+          );
+          const execution = schedulers.context({
+            graph,
+            scheduler: schedulers.parallel(),
+          });
           const forgetGraph = defer(() => graph.close());
           rootMember.stagePrompt("go");
           rootId = graph.addNode({
@@ -195,7 +223,9 @@ test(
       expect(shared.policy).toBe(LockPolicy);
 
       // The independent graph runs and closes first, closing its agent and that agent's server.
-      const separatePid = pidOf((await separate.context.run()).get(separate.id));
+      const separatePid = pidOf(
+        (await separate.context.run()).get(separate.id),
+      );
       await separate.context.graph.close().finally(forgetSeparate);
       // Its collection is still the test's: the graph released only its own lease.
       await independent.mux.validateCwd(seed);
@@ -328,11 +358,23 @@ test(
           shared = collection;
           const decider = schedulerModel();
           const ports = terminalPorts();
-          const graph = new JuncoGraph(ports.source, ports.sink, Width.create(1), UNBOUNDED,
-            new DummyTracer(), LockPolicy, collection);
-          const execution = schedulers.context({ graph, scheduler: pi({
-            models: decider.models, model: decider.model, prompt: "Run the caller.",
-          }) });
+          const graph = new JuncoGraph(
+            ports.source,
+            ports.sink,
+            Width.create(1),
+            UNBOUNDED,
+            new DummyTracer(),
+            LockPolicy,
+            collection,
+          );
+          const execution = schedulers.context({
+            graph,
+            scheduler: pi({
+              models: decider.models,
+              model: decider.model,
+              prompt: "Run the caller.",
+            }),
+          });
           const forgetGraph = defer(() => graph.close());
           caller = await JuncoAgent.fromResolved({
             session: await new MemorySessionRepo().create(

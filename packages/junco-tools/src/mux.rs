@@ -11,13 +11,13 @@ use marsh_core::shellmux::{
     CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell,
     ShellFrontend, ShellId, ShellMux, SpawnOptions, WaitError,
 };
-use marsh_core::{PolicyObserver, Principal, SandboxPolicy, ShellError, ShellErrorKind};
+use marsh_core::{PolicyObserver, Principal, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
-use crate::frontend::{Frontend, OutputCallback, OutputRoute, PolicyLog};
+use crate::frontend::{Frontend, OutputCallback, OutputRoute, PolicyLog, ResourceLog};
 use crate::process::{Admission, Admitted, ExecLine, ProcessState, ProcessTask, process_channels};
 use crate::tool::JuncoTool;
 use crate::{NativeProcessOptions, NativeRunOptions, NativeRunResult};
@@ -114,6 +114,9 @@ pub(crate) struct Backend {
     /// The one filesystem this session discovers seeds through. A second instance would
     /// know none of a CopyTree fixture's registered roots.
     pub(crate) filesystem: Arc<dyn Subvolumes>,
+    /// Resource policy of every shell this session opens; its clones in shells and runs end
+    /// with them, so close can wait for the monitor stream to end.
+    pub(crate) pipeline_options: marsh_core::PipelineOptions,
 }
 
 /// A task close joins before the mux shuts down: a run, which close also cancels through its
@@ -123,12 +126,19 @@ struct TrackedTask {
     task: JoinHandle<()>,
 }
 
+/// The monitor's forwarding task and its sink; close joins it once every sender is gone.
+struct ResourceForwarding {
+    log: Arc<ResourceLog>,
+    forwarder: JoinHandle<()>,
+}
+
 struct SessionState {
     backend: Option<Backend>,
     tasks: HashMap<Id, TrackedTask>,
     principals: HashMap<String, watch::Receiver<bool>>,
     /// Every capability decision of this mux's shells; close takes, drains and releases it.
     policy_log: Option<Arc<PolicyLog>>,
+    resource_log: Option<ResourceForwarding>,
 }
 
 pub(crate) struct Session {
@@ -142,9 +152,7 @@ impl Session {
     pub(crate) fn new(
         seed: PathBuf,
         filesystem: Arc<dyn Subvolumes>,
-        sandbox_policy: SandboxPolicy,
-        shell_policy: Arc<dyn marsh_core::Policy>,
-        policy_log: Option<Arc<PolicyLog>>,
+        setup: crate::MuxSetup,
         create_mux: impl FnOnce(MuxProfile, Arc<Mutex<Frontend>>) -> Result<Arc<ShellMux>, MuxError>,
     ) -> Result<Arc<Self>, String> {
         let runtime = Handle::current();
@@ -152,9 +160,9 @@ impl Session {
         let profile = MuxProfile {
             environment: ShellEnvironment::default(),
             builtins: HashMap::default(),
-            sandbox_policy,
-            shell_policy,
-            policy_observer: policy_log.clone().map(|log| {
+            sandbox_policy: crate::tool::sandbox_policy(setup.sandbox),
+            shell_policy: setup.shell_policy,
+            policy_observer: setup.policy_log.clone().map(|log| {
                 Arc::new(PolicyObserver::new(move |event, decision| {
                     log.observe(event, decision);
                 }))
@@ -165,6 +173,15 @@ impl Session {
         // state is marsh's, shared across every live shell drawing on the same backend (and,
         // in a CopyTree build, a second mux over that backend), never retained here.
         let mux = create_mux(profile, Arc::clone(&frontend)).map_err(|error| error.to_string())?;
+        let resource_log = setup.resource_events.map(|(mut events, log)| {
+            let sink = Arc::clone(&log);
+            let forwarder = runtime.spawn(async move {
+                while let Some(event) = events.recv().await {
+                    sink.observe(event);
+                }
+            });
+            ResourceForwarding { log, forwarder }
+        });
         let (closed, _) = watch::channel(None);
         Ok(Arc::new(Self {
             seed,
@@ -174,10 +191,12 @@ impl Session {
                     mux,
                     frontend,
                     filesystem,
+                    pipeline_options: setup.pipeline_options,
                 }),
                 tasks: HashMap::new(),
                 principals: HashMap::new(),
-                policy_log,
+                policy_log: setup.policy_log,
+                resource_log,
             }),
             closed,
         }))
@@ -382,8 +401,7 @@ impl Session {
                 drop(backend);
                 let _ = sender.send(result);
                 if let Some(this) = this.upgrade() {
-                    this
-                        .state
+                    this.state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .tasks
@@ -413,6 +431,7 @@ impl Session {
         }
         let closed = self.closed.clone();
         let policy_log = session.policy_log.take();
+        let resource_log = session.resource_log.take();
         // No caller owns this cleanup future, so cancelling a close promise cannot
         // cancel teardown or let another close return ahead of it.
         self.runtime.spawn(async move {
@@ -434,6 +453,17 @@ impl Session {
             // through is marsh's, shared with any other live shell or mux over the same
             // backend, and was never an exclusive resource this idle session retained.
             drop(backend);
+            if let Some(ResourceForwarding { log, forwarder }) = resource_log {
+                if let Err(error) = forwarder.await {
+                    remember_error(
+                        &mut failure,
+                        format!("ShellMux resource forwarder failed: {error}"),
+                    );
+                }
+                if let Err(error) = log.drained().await {
+                    remember_error(&mut failure, error);
+                }
+            }
             // Every producer is joined; the last decision is enqueued. Drain it before release.
             if let Some(log) = policy_log {
                 let drained = log.drained().await;
@@ -509,6 +539,7 @@ impl RunTask {
                     io: JobIo::Pipes,
                     environment: Some(environment),
                     policy_owner: owner,
+                    pipeline_options: backend.pipeline_options.clone(),
                     ..Default::default()
                 },
             )

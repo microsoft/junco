@@ -1,8 +1,8 @@
 import {
   DataflowDefinitionError,
   type DataflowObservation,
-  type NodeIdType,
   type InputSchedule,
+  type NodeIdType,
 } from "dataflow-engine";
 
 export type Decision = { readonly selected: readonly NodeIdType[] };
@@ -64,7 +64,10 @@ export function validateDecision<S, N, T, C>(
 
 /** Rank only available, owned work; equal ranks use raw JavaScript string order. */
 export function choose<S, N, T, C>(options: {
-  readonly where?: (snapshot: Snapshot<S, N, T, C>, node: NodeIdType) => boolean;
+  readonly where?: (
+    snapshot: Snapshot<S, N, T, C>,
+    node: NodeIdType,
+  ) => boolean;
   readonly rank: (
     snapshot: Snapshot<S, N, T, C>,
     left: NodeIdType,
@@ -145,15 +148,19 @@ export function separate<S, N, T, C>(
     const [leftResult, rightResult] = outcomes;
     if (leftResult.status === "rejected") throw leftResult.reason;
     if (rightResult.status === "rejected") throw rightResult.reason;
-    return { selected: [...leftResult.value.selected, ...rightResult.value.selected] };
+    return {
+      selected: [...leftResult.value.selected, ...rightResult.value.selected],
+    };
   };
 }
 
 /** Normalize this invocation's first applicable speculative wave; retain no future plan. */
-export function agent<S, N, T, C>(invoke: (
-  snapshot: Snapshot<S, N, T, C>,
-  signal?: AbortSignal,
-) => Promise<readonly (readonly NodeIdType[])[]>): Scheduler<S, N, T, C> {
+export function agent<S, N, T, C>(
+  invoke: (
+    snapshot: Snapshot<S, N, T, C>,
+    signal?: AbortSignal,
+  ) => Promise<readonly (readonly NodeIdType[])[]>,
+): Scheduler<S, N, T, C> {
   return async (snapshot, signal) => {
     let hasCandidate = false;
     for (const id of snapshot.available) {
@@ -167,7 +174,8 @@ export function agent<S, N, T, C>(invoke: (
     for (const wave of waves) {
       const selected = new Set<NodeIdType>();
       for (const id of wave)
-        if (snapshot.available.has(id) && snapshot.owned.has(id)) selected.add(id);
+        if (snapshot.available.has(id) && snapshot.owned.has(id))
+          selected.add(id);
       if (selected.size > 0) return { selected: [...selected] };
     }
     return { selected: [] };

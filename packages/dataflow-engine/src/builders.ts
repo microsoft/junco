@@ -10,8 +10,8 @@ import type {
   ParentView,
   StepFn,
 } from "./node.js";
-import type { TriggerRule } from "./trigger.js";
 import type { Profiles, ResourceKind } from "./profile.js";
+import type { TriggerRule } from "./trigger.js";
 
 /** Shared empty result for `from`. Safe to alias: the return type is `readonly N[]`. */
 const NO_MESSAGES: readonly never[] = [];
@@ -31,7 +31,9 @@ export const from = <N, T>(
  * what a pure sink wants. `options` supplies everything but the body; its own properties are copied
  * onto the spec.
  */
-export class StepNode<S, N, T, K extends ResourceKind = never> implements NodeSpec<S, N, T> {
+export class StepNode<S, N, T, K extends ResourceKind = never>
+  implements NodeSpec<S, N, T>
+{
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;
@@ -61,7 +63,9 @@ export class StepNode<S, N, T, K extends ResourceKind = never> implements NodeSp
  * the real batch. A source therefore runs in two turns: turn one yields its batch, turn two returns
  * `ret`. `options` supplies everything but the body; its own properties are copied onto the spec.
  */
-export class EmitOnce<S, N, T, K extends ResourceKind = never> implements NodeSpec<S, N, T> {
+export class EmitOnce<S, N, T, K extends ResourceKind = never>
+  implements NodeSpec<S, N, T>
+{
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;

@@ -1,5 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import * as E from "fp-ts/lib/Either.js";
+import * as O from "fp-ts/lib/Option.js";
 import { graph } from "junco-agency";
 import { edgeId, parse, resolveTrigger } from "../src/parse.ts";
 
@@ -12,16 +14,53 @@ const base = () => ({
     ],
   },
 });
-const rejects = (mutate: (doc: any) => void, message: string) => {
-  const doc = base();
+const nested = () => ({
+  graph: {
+    nodes: {
+      A: {
+        kind: "graph",
+        graph: {
+          source: { routes: { incoming: ["$source~>W"] } },
+          nodes: { W: { model: "p/m" } },
+          edges: [
+            { from: "$source", to: "W", kind: "message" },
+            { from: "W", to: "$sink" },
+          ],
+        },
+      },
+    },
+    edges: [{ from: "A", to: "$sink" }],
+  },
+});
+/** A mutated copy of `base()`; loose typing lets cases spell invalid shapes. */
+const variant = (mutate: (doc: any) => void) => {
+  const doc: any = base();
   mutate(doc);
+  return doc;
+};
+const rejects = (mutate: (doc: any) => void, message: string) => {
   assert.throws(
-    () => parse(doc),
+    () => parse(variant(mutate)),
     (error) =>
       error instanceof graph.DataflowDefinitionError &&
       error.message.includes(message),
   );
 };
+const rejectsAt = (value: unknown, path: string) =>
+  assert.throws(
+    () => parse(value),
+    (error) => {
+      if (!(error instanceof graph.DataflowDefinitionError)) return false;
+      // TypeBox may identify the union boundary or a selected variant's field.
+      const reported = error.message.match(/^junco-syntax: ([^:]+):/)?.[1];
+      return (
+        reported === path ||
+        (path.startsWith("/graph/nodes/") &&
+          reported?.startsWith(`${path}/`) === true)
+      );
+    },
+  );
+
 for (const id of ["$source", "$sink"])
   test(`reserved node ${id}`, () =>
     rejects((d) => {
@@ -110,24 +149,6 @@ for (const mode of ["missing", "value", "trigger", "extra"])
           id: "second",
         });
     }, 'Node "B" (ralph) needs exactly one inbound message edge and one outbound message edge, and no trigger'));
-const nested = () => ({
-  graph: {
-    nodes: {
-      A: {
-        kind: "graph",
-        graph: {
-          source: { routes: { incoming: ["$source~>W"] } },
-          nodes: { W: { model: "p/m" } },
-          edges: [
-            { from: "$source", to: "W", kind: "message" },
-            { from: "W", to: "$sink" },
-          ],
-        },
-      },
-    },
-    edges: [{ from: "A", to: "$sink" }],
-  },
-});
 test("nested routes require parent edge", () =>
   assert.throws(
     () => parse(nested()),
@@ -144,23 +165,6 @@ test("root routes allow external ids but validate targets", () => {
     () => parse({ graph: doc }),
     /route target "wrong" is not an edge from \$source/,
   );
-});
-test("trigger forms and defaults mirror engine", () => {
-  const doc = parse(base());
-  for (const [input, kind, rule] of [
-    ["always", "all", []],
-    ["never", "any", []],
-    ["A->B", "all", ["A->B"]],
-    [{ all: ["A->B"] }, "all", ["A->B"]],
-    [{ any: ["A->B"] }, "any", ["A->B"]],
-    [undefined, "all", ["A->B"]],
-  ] as const) {
-    assert.deepEqual(resolveTrigger(doc.graph, "B", input as any), {
-      kind,
-      rule,
-    });
-  }
-  assert.deepEqual(resolveTrigger(doc.graph, "A"), { kind: "all", rule: [] });
 });
 test("YAML and object parsing, default ids", () => {
   assert.equal(edgeId({ from: "A", to: "B" }), "A->B");
@@ -184,4 +188,676 @@ test("invalid YAML and strict shape", () => {
     () => parse({ graph: { nodes: { A: { model: "bad" } } } }),
     /junco-syntax:/,
   );
+});
+
+test("complete block YAML preserves every registry, node, edge and scalar", () => {
+  const yaml = `# Complete grammar using block mappings.
+mcp:
+  fast:
+    command: fixture-mcp
+  full:
+    command: fixture-mcp
+    args: ["--stdio"]
+    cwd: "."
+    env:
+      MODE: fixture
+    timeout: 250
+skills:
+  guide: guide/SKILL.md
+graph:
+  name: full
+  window: 2
+  threads: 3
+  source:
+    description: external input fan-out
+    routes:
+      external: [ingress]
+  sink:
+    description: final result fan-in
+    trigger:
+      all: [done]
+    returns: Final
+  nodes:
+    Seed:
+      kind: emit
+      description: seeds message recipients
+      trigger: always
+      text: |
+        seed text
+    "Agent:1":
+      kind: agent
+      description: receives either input
+      model: faux/team/model
+      thinking: minimal
+      system: |-
+        first system line
+        second system line
+      tools: [read, custom]
+      mcp: [fast, full]
+      skills: [guide]
+      trigger:
+        any: [ingress, seed]
+      prompt: |-
+        External: {{ ingress }}
+        Seed: {{ seed }}
+      contracts:
+        ingress: external prompt
+        seed: seed prompt
+    Ralph:
+      kind: ralph
+      description: revises the seeded assignment
+      model: faux/ralph
+      thinking: max
+      system: revise the assignment
+      tools: [custom]
+      mcp: [full]
+      skills: [guide]
+      rounds: 3
+      prompt: "{{ ralph-input }}"
+      contracts:
+        ralph-input: complete assignment
+    Child:
+      kind: graph
+      description: nested work
+      trigger: ralph-output
+      graph:
+        name: child
+        threads: unbounded
+        source:
+          description: child ingress
+          routes:
+            ralph-output: [child-input]
+        sink:
+          description: child egress
+          trigger: child-result
+          returns: Worker
+        nodes:
+          Worker:
+            model: faux/worker
+            thinking: low
+            system: work
+            trigger: child-input
+            prompt: "{{ child-input }}"
+            contracts:
+              child-input: revised assignment
+        edges:
+          - from: $source
+            to: Worker
+            kind: message
+            id: child-input
+          - from: Worker
+            to: $sink
+            id: child-result
+    Final:
+      model: faux/final
+      thinking: high
+      system: combine both reports
+      trigger:
+        all: [agent-answer, child-answer]
+      prompt: "{{ agent-answer }}\\n{{ child-answer }}"
+      contracts:
+        agent-answer: direct final
+        child-answer: child final
+  edges:
+    - from: $source
+      to: "Agent:1"
+      kind: message
+      id: ingress
+    - from: Seed
+      to: "Agent:1"
+      kind: message
+      id: seed
+    - from: Seed
+      to: Ralph
+      kind: message
+      id: ralph-input
+    - from: Ralph
+      to: Child
+      kind: message
+      id: ralph-output
+    - from: "Agent:1"
+      to: Final
+      kind: value
+      id: agent-answer
+    - from: Child
+      to: Final
+      id: child-answer
+    - from: Final
+      to: $sink
+      id: done
+`;
+  const expected = {
+    mcp: {
+      fast: { command: "fixture-mcp" },
+      full: {
+        command: "fixture-mcp",
+        args: ["--stdio"],
+        cwd: ".",
+        env: { MODE: "fixture" },
+        timeout: 250,
+      },
+    },
+    skills: { guide: "guide/SKILL.md" },
+    graph: {
+      name: "full",
+      window: 2,
+      threads: 3,
+      source: {
+        description: "external input fan-out",
+        routes: { external: ["ingress"] },
+      },
+      sink: {
+        description: "final result fan-in",
+        trigger: { all: ["done"] },
+        returns: "Final",
+      },
+      nodes: {
+        Seed: {
+          kind: "emit",
+          description: "seeds message recipients",
+          trigger: "always",
+          text: "seed text\n",
+        },
+        "Agent:1": {
+          kind: "agent",
+          description: "receives either input",
+          model: "faux/team/model",
+          thinking: "minimal",
+          system: "first system line\nsecond system line",
+          tools: ["read", "custom"],
+          mcp: ["fast", "full"],
+          skills: ["guide"],
+          trigger: { any: ["ingress", "seed"] },
+          prompt: "External: {{ ingress }}\nSeed: {{ seed }}",
+          contracts: { ingress: "external prompt", seed: "seed prompt" },
+        },
+        Ralph: {
+          kind: "ralph",
+          description: "revises the seeded assignment",
+          model: "faux/ralph",
+          thinking: "max",
+          system: "revise the assignment",
+          tools: ["custom"],
+          mcp: ["full"],
+          skills: ["guide"],
+          rounds: 3,
+          prompt: "{{ ralph-input }}",
+          contracts: { "ralph-input": "complete assignment" },
+        },
+        Child: {
+          kind: "graph",
+          description: "nested work",
+          trigger: "ralph-output",
+          graph: {
+            name: "child",
+            threads: "unbounded",
+            source: {
+              description: "child ingress",
+              routes: { "ralph-output": ["child-input"] },
+            },
+            sink: {
+              description: "child egress",
+              trigger: "child-result",
+              returns: "Worker",
+            },
+            nodes: {
+              Worker: {
+                model: "faux/worker",
+                thinking: "low",
+                system: "work",
+                trigger: "child-input",
+                prompt: "{{ child-input }}",
+                contracts: { "child-input": "revised assignment" },
+              },
+            },
+            edges: [
+              {
+                from: "$source",
+                to: "Worker",
+                kind: "message",
+                id: "child-input",
+              },
+              { from: "Worker", to: "$sink", id: "child-result" },
+            ],
+          },
+        },
+        Final: {
+          model: "faux/final",
+          thinking: "high",
+          system: "combine both reports",
+          trigger: { all: ["agent-answer", "child-answer"] },
+          prompt: "{{ agent-answer }}\n{{ child-answer }}",
+          contracts: {
+            "agent-answer": "direct final",
+            "child-answer": "child final",
+          },
+        },
+      },
+      edges: [
+        { from: "$source", to: "Agent:1", kind: "message", id: "ingress" },
+        { from: "Seed", to: "Agent:1", kind: "message", id: "seed" },
+        { from: "Seed", to: "Ralph", kind: "message", id: "ralph-input" },
+        { from: "Ralph", to: "Child", kind: "message", id: "ralph-output" },
+        { from: "Agent:1", to: "Final", kind: "value", id: "agent-answer" },
+        { from: "Child", to: "Final", id: "child-answer" },
+        { from: "Final", to: "$sink", id: "done" },
+      ],
+    },
+  };
+  assert.deepEqual(parse(yaml), expected);
+  assert.equal(parse(expected), expected);
+  assert.deepEqual(Object.keys(parse(yaml).graph.nodes), [
+    "Seed",
+    "Agent:1",
+    "Ralph",
+    "Child",
+    "Final",
+  ]);
+  assert.deepEqual(parse(yaml).graph.edges?.map(edgeId), [
+    "ingress",
+    "seed",
+    "ralph-input",
+    "ralph-output",
+    "agent-answer",
+    "child-answer",
+    "done",
+  ]);
+});
+
+test("schema rejects non-documents and missing required fields at stable paths", () => {
+  for (const value of [null, 1, true, [], "plain scalar"])
+    rejectsAt(value, "/");
+  rejectsAt({}, "/");
+  const cases: [unknown, string][] = [
+    [{ graph: {} }, "/graph"],
+    [{ graph: { nodes: {} } }, "/graph/nodes"],
+    [{ graph: { nodes: { A: {} } } }, "/graph/nodes/A"],
+    [{ graph: { nodes: { A: { kind: "emit" } } } }, "/graph/nodes/A"],
+    [{ graph: { nodes: { A: { kind: "graph" } } } }, "/graph/nodes/A"],
+    [{ ...base(), mcp: { server: {} } }, "/mcp/server"],
+  ];
+  for (const [value, path] of cases) rejectsAt(value, path);
+});
+
+test("numeric grammar preserves positive widths and unrestricted integer MCP timeout", () => {
+  for (const field of ["window", "threads"]) {
+    for (const value of [1, 2, ...(field === "threads" ? ["unbounded"] : [])]) {
+      const doc = variant((d) => {
+        d.graph[field] = value;
+      });
+      assert.equal((parse(doc).graph as any)[field], value);
+    }
+    for (const value of [0, -1, 1.5, "2", null, true, false]) {
+      rejectsAt(
+        variant((d) => {
+          d.graph[field] = value;
+        }),
+        `/graph/${field}`,
+      );
+    }
+  }
+  for (const timeout of [-1, 0, 250]) {
+    const doc = { ...base(), mcp: { server: { command: "unused", timeout } } };
+    assert.equal(parse(doc).mcp?.server?.timeout, timeout);
+  }
+  for (const timeout of [1.5, "250"])
+    rejectsAt(
+      { ...base(), mcp: { server: { command: "unused", timeout } } },
+      "/mcp/server/timeout",
+    );
+  for (const rounds of [1, 2, 3]) {
+    const doc = variant((d) => {
+      d.graph.nodes.B = { kind: "ralph", model: "p/m", rounds };
+      for (const e of d.graph.edges) e.kind = "message";
+    });
+    assert.equal((parse(doc).graph.nodes.B as any).rounds, rounds);
+  }
+  for (const rounds of [0, -1, 1.5, "2", null, false]) {
+    rejectsAt(
+      variant((d) => {
+        d.graph.nodes.B = { kind: "ralph", model: "p/m", rounds };
+      }),
+      "/graph/nodes/B",
+    );
+  }
+});
+
+test("model and thinking grammar accepts every documented choice", () => {
+  for (const thinking of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+    const doc = variant((d) => {
+      d.graph.nodes.A = { model: "provider/family/model", thinking };
+    });
+    assert.deepEqual(parse(doc).graph.nodes.A, {
+      model: "provider/family/model",
+      thinking,
+    });
+  }
+  for (const model of ["model", "/model", "provider/", 2, null, true]) {
+    rejectsAt(
+      variant((d) => {
+        d.graph.nodes.A.model = model;
+      }),
+      "/graph/nodes/A",
+    );
+  }
+});
+
+test("strict object boundaries and malformed list/map entries", () => {
+  const cases: [string, (d: any) => void][] = [
+    ["/extra", (d) => (d.extra = true)],
+    [
+      "/mcp/server/extra",
+      (d) => (d.mcp = { server: { command: "unused", extra: true } }),
+    ],
+    ["/graph/extra", (d) => (d.graph.extra = true)],
+    ["/graph/source/extra", (d) => (d.graph.source = { extra: true })],
+    ["/graph/sink/extra", (d) => (d.graph.sink = { extra: true })],
+    ["/graph/edges/0/extra", (d) => (d.graph.edges[0].extra = true)],
+    ...["agent", "ralph", "emit", "graph"].map(
+      (kind) =>
+        [
+          "/graph/nodes/A",
+          (d: any) => {
+            d.graph.nodes.A = {
+              ...(kind === "graph"
+                ? { graph: nested().graph }
+                : kind === "emit"
+                  ? { text: "go" }
+                  : { model: "p/m" }),
+              kind,
+              extra: true,
+            };
+          },
+        ] as [string, (d: any) => void],
+    ),
+    ["/graph/nodes/A", (d) => (d.graph.nodes.A.kind = "unknown")],
+    ["/graph/nodes/A", (d) => (d.graph.nodes.A.thinking = "off")],
+    ["/graph/edges/0/kind", (d) => (d.graph.edges[0].kind = "unknown")],
+    ["/graph/edges/0/from", (d) => (d.graph.edges[0].from = 1)],
+    ["/graph/edges/0/to", (d) => (d.graph.edges[0].to = null)],
+    ["/graph/edges/0/id", (d) => (d.graph.edges[0].id = false)],
+    ["/graph/edges", (d) => (d.graph.edges = {})],
+    [
+      "/graph/source/routes/seed/0",
+      (d) => (d.graph.source = { routes: { seed: [1] } }),
+    ],
+    [
+      "/graph/source/routes/seed",
+      (d) => (d.graph.source = { routes: { seed: "edge" } }),
+    ],
+    ["/skills/guide", (d) => (d.skills = { guide: 2 })],
+    [
+      "/mcp/server/env/MODE",
+      (d) => (d.mcp = { server: { command: "unused", env: { MODE: false } } }),
+    ],
+    [
+      "/mcp/server/args/0",
+      (d) => (d.mcp = { server: { command: "unused", args: [1] } }),
+    ],
+    [
+      "/mcp/server/cwd",
+      (d) => (d.mcp = { server: { command: "unused", cwd: 1 } }),
+    ],
+    ...[
+      "tools",
+      "skills",
+      "mcp",
+      "contracts",
+      "system",
+      "prompt",
+      "description",
+    ].map(
+      (field) =>
+        [
+          "/graph/nodes/A",
+          (d: any) => {
+            d.graph.nodes.A[field] = field === "contracts" ? { x: 2 } : [2];
+          },
+        ] as [string, (d: any) => void],
+    ),
+  ];
+  for (const [path, mutate] of cases) rejectsAt(variant(mutate), path);
+  for (const trigger of [
+    { all: [{ any: ["A->B"] }] },
+    { not: "A->B" },
+    { all: [], any: [] },
+    { all: [], extra: true },
+    { any: [2] },
+  ]) {
+    const doc = variant((d) => {
+      d.graph.nodes.B.trigger = trigger;
+    });
+    rejectsAt(doc, "/graph/nodes/B");
+    delete doc.graph.nodes.B.trigger;
+    doc.graph.sink = { trigger };
+    rejectsAt(doc, "/graph/sink/trigger");
+  }
+});
+
+test("all builtins, collision identities and legal parallel edges", () => {
+  for (const name of ["yield", "info", "send", "recv", "task"])
+    rejects((d) => {
+      d.graph.nodes.A.tools = [name];
+    }, `tool "${name}" is builtin and always on`);
+  rejects((d) => {
+    d.graph.edges[0].id = "shared";
+    d.graph.edges[1] = {
+      from: "B",
+      to: "$sink",
+      kind: "message",
+      id: "shared",
+    };
+  }, 'edge "shared" declared twice');
+  rejects((d) => {
+    d.graph.edges.push({ from: "A", to: "B", kind: "value" });
+  }, 'edge "A->B" declared twice');
+  const doc = variant((d) => {
+    d.graph.edges.push(
+      { from: "A", to: "B", kind: "message" },
+      { from: "A", to: "B", id: "custom" },
+      { from: "B", to: "$sink", kind: "message" },
+    );
+    d.graph.nodes.B.prompt = "{{ custom }} / {{custom}}";
+    d.graph.nodes.B.contracts = { custom: "report" };
+  });
+  assert.deepEqual(parse(doc).graph.edges?.map(edgeId), [
+    "A->B",
+    "B->$sink",
+    "A~>B",
+    "custom",
+    "B~>$sink",
+  ]);
+  doc.graph.edges.push({ from: "A", to: "$sink" });
+  doc.graph.sink = { returns: "B" };
+  assert.equal(parse(doc).graph.sink?.returns, "B");
+  for (const edges of [undefined, []])
+    rejectsAt(
+      variant((d) => {
+        d.graph.edges = edges;
+      }),
+      "/graph",
+    );
+});
+
+test("recursive validation and ports do not impose connectivity or acyclicity", () => {
+  const doc: any = nested();
+  doc.graph.nodes.Seed = { kind: "emit", text: "go" };
+  doc.graph.edges.unshift({
+    from: "Seed",
+    to: "A",
+    kind: "message",
+    id: "incoming",
+  });
+  const child = doc.graph.nodes.A.graph;
+  child.nodes.Other = { model: "p/m" };
+  child.edges.push({
+    from: "$source",
+    to: "Other",
+    kind: "message",
+    id: "other",
+  });
+  child.source.routes.incoming.push("other");
+  assert.equal(parse(doc), doc);
+  for (const trigger of ["wrong", { all: ["incoming", "incoming"] }]) {
+    doc.graph.nodes.A.trigger = trigger;
+    rejectsAt(doc, "/graph");
+  }
+  delete doc.graph.nodes.A.trigger;
+  for (const trigger of ["wrong", { any: ["A->$sink", "A->$sink"] }]) {
+    doc.graph.sink = { trigger };
+    rejectsAt(doc, "/graph");
+  }
+  delete doc.graph.sink;
+  child.source.routes.incoming = ["W->$sink"];
+  rejectsAt(doc, "/graph/nodes/A/graph");
+  child.source.routes.incoming = ["$source~>W"];
+  for (const id of ["$source", "$sink"]) {
+    child.nodes[id] = { model: "p/m" };
+    rejectsAt(doc, `/graph/nodes/A/graph/nodes/${id}`);
+    delete child.nodes[id];
+  }
+  child.edges.push({ from: "Missing", to: "W" });
+  rejectsAt(doc, "/graph/nodes/A/graph");
+  child.edges.pop();
+  child.edges.push({ from: "Other", to: "$sink" });
+  rejectsAt(doc, "/graph/nodes/A/graph");
+  child.sink = { returns: "W" };
+  assert.equal(parse(doc), doc);
+  const free = variant((d) => {
+    d.graph.nodes.Isolated = { model: "p/m" };
+    d.graph.edges.push(
+      { from: "B", to: "A", kind: "message" },
+      { from: "A", to: "A", kind: "message" },
+    );
+  });
+  assert.equal(parse(free), free);
+  rejectsAt(
+    variant((d) => {
+      d.graph.nodes["a/b~c"] = { model: "p/m", prompt: "{{missing}}" };
+    }),
+    "/graph/nodes/a~1b~0c",
+  );
+});
+
+test("emit fan-out and Ralph message degrees including extra value output", () => {
+  const doc = variant((d) => {
+    d.graph.nodes.A = { kind: "emit", text: "go" };
+    d.graph.nodes.B = { kind: "ralph", model: "p/m" };
+    for (const e of d.graph.edges) e.kind = "message";
+    d.graph.nodes.C = { model: "p/m" };
+    d.graph.edges.push(
+      { from: "A", to: "C", kind: "message" },
+      { from: "B", to: "C", kind: "value" },
+    );
+  });
+  assert.equal(parse(doc), doc);
+  for (const outgoing of [
+    [],
+    [
+      { from: "B", to: "$sink", kind: "message" },
+      { from: "B", to: "C", kind: "message" },
+    ],
+  ]) {
+    const bad = structuredClone(doc);
+    bad.graph.edges = bad.graph.edges
+      .filter((e: any) => e.from !== "B")
+      .concat(outgoing);
+    // Preserve a valid sink so this reaches Ralph's degree check.
+    bad.graph.edges.push({ from: "C", to: "$sink" });
+    bad.graph.sink = { returns: "C" };
+    rejectsAt(bad, "/graph/nodes/B");
+  }
+});
+
+test("trigger forms and defaults mirror engine", () => {
+  const doc = parse(base());
+  for (const [input, kind, rule] of [
+    ["always", "all", []],
+    ["never", "any", []],
+    ["A->B", "all", ["A->B"]],
+    [{ all: ["A->B"] }, "all", ["A->B"]],
+    [{ any: ["A->B"] }, "any", ["A->B"]],
+    [undefined, "all", ["A->B"]],
+  ] as const) {
+    assert.deepEqual(resolveTrigger(doc.graph, "B", input as any), {
+      kind,
+      rule,
+    });
+  }
+  assert.deepEqual(resolveTrigger(doc.graph, "A"), { kind: "all", rule: [] });
+});
+test("resolved node, wrapper and sink rules preserve ordering and native readiness", () => {
+  const cases = [
+    ["always", "all", [], [true, true, true, true]],
+    ["never", "any", [], [false, false, false, false]],
+    ["m", "all", ["m"], [false, true, false, true]],
+    [{ all: ["m", "v"] }, "all", ["m", "v"], [false, false, false, true]],
+    [{ any: ["m", "v"] }, "any", ["m", "v"], [false, true, true, true]],
+    [{ all: [] }, "all", [], [true, true, true, true]],
+    [{ any: [] }, "any", [], [false, false, false, false]],
+    [undefined, "all", ["v", "m"], [false, false, false, true]],
+  ] as const;
+  for (const target of ["Consumer", "Wrapper", "$sink"]) {
+    const spec: any = {
+      nodes: {},
+      edges: [
+        { from: "A", to: target, id: "v" },
+        { from: "B", to: target, kind: "message", id: "m" },
+      ],
+    };
+    for (const [input, kind, order, expected] of cases) {
+      const rule = resolveTrigger<number, string>(spec, target, input as any);
+      assert.deepEqual(rule, { kind, rule: order });
+      const truth: boolean[] = [];
+      for (const [mReady, vReady] of [
+        [false, false],
+        [true, false],
+        [false, true],
+        [true, true],
+      ]) {
+        const m = graph.Edge.message<number, string>("m");
+        const v = graph.Edge.value<number, string>("v");
+        if (mReady && E.isLeft(m.transport)) m.transport.left.push(1);
+        if (vReady) v.transport = E.right(O.some("value"));
+        const inbound = new Map([
+          [v.id, v],
+          [m.id, m],
+        ]);
+        truth.push(
+          graph.trigger.evaluateTrigger(
+            rule,
+            inbound,
+            graph.NodeId.create(target),
+          ),
+        );
+        assert.deepEqual(
+          graph.trigger.satisfiedEdges(
+            rule,
+            inbound,
+            graph.NodeId.create(target),
+          ),
+          order.filter((id) => (id === "m" ? mReady : vReady)),
+        );
+      }
+      assert.deepEqual(truth, expected);
+    }
+  }
+  assert.deepEqual(resolveTrigger(base().graph, "A"), {
+    kind: "all",
+    rule: [],
+  });
+  for (const id of ["always", "never"]) {
+    const doc = variant((d) => {
+      d.graph.edges[0].id = id;
+      d.graph.nodes.B.trigger = { all: [id] };
+    });
+    assert.deepEqual(resolveTrigger(parse(doc).graph, "B", { all: [id] }), {
+      kind: "all",
+      rule: [id],
+    });
+    assert.deepEqual(resolveTrigger(doc.graph, "B", id), {
+      kind: id === "always" ? "all" : "any",
+      rule: [],
+    });
+  }
 });

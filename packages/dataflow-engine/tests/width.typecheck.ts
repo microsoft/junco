@@ -17,10 +17,7 @@ export type _negativeRejected = Expect<Equal<ValidWidth<-3>, never>>;
 export type _runtimeNumberRejected = Expect<Equal<ValidWidth<number>, never>>;
 
 // Accepted: a positive integer literal, and the sanctioned spelling of Infinity.
-new DataflowGraph<void, number, string, never>(
-  Width.create(1),
-  UNBOUNDED,
-);
+new DataflowGraph<void, number, string, never>(Width.create(1), UNBOUNDED);
 new DataflowGraph<void, number, string, never>(
   Width.create(64),
   Width.create(8),
