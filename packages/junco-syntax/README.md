@@ -13,6 +13,8 @@ mcp:                                   # optional registry of stdio MCP servers
     timeout?: int                      # timeout = requestTimeoutMs
 skills:                                # optional registry; path to a SKILL.md, relative to build cwd
   <name>: path/to/SKILL.md
+code:                                  # optional registry; module path relative to build cwd
+  <name>: path/to/module.ts            # the module's export named <name> implements DeterministicNode
 graph: <Graph>                         # required root graph
 
 Graph:
@@ -53,6 +55,8 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
     text: string                    # no inbound edges; no outbound value edges; >= 1 outbound message edge
   kind: graph                       # nested graph as a node
     graph: <Graph>
+  kind: code                        # registered from code: DeterministicNode.create(CodeContext)
+    name: <code name>               # registry key; no model/prompt/contracts fields (the definition supplies them)
 ```
 
 `Trigger` is `always`, `never`, a scalar inbound edge ID, or one of the flat mappings below. Omitted: always when the node has no inbound edges, otherwise all inbound edges in declaration order.
@@ -77,6 +81,7 @@ Every graph gets fresh `$source` and `$sink` ports. Edges into `$source`, out of
 - Triggers map to `TriggerRule.always`, `never`, `when`, `allOf(...entries.map(TriggerEntry.on))`, or `anyOf`.
 - Every agent spec receives fresh `YieldTool`, `InfoTool`, `SendTool`, `RecvTool`, `TaskTool` in that order. `tools` and `mcp` only add tools. Builtin names `yield`, `info`, `send`, `recv`, `task` cannot be listed or shadowed. Collection names include `read`, `bash`, `edit`, `grep`, `find`, `ast_grep`, `ast_edit`, `diff`, `release`; other names are code-registered tools.
 - Skills are loaded once per referenced registry name, attached as `resources.skills`, and advertised with `formatSkillsForSystemPrompt`, appended to YAML `system` using `"\n\n"`.
+- `code` nodes: `build` imports every referenced registry module before creating any agent or graph; a failed import or a missing/non-`DeterministicNode` export (`{ create(context) }`) throws `DataflowDefinitionError`. `create` receives `{ graph, label, node, edges, policy, collection?, context, signal? }` (`context` = `BuildOptions.context`) and returns `{ state: Deterministic, is_available?, contract? }`; its `is_available` overrides an `available` hook for the same id. Code-only documents never create a collection.
 
 ```ts
 import { parse, build } from "junco-syntax";

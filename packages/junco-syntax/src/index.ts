@@ -2,7 +2,10 @@ export {
   type AgentSpec,
   type BuildOptions,
   build,
+  type CodeContext,
+  type CodeRegistration,
   createJuncoAgent,
+  type DeterministicNode,
   resolveAgents,
 } from "./build.js";
 export { parse } from "./parse.js";

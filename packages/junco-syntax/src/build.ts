@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   type AgentTool,
   formatSkillsForSystemPrompt,
@@ -64,7 +65,27 @@ export type AgentSpec = {
   readonly cwd: string;
   readonly collection?: tools.ToolCollection;
 };
-export type BuildOptions = {
+/** What a `kind: code` definition sees when its node is registered. */
+export type CodeContext<C = unknown> = {
+  readonly graph: JuncoGraph;
+  readonly label: string;
+  readonly node: string;
+  readonly edges: ReadonlyMap<string, Edge>;
+  readonly policy: tools.Policy;
+  readonly collection?: tools.ToolCollection;
+  readonly context: C;
+  readonly signal?: AbortSignal;
+};
+export type CodeRegistration = {
+  readonly state: Deterministic<AgenticInput, AssistantMessage>;
+  readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;
+  readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
+};
+/** Module export named by a `code:` registry key; backs every `kind: code` node using it. */
+export interface DeterministicNode<C = unknown> {
+  create(context: CodeContext<C>): CodeRegistration | Promise<CodeRegistration>;
+}
+export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   readonly scheduler: (
     graph: string,
@@ -91,6 +112,7 @@ export type BuildOptions = {
       }) => graph.AvailabilityFn<AgenticInput, AssistantMessage>
     >
   >;
+  readonly context?: C;
   readonly signal?: AbortSignal;
 };
 
@@ -173,7 +195,7 @@ export async function resolveAgents(
         await visit(node.graph, node.graph.name ?? id);
         continue;
       }
-      if (node.kind === "emit") continue;
+      if (node.kind === "emit" || node.kind === "code") continue;
       const skills: Skill[] = [];
       for (const name of node.skills ?? []) {
         const skill =
@@ -246,7 +268,9 @@ export function createJuncoAgent(
 
 function hasAgents(spec: GraphSpec): boolean {
   return Object.values(spec.nodes).some((node) =>
-    node.kind === "graph" ? hasAgents(node.graph) : node.kind !== "emit",
+    node.kind === "graph"
+      ? hasAgents(node.graph)
+      : node.kind !== "emit" && node.kind !== "code",
   );
 }
 
@@ -471,6 +495,24 @@ async function buildGraph(
         state: child,
       });
       c.partialRoots.delete(child.graph);
+    } else if (node.kind === "code") {
+      const created = await c.code.get(node.name)!.create({
+        graph: g,
+        label,
+        node: id,
+        edges,
+        policy: c.policy,
+        collection: c.collection,
+        context: c.options.context,
+        signal: c.options.signal,
+      });
+      g.addNode({
+        ...registration,
+        ...(created.is_available ? { is_available: created.is_available } : {}),
+        trigger: resolveTrigger(spec, id, node.trigger),
+        state: created.state,
+        ...(created.contract ? { contract: created.contract } : {}),
+      });
     } else {
       await registerAgent(c, g, spec, id, node, registration, outbound, edges);
     }
@@ -525,9 +567,50 @@ function compilePrompt(
     });
 }
 
+function codeNames(spec: GraphSpec, names: Set<string>): Set<string> {
+  for (const node of Object.values(spec.nodes))
+    if (node.kind === "graph") codeNames(node.graph, names);
+    else if (node.kind === "code") names.add(node.name);
+  return names;
+}
+
+async function resolveCode(
+  doc: JuncoDocument,
+  cwd: string,
+): Promise<ReadonlyMap<string, DeterministicNode>> {
+  const resolved = new Map<string, DeterministicNode>();
+  for (const name of codeNames(doc.graph, new Set())) {
+    const path = resolve(cwd, doc.code![name]!);
+    let module: Record<string, unknown>;
+    try {
+      // Module path comes from the document's `code:` registry at runtime.
+      module = await import(pathToFileURL(path).href);
+    } catch (error) {
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: code "${name}": cannot import ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const definition = module[name];
+    if (
+      !definition ||
+      typeof definition !== "object" ||
+      !("create" in definition) ||
+      typeof definition.create !== "function"
+    )
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: code "${name}": ${path} has no DeterministicNode export "${name}"`,
+      );
+    // Shape checked above; the context type C is the document author's contract.
+    const node: DeterministicNode = definition as DeterministicNode;
+    resolved.set(name, node);
+  }
+  return resolved;
+}
+
 /** Per-build state shared by every graph level; agents/graphs here are released on failure. */
 type Construction = {
   readonly options: BuildOptions;
+  readonly code: ReadonlyMap<string, DeterministicNode>;
   readonly policy: tools.Policy;
   readonly collection: tools.ToolCollection | undefined;
   readonly specs: Iterator<AgentSpec>;
@@ -543,16 +626,18 @@ type Registration = {
 };
 type Available = graph.AvailabilityFn<AgenticInput, AssistantMessage>;
 
-export async function build(
+export async function build<C = unknown>(
   doc: JuncoDocument,
-  options: BuildOptions,
+  options: BuildOptions<C>,
 ): Promise<Execution> {
+  const code = await resolveCode(doc, options.cwd);
   const policy = options.policy ?? tools.LockPolicy;
   const construct = async (
     collection?: tools.ToolCollection,
   ): Promise<Execution> => {
     const c: Construction = {
       options,
+      code,
       policy,
       collection,
       specs: (await resolveAgents(doc, { ...options, collection }))[

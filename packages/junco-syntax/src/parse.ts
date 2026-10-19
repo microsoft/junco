@@ -147,6 +147,9 @@ export function parse(source: string | unknown): JuncoDocument {
             nodePath,
             `Node "${id}" (emit) must have no inbound edges and only message outbound edges (at least one)`,
           );
+      } else if (node.kind === "code") {
+        if (!Object.hasOwn(doc.code ?? {}, node.name))
+          fail(nodePath, `Node "${id}" references unknown code "${node.name}"`);
       } else {
         if (
           node.kind === "ralph" &&

@@ -1703,3 +1703,64 @@ for (const nested of [false, true])
       }
       assert.equal(active.creatorCloses, 1);
     });
+
+const codeDocument = (code: Record<string, string>, name = "Emitter") =>
+  parse({
+    code,
+    graph: {
+      name: "Codes",
+      nodes: { E: { kind: "code", name, trigger: "always" } },
+      edges: [{ from: "E", to: "$sink" }],
+    },
+  });
+const codeOptions = (log: string[]) => ({
+  cwd: join(import.meta.dir, ".."),
+  scheduler: () => schedulers.roundRobin(),
+  policy: tools.EmptyPolicy,
+  context: { log },
+});
+for (const hooked of [false, true])
+  test(`code node registers its imported definition${hooked ? " over an availability hook" : ""}`, async () => {
+    const log: string[] = [];
+    const execution = await build(
+      codeDocument({ Emitter: "./tests/fixtures/code-nodes.ts" }),
+      {
+        ...codeOptions(log),
+        ...(hooked ? { available: { E: () => () => false } } : {}),
+      },
+    );
+    try {
+      assert.deepEqual(log, ["Codes/E"]);
+      await execution.run();
+      assert.equal(resultText(execution.graph), "Codes/E");
+    } finally {
+      await execution.graph.close();
+    }
+  });
+for (const [name, path, message] of [
+  [
+    "Missing",
+    "./tests/fixtures/code-nodes.ts",
+    /has no DeterministicNode export "Missing"/,
+  ],
+  [
+    "NotANode",
+    "./tests/fixtures/code-nodes.ts",
+    /has no DeterministicNode export "NotANode"/,
+  ],
+  [
+    "Emitter",
+    "./tests/fixtures/absent.ts",
+    /code "Emitter": cannot import .*absent\.ts/,
+  ],
+] as const)
+  test(`code ${name} from ${path} is a definition error`, async () => {
+    const log: string[] = [];
+    await assert.rejects(
+      build(codeDocument({ [name]: path }, name), codeOptions(log)),
+      (error) =>
+        error instanceof graph.DataflowDefinitionError &&
+        message.test(error.message),
+    );
+    assert.deepEqual(log, []);
+  });

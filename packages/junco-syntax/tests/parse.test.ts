@@ -149,6 +149,38 @@ for (const mode of ["missing", "value", "trigger", "extra"])
           id: "second",
         });
     }, 'Node "B" (ralph) needs exactly one inbound message edge and one outbound message edge, and no trigger'));
+test("code node with registry name, trigger and description", () => {
+  const doc = parse(
+    variant((d) => {
+      d.code = { Impl: "./impl.ts" };
+      d.graph.nodes.B = {
+        kind: "code",
+        name: "Impl",
+        trigger: "A->B",
+        description: "deterministic",
+      };
+    }),
+  );
+  assert.deepEqual(doc.graph.nodes.B, {
+    kind: "code",
+    name: "Impl",
+    trigger: "A->B",
+    description: "deterministic",
+  });
+});
+test("code node names an unknown registry entry", () =>
+  rejects((d) => {
+    d.code = { Other: "./impl.ts" };
+    d.graph.nodes.B = { kind: "code", name: "Impl" };
+  }, 'Node "B" references unknown code "Impl"'));
+test("code node rejects agent fields", () =>
+  rejectsAt(
+    variant((d) => {
+      d.code = { Impl: "./impl.ts" };
+      d.graph.nodes.B = { kind: "code", name: "Impl", model: "p/m" };
+    }),
+    "/graph/nodes/B",
+  ));
 test("nested routes require parent edge", () =>
   assert.throws(
     () => parse(nested()),

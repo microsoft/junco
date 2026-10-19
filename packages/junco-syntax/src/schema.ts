@@ -115,6 +115,15 @@ const graphSchema = Type.Cyclic(
               },
               strict,
             ),
+            Type.Object(
+              {
+                ...common,
+                kind: Type.Literal("code"),
+                trigger: Type.Optional(trigger),
+                name: Type.String(),
+              },
+              strict,
+            ),
           ]),
           { minProperties: 1 },
         ),
@@ -144,6 +153,7 @@ export const JuncoDocumentSchema = Type.Object(
       ),
     ),
     skills: Type.Optional(Type.Record(Type.String(), Type.String())),
+    code: Type.Optional(Type.Record(Type.String(), Type.String())),
     graph: graphSchema,
   },
   strict,
