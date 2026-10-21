@@ -29,7 +29,7 @@ export function roundRobin(
     history: for (let i = snapshot.history.length - 1; i >= 0; i--) {
       const selected = snapshot.history[i]!.selected;
       for (let j = selected.length - 1; j >= 0; j--) {
-        const index = indices.get(selected[j]!);
+        const index = indices.get(selected[j]!.nodeId);
         if (index !== undefined) {
           cursor = (index + 1) % ids.length;
           break history;

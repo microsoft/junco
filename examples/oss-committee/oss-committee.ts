@@ -19,22 +19,24 @@
 
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type DataflowTracer, NodeId, type NodeIdType } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
-import type { JuncoAgent } from "junco-agent";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { type AgenticInput, graph as graphApi, schedules, tracer } from "junco-agency";
-import { build, createJuncoAgent, parse, resolveAgents } from "junco-syntax";
-import { ctrlC } from "../cancellation/cancellation.ts";
-import { finalText, type RoundContext, type SearchCounts } from "./code.ts";
+import { type AgenticInput, type agent, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco-agency";
+import { runCli } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
-const document = parse(source);
+const document = syntax.parse(source);
+
+const RESEARCH_RUNG: schedules.LadderRung = { model: "github-copilot/claude-opus-5.5", thinking: "medium" };
+const LADDER: schedules.Ladder = {
+  smol: RESEARCH_RUNG, low: RESEARCH_RUNG, med: RESEARCH_RUNG,
+  high: { model: "github-copilot/gpt-6-sol", thinking: "high" },
+  xhigh: { model: "github-copilot/claude-sonnet-5.5", thinking: "xhigh" },
+};
 
 // ## 1. Tools
 //
@@ -123,7 +125,7 @@ const reviewParameters = Type.Object(
   { additionalProperties: false },
 );
 
-export type ReviewVerdict = { readonly approved: boolean; readonly feedback: string };
+type ReviewVerdict = { readonly approved: boolean; readonly feedback: string };
 
 /** The Reducer's `review` tool and its verdict for the current round; a later call in the same round replaces it. */
 export class ReviewTool {
@@ -156,10 +158,101 @@ export class ReviewTool {
 
 // ## 2. Members
 //
-// The YAML declares each member's model, system instructions, tools, and graph role.
+// The YAML declares instructions, tools, and graph roles; LADDER supplies scheduler-chosen models.
 
 export type MemberId = "Librarian" | "Architect" | "Reducer";
-export type Members = Readonly<Record<MemberId, JuncoAgent>>;
+export type Members = Readonly<Record<MemberId, agent.JuncoAgent>>;
+type SearchCounts = Pick<OssSearchTool, "searches" | "failures">;
+type RoundContext = {
+  readonly request: string;
+  readonly feedback?: string;
+  readonly members: Members;
+  readonly search: SearchCounts;
+  readonly failuresBefore: number;
+  architectStarted: boolean;
+};
+
+const partialResearchId = graphApi.EdgeId.create("Librarian~>DesignAssignment");
+const researchId = graphApi.EdgeId.create("Librarian->DesignAssignment");
+const reducerResearchId = graphApi.EdgeId.create("Librarian->ReviewAssignment");
+const designId = graphApi.EdgeId.create("Architect->ReviewAssignment");
+
+/** Prepare the first assignment at execution time, without starting or replacing any member. */
+const ResearchAssignment: syntax.DeterministicNode<RoundContext> = {
+  create({ context, edges, policy }) {
+    let published = false;
+    return {
+      state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        const { request, feedback } = context;
+        const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
+          (feedback === undefined
+            ? "Search public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps."
+            : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
+        published = true;
+        // Like a YAML emit node, publish once and park; assignments are messages, not fake reports.
+        while (true) yield [graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, { kind: "prompt", text })];
+      }, policy),
+      is_available: (_view, triggered) => triggered && !published,
+    };
+  },
+};
+
+/** Admit either exactly one partial prompt or a valid, normally completed research report. */
+const DesignAssignment: syntax.DeterministicNode<RoundContext> = {
+  create({ context, edges, policy }) {
+    let published = false;
+    return {
+      state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        const inputs = yield [];
+        const partial = inputs.messages.get(partialResearchId);
+        let report: string;
+        if (partial !== undefined) {
+          const [snapshot, ...extra] = partial;
+          if (snapshot?.kind !== "prompt" || extra.length > 0)
+            throw new Error("Librarian must send exactly one partial research prompt");
+          report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
+        } else {
+          if (context.search.failures() > context.failuresBefore)
+            throw new Error("Librarian must send its partial research after a failed GitHub lookup");
+          if (context.search.searches() === 0)
+            throw new Error("Librarian did not complete a valid GitHub OSS search");
+          report = syntax.finalText(inputs.values.get(researchId), "Librarian");
+        }
+        context.architectStarted = true;
+        const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
+        published = true;
+        while (true) yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, { kind: "prompt", text })];
+      }, policy),
+      is_available: (_view, triggered) => triggered && !published,
+      contract: (edgeId) => ({
+        expect: edgeId === partialResearchId
+          ? "Exactly one prompt carrying partial research: available evidence, the failed lookup/error, and remaining gaps, used to prepare the Architect's assignment."
+          : "Normally completed, non-empty Librarian research after a valid OSS search and no unhanded failed lookup, used to prepare the Architect's assignment.",
+      }),
+    };
+  },
+};
+
+/** Only the joined, validated final reports can prepare the Reducer's assignment. */
+const ReviewAssignment: syntax.DeterministicNode<RoundContext> = {
+  create({ context, edges, policy }) {
+    let published = false;
+    return {
+      state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+        const inputs = yield [];
+        const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
+        published = true;
+        while (true) yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, { kind: "prompt", text })];
+      }, policy),
+      is_available: (_view, triggered) => triggered && !published,
+      contract: (edgeId) => ({
+        expect: edgeId === reducerResearchId
+          ? "The Librarian's normally completed, non-empty closing report for the joined review."
+          : "The Architect's normally completed, non-empty design report for the joined review.",
+      }),
+    };
+  },
+};
 
 // ## 3. One review round
 //
@@ -172,20 +265,19 @@ export type Members = Readonly<Record<MemberId, JuncoAgent>>;
 /** One review round's graph and its Reducer node. */
 export interface ReviewRound {
   execution: ReturnType<typeof schedules.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
-  reducerId: NodeIdType;
+  reducerId: graphApi.NodeIdType;
 }
 
 export const ReviewRound = {
-  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: DataflowTracer): Promise<ReviewRound> {
+  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder): Promise<ReviewRound> {
     const context: RoundContext = {
       request, feedback, members, search, failuresBefore: search.failures(), architectStarted: false,
     };
-    const execution = await build({
-      ...document,
-      // The example also runs outside the repo cwd; YAML paths remain root-relative for readers.
-      code: Object.fromEntries(Object.keys(document.code!).map((name) => [name, fileURLToPath(new URL("./code.js", import.meta.url))])),
-    }, {
-      cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
+    const execution = await JuncoGraph.fromYaml(source, {
+      cwd: process.cwd(),
+      scheduler: () => schedules.strength((_, id) => ({ Librarian: "med", Architect: "high", Reducer: "xhigh" } as const)[id as MemberId] ?? "med", schedules.parallel()),
+      tracer: observer, context, code: { ResearchAssignment, DesignAssignment, ReviewAssignment },
+      ...(ladder === undefined ? {} : { ladder }),
       tools: {
         search: members.Librarian.getTools().find((tool) => tool.name === "search_oss")!,
         review: members.Reducer.getTools().find((tool) => tool.name === "review")!,
@@ -193,16 +285,16 @@ export const ReviewRound = {
       createAgent: async (spec) => members[spec.node as MemberId],
       available: {
         Librarian: ({ graph, edges }) => (_view, triggered) => {
-          if (!triggered && graph.getNode(NodeId.create("Librarian"))!.status !== "running") return false;
+          if (!triggered && graph.getNode(graphApi.NodeId.create("Librarian"))!.status !== "running") return false;
           const partial = edges.get("Librarian~>DesignAssignment")!;
           // Hold the paused Librarian until the Architect finishes its partial research.
           return search.failures() <= context.failuresBefore ||
             !((E.isLeft(partial.transport) && partial.transport.left.length > 0) || context.architectStarted) ||
-            graph.getNode(NodeId.create("Architect"))!.status === "done";
+            graph.getNode(graphApi.NodeId.create("Architect"))!.status === "done";
         },
       },
     });
-    return { execution, reducerId: NodeId.create("Reducer") };
+    return { execution, reducerId: graphApi.NodeId.create("Reducer") };
   },
 };
 
@@ -214,7 +306,7 @@ export const ReviewRound = {
 
 /** An approved plan must be a complete, titled Markdown answer. */
 export function approvedPlan(message: AssistantMessage | undefined): string {
-  const markdown = finalText(message, "Reducer");
+  const markdown = syntax.finalText(message, "Reducer");
   if (!markdown.startsWith("# ")) throw new Error("Reducer's approved plan must start with a Markdown title (# )");
   return markdown;
 }
@@ -225,7 +317,8 @@ export async function convene(
   search: SearchCounts,
   review: Pick<ReviewTool, "takeVerdict">,
   signal?: AbortSignal,
-  observer?: DataflowTracer,
+  observer?: tracer.DataflowTracer,
+  ladder?: schedules.Ladder,
 ): Promise<string> {
   let feedback: string | undefined;
   // Rounds share the automatically selected tracer: flush it once, however the committee ends.
@@ -233,7 +326,7 @@ export async function convene(
   try {
     for (;;) {
       signal?.throwIfAborted();
-      const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected);
+      const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected, ladder);
       const plan = (await execution.run({ signal })).get(reducerId);
       signal?.throwIfAborted();
       const verdict = review.takeVerdict();
@@ -282,26 +375,17 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
   let plan: string;
   {
     await using resources = new AsyncDisposableStack();
-    const members = {} as Record<MemberId, JuncoAgent>;
-    const specs = await resolveAgents(document, { cwd: process.cwd(), tools: { search: search.tool, review: review.tool } });
+    const members = {} as Record<MemberId, agent.JuncoAgent>;
+    const specs = await syntax.resolveAgents(document, { cwd: process.cwd(), tools: { search: search.tool, review: review.tool } });
     for (const spec of specs) {
       signal?.throwIfAborted();
-      members[spec.node as MemberId] = resources.use(await createJuncoAgent(spec, models));
+      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent(spec, LADDER, models));
     }
-    plan = await convene(request, members, search, review, signal);
+    plan = await convene(request, members, search, review, signal, undefined, LADDER);
   }
   signal?.throwIfAborted();
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });
   console.log(outputPath);
 }
 
-if (import.meta.main) {
-  using cancellation = ctrlC();
-  try {
-    await main(process.argv.slice(2), cancellation.signal);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = cancellation.signal.aborted ? 130 : 1;
-  }
-  if (cancellation.signal.aborted) process.exitCode = 130;
-}
+if (import.meta.main) await runCli((signal) => main(process.argv.slice(2), signal));

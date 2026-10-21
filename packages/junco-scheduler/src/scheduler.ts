@@ -5,7 +5,23 @@ import {
   type NodeIdType,
 } from "dataflow-engine";
 
-export type Decision = { readonly selected: readonly NodeIdType[] };
+export const MODEL_STRENGTHS = ["smol", "low", "med", "high", "xhigh"] as const;
+export type ModelStrengthName = (typeof MODEL_STRENGTHS)[number];
+/** Index into MODEL_STRENGTHS: 0 = smol … 4 = xhigh. */
+export type ModelStrength = 0 | 1 | 2 | 3 | 4;
+export const DEFAULT_MODEL_STRENGTH: ModelStrength = 2;
+export type NodeModel = {
+  readonly nodeId: NodeIdType;
+  readonly modelStrength: ModelStrength;
+};
+export type Decision = { readonly selected: readonly NodeModel[] };
+/** Work-only policies select at the default strength. */
+export const select = (
+  ids: Iterable<NodeIdType>,
+  modelStrength: ModelStrength = DEFAULT_MODEL_STRENGTH,
+): NodeModel[] => [...ids].map((nodeId) => ({ nodeId, modelStrength }));
+export const nodeIds = (selected: readonly NodeModel[]): NodeIdType[] =>
+  selected.map((entry) => entry.nodeId);
 
 /** Native containers are detached; opaque state, messages, results and metadata are borrowed. */
 export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
@@ -35,17 +51,31 @@ export function validateDecision<S, N, T, C>(
     !Array.isArray(decision.selected)
   ) {
     throw new DataflowDefinitionError(
-      "Scheduler must return a decision with a selected array of node IDs",
+      "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
     );
   }
   const seen = new Set<NodeIdType>();
-  for (const id of decision.selected) {
-    if (typeof id !== "string")
+  for (const entry of decision.selected) {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      typeof entry.nodeId !== "string"
+    )
       throw new DataflowDefinitionError(
-        "Scheduler must return a decision with a selected array of node IDs",
+        "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
+      );
+    const { nodeId, modelStrength } = entry;
+    if (
+      !Number.isInteger(modelStrength) ||
+      modelStrength < 0 ||
+      modelStrength > 4
+    )
+      throw new DataflowDefinitionError(
+        `Scheduler decision gives node "${nodeId}" an invalid model strength ${String(modelStrength)}`,
       );
   }
-  for (const id of decision.selected) {
+  for (const { nodeId: id } of decision.selected) {
     if (seen.has(id))
       throw new DataflowDefinitionError(
         `Scheduler decision selects node "${id}" more than once`,
@@ -94,7 +124,7 @@ export function choose<S, N, T, C>(options: {
         );
       return rank === 0 ? (left < right ? -1 : left > right ? 1 : 0) : rank;
     });
-    return { selected: candidates.slice(0, width) };
+    return { selected: select(candidates.slice(0, width)) };
   };
 }
 
@@ -104,7 +134,9 @@ function restrict<S, N, T, C>(
 ): Snapshot<S, N, T, C> {
   const history: Decision[] = [];
   for (const decision of snapshot.history) {
-    const selected = decision.selected.filter((id) => owned.has(id));
+    const selected = decision.selected.filter((entry) =>
+      owned.has(entry.nodeId),
+    );
     if (selected.length > 0)
       history.push(Object.freeze({ selected: Object.freeze(selected) }));
   }
@@ -154,6 +186,30 @@ export function separate<S, N, T, C>(
   };
 }
 
+/** Override the strength of every node `inner` selects; `assign` names the rung per node. */
+export function strength<S, N, T, C>(
+  assign: (
+    snapshot: Snapshot<S, N, T, C>,
+    nodeId: NodeIdType,
+  ) => ModelStrengthName,
+  inner: Scheduler<S, N, T, C>,
+): Scheduler<S, N, T, C> {
+  return async (snapshot, signal) => {
+    const decision = await inner(snapshot, signal);
+    return {
+      selected: decision.selected.map(({ nodeId }) => {
+        const name = assign(snapshot, nodeId);
+        const index = MODEL_STRENGTHS.indexOf(name);
+        if (index < 0)
+          throw new DataflowDefinitionError(
+            `strength: unknown model strength "${name}" for node "${nodeId}"`,
+          );
+        return { nodeId, modelStrength: index as ModelStrength };
+      }),
+    };
+  };
+}
+
 /** Normalize this invocation's first applicable speculative wave; retain no future plan. */
 export function agent<S, N, T, C>(
   invoke: (
@@ -176,7 +232,7 @@ export function agent<S, N, T, C>(
       for (const id of wave)
         if (snapshot.available.has(id) && snapshot.owned.has(id))
           selected.add(id);
-      if (selected.size > 0) return { selected: [...selected] };
+      if (selected.size > 0) return { selected: select(selected) };
     }
     return { selected: [] };
   };

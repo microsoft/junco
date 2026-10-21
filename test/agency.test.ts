@@ -6,24 +6,18 @@ import {
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
 import { NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
-import * as O from "fp-ts/lib/Option.js";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import {
-  type AgenticInput,
-  Deterministic,
-  type JuncoGraph,
-  MockAgent,
-} from "../src/index.ts";
+import { type AgenticInput, Deterministic, MockAgent } from "../src/index.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 import {
   assistant,
   pause,
   reason,
+  resultText,
   run,
   settle,
   terminalPorts,
-  textOf,
   yieldsThen,
 } from "./deterministic-support.ts";
 import {
@@ -33,10 +27,6 @@ import {
   schedulerRequestOf,
 } from "./support.ts";
 
-const resultText = (graph: JuncoGraph, id: NodeIdType) => {
-  const result = graph.result(id);
-  return O.isSome(result) ? textOf(result.value) : undefined;
-};
 const member = (agent: MockAgent, description: string, id?: string) => ({
   ...(id === undefined ? {} : { id: NodeId.create(id) }),
   state: agent,

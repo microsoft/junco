@@ -1,5 +1,3 @@
-code:
-  Join: examples/recursive-agency/code.ts
 graph:
   name: root
   nodes:
@@ -18,7 +16,6 @@ graph:
               name: grandchild
               nodes:
                 "0":
-                  model: faux/leaf
                   system: leaf
                   prompt: Do your part.
                   description: grandchild member 0
@@ -30,14 +27,12 @@ graph:
           - from: "0"
             to: $sink
     "1":
-      model: faux/sibling
       system: leaf
       prompt: Do your part.
       description: root member 1
       trigger: always
     Join:
       kind: code
-      name: Join
       description: Validates both root branches and retains the child's exact result.
   edges:
     - from: "0"

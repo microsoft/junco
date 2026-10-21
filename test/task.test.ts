@@ -34,7 +34,8 @@ import {
   trigger,
 } from "../src/index.ts";
 import { registeredNodeContexts } from "../src/node-policy.ts";
-import { type AgencyContext, waitingTool } from "./support.ts";
+import { userTexts } from "./deterministic-support.ts";
+import { type AgencyContext, toolTurn, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call expands the caller's node into a Spawn graph whose workers report back through queues.
@@ -187,12 +188,9 @@ function holdTool(name = "hold") {
 const textOf = (message: AgentMessage): string =>
   "content" in message ? contentText(message.content) : "";
 
-const userTexts = (context: Context): string[] =>
-  context.messages.filter((message) => message.role === "user").map(textOf);
-
 /** Every task report among `context`'s user messages, parsed. */
 const reportsIn = (context: Context): Report[] =>
-  userTexts(context)
+  userTexts(context.messages)
     .filter((text) => text.startsWith('{"type":"task_result"'))
     .map((text): Report => JSON.parse(text));
 
@@ -270,8 +268,6 @@ const taskCall = (tasks: JsonValue[], id = "task-call") =>
   fauxToolCall("task", { context: TASK_CONTEXT, tasks }, { id });
 const yieldCall = (reason: string, id = "yield-call") =>
   fauxToolCall("yield", { reason }, { id });
-const toolUse = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 
 function callerNode(caller: Agent, prompt = "Start") {
   caller.stagePrompt(prompt);
@@ -347,7 +343,7 @@ const pairedLinks = (ids: readonly string[]) =>
 
 /** The ids of every batch-completion marker among `context`'s user messages. */
 const markersIn = (context: Context): string[][] =>
-  userTexts(context)
+  userTexts(context.messages)
     .filter((text) => text.startsWith('{"type":"task_batch_complete"'))
     .map((text) => JSON.parse(text).ids);
 
@@ -383,7 +379,7 @@ function answering(
       if (decide === undefined || !report.decisionRequired || asked.has(key))
         continue;
       asked.add(key);
-      return toolUse(...decide(report));
+      return toolTurn(...decide(report));
     }
     return markersIn(context).length > 0
       ? finish(context)
@@ -411,7 +407,7 @@ function worker(
   r.script(
     name,
     Array.from({ length: failures + 2 }, (_, index) => (context: Context) => {
-      prompts.push(userTexts(context)[0] ?? "");
+      prompts.push(userTexts(context.messages)[0] ?? "");
       return outcome(name, index < failures, index + 1);
     }),
   );
@@ -434,7 +430,7 @@ async function failingCaller(
   turns: FauxResponseStep[],
 ) {
   r.script("caller", [
-    toolUse(taskCall(names.map((name) => taskOn(r, name)))),
+    toolTurn(taskCall(names.map((name) => taskOn(r, name)))),
     ...turns,
   ]);
   const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool()]);
@@ -483,9 +479,9 @@ describe("task tool through a graph-driven agent", () => {
       const accepted = Promise.withResolvers<void>();
       r.script("worker", [fauxAssistantMessage("worker-result")]);
       r.script("caller", [
-        toolUse(taskCall([taskOn(r, "worker")])),
-        toolUse(yieldCall("promote before sending")),
-        toolUse(
+        toolTurn(taskCall([taskOn(r, "worker")])),
+        toolTurn(yieldCall("promote before sending")),
+        toolTurn(
           fauxToolCall(
             "send",
             {
@@ -587,7 +583,7 @@ describe("task tool through a graph-driven agent", () => {
     const seen: { handles?: TaskToolDetails["tasks"]; reports?: Report[] } = {};
     const order: string[] = [];
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall([
           {
             name: " alpha ",
@@ -612,7 +608,7 @@ describe("task tool through a graph-driven agent", () => {
     r.script("alpha", [
       (context) => {
         workerContexts.push(context);
-        return toolUse(fauxToolCall("hold", {}, { id: "h1" }));
+        return toolTurn(fauxToolCall("hold", {}, { id: "h1" }));
       },
       () => {
         order.push("alpha-done");
@@ -711,13 +707,15 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(runIds.size, 2, "one more caller run processed the reports");
     for (const context of workerContexts) {
       assert.equal(
-        userTexts(context).some((text) => text.includes("Start the workers")),
+        userTexts(context.messages).some((text) =>
+          text.includes("Start the workers"),
+        ),
         false,
         "a worker's fresh session excludes the caller transcript",
       );
     }
     assert.deepEqual(
-      workerContexts.map((context) => userTexts(context)[0]).sort(),
+      workerContexts.map((context) => userTexts(context.messages)[0]).sort(),
       [childPrompt("do alpha"), childPrompt("do beta")],
     );
     for (const child of childIds) {
@@ -785,7 +783,7 @@ describe("task tool through a graph-driven agent", () => {
           message.role === "toolResult" && message.toolName === "task",
       ).length;
       if (tasks === 0)
-        return toolUse(
+        return toolTurn(
           taskCall([
             {
               name: "alpha",
@@ -795,15 +793,15 @@ describe("task tool through a graph-driven agent", () => {
             },
           ]),
         );
-      if (!called(context, "yield")) return toolUse(yieldCall("checkpoint"));
+      if (!called(context, "yield")) return toolTurn(yieldCall("checkpoint"));
       const infos = results<Info>(context, "info");
       if (infos.length === 0)
-        return toolUse(fauxToolCall("info", {}, { id: "info-1" }));
+        return toolTurn(fauxToolCall("info", {}, { id: "info-1" }));
       const received = results<Received>(context, "recv");
       const messages = received.flatMap((batch) => batch.messages);
       if (messages.length < 5) {
         const last = context.messages.at(-1);
-        return toolUse(
+        return toolTurn(
           last?.role === "toolResult" && last.toolName === "recv"
             ? yieldCall("waiting for notes", `wait-${received.length}`)
             : fauxToolCall("recv", {}, { id: `recv-${received.length}` }),
@@ -811,19 +809,19 @@ describe("task tool through a graph-driven agent", () => {
       }
       // A later admission joins the already promoted Spawn graph.
       if (tasks === 1)
-        return toolUse(
+        return toolTurn(
           taskCall(
             [{ name: "beta", task: "more", model: r.model("beta"), tools: [] }],
             "task-2",
           ),
         );
       if (infos.length === 1)
-        return toolUse(fauxToolCall("info", {}, { id: "info-2" }));
+        return toolTurn(fauxToolCall("info", {}, { id: "info-2" }));
       const sendResults = context.messages
         .filter((message) => message.role === "toolResult")
         .filter((message) => message.toolName === "send");
       if (sendResults.length < 2)
-        return toolUse(
+        return toolTurn(
           fauxToolCall(
             "send",
             {
@@ -839,7 +837,7 @@ describe("task tool through a graph-driven agent", () => {
           .at(-1)
           ?.children.find((child) => child.kind === "message");
         assert.ok(route, "info names an outgoing message route");
-        return toolUse(
+        return toolTurn(
           fauxToolCall(
             "send",
             {
@@ -862,11 +860,11 @@ describe("task tool through a graph-driven agent", () => {
     r.script("alpha", [
       () => {
         alphaStarted = true;
-        return toolUse(fauxToolCall("info", {}, { id: "alpha-info" }));
+        return toolTurn(fauxToolCall("info", {}, { id: "alpha-info" }));
       },
       (context) => {
         childInfos.push(...results<Info>(context, "info"));
-        return toolUse(yieldCall("alpha pause"));
+        return toolTurn(yieldCall("alpha pause"));
       },
       fauxAssistantMessage("alpha-report"),
     ]);
@@ -1026,7 +1024,7 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(sendResults[1]?.isError, true);
     assert.equal(sendResults[2]?.isError, false);
     assert.equal(
-      userTexts(finalContext).includes("note-1"),
+      userTexts(finalContext.messages).includes("note-1"),
       false,
       "notes are data, not prompts",
     );
@@ -1107,7 +1105,7 @@ describe("task tool through a graph-driven agent", () => {
     const r = registry("caller", "worker");
     const contexts: Context[] = [];
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall(
           [{ name: "alpha", task: "a", model: r.model("worker") }],
           "t1",
@@ -1117,7 +1115,7 @@ describe("task tool through a graph-driven agent", () => {
       fauxAssistantMessage("interim"),
       (context) => {
         contexts.push(context);
-        return toolUse(
+        return toolTurn(
           taskCall(
             [{ name: "gamma", task: "c", model: r.model("worker") }],
             "t3",
@@ -1131,9 +1129,12 @@ describe("task tool through a graph-driven agent", () => {
       },
     ]);
     r.script("worker", [
-      (context) => fauxAssistantMessage(`${userTexts(context)[0]}-report`),
-      (context) => fauxAssistantMessage(`${userTexts(context)[0]}-report`),
-      (context) => fauxAssistantMessage(`${userTexts(context)[0]}-report`),
+      (context) =>
+        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
+      (context) =>
+        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
+      (context) =>
+        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
     ]);
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
@@ -1176,7 +1177,7 @@ describe("task tool through a graph-driven agent", () => {
   test("a subagent's own task call nests its node; the grandchild's report reaches the original caller", async () => {
     const r = registry("caller", "alpha", "grand");
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall([
           {
             name: "alpha",
@@ -1195,7 +1196,7 @@ describe("task tool through a graph-driven agent", () => {
         ),
     ]);
     r.script("alpha", [
-      toolUse(
+      toolTurn(
         taskCall([
           { name: "grand", task: "leaf work", model: r.model("grand") },
         ]),
@@ -1247,14 +1248,14 @@ describe("task tool through a graph-driven agent", () => {
     const r = registry("caller", "worker");
     const seen: Context[] = [];
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall(
           [{ name: "alpha", task: "a", model: r.model("worker") }],
           "t1",
         ),
       ),
-      toolUse(yieldCall("wait")),
-      toolUse(
+      toolTurn(yieldCall("wait")),
+      toolTurn(
         taskCall(
           [{ name: "gamma", task: "c", model: r.model("worker") }],
           "t2",
@@ -1305,7 +1306,7 @@ describe("task tool through a graph-driven agent", () => {
     const r = registry("caller", "worker");
     const errors: string[] = [];
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall(
           [
             { task: "ok", model: r.model("worker") },
@@ -1317,7 +1318,7 @@ describe("task tool through a graph-driven agent", () => {
       (context) => {
         const result = lastToolResult(context);
         if (result.isError) errors.push(textOf(result));
-        return toolUse(taskCall([{ task: "bad", tools: ["missing"] }], "t2"));
+        return toolTurn(taskCall([{ task: "bad", tools: ["missing"] }], "t2"));
       },
       (context) => {
         const result = lastToolResult(context);
@@ -1348,7 +1349,7 @@ describe("task tool through a graph-driven agent", () => {
   test("an abort after acquisition and before publication closes the acquired children and keeps the caller's node", async () => {
     const r = registry("caller", "worker");
     r.script("caller", [
-      toolUse(taskCall([{ task: "a" }, { task: "b" }], "t1")),
+      toolTurn(taskCall([{ task: "a" }, { task: "b" }], "t1")),
     ]);
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
@@ -1374,7 +1375,7 @@ describe("task tool through a graph-driven agent", () => {
 
   test("closing the graph during acquisition creates no children", async () => {
     const r = registry("caller");
-    r.script("caller", [toolUse(taskCall([{ task: "a" }], "t1"))]);
+    r.script("caller", [toolTurn(taskCall([{ task: "a" }], "t1"))]);
     const caller = await newCaller(r.models, "caller", [
       new toolsApi.TaskTool(),
     ]);
@@ -1407,7 +1408,7 @@ describe("task tool through a graph-driven agent", () => {
     const hold = holdTool();
     const r = registry("caller", "worker");
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall([
           { task: "a", model: r.model("worker"), tools: ["hold"] },
           { task: "b", model: r.model("worker"), tools: [] },
@@ -1416,7 +1417,7 @@ describe("task tool through a graph-driven agent", () => {
       fauxAssistantMessage("interim"),
     ]);
     r.script("worker", [
-      toolUse(fauxToolCall("hold", {}, { id: "h" })),
+      toolTurn(fauxToolCall("hold", {}, { id: "h" })),
       fauxAssistantMessage("b-report"),
       fauxAssistantMessage("a-report"),
     ]);
@@ -1445,7 +1446,7 @@ describe("task tool through a graph-driven agent", () => {
     const r = registry("caller", "worker");
     let finalContext: Context | undefined;
     r.script("caller", [
-      toolUse(taskCall([{ name: "w", task: "a", model: r.model("worker") }])),
+      toolTurn(taskCall([{ name: "w", task: "a", model: r.model("worker") }])),
       ...answering(
         (report) => [decision("ignore", report, "ignore-w")],
         (context) => {
@@ -1510,7 +1511,7 @@ describe("task tool through a graph-driven agent", () => {
       return fauxAssistantMessage("handled both");
     });
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall([
           { name: "bad", task: "explode", model: r.model("bad"), tools: [] },
           { name: "good", task: "work", model: r.model("good"), tools: [] },
@@ -1607,7 +1608,7 @@ describe("task tool through a graph-driven agent", () => {
     let handles: TaskToolDetails["tasks"] = [];
     let finalContext: Context | undefined;
     r.script("caller", [
-      toolUse(
+      toolTurn(
         taskCall([
           {
             name: "child",
@@ -1627,7 +1628,7 @@ describe("task tool through a graph-driven agent", () => {
       }),
     ]);
     r.script("child", [
-      toolUse(
+      toolTurn(
         taskCall([
           {
             name: "fast",
@@ -1652,7 +1653,7 @@ describe("task tool through a graph-driven agent", () => {
       Array.from(
         { length: 16 },
         (_, turn) => () =>
-          toolUse(
+          toolTurn(
             yieldCall(
               "wait for the root's failing drive",
               `slow-yield-${turn}`,
@@ -1734,11 +1735,11 @@ describe("task tool through a graph-driven agent", () => {
   test("complaints follow the caller into its Spawn root and children keep their own task ids", async () => {
     const r = registry("caller", "worker");
     const complain = (complaint: string, id: string) =>
-      toolUse(fauxToolCall("complain", { complaint }, { id }));
+      toolTurn(fauxToolCall("complain", { complaint }, { id }));
     const seen: { handles?: TaskToolDetails["tasks"] } = {};
     r.script("caller", [
       complain("before expansion", "c1"),
-      toolUse(
+      toolTurn(
         taskCall([
           { name: "w", task: "do w", model: r.model("worker"), tools: [] },
         ]),
@@ -1812,7 +1813,7 @@ describe("task tool through a graph-driven agent", () => {
     let finalContext: Context | undefined;
     const launch = (id: string) => fauxToolCall("task", {}, { id });
     r.script("caller", [
-      toolUse(launch("l1"), launch("l2"), launch("l3")),
+      toolTurn(launch("l1"), launch("l2"), launch("l3")),
       ...answering(undefined, (context) => {
         finalContext = context;
         return fauxAssistantMessage("final");
@@ -2072,7 +2073,7 @@ describe("task tool through a graph-driven agent", () => {
           probed = true;
           const [a] = markersIn(context)[0] ?? [];
           // The retried attempt completed: no decision about it is pending.
-          return toolUse(
+          return toolTurn(
             decision("ignore", { id: a!, attempt: 2 }, "completed"),
           );
         },

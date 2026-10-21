@@ -27,20 +27,21 @@ const edge = Type.Object(
   },
   strict,
 );
-const common = { description: Type.Optional(Type.String()) };
+const quantity = Type.String({ pattern: "^\\d+(\\.\\d+)?\\s*[A-Za-z]+$" });
+const profiles = Type.Object(
+  {
+    memory: Type.Optional(quantity),
+    runtime: Type.Optional(quantity),
+    tokens: Type.Optional(quantity),
+  },
+  strict,
+);
+const common = {
+  description: Type.Optional(Type.String()),
+  profiles: Type.Optional(profiles),
+};
 const agentFields = {
   ...common,
-  model: Type.String({ pattern: "^[^/]+/.+$" }),
-  thinking: Type.Optional(
-    Type.Union([
-      Type.Literal("minimal"),
-      Type.Literal("low"),
-      Type.Literal("medium"),
-      Type.Literal("high"),
-      Type.Literal("xhigh"),
-      Type.Literal("max"),
-    ]),
-  ),
   system: Type.Optional(Type.String()),
   tools: Type.Optional(strings),
   mcp: Type.Optional(strings),
@@ -61,7 +62,7 @@ const graphSchema = Type.Cyclic(
         source: Type.Optional(
           Type.Object(
             {
-              ...common,
+              description: common.description,
               routes: Type.Optional(Type.Record(Type.String(), strings)),
             },
             strict,
@@ -70,7 +71,7 @@ const graphSchema = Type.Cyclic(
         sink: Type.Optional(
           Type.Object(
             {
-              ...common,
+              description: common.description,
               trigger: Type.Optional(trigger),
               returns: Type.Optional(Type.String()),
             },
@@ -111,7 +112,6 @@ const graphSchema = Type.Cyclic(
                 ...common,
                 kind: Type.Literal("code"),
                 trigger: Type.Optional(trigger),
-                name: Type.String(),
               },
               strict,
             ),
@@ -144,7 +144,6 @@ export const JuncoDocumentSchema = Type.Object(
       ),
     ),
     skills: Type.Optional(Type.Record(Type.String(), Type.String())),
-    code: Type.Optional(Type.Record(Type.String(), Type.String())),
     graph: graphSchema,
   },
   strict,

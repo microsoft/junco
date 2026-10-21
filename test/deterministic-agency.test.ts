@@ -26,15 +26,15 @@ import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import {
   type Decision,
+  nodeIds,
   parallel,
   type SchedulerContext,
 } from "junco-scheduler";
-import { LockPolicy, type Policy } from "junco-tools";
+import { LockPolicy } from "junco-tools";
 import {
   type Agentic,
   type AgenticInput,
   Deterministic,
-  graph as graphApi,
   JuncoGraph,
   MockAgent,
   type MockHook,
@@ -47,6 +47,7 @@ import {
   policyContext,
   reason,
   requestTexts,
+  resultText,
   run,
   STRATEGIES,
   settle,
@@ -189,14 +190,6 @@ const detached = (child: PolicyContext, description = "nested") => ({
 const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
   E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
-const resultText = (
-  graph: Pick<PolicyGraph, "result">,
-  id: NodeId,
-): string | undefined => {
-  const result = graph.result(id);
-  return O.isSome(result) ? textOf(result.value) : undefined;
-};
-
 /** The stop reason of `id`'s retained result. */
 const stopReason = (graph: Pick<PolicyGraph, "result">, id: NodeId) => {
   const result = graph.result(id);
@@ -308,7 +301,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(worker.status, "closed");
     });
 
-    test("an all trigger reads both message edges together or neither", async () => {
+    test("an all trigger gates initial admission while active members read queued messages", async () => {
       const sender = new MockAgent({
         prompt: "send",
         runs: [yieldsThen(12, "sent")],
@@ -372,7 +365,7 @@ for (const strategy of STRATEGIES) {
       await stepUntil(graphContext, () => queued(left).length === 1);
       const before = gatedMember.requests.length;
       await stepUntil(graphContext, () => gatedMember.requests.length > before);
-      assert.deepEqual([queued(left), queued(right)], [[followUp("x2")], []]);
+      assert.deepEqual([queued(left), queued(right)], [[], []]);
 
       graph.emit(s, Message.create(right, followUp("y2")));
       await stepUntil(
@@ -1729,12 +1722,16 @@ describe("source and sink boundaries", () => {
       );
       assert.ok(
         histories.some((history) =>
-          history.some((decision) => decision.selected.includes(source.id)),
+          history.some((decision) =>
+            nodeIds(decision.selected).includes(source.id),
+          ),
         ),
       );
       assert.ok(
         histories.some((history) =>
-          history.some((decision) => decision.selected.includes(sink.id)),
+          history.some((decision) =>
+            nodeIds(decision.selected).includes(sink.id),
+          ),
         ),
       );
       const deliveryFailure = new Error("delivery failed");

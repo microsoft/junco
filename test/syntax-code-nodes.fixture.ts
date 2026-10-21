@@ -1,15 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type AgenticInput, Deterministic } from "junco-agency";
-import type { DeterministicNode } from "../../src/build.ts";
-
-const usage = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
+import type { DeterministicNode } from "../src/syntax/build.ts";
+import { assistant } from "./deterministic-support.ts";
 
 /** Records where it was registered and returns `<label>/<node>` on its single activation. */
 export const Emitter: DeterministicNode<{ log: string[] }> = {
@@ -21,16 +13,7 @@ export const Emitter: DeterministicNode<{ log: string[] }> = {
         async function* () {
           yield [];
           finished = true;
-          return {
-            role: "assistant",
-            content: [{ type: "text", text: `${label}/${node}` }],
-            api: "mock",
-            provider: "mock",
-            model: "mock",
-            usage,
-            stopReason: "stop",
-            timestamp: 0,
-          };
+          return assistant(`${label}/${node}`);
         },
         policy,
       ),
@@ -39,5 +22,3 @@ export const Emitter: DeterministicNode<{ log: string[] }> = {
     };
   },
 };
-
-export const NotANode = 42;

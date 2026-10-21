@@ -112,8 +112,10 @@ export function exactRequest(
   metadata?.label;
   // @ts-expect-error Context entries are readonly.
   request.context.push([NodeId.create("a"), { trigger: "all", satisfied: 0 }]);
-  // @ts-expect-error Historical selections contain branded native IDs.
-  const decision: Decision = { selected: ["unbranded"] };
+  const decision: Decision = {
+    // @ts-expect-error Historical selections contain branded native IDs.
+    selected: [{ nodeId: "unbranded", modelStrength: 2 }],
+  };
   return [satisfied, trigger, decision];
 }
 

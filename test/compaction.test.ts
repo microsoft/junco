@@ -17,7 +17,6 @@ import {
   Source,
   TriggerRule,
 } from "dataflow-engine";
-import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import { LockPolicy } from "junco-tools";
 import {
@@ -32,10 +31,10 @@ import {
 import {
   assistant,
   plainContext,
+  resultText,
   run,
   settle,
   terminalPorts,
-  textOf,
   user,
   userTexts,
   yieldsThen,
@@ -94,14 +93,6 @@ const node = (agent: MockAgent, id: string) => ({
   description: id,
   trigger: TriggerRule.always(),
 });
-
-const resultText = (
-  graph: JuncoGraph<AgenticInput, AssistantMessage>,
-  id: NodeIdType,
-): string | undefined => {
-  const result = graph.result(id);
-  return O.isSome(result) ? textOf(result.value) : undefined;
-};
 
 const flushMacrotask = () =>
   new Promise<void>((resolve) => setImmediate(resolve));

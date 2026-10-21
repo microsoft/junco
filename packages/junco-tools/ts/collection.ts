@@ -45,6 +45,8 @@ export interface ToolCollectionOptions {
  * drops its hold on the collection. Neither clears an ownership Marsh already committed.
  */
 export interface ToolBinding {
+  /** Policy owner id of this binding's calls and commands (`NativeResourceEvent.owner`). */
+  readonly owner: string;
   readonly tools: ReadonlyMap<AgentTool<any>, AgentTool<any>>;
   close(): Promise<void>;
 }
@@ -242,6 +244,9 @@ export class ToolCollection {
    */
   bind(): ToolBinding {
     const mux = this.mux.forkOwner();
+    const owner = mux.owner;
+    if (owner === undefined)
+      throw new Error("ToolCollection.bind: the forked mux has no owner");
     const hold = this.lease();
     const stop = new AbortController();
     const signal = AbortSignal.any([this.#abort.signal, stop.signal]);
@@ -265,6 +270,7 @@ export class ToolCollection {
       tools.set(this.tools[index]!, tool);
     });
     return {
+      owner,
       tools,
       close: () => {
         closing ??= (async () => {

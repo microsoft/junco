@@ -1,4 +1,5 @@
-import { graph } from "junco-agency";
+import * as graph from "dataflow-engine";
+import { unitOf } from "dataflow-profile";
 import { Value } from "typebox/value";
 import {
   BUILTIN_TOOL_NAMES,
@@ -17,12 +18,22 @@ export const outboundEdges = (spec: GraphSpec, id: string): EdgeSpec[] =>
   (spec.edges ?? []).filter((e) => e.from === id);
 export const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
 
+const QUANTITY = /^(\d+(?:\.\d+)?)\s*([A-Za-z]+)$/;
+/** Convert a schema-validated quantity, rejecting unknown unit symbols for its resource. */
+export function quantityOf<R extends graph.ResourceKind>(
+  kind: R,
+  text: string,
+): graph.ResourceQuantity<R> {
+  const [, amount, symbol] = QUANTITY.exec(text)!;
+  return unitOf(kind, symbol!)(Number(amount));
+}
+
 export function resolveTrigger<N = never, T = never>(
   spec: GraphSpec,
   id: string,
   trigger?: TriggerSpec,
-): graph.trigger.TriggerRule<N, T> {
-  const { TriggerRule, TriggerEntry } = graph.trigger;
+): graph.TriggerRule<N, T> {
+  const { TriggerRule, TriggerEntry } = graph;
   if (trigger === "always") return TriggerRule.always();
   if (trigger === "never") return TriggerRule.never();
   const entries =
@@ -150,6 +161,13 @@ export function parse(
     checkTrigger("$sink", spec.sink?.trigger);
     for (const [id, node] of Object.entries(spec.nodes)) {
       const nodePath = `${path}/nodes/${pointer(id)}`;
+      for (const [kind, text] of Object.entries(node.profiles ?? {})) {
+        try {
+          quantityOf(kind as graph.ResourceKind, text);
+        } catch (error) {
+          fail(`${nodePath}/profiles/${kind}`, (error as Error).message);
+        }
+      }
       const inbound = inboundEdges(spec, id);
       const outbound = outboundEdges(spec, id);
       checkTrigger(id, node.trigger);
@@ -168,10 +186,7 @@ export function parse(
             nodePath,
             `Node "${id}" (emit) must have no inbound edges and only message outbound edges (at least one)`,
           );
-      } else if (node.kind === "code") {
-        if (!Object.hasOwn(doc.code ?? {}, node.name))
-          fail(nodePath, `Node "${id}" references unknown code "${node.name}"`);
-      } else {
+      } else if (node.kind !== "code") {
         const inboundIds = new Set(inbound.map(edgeId));
         for (const [field, refs] of [
           ["contracts", Object.keys(node.contracts ?? {})],

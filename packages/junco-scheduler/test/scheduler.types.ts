@@ -72,7 +72,11 @@ export function graphAndHookDetermineAllTypes(
         // @ts-expect-error input containers are readonly
         snapshot.inputs.get(id)!.messages.set(edge, []);
         // @ts-expect-error historical selections are readonly
-        snapshot.history[0]!.selected.push(id);
+        snapshot.history[0]!.selected.push({ nodeId: id, modelStrength: 2 });
+        // @ts-expect-error historical node IDs are readonly
+        snapshot.history[0]!.selected[0]!.nodeId = id;
+        // @ts-expect-error historical strengths are readonly
+        snapshot.history[0]!.selected[0]!.modelStrength = 3;
         // @ts-expect-error ownership is readonly
         snapshot.owned.add(id);
         void [
@@ -244,9 +248,17 @@ export function universalPoliciesAndExactComposition(id: NodeIdType) {
     signal,
   ) => await composed(snapshot, signal);
   // @ts-expect-error raw strings are not native branded selections
-  const malformed: Decision = { selected: ["a"] };
-  const valid: Decision = { selected: [NodeId.create("a")] };
-  return [a, b, c, d, callback, malformed, valid];
+  const malformed: Decision = { selected: [{ nodeId: "a", modelStrength: 2 }] };
+  const valid: Decision = {
+    selected: [{ nodeId: NodeId.create("a"), modelStrength: 2 }],
+  };
+  const invalidStrength: Decision = {
+    // @ts-expect-error strengths are ladder indices, not arbitrary numbers
+    selected: [{ nodeId: id, modelStrength: 5 }],
+  };
+  // @ts-expect-error bare branded IDs are not model selections
+  const bareIds: Decision = { selected: [id] };
+  return [a, b, c, d, callback, malformed, valid, invalidStrength, bareIds];
 }
 
 export function metadataConsumerVariance() {

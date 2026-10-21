@@ -7,4 +7,8 @@ export {
   type DataflowTracer,
   DummyTracer,
 } from "dataflow-engine";
+export {
+  ProfileRecorder,
+  type ProfileRecorderOptions,
+} from "../profile-recorder.js";
 export { TuiTracer } from "../tui-tracer.js";

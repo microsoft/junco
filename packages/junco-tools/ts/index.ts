@@ -56,6 +56,14 @@ export { ReadTool } from "./read.js";
 export { ReleaseTool } from "./release.js";
 export { ShellMuxLease } from "./shell-mux.js";
 export {
+  applySourceEdits,
+  captureBaseline,
+  isRepoRelativePath,
+  repositorySourceReader,
+  requireWorkTreeRoot,
+  type SourceEdit,
+} from "./source-edits.js";
+export {
   AssignedTaskTool,
   invokeTaskTool,
   isAssignedTaskTool,

@@ -5,8 +5,14 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import fc from "fast-check";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import type { Decision, Snapshot } from "junco-scheduler";
-import { context, parallel, roundRobin, separate } from "junco-scheduler";
+import type { Snapshot } from "junco-scheduler";
+import {
+  context,
+  parallel,
+  roundRobin,
+  select,
+  separate,
+} from "junco-scheduler";
 import type {
   DataflowExecution,
   DataflowRunOptions,
@@ -194,7 +200,7 @@ test("a ready dependent is primed without consuming its queued activation batch"
       const id = scheduled[turn]!;
       if (turn === 2) assert.deepEqual(queued(feed), [7]);
       turn += 1;
-      return { selected: [id] };
+      return { selected: select([id]) };
     },
   });
   const received: number[] = [];
@@ -2173,7 +2179,7 @@ test("external composition observes native work and ordered links without adding
     ["running", "done"],
   );
   assert.deepEqual(snapshots[0]!.history, []);
-  assert.deepEqual(snapshots[1]!.history, [{ selected: [zero, one] }]);
+  assert.deepEqual(snapshots[1]!.history, [{ selected: select([zero, one]) }]);
   assert.ok(Object.isFrozen(snapshots[1]!.history));
   assert.ok(Object.isFrozen(snapshots[1]!.history[0]));
   assert.ok(Object.isFrozen(snapshots[1]!.history[0]!.selected));
@@ -2227,7 +2233,7 @@ test("contexts sharing one native graph exclude planning and keep independent co
       seenA.push(snapshot);
       started.resolve();
       await release.promise;
-      return { selected: [a] };
+      return { selected: select([a]) };
     },
   });
   const second = context({
@@ -2283,7 +2289,7 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
     let cleaned = false;
     let otherStarts = 0;
     let lateStarts = 0;
-    const reports: Decision[] = [];
+    const reports: NodeIdType[][] = [];
     const other = graph.addNode({
       id: NodeId.create("other"),
       state: undefined,
@@ -2318,7 +2324,7 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
         captured = execute;
         const work = execute([[{ id: failing, inputs: new Map() }]], {
           onColumn: (selected) => {
-            reports.push({ selected: [...selected] });
+            reports.push([...selected]);
           },
         });
         void work.then(
@@ -2374,7 +2380,7 @@ test("evaluation drains forgotten concrete work, rejects overlap and expires its
         assert.equal(executionError.cause, nodeError);
       }
       assert.equal(cleaned, true);
-      assert.deepEqual(reports, [{ selected: [failing] }]);
+      assert.deepEqual(reports, [[failing]]);
       const late = graph.addNode({
         state: undefined,
         trigger: TriggerRule.always(),

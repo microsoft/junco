@@ -1,3 +1,4 @@
+import type { ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
 import type {
   DataflowTracer,
   EdgeIdType as EdgeId,
@@ -5,13 +6,20 @@ import type {
   Lookup,
   NodeAvailability,
 } from "dataflow-engine";
-import { triggerInputs } from "dataflow-engine";
+import {
+  DataflowDefinitionError,
+  messageInputs,
+  triggerInputs,
+} from "dataflow-engine";
 import type {
   AgenticYieldReason,
   JuncoAgent,
   JuncoAgentNodeContext,
 } from "junco-agent";
 import {
+  MODEL_STRENGTHS,
+  type ModelStrength,
+  type ModelStrengthName,
   type Scheduler,
   type SchedulerContext,
   context as schedulerContext,
@@ -20,6 +28,51 @@ import type { ToolCollection } from "junco-tools";
 import type { Agentic, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
+
+/** One rung: a "provider/model-id" and its reasoning effort (`"off"` when omitted). */
+export type LadderRung = {
+  readonly model: string;
+  readonly thinking?: ThinkingLevel;
+};
+/** Every strength's model; all five rungs are required. */
+export type Ladder = Readonly<Record<ModelStrengthName, LadderRung>>;
+
+export function validateLadder(ladder: Ladder): void {
+  for (const name of MODEL_STRENGTHS) {
+    const rung = ladder?.[name];
+    if (
+      rung === null ||
+      typeof rung !== "object" ||
+      Array.isArray(rung) ||
+      typeof rung.model !== "string" ||
+      !/^[^/]+\/.+$/.test(rung.model)
+    )
+      throw new DataflowDefinitionError(
+        `ladder.${name}.model must be "provider/model-id"`,
+      );
+  }
+}
+
+/** The same rung at every strength. */
+export const uniformLadder = (rung: LadderRung): Ladder =>
+  Object.fromEntries(MODEL_STRENGTHS.map((name) => [name, rung])) as Ladder;
+
+/** The provider, model and thinking level `strength` selects in `ladder` (`thinking` defaults to `"off"`). */
+export function resolveRung(
+  ladder: Ladder,
+  strength: ModelStrength,
+): { provider: string; modelId: string; thinking: ModelThinkingLevel } {
+  const { model, thinking = "off" } = ladder[MODEL_STRENGTHS[strength]];
+  const slash = model.indexOf("/");
+  return {
+    provider: model.slice(0, slash),
+    modelId: model.slice(slash + 1),
+    thinking,
+  };
+}
+
+/** The `provider/model@thinking` each agent last switched to. */
+const appliedModels = new WeakMap<object, string>();
 
 // Internal execution bookkeeping of adapter-built node bodies; not part of the public surface.
 
@@ -31,7 +84,7 @@ export type NodePolicy = {
   readonly seenValues?: Map<EdgeId, unknown>;
   /**
    * `all-messages`: every activation reads every nonempty inbound message queue, whatever the
-   * trigger, and no value edge. Used by task-spawn members, whose return queues are added later.
+   * trigger, and no value edge. Prompt agents use it so messaging is independent of activation.
    */
   readonly inputMode?: "all-messages";
   /** Reasons of the agent's latest pause. */
@@ -118,13 +171,7 @@ export function nodeInputs<N, T>(
   candidate: NodeAvailability<N, T>,
 ): InputSchedule {
   const policy = step === undefined ? undefined : nodePolicies.get(step);
-  if (policy?.inputMode === "all-messages") {
-    const reads = new Map<EdgeId, "all">();
-    const messages = candidate.view.messages;
-    for (const id of messages.keys())
-      if ((messages.get(id)?.length ?? 0) > 0) reads.set(id, "all");
-    return reads;
-  }
+  if (policy?.inputMode === "all-messages") return messageInputs(candidate);
   if (candidate.trigger.kind === "all") return triggerInputs(candidate);
   const seen = policy?.seenValues;
   const first = candidate.satisfied.find(
@@ -144,10 +191,35 @@ export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
     AgencyNodeMetadata
   >;
   readonly graph: G & JuncoGraph<N, T, never>;
+  readonly ladder?: Ladder;
 }): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G> {
-  const { graph } = options;
+  const { graph, ladder } = options;
+  if (ladder !== undefined) validateLadder(ladder);
   return schedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G>({
     ...options,
+    ...(ladder === undefined
+      ? {}
+      : {
+          prepare: async (selected) => {
+            for (const { nodeId, modelStrength } of selected) {
+              const node = graph.getNode(nodeId);
+              const member =
+                node === undefined
+                  ? undefined
+                  : nodePolicies.get(node.step)?.agent;
+              if (member === undefined) continue;
+              const { provider, modelId, thinking } = resolveRung(
+                ladder,
+                modelStrength,
+              );
+              const key = `${provider}/${modelId}@${thinking}`;
+              if (appliedModels.get(member) === key) continue;
+              await member.setModel({ provider, modelId });
+              await member.setThinkingLevel(thinking);
+              appliedModels.set(member, key);
+            }
+          },
+        }),
     readInputs: (id, candidate) =>
       nodeInputs(graph.getNode(id)?.step, candidate),
     describeNode: (id): AgencyNodeMetadata | undefined => {

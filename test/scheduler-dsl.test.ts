@@ -4,25 +4,17 @@ import {
   type AssistantMessage,
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
-import { Edge, NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
+import { Edge, NodeId, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import type { AgenticInput, JuncoGraph } from "../src/index.ts";
+import type { AgenticInput } from "../src/index.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
-import { terminalPorts } from "./deterministic-support.ts";
+import { resultText, terminalPorts } from "./deterministic-support.ts";
 import { agencyGraph, leaf, runAvailable, type Script } from "./support.ts";
 
-const textOf = (message: AssistantMessage) =>
-  message.content
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("");
 const MEMBER = NodeId.create("0");
-const resultOf = (graph: JuncoGraph, id: NodeIdType) => {
-  const result = graph.result(id);
-  return O.isSome(result) ? textOf(result.value) : undefined;
-};
 
 async function singleMember(script: Script, reply = "member done") {
   const member = await leaf([fauxAssistantMessage(reply)], { prompt: "work" });
@@ -51,7 +43,7 @@ test("a repeated ID in an oracle wave runs once and retains the exact sink resul
   try {
     await context.run();
     const graph = context.graph;
-    assert.equal(resultOf(graph, MEMBER), "kept");
+    assert.equal(resultText(graph, MEMBER), "kept");
     assert.deepEqual(graph.result(graph.sink.id), graph.result(MEMBER));
     assert.equal(member.faux.state.callCount, 1);
     const calls = faux.state.callCount;
@@ -104,7 +96,7 @@ test("speculative unavailable IDs are filtered and reconsidered from a fresh dec
     );
     assert.equal(producer.faux.state.callCount, 1);
     assert.deepEqual(
-      [resultOf(graph, p), resultOf(graph, c)],
+      [resultText(graph, p), resultText(graph, c)],
       ["produced", "consumed"],
     );
   } finally {
@@ -152,7 +144,7 @@ test("a node added between decisions is described with fresh typed metadata", as
     );
     assert.equal(new Map(request?.context).get(lateId)?.agentStatus, "ready");
     assert.deepEqual(
-      [resultOf(graph, MEMBER), resultOf(graph, lateId)],
+      [resultText(graph, MEMBER), resultText(graph, lateId)],
       ["first done", "late done"],
     );
   } finally {
@@ -194,7 +186,7 @@ test("a nested context publishes its sink result after all child decisions", asy
     await parent.context.run();
     assert.equal(childRequestsAtDelivery, child.faux.state.callCount);
     assert.deepEqual(
-      [resultOf(graph, nested), resultOf(graph, c)],
+      [resultText(graph, nested), resultText(graph, c)],
       ["leaf result", "consumed"],
     );
     assert.deepEqual(
@@ -222,7 +214,7 @@ test("an already quiescent child returns its retained sink result without anothe
   ports.connect(graph, nested);
   try {
     await parent.context.run();
-    assert.equal(resultOf(graph, nested), "leaf result");
+    assert.equal(resultText(graph, nested), "leaf result");
     assert.equal(child.faux.state.callCount, calls);
     assert.equal(child.member.faux.state.callCount, 1);
   } finally {

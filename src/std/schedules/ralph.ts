@@ -1,7 +1,7 @@
-// The Ralph round controller for `workflows.ralph`: availability hooks for `junco-syntax`'s
+// The Ralph round controller for `workflows.ralph`: availability hooks for `syntax`'s
 // `BuildOptions.available`. Ralph runs once per round in the same agent session; only the last
 // round reaches $sink. A native yield resumes the running node without counting as a round.
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   type AvailabilityFn,
   type Edge,
@@ -13,12 +13,13 @@ import type { JuncoAgent } from "junco-agent";
 import type { AgenticInput } from "../../agentic.js";
 import type { JuncoGraph } from "../../junco-graph.js";
 import type { MockAgent } from "../../mock-agent.js";
+import { finalText } from "../../syntax/build.js";
 
 export type RalphOptions = {
   /** Full-assignment rounds to run; a positive safe integer, two when omitted. */
   readonly rounds?: number;
 };
-/** Factories keyed by node id, the shape of `junco-syntax` `BuildOptions.available`. */
+/** Factories keyed by node id, the shape of `syntax.BuildOptions.available`. */
 export type Availability = Readonly<
   Record<
     string,
@@ -39,17 +40,6 @@ type Prompt = NonNullable<Parameters<JuncoAgent["stagePrompt"]>[0]>;
 const NODE = NodeId.create("Ralph");
 const INPUT = EdgeId.create("$source~>Ralph");
 const LOOP = "Ralph->Ralph";
-
-/** A round's answer counts only when its run finished normally with text. */
-function finalText(message: AssistantMessage | undefined): string {
-  if (message?.stopReason !== "stop")
-    throw new Error(
-      `Ralph did not finish normally: ${message?.stopReason ?? "no final message"}`,
-    );
-  const text = contentText(message.content).trim();
-  if (!text) throw new Error("Ralph produced an empty report");
-  return text;
-}
 
 /** @throws {RangeError} when `rounds` is not a positive safe integer. */
 export function ralph(options: RalphOptions = {}): {
@@ -97,7 +87,7 @@ export function ralph(options: RalphOptions = {}): {
     () => {
       if (p.assignment === undefined)
         throw new Error("Ralph requires exactly one prompt assignment");
-      const previous = finalText(p.last);
+      const previous = finalText(p.last, "Ralph");
       return `${p.assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
     };
   return {

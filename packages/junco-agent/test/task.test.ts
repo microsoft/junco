@@ -17,36 +17,28 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   isAssignedTaskTool,
-  isComplainTool,
   isTaskTool,
   type TaskInput,
   TaskTool,
   type TaskToolDetails,
   type TaskToolHost,
 } from "junco-tools";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
-import { countingTool, newAgent, scripted } from "./harness.ts";
+import { JuncoAgent } from "../src/index.ts";
+import {
+  assertTools,
+  countingTool,
+  isCode,
+  newAgent,
+  scripted,
+  settledText,
+  tick,
+  toolTurn,
+  userTexts,
+} from "./harness.ts";
 
 const TIMEOUT = 5_000;
-const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-const toolTurn = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const taskCall = (id: string, input: ToolCall["arguments"]) =>
   fauxToolCall("task", input, { id });
-
-function step(result: IteratorResult<AgenticStep, void>): AgenticStep {
-  assert.ok(!result.done);
-  return result.value;
-}
-
-function settledText(result: IteratorResult<AgenticStep, void>): string {
-  const value = step(result);
-  assert.equal(value.kind, "settled");
-  if (value.kind !== "settled") return "";
-  return value.message.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-}
 
 function blockText(content: string | readonly { type: string }[]): string {
   if (typeof content === "string") return content;
@@ -58,20 +50,6 @@ function blockText(content: string | readonly { type: string }[]): string {
     )
     .join("");
 }
-
-function userTexts(messages: Context["messages"]): string[] {
-  return messages.flatMap((message) =>
-    message.role === "user" ? [blockText(message.content)] : [],
-  );
-}
-
-/** Asserts the optional tools in order, followed by exactly one genuine complain tool. */
-function assertTools(actual: readonly object[], expected: readonly object[]) {
-  assert.deepEqual(actual.slice(0, -1), expected);
-  assert.equal(isComplainTool(actual.at(-1)!), true);
-  assert.equal(actual.filter((tool) => isComplainTool(tool)).length, 1);
-}
-
 function toolResultOf(
   messages: Context["messages"],
   toolCallId: string,
@@ -83,12 +61,6 @@ function toolResultOf(
   assert.ok(found, `no tool result for ${toolCallId}`);
   return found;
 }
-
-const isCode =
-  (code: JuncoAgentError["code"]) =>
-  (error: unknown): boolean =>
-    error instanceof JuncoAgentError && error.code === code;
-
 /** A host recording each request: one handle per launched task, the retried ID, none for ignore. */
 function recordingHost(prefix = "h") {
   const calls: { toolCallId: string; input: Parameters<TaskToolHost>[1] }[] =

@@ -1,8 +1,8 @@
 // # MCP: two agents read this repository through graft
 //
 // Two live-LLM agents analyze the repository through graft MCP, alongside Junco's builtin tools.
-// mcp.yml declares their prompts, graph, and shared server definition. Each agent connects its
-// own graft client and server process, owned by the graph's Git-policy tool collection.
+// mcp.yml declares their prompts, graph, and shared server definition; this module supplies Reports
+// and LADDER. Each agent owns its graft client and server through the graph's tool collection.
 // Research maps the repository with `mcp__graft__graft_repo_map` and selects exactly five
 //    central, repository-owned classes, confirming each declaration.
 // 3. Dependencies runs once Research's report exists, as a value edge. Its staged prompt callback
@@ -21,15 +21,26 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { contentText } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { agent, graph, schedules, tools } from "junco-agency";
-import { build, parse } from "junco-syntax";
-import { ctrlC } from "../cancellation/cancellation.ts";
+import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco-agency";
+import { runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
 
-const document = parse(source);
-document.code = { Reports: fileURLToPath(new URL("./code.js", import.meta.url)) };
+/** Validate both reports before publishing the dependency report as the graph result. */
+export const Reports: syntax.DeterministicNode = {
+  create({ policy }) {
+    return {
+      state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* () {
+        const inputs = yield [];
+        syntax.finalText(inputs.values.get(graph.EdgeId.create("Research->Reports")), "Research");
+        const result = inputs.values.get(graph.EdgeId.create("Dependencies->Reports"));
+        syntax.finalText(result, "Dependencies");
+        return result!;
+      }, policy),
+    };
+  },
+};
+
 
 // ## 1. Where the repository is
 //
@@ -61,55 +72,34 @@ const requiredTools = [
   "mcp__graft__graft_trace_calls",
 ] as const;
 
-
 /**
  * GitHub's supported-models table lists Claude Sonnet 5.5 for Copilot (checked 2026-10-04,
  * https://docs.github.com/en/copilot/reference/ai-models/supported-models); whether this login is
- * entitled to it is decided by the live catalog below.
+ * entitled to it is decided by `verifiedModels` against the live catalog.
  */
-const provider = "github-copilot";
-const modelId = "claude-sonnet-5.5";
-
-async function modelRuntime(): Promise<ModelRuntime> {
-  const models = await ModelRuntime.create({ allowModelNetwork: true, refreshOnCreate: false });
-  const refreshed = await models.refresh({ allowNetwork: true });
-  if (refreshed.aborted || refreshed.errors.size > 0) {
-    throw new AggregateError(
-      [
-        ...(refreshed.aborted ? [new Error("Model catalog refresh aborted")] : []),
-        ...[...refreshed.errors].map(
-          ([name, error]) => new Error(`${name}: ${error.message}`, { cause: error }),
-        ),
-      ],
-      "Model catalog refresh failed",
-    );
-  }
-  if (!(await models.listCredentials()).some(({ providerId }) => providerId === provider)) {
-    throw new Error("A saved GitHub Copilot Pi login is required");
-  }
-  if (!(await models.getAvailable(provider)).some((model) => model.id === modelId)) {
-    throw new Error("GitHub Copilot Claude Sonnet 5.5 is unavailable");
-  }
-  return models;
-}
+const LADDER = schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" });
 
 /** The complete application: runs the graph once; closing it also closes its ShellMux. */
-export async function runMcpExample(signal?: AbortSignal): Promise<void> {
-  const failures: unknown[] = [];
-  let researchText: string | undefined;
-  let dependencyText: string | undefined;
-  let execution: Awaited<ReturnType<typeof build>> | undefined;
-  try {
+async function runMcpExample(signal?: AbortSignal): Promise<void> {
+  let researchText: string;
+  let dependencyText: string;
+  {
+    // LIFO: close the graph (its agents, their graft servers and the collection), then flush the tracer.
+    await using lifetime = new AsyncDisposableStack();
     signal?.throwIfAborted();
-    const models = await modelRuntime();
+    const models = await verifiedModels(LADDER.med, signal);
     signal?.throwIfAborted();
-    execution = await build(document, {
+    const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
       models,
+      ladder: LADDER,
+      code: { Reports },
       scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,
       signal,
     });
+    lifetime.defer(() => execution.graph.tracer.flush());
+    lifetime.adopt(execution.graph, (g) => g.close());
     for (const id of ["Research", "Dependencies"]) {
       signal?.throwIfAborted();
       const member = execution.graph.getNode(graph.NodeId.create(id))!.state as agent.JuncoAgent;
@@ -126,38 +116,10 @@ export async function runMcpExample(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     researchText = contentText(results.get(graph.NodeId.create("Research"))!.content).trim();
     dependencyText = contentText(results.get(execution.graph.sink.id)!.content).trim();
-  } catch (error) {
-    failures.push(error);
-  }
-  // Every release is attempted, in order, whatever failed before it.
-  try {
-    // The graph owns its registered agents, their graft servers and the collection: closing it
-    // returns all of them.
-    await execution?.graph.close();
-  } catch (error) {
-    failures.push(error);
-  }
-  try {
-    await execution?.graph.tracer.flush();
-  } catch (error) {
-    failures.push(error);
-  }
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) {
-    throw new AggregateError(failures, "MCP example failed", { cause: failures[0] });
   }
   signal?.throwIfAborted();
   console.log(`Central classes:\n${researchText}`);
   console.log(`Dependency chains:\n${dependencyText}`);
 }
 
-if (import.meta.main) {
-  using cancellation = ctrlC();
-  try {
-    await runMcpExample(cancellation.signal);
-  } catch (error) {
-    console.error(error);
-    process.exitCode = cancellation.signal.aborted ? 130 : 1;
-  }
-  if (cancellation.signal.aborted) process.exitCode = 130;
-}
+if (import.meta.main) await runCli(runMcpExample);

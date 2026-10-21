@@ -3,6 +3,7 @@ import {
   Edge,
   EdgeId,
   type EdgeIdType,
+  fires,
   type Message,
   type Node,
   type NodeGenerator,
@@ -23,6 +24,7 @@ import {
   type JuncoAgentNodeContext,
   type TaskAgentOptions,
   type TaskFailurePolicy,
+  type TaskResult,
 } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
 import type {
@@ -48,19 +50,7 @@ import {
 import { TuiTracer } from "./tui-tracer.js";
 
 /** The final report a subagent sends back to the agent that started it, as JSON follow-up text. */
-type TaskReport = {
-  type: "task_result";
-  /** The stable handle ID, whichever attempt reports. */
-  id: string;
-  name?: string;
-  attempt: number;
-  status: "completed" | "failed";
-  output: string;
-  stopReason: AssistantMessage["stopReason"];
-  error?: string;
-  /** The failed task waits for the caller to retry or ignore it. */
-  decisionRequired?: true;
-};
+type TaskReport = TaskResult & { readonly type: "task_result" };
 
 /** A subagent a task call or retry acquired, not yet registered in a graph. */
 type StagedChild = {
@@ -102,7 +92,6 @@ type DriverBinding = {
     this: Node<Agentic, AgenticInput, AssistantMessage>,
     message: AssistantMessage,
   ) => Message<AgenticInput>[] | Promise<Message<AgenticInput>[]>;
-  readonly inputMode?: "all-messages";
 };
 
 const ROOT = NodeId.create("root");
@@ -312,10 +301,12 @@ export class AgentDriver {
   readonly tasks = new Map<string, TaskRecord>();
   /** Admitted tasks neither completed nor ignored. */
   readonly outstanding = new Set<string>();
-  /** Report and completion texts to queue natively, in order, at the next opportunity. */
-  readonly notices: string[] = [];
-  /** Report texts queued natively that have not entered the agent's context. */
-  readonly unread = new Set<string>();
+  /** Report and completion notices to queue natively, in order. */
+  readonly notices: (string | TaskReport)[] = [];
+  /** Queued notices that have not entered the agent's context. */
+  readonly unread = new Map<string, TaskResult | undefined>();
+  /** Authenticated task attempts whose reports actually entered the caller's context. */
+  readonly taskResults: TaskResult[] = [];
   /** A native assistant message followed the latest report that entered the context. */
   answered = true;
   /** The final message, once the run settled with every accepted report processed. */
@@ -494,7 +485,7 @@ export class AgentDriver {
     )
       return;
     if (report.status === "completed") {
-      this.notices.push(payload.text);
+      this.notices.push(report);
       this.#resolve(record);
       return;
     }
@@ -517,18 +508,18 @@ export class AgentDriver {
       }
     }
     record.state = "awaiting-decision";
-    const question = JSON.stringify({
+    this.notices.push({
       ...report,
       ...(error === undefined ? {} : { error }),
       decisionRequired: true,
-    } satisfies TaskReport);
-    this.notices.push(question);
+    });
   }
 
   /** Queue every pending notice natively, in order. */
   async #flush(): Promise<void> {
-    for (const text of this.notices.splice(0)) {
-      this.unread.add(text);
+    for (const notice of this.notices.splice(0)) {
+      const text = typeof notice === "string" ? notice : JSON.stringify(notice);
+      this.unread.set(text, typeof notice === "string" ? undefined : notice);
       await this.agent.followUp(text);
     }
   }
@@ -591,6 +582,20 @@ export class AgentDriver {
     return messages;
   }
 
+  /** What `recv` returns right now, for the model's next request — only while that inbox would fire `trigger`. */
+  briefing(
+    trigger: TriggerRule<AgenticInput, AssistantMessage>,
+  ): string | undefined {
+    if (this.messages.size === 0 && this.values.size === 0) return undefined;
+    if (!fires(trigger, (id) => this.messages.has(id) || this.values.has(id)))
+      return undefined;
+    const entries = [
+      ...[...this.messages].map(([id, batch]) => `${id}: ${batch.length}`),
+      ...[...this.values.keys()].map((id) => `${id}: 1`),
+    ];
+    return `Inbox { ${entries.join(", ")} } read with recv tool`;
+  }
+
   /**
    * One activation: consume task reports, then advance the run at most once. A real agent does
    * this with one node context bound: its messaging host, its task host (observing which reports
@@ -621,8 +626,12 @@ export class AgentDriver {
       unsubscribe = agent.events.on("message_end", ({ lane, message }) => {
         if (lane !== "main") return;
         if (message.role === "user") {
-          if (this.unread.delete(contentText(message.content)))
+          const text = contentText(message.content);
+          const result = this.unread.get(text);
+          if (this.unread.delete(text)) {
             this.answered = false;
+            if (result !== undefined) this.taskResults.push(result);
+          }
         } else if (message.role === "assistant") {
           this.answered = true;
         }
@@ -630,7 +639,9 @@ export class AgentDriver {
       await agent.runWithNodeContext(
         {
           messaging: this.#messaging(),
+          briefing: () => this.briefing(node.trigger),
           task: this.host,
+          taskResults: this.taskResults,
           complaint: {
             nodeId: node.id,
             messages,
@@ -701,7 +712,8 @@ export class AgentDriver {
    * message edges and `info` describes this node's routes with each receiver's contract. Unless
    * `options.is_available` replaces it, the node is available before it starts only when its
    * trigger fires with a staged prompt or fresh inbound data, and once started it stays resumable
-   * until its run settles. Its receiver contract is `options.contract`, else the agent's.
+   * until it returns; a node re-armed through a value self-edge waits for its trigger again.
+   * Its receiver contract is `options.contract`, else the agent's.
    *
    * A `JuncoAgent`'s `task` calls are admitted while the node drives it; the run continues. At its
    * next pause or settlement the node's state becomes a `JuncoGraph.spawn` graph whose root is the same
@@ -721,12 +733,12 @@ export class AgentDriver {
   ): NodeSpec<Agentic, AgenticInput, AssistantMessage> &
     Pick<ToolCollection, "policy"> &
     Pick<AgenticNode, "contract"> {
-    const { complete, inputMode } = binding;
+    const { complete } = binding;
     const seenValues = new Map<EdgeIdType, unknown>();
     const policy: NodePolicy = {
       agent,
       seenValues,
-      ...(inputMode === undefined ? {} : { inputMode }),
+      inputMode: "all-messages",
     };
     const driver = new AgentDriver(agent, policy);
     /** The spawn graph this node's state became, once a task call expanded it. */
@@ -823,7 +835,6 @@ export class AgentDriver {
               { output, stopReason: message.stopReason, ...error },
             );
           },
-          inputMode: "all-messages",
         },
       );
     };
@@ -962,7 +973,7 @@ export class AgentDriver {
       // The root drives the agent from now on; this body keeps only its external reads.
       nodePolicies.set(step, {
         seenValues,
-        ...(inputMode === undefined ? {} : { inputMode }),
+        inputMode: "all-messages",
       });
       driver.policy = rootPolicy;
       return execution;
@@ -1040,7 +1051,6 @@ export class AgentDriver {
               "A promoted task node cannot run again",
             );
           driver.result = undefined;
-          driver.started = false;
           driver.active = false;
         }
         let view = yield [];
@@ -1048,7 +1058,10 @@ export class AgentDriver {
         let reported: AssistantMessage | undefined;
         try {
           while (true) {
-            if (reported !== undefined) return reported;
+            if (reported !== undefined) {
+              driver.started = false;
+              return reported;
+            }
             // Retain the delivery for recv; values are seen once staged, so a postponed recv
             // never lets a permanent result starve a newer message.
             const fresh = {
@@ -1067,7 +1080,10 @@ export class AgentDriver {
             }
             const result = finished();
             if (result !== undefined) {
-              if (complete === undefined) return result;
+              if (complete === undefined) {
+                driver.started = false;
+                return result;
+              }
               reported = result;
               view = yield await complete.call(this, result);
               continue;

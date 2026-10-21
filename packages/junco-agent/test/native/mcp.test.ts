@@ -20,7 +20,6 @@ import {
   InMemoryCredentialStore,
   fauxAssistantMessage,
   fauxToolCall,
-  type ToolCall,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { McpAbortError, McpClient } from "@earendil-works/pi-mcp";
@@ -33,8 +32,8 @@ import {
 import { isTaskTool, LockPolicy, type NativeModule, ToolCollection, TaskTool } from "junco-tools";
 import { isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../../src/index.ts";
-import { countingTool, scripted } from "../harness.ts";
+import { JuncoAgent, JuncoAgentError } from "../../src/index.ts";
+import { countingTool, scripted, settledText, toolTurn } from "../harness.ts";
 import { withNativeCleanup } from "../../../../test/native-support.ts";
 
 const SERVER = fileURLToPath(
@@ -78,9 +77,6 @@ const fixture = (name = "fx", env: Record<string, string> = {}) =>
     env,
   });
 
-const toolTurn = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
-
 /** A final reply listing every tool result the model saw, in order. */
 const reportResults: FauxResponseStep = (context: Context) =>
   fauxAssistantMessage(
@@ -96,15 +92,6 @@ const reportResults: FauxResponseStep = (context: Context) =>
       )
       .join("|"),
   );
-
-function settledText(result: IteratorResult<AgenticStep, void>): string {
-  assert.equal(result.done, false);
-  const value = result.value as AgenticStep;
-  assert.equal(value.kind, "settled");
-  return value.message.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-}
 
 async function fauxRuntime(responses: readonly FauxResponseStep[]) {
   const { faux } = scripted(responses);

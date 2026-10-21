@@ -152,6 +152,20 @@ export type TaskAgentOptions = {
   readonly tools?: readonly string[];
 };
 
+/** A task attempt's result after it entered the caller's model context. */
+export type TaskResult = {
+  readonly id: string;
+  readonly name?: string;
+  readonly attempt: number;
+  readonly status: "completed" | "failed";
+  readonly output: string;
+  readonly stopReason: AssistantMessage["stopReason"];
+  readonly error?: string;
+  readonly decisionRequired?: true;
+};
+
+const NO_TASK_RESULTS: readonly TaskResult[] = [];
+
 /**
  * What one graph activation binds while a {@link JuncoAgent} runs: the node's retained inbox,
  * outgoing routes and topology for recv/send/info, its task host, and complaint attribution.
@@ -163,6 +177,9 @@ export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
     NonNullable<ConstructorParameters<typeof SendTool<N>>[0]> &
     NonNullable<ConstructorParameters<typeof InfoTool>[0]>;
   readonly task?: TaskToolHost;
+  readonly taskResults?: readonly TaskResult[];
+  /** One line the graph wants in the model's next request about this node's inbox; undefined when nothing needs reading. Read per request, never persisted. */
+  readonly briefing?: () => string | undefined;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
 };
 
@@ -376,8 +393,9 @@ function withRequiredNames(
   return result;
 }
 
-/** The sentence every model request's system prompt carries. */
-const RELEASE_INSTRUCTION =
+/** The text every model request's system prompt carries: team guidance, then the release rule. */
+export const SYSTEM_INSTRUCTION =
+  "You are an expert in a collaborative team. You have tools send, recv for communicating with collaborators, yield if you receive a resource-in-use error or if you want to wait for other collaborators to make progress. Summarize your work (send) to your downstream collaborator before yielding and read messages (recv) before a new task.\n\n" +
   "After you write to a file use release to relinquish ownership";
 
 function valueOrThrow<T, E>(
@@ -684,6 +702,10 @@ export class JuncoAgent<
    * `collection.lease()` to keep it beyond the agent; never close it directly.
    */
   readonly collection: ToolCollection | undefined;
+  /** Policy owner of this agent's tools (`NativeResourceEvent.owner`); absent without a collection. */
+  get owner(): string | undefined {
+    return this.#owned.binding?.owner;
+  }
   readonly #owned: OwnedResources;
   #harness: AgentHarness<undefined> | undefined;
   #lane: AgentLane | undefined;
@@ -906,23 +928,26 @@ export class JuncoAgent<
   }
 
   /**
-   * `models` with `streamSimple` giving each request's system prompt {@link RELEASE_INSTRUCTION}
-   * (once; the supplied context is never mutated) and snapshotting that outgoing request of the
-   * current run, after every native context hook and provider conversion. `completeSimple`
-   * (compaction and summaries) goes through the same wrapper. Other members pass through.
+   * `models` with `streamSimple` giving each request's system prompt {@link SYSTEM_INSTRUCTION}
+   * (once) and the current node's inbox briefing suffix, without mutating the supplied context.
+   * Snapshots that outgoing request of the current run after every native context hook and provider
+   * conversion. `completeSimple` (compaction and summaries) uses the same wrapper; others pass through.
    */
   #captureRequests(models: Models): Models {
     const streamSimple: Models["streamSimple"] = (model, supplied, options) => {
       const prompt = supplied.systemPrompt ?? "";
-      const context = prompt.includes(RELEASE_INSTRUCTION)
-        ? supplied
-        : {
-            ...supplied,
-            systemPrompt:
-              prompt === ""
-                ? RELEASE_INSTRUCTION
-                : `${prompt}\n\n${RELEASE_INSTRUCTION}`,
-          };
+      const base = prompt.includes(SYSTEM_INSTRUCTION)
+        ? prompt
+        : prompt === ""
+          ? SYSTEM_INSTRUCTION
+          : `${prompt}\n\n${SYSTEM_INSTRUCTION}`;
+      const briefing = this.#nodeContext?.briefing?.();
+      const systemPrompt =
+        briefing === undefined ? base : `${base}\n\n${briefing}`;
+      const context =
+        systemPrompt === supplied.systemPrompt
+          ? supplied
+          : { ...supplied, systemPrompt };
       const run = this.#currentRun;
       if (run !== undefined) {
         try {
@@ -1564,6 +1589,11 @@ export class JuncoAgent<
   getTaskFailurePolicy(): TaskFailurePolicy {
     const policy = this.#taskFailurePolicy;
     return policy === "ignore" ? policy : { retries: policy.retries };
+  }
+
+  /** Results delivered in this graph run; available to tools during a bound graph activation. */
+  getTaskResults(): readonly TaskResult[] {
+    return this.#nodeContext?.taskResults ?? NO_TASK_RESULTS;
   }
 
   /**

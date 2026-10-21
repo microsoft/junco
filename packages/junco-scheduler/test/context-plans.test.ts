@@ -11,7 +11,7 @@ import {
   triggerInputs,
   UNBOUNDED,
 } from "dataflow-engine";
-import { context } from "../src/index.ts";
+import { context, select } from "../src/index.ts";
 
 test("snapshot plans predict the same limited batch the context consumes", async () => {
   const graph = new DataflowGraph<void, string, string, never>(
@@ -54,7 +54,7 @@ test("snapshot plans predict the same limited batch the context consumes", async
         assert.equal(plan, 2);
         predicted.push(Math.min(plan as number, queue.length));
       }
-      return { selected: [...snapshot.available] };
+      return { selected: select(snapshot.available) };
     },
   }).run();
   assert.deepEqual(predicted, [2, 1]);

@@ -107,6 +107,12 @@ impl RunState {
     }
 }
 
+/// Per-shell monitors relay events tagged with the shell's policy owner to this shared channel.
+pub(crate) struct ResourceTagging {
+    interval: Duration,
+    events: tokio::sync::mpsc::Sender<(Option<String>, marsh_core::ResourceEvent)>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Backend {
     pub(crate) mux: Arc<ShellMux>,
@@ -114,9 +120,34 @@ pub(crate) struct Backend {
     /// The one filesystem this session discovers seeds through. A second instance would
     /// know none of a CopyTree fixture's registered roots.
     pub(crate) filesystem: Arc<dyn Subvolumes>,
-    /// Resource policy of every shell this session opens; its clones in shells and runs end
-    /// with them, so close can wait for the monitor stream to end.
+    /// Resource limits of every shell this session opens; monitors are per shell.
     pub(crate) pipeline_options: marsh_core::PipelineOptions,
+    pub(crate) monitor: Option<Arc<ResourceTagging>>,
+}
+
+impl Backend {
+    /// Shared limits plus a private monitor whose relay ends with the shell's monitor channel.
+    pub(crate) fn pipeline_options(
+        &self,
+        runtime: &Handle,
+        owner: Option<&Principal>,
+    ) -> marsh_core::PipelineOptions {
+        let Some(tagging) = &self.monitor else {
+            return self.pipeline_options.clone();
+        };
+        let monitor = marsh_core::ResourceMonitorConfig::new(tagging.interval);
+        let mut events = monitor.events().expect("a fresh monitor's receiver");
+        let sender = tagging.events.clone();
+        let owner = owner.map(|principal| principal.as_str().to_owned());
+        runtime.spawn(async move {
+            while let Some(event) = events.recv().await {
+                if sender.send((owner.clone(), event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        self.pipeline_options.clone().with_resource_monitor(monitor)
+    }
 }
 
 /// A task close joins before the mux shuts down: a run, which close also cancels through its
@@ -173,15 +204,22 @@ impl Session {
         // state is marsh's, shared across every live shell drawing on the same backend (and,
         // in a CopyTree build, a second mux over that backend), never retained here.
         let mux = create_mux(profile, Arc::clone(&frontend)).map_err(|error| error.to_string())?;
-        let resource_log = setup.resource_events.map(|(mut events, log)| {
-            let sink = Arc::clone(&log);
-            let forwarder = runtime.spawn(async move {
-                while let Some(event) = events.recv().await {
-                    sink.observe(event);
-                }
-            });
-            ResourceForwarding { log, forwarder }
-        });
+        let (resource_log, monitor) = match setup.resource_events {
+            Some((interval, log)) => {
+                let (events, mut tagged) = tokio::sync::mpsc::channel(64);
+                let sink = Arc::clone(&log);
+                let forwarder = runtime.spawn(async move {
+                    while let Some((owner, event)) = tagged.recv().await {
+                        sink.observe(owner, event);
+                    }
+                });
+                (
+                    Some(ResourceForwarding { log, forwarder }),
+                    Some(Arc::new(ResourceTagging { interval, events })),
+                )
+            }
+            None => (None, None),
+        };
         let (closed, _) = watch::channel(None);
         Ok(Arc::new(Self {
             seed,
@@ -192,6 +230,7 @@ impl Session {
                     frontend,
                     filesystem,
                     pipeline_options: setup.pipeline_options,
+                    monitor,
                 }),
                 tasks: HashMap::new(),
                 principals: HashMap::new(),
@@ -527,6 +566,7 @@ impl RunTask {
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
+        let pipeline_options = backend.pipeline_options(&runtime, owner.as_ref());
         // Never race this future against cancellation: open_shell leases the seed and builds
         // resources, and dropping it could orphan both. A fresh pipe shell every call, so a
         // durable principal's variables never leak from one command into the next.
@@ -539,7 +579,7 @@ impl RunTask {
                     io: JobIo::Pipes,
                     environment: Some(environment),
                     policy_owner: owner,
-                    pipeline_options: backend.pipeline_options.clone(),
+                    pipeline_options,
                     ..Default::default()
                 },
             )

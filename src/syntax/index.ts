@@ -1,11 +1,12 @@
 export {
   type AgentSpec,
   type BuildOptions,
-  build,
   type CodeContext,
   type CodeRegistration,
   createJuncoAgent,
   type DeterministicNode,
+  type FromYamlOptions,
+  finalText,
   resolveAgents,
 } from "./build.js";
 export { type ParseOptions, parse } from "./parse.js";

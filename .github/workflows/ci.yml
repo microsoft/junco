@@ -406,9 +406,6 @@ jobs:
       - name: Build and test junco-agency
         run: |
           bun run build
-          bun run --cwd packages/junco-syntax build
-          bun run --cwd packages/junco-syntax typecheck
-          bun run --cwd packages/junco-syntax test:coverage
           bun run typecheck
           bun run test:coverage
           bun run smoke

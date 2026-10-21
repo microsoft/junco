@@ -9,6 +9,7 @@ import {
 } from "dataflow-engine";
 import {
   type Decision,
+  type NodeModel,
   type Scheduler,
   type Snapshot,
   validateDecision,
@@ -45,6 +46,10 @@ export function context<
     id: NodeIdType,
     candidate: NodeAvailability<N, T>,
   ) => InputSchedule;
+  readonly prepare?: (
+    selected: readonly NodeModel[],
+    signal?: AbortSignal,
+  ) => void | Promise<void>;
 }): SchedulerContext<S, N, T, C, G> {
   const { graph, scheduler, describeNode, readInputs } = options;
   const inputs =
@@ -88,27 +93,38 @@ export function context<
         }
         signal?.throwIfAborted();
         validateDecision(snapshot, decision);
-        const schedule = decision.selected.map((id) => [
+        const schedule = decision.selected.map(({ nodeId }) => [
           {
-            id,
-            inputs: plans.get(id)!,
+            id: nodeId,
+            inputs: plans.get(nodeId)!,
           },
         ]);
         const live = graph.available();
         if (
           graph.observe().version !== snapshot.version ||
-          decision.selected.some((id) => !live.has(id))
+          decision.selected.some((entry) => !live.has(entry.nodeId))
         ) {
           throw new DataflowDefinitionError(
             "Scheduler snapshot changed while computing a decision",
           );
         }
+        const strengths = new Map(
+          decision.selected.map((entry) => [entry.nodeId, entry.modelStrength]),
+        );
+        await options.prepare?.(decision.selected, signal);
         await execute(schedule, {
           resolveInputs: (entry, candidate) => inputs(entry.id, candidate),
           onColumn: (selected) => {
             if (selected.length > 0)
               history.push(
-                Object.freeze({ selected: Object.freeze([...selected]) }),
+                Object.freeze({
+                  selected: Object.freeze(
+                    selected.map((nodeId) => ({
+                      nodeId,
+                      modelStrength: strengths.get(nodeId)!,
+                    })),
+                  ),
+                }),
               );
           },
         });
@@ -121,4 +137,19 @@ export function context<
     step: (runOptions?: DataflowRunOptions) => drive(false, runOptions),
     run: (runOptions?: DataflowRunOptions) => drive(true, runOptions),
   });
+}
+
+/** Run to quiescence as separate steps, retaining trace and cancellation boundaries between them. */
+export async function drain(
+  execution: {
+    readonly graph: { available(): { readonly size: number } };
+    step(options?: DataflowRunOptions): Promise<unknown>;
+  },
+  options?: DataflowRunOptions,
+): Promise<void> {
+  options?.signal?.throwIfAborted();
+  while (execution.graph.available().size > 0) {
+    await execution.step(options);
+    options?.signal?.throwIfAborted();
+  }
 }

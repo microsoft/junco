@@ -167,6 +167,51 @@ Obtain the mux from a lease, `const lease = await ShellMuxLease.create(cwd)` (op
 
 The same objects work as SDK `customTools` and with `pi.registerTool`. There, `read` also receives Pi's runtime context, which adds Pi's notice when the active model cannot accept an image; a bare `Agent` calls tools without that context, exactly as Pi's own `createReadTool` does.
 
+### Reviewed source edits and repository baselines
+
+`SourceEdit` is a domain-neutral `replace`/`create` union: `path` is a POSIX repo-relative path,
+`startLine` is 1-based, and `beforeLines`/`afterLines` contain exact source lines without terminators.
+An empty `beforeLines` inserts; a create uses line 1, empty `beforeLines`, and nonempty `afterLines`.
+This explicit application API is separate from the agent-facing hashline `edit` tool.
+
+```ts
+import {
+  applySourceEdits, captureBaseline, repositorySourceReader,
+  requireWorkTreeRoot, type SourceEdit, type ToolCollection,
+} from "junco-tools";
+
+export async function applyReviewedEdits(
+  root: string, collection: ToolCollection, edits: readonly SourceEdit[], signal?: AbortSignal,
+) {
+  await requireWorkTreeRoot(collection, signal);
+  const baseline = await captureBaseline(root, new Set(edits.map((edit) => edit.path)));
+  const readSource = repositorySourceReader(root, baseline);
+  // readSource(path) decodes BOM-aware UTF-8/UTF-16LE and rejects a changed captured file.
+  return applySourceEdits(root, collection.mux, edits, baseline, {
+    label: "reviewed edits", principal: "reviewed-edits", signal,
+  });
+}
+```
+
+Capture the baseline **before** analysis/review and retain it until application. Baseline entries
+are SHA-256 hashes of complete bytes, or `null` for absent paths. Both capture and source reading
+reject invalid paths, dangling symlinks, and paths resolving outside the repository;
+`isRepoRelativePath` exposes the lexical predicate. A reader returns `undefined` for missing files,
+and may read uncaptured files; a captured absence rejects a subsequently created file.
+`requireWorkTreeRoot` checks the collection's cwd through its native bash tool, rejecting a subdirectory
+or non-working-tree repository and retaining Git output in the error's cause.
+
+`applySourceEdits` borrows a mux opened with `sandbox: "always"`; the caller retains its lifetime.
+It preflights every baseline hash, exact before-line, range, overlap, encoding, and target before
+writing; refuses symlink targets, escaping/dangling ancestors, and multiply linked replacement files;
+preserves existing BOMs, UTF-8/UTF-16LE, line terminators, final-newline state, and file modes; and
+creates UTF-8 files with LF and a final newline. The same managed command then releases exactly the
+sorted unique edited paths, without staging or committing. `principal` orders commands, not policy
+ownership; the mux's policy still authorizes every write and release. Worker/release failures abort
+and discard the private view, cancellation joins native cleanup, and policy/native errors retain
+their identity. Unexpected shell failures explicitly warn that effects may already be published.
+
+
 ### Pi SDK: bash only
 
 `BashTool` returns a four-argument `AgentTool` that keeps Pi's bash renderers and prompt metadata, so it goes into **`customTools`** as is. In Pi 0.99.2, **`tools` is an allowlist of names**, not an array of tool objects.
@@ -293,6 +338,10 @@ Monitoring requires both a positive `resources.monitorIntervalMs` (milliseconds)
 carries the pipeline's source text in `command`; periodic, lossy `sample` events and the
 always-delivered `finished` event carry cumulative accounting in `sample`. Sample durations
 are milliseconds, memory fields are bytes, and counters are JavaScript numbers.
+Every event also carries `owner` for a forked handle (`NativeMux.owner`, exposed as
+`ToolBinding.owner` and `JuncoAgent.owner`); an unforked handle has no owner. Each shell
+uses a private monitor, preserving its owner on started/sample/finished events even when
+several bindings share one collection.
 
 The final collection release, lease `release()`, or owned operations `close()` waits for the
 event stream to end and all callbacks to return; a callback throw rejects that final release

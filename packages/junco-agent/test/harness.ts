@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import {
   type AgentTool,
   BACKGROUND_CONTEXT,
@@ -6,13 +7,67 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import {
+  type Context,
   createModels,
   type FauxProviderHandle,
   type FauxResponseStep,
+  fauxAssistantMessage,
   fauxProvider,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
+import { isComplainTool } from "junco-tools";
 import { Type } from "typebox";
-import { type AgenticOptions, JuncoAgent } from "../src/index.ts";
+import {
+  type AgenticOptions,
+  type AgenticStep,
+  JuncoAgent,
+  JuncoAgentError,
+} from "../src/index.ts";
+
+export const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+export const toolTurn = (...calls: ToolCall[]) =>
+  fauxAssistantMessage(calls, { stopReason: "toolUse" });
+
+export function step(result: IteratorResult<AgenticStep, void>): AgenticStep {
+  assert.ok(!result.done);
+  return result.value;
+}
+
+export function settledText(result: IteratorResult<AgenticStep, void>): string {
+  const value = step(result);
+  assert.equal(value.kind, "settled");
+  return value.message.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("");
+}
+
+export function userTexts(messages: Context["messages"]): string[] {
+  return messages.flatMap((message) => {
+    if (message.role !== "user") return [];
+    return [
+      typeof message.content === "string"
+        ? message.content
+        : message.content
+            .flatMap((block) => (block.type === "text" ? [block.text] : []))
+            .join(""),
+    ];
+  });
+}
+
+export const isCode =
+  (code: JuncoAgentError["code"]) =>
+  (error: unknown): boolean =>
+    error instanceof JuncoAgentError && error.code === code;
+
+/** Asserts the optional tools in order, followed by exactly one genuine complain tool. */
+export function assertTools(
+  actual: readonly object[],
+  expected: readonly object[],
+) {
+  assert.deepEqual(actual.slice(0, -1), expected);
+  assert.equal(isComplainTool(actual.at(-1)!), true);
+  assert.equal(actual.filter((tool) => isComplainTool(tool)).length, 1);
+}
 
 // Offline scaffolding: Pi's faux provider in an explicit Models collection, an in-memory session and
 // caller-supplied tools. Nothing here loads junco-tools' native addon or needs credentials.

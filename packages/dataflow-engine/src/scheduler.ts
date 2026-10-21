@@ -63,3 +63,13 @@ export const triggerInputs = <N, T>({
   }
   return inputs;
 };
+
+/** Read every queued inbound message on activation, independently of which edge triggered it. */
+export const messageInputs = <N, T>({
+  view,
+}: Pick<NodeAvailability<N, T>, "view">): InputSchedule => {
+  const inputs = new Map<EdgeId, MessageSchedule>();
+  for (const id of view.messages.keys())
+    if ((view.messages.get(id)?.length ?? 0) > 0) inputs.set(id, "all");
+  return inputs;
+};

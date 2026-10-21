@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { SourceEdit } from "junco-tools";
 import {
   type AcceptedRefactor,
   type Candidate,
@@ -21,7 +22,6 @@ import {
   runCandidateBatch,
   type SearchReport,
   type SnapshotRefresher,
-  type SourceEdit,
   VerdictRecorder,
 } from "../examples/yak-shaver/yak-shaver.ts";
 import { agent, Deterministic, graph, tracer } from "../src/index.ts";
@@ -376,6 +376,17 @@ function researched(work: CandidateWork = keysWork) {
     snapshot: keysSnapshot,
     work,
     readSource: async (path) => keysSources.get(path),
+    taskResults: () =>
+      research.map(
+        (report): agent.TaskResult => ({
+          id: `task-${report.shard}`,
+          name: report.shard,
+          attempt: 1,
+          status: "completed",
+          output: JSON.stringify(report),
+          stopReason: "stop",
+        }),
+      ),
   });
   const research: SearchReport[] = work.shards.map((shard) => ({
     shard: shard.name,
@@ -383,18 +394,6 @@ function researched(work: CandidateWork = keysWork) {
     status: "complete",
     report: `${shard.name}:   checked ${shard.files.join(", ")}`,
   }));
-  for (const report of research) {
-    recorder.noteTaskReport(
-      JSON.stringify({
-        type: "task_result",
-        id: `task-${report.shard}`,
-        name: report.shard,
-        status: "completed",
-        output: JSON.stringify(report),
-        stopReason: "stop",
-      }),
-    );
-  }
   const submit = (input: Record<string, unknown>) =>
     recorder.tool.execute("call", { research, ...input } as never);
   return { recorder, research, submit };
@@ -664,7 +663,7 @@ async function keysBatch(scripts: readonly LaneScript[]) {
     observer: quiet(),
     apply: recorder.apply,
   });
-  return { outcomes, applied: recorder.applied };
+  return { outcomes, applied: recorder.applied, lanes };
 }
 
 describe("acceptance gates", () => {
@@ -696,6 +695,28 @@ describe("acceptance gates", () => {
     assert.equal(applied[0]?.proposal, outcome.proposal);
     assert.deepEqual(applied[0]?.verdict, allPass);
     assert.equal(applied[0]?.candidate, keysWork.candidate);
+  }, 30_000);
+
+  test("each proposer's summary reaches its own judge through send and recv", async () => {
+    const { lanes } = await keysBatch([keysScript(), keysScript()]);
+    lanes.forEach(({ log }, index) => {
+      const rank = index + 1;
+      assert.equal(log.received.length, 1);
+      const inbox = JSON.parse(log.received[0]!) as {
+        messages: unknown[];
+        values: { id: string }[];
+      };
+      assert.deepEqual(inbox.messages, [
+        {
+          id: `summary:${rank}`,
+          payload: `Proposer ${rank}: callers reconciled; research launched`,
+        },
+      ]);
+      assert.deepEqual(
+        inbox.values.map((value) => value.id),
+        [`proposal:${rank}`],
+      );
+    });
   }, 30_000);
 
   test("all criteria still need a new caller definition and a positive net deletion", async () => {
@@ -1445,7 +1466,7 @@ describe("candidate batch graph", () => {
     {
       name: "empty final answer",
       script: { proposerFinal: "" },
-      message: /Proposer:1 produced an empty final message/,
+      message: /Proposer:1 produced an empty report/,
       judgeCalls: 0,
     },
   ]) {
@@ -1476,25 +1497,31 @@ describe("candidate batch graph", () => {
     }, 30_000);
   }
 
-  test("cancelling right after a step recorded a completed review applies nothing", async () => {
+  test("cancelling at a completed review applies nothing", async () => {
     const [work] = laneWorks();
     const scripted = await scriptedLane(work!, laneSnapshot, laneSources, {
       proposal: dupProposal(1),
     });
     const controller = new AbortController();
     const inner = new tracer.DummyTracer();
-    // A step's `end` sees its cumulative results just before `step()` resolves.
+    // Cancel when the review settles, before the next scheduler decision can apply it.
     const observer: tracer.DataflowTracer = {
       startRun: (graph) => {
         const run = inner.startRun(graph);
         return {
           ...run,
-          end: (results) => {
-            run.end(results);
-            if ([...results.keys()].some((id) => String(id) === "Judge:1"))
-              queueMicrotask(() =>
-                controller.abort(new DOMException("stop", "AbortError")),
-              );
+          startNode: (id, phase, inputs) => {
+            const node = run.startNode(id, phase, inputs);
+            return {
+              ...node,
+              end: (step) => {
+                node.end(step);
+                if (String(id) === "Judge:1" && step.done)
+                  queueMicrotask(() =>
+                    controller.abort(new DOMException("stop", "AbortError")),
+                  );
+              },
+            };
           },
         };
       },

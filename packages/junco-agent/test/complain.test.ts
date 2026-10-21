@@ -13,45 +13,29 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
   type Message,
-  type ToolCall,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { EdgeId, NodeId } from "dataflow-engine";
 import { ComplainTool, isComplainTool, issueLog } from "junco-tools";
-import { type AgenticStep, JuncoAgent, JuncoAgentError } from "../src/index.ts";
-import { countingTool, newAgent, scripted } from "./harness.ts";
+import { JuncoAgent, SYSTEM_INSTRUCTION } from "../src/index.ts";
+import {
+  countingTool,
+  isCode,
+  newAgent,
+  scripted,
+  settledText,
+  toolTurn,
+  userTexts,
+} from "./harness.ts";
 
-const toolTurn = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const complainCall = (complaint: string, id: string) =>
   fauxToolCall("complain", { complaint }, { id });
-
-const isCode =
-  (code: JuncoAgentError["code"]) =>
-  (error: unknown): boolean =>
-    error instanceof JuncoAgentError && error.code === code;
-
 function text(content: Message["content"]): string {
   if (typeof content === "string") return content;
   return content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("");
 }
-
-function userTexts(messages: readonly Message[]): string[] {
-  return messages.flatMap((message) =>
-    message.role === "user" ? [text(message.content)] : [],
-  );
-}
-
-function settledText(result: IteratorResult<AgenticStep, void>): string {
-  assert.equal(result.done, false);
-  const value = result.value as AgenticStep;
-  assert.equal(value.kind, "settled");
-  if (value.kind !== "settled") return "";
-  return text(value.message.content);
-}
-
 function toolResult(messages: Context["messages"], id: string) {
   const result = messages.find(
     (message) => message.role === "toolResult" && message.toolCallId === id,
@@ -439,7 +423,7 @@ test("the saved prompt is the final converted request, unaffected by later reque
     assert.ok(issue);
     assert.equal(
       issue.prompt.systemPrompt,
-      "hooked system 1\n\nAfter you write to a file use release to relinquish ownership",
+      `hooked system 1\n\n${SYSTEM_INSTRUCTION}`,
     );
     assert.deepEqual(issue.prompt.messages, [converted]);
     const tools = issue.prompt.tools ?? [];

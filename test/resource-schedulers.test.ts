@@ -57,7 +57,7 @@ function recorded(inner: Policy): {
     waves,
     scheduler: async (s, signal) => {
       const d = await inner(s, signal);
-      waves.push([...d.selected]);
+      waves.push(schedules.nodeIds(d.selected));
       return d;
     },
   };
@@ -266,5 +266,64 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
     assert.equal(results.has(racers[2]!), false);
   } finally {
     await graph.close();
+  }
+});
+
+test("agency ladders switch model and thinking before work, only when strength changes", async () => {
+  const rung = { model: "p/default" };
+  const ladder: schedules.Ladder = {
+    smol: { model: "p/s", thinking: "low" },
+    low: rung,
+    med: rung,
+    high: { model: "p/h/variant" },
+    xhigh: rung,
+  };
+  for (const configured of [undefined, ladder]) {
+    const agent = new MockAgent({
+      prompt: "go",
+      runs: [yieldsThen(1, "done")],
+    });
+    const ports = terminalPorts();
+    const graph = new JuncoGraph(
+      ports.source,
+      ports.sink,
+      Width.create(1),
+      UNBOUNDED,
+      new DummyTracer(),
+      LockPolicy,
+    );
+    try {
+      const id = graph.addNode(member("worker", agent));
+      ports.connect(graph, id);
+      const scheduler: Policy = schedules.strength(
+        (snapshot) => (snapshot.history.length === 0 ? "smol" : "high"),
+        schedules.parallel(),
+      );
+      const execution = schedules.context({
+        graph,
+        scheduler,
+        ladder: configured,
+      });
+      const results = await execution.run();
+      assert.equal(textOf(results.get(id)!), "done");
+      assert.deepEqual(
+        agent.calls
+          .filter(
+            ({ method }) =>
+              method === "setModel" || method === "setThinkingLevel",
+          )
+          .map(({ method, args }) => [method, args]),
+        configured === undefined
+          ? []
+          : [
+              ["setModel", [{ provider: "p", modelId: "s" }]],
+              ["setThinkingLevel", ["low"]],
+              ["setModel", [{ provider: "p", modelId: "h/variant" }]],
+              ["setThinkingLevel", ["off"]],
+            ],
+      );
+    } finally {
+      await graph.close();
+    }
   }
 });

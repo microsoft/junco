@@ -9,6 +9,7 @@
         "@earendil-works/pi-ai": "0.99.2",
         "@earendil-works/pi-coding-agent": "0.99.2",
         "dataflow-engine": "workspace:*",
+        "dataflow-profile": "workspace:*",
         "fp-ts": "^2.16.11",
         "junco-agent": "workspace:*",
         "junco-mcp": "workspace:*",
@@ -24,7 +25,6 @@
         "@types/bun": "1.4.2",
         "@types/node": "26.6.3",
         "dataflow-engine-opik": "workspace:*",
-        "junco-syntax": "workspace:*",
         "typescript": "7.0.2",
       },
     },
@@ -149,26 +149,6 @@
         "dataflow-engine",
         "typebox",
       ],
-    },
-    "packages/junco-syntax": {
-      "name": "junco-syntax",
-      "version": "0.1.0",
-      "dependencies": {
-        "@earendil-works/pi-agent-core": "0.99.2",
-        "@earendil-works/pi-ai": "0.99.2",
-        "@earendil-works/pi-coding-agent": "0.99.2",
-        "fp-ts": "^2.16.11",
-        "typebox": "1.3.34",
-      },
-      "devDependencies": {
-        "@types/bun": "1.4.2",
-        "@types/node": "26.6.3",
-        "junco-agency": "file:../..",
-        "typescript": "7.0.2",
-      },
-      "peerDependencies": {
-        "junco-agency": "^0.1.0",
-      },
     },
     "packages/junco-tools": {
       "name": "junco-tools",
@@ -1019,15 +999,11 @@
 
     "json-with-bigint": ["json-with-bigint@3.5.12", "", {}, "sha512-uwbF/wSSuOgC7qqlq27Xp5B6a2MHVug3t0idZdTqu0JnlFvgJuH7ju+KAk/J06C7GfhoYy2gnb9wz2INqcne7w=="],
 
-    "junco-agency": ["junco-agency@root:", {}],
-
     "junco-agent": ["junco-agent@workspace:packages/junco-agent"],
 
     "junco-mcp": ["junco-mcp@workspace:packages/junco-mcp"],
 
     "junco-scheduler": ["junco-scheduler@workspace:packages/junco-scheduler"],
-
-    "junco-syntax": ["junco-syntax@workspace:packages/junco-syntax"],
 
     "junco-tools": ["junco-tools@workspace:packages/junco-tools"],
 

@@ -14,18 +14,18 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
-  InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as O from "fp-ts/lib/Option.js";
 import {
   agent as agentApi,
   graph as graphApi,
+  JuncoGraph,
   schedules,
   tools as toolsApi,
   tracer as tracerApi,
   workflows,
 } from "junco-agency";
+import { fauxRuntime } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 const revision = (previous: string) =>
@@ -140,33 +140,19 @@ if (typeof Bun === "undefined") {
   process.exit(0);
 }
 
-const { build, parse } = await import("junco-syntax");
-const faux = fauxProvider({
-  api: "ralph-workflow-smoke",
-  provider: "ralph-workflow-smoke",
-  tokenSize: { min: 4, max: 4 },
-});
-faux.setResponses(["draft-1", "draft-2", "draft-3"].map(recording));
-const credentials = new InMemoryCredentialStore();
-await credentials.modify(faux.getModel().provider, async () => ({
-  type: "api_key",
-  key: "fixture-login",
-}));
-const models = await ModelRuntime.create({
-  credentials,
-  modelsPath: null,
-  refreshOnCreate: false,
-  allowModelNetwork: false,
-});
-models.registerNativeProvider(faux.provider);
+const { models, faux } = await fauxRuntime(
+  ["draft-1", "draft-2", "draft-3"].map(recording),
+  "ralph-workflow-smoke",
+);
 const model = faux.getModel();
-const doc = parse(workflows.ralph, {
-  params: { model: `${model.provider}/${model.id}` },
+const ladder = schedules.uniformLadder({
+  model: `${model.provider}/${model.id}`,
 });
-const execution = await build(doc, {
+const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
   models,
+  ladder,
   tracer: new tracerApi.DummyTracer(),
   ...schedules.ralph({ rounds: 3 }),
 });

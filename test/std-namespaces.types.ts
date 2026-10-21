@@ -532,8 +532,10 @@ export async function typedSchedulerPolicyReadsPerEdge(
     string,
     { priority: number }
   > = schedules.roundRobin();
-  // @ts-expect-error selected IDs are branded native IDs
-  const rawId: schedules.Decision = { selected: ["a"] };
+  const rawId: schedules.Decision = {
+    // @ts-expect-error selected IDs are branded native IDs
+    selected: [{ nodeId: "a", modelStrength: 2 }],
+  };
   // @ts-expect-error a read is a count, "all" or "none"
   const unknownRead: MessageSchedule = "some";
   const wrongPayload: schedules.Scheduler<

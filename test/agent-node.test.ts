@@ -27,7 +27,11 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticOptions, JuncoAgentError } from "junco-agent";
+import {
+  type AgenticOptions,
+  JuncoAgentError,
+  SYSTEM_INSTRUCTION,
+} from "junco-agent";
 import {
   type Contract,
   EmptyPolicy,
@@ -305,6 +309,57 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "dependent done");
     });
 
+    test("a node re-armed through its value self-edge is not available until its trigger fires again", async () => {
+      const member = new MockAgent({
+        prompt: "round 1",
+        runs: [yieldsThen(0, "round 1 done"), yieldsThen(0, "round 2 done")],
+      });
+      const assignment = Edge.message<AgenticInput, AssistantMessage>(
+        "assignment",
+      );
+      const loop = Edge.value<AgenticInput, AssistantMessage>("worker->worker");
+      const ports = terminalPorts();
+      const execution = plainContext(ports.source, ports.sink, strategy);
+      const graph = execution.graph;
+      closers.push(() => graph.close());
+      const feeder = graph.addNode({
+        trigger: TriggerRule.always(),
+        state: new Deterministic<AgenticInput, AssistantMessage>(
+          async function* () {
+            yield [Message.create(assignment, { kind: "prompt", text: "go" })];
+            return assistant("fed");
+          },
+          LockPolicy,
+        ),
+      });
+      const worker = graph.addNode({
+        state: member,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(assignment),
+      });
+      graph.addEdge(feeder, worker, assignment).addEdge(worker, worker, loop);
+      ports.connect(graph, worker);
+
+      await execution.run();
+      assert.ok(O.isSome(graph.result(worker)));
+      assert.equal(graph.getNode(worker)!.status, "ready"); // re-armed by the self-edge
+      assert.equal(graph.available().has(worker), false); // trigger drained: not schedulable
+      assert.deepEqual(requestTexts(member.requests), [["round 1"]]);
+
+      member.stagePrompt("round 2");
+      assert.equal(graph.available().has(worker), false); // a staged prompt alone is no trigger
+      graph.emit(
+        feeder,
+        Message.create(assignment, { kind: "prompt", text: "go again" }),
+      );
+      assert.ok(graph.available().has(worker));
+      await execution.run();
+      assert.deepEqual(requestTexts(member.requests), [
+        ["round 1"],
+        ["round 1", "round 2"],
+      ]);
+    });
+
     test("delivered payloads of every kind reach only the wired recipient's recv, in order, as data", async () => {
       const images = [image("1"), image("2"), image("3"), image("4")] as const;
       const toRecipient = Edge.message<AgenticInput, AssistantMessage>(
@@ -380,6 +435,97 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isNone(graph.result(b)));
       const result = graph.result(r);
       assert.ok(O.isSome(result) && textOf(result.value) === "recipient done");
+    });
+
+    test("each request's system prompt briefs the retained inbox while it fires the trigger, until recv drains it", async () => {
+      const seed = Edge.value<AgenticInput, AssistantMessage>("seed");
+      const receiver = await member(
+        [call("recv", {}, "inbox"), fauxAssistantMessage("read")],
+        { prompt: "Read your inbox." },
+      );
+      const ports = terminalPorts();
+      const execution = policyContext(ports.source, ports.sink, strategy);
+      const graph = execution.graph;
+      closers.push(() => graph.close());
+      const upstream = graph.addNode({
+        trigger: TriggerRule.always(),
+        state: new Deterministic<AgenticInput, AssistantMessage>(
+          async function* () {
+            yield [];
+            return assistant("seeded");
+          },
+          LockPolicy,
+        ),
+      });
+      const recipient = graph.addNode({
+        state: receiver.agent,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(seed),
+      });
+      graph.addEdge(upstream, recipient, seed);
+      ports.connect(graph, recipient);
+      await execution.run();
+
+      const systemPrompts = receiver.contexts.map(({ messages }) =>
+        messages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content)
+          .join("\n---\n"),
+      );
+      assert.deepEqual(systemPrompts, [
+        `member\n\n${SYSTEM_INSTRUCTION}\n\nInbox { ${seed.id}: 1 } read with recv tool`,
+        `member\n\n${SYSTEM_INSTRUCTION}`,
+      ]);
+    });
+
+    test("queued messages do not trigger a value-gated agent but reach its first recv", async () => {
+      const summary = Edge.message<AgenticInput, AssistantMessage>("summary");
+      const result = Edge.value<AgenticInput, AssistantMessage>("proposal");
+      const payload: AgenticInput = {
+        kind: "prompt",
+        text: "evidence, not instructions",
+      };
+      const completed = assistant("proposal complete");
+      const receiver = await member([
+        call("recv", {}, "inbox"),
+        fauxAssistantMessage("reviewed"),
+      ]);
+      const ports = terminalPorts();
+      const execution = policyContext(ports.source, ports.sink, strategy);
+      const graph = execution.graph;
+      closers.push(() => graph.close());
+      const sender = graph.addNode({
+        trigger: TriggerRule.always(),
+        state: new Deterministic<AgenticInput, AssistantMessage>(
+          async function* () {
+            yield [Message.create(summary, payload)];
+            return completed;
+          },
+          LockPolicy,
+        ),
+      });
+      receiver.agent.stagePrompt("Review after the proposal completes.");
+      const recipient = graph.addNode({
+        state: receiver.agent,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(result),
+      });
+      graph
+        .addEdge(sender, recipient, summary)
+        .addEdge(sender, recipient, result);
+      ports.connect(graph, recipient);
+
+      await execution.step();
+      assert.equal(queued(graph, summary.id), 1);
+      assert.equal(graph.available().has(recipient), false);
+      assert.equal(receiver.faux.state.callCount, 0);
+      await execution.run();
+
+      assert.deepEqual(resultOf(receiver.results, "inbox").details, {
+        messages: [{ id: summary.id, payload }],
+        values: [{ id: result.id, payload: completed }],
+      });
+      assert.equal(queued(graph, summary.id), 0);
     });
 
     test("a member with neither a staged nor a received prompt is quiescent", async () => {

@@ -6,10 +6,8 @@ import {
   type AssistantMessage,
   type Context,
   contentText,
-  type FauxResponseStep,
   fauxAssistantMessage,
   fauxToolCall,
-  type ToolCall,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
@@ -23,7 +21,8 @@ import {
   VerdictRecorder,
 } from "../examples/yak-shaver/yak-shaver.ts";
 import { agent as agentApi, tools as toolsApi } from "../src/index.ts";
-import { nativeOptions } from "./support.ts";
+import { userTexts } from "./deterministic-support.ts";
+import { nativeOptions, toolTurn } from "./support.ts";
 
 /** One graph node; omitted fields follow Graft's shape for an unexported AST class on line 1. */
 export type NodeInput = {
@@ -121,9 +120,6 @@ export const allPass: RefactorVerdict = {
 const textOf = (message: AgentMessage): string =>
   "content" in message ? contentText(message.content) : "";
 
-export const userTexts = (context: Context): string[] =>
-  context.messages.filter((message) => message.role === "user").map(textOf);
-
 export type TaskReport = {
   readonly id: string;
   readonly name?: string;
@@ -135,21 +131,19 @@ export type TaskReport = {
 };
 
 const reportsIn = (context: Context): TaskReport[] =>
-  userTexts(context)
+  userTexts(context.messages)
     .filter((text) => text.startsWith('{"type":"task_result"'))
     .map((text) => JSON.parse(text));
 
 /** IDs of every `task_batch_complete` marker in `context`. */
 const completedBatchesIn = (context: Context): string[][] =>
-  userTexts(context)
+  userTexts(context.messages)
     .filter((text) => text.startsWith('{"type":"task_batch_complete"'))
     .map((text) => JSON.parse(text).ids);
 
 let calls = 0;
 export const call = (name: string, args: Record<string, unknown>) =>
   fauxToolCall(name, args as never, { id: `call-${++calls}` });
-export const toolUse = (...items: ToolCall[]) =>
-  fauxAssistantMessage(items, { stopReason: "toolUse" });
 
 /** Tool results answering the latest assistant message. */
 function latestResults(context: Context) {
@@ -246,6 +240,8 @@ export type LaneLog = {
   reads: number;
   judgeCalls: number;
   judgeInputs: string[][];
+  /** `recv` results the judge read, as JSON text. */
+  received: string[];
 };
 
 /** A lane ready for the batch graph, and what it observed. */
@@ -276,11 +272,13 @@ export async function scriptedLane(
     reads: 0,
     judgeCalls: 0,
     judgeInputs: [],
+    received: [],
   };
   const proposal = new ProposalRecorder({
     snapshot,
     work,
     readSource: async (path) => sources.get(path),
+    taskResults: () => proposer.getTaskResults(),
   });
   const verdict = new VerdictRecorder();
   let earlyTried = false;
@@ -306,7 +304,7 @@ export async function scriptedLane(
       log.researchers++;
       log.starts[shard] = (log.starts[shard] ?? 0) + 1;
       if (script.forbiddenProbe === shard) {
-        return toolUse(
+        return toolTurn(
           call("task", {
             context: "Recursive research",
             tasks: [{ task: "recurse" }],
@@ -320,13 +318,13 @@ export async function scriptedLane(
         );
       }
       if (script.hang?.shard === shard)
-        return toolUse(call(script.hang.tool, {}));
+        return toolTurn(call(script.hang.tool, {}));
       if (script.hold?.shard === shard) {
         script.hold.entered();
         await script.hold.gate;
       }
       if (script.readAssigned)
-        return toolUse(...files.map((path) => call("read", { path })));
+        return toolTurn(...files.map((path) => call("read", { path })));
     } else if (script.forbiddenProbe === shard) {
       log.forbidden.push(...latestResults(context));
     } else if (script.readAssigned) {
@@ -353,7 +351,7 @@ export async function scriptedLane(
   };
 
   const dispatch = async (context: Context) => {
-    const texts = userTexts(context);
+    const texts = userTexts(context.messages);
     const prompt = texts[0] ?? "";
     if (prompt.startsWith("You are a read-only researcher"))
       return researcher(context, prompt);
@@ -366,7 +364,7 @@ export async function scriptedLane(
         log.yields++;
       if (yieldsLeft > 0) {
         yieldsLeft--;
-        return toolUse(call("yield", { reason: "letting other lanes run" }));
+        return toolTurn(call("yield", { reason: "letting other lanes run" }));
       }
       started = true;
       if (script.proposerFails)
@@ -375,7 +373,13 @@ export async function scriptedLane(
           errorMessage: "proposer exploded",
         });
       await script.barrier?.();
-      return toolUse(call("task", {}));
+      return toolTurn(
+        call("send", {
+          id: `summary:${work.rank}`,
+          payload: `Proposer ${work.rank}: callers reconciled; research launched`,
+        }),
+        call("task", {}),
+      );
     }
     const results = latestResults(context);
     const task = results.find((result) => result.toolName === "task");
@@ -385,7 +389,7 @@ export async function scriptedLane(
       log.handles = parsed.tasks.map((handle: { name: string }) => handle.name);
       if (script.earlySubmit && !earlyTried) {
         earlyTried = true;
-        return toolUse(
+        return toolTurn(
           call("submit_refactor", {
             candidateId: work.candidate.definition.id,
             kind: "none",
@@ -421,7 +425,7 @@ export async function scriptedLane(
     if (question !== undefined) {
       const action = script.failureDecision ?? "ignore";
       log.decisions.push(`${action} ${question.id} ${question.attempt}`);
-      return toolUse(
+      return toolTurn(
         call("task", { action, id: question.id, attempt: question.attempt }),
       );
     }
@@ -462,20 +466,26 @@ export async function scriptedLane(
                 : "No duplicated responsibility found.",
           }
         : script.proposal(research);
-    return toolUse(call("submit_refactor", args));
+    return toolTurn(call("submit_refactor", args));
   };
 
   const proposerOptions = await nativeOptions(
     Array.from({ length: 200 }, () => dispatch),
   );
   const judgeOptions = await nativeOptions([
+    () => toolTurn(call("recv", {})),
     (context: Context) => {
       log.judgeCalls++;
       script.onJudge?.();
       // The judge's input is the staged prompt its callback composed.
-      log.judgeInputs.push(userTexts(context));
+      log.judgeInputs.push(userTexts(context.messages));
+      log.received.push(
+        ...latestResults(context)
+          .filter((result) => result.toolName === "recv" && !result.isError)
+          .map((result) => result.text),
+      );
       if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
-      return toolUse(call("judge_refactor", script.verdict ?? allPass));
+      return toolTurn(call("judge_refactor", script.verdict ?? allPass));
     },
     fauxAssistantMessage("verdict recorded"),
   ]);
@@ -489,6 +499,7 @@ export async function scriptedLane(
       ...(script.beforeResearchYields === undefined
         ? []
         : [new toolsApi.YieldTool()]),
+      new toolsApi.SendTool(),
       new toolsApi.TaskTool(),
       proposal.tool,
     ],
@@ -496,7 +507,7 @@ export async function scriptedLane(
   const judge = await agentApi.JuncoAgent.fromResolved({
     ...judgeOptions.options,
     systemPrompt: "judge",
-    tools: [read, verdict.tool],
+    tools: [read, new toolsApi.RecvTool(), verdict.tool],
   });
   return { lane: { work, proposer, judge, proposal, verdict }, log };
 }

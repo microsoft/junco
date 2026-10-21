@@ -12,11 +12,11 @@ import * as O from "fp-ts/lib/Option.js";
 import {
   agent as agentApi,
   graph,
+  JuncoGraph,
   schedules,
   tracer,
   workflows,
 } from "junco-agency";
-import { build, parse } from "junco-syntax";
 import { nativeOptions } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
@@ -47,23 +47,20 @@ async function ralphWorkflow(
   );
   let agent: agentApi.JuncoAgent | undefined;
   try {
-    const execution = await build(
-      parse(workflows.ralph, { params: { model: "faux/ralph" } }),
-      {
-        cwd: process.cwd(),
-        scheduler: () => schedules.parallel(),
-        tracer: new tracer.DummyTracer(),
-        createAgent: async (spec) => {
-          agent = await agentApi.JuncoAgent.fromResolved({
-            ...options,
-            systemPrompt: spec.systemPrompt,
-            tools: spec.tools as AgentTool[],
-          });
-          return agent;
-        },
-        ...schedules.ralph({ rounds }),
+    const execution = await JuncoGraph.fromYaml(workflows.ralph, {
+      cwd: process.cwd(),
+      scheduler: () => schedules.parallel(),
+      tracer: new tracer.DummyTracer(),
+      createAgent: async (spec) => {
+        agent = await agentApi.JuncoAgent.fromResolved({
+          ...options,
+          systemPrompt: spec.systemPrompt,
+          tools: spec.tools as AgentTool[],
+        });
+        return agent;
       },
-    );
+      ...schedules.ralph({ rounds }),
+    });
     assert.ok(agent);
     execution.graph.source.enqueue({
       messages: new Map([

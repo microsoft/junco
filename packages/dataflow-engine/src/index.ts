@@ -60,11 +60,12 @@ export type {
   NodeSchedule,
   Schedule,
 } from "./scheduler.js";
-export { triggerInputs } from "./scheduler.js";
+export { messageInputs, triggerInputs } from "./scheduler.js";
 export { ConstFanin, ConstFanout, Sink, Source } from "./stdlib.js";
 export type { TriggerKind } from "./trigger.js";
 export {
   evaluateTrigger,
+  fires,
   satisfiedEdges,
   TriggerEntry,
   TriggerRule,

@@ -4,8 +4,7 @@
     "module": "ESNext",
     "noEmit": true,
     "paths": {
-      "junco-agency": ["./src/index.ts"],
-      "junco-syntax": ["./packages/junco-syntax/src/index.ts"]
+      "junco-agency": ["./src/index.ts"]
     },
     "declaration": false,
     "rootDir": ".",

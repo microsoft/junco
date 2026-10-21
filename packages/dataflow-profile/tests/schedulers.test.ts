@@ -2,7 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { constantProfile, DataflowGraph, Edge, EmitOnce, from, Message, NodeId, StepNode, TriggerEntry, TriggerRule, UNBOUNDED, mebibytes, megabytes, tokens } from "dataflow-engine";
-import { choose, context, limit, lowest, parallel, type Scheduler } from "junco-scheduler";
+import { choose, context, limit, lowest, nodeIds, parallel, type Scheduler } from "junco-scheduler";
 import { makeProfile, profilesOf } from "../src/predict.ts";
 import { parseProfiles } from "../src/schema.ts";
 import type { ProfileRecord } from "../src/types.ts";
@@ -26,7 +26,7 @@ test("few-samples fallback charges each rare activation its 130 MiB bound", asyn
     });
     const waves: string[][] = [];
     const inner = limit<void, string, string, never>({ memory: mebibytes(allowance) }, parallel());
-    const scheduler: Scheduler<void, string, string, never> = async (s, signal) => { const d = await inner(s, signal); waves.push([...d.selected]); return d; };
+    const scheduler: Scheduler<void, string, string, never> = async (s, signal) => { const d = await inner(s, signal); waves.push(nodeIds(d.selected)); return d; };
     await context({ graph, scheduler }).run();
     assert.deepEqual(consumed, ["rareX", "rareY"]);
     assert.equal(waves.some(wave => rares.every(node => wave.includes(node))), allowance === 300);
@@ -51,7 +51,7 @@ test("fitted count features rank the one-message racer ahead of the nine-message
   racers.forEach((racer, i) => graph.addEdge(racer, join, arrivals[i]!));
   const waves: string[][] = [];
   const inner = choose<void, string, string, never>({ rank: lowest("tokens"), width: () => 1 });
-  const scheduler: Scheduler<void, string, string, never> = async (s, signal) => { const d = await inner(s, signal); waves.push([...d.selected]); return d; };
+  const scheduler: Scheduler<void, string, string, never> = async (s, signal) => { const d = await inner(s, signal); waves.push(nodeIds(d.selected)); return d; };
   const results = await context({ graph, scheduler }).run();
   assert.equal(results.get(join), "R2");
   assert.ok(waves.findIndex(w => w.includes("R2")) < waves.findIndex(w => w.includes("R1")));

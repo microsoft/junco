@@ -51,6 +51,8 @@ import {
   registeredNodeContexts,
   unseenValues,
 } from "./node-policy.js";
+import { build, type FromYamlOptions } from "./syntax/build.js";
+import { parse } from "./syntax/parse.js";
 import { TuiTracer } from "./tui-tracer.js";
 
 type NestedContext<N, T> = SchedulerContext<
@@ -65,7 +67,9 @@ type NestedNode<N, T> = Extract<
   { readonly state: NestedContext<N, T>; readonly step?: never }
 >;
 
-function isNestedContext<N, T>(value: unknown): value is NestedContext<N, T> {
+export function isNestedContext<N, T>(
+  value: unknown,
+): value is NestedContext<N, T> {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -186,6 +190,31 @@ export class JuncoGraph<
         "Graph source cannot produce value edges",
       );
     return super.addEdge(from, to, edge);
+  }
+
+  /**
+   * The workflow a YAML document (text or parsed object) and its config define; see `syntax`.
+   * Prepared agents transfer ownership at entry, including when parsing fails.
+   */
+  static async fromYaml<C = unknown>(
+    source: string | object,
+    config: FromYamlOptions<C>,
+  ): Promise<
+    SchedulerContext<
+      Agentic,
+      AgenticInput,
+      AssistantMessage,
+      AgencyNodeMetadata,
+      JuncoGraph
+    >
+  > {
+    await using prepared = new AsyncDisposableStack();
+    for (const instance of new Set(Object.values(config.agents ?? {})))
+      prepared.use(instance);
+    const { params, ...options } = config;
+    const doc = parse(source, params === undefined ? {} : { params });
+    prepared.move();
+    return build(doc, options);
   }
 
   /** Build and return the caller's context, adopting its graph into one owned collection. */
@@ -599,7 +628,10 @@ export class JuncoGraph<
         signal.throwIfAborted();
         if (graph.available().size === 0) {
           const retained = graph.result(graph.sink.id);
-          if (O.isSome(retained)) return retained.value;
+          if (O.isSome(retained)) {
+            started = false;
+            return retained.value;
+          }
           throw new JuncoAgentError(
             "invalid_state",
             "Nested graph quiesced without a sink result",

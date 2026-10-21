@@ -3,6 +3,7 @@ import {
   context,
   limit,
   lowest,
+  nodeIds,
   parallel,
   type Scheduler,
 } from "junco-scheduler";
@@ -84,7 +85,7 @@ export async function runMemoryLimit(tracer?: DataflowTracer): Promise<{
     signal,
   ) => {
     const d = await inner(s, signal);
-    waves.push([...d.selected]);
+    waves.push(nodeIds(d.selected));
     return d;
   };
   const results = await context({ graph, scheduler }).run();
@@ -149,7 +150,7 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     signal,
   ) => {
     const d = await inner(s, signal);
-    waves.push([...d.selected]);
+    waves.push(nodeIds(d.selected));
     return d;
   };
   const results = await context({ graph, scheduler }).run();
