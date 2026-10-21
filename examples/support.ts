@@ -15,13 +15,13 @@ export function ctrlC(): { readonly signal: AbortSignal; [Symbol.dispose](): voi
   };
 }
 
-/** Run `main` under Ctrl-C cancellation: print the failure, exit 130 when interrupted, 1 on any other failure. */
+/** Run `main` under Ctrl-C cancellation: print the failure (just the message of a plain error), exit 130 when interrupted, 1 on any other failure. */
 export async function runCli(main: (signal: AbortSignal) => Promise<void>): Promise<void> {
   using cancellation = ctrlC();
   try {
     await main(cancellation.signal);
   } catch (error) {
-    console.error(error);
+    console.error(error instanceof Error && error.constructor === Error && error.cause === undefined ? error.message : error);
     process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
   if (cancellation.signal.aborted) process.exitCode = 130;

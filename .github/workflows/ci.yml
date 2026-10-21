@@ -128,7 +128,7 @@ jobs:
             const recursive = await run("recursive-agency/recursive-agency.js");
             assert.equal(recursive.code, 0, recursive.stderr);
             assert.equal(recursive.stderr, "");
-            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 11 root decisions\n");
+            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 14 root decisions\n");
             const committee = await run("oss-committee/oss-committee.js");
             assert.equal(committee.code, 1);
             assert.equal(committee.stdout, "");
