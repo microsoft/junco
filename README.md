@@ -26,7 +26,7 @@ During graph activations, each request also ends with `Inbox { <edgeId>: <count>
 
 Prepared `agents` in `JuncoGraph.fromYaml` transfer ownership at entry: failed parsing or construction closes every supplied agent, including unregistered agents; successful construction leaves them owned by the graph. The node-path mapping must cover each agent exactly once and is exclusive with `createAgent`. Prepared agents keep their existing model/tool/skill/system configuration; YAML prompts, contracts and profiles still apply, without creating a default collection.
 
-For package development (Node `dist` builds, declarations, and the native addon), build in dependency order (tools → engine → agent → scheduler → Opik adapter → agency):
+For package development (Node `dist` builds, declarations, and the native addon), build in dependency order (tools → engine → agent → scheduler → Opik adapter → profile → agency):
 
 ```sh
 bun install --frozen-lockfile
@@ -36,6 +36,7 @@ bun install --frozen-lockfile
 (cd packages/junco-agent && bun run build)
 (cd packages/junco-scheduler && bun run build)
 (cd packages/dataflow-engine-opik && bun run build)
+(cd packages/dataflow-profile && bun run build)
 bun run typecheck
 bun run build
 bun run check

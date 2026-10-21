@@ -403,6 +403,11 @@ jobs:
         working-directory: junco-agency/packages/dataflow-engine-opik
         run: bun run build
 
+      # The agency's declaration build and typecheck import dataflow-profile's public types.
+      - name: Build dataflow-profile
+        working-directory: junco-agency/packages/dataflow-profile
+        run: bun run build
+
       - name: Build and test junco-agency
         run: |
           bun run build
