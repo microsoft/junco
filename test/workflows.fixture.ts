@@ -21,6 +21,7 @@ import {
   graph as graphApi,
   JuncoGraph,
   schedules,
+  syntax,
   tools as toolsApi,
   tracer as tracerApi,
   workflows,
@@ -148,10 +149,11 @@ const model = faux.getModel();
 const ladder = schedules.uniformLadder({
   model: `${model.provider}/${model.id}`,
 });
+// createAgent keeps the smoke collection-free: no ShellMux, so no Btrfs seed is needed.
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
-  models,
+  createAgent: (spec) => syntax.createJuncoAgent(spec, ladder, models),
   ladder,
   tracer: new tracerApi.DummyTracer(),
   ...schedules.ralph({ rounds: 3 }),
