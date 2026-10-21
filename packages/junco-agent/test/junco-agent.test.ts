@@ -22,62 +22,33 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { isComplainTool, issueLog, YieldTool } from "junco-tools";
+import { issueLog, YieldTool } from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
 import {
   type AgenticStep,
   JuncoAgent,
   JuncoAgentError,
+  SYSTEM_INSTRUCTION,
   type TokenMonitorConfig,
 } from "../src/index.ts";
-import { countingTool, nativeOptions, newAgent, scripted } from "./harness.ts";
+import {
+  assertTools,
+  countingTool,
+  isCode,
+  nativeOptions,
+  newAgent,
+  scripted,
+  settledText,
+  step,
+  tick,
+  toolTurn,
+  userTexts,
+} from "./harness.ts";
 
 const TIMEOUT = 5_000;
-const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-const toolTurn = (...calls: ReturnType<typeof fauxToolCall>[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const yieldCall = (reason: string, id: string) =>
   fauxToolCall("yield", { reason }, { id });
-
-function step(result: IteratorResult<AgenticStep, void>): AgenticStep {
-  assert.equal(result.done, false);
-  return result.value as AgenticStep;
-}
-
-function settledText(result: IteratorResult<AgenticStep, void>): string {
-  const value = step(result);
-  assert.equal(value.kind, "settled");
-  return value.message.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-}
-
-function userTexts(messages: Context["messages"]): string[] {
-  return messages.flatMap((message) => {
-    if (message.role !== "user") return [];
-    return [
-      typeof message.content === "string"
-        ? message.content
-        : message.content
-            .flatMap((block) => (block.type === "text" ? [block.text] : []))
-            .join(""),
-    ];
-  });
-}
-
-const isCode =
-  (code: JuncoAgentError["code"]) =>
-  (error: unknown): boolean =>
-    error instanceof JuncoAgentError && error.code === code;
-
-/** Asserts the optional tools in order, followed by exactly one genuine complain tool. */
-function assertTools(actual: readonly object[], expected: readonly object[]) {
-  assert.deepEqual(actual.slice(0, -1), expected);
-  assert.equal(isComplainTool(actual.at(-1)!), true);
-  assert.equal(actual.filter((tool) => isComplainTool(tool)).length, 1);
-}
-
 test("the caller's tools remain inspectable and active selection governs execution", async () => {
   const first = countingTool("first");
   const second = countingTool("second");
@@ -2374,10 +2345,8 @@ test(
 );
 
 test(
-  "every model request carries the release instruction exactly once, never persisted",
+  "every model request carries the system instruction exactly once, never persisted",
   async () => {
-    const RELEASE =
-      "After you write to a file use release to relinquish ownership";
     const prompts: string[] = [];
     // The provider sees the system prompt as the transcript's system message text.
     const record = (context: Context) => {
@@ -2434,16 +2403,16 @@ test(
       assert.equal(settledText(await agent.next()), "done");
       assert.equal(one.state.executions, 1);
       assert.deepEqual(prompts, [
-        `hooked\n\n${RELEASE}`,
-        `hooked\n\n${RELEASE}`,
-        `hooked\n\n${RELEASE}`,
+        `hooked\n\n${SYSTEM_INSTRUCTION}`,
+        `hooked\n\n${SYSTEM_INSTRUCTION}`,
+        `hooked\n\n${SYSTEM_INSTRUCTION}`,
       ]);
       await seedLargeHistory(agent);
       assert.equal(await agent.compact(), undefined);
       assert.equal(faux.state.callCount, 4);
       assert.equal(prompts.length, 4);
-      assert.equal(prompts[3]!.split(RELEASE).length, 2);
-      assert.ok(prompts[3]!.endsWith(RELEASE));
+      assert.equal(prompts[3]!.split(SYSTEM_INSTRUCTION).length, 2);
+      assert.ok(prompts[3]!.endsWith(SYSTEM_INSTRUCTION));
     } finally {
       await agent.return();
     }
@@ -2478,8 +2447,8 @@ test(
         await child!.return();
       }
       assert.deepEqual(prompts.slice(4), [
-        `sys\n\n${RELEASE}`,
-        `sys\n\n${RELEASE}`,
+        `sys\n\n${SYSTEM_INSTRUCTION}`,
+        `sys\n\n${SYSTEM_INSTRUCTION}`,
       ]);
     } finally {
       await restored.return();

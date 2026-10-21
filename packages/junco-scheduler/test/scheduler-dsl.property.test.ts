@@ -16,10 +16,12 @@ import {
   choose,
   context,
   type Decision,
+  nodeIds,
   parallel,
   roundRobin,
   type Scheduler,
   type Snapshot,
+  select,
   separate,
 } from "../src/index.ts";
 
@@ -161,7 +163,7 @@ function snapshot(f: Fixture): View {
     plans: new Map(),
     history: Object.freeze(
       f.history.map((selected) =>
-        Object.freeze({ selected: Object.freeze([...selected]) }),
+        Object.freeze({ selected: Object.freeze(select(selected)) }),
       ),
     ),
     version: f.version,
@@ -198,7 +200,7 @@ function policy(p: Leaf): Policy {
         (s.context.get(node)?.bias ?? 0) -
         (p.historyScore
           ? count(
-              s.history.map((d) => d.selected),
+              s.history.map((d) => nodeIds(d.selected)),
               node,
             )
           : 0);
@@ -261,7 +263,7 @@ function safe(f: Fixture, selected: readonly Id[]): void {
 function assertProjection(actual: View, parent: View, model: Fixture): void {
   assert.deepEqual([...actual.owned], model.owned);
   assert.deepEqual(
-    actual.history.map((d) => [...d.selected]),
+    actual.history.map((d) => nodeIds(d.selected)),
     model.history,
   );
   for (const key of [
@@ -384,8 +386,8 @@ test("CSL: atomic decisions follow their denotations", async () => {
         const p = { ...a, kind };
         const want = expected(f, p);
         const result = await policy(p)(snapshot(f));
-        assert.deepEqual(result.selected, want);
-        safe(f, result.selected);
+        assert.deepEqual(nodeIds(result.selected), want);
+        safe(f, nodeIds(result.selected));
       }
       const exhausted = { ...f, owned: [] };
       assert.deepEqual(
@@ -427,16 +429,16 @@ test("CSL: atomic decisions follow their denotations", async () => {
         );
         const one = await oracle(snapshot(f));
         assert.deepEqual(
-          one.selected,
+          nodeIds(one.selected),
           expected(f, parameters("agent", { waves: first })),
         );
         const next = {
           ...f,
-          history: one.selected.length ? [[...one.selected]] : [],
+          history: one.selected.length ? [nodeIds(one.selected)] : [],
         };
         const two = await oracle(snapshot(next));
         assert.deepEqual(
-          two.selected,
+          nodeIds(two.selected),
           expected(next, parameters("agent", { waves: second })),
         );
         assert.equal(calls, 2);
@@ -479,7 +481,7 @@ test("CSL: parallel conserves authority", async () => {
         async (child) => {
           assertProjection(child, s, model);
           const decision = await policy(p)(child);
-          safe(model, decision.selected);
+          safe(model, nodeIds(decision.selected));
           return decision;
         };
       const actual = await separate(
@@ -487,9 +489,9 @@ test("CSL: parallel conserves authority", async () => {
         probe(a, l),
         probe(b, r),
       )(s);
-      assert.deepEqual(actual.selected, [...wantLeft, ...wantRight]);
+      assert.deepEqual(nodeIds(actual.selected), [...wantLeft, ...wantRight]);
       assert.ok(wantLeft.every((node) => !wantRight.includes(node)));
-      safe(f, actual.selected);
+      safe(f, nodeIds(actual.selected));
     }),
     { ...options, examples: [[boundary]] },
   );
@@ -514,11 +516,11 @@ test("CSL: ordered composition associates and has a unit", async () => {
       ];
       const s = snapshot(f);
       assert.deepEqual(
-        (await separate(inAB, separate(inA, S, T), U)(s)).selected,
+        nodeIds((await separate(inAB, separate(inA, S, T), U)(s)).selected),
         want,
       );
       assert.deepEqual(
-        (await separate(inA, S, separate(inB, T, U))(s)).selected,
+        nodeIds((await separate(inA, S, separate(inB, T, U))(s)).selected),
         want,
       );
       const ordinary = await S(s);
@@ -526,7 +528,7 @@ test("CSL: ordered composition associates and has a unit", async () => {
       assert.deepEqual(await separate(() => false, abstain, S)(s), ordinary);
       const forward = await separate(inA, S, T)(s);
       const reversed = await separate((_s, node) => !A.includes(node), T, S)(s);
-      assert.deepEqual(reversed.selected, [
+      assert.deepEqual(nodeIds(reversed.selected), [
         ...expected(
           project(
             f,
@@ -536,7 +538,10 @@ test("CSL: ordered composition associates and has a unit", async () => {
         ),
         ...expected(project(f, A), a),
       ]);
-      assert.deepEqual(new Set(reversed.selected), new Set(forward.selected));
+      assert.deepEqual(
+        new Set(nodeIds(reversed.selected)),
+        new Set(nodeIds(forward.selected)),
+      );
     }),
     { ...options, examples: [[boundary]] },
   );
@@ -614,7 +619,9 @@ test("CSL: local policies satisfy the frame rule", async () => {
         ] as const) {
           const p = { ...a, kind };
           assert.deepEqual(
-            (await scoped(snapshot(extension), f.owned, policy(p))).selected,
+            nodeIds(
+              (await scoped(snapshot(extension), f.owned, policy(p))).selected,
+            ),
             expected(f, p),
           );
         }
@@ -681,9 +688,9 @@ test("CSL: round-robin traces use only projected history", async () => {
         const extended = framed({ ...local, history: histories[stream]! }, 4);
         extended.history.push(...transition.frame.map((node) => [node]));
         const decision = await scoped(snapshot(extended), f.owned, shared);
-        assert.deepEqual(decision.selected, want);
+        assert.deepEqual(nodeIds(decision.selected), want);
         if (decision.selected.length)
-          histories[stream]!.push([...decision.selected]);
+          histories[stream]!.push(nodeIds(decision.selected));
         if (want.length) models[stream]!.push(want);
       }
     }),
@@ -713,7 +720,7 @@ test("CSL: round-robin traces use only projected history", async () => {
   const wideSelections: (readonly Id[])[] = [];
   for (let n = 0; n < 3; n++) {
     const decision = await roundRobin(undefined, 2)(wide);
-    wideSelections.push(decision.selected);
+    wideSelections.push(nodeIds(decision.selected));
     wide = { ...wide, history: [...wide.history, decision] };
   }
   assert.deepEqual(wideSelections, [
@@ -727,7 +734,7 @@ test("CSL: round-robin traces use only projected history", async () => {
   for (const stream of [0, 1, 0, 1]) {
     const s = streams[stream]!;
     const d = await shared(s);
-    selections.push(d.selected);
+    selections.push(nodeIds(d.selected));
     streams[stream] = { ...s, history: [...s.history, d] };
   }
   assert.deepEqual(selections, [["1"], ["1"], ["10"], ["10"]]);
@@ -737,7 +744,7 @@ test("CSL: round-robin traces use only projected history", async () => {
   ] as const) {
     const s = snapshot(fixed(["a", "b", "c"], [[...history]]));
     assert.deepEqual(
-      (await roundRobin([id("a"), id("b"), id("c")])(s)).selected,
+      nodeIds((await roundRobin([id("a"), id("b"), id("c")])(s)).selected),
       want,
     );
   }
@@ -790,13 +797,13 @@ test("CSL: async composition drains before settling", async () => {
           }
           if (kind === "return") {
             cleaned[n] = true;
-            return { selected: [id(n === 0 ? "a" : "b")] };
+            return { selected: select([id(n === 0 ? "a" : "b")]) };
           }
           return (async () => {
             try {
               await gates[n]!.promise;
               if (kind === "reject") throw errors[n];
-              return { selected: [id(n === 0 ? "a" : "b")] };
+              return { selected: select([id(n === 0 ? "a" : "b")]) };
             } finally {
               cleaned[n] = true;
             }
@@ -848,7 +855,7 @@ test("CSL: async composition drains before settling", async () => {
             assert.equal(result.error, cancel ? reason : errors[failed]);
         } else {
           assert.ok(result.ok);
-          assert.deepEqual(result.value.selected, ["a", "b"]);
+          assert.deepEqual(nodeIds(result.value.selected), ["a", "b"]);
         }
       } finally {
         for (const gate of gates) gate.resolve();
@@ -920,9 +927,9 @@ test("CSL: context rejects authority or capacity violations atomically", async (
       const faulty: EnginePolicy = separate(
         (_s, node) => left.includes(node),
         fault === "escape"
-          ? () => ({ selected: [right[0]!] })
+          ? () => ({ selected: select([right[0]!]) })
           : fault === "duplicate"
-            ? () => ({ selected: [left[0]!, left[0]!] })
+            ? () => ({ selected: select([left[0]!, left[0]!]) })
             : parallel(),
         parallel(),
       );

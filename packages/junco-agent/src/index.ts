@@ -16,7 +16,9 @@ export {
   type JuncoAgentResolvedOptions,
   type JuncoAgentTools,
   type SubagentObserver,
+  SYSTEM_INSTRUCTION,
   type TaskAgentOptions,
   type TaskFailurePolicy,
   type TaskPolicy,
+  type TaskResult,
 } from "./junco-agent.js";

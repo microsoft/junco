@@ -14,7 +14,7 @@ flowchart TB
     E["addEdge(from, to, Edge#lt;N, T#gt;)<br/>message: FIFO queue; value: latest return"]
   end
   subgraph Context["context({ graph, scheduler }) — external policy and local history"]
-    A["available() + observe()<br/>typed native data and external metadata"] --> P["Scheduler(snapshot, signal?)<br/>Decision: ordered selected work IDs"]
+    A["available() + observe()<br/>typed native data and external metadata"] --> P["Scheduler(snapshot, signal?)<br/>Decision: ordered work IDs + model strengths"]
     P --> L["validate authority, availability and freshness<br/>lower one entry per lane, one column"]
   end
   subgraph Execution["graph.evaluate((execute, signal) => ...) — single-flight lifetime scope"]
@@ -204,9 +204,11 @@ const execution = context({ graph, scheduler: choose({ rank: () => 0 }) });
 const results = await execution.run(); // ties choose by string ID, not registration order
 ```
 
-`Scheduler<S,N,T,C>` is one sync/async function type returning `{ selected }`; all native data and metadata remain typed. `parallel()` and `roundRobin()` are universally callable across graph/data domains. Priority/FIFO ranks, nondeterminism and fallback are ordinary TypeScript callbacks, not extra operators. Optional `pi` is imported from `junco-scheduler/agent`, never required by the core entrypoint.
+`Scheduler<S,N,T,C>` is one sync/async function type returning `{ selected }`, an ordered array of `{ nodeId, modelStrength }` entries; `select(ids)` defaults strengths to `med` (2), and `nodeIds(selected)` extracts native IDs. All native data and metadata remain typed. `parallel()` and `roundRobin()` are universally callable across graph/data domains. Priority/FIFO ranks, nondeterminism and fallback are ordinary TypeScript callbacks, not extra operators. Optional `pi` is imported from `junco-scheduler/agent`, never required by the core entrypoint.
 
 `triggerInputs` reads each fired edge whole. A context's optional pure `readInputs(id, candidate)` instead returns counts (`n`, `"all"` or `"none"`) per edge, and is reused for live reads of running nodes. Native execution validates bounds, availability and all read maps before starting a column; invalid decisions or reads consume nothing and throw `DataflowDefinitionError`. Wiring mistakes throw the same error.
+
+`messageInputs(candidate)` instead reads every nonempty inbound message queue on activation, independent of trigger edges, and consumes no value edges. This keeps inbox delivery opaque while triggers independently control readiness.
 
 Resource policies use each node's profiles and planned input batch, including priming activations. Only `count` features are supported (`n` is capped by queue length, `"all"` reads the queue, absent/`"none"` reads zero); `bytes`/`tokens` features throw rather than inspecting payloads. Every selected node needs a memory profile for `limit`; every compared node needs the ranked profile. Wrap the outermost scheduler so `separate` branches share one allowance. Memory retained across yields is not tracked: leave headroom. Small-work-first policies can delay larger nodes indefinitely.
 

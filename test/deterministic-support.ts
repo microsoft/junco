@@ -233,6 +233,15 @@ export const textOf = (message: AssistantMessage): string =>
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("");
 
+/** The text of `id`'s retained result, or `undefined` before it exists. */
+export const resultText = (
+  graph: Pick<JuncoGraph, "result">,
+  id: NodeIdType,
+): string | undefined => {
+  const result = graph.result(id);
+  return O.isSome(result) ? textOf(result.value) : undefined;
+};
+
 /** The user texts of `messages`, in order. */
 export const userTexts = (messages: readonly AgentMessage[]): string[] =>
   messages.flatMap((message) =>

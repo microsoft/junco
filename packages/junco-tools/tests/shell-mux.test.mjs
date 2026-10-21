@@ -222,6 +222,14 @@ test("a collection's resources limit and monitor only its own commands", {
       return;
     }
     assert.equal(text(first), "4\n");
+    const binding = limited.bind();
+    try {
+      await binding.tools
+        .get(tool(limited, "bash"))
+        .execute("bash", { command: probe }, undefined);
+    } finally {
+      await binding.close();
+    }
 
     const plain = await ToolCollection.create(seed, {
       ...base,
@@ -253,17 +261,28 @@ test("a collection's resources limit and monitor only its own commands", {
       await owned.close();
     }
 
-    // Final release drains the stream: every event of the one pipeline, then nothing.
+    // Final release drains both pipelines, then nothing.
     await limited.close();
     const started = events.filter((event) => event.kind === "started");
     const finished = events.filter((event) => event.kind === "finished");
-    assert.equal(started.length, 1, JSON.stringify(events));
+    assert.equal(started.length, 2, JSON.stringify(events));
+    assert.equal(started[0].owner, undefined);
     assert.equal(started[0].command, probe);
-    assert.equal(finished.length, 1, JSON.stringify(events));
-    assert.equal(finished[0].pipelineId, started[0].pipelineId);
-    assert.equal(finished[0].sample.pids, 0);
+    assert.equal(typeof binding.owner, "string");
+    assert.equal(started[1].owner, binding.owner);
+    assert.equal(finished.length, 2, JSON.stringify(events));
+    for (const event of started) {
+      const ended = finished.filter(
+        (end) => end.pipelineId === event.pipelineId,
+      );
+      assert.equal(ended.length, 1);
+      assert.equal(ended[0].owner, event.owner);
+      assert.equal(ended[0].sample.pids, 0);
+    }
     assert.ok(
-      events.every((event) => event.pipelineId === started[0].pipelineId),
+      events.every((event) =>
+        started.some((start) => start.pipelineId === event.pipelineId),
+      ),
     );
   } finally {
     await cleanup(

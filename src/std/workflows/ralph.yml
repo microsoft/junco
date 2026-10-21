@@ -1,7 +1,7 @@
 # Ralph: one agent revises its complete answer for a fixed number of rounds.
 # The feedback edge Ralph->Ralph is the loop; rounds and prompts are code:
-#   const doc = parse(workflows.ralph, { params: { model: "github-copilot/claude-sonnet-5.5" } });
-#   build(doc, { cwd, scheduler: () => schedules.parallel(), ...schedules.ralph({ rounds: 3 }) });
+#   JuncoGraph.fromYaml(workflows.ralph, { cwd, scheduler: () => schedules.parallel(),
+#     ladder, ...schedules.ralph({ rounds: 3 }) });
 # Feed the assignment on route `assignment`; the result is Ralph's final round.
 graph:
   name: Ralph
@@ -10,7 +10,6 @@ graph:
       assignment: ["$source~>Ralph"]
   nodes:
     Ralph:
-      model: "{{ params.model }}"
       description: Revises its complete answer each round; only the final round reaches $sink.
       trigger:
         any: ["$source~>Ralph", "Ralph->Ralph"]

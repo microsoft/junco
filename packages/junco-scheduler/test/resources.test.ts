@@ -22,9 +22,12 @@ import {
   highest,
   limit,
   lowest,
+  nodeIds,
   parallel,
   type Scheduler,
   type Snapshot,
+  select,
+  strength,
 } from "../src/index.ts";
 
 const id = NodeId.create;
@@ -192,7 +195,7 @@ test("lowest and highest rank safe estimates, cache predictions and break ties b
     });
     const comparator = rank("tokens");
     assert.deepEqual(
-      (await choose({ rank: comparator, width: () => 3 })(s)).selected,
+      nodeIds((await choose({ rank: comparator, width: () => 3 })(s)).selected),
       expected.map(id),
     );
     assert.deepEqual(
@@ -200,7 +203,7 @@ test("lowest and highest rank safe estimates, cache predictions and break ties b
       [1, 1, 1],
     );
     assert.deepEqual(
-      (await choose({ rank: comparator, width: () => 1 })(s)).selected,
+      nodeIds((await choose({ rank: comparator, width: () => 1 })(s)).selected),
       [id(expected[0])],
     );
     assert.deepEqual(
@@ -209,7 +212,9 @@ test("lowest and highest rank safe estimates, cache predictions and break ties b
     );
     const ties = snapshot({ b: tokenCost(100), a: tokenCost(100) });
     assert.deepEqual(
-      (await choose({ rank: rank("tokens"), width: () => 2 })(ties)).selected,
+      nodeIds(
+        (await choose({ rank: rank("tokens"), width: () => 2 })(ties)).selected,
+      ),
       [id("a"), id("b")],
     );
     await assert.rejects(
@@ -225,11 +230,15 @@ test("lowest and highest rank safe estimates, cache predictions and break ties b
     b: memory(3000),
   });
   assert.deepEqual(
-    (await choose({ rank: lowest("memory"), width: () => 2 })(s)).selected,
+    nodeIds(
+      (await choose({ rank: lowest("memory"), width: () => 2 })(s)).selected,
+    ),
     [id("a"), id("b")],
   );
   assert.deepEqual(
-    (await choose({ rank: highest("memory"), width: () => 2 })(s)).selected,
+    nodeIds(
+      (await choose({ rank: highest("memory"), width: () => 2 })(s)).selected,
+    ),
     [id("b"), id("a")],
   );
 });
@@ -242,28 +251,32 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
     D: memory(1000),
   });
   const limited = limit({ memory: gigabytes(4) }, parallel());
-  assert.deepEqual((await limited(s)).selected, [id("A"), id("D")]);
+  assert.deepEqual(nodeIds((await limited(s)).selected), [id("A"), id("D")]);
   const ranked: Policy = choose({
     rank: (s, a, b) => b.localeCompare(a),
     width: () => 4,
   });
   assert.deepEqual(
-    (await limit({ memory: gigabytes(4) }, ranked)(s)).selected,
+    nodeIds((await limit({ memory: gigabytes(4) }, ranked)(s)).selected),
     [id("D"), id("C")],
   );
   assert.deepEqual(
-    (await limited(snapshot({ C: memory(2000), D: memory(1000) }))).selected,
+    nodeIds(
+      (await limited(snapshot({ C: memory(2000), D: memory(1000) }))).selected,
+    ),
     [id("C"), id("D")],
   );
   assert.deepEqual(
-    (
-      await limited(
-        snapshot({
-          A: memory(3000),
-          B: { memory: stub("memory", gibibytes, [], () => 3) },
-        }),
-      )
-    ).selected,
+    nodeIds(
+      (
+        await limited(
+          snapshot({
+            A: memory(3000),
+            B: { memory: stub("memory", gibibytes, [], () => 3) },
+          }),
+        )
+      ).selected,
+    ),
     [id("A")],
   );
   await assert.rejects(
@@ -280,12 +293,21 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
   );
   await assert.rejects(
     async () =>
-      limit({ memory: gigabytes(4) }, () => ({ selected: [id("unowned")] }))(s),
+      limit({ memory: gigabytes(4) }, () => ({
+        selected: select([id("unowned")]),
+      }))(s),
     /unowned/,
   );
   assert.deepEqual(
     await limit({ memory: gigabytes(4) }, () => ({ selected: [] }))(s),
     { selected: [] },
+  );
+  assert.deepEqual(
+    await limit(
+      { memory: gigabytes(4) },
+      strength(() => "high", parallel()),
+    )(s),
+    { selected: select([id("A"), id("D")], 3) },
   );
 });
 
@@ -305,7 +327,7 @@ test("one rank comparator caches each snapshot independently", async () => {
     [second, "a"],
     [first, "b"],
   ] as const)
-    assert.deepEqual((await scheduler(view)).selected, [id(expected)]);
+    assert.deepEqual(nodeIds((await scheduler(view)).selected), [id(expected)]);
   assert.deepEqual(
     calls.map((c) => c.length),
     [1, 1, 1, 1],
@@ -324,15 +346,19 @@ test("memory admission and token ranking use safe rather than value", async () =
     },
   });
   assert.deepEqual(
-    (await limit({ memory: gigabytes(4) }, parallel())(s)).selected,
+    nodeIds((await limit({ memory: gigabytes(4) }, parallel())(s)).selected),
     [id("a")],
   );
   assert.deepEqual(
-    (await choose({ rank: lowest("tokens"), width: () => 1 })(s)).selected,
+    nodeIds(
+      (await choose({ rank: lowest("tokens"), width: () => 1 })(s)).selected,
+    ),
     [id("b")],
   );
   assert.deepEqual(
-    (await choose({ rank: highest("tokens"), width: () => 1 })(s)).selected,
+    nodeIds(
+      (await choose({ rank: highest("tokens"), width: () => 1 })(s)).selected,
+    ),
     [id("a")],
   );
 });
@@ -350,7 +376,7 @@ test("limit checks cancellation before invocation and after awaited inner work",
     async () =>
       limit({ memory: gigabytes(4) }, () => {
         invoked = true;
-        return { selected: [id("a")] };
+        return { selected: select([id("a")]) };
       })(s, before.signal),
     (error) => error === reason,
   );
@@ -361,7 +387,7 @@ test("limit checks cancellation before invocation and after awaited inner work",
   const pending = limit({ memory: gigabytes(4) }, async () => {
     entered.resolve();
     await release.promise;
-    return { selected: [id("a")] };
+    return { selected: select([id("a")]) };
   })(s, after.signal);
   await entered.promise;
   after.abort(reason);

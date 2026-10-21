@@ -252,6 +252,7 @@ impl ProcessTask {
         if state.is_cancelled() {
             return Ok(crate::mux::cancelled_result(None, false));
         }
+        let pipeline_options = backend.pipeline_options(&runtime, owner.as_ref());
         // As for a run: never raced against cancellation, which could orphan the shell.
         let shell = backend
             .mux
@@ -263,7 +264,7 @@ impl ProcessTask {
                     environment: Some(environment),
                     force_sandbox: true,
                     policy_owner: owner,
-                    pipeline_options: backend.pipeline_options.clone(),
+                    pipeline_options,
                     ..Default::default()
                 },
             )

@@ -7,25 +7,43 @@ export {
   type Schedule,
   triggerInputs,
 } from "dataflow-engine";
+// Explicit names: `bun build --packages external --splitting` drops the binding of an `export *`
+// from an external package in a namespace re-export, breaking the Node `dist` build.
 export {
   agent,
   choose,
   type DataflowObservation,
+  DEFAULT_MODEL_STRENGTH,
   type Decision,
+  drain,
   highest,
   limit,
   lowest,
+  MODEL_STRENGTHS,
+  type ModelStrength,
+  type ModelStrengthName,
+  type NodeModel,
+  nodeIds,
   parallel,
   roundRobin,
   type Scheduler,
   type SchedulerContext,
   type Snapshot,
+  select,
   separate,
+  strength,
 } from "junco-scheduler";
 export {
   type PiOptions,
   pi,
   type SchedulerRequest,
 } from "junco-scheduler/agent";
-export { type AgencyNodeMetadata, context } from "../../node-policy.js";
+export {
+  type AgencyNodeMetadata,
+  context,
+  type Ladder,
+  type LadderRung,
+  uniformLadder,
+  validateLadder,
+} from "../../node-policy.js";
 export { type RalphOptions, ralph } from "./ralph.js";

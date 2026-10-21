@@ -6,15 +6,14 @@ import { join } from "node:path";
 import {
   fauxAssistantMessage,
   fauxToolCall,
-  type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { NodeId, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
 import { LockPolicy } from "junco-tools";
-import { type JuncoGraph, LspTool, tools } from "../src/index.ts";
-import { terminalPorts } from "./deterministic-support.ts";
+import { LspTool, tools } from "../src/index.ts";
+import { resultText, terminalPorts } from "./deterministic-support.ts";
 import {
   type AgencyContext,
   agencyGraph,
@@ -26,13 +25,12 @@ import {
   type Script,
   scheduleCall,
   settledText,
+  toolTurn,
   waitingTool,
 } from "./support.ts";
 
 const TIMEOUT_MS = 30_000;
 const MEMBER = NodeId.create("0");
-const toolTurn = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 /** Nested consumers retain the context while native node state remains its actual graph. */
 const member = (state: JuncoAgent | AgencyContext, description = "member") =>
   state instanceof JuncoAgent
@@ -62,16 +60,6 @@ const plan =
   (...waves: string[][][]): Script =>
   (request, index) =>
     index < waves.length ? { waves: waves[index]! } : runAvailable(request);
-
-/** The text of member `id`'s result in `graph`. */
-function resultText(graph: JuncoGraph, id = "0"): string | undefined {
-  const result = graph.result(NodeId.create(id));
-  return O.isSome(result)
-    ? result.value.content
-        .map((block) => (block.type === "text" ? block.text : ""))
-        .join("")
-    : undefined;
-}
 
 /** A JuncoAgent recording each public `abort()` and `return()` request into `calls`. */
 function counting(
@@ -112,7 +100,9 @@ test(
     const root = levels.at(-1)!;
     try {
       await root.run();
-      assert.ok(levels.every(({ graph }) => resultText(graph) === "deep"));
+      assert.ok(
+        levels.every(({ graph }) => resultText(graph, MEMBER) === "deep"),
+      );
       const final = levels[0]!.graph.result(MEMBER);
       assert.ok(O.isSome(final));
       for (const { graph } of levels) {

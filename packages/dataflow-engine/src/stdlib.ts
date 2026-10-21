@@ -11,6 +11,7 @@ import type {
   ParentView,
 } from "./node.js";
 import { Message, snapshotView } from "./node.js";
+import type { Profiles } from "./profile.js";
 import { TriggerEntry, TriggerRule } from "./trigger.js";
 
 /** Registration options for a constant node: identity, prose, its graph state and return value. */
@@ -215,6 +216,7 @@ export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T> {
 export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
   readonly id: NodeId;
   readonly description?: string;
+  readonly profiles?: Profiles<never>;
   readonly state = this;
   readonly trigger = TriggerRule.always<N, T>();
   readonly is_available = () => this.#pending.length > 0;
@@ -224,9 +226,12 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
 
   constructor(
     route: (view: ParentView<N, T>) => Message<N>[],
-    options: Pick<NodeOptions<N, T>, "description"> & { readonly id: NodeId },
+    options: Pick<NodeOptions<N, T>, "description" | "profiles"> & {
+      readonly id: NodeId;
+    },
   ) {
     this.id = options.id;
+    if (options.profiles !== undefined) this.profiles = options.profiles;
     if (options.description !== undefined)
       this.description = options.description;
     const source = this;
@@ -272,6 +277,7 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
 export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
   readonly id: NodeId;
   readonly description?: string;
+  readonly profiles?: Profiles<never>;
   readonly state = this;
   readonly trigger: TriggerRule<N, T>;
   readonly is_available?: AvailabilityFn<N, T>;
@@ -283,6 +289,7 @@ export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
     options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId },
   ) {
     this.id = options.id;
+    if (options.profiles !== undefined) this.profiles = options.profiles;
     this.trigger = options.trigger;
     if (options.description !== undefined)
       this.description = options.description;

@@ -47,6 +47,7 @@ import {
   type Scheduler,
   type SchedulerContext,
   type Snapshot,
+  select,
   separate,
 } from "junco-scheduler";
 import { type PiOptions, pi } from "junco-scheduler/agent";
@@ -1102,14 +1103,14 @@ export function typedContextsPreserveNativeAndCallerData(id: NodeIdType) {
     number,
     string,
     { priority: number }
-  > = async () => ({ selected: [id] });
+  > = async () => ({ selected: select([id]) });
   const unbranded: Scheduler<
     State,
     number,
     string,
     { priority: number }
     // @ts-expect-error selections use branded native IDs
-  > = () => ({ selected: ["raw"] });
+  > = () => ({ selected: [{ nodeId: "raw", modelStrength: 2 }] });
   // @ts-expect-error policy association is external
   graph.scheduler;
   // @ts-expect-error passive native graphs do not drive policies

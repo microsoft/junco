@@ -128,7 +128,7 @@ jobs:
             const recursive = await run("recursive-agency/recursive-agency.js");
             assert.equal(recursive.code, 0, recursive.stderr);
             assert.equal(recursive.stderr, "");
-            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 11 root decisions\n");
+            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 14 root decisions\n");
             const committee = await run("oss-committee/oss-committee.js");
             assert.equal(committee.code, 1);
             assert.equal(committee.stdout, "");
@@ -403,12 +403,14 @@ jobs:
         working-directory: junco-agency/packages/dataflow-engine-opik
         run: bun run build
 
+      # The agency's declaration build and typecheck import dataflow-profile's public types.
+      - name: Build dataflow-profile
+        working-directory: junco-agency/packages/dataflow-profile
+        run: bun run build
+
       - name: Build and test junco-agency
         run: |
           bun run build
-          bun run --cwd packages/junco-syntax build
-          bun run --cwd packages/junco-syntax typecheck
-          bun run --cwd packages/junco-syntax test:coverage
           bun run typecheck
           bun run test:coverage
           bun run smoke

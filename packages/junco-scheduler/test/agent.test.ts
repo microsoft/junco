@@ -24,7 +24,7 @@ import {
 } from "dataflow-engine";
 import { Value } from "typebox/value";
 import { type PiOptions, pi, type SchedulerRequest } from "../src/agent.ts";
-import { context, parallel, separate } from "../src/index.ts";
+import { context, parallel, select, separate } from "../src/index.ts";
 import {
   nativeOptions,
   newScheduler,
@@ -94,7 +94,7 @@ test("empty IDs execute through fresh schedule requests, without a quiescent cal
     requests.map((request) =>
       request.history.map((decision) => decision.selected),
     ),
-    [[], [[""]], [[""], [""]]],
+    [[], [select([id("")])], [select([id("")]), select([id("")])]],
   );
   assert.deepEqual([...(await execution.step())], [["", "empty-id result"]]);
   assert.equal(faux.state.callCount, 3);
@@ -146,7 +146,9 @@ test("only the first applicable wave runs, and the next decision asks again", as
     ],
   );
   assert.equal(faux.state.callCount, 2);
-  assert.deepEqual(requests[1]?.history, [{ selected: ["b", "a"] }]);
+  assert.deepEqual(requests[1]?.history, [
+    { selected: select([id("b"), id("a")]) },
+  ]);
 });
 
 test("a Pi policy is reusable across graphs with independent histories", async () => {
@@ -167,7 +169,12 @@ test("a Pi policy is reusable across graphs with independent histories", async (
   await b.run();
   assert.deepEqual(
     requests.map((request) => request.history),
-    [[], [], [{ selected: ["left"] }], [{ selected: ["right"] }]],
+    [
+      [],
+      [],
+      [{ selected: select([id("left")]) }],
+      [{ selected: select([id("right")]) }],
+    ],
   );
 });
 
@@ -222,7 +229,7 @@ test("the request uses one strict tool, caller prompt first, snapshot last and n
   assert.deepEqual(signals, [controller.signal, controller.signal]);
   assert.deepEqual(schedulerRequestOf<never>(captured[0]!).history, []);
   assert.deepEqual(schedulerRequestOf<never>(captured[1]!).history, [
-    { selected: [""] },
+    { selected: select([id("")]) },
   ]);
 });
 
@@ -310,7 +317,9 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   assert.deepEqual(shown[1]?.context, [
     ["worker", { trigger: "all", satisfied: 0 }],
   ]);
-  assert.deepEqual(shown[1]?.history, [{ selected: ["worker", "plain"] }]);
+  assert.deepEqual(shown[1]?.history, [
+    { selected: select([id("worker"), id("plain")]) },
+  ]);
   assert.ok(shown.every((request) => request.threads === null));
   assert.ok(
     described.every((name) => name !== "finished" && name !== "dormant"),
@@ -584,7 +593,9 @@ test("a failed native column drains its sibling and is retained in the next requ
   assert.equal(error.cause, failure);
   assert.equal(cleaned, true);
   await execution.run();
-  assert.deepEqual(requests[1]?.history, [{ selected: ["fails", "sibling"] }]);
+  assert.deepEqual(requests[1]?.history, [
+    { selected: select([id("fails"), id("sibling")]) },
+  ]);
   assert.deepEqual(graph.result(id("sibling")), {
     _tag: "Some",
     value: "sibling",

@@ -166,7 +166,7 @@ describe("complaints through real graphs", () => {
     assert.deepEqual(issue!.messages, [{ id: edge.id, payload: input }]);
     assert.equal(
       issue!.prompt.systemPrompt,
-      "complaint system\n\nAfter you write to a file use release to relinquish ownership",
+      `complaint system\n\n${agentApi.SYSTEM_INSTRUCTION}`,
     );
     // The delivered payload reached the request as recv's result, not as a native user message.
     assert.ok(promptTexts(issue!).some((text) => text.includes(input.text)));
@@ -279,7 +279,7 @@ describe("complaints through real graphs", () => {
       assert.deepEqual(issue.messages, [{ id: wired.edge.id, payload: own }]);
       assert.equal(
         issue.prompt.systemPrompt,
-        `${systemPrompt}\n\nAfter you write to a file use release to relinquish ownership`,
+        `${systemPrompt}\n\n${agentApi.SYSTEM_INSTRUCTION}`,
       );
       const texts = promptTexts(issue);
       assert.ok(texts.some((text) => text.includes(own.text)));

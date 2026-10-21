@@ -1,13 +1,14 @@
 // Offline recursive agency: root → child → grandchild → a leaf that yields once, plus a root sibling.
 // Scheduler models select one current wave from SchedulerSnapshot; only work graphs own members.
+// recursive-agency.yml declares the topology; this module supplies Join and the faux agents.
 // Run: bun run examples/recursive-agency/recursive-agency.ts
 
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT, type AgentTool, MemorySessionRepo } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   type Context,
+  contentText,
   createModels,
   type FauxResponseFactory,
   type FauxResponseStep,
@@ -15,19 +16,32 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { NodeId } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { JuncoAgent } from "junco-agent";
-import type { SchedulerRequest } from "junco-scheduler/agent";
-import { build, parse } from "junco-syntax";
-import { graph as graphApi, schedules } from "junco-agency";
-import { ctrlC } from "../cancellation/cancellation.ts";
+import { agent, graph as graphApi, JuncoGraph, schedules, syntax } from "junco-agency";
+import { runCli } from "../support.ts";
 import source from "./recursive-agency.yml" with { type: "text" };
 
-const document = parse(source);
-document.code = { Join: fileURLToPath(new URL("./code.js", import.meta.url)) };
-type Request = SchedulerRequest<schedules.AgencyNodeMetadata>;
+const { JuncoAgent } = agent;
+const { NodeId } = graphApi;
+type Request = schedules.SchedulerRequest<schedules.AgencyNodeMetadata>;
 type Plan = { readonly waves: readonly (readonly string[])[] };
+
+/** Join both root branches, retaining the child's exact result after validating both reports. */
+const Join: syntax.DeterministicNode = {
+  create({ policy }) {
+    return {
+      state: new graphApi.nodes.Deterministic<graphApi.nodes.AgenticInput, AssistantMessage>(async function* () {
+        const inputs = yield [];
+        for (const id of ["0->Join", "1->Join"]) {
+          const result = inputs.values.get(graphApi.EdgeId.create(id));
+          if (result?.stopReason !== "stop" || !contentText(result.content).trim())
+            throw new Error(`${id} did not produce a complete report`);
+        }
+        return inputs.values.get(graphApi.EdgeId.create("0->Join"))!;
+      }, policy),
+    };
+  },
+};
 
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
@@ -92,7 +106,7 @@ async function main(signal: AbortSignal) {
     fauxAssistantMessage("leaf-result"),
   ];
   const siblingResponses = [fauxAssistantMessage("sibling-result")];
-  const actors = new Map<string, { faux: Awaited<ReturnType<typeof nativeOptions>>["faux"]; agent: JuncoAgent }>();
+  const actors = new Map<string, { faux: Awaited<ReturnType<typeof nativeOptions>>["faux"]; agent: agent.JuncoAgent }>();
   const decisions: string[][] = [];
   const decide: Record<string, (request: Request) => Plan> = {
     grandchild: runAvailable,
@@ -107,9 +121,10 @@ async function main(signal: AbortSignal) {
     },
   };
   const root = {
-    context: await build(document, {
+    context: await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
+      code: { Join },
       createAgent: async (spec) => {
         const { faux, options } = await nativeOptions(spec.node === "0" ? leafResponses : siblingResponses);
         const agent = await JuncoAgent.fromResolved({
@@ -130,34 +145,25 @@ async function main(signal: AbortSignal) {
   };
   const leaf = actors.get("0")!;
   const sibling = actors.get("1")!;
-  const failures: unknown[] = [];
-  let abortWork: Promise<void> | undefined;
-  const interrupt = () => {
-    abortWork = root.context.graph.abort(signal.reason).catch((error) => {
-      failures.push(error);
+  {
+    // LIFO: join a pending abort, then close the graph, then flush its tracer.
+    await using lifetime = new AsyncDisposableStack();
+    lifetime.defer(() => root.context.graph.tracer.flush());
+    lifetime.adopt(root.context.graph, (graph) => graph.close());
+    let abortWork: Promise<void> | undefined;
+    const interrupt = () => {
+      abortWork = root.context.graph.abort(signal.reason);
+    };
+    signal.addEventListener("abort", interrupt, { once: true });
+    lifetime.defer(async () => {
+      signal.removeEventListener("abort", interrupt);
+      await abortWork;
     });
-  };
-  signal.addEventListener("abort", interrupt, { once: true });
-  if (signal.aborted) interrupt();
-  try {
+    if (signal.aborted) interrupt();
     signal.throwIfAborted();
     await root.context.run({ signal });
     signal.throwIfAborted();
-  } catch (error) {
-    failures.push(error);
-  } finally {
-    signal.removeEventListener("abort", interrupt);
-    await abortWork;
-    for (const release of [() => root.context.graph.close(), () => root.context.graph.tracer.flush()]) {
-      try {
-        await release();
-      } catch (error) {
-        failures.push(error);
-      }
-    }
   }
-  if (failures.length > 0) throw new AggregateError(failures, "Recursive agency failed", { cause: failures[0] });
-  signal.throwIfAborted();
 
   const childGraph = root.context.graph.getNode(NodeId.create("0"))!.state as graphApi.JuncoGraph;
   const grandchildGraph = childGraph.getNode(NodeId.create("0"))!.state as graphApi.JuncoGraph;
@@ -184,12 +190,4 @@ async function main(signal: AbortSignal) {
   console.log(`root complete; ${leafResult} + ${siblingResult}; ${root.decisions.length} root decisions`);
 }
 
-if (import.meta.main) {
-  using cancellation = ctrlC();
-  try {
-    await main(cancellation.signal);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = cancellation.signal.aborted ? 130 : 1;
-  }
-}
+if (import.meta.main) await runCli(main);

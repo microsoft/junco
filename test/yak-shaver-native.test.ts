@@ -17,19 +17,22 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  applySourceEdits,
+  captureBaseline,
   EmptyPolicy,
   isMarshPolicyDenied,
+  isRepoRelativePath,
   LockPolicy,
   type NativeModule,
   type NativeMux,
+  repositorySourceReader,
+  requireWorkTreeRoot,
+  type SourceEdit,
   ToolCollection,
 } from "junco-tools";
 import {
-  type AcceptedRefactor,
-  applyRefactor,
   parseSnapshot,
   refreshGraftSnapshot,
-  type SourceEdit,
 } from "../examples/yak-shaver/yak-shaver.ts";
 import { withNativeCleanup } from "./native-support.ts";
 
@@ -61,6 +64,7 @@ type Fixture = {
   readonly seed: string;
   /** The protected `LockPolicy` mux: the applier's. */
   readonly mux: NativeMux;
+  readonly collection: ToolCollection;
   /** The trusted-build `EmptyPolicy` collection: index refresh's. */
   readonly buildCollection: ToolCollection;
   readonly git: (...args: string[]) => string;
@@ -111,6 +115,7 @@ async function withRepository(
     await body({
       seed,
       mux: protectedTools.mux,
+      collection: protectedTools,
       buildCollection: buildTools,
       git,
     });
@@ -119,40 +124,6 @@ async function withRepository(
 
 const sha256 = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
-
-async function baselineOf(
-  seed: string,
-  paths: readonly string[],
-): Promise<Map<string, string | null>> {
-  const baseline = new Map<string, string | null>();
-  for (const path of paths) {
-    try {
-      baseline.set(path, sha256(await readFile(join(seed, path))));
-    } catch (error) {
-      if (
-        !(error instanceof Error && "code" in error && error.code === "ENOENT")
-      )
-        throw error;
-      baseline.set(path, null);
-    }
-  }
-  return baseline;
-}
-
-/** A reviewed refactor carrying `edits`; the applier reads only its rank and proposal edits. */
-function accepted(
-  rank: number,
-  edits: readonly SourceEdit[],
-): AcceptedRefactor {
-  const refactor: unknown = {
-    rank,
-    candidate: {},
-    verdict: {},
-    proposal: { candidateId: `candidate-${rank}`, kind: "proposal", edits },
-  };
-  // Fabricated: candidate/verdict/metrics are irrelevant to application and not built here.
-  return refactor as AcceptedRefactor;
-}
 
 const replace = (
   path: string,
@@ -174,17 +145,19 @@ async function apply(
   edits: readonly SourceEdit[],
   overrides: Readonly<Record<string, string | null>> = {},
 ) {
-  const baseline = await baselineOf(fixture.seed, [
-    ...new Set(edits.map((edit) => edit.path)),
-  ]);
+  const baseline = new Map(
+    await captureBaseline(fixture.seed, [
+      ...new Set(
+        edits.map((edit) => edit.path).filter((path) => !(path in overrides)),
+      ),
+    ]),
+  );
   for (const [path, hash] of Object.entries(overrides))
     baseline.set(path, hash);
-  return applyRefactor(
-    fixture.seed,
-    fixture.mux,
-    accepted(rank, edits),
-    baseline,
-  );
+  return applySourceEdits(fixture.seed, fixture.mux, edits, baseline, {
+    label: `candidate-${rank} (rank ${rank})`,
+    principal: `yak-apply-${rank}`,
+  });
 }
 
 /** The repository's observable state: every non-.git file's bytes plus the index and status. */
@@ -213,6 +186,89 @@ const indexBlob = (fixture: Fixture, path: string) =>
   fixture.git("ls-files", "--stage", "--", path).split(/\s+/)[1];
 const blobOf = (fixture: Fixture, path: string) =>
   fixture.git("hash-object", "--no-filters", "--", path).trim();
+
+test("repository baselines and Git-root preflight enforce native and source boundaries", async () => {
+  await withRepository(
+    { "src/wide.ts": utf16("one\r\ntwo\r\n") },
+    async (fixture) => {
+      const { seed, collection } = fixture;
+      await requireWorkTreeRoot(collection);
+      const reason = new Error("preflight cancelled");
+      await assert.rejects(
+        requireWorkTreeRoot(collection, AbortSignal.abort(reason)),
+        (error) => error === reason,
+      );
+      await withNativeCleanup(async (defer) => {
+        const nested = await ToolCollection.create(join(seed, "src"), {
+          native: copyTree,
+          policy: LockPolicy,
+          sandbox: "always",
+        });
+        defer(() => nested.close());
+        await assert.rejects(requireWorkTreeRoot(nested), (error: Error) => {
+          assert.match(error.message, /Git working-tree root/);
+          assert.ok(error.cause instanceof Error);
+          assert.match(error.cause.message, /src\//);
+          return true;
+        });
+      });
+
+      const baseline = await captureBaseline(seed, ["src/wide.ts", "new.ts"]);
+      assert.equal(
+        baseline.get("src/wide.ts"),
+        sha256(utf16("one\r\ntwo\r\n")),
+      );
+      assert.equal(baseline.get("new.ts"), null);
+      const read = repositorySourceReader(seed, baseline);
+      assert.equal(await read("src/wide.ts"), "one\r\ntwo\r\n");
+      assert.equal(await read("new.ts"), undefined);
+      await writeFile(join(seed, "new.ts"), "created\n");
+      await assert.rejects(read("new.ts"), /changed since/);
+      await writeFile(join(seed, "src/wide.ts"), utf16("changed\n"));
+      await assert.rejects(read("src/wide.ts"), /changed since/);
+
+      for (const path of [
+        "",
+        "/tmp/escape.ts",
+        "../escape.ts",
+        "src/../escape.ts",
+        "src\\escape.ts",
+        "src//escape.ts",
+        "src/\0.ts",
+      ]) {
+        assert.equal(isRepoRelativePath(path), false);
+        await assert.rejects(
+          captureBaseline(seed, [path]),
+          /not a repo-relative path/,
+        );
+        await assert.rejects(read(path), /not a repo-relative path/);
+      }
+      assert.equal(isRepoRelativePath("src/wide.ts"), true);
+      const outside = await mkdtemp(join(tmpdir(), "junco-source-outside-"));
+      try {
+        await writeFile(join(outside, "secret.ts"), "outside\n");
+        await symlink(outside, join(seed, "escape"));
+        await symlink(join(seed, "missing"), join(seed, "dangling"));
+        for (const path of ["escape/secret.ts", "escape/new.ts"]) {
+          await assert.rejects(
+            captureBaseline(seed, [path]),
+            /outside the repository/,
+          );
+          await assert.rejects(read(path), /outside the repository/);
+        }
+        for (const path of ["dangling", "dangling/new.ts"]) {
+          await assert.rejects(
+            captureBaseline(seed, [path]),
+            /dangling symlink/,
+          );
+          await assert.rejects(read(path), /dangling symlink/);
+        }
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+}, 60_000);
 
 const QUOTED = 'dir with space/it\'s "q".ts';
 
@@ -402,7 +458,7 @@ test("refused proposals change neither source nor index", async () => {
                 afterLines: ["x"],
               },
             ],
-            {},
+            { dangling: null },
             /already exists/,
           ],
           [
@@ -417,7 +473,7 @@ test("refused proposals change neither source nor index", async () => {
                 afterLines: ["x"],
               },
             ],
-            {},
+            { "dangling/x.ts": null },
             /dangling symlink/,
           ],
           [
@@ -432,7 +488,7 @@ test("refused proposals change neither source nor index", async () => {
                 afterLines: ["x"],
               },
             ],
-            {},
+            { "escape/x.ts": null },
             /outside the repository/,
           ],
           [
@@ -480,12 +536,16 @@ test("refused proposals change neither source nor index", async () => {
         const aborted = new AbortController();
         aborted.abort(new Error("cancelled before start"));
         await assert.rejects(
-          applyRefactor(
+          applySourceEdits(
             fixture.seed,
             fixture.mux,
-            accepted(1, [valid]),
-            await baselineOf(fixture.seed, ["valid.ts"]),
-            aborted.signal,
+            [valid],
+            await captureBaseline(fixture.seed, ["valid.ts"]),
+            {
+              label: "cancelled application",
+              principal: "cancelled",
+              signal: aborted.signal,
+            },
           ),
           /cancelled before start/,
         );

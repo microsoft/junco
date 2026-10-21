@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { graph } from "junco-agency";
-import { edgeId, parse, resolveTrigger } from "../src/parse.ts";
+import { edgeId, parse, resolveTrigger } from "../src/syntax/parse.ts";
 
 const base = () => ({
   graph: {
-    nodes: { A: { model: "p/m" }, B: { model: "p/m" } },
+    nodes: { A: {}, B: {} },
     edges: [
       { from: "A", to: "B" },
       { from: "B", to: "$sink" },
@@ -21,7 +21,7 @@ const nested = () => ({
         kind: "graph",
         graph: {
           source: { routes: { incoming: ["$source~>W"] } },
-          nodes: { W: { model: "p/m" } },
+          nodes: { W: {} },
           edges: [
             { from: "$source", to: "W", kind: "message" },
             { from: "W", to: "$sink" },
@@ -64,7 +64,7 @@ const rejectsAt = (value: unknown, path: string) =>
 for (const id of ["$source", "$sink"])
   test(`reserved node ${id}`, () =>
     rejects((d) => {
-      d.graph.nodes[id] = { model: "p/m" };
+      d.graph.nodes[id] = {};
     }, `node id "${id}" is reserved`));
 for (const [from, to, message] of [
   ["Missing", "B", 'references unknown node "Missing"'],
@@ -133,38 +133,24 @@ for (const mode of ["input", "value", "empty"])
         d.graph.edges.push({ from: "B", to: "A", kind: "message" });
       if (mode === "empty") d.graph.edges.shift();
     }, 'Node "A" (emit) must have no inbound edges and only message outbound edges (at least one)'));
-test("code node with registry name, trigger and description", () => {
-  const doc = parse(
-    variant((d) => {
-      d.code = { Impl: "./impl.ts" };
-      d.graph.nodes.B = {
-        kind: "code",
-        name: "Impl",
-        trigger: "A->B",
-        description: "deterministic",
-      };
-    }),
-  );
-  assert.deepEqual(doc.graph.nodes.B, {
-    kind: "code",
-    name: "Impl",
-    trigger: "A->B",
-    description: "deterministic",
-  });
-});
-test("code node names an unknown registry entry", () =>
-  rejects((d) => {
-    d.code = { Other: "./impl.ts" };
-    d.graph.nodes.B = { kind: "code", name: "Impl" };
-  }, 'Node "B" references unknown code "Impl"'));
-test("code node rejects agent fields", () =>
+test("YAML rejects a code module registry", () =>
   rejectsAt(
     variant((d) => {
-      d.code = { Impl: "./impl.ts" };
-      d.graph.nodes.B = { kind: "code", name: "Impl", model: "p/m" };
+      d.code = { B: "./impl.ts" };
     }),
-    "/graph/nodes/B",
+    "/code",
   ));
+for (const [field, value] of [
+  ["model", "p/m"],
+  ["name", "B"],
+] as const)
+  test(`code node rejects ${field}`, () =>
+    rejectsAt(
+      variant((d) => {
+        d.graph.nodes.B = { kind: "code", [field]: value };
+      }),
+      "/graph/nodes/B",
+    ));
 test("nested routes require parent edge", () =>
   assert.throws(
     () => parse(nested()),
@@ -187,25 +173,27 @@ test("YAML and object parsing, default ids", () => {
   assert.equal(edgeId({ from: "A", to: "B", kind: "message" }), "A~>B");
   const doc = base();
   assert.equal(parse(doc), doc);
-  const node = parse(
-    "graph:\n  nodes:\n    A: {model: p/m}\n  edges: [{from: A, to: $sink}]",
-  ).graph.nodes.A;
-  assert.ok(node && "model" in node);
-  assert.equal(node.model, "p/m");
+  assert.deepEqual(
+    parse("graph:\n  nodes:\n    A: {}\n  edges: [{from: A, to: $sink}]").graph
+      .nodes.A,
+    {},
+  );
 });
 test("params substitute into YAML text before parsing", () => {
   const source =
-    'graph:\n  nodes:\n    A:\n      model: "{{ params.model }}"\n  edges:\n    - from: A\n      to: $sink\n';
+    'graph:\n  nodes:\n    A:\n      description: "{{ params.description }}"\n  edges:\n    - from: A\n      to: $sink\n';
   for (const text of [
     source,
-    source.replace("{{ params.model }}", "{{params.model}}"),
+    source.replace("{{ params.description }}", "{{params.description}}"),
   ]) {
-    const node = parse(text, { params: { model: "p/m", unused: true } }).graph
-      .nodes.A!;
-    assert.ok("model" in node);
-    assert.equal(node.model, "p/m");
+    const node = parse(text, { params: { description: "p/m", unused: true } })
+      .graph.nodes.A!;
+    assert.equal(node.description, "p/m");
   }
-  assert.throws(() => parse(source), /junco-syntax: missing param "model"/);
+  assert.throws(
+    () => parse(source),
+    /junco-syntax: missing param "description"/,
+  );
   assert.throws(
     () => parse(base(), { params: {} }),
     /params apply to YAML text/,
@@ -218,10 +206,7 @@ test("invalid YAML and strict shape", () => {
     () => parse({ graph: { nodes: {}, edges: [] } }),
     /junco-syntax:/,
   );
-  assert.throws(
-    () => parse({ graph: { nodes: { A: { model: "bad" } } } }),
-    /junco-syntax:/,
-  );
+  assert.throws(() => parse({ graph: { nodes: { A: {} } } }), /junco-syntax:/);
 });
 
 test("complete block YAML preserves every registry, node, edge and scalar", () => {
@@ -261,8 +246,6 @@ graph:
     "Agent:1":
       kind: agent
       description: receives either input
-      model: faux/team/model
-      thinking: minimal
       system: |-
         first system line
         second system line
@@ -279,8 +262,6 @@ graph:
         seed: seed prompt
     Ralph:
       description: revises the seeded assignment
-      model: faux/ralph
-      thinking: max
       system: revise the assignment
       tools: [custom]
       mcp: [full]
@@ -305,8 +286,6 @@ graph:
           returns: Worker
         nodes:
           Worker:
-            model: faux/worker
-            thinking: low
             system: work
             trigger: child-input
             prompt: "{{ child-input }}"
@@ -321,8 +300,6 @@ graph:
             to: $sink
             id: child-result
     Final:
-      model: faux/final
-      thinking: high
       system: combine both reports
       trigger:
         all: [agent-answer, child-answer]
@@ -393,8 +370,6 @@ graph:
         "Agent:1": {
           kind: "agent",
           description: "receives either input",
-          model: "faux/team/model",
-          thinking: "minimal",
           system: "first system line\nsecond system line",
           tools: ["read", "custom"],
           mcp: ["fast", "full"],
@@ -405,8 +380,6 @@ graph:
         },
         Ralph: {
           description: "revises the seeded assignment",
-          model: "faux/ralph",
-          thinking: "max",
           system: "revise the assignment",
           tools: ["custom"],
           mcp: ["full"],
@@ -432,8 +405,6 @@ graph:
             },
             nodes: {
               Worker: {
-                model: "faux/worker",
-                thinking: "low",
                 system: "work",
                 trigger: "child-input",
                 prompt: "{{ child-input }}",
@@ -452,8 +423,6 @@ graph:
           },
         },
         Final: {
-          model: "faux/final",
-          thinking: "high",
           system: "combine both reports",
           trigger: { all: ["agent-answer", "child-answer"] },
           prompt: "{{ agent-answer }}\n{{ child-answer }}",
@@ -501,7 +470,6 @@ test("schema rejects non-documents and missing required fields at stable paths",
   const cases: [unknown, string][] = [
     [{ graph: {} }, "/graph"],
     [{ graph: { nodes: {} } }, "/graph/nodes"],
-    [{ graph: { nodes: { A: {} } } }, "/graph/nodes/A"],
     [{ graph: { nodes: { A: { kind: "emit" } } } }, "/graph/nodes/A"],
     [{ graph: { nodes: { A: { kind: "graph" } } } }, "/graph/nodes/A"],
     [{ ...base(), mcp: { server: {} } }, "/mcp/server"],
@@ -537,24 +505,14 @@ test("numeric grammar preserves positive widths and unrestricted integer MCP tim
     );
 });
 
-test("model and thinking grammar accepts every documented choice", () => {
-  for (const thinking of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
-    const doc = variant((d) => {
-      d.graph.nodes.A = { model: "provider/family/model", thinking };
-    });
-    assert.deepEqual(parse(doc).graph.nodes.A, {
-      model: "provider/family/model",
-      thinking,
-    });
-  }
-  for (const model of ["model", "/model", "provider/", 2, null, true]) {
+test("agents reject YAML model and thinking fields", () => {
+  for (const field of [{ model: "p/m" }, { thinking: "high" }])
     rejectsAt(
       variant((d) => {
-        d.graph.nodes.A.model = model;
+        Object.assign(d.graph.nodes.A, field);
       }),
       "/graph/nodes/A",
     );
-  }
 });
 
 test("strict object boundaries and malformed list/map entries", () => {
@@ -567,6 +525,22 @@ test("strict object boundaries and malformed list/map entries", () => {
     ["/graph/extra", (d) => (d.graph.extra = true)],
     ["/graph/source/extra", (d) => (d.graph.source = { extra: true })],
     ["/graph/sink/extra", (d) => (d.graph.sink = { extra: true })],
+    [
+      "/graph/source/profiles",
+      (d) => (d.graph.source = { profiles: { memory: "1 MB" } }),
+    ],
+    [
+      "/graph/sink/profiles",
+      (d) => (d.graph.sink = { profiles: { memory: "1 MB" } }),
+    ],
+    [
+      "/graph/nodes/A/profiles/cpu",
+      (d) => (d.graph.nodes.A.profiles = { cpu: "1 s" }),
+    ],
+    [
+      "/graph/nodes/A/profiles/memory",
+      (d) => (d.graph.nodes.A.profiles = { memory: "fast" }),
+    ],
     ["/graph/edges/0/extra", (d) => (d.graph.edges[0].extra = true)],
     ...["agent", "emit", "graph"].map(
       (kind) =>
@@ -578,7 +552,7 @@ test("strict object boundaries and malformed list/map entries", () => {
                 ? { graph: nested().graph }
                 : kind === "emit"
                   ? { text: "go" }
-                  : { model: "p/m" }),
+                  : {}),
               kind,
               extra: true,
             };
@@ -586,7 +560,6 @@ test("strict object boundaries and malformed list/map entries", () => {
         ] as [string, (d: any) => void],
     ),
     ["/graph/nodes/A", (d) => (d.graph.nodes.A.kind = "unknown")],
-    ["/graph/nodes/A", (d) => (d.graph.nodes.A.thinking = "off")],
     ["/graph/edges/0/kind", (d) => (d.graph.edges[0].kind = "unknown")],
     ["/graph/edges/0/from", (d) => (d.graph.edges[0].from = 1)],
     ["/graph/edges/0/to", (d) => (d.graph.edges[0].to = null)],
@@ -649,6 +622,45 @@ test("strict object boundaries and malformed list/map entries", () => {
   }
 });
 
+test("resource quantities parse on every node kind and reject unknown units", () => {
+  const profiles = { memory: "512 MB", runtime: "1.5 s", tokens: "4000 tok" };
+  const doc = parse({
+    graph: {
+      nodes: {
+        Start: { kind: "emit", text: "go", profiles },
+        A: { profiles },
+        C: { kind: "code", profiles },
+        Inner: {
+          kind: "graph",
+          profiles,
+          graph: {
+            nodes: { W: {} },
+            edges: [{ from: "W", to: "$sink" }],
+          },
+        },
+      },
+      edges: [
+        { from: "Start", to: "A", kind: "message" },
+        { from: "A", to: "$sink" },
+      ],
+    },
+  });
+  for (const node of Object.values(doc.graph.nodes))
+    assert.deepEqual(node.profiles, profiles);
+  assert.throws(
+    () =>
+      parse(
+        variant((d) => {
+          d.graph.nodes.A.profiles = { memory: "1 MBs" };
+        }),
+      ),
+    (error) =>
+      error instanceof graph.DataflowDefinitionError &&
+      error.message ===
+        'junco-syntax: /graph/nodes/A/profiles/memory: profile memory: unknown unit "MBs"',
+  );
+});
+
 test("all builtins, collision identities and legal parallel edges", () => {
   for (const name of ["yield", "info", "send", "recv", "task"])
     rejects((d) => {
@@ -704,7 +716,7 @@ test("recursive validation and ports do not impose connectivity or acyclicity", 
     id: "incoming",
   });
   const child = doc.graph.nodes.A.graph;
-  child.nodes.Other = { model: "p/m" };
+  child.nodes.Other = {};
   child.edges.push({
     from: "$source",
     to: "Other",
@@ -727,7 +739,7 @@ test("recursive validation and ports do not impose connectivity or acyclicity", 
   rejectsAt(doc, "/graph/nodes/A/graph");
   child.source.routes.incoming = ["$source~>W"];
   for (const id of ["$source", "$sink"]) {
-    child.nodes[id] = { model: "p/m" };
+    child.nodes[id] = {};
     rejectsAt(doc, `/graph/nodes/A/graph/nodes/${id}`);
     delete child.nodes[id];
   }
@@ -739,7 +751,7 @@ test("recursive validation and ports do not impose connectivity or acyclicity", 
   child.sink = { returns: "W" };
   assert.equal(parse(doc), doc);
   const free = variant((d) => {
-    d.graph.nodes.Isolated = { model: "p/m" };
+    d.graph.nodes.Isolated = {};
     d.graph.edges.push(
       { from: "B", to: "A", kind: "message" },
       { from: "A", to: "A", kind: "message" },
@@ -748,7 +760,7 @@ test("recursive validation and ports do not impose connectivity or acyclicity", 
   assert.equal(parse(free), free);
   rejectsAt(
     variant((d) => {
-      d.graph.nodes["a/b~c"] = { model: "p/m", prompt: "{{missing}}" };
+      d.graph.nodes["a/b~c"] = { prompt: "{{missing}}" };
     }),
     "/graph/nodes/a~1b~0c",
   );
@@ -758,7 +770,7 @@ test("emit fan-out degrees", () => {
   const doc = variant((d) => {
     d.graph.nodes.A = { kind: "emit", text: "go" };
     for (const e of d.graph.edges) e.kind = "message";
-    d.graph.nodes.C = { model: "p/m" };
+    d.graph.nodes.C = {};
     d.graph.edges.push({ from: "A", to: "C", kind: "message" });
   });
   assert.equal(parse(doc), doc);

@@ -156,6 +156,16 @@ export const satisfiedEdges = <N, T>(
   return satisfied;
 };
 
+/** Whether `trigger` fires when `has(edgeId)` says which entries have something to offer. Never short-circuits. */
+export const fires = <N, T>(
+  trigger: TriggerRule<N, T>,
+  has: (edgeId: EdgeId) => boolean,
+): boolean => {
+  let met = 0;
+  for (const edgeId of trigger.rule) if (has(edgeId)) met++;
+  return trigger.kind === "all" ? met === trigger.rule.length : met > 0;
+};
+
 /**
  * Whether `trigger` fires right now against `nodeId`'s inbound edges. An empty rule is `true` for
  * `"all"` (how a source with no inbound edges stays permanently available) and `false` for `"any"`.
@@ -170,9 +180,5 @@ export const evaluateTrigger = <N, T>(
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
   nodeId: NodeId,
 ): boolean => {
-  let met = 0;
-  for (const edgeId of trigger.rule) {
-    if (isSatisfied(edgeId, inbound, nodeId)) met++;
-  }
-  return trigger.kind === "all" ? met === trigger.rule.length : met > 0;
+  return fires(trigger, (edgeId) => isSatisfied(edgeId, inbound, nodeId));
 };

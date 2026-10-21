@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use marsh_btrfs::{LibBtrfs, PersistenceLayer, Subvolumes};
 use marsh_core::shellmux::ShellMux;
-use napi::bindgen_prelude::{Buffer, PromiseRaw};
+use napi::bindgen_prelude::{Buffer, Either, PromiseRaw, Undefined};
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
@@ -93,6 +93,8 @@ pub struct NativeResourceEvent {
     #[napi(ts_type = "\"started\" | \"sample\" | \"finished\"")]
     pub kind: String,
     pub pipeline_id: f64,
+    /// Policy owner of the shell that ran the pipeline; absent for an unforked handle.
+    pub owner: Option<String>,
     pub command: Option<String>,
     pub sample: Option<NativeResourceSample>,
 }
@@ -111,10 +113,7 @@ pub struct NativePolicyDecision {
     pub allowed_fixes: Option<Vec<String>>,
 }
 
-type ResourceEvents = (
-    tokio::sync::mpsc::Receiver<marsh_core::ResourceEvent>,
-    Arc<frontend::ResourceLog>,
-);
+type ResourceEvents = (Duration, Arc<frontend::ResourceLog>);
 
 /// What `NativeMuxOptions` and the open callbacks select, refused before anything is discovered.
 pub(crate) struct MuxSetup {
@@ -122,7 +121,7 @@ pub(crate) struct MuxSetup {
     pub(crate) shell_policy: Arc<dyn marsh_core::Policy>,
     pub(crate) policy_log: Option<Arc<frontend::PolicyLog>>,
     pub(crate) pipeline_options: marsh_core::PipelineOptions,
-    /// The monitor's receiver and the sink forwarding it, when monitoring is on.
+    /// The monitor interval and the sink, when monitoring is on.
     pub(crate) resource_events: Option<ResourceEvents>,
 }
 
@@ -165,9 +164,7 @@ fn pipeline_options(
     resources: Option<NativeResourceOptions>,
     on_resource_event: Option<ResourceCallback>,
 ) -> Result<(marsh_core::PipelineOptions, Option<ResourceEvents>)> {
-    use marsh_core::{
-        CpuLimit, MemoryLimit, PipelineOptions, ResourceLimits, ResourceMonitorConfig,
-    };
+    use marsh_core::{CpuLimit, MemoryLimit, PipelineOptions, ResourceLimits};
 
     let mut limits = ResourceLimits::default();
     let mut interval = None;
@@ -236,14 +233,7 @@ fn pipeline_options(
                 "onResourceEvent requires resources.monitorIntervalMs",
             ));
         }
-        (Some(interval), Some(callback)) => {
-            let monitor = ResourceMonitorConfig::new(interval);
-            let receiver = monitor
-                .events()
-                .ok_or_else(|| Error::from_reason("resource monitor receiver already taken"))?;
-            options = options.with_resource_monitor(monitor);
-            Some((receiver, frontend::ResourceLog::new(callback)))
-        }
+        (Some(interval), Some(callback)) => Some((interval, frontend::ResourceLog::new(callback))),
         (None, None) => None,
     };
     Ok((options, events))
@@ -406,6 +396,15 @@ impl NativeMux {
             sandbox,
             owner: None,
         })
+    }
+
+    /// The policy owner this handle acts as: a `forkOwner` handle has one, an `open` handle none.
+    #[napi(getter)]
+    pub fn owner(&self) -> Either<String, Undefined> {
+        match &self.owner {
+            Some(principal) => Either::A(principal.as_str().to_owned()),
+            None => Either::B(()),
+        }
     }
 
     /// A handle over this same session whose every call, command and process acts as one fresh

@@ -13,7 +13,10 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  InMemoryCredentialStore,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   DummyTracer,
   type EdgeIdType,
@@ -67,6 +70,36 @@ export function scripted(responses: readonly FauxResponseStep[] = []) {
   models.setProvider(faux.provider);
   return { faux, models, model: faux.getModel() };
 }
+
+/** A `ModelRuntime` with a saved login for a faux `provider` serving `responses` in order. */
+export async function fauxRuntime(
+  responses: readonly FauxResponseStep[],
+  provider = "faux",
+) {
+  const faux = fauxProvider({
+    api: provider,
+    provider,
+    tokenSize: { min: 4, max: 4 },
+  });
+  faux.setResponses([...responses]);
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify(provider, async () => ({
+    type: "api_key",
+    key: "fixture-login",
+  }));
+  const models = await ModelRuntime.create({
+    credentials,
+    modelsPath: null,
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+  });
+  models.registerNativeProvider(faux.provider);
+  return { models, faux };
+}
+
+/** A faux assistant turn calling `calls`. */
+export const toolTurn = (...calls: ToolCall[]) =>
+  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 
 /** Native options over `responses` with a fresh in-memory session, under `LockPolicy`. */
 export async function nativeOptions(

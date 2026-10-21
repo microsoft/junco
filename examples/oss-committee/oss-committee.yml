@@ -1,19 +1,12 @@
-code:
-  ResearchAssignment: examples/oss-committee/code.ts
-  DesignAssignment: examples/oss-committee/code.ts
-  ReviewAssignment: examples/oss-committee/code.ts
-
+# Assignments and scheduler-chosen model rungs are defined in oss-committee.ts.
 graph:
   name: OSS committee
   nodes:
     ResearchAssignment:
       kind: code
-      name: ResearchAssignment
       description: Prepare this round's initial or feedback-driven research assignment.
       trigger: always
     Librarian:
-      model: "github-copilot/claude-opus-5.5"
-      thinking: "medium"
       description: "find relevant OSS libraries from live repository search"
       system: |-
         You are the Librarian of a three-member OSS design committee. Research relevant public GitHub repositories with search_oss. Submit a research report with explicit gaps, not a titled final plan.
@@ -29,13 +22,10 @@ graph:
         "ResearchAssignment~>Librarian": "This round's original request and optional review feedback, with the research assignment."
     DesignAssignment:
       kind: code
-      name: DesignAssignment
       description: Validate final research or exactly one partial handoff before preparing the design assignment.
       trigger:
         any: ["Librarian~>DesignAssignment", "Librarian->DesignAssignment"]
     Architect:
-      model: "github-copilot/gpt-6-sol"
-      thinking: "high"
       description: "design small integration boundaries using the research"
       system: |-
         You are the Architect of a three-member OSS design committee. Your assignment is the original request and either the Librarian's final research report or partial research sent after a failed lookup; in later review rounds it also contains the Reducer's review feedback and you must revise your design to address it. You may call info to inspect your graph routes; do not call any research tools. Work only from the available evidence and disclose research gaps. Do not write the final titled plan.
@@ -48,13 +38,10 @@ graph:
         "DesignAssignment~>Architect": "The original request, optional review feedback, and validated final or partial Librarian research."
     ReviewAssignment:
       kind: code
-      name: ReviewAssignment
       description: Join and validate both final member reports before preparing the review assignment.
       trigger:
         all: ["Librarian->ReviewAssignment", "Architect->ReviewAssignment"]
     Reducer:
-      model: "github-copilot/claude-sonnet-5.5"
-      thinking: "xhigh"
       description: "consolidate the design, remove unnecessary custom code, and approve it or request another round"
       system: |-
         You are the Reducer and reviewer of a three-member OSS design committee. Each review round, your assignment is the original request and both final reports; the Librarian's research may be partial after a failed lookup. Preserve those gaps, reconcile disagreements, combine/remove unnecessary modules and glue without losing correctness, and emit the ONLY titled Markdown plan as your final message.

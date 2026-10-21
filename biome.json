@@ -28,7 +28,6 @@
       "packages/junco-scheduler/test/**",
       "packages/junco-scheduler/package.json",
       "packages/junco-scheduler/tsconfig*.json",
-      "packages/junco-syntax/**",
       "packages/junco-tools/ts/**",
       "packages/junco-tools/tests/**",
       "packages/junco-tools/package.json",

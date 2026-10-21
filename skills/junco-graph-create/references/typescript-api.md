@@ -1,6 +1,6 @@
 # Junco TypeScript API reference
 
-Escape hatch for what `junco-syntax` YAML cannot express: `kind: code` node bodies (`graph.nodes.Deterministic`, `graph.Message`, `graph.from`, `TriggerRule`), resource profiles and `schedules.limit`/`lowest`/`highest`, graph compaction, tracer internals, hand-wired `DataflowGraph`/`JuncoGraph` programs and the Trail/graft mapper. Read only the heading you need.
+Escape hatch for what Junco YAML cannot express: `kind: code` node bodies (`graph.nodes.Deterministic`, `graph.Message`, `graph.from`, `TriggerRule`), resource scheduling with `schedules.limit`/`lowest`/`highest`, graph compaction, tracer internals, hand-wired `DataflowGraph`/`JuncoGraph` programs and the Trail/graft mapper. Read only the heading you need.
 
 Contents: `## Public API` → `### graph`, `### graph.nodes`, `### workflows and schedules.ralph`, `### graph.trigger`, `### agent`, `### tools`, `### mcp`, `### schedules`, `### Resource profiles and schedules`, `### Graph compaction`, `### tracer`, `### Supporting Pi APIs`; `## Composition patterns`; `## Executable example` (hand-wired `DataflowGraph`).
 
@@ -368,17 +368,16 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
 
 ### workflows and schedules.ralph
 
-`workflows.ralph` is YAML text exported from the root `junco-agency` namespace. It declares one ordinary agent `Ralph`, assignment message ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final value output `Ralph->$sink`. Parse it with `junco-syntax` (Bun's YAML parser); round control is supplied separately through `build` availability hooks, not a special node kind.
+`workflows.ralph` is YAML text exported from `junco-agency`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from `schedules.ralph` availability hooks.
 
 ```ts
-import { graph, schedules, workflows } from "junco-agency";
-import { build, parse } from "junco-syntax";
+import { graph, JuncoGraph, schedules, workflows } from "junco-agency";
 
-// model is an authoring-verified "provider/model" ID; share acquired models/observer.
-const doc = parse(workflows.ralph, { params: { model } });
-const childContext = await build(doc, {
+// ladder has all five authoring-verified rungs; share acquired models/observer.
+const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd,
   models,
+  ladder,
   tracer: observer,
   scheduler: () => schedules.parallel(),
   ...schedules.ralph({ rounds: 2 }),
@@ -395,7 +394,7 @@ try {
 }
 ```
 
-`parse(source, { params })` substitutes `{{ params.model }}` before parsing YAML; quote placeholders in YAML because substitution is verbatim. Missing parameters fail; parameters apply only to YAML text. `schedules.ralph({ rounds })` returns `{ available }` factories for `Ralph` and `$sink`, to spread into `build`; factories decline graph levels without `Ralph->Ralph`. Rounds must be positive safe integers (default two). Admit exactly one image-free `prompt` on the explicit `assignment` source route. The first prompt is the assignment verbatim; later rounds retain that assignment and only the immediately preceding complete draft. Blank or non-normal intermediate drafts fail before the next round; the controller does not validate the final draft. Native yields continue the current round. Only the final round reaches the sink.
+`fromYaml(source, { ...config, params })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` returns availability factories for Ralph and $sink; factories decline levels without Ralph->Ralph. Rounds must be positive safe integers (default two). Admit exactly one image-free prompt on the assignment source route. The first prompt is the assignment; later rounds retain it and only the immediately preceding complete draft. Blank or non-normal intermediate drafts fail before the next round; the controller does not validate the final draft. Native yields continue the current round. Only the final round reaches the sink.
 
 For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext, contract? }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, build a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. If final output must be sent on a parent message edge, configure a nested Sink that sends the validated final prompt on that edge before returning the exact final message; the stock Ralph sink only returns its value. Close through the owning root recursively, then flush shared tracing once after all users stop. Do not stage the Ralph worker yourself: its availability hooks stage each round.
 
@@ -850,12 +849,23 @@ export class JuncoMcpTools {
 
 ### schedules
 
-Core `junco-scheduler` exports exactly three semantic operators, two derived policies, resource combinator `limit`, comparators `lowest`/`highest`, the context pair/factory and types (including native `DataflowObservation`), with no runtime Pi peers. `junco-agency`'s `schedules` adds the agency-aware context bridge and optional `pi`. Native matrix/read types are engine execution formats, not another policy API.
+Core `junco-scheduler` exports work-selection operators, the `strength` model-rung combinator, derived policies, resource combinator `limit`, comparators `lowest`/`highest`, decision helpers, the context pair/factory and types (including native `DataflowObservation`), with no runtime Pi peers. `junco-agency`'s `schedules` adds the agency-aware context bridge and optional `pi`. Native matrix/read types are engine execution formats, not another policy API.
 
 Verbatim signature excerpts (core language):
 
 ```text
-export type Decision = { readonly selected: readonly NodeIdType[] };
+export const MODEL_STRENGTHS = ["smol", "low", "med", "high", "xhigh"] as const;
+export type ModelStrengthName = (typeof MODEL_STRENGTHS)[number];
+export type ModelStrength = 0 | 1 | 2 | 3 | 4;
+export const DEFAULT_MODEL_STRENGTH: ModelStrength = 2;
+export type NodeModel = { readonly nodeId: NodeIdType; readonly modelStrength: ModelStrength };
+export type Decision = { readonly selected: readonly NodeModel[] };
+export const select: (ids: Iterable<NodeIdType>, modelStrength?: ModelStrength) => NodeModel[];
+export const nodeIds: (selected: readonly NodeModel[]) => NodeIdType[];
+export function strength<S, N, T, C>(
+  assign: (snapshot: Snapshot<S, N, T, C>, nodeId: NodeIdType) => ModelStrengthName,
+  inner: Scheduler<S, N, T, C>,
+): Scheduler<S, N, T, C>;
 
 export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
   readonly available: ReadonlySet<NodeIdType>;
@@ -907,6 +917,7 @@ export function context<
   readonly graph: G & DataflowGraph<S, N, T, never>;
   readonly describeNode?: (id: NodeIdType, candidate: NodeAvailability<N, T>) => C | undefined;
   readonly readInputs?: (id: NodeIdType, candidate: NodeAvailability<N, T>) => InputSchedule;
+  readonly prepare?: (selected: readonly NodeModel[], signal?: AbortSignal) => void | Promise<void>;
 }): SchedulerContext<S, N, T, C, G>;
 ```
 
@@ -932,8 +943,11 @@ export type AgencyNodeMetadata = Readonly<Pick<NodePolicy, "lastYield"> & {
 export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
   readonly scheduler: Scheduler<NoInfer<Agentic<N, T>>, NoInfer<N>, NoInfer<T>, AgencyNodeMetadata>;
   readonly graph: G & JuncoGraph<N, T, never>;
+  readonly ladder?: Ladder;
 }): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G>;
 ```
+
+`Ladder` is `Readonly<Record<ModelStrengthName, LadderRung>>`; each rung is `{ readonly model: string; readonly thinking?: ThinkingLevel }`. `validateLadder` checks all five model identities. Selected prompt agents receive their rung before execution; omitted thinking means `"off"`. Without a ladder the context leaves models untouched.
 
 **Stateless model oracle.** `junco-scheduler/agent` exports only `pi`, `PiOptions`, `SchedulerRequest`; `schedules.pi` reexports them for agency callers. `Models`, `Model`, `Api` and stream option types come from `@earendil-works/pi-ai`:
 

@@ -28,11 +28,15 @@ import {
   choose,
   context,
   type Decision,
+  type NodeModel,
+  nodeIds,
   parallel,
   roundRobin,
   type Scheduler,
   type Snapshot,
+  select,
   separate,
+  strength,
 } from "../src/index.ts";
 
 type Graph = DataflowGraph<void, number, string, never>;
@@ -41,7 +45,7 @@ type View = Snapshot<void, number, string, never>;
 const id = NodeId.create;
 const ids = (names: readonly string[]) => names.map(id);
 const selections = (snapshot: View) =>
-  snapshot.history.map((event) => [...event.selected]);
+  snapshot.history.map((event) => nodeIds(event.selected));
 
 const actor = (ran: string[]): StepFn<void, number, string> =>
   async function* (this) {
@@ -105,7 +109,7 @@ function snapshot(
     plans: new Map(),
     history: Object.freeze(
       (options.history ?? []).map((event) =>
-        Object.freeze({ selected: Object.freeze(ids(event)) }),
+        Object.freeze({ selected: Object.freeze(select(ids(event))) }),
       ),
     ),
     threads: Infinity,
@@ -134,7 +138,9 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
     available: ["foreign", "2", "1", "10"],
     owned: ["2", "1", "10", "unavailable"],
   });
-  assert.deepEqual(await policy(view), { selected: ids(["1", "10", "2"]) });
+  assert.deepEqual(await policy(view), {
+    selected: select(ids(["1", "10", "2"])),
+  });
   assert.deepEqual(seen, ["2", "1", "10"]);
   assert.equal(widths, 1);
   const composed: Policy = separate(
@@ -143,7 +149,7 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
     parallel(),
   );
   assert.deepEqual(await composed(snapshot(["1", "2"])), {
-    selected: ids(["2"]),
+    selected: select(ids(["2"])),
   });
 });
 
@@ -257,17 +263,17 @@ test("round robin preserves selection order, unavailable cursor IDs and explicit
   order.reverse(); // construction copied caller storage
   assert.deepEqual(
     await rotation(snapshot(["a", "b", "c"], { history: [["a", "b"]] })),
-    { selected: ids(["c"]) },
+    { selected: select(ids(["c"])) },
   );
   assert.deepEqual(
     await rotation(snapshot(["a", "b", "c"], { history: [["b", "a"]] })),
-    { selected: ids(["b"]) },
+    { selected: select(ids(["b"])) },
   );
   assert.deepEqual(
     await rotation(
       snapshot(["a", "b", "c"], { available: ["a", "c"], history: [["b"]] }),
     ),
-    { selected: ids(["c"]) },
+    { selected: select(ids(["c"])) },
   );
   assert.deepEqual(await roundRobin([])(snapshot(["a"])), { selected: [] });
   assert.throws(() => roundRobin(ids(["", ""])), DataflowDefinitionError);
@@ -279,8 +285,8 @@ test("round robin preserves selection order, unavailable cursor IDs and explicit
     ["10", "2"],
   ]) {
     const decision = await pairs(snapshot(["2", "1", "10"], { history }));
-    assert.deepEqual(decision.selected, expected);
-    history.push([...decision.selected]);
+    assert.deepEqual(nodeIds(decision.selected), expected);
+    history.push(nodeIds(decision.selected));
   }
   const { graph, execution, ran } = actors(roundRobin(), ["a", "c"]);
   await execution.step();
@@ -315,7 +321,7 @@ test("separate projects authority/history only and prevents sibling authority es
       return { selected: [] };
     },
   );
-  assert.deepEqual(await policy(ambient), { selected: ids(["c"]) });
+  assert.deepEqual(await policy(ambient), { selected: select(ids(["c"])) });
   assert.equal(partitions, 3);
   assert.deepEqual([...probed[0]!.owned], ids(["a", "c"]));
   assert.deepEqual(selections(probed[0]!), [["a"], ["c", "a"]]);
@@ -332,7 +338,7 @@ test("separate projects authority/history only and prevents sibling authority es
   }
   const escaping: Policy = separate(
     (_s, node) => node === id("a"),
-    () => ({ selected: ids(["b"]) }),
+    () => ({ selected: select(ids(["b"])) }),
     parallel(),
   );
   await assert.rejects(
@@ -346,7 +352,7 @@ test("separate projects authority/history only and prevents sibling authority es
   );
   assert.deepEqual(
     await local(snapshot(["a", "b", "c"], { history: [["b"]] })),
-    { selected: ids(["a"]) },
+    { selected: select(ids(["a"])) },
   );
 });
 
@@ -417,10 +423,10 @@ test("agent normalizes each current response and never invokes an exhausted orac
   const first = await policy(
     snapshot(["a", "b", "unowned"], { owned: ["a", "b"] }),
   );
-  assert.deepEqual(first, { selected: ids(["b", "a"]) });
+  assert.deepEqual(first, { selected: select(ids(["b", "a"])) });
   assert.deepEqual(
-    await policy(snapshot(["a", "b"], { history: [first.selected] })),
-    { selected: ids(["a"]) },
+    await policy(snapshot(["a", "b"], { history: [nodeIds(first.selected)] })),
+    { selected: select(ids(["a"])) },
   );
   assert.equal(calls, 2);
   const never: Policy = agent(async () => {
@@ -431,7 +437,157 @@ test("agent normalizes each current response and never invokes an exhausted orac
   });
   assert.deepEqual(await policy(snapshot([""])), { selected: [] });
   const emptyId: Policy = agent(async () => [ids(["", "", "missing"])]);
-  assert.deepEqual(await emptyId(snapshot([""])), { selected: ids([""]) });
+  assert.deepEqual(await emptyId(snapshot([""])), {
+    selected: select(ids([""])),
+  });
+});
+
+test("strength assigns a model rung per selected node", async () => {
+  const policy: Policy = strength(
+    (_snapshot, node) => (node === id("a") ? "high" : "smol"),
+    parallel(),
+  );
+  assert.deepEqual(await policy(snapshot(["b", "a"])), {
+    selected: [
+      { nodeId: id("b"), modelStrength: 0 },
+      { nodeId: id("a"), modelStrength: 3 },
+    ],
+  });
+  assert.deepEqual(select(ids(["a"])), [{ nodeId: id("a"), modelStrength: 2 }]);
+  // @ts-expect-error deliberately invalid runtime model rung
+  const invalid: Policy = strength(() => "unknown", parallel());
+  await assert.rejects(
+    async () => invalid(snapshot(["a"])),
+    new DataflowDefinitionError(
+      'strength: unknown model strength "unknown" for node "a"',
+    ),
+  );
+});
+
+test("separate preserves selected model strengths", async () => {
+  const policy: Policy = separate(
+    (_snapshot, node) => node === id("a"),
+    strength(() => "high", parallel()),
+    strength(() => "smol", parallel()),
+  );
+  assert.deepEqual(await policy(snapshot(["a", "b"])), {
+    selected: [
+      { nodeId: id("a"), modelStrength: 3 },
+      { nodeId: id("b"), modelStrength: 0 },
+    ],
+  });
+});
+
+test("context rejects malformed decision shapes with the selected-entry contract", async () => {
+  for (const decision of [
+    undefined,
+    null,
+    {},
+    { selected: null },
+    { selected: {} },
+    { selected: [null] },
+    { selected: [7] },
+    { selected: ["a"] },
+    { selected: [{}] },
+    { selected: [{ nodeId: 7, modelStrength: 2 }] },
+    { selected: Array<NodeModel>(1) },
+  ]) {
+    const { execution, ran } = actors(() => decision as Decision, ["a"]);
+    await assert.rejects(
+      execution.step(),
+      new DataflowDefinitionError(
+        "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
+      ),
+    );
+    assert.deepEqual(ran, []);
+  }
+});
+
+test("context rejects invalid model strengths before effects", async () => {
+  for (const modelStrength of [5, -1, 1.5, "med"]) {
+    const { execution, ran } = actors(
+      () => ({ selected: [{ nodeId: id("a"), modelStrength }] }) as Decision,
+      ["a"],
+    );
+    await assert.rejects(
+      execution.step(),
+      new DataflowDefinitionError(
+        `Scheduler decision gives node "a" an invalid model strength ${String(modelStrength)}`,
+      ),
+    );
+    assert.deepEqual(ran, []);
+  }
+});
+
+test("context history retains the selected model strength", async () => {
+  const captured: View[] = [];
+  const { execution } = actors(
+    (view) => {
+      captured.push(view);
+      return { selected: select(view.available, 3) };
+    },
+    ["a"],
+  );
+  await execution.step();
+  await execution.step();
+  assert.equal(captured[1]!.history[0]!.selected[0]!.modelStrength, 3);
+  assert.deepEqual(captured[1]!.history[0]!.selected, select(ids(["a"]), 3));
+});
+
+test("context awaits prepare with the selected entries before executing any node", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  const { graph, ran } = actors(parallel(), ["a", "b"]);
+  const entries = select(ids(["a", "b"]), 3);
+  let prepared = false;
+  const execution = context({
+    graph,
+    scheduler: () => ({ selected: entries }),
+    prepare: async (selected, signal) => {
+      assert.equal(selected, entries);
+      assert.equal(signal, controller.signal);
+      assert.deepEqual(ran, []);
+      entered.resolve();
+      await release.promise;
+      prepared = true;
+    },
+  });
+  const pending = execution.step({ signal: controller.signal });
+  try {
+    await entered.promise;
+    await nextTurn();
+    assert.equal(prepared, false);
+    assert.deepEqual(ran, []);
+  } finally {
+    release.resolve();
+    await pending;
+  }
+  assert.equal(prepared, true);
+  assert.deepEqual(ran, ["a", "b"]);
+});
+
+test("context propagates prepare rejection without running nodes or committing history", async () => {
+  const failure = new Error("prepare failed");
+  const captured: View[] = [];
+  const { graph, ran } = actors(parallel(), ["a"]);
+  let fail = true;
+  const execution = context({
+    graph,
+    scheduler: (view) => {
+      captured.push(view);
+      return { selected: select(view.available, 3) };
+    },
+    prepare: async () => {
+      if (fail) throw failure;
+    },
+  });
+  await assert.rejects(execution.step(), (error) => error === failure);
+  assert.deepEqual(ran, []);
+  fail = false;
+  await execution.step();
+  assert.deepEqual(captured[1]!.history, []);
+  assert.deepEqual(ran, ["a"]);
 });
 
 test("context validates malformed, duplicate, unavailable and unowned decisions before effects", async () => {
@@ -441,13 +597,13 @@ test("context validates malformed, duplicate, unavailable and unowned decisions 
   const numeric: Policy = () => ({ selected: [7] });
   // @ts-expect-error deliberately invalid JavaScript callback declaration
   const absent: Policy = () => undefined;
-  const sparse: Policy = () => ({ selected: Array<NodeIdType>(1) });
-  const duplicates: Policy = () => ({ selected: ids(["a", "a"]) });
-  const foreign: Policy = () => ({ selected: ids(["missing"]) });
-  const unavailable: Policy = () => ({ selected: ids(["dormant"]) });
+  const sparse: Policy = () => ({ selected: Array<NodeModel>(1) });
+  const duplicates: Policy = () => ({ selected: select(ids(["a", "a"])) });
+  const foreign: Policy = () => ({ selected: select(ids(["missing"])) });
+  const unavailable: Policy = () => ({ selected: select(ids(["dormant"])) });
   const escaped: Policy = separate(
     (_s, node) => node === id("a"),
-    () => ({ selected: ids(["b"]) }),
+    () => ({ selected: select(ids(["b"])) }),
     parallel(),
   );
   for (const bad of [
@@ -552,7 +708,7 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const execution = context({
     graph,
-    scheduler: () => ({ selected: [target] }),
+    scheduler: () => ({ selected: select([target]) }),
     readInputs: (_node, candidate) =>
       new Map<EdgeIdType, MessageSchedule>(
         candidate.trigger.rule.map((edge) => [edge, 2]),
@@ -724,7 +880,7 @@ test("external pairing excludes overlapping planners without binding policies or
     scheduler: async () => {
       entered.resolve();
       await gate.promise;
-      return { selected: ids(["a"]) };
+      return { selected: select(ids(["a"])) };
     },
   });
   const snapshots: View[] = [];
@@ -732,7 +888,7 @@ test("external pairing excludes overlapping planners without binding policies or
     graph,
     scheduler: (view) => {
       snapshots.push(view);
-      return { selected: ids(["b"]) };
+      return { selected: select(ids(["b"])) };
     },
   });
   const pending = first.step();
@@ -771,7 +927,7 @@ for (const mutation of ["addNode", "emit"] as const) {
         captured.push(view);
         entered.resolve();
         await gate.promise;
-        return { selected: ids(["a"]) };
+        return { selected: select(ids(["a"])) };
       },
     });
     const pending = execution.step();
@@ -822,7 +978,7 @@ test("live availability and mutation inside read lowering also invalidate a deci
       scheduler: async () => {
         entered.resolve();
         await gate.promise;
-        return { selected: ids(["a"]) };
+        return { selected: select(ids(["a"])) };
       },
       readInputs: () => {
         if (mutate) {
@@ -1022,7 +1178,7 @@ test("cancellation after either policy settlement wins without committing work",
           entered.resolve();
           return gate.promise;
         }
-        return { selected: ids(["a"]) };
+        return { selected: select(ids(["a"])) };
       },
     });
     const version = graph.observe().version;
@@ -1033,7 +1189,7 @@ test("cancellation after either policy settlement wins without committing work",
     await entered.promise;
     controller.abort(reason);
     if (rejectedPolicy) gate.reject(new Error("provider error"));
-    else gate.resolve({ selected: ids(["a"]) });
+    else gate.resolve({ selected: select(ids(["a"])) });
     await rejected;
     assert.deepEqual(ran, []);
     assert.equal(graph.observe().version, version);

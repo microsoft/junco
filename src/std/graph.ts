@@ -3,6 +3,7 @@
 
 export {
   type AvailabilityFn,
+  constantProfile,
   DataflowDefinitionError,
   type DataflowExecution,
   DataflowGraph,
@@ -26,7 +27,11 @@ export {
   type NodeStatus,
   type ParentView,
   type Pretty,
+  type ProfileData,
+  type ProfileSet,
   Queue,
+  type ResourceKind,
+  type ResourceQuantity,
   renderPretty,
   type StepFn,
   UNBOUNDED,

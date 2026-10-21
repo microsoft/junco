@@ -9,6 +9,7 @@ import {
   type ResourceQuantity,
 } from "dataflow-engine";
 import {
+  type NodeModel,
   type Scheduler,
   type Snapshot,
   validateDecision,
@@ -143,15 +144,15 @@ export function limit<S, N, T, C>(
     validateDecision(snapshot, decision);
     signal?.throwIfAborted();
     let load = 0;
-    const selected: NodeIdType[] = [];
+    const selected: NodeModel[] = [];
     let smallest: { id: NodeIdType; need: number } | undefined;
-    for (const id of decision.selected) {
-      const need = safeCost(snapshot, id, "memory", "limit");
+    for (const entry of decision.selected) {
+      const need = safeCost(snapshot, entry.nodeId, "memory", "limit");
       if (load + need <= limitBase) {
-        selected.push(id);
+        selected.push(entry);
         load += need;
       } else if (smallest === undefined || need < smallest.need) {
-        smallest = { id, need };
+        smallest = { id: entry.nodeId, need };
       }
     }
     if (selected.length === 0 && smallest !== undefined)

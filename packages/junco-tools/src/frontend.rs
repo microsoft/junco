@@ -262,7 +262,7 @@ impl ResourceLog {
     }
 
     /// Enqueues one event; never waits for JavaScript. Unknown future variants are ignored.
-    pub(crate) fn observe(&self, event: ResourceEvent) {
+    pub(crate) fn observe(&self, owner: Option<String>, event: ResourceEvent) {
         let (kind, pipeline_id, command, sample) = match event {
             ResourceEvent::Started {
                 pipeline_id,
@@ -282,6 +282,7 @@ impl ResourceLog {
             NativeResourceEvent {
                 kind: kind.to_owned(),
                 pipeline_id: pipeline_id as f64,
+                owner,
                 command,
                 sample: sample.map(resource_sample),
             },
