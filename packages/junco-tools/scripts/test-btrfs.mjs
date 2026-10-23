@@ -5,7 +5,7 @@ import { runBtrfsFixtureCommand } from "../tests/btrfs-fixture.mjs";
 // Resolved here, before the child's working directory becomes the disposable fixture root.
 const suites = [
   fileURLToPath(new URL("../tests/btrfs-fixture.test.mjs", import.meta.url)),
-  fileURLToPath(new URL("../tests/extension.btrfs.test.mjs", import.meta.url)),
+  fileURLToPath(new URL("../tests/extension.btrfs.mjs", import.meta.url)),
 ];
 
 if (process.argv.length > 2) {

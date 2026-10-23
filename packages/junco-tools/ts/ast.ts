@@ -1,4 +1,9 @@
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { contentText } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type {
@@ -7,6 +12,7 @@ import type {
   AstReplaceResult,
   NativeMux,
 } from "../native/index.js";
+import type { ToolCollection } from "./collection.js";
 import type { NativeModule } from "./native.js";
 import {
   type BoundedToolDetails,
@@ -240,3 +246,196 @@ export const AstEditTool = {
     return tool;
   },
 };
+
+/** Exact, 1-based baseline lines, without line terminators; an empty beforeLines inserts. */
+export type SourceEdit = {
+  readonly path: string;
+  readonly startLine: number;
+  readonly beforeLines: readonly string[];
+  readonly afterLines: readonly string[];
+} & ({ readonly kind: "replace" } | { readonly kind: "create" });
+
+/** A POSIX path inside the repository: relative, no empty, `.`, or `..` segments. */
+export function isRepoRelativePath(path: string): boolean {
+  if (
+    path.length === 0 ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0")
+  )
+    return false;
+  return path
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+const sha256 = (bytes: Uint8Array): string =>
+  createHash("sha256").update(bytes).digest("hex");
+const errorCode = (error: unknown): unknown =>
+  error instanceof Error && "code" in error ? error.code : undefined;
+
+/** Resolve the deepest existing ancestor before any host read; dangling symlinks are not absence. */
+async function sourcePath(
+  root: string,
+  rootReal: string,
+  path: string,
+): Promise<string> {
+  if (!isRepoRelativePath(path))
+    throw new Error(`${path} is not a repo-relative path`);
+  const absolute = join(root, path);
+  for (let probe = absolute; ; probe = dirname(probe)) {
+    let real: string;
+    try {
+      real = await realpath(probe);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT" || probe === root) throw error;
+      try {
+        await lstat(probe);
+      } catch (missing) {
+        if (errorCode(missing) !== "ENOENT") throw missing;
+        continue;
+      }
+      throw new Error(
+        `${path}: ${probe === absolute ? "target" : "ancestor"} is a dangling symlink`,
+      );
+    }
+    if (real !== rootReal && !real.startsWith(rootReal + sep))
+      throw new Error(`${path} resolves outside the repository`);
+    if (probe !== absolute && !(await stat(real)).isDirectory())
+      throw new Error(`${path}: ancestor is not a directory`);
+    return absolute;
+  }
+}
+
+/** Capture each path's full-byte SHA-256 (`null` when absent), refusing repository escapes. */
+export async function captureBaseline(
+  root: string,
+  paths: Iterable<string>,
+): Promise<ReadonlyMap<string, string | null>> {
+  root = resolve(root);
+  const rootReal = await realpath(root);
+  const files = new Map<string, string | null>();
+  for (const path of paths) {
+    const absolute = await sourcePath(root, rootReal, path);
+    try {
+      files.set(path, sha256(await readFile(absolute)));
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      files.set(path, null);
+    }
+  }
+  return files;
+}
+
+/** UTF-16LE after its BOM, else UTF-8 without a leading BOM; malformed text is refused. */
+function decodeSource(bytes: Uint8Array, path: string): string {
+  if (bytes[0] === 0xfe && bytes[1] === 0xff)
+    throw new Error(`${path}: UTF-16BE source is unsupported`);
+  const encoding =
+    bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : "utf-8";
+  try {
+    return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`${path}: malformed ${encoding} source`, { cause: error });
+  }
+}
+
+/** Read current source within the repository, refusing escapes and changes to captured baselines. */
+export function repositorySourceReader(
+  root: string,
+  baseline: ReadonlyMap<string, string | null>,
+): (path: string) => Promise<string | undefined> {
+  root = resolve(root);
+  const rootReal = realpathSync(root);
+  return async (path: string): Promise<string | undefined> => {
+    const absolute = await sourcePath(root, rootReal, path);
+    let bytes: Uint8Array;
+    try {
+      bytes = await readFile(absolute);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return undefined;
+      throw error;
+    }
+    const expected = baseline.get(path);
+    if (expected !== undefined && sha256(bytes) !== expected)
+      throw new Error(`${path} changed since this batch's baseline`);
+    return decodeSource(bytes, path);
+  };
+}
+
+/** Require a Git working-tree root through the collection's sandboxed native bash tool. */
+export async function requireWorkTreeRoot(
+  collection: ToolCollection,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const bash = collection.tools.find((tool) => tool.name === "bash");
+  if (bash === undefined)
+    throw new Error("The native tool collection has no bash tool");
+  const result = await bash.execute(
+    "git-root-preflight",
+    { command: "git rev-parse --is-inside-work-tree --show-prefix" },
+    signal,
+  );
+  signal?.throwIfAborted();
+  const output = contentText(result.content);
+  // At the root, --show-prefix prints an empty line.
+  if (
+    ("isError" in result && result.isError === true) ||
+    !/^true\r?\n\r?\n$/.test(output)
+  ) {
+    throw new Error("A Git working-tree root is required", {
+      cause: new Error(`git rev-parse: ${output}`),
+    });
+  }
+}
+
+/**
+ * Apply exact baseline edits through `mux`'s routed `astApply`, then release exactly their sorted
+ * unique paths. The borrowed mux must use sandbox "always": a refused application publishes
+ * nothing. `baseline` contains full-byte SHA-256 hashes, or null for absent files. The operation's
+ * `label` is diagnostic text.
+ */
+export async function applySourceEdits(
+  root: string,
+  mux: NativeMux,
+  edits: readonly SourceEdit[],
+  baseline: ReadonlyMap<string, string | null>,
+  options: { readonly label: string; readonly signal?: AbortSignal },
+): Promise<readonly string[]> {
+  const { label, signal } = options;
+  signal?.throwIfAborted();
+  if (mux.sandbox !== "always")
+    throw new Error(`Applying ${label} requires sandbox "always"`);
+  const paths = [...new Set(edits.map((edit) => edit.path))].sort();
+  if (paths.length === 0)
+    throw new Error(`Operation ${label} has no edits to apply`);
+  const files = paths.map((path) => {
+    if (!isRepoRelativePath(path))
+      throw new Error(
+        `Operation ${label}: ${path} is not a repo-relative path`,
+      );
+    const hash = baseline.get(path);
+    if (edits.some((edit) => edit.path === path && edit.kind === "create")) {
+      if (hash != null)
+        throw new Error(
+          `Operation ${label}: ${path} existed at its batch baseline and cannot be created`,
+        );
+      return { path };
+    }
+    if (typeof hash !== "string")
+      throw new Error(`Operation ${label}: ${path} has no batch baseline hash`);
+    return { path, sha256: hash };
+  });
+  for (const edit of edits) {
+    if (!Number.isInteger(edit.startLine) || edit.startLine < 1)
+      throw new Error(
+        `Operation ${label}: ${edit.path}:${edit.startLine} is not a positive integer line`,
+      );
+  }
+  const applied = await withNativeSignal(signal, (nativeSignal) =>
+    mux.astApply(root, { files, edits, label, signal: nativeSignal }),
+  );
+  signal?.throwIfAborted();
+  return applied;
+}

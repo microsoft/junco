@@ -47,6 +47,17 @@ export type ParentView<N, T> = {
   readonly values: Lookup<EdgeId, T>;
 };
 
+/** The batch `view` delivered: each payload with its edge, in edge then delivery order. */
+export function messagesOf<N>(
+  view: Pick<ParentView<N, unknown>, "messages">,
+): Message<N>[] {
+  const messages: Message<N>[] = [];
+  for (const id of view.messages.keys())
+    for (const payload of view.messages.get(id) ?? [])
+      messages.push({ id, payload });
+  return messages;
+}
+
 /** Detach native input containers, preserving present-undefined values and opaque identity. */
 export function snapshotView<N, T>(view: ParentView<N, T>): ParentView<N, T> {
   // ponytail: opaque S/N/T values are borrowed; use immutable application data when historical value snapshots are required

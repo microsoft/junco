@@ -20,7 +20,8 @@ import {
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { getJuncoMcpToolIdentity, JuncoMcpTools } from "../src/index.ts";
-import { adaptMcpTools, type McpServerTools } from "../src/tools.ts";
+import { adaptMcpTools, type ServerRecord } from "../src/junco-mcp-tools.ts";
+import type { ShellMuxStdioTransport } from "../src/stdio.ts";
 
 type Handler = (request: JsonRpcRequest) => unknown | Promise<unknown>;
 
@@ -124,7 +125,7 @@ async function connectServer(
   name: string,
   setup: (server: TestServer) => void,
   terminalError?: () => Error | undefined,
-): Promise<McpServerTools & { readonly server: TestServer }> {
+): Promise<ServerRecord & { readonly server: TestServer }> {
   const { clientTransport, server } = await createServer();
   setup(server);
   const client = new McpClient({ name: "junco-mcp-test", version: "0.0.0" });
@@ -135,7 +136,11 @@ async function connectServer(
     client,
     server,
     tools: await client.listTools(),
-    ...(terminalError ? { terminalError } : {}),
+    transport: {
+      get terminalError() {
+        return terminalError?.();
+      },
+    } as ShellMuxStdioTransport,
   };
 }
 
@@ -161,6 +166,14 @@ function named(tools: readonly AgentTool[], name: string): AgentTool {
 
 function nativeAddonLoaded(): boolean {
   return readFileSync("/proc/self/maps", "utf8").includes("junco_tools");
+}
+
+/** A shared-process run (plain `bun test` at the root) may have mapped the addon before this file. */
+const addonPreloaded = nativeAddonLoaded();
+
+/** Nothing here loaded the addon; observable only when it was not already mapped. */
+function assertAddonUnloaded(): void {
+  if (!addonPreloaded) assert.equal(nativeAddonLoaded(), false);
 }
 
 test("JuncoMcpTools.add validates names without changing the definition", async () => {
@@ -207,7 +220,7 @@ test("JuncoMcpTools.add validates names without changing the definition", async 
   await assert.rejects(built.connect(), {
     message: 'JuncoMcpTools: unsupported transport "bogus"',
   });
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("connect rejects invalid close timeouts before acquiring the ShellMux", async () => {
@@ -225,7 +238,7 @@ test("connect rejects invalid close timeouts before acquiring the ShellMux", asy
       },
     );
   }
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("connect rejects unknown lifetimes even for empty definitions", async () => {
@@ -240,7 +253,7 @@ test("connect rejects unknown lifetimes even for empty definitions", async () =>
       );
     }
   }
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("empty definitions ignore cancellation for both lifetimes and acquire nothing", async () => {
@@ -253,7 +266,7 @@ test("empty definitions ignore cancellation for both lifetimes and acquire nothi
     assert.deepEqual(connection.tools, []);
     await connection.close();
   }
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("an empty definition connects without loading the native addon", async () => {
@@ -261,7 +274,7 @@ test("an empty definition connects without loading the native addon", async () =
   assert.deepEqual(connection.tools, []);
   await connection.close();
   await connection.close();
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("snapshot is a detached definition and acquires nothing", async () => {
@@ -296,7 +309,7 @@ test("snapshot is a detached definition and acquires nothing", async () => {
   const connection = await emptyCopy.connect({ cwd: "/nonexistent" });
   assert.deepEqual(connection.tools, []);
   await connection.close();
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("an already aborted connect rejects with McpAbortError before acquiring the ShellMux", async () => {
@@ -313,7 +326,7 @@ test("an already aborted connect rejects with McpAbortError before acquiring the
     }),
     (error) => error instanceof McpAbortError,
   );
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("a nonempty definition without a collection rejects before starting anything", async () => {
@@ -327,7 +340,7 @@ test("a nonempty definition without a collection rejects before starting anythin
     name: "TypeError",
     message: "JuncoMcpTools: a nonempty definition requires a collection",
   });
-  assert.equal(nativeAddonLoaded(), false);
+  assertAddonUnloaded();
 });
 
 test("tool names are sanitized, bounded, and collision-hashed independent of order", async () => {

@@ -80,9 +80,6 @@ pub struct AstFindOptions<'env> {
     pub offset: Option<u32>,
     /// When true, include meta-variable bindings per match.
     pub include_meta: Option<bool>,
-    /// Reserved for contextual snippets; not used by the current native find
-    /// path.
-    pub context: Option<u32>,
     /// Optional cancellation handle (library-specific).
     pub signal: Option<Unknown<'env>>,
     /// Wall-clock timeout for the worker task in milliseconds.
@@ -393,7 +390,7 @@ struct PendingWrite {
 }
 
 fn to_u32(value: usize) -> u32 {
-    value.min(u32::MAX as usize) as u32
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn resolve_supported_lang(value: &str) -> Result<SupportLang> {
@@ -672,7 +669,6 @@ pub(crate) fn prepare_find(options: AstFindOptions<'_>) -> (AstFindSpec, task::C
         limit,
         offset,
         include_meta,
-        context: _,
         signal,
         timeout_ms,
     } = options;
@@ -1043,6 +1039,351 @@ pub(crate) fn prepare_replace(
     )
 }
 
+/// One file an `astApply` edits, with its baseline.
+#[napi(object, object_to_js = false)]
+pub struct AstSourceFile {
+    /// Repo-relative POSIX path.
+    pub path: String,
+    /// Hex SHA-256 of the file's bytes at its baseline; absent when the file must not exist yet.
+    pub sha256: Option<String>,
+}
+
+/// One exact-line edit: `beforeLines` (without terminators) at 1-based `startLine` become
+/// `afterLines`; empty `beforeLines` inserts before `startLine`.
+#[napi(object, object_to_js = false)]
+pub struct AstSourceEdit {
+    #[napi(ts_type = "'replace' | 'create'")]
+    pub kind: String,
+    pub path: String,
+    pub start_line: u32,
+    #[napi(ts_type = "readonly string[]")]
+    pub before_lines: Vec<String>,
+    #[napi(ts_type = "readonly string[]")]
+    pub after_lines: Vec<String>,
+}
+
+/// Options for `astApply`: every file the edits touch, the edits, and a diagnostic label.
+#[napi(object, object_to_js = false)]
+pub struct AstApplyOptions<'env> {
+    #[napi(ts_type = "readonly AstSourceFile[]")]
+    pub files: Vec<AstSourceFile>,
+    #[napi(ts_type = "readonly AstSourceEdit[]")]
+    pub edits: Vec<AstSourceEdit>,
+    pub label: String,
+    /// Optional cancellation handle.
+    pub signal: Option<Unknown<'env>>,
+    /// Wall-clock timeout in milliseconds.
+    pub timeout_ms: Option<u32>,
+}
+
+/// An `astApply` request prepared on the JS thread.
+pub(crate) struct AstApplySpec {
+    files: Vec<AstSourceFile>,
+    edits: Vec<AstSourceEdit>,
+    label: String,
+}
+
+/// Splits `options` into its request and a cancel token that consumes the abort
+/// signal on the JS thread.
+pub(crate) fn prepare_apply(options: AstApplyOptions<'_>) -> (AstApplySpec, task::CancelToken) {
+    let AstApplyOptions {
+        files,
+        edits,
+        label,
+        signal,
+        timeout_ms,
+    } = options;
+    (
+        AstApplySpec {
+            files,
+            edits,
+            label,
+        },
+        task::CancelToken::new(timeout_ms, signal),
+    )
+}
+
+impl AstApplySpec {
+    /// Applies every edit under `root` all-or-nothing: each file is preflighted and its output
+    /// computed before `persist` sees the first write. Returns the sorted edited paths.
+    pub(crate) fn run(
+        self,
+        ct: task::CancelToken,
+        root: &Path,
+        persist: &mut dyn FnMut(&Path, &[u8]) -> std::io::Result<()>,
+    ) -> Result<Vec<String>> {
+        let writes = self.preflight(root).map_err(|reason| {
+            Error::from_reason(format!(
+                "Applying {} failed: {reason}; nothing was written",
+                self.label
+            ))
+        })?;
+        let mut paths = Vec::with_capacity(writes.len());
+        for (path, physical, bytes) in writes {
+            ct.heartbeat()?;
+            persist(&physical, &bytes)
+                .map_err(|err| Error::from_reason(format!("Failed to write {path}: {err}")))?;
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
+    fn preflight(
+        &self,
+        root: &Path,
+    ) -> std::result::Result<Vec<(String, PathBuf, Vec<u8>)>, String> {
+        let mut files: Vec<&AstSourceFile> = self.files.iter().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(pair) = files.windows(2).find(|pair| pair[0].path == pair[1].path) {
+            return Err(format!("{} is listed twice", pair[0].path));
+        }
+        if self.edits.iter().any(|edit| {
+            files
+                .binary_search_by(|file| file.path.cmp(&edit.path))
+                .is_err()
+        }) || files
+            .iter()
+            .any(|file| !self.edits.iter().any(|edit| edit.path == file.path))
+        {
+            return Err("the files do not match the edits".to_owned());
+        }
+        for edit in &self.edits {
+            let at = || format!("{}:{}", edit.path, edit.start_line);
+            if edit.kind != "replace" && edit.kind != "create" {
+                return Err(format!("{}: kind {:?} is invalid", at(), edit.kind));
+            }
+            if edit.start_line == 0 {
+                return Err(format!("{}: edit out of range", at()));
+            }
+            if edit.before_lines.is_empty() && edit.after_lines.is_empty() {
+                return Err(format!("{}: the edit changes nothing", at()));
+            }
+            if edit
+                .before_lines
+                .iter()
+                .chain(&edit.after_lines)
+                .any(|line| line.contains(['\r', '\n']))
+            {
+                return Err(format!("{}: a line contains a line terminator", at()));
+            }
+        }
+        let root_real = root
+            .canonicalize()
+            .map_err(|err| format!("{}: {err}", root.display()))?;
+        let mut writes = Vec::with_capacity(files.len());
+        for file in files {
+            let path = file.path.as_str();
+            let edits: Vec<&AstSourceEdit> =
+                self.edits.iter().filter(|edit| edit.path == path).collect();
+            let physical = source_path(root, &root_real, path)?;
+            let bytes = match &file.sha256 {
+                None => created_source(path, &physical, &edits)?,
+                Some(baseline) => replaced_source(path, &physical, baseline, edits)?,
+            };
+            writes.push((file.path.clone(), physical, bytes));
+        }
+        Ok(writes)
+    }
+}
+
+/// `path` under `root`, once it is repo-relative and its deepest existing ancestor is a real
+/// directory inside `root_real`.
+fn source_path(root: &Path, root_real: &Path, path: &str) -> std::result::Result<PathBuf, String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains(['\\', '\0'])
+        || path
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err(format!("{path} is not a repo-relative path"));
+    }
+    let physical = root.join(path);
+    let mut probe = physical.parent().unwrap_or(root);
+    loop {
+        match probe.canonicalize() {
+            Ok(real) if !real.starts_with(root_real) => {
+                return Err(format!("{path} resolves outside the repository"));
+            }
+            Ok(real) if !real.is_dir() => {
+                return Err(format!("{path}: ancestor is not a directory"));
+            }
+            Ok(_) => return Ok(physical),
+            Err(err)
+                if probe != root
+                    && matches!(
+                        err.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+            {
+                if probe.symlink_metadata().is_ok() {
+                    return Err(format!("{path}: ancestor is a dangling symlink"));
+                }
+                probe = probe.parent().unwrap_or(root);
+            }
+            Err(err) => return Err(format!("{path}: {err}")),
+        }
+    }
+}
+
+/// A new file's bytes: its one create edit's lines, LF-terminated.
+fn created_source(
+    path: &str,
+    physical: &Path,
+    edits: &[&AstSourceEdit],
+) -> std::result::Result<Vec<u8>, String> {
+    let [edit] = edits else {
+        return Err(format!("{path}: a new file takes exactly one create edit"));
+    };
+    if edit.kind != "create" || edit.start_line != 1 || !edit.before_lines.is_empty() {
+        return Err(format!(
+            "{path}: a new file takes one create edit at line 1 with empty beforeLines"
+        ));
+    }
+    match physical.symlink_metadata() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(format!("{path} already exists")),
+        Err(err) => return Err(format!("{path}: {err}")),
+    }
+    let mut text = edit.after_lines.join("\n");
+    text.push('\n');
+    Ok(text.into_bytes())
+}
+
+/// An existing file's bytes after `edits`, keeping its BOM, encoding, and line terminators;
+/// inserted lines take the file's first terminator.
+fn replaced_source(
+    path: &str,
+    physical: &Path,
+    baseline: &str,
+    mut edits: Vec<&AstSourceEdit>,
+) -> std::result::Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+
+    if edits.iter().any(|edit| edit.kind != "replace") {
+        return Err(format!("{path} exists, so only replace edits apply"));
+    }
+    let metadata = physical.symlink_metadata().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            format!("{path} is missing")
+        } else {
+            format!("{path}: {err}")
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(format!("{path} is not a regular file"));
+    }
+    if metadata.nlink() != 1 {
+        return Err(format!("{path} has {} hard links", metadata.nlink()));
+    }
+    let bytes = std::fs::read(physical).map_err(|err| format!("{path}: {err}"))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != baseline {
+        return Err(format!("{path} changed since its baseline"));
+    }
+    let (bom, wide) = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        (3, false)
+    } else if bytes.starts_with(&[0xff, 0xfe]) {
+        (2, true)
+    } else {
+        (0, false)
+    };
+    let body = &bytes[bom..];
+    let text: std::borrow::Cow<'_, str> = if wide {
+        let units: Vec<u16> = body
+            .chunks(2)
+            .map(|pair| match pair {
+                [low, high] => Ok(u16::from_le_bytes([*low, *high])),
+                _ => Err(()),
+            })
+            .collect::<std::result::Result<_, ()>>()
+            .map_err(|()| format!("{path}: not valid UTF-16LE text"))?;
+        String::from_utf16(&units)
+            .map_err(|_| format!("{path}: not valid UTF-16LE text"))?
+            .into()
+    } else {
+        std::str::from_utf8(body)
+            .map_err(|_| format!("{path}: not valid UTF-8 text"))?
+            .into()
+    };
+
+    // Each line keeps its own terminator: LF, or CRLF; the last line may have none.
+    let mut lines: Vec<(&str, &str)> = text
+        .split_inclusive('\n')
+        .map(|line| {
+            let content = line
+                .strip_suffix('\n')
+                .map_or(line, |line| line.strip_suffix('\r').unwrap_or(line));
+            line.split_at(content.len())
+        })
+        .collect();
+    let terminated = lines.last().is_none_or(|(_, term)| !term.is_empty());
+    let separator = lines
+        .iter()
+        .map(|(_, term)| *term)
+        .find(|term| !term.is_empty())
+        .unwrap_or("\n");
+
+    let span = |edit: &AstSourceEdit| {
+        let start = edit.start_line as usize;
+        (start, start + edit.before_lines.len())
+    };
+    for edit in &edits {
+        let (start, end) = span(edit);
+        if start > lines.len() + 1 || end - 1 > lines.len() {
+            return Err(format!("{path}:{start}: edit out of range"));
+        }
+        for (line, expected) in (start..).zip(&edit.before_lines) {
+            let actual = lines[line - 1].0;
+            if actual != expected {
+                return Err(format!(
+                    "{path}:{line}: expected {expected:?}, found {actual:?}"
+                ));
+            }
+        }
+    }
+    // An insertion overlaps another at its own line or inside a replaced range.
+    for (index, x) in edits.iter().enumerate() {
+        for y in &edits[index + 1..] {
+            let ((xs, xe), (ys, ye)) = (span(x), span(y));
+            let overlap = match (xs == xe, ys == ye) {
+                (true, true) => xs == ys,
+                (true, false) => ys <= xs && xs < ye,
+                (false, true) => xs <= ys && ys < xe,
+                (false, false) => xs < ye && ys < xe,
+            };
+            if overlap {
+                return Err(format!("{path}: overlapping edits"));
+            }
+        }
+    }
+
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.start_line));
+    for edit in &edits {
+        let (start, end) = span(edit);
+        lines.splice(
+            start - 1..end - 1,
+            edit.after_lines
+                .iter()
+                .map(|line| (line.as_str(), separator)),
+        );
+    }
+    let mut output = String::with_capacity(text.len());
+    for (index, (content, term)) in lines.iter().enumerate() {
+        output.push_str(content);
+        if index + 1 < lines.len() || terminated {
+            output.push_str(if term.is_empty() { separator } else { term });
+        }
+    }
+    let mut encoded = bytes[..bom].to_vec();
+    if wide {
+        encoded.extend(output.encode_utf16().flat_map(u16::to_le_bytes));
+    } else {
+        encoded.extend_from_slice(output.as_bytes());
+    }
+    Ok(encoded)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors the JS-facing argument list plus the host's writer"
@@ -1335,35 +1676,19 @@ fn ast_edit_blocking(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
     use super::*;
+    use crate::testing::TempDir;
 
-    struct TempTree {
-        root: PathBuf,
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-
-    fn make_temp_tree() -> TempTree {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after UNIX_EPOCH")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("pi-ast-glob-test-{unique}"));
+    fn make_temp_tree() -> TempDir {
+        let tree = TempDir::new("pi-ast-glob-test");
+        let root = tree.path();
         fs::create_dir_all(root.join("nested")).expect("temp nested dir should be created");
         fs::write(root.join("a.ts"), "const a = 1;\n").expect("temp file a.ts should be written");
         fs::write(root.join("nested").join("b.ts"), "const b = 2;\n")
             .expect("temp file nested/b.ts should be written");
-        TempTree { root }
+        tree
     }
 
     fn retained_test_match(line: u32) -> RetainedAstFindMatch {
@@ -1412,7 +1737,7 @@ mod tests {
         let tree = make_temp_tree();
         let ct = task::CancelToken::default();
         let candidates = collect_candidates(
-            Some(tree.root.to_string_lossy().into_owned()),
+            Some(tree.path().to_string_lossy().into_owned()),
             Some("*.ts"),
             &ct,
         )
@@ -1429,7 +1754,7 @@ mod tests {
         let tree = make_temp_tree();
         let ct = task::CancelToken::default();
         let candidates = collect_candidates(
-            Some(tree.root.to_string_lossy().into_owned()),
+            Some(tree.path().to_string_lossy().into_owned()),
             Some("**/*.ts"),
             &ct,
         )
@@ -1441,24 +1766,20 @@ mod tests {
         assert_eq!(paths, vec!["a.ts".to_string(), "nested/b.ts".to_string()]);
     }
 
-    fn make_mixed_temp_tree() -> TempTree {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after UNIX_EPOCH")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("pi-ast-mixed-lang-test-{unique}"));
-        fs::create_dir_all(&root).expect("temp mixed-lang dir should be created");
+    fn make_mixed_temp_tree() -> TempDir {
+        let tree = TempDir::new("pi-ast-mixed-lang-test");
+        let root = tree.path();
         fs::write(root.join("a.ts"), "const f = (x) => x;\n")
             .expect("temp file a.ts should be written");
         fs::write(root.join("b.rs"), "fn main() {}\n").expect("temp file b.rs should be written");
-        TempTree { root }
+        tree
     }
 
     #[test]
     fn ast_edit_rewrites_mixed_language_tree_per_file() {
         let tree = make_mixed_temp_tree();
-        let a_path = tree.root.join("a.ts");
-        let b_path = tree.root.join("b.rs");
+        let a_path = tree.path().join("a.ts");
+        let b_path = tree.path().join("b.rs");
 
         // The arrow pattern only matches TypeScript; the Rust file is searched in
         // its own language and left untouched instead of failing the whole call.
@@ -1469,7 +1790,7 @@ mod tests {
             task::CancelToken::default(),
             Some(rewrites),
             None,
-            Some(tree.root.to_string_lossy().into_owned()),
+            Some(tree.path().to_string_lossy().into_owned()),
             None,
             None,
             None,
@@ -1600,14 +1921,8 @@ mod tests {
 
     #[test]
     fn ast_edit_dedupes_identical_matches_across_rules() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after UNIX_EPOCH")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("pi-ast-dedupe-{unique}"));
-        fs::create_dir_all(&root).expect("temp dedupe dir should be created");
-        let tree = TempTree { root };
-        let file_path = tree.root.join("a.ts");
+        let tree = TempDir::new("pi-ast-dedupe");
+        let file_path = tree.path().join("a.ts");
         fs::write(&file_path, "const b = foo(bar);\n").expect("temp file a.ts should be written");
 
         // Both rules match the same call node and produce the byte-identical
@@ -1621,7 +1936,7 @@ mod tests {
             task::CancelToken::default(),
             Some(rewrites),
             Some("ts".to_string()),
-            Some(tree.root.to_string_lossy().into_owned()),
+            Some(tree.path().to_string_lossy().into_owned()),
             None,
             None,
             None,
@@ -1643,13 +1958,9 @@ mod tests {
         );
     }
 
-    fn make_apply_failure_tree() -> TempTree {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after UNIX_EPOCH")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("pi-ast-apply-fail-{unique}"));
-        fs::create_dir_all(&root).expect("temp apply-fail dir should be created");
+    fn make_apply_failure_tree() -> TempDir {
+        let tree = TempDir::new("pi-ast-apply-fail");
+        let root = tree.path();
         // `a.ts` rewrites cleanly under both rules (one applies, the other
         // doesn't match).
         fs::write(root.join("a.ts"), "const a = bar;\n").expect("temp file a.ts should be written");
@@ -1658,14 +1969,14 @@ mod tests {
         // overlap error.
         fs::write(root.join("b.ts"), "const b = foo(bar);\n")
             .expect("temp file b.ts should be written");
-        TempTree { root }
+        tree
     }
 
     #[test]
     fn ast_edit_does_not_partially_write_when_apply_fails() {
         let tree = make_apply_failure_tree();
-        let a_path = tree.root.join("a.ts");
-        let b_path = tree.root.join("b.ts");
+        let a_path = tree.path().join("a.ts");
+        let b_path = tree.path().join("b.ts");
         let a_before = fs::read_to_string(&a_path).expect("a.ts should be readable");
         let b_before = fs::read_to_string(&b_path).expect("b.ts should be readable");
 
@@ -1677,7 +1988,7 @@ mod tests {
             task::CancelToken::default(),
             Some(rewrites),
             Some("ts".to_string()),
-            Some(tree.root.to_string_lossy().into_owned()),
+            Some(tree.path().to_string_lossy().into_owned()),
             None,
             None,
             None,

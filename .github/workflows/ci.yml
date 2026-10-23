@@ -282,21 +282,12 @@ jobs:
           bun --no-install --eval "$smoke"
           node --input-type=module --eval "$smoke"
 
-  # Native tools, agent, full scheduler and agency integration; Cargo fetches marsh and junco-policy from GitHub.
+  # Native tools, agent, full scheduler and agency integration, including junco-tools' btrfs lane:
+  # ci/test.sh runs inside ci/Dockerfile's container, whose project root is a fresh btrfs mount.
+  # Cargo fetches marsh and junco-policy from GitHub.
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: junco-agency
-    env:
-      CARGO_HOME: ${{ github.workspace }}/.cargo
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
-      CARGO_TARGET_DIR: ${{ github.workspace }}/junco-agency/packages/junco-tools/target/cargo
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - name: Checkout junco-agency
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -304,156 +295,43 @@ jobs:
           path: junco-agency
           persist-credentials: false
 
-      - name: Install native build libraries
+      # ponytail: the toolchain image is rebuilt every run; cache its layers if build time matters.
+      - name: Build the CI image
+        run: docker build --tag junco-ci junco-agency/ci
+
+      # The image, the btrfs loop file and every build share the runner's root disk.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Test on a btrfs project root
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            build-essential pkg-config clang libclang-dev llvm-dev \
-            libbtrfsutil-dev zlib1g-dev ca-certificates curl git
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.19.0'
-
-      - name: Install Rust 1.95.0
-        env:
-          RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-            sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
-          "$CARGO_HOME/bin/rustup" component add rustfmt clippy
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-
-      - name: Install workspace
-        run: bun install --frozen-lockfile
-
-      - name: junco-tools routed bridge formatting
-        # Older native modules and the marsh path dependency use different existing layouts.
-        working-directory: junco-agency/packages/junco-tools
-        run: node scripts/with-junco-build-env.mjs rustfmt --edition 2024 --check src/tool.rs
-
-      - name: junco-tools Clippy (library and tests)
-        # napi exports look unused to Rust; two legacy grep helpers exceed Clippy's argument threshold.
-        working-directory: junco-agency/packages/junco-tools
-        run: node scripts/with-junco-build-env.mjs cargo clippy --locked --features test-fs --lib --tests -- -D warnings -A dead_code -A clippy::too_many_arguments
-
-      - name: junco-tools Rust unit tests (CopyTree)
-        working-directory: junco-agency/packages/junco-tools
-        run: node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
-
-      # Before junco-tools, whose declaration build imports the engine's public types.
-      - name: Build dataflow-engine
-        working-directory: junco-agency/packages/dataflow-engine
-        run: bun run build
-
-      - name: Build and test junco-tools
-        working-directory: junco-agency/packages/junco-tools
-        run: |
-          bun run build
-          bun run build:native:test
-          bun run test
-
-      # After junco-tools, whose addons and declarations it uses; before junco-agent, which uses it.
-      - name: Build, typecheck and test junco-mcp
-        working-directory: junco-agency/packages/junco-mcp
-        run: |
-          bun run build
-          bun run typecheck
-          bun run test
-          bun run test:native
-
-      - name: Build, typecheck and test junco-agent with coverage
-        working-directory: junco-agency/packages/junco-agent
-        run: |
-          bun run build
-          bun run typecheck
-          bun run test:coverage
-          bun run test:native
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          docker run --rm --privileged \
+            --env CARGO_BUILD_JOBS=2 \
+            --volume "$GITHUB_WORKSPACE/junco-agency:/src:ro" \
+            --volume "$RUNNER_TEMP/artifacts:/artifacts" \
+            junco-ci
 
       - name: Upload junco-agent coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: junco-agent-coverage
-          path: junco-agency/packages/junco-agent/coverage/lcov.info
+          path: ${{ runner.temp }}/artifacts/packages/junco-agent/coverage/lcov.info
           if-no-files-found: error
-
-      - name: Build, typecheck and test junco-scheduler with coverage
-        working-directory: junco-agency/packages/junco-scheduler
-        run: |
-          bun run build
-          bun run typecheck
-          bun run test:coverage
 
       - name: Upload junco-scheduler coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: junco-scheduler-coverage
-          path: junco-agency/packages/junco-scheduler/coverage/lcov.info
+          path: ${{ runner.temp }}/artifacts/packages/junco-scheduler/coverage/lcov.info
           if-no-files-found: error
-
-      - name: Build dataflow-engine-opik
-        working-directory: junco-agency/packages/dataflow-engine-opik
-        run: bun run build
-
-      # The agency's declaration build and typecheck import dataflow-profile's public types.
-      - name: Build dataflow-profile
-        working-directory: junco-agency/packages/dataflow-profile
-        run: bun run build
-
-      - name: Build and test junco-agency
-        run: |
-          bun run build
-          bun run typecheck
-          bun run test:coverage
-          bun run smoke
-          bun run test:integration
-          bun run test:native
-          bun run smoke:workflows:bun
-          bun run smoke:workflows
 
       - name: Upload agency coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agency-coverage
-          path: junco-agency/coverage/lcov.info
+          path: ${{ runner.temp }}/artifacts/coverage/lcov.info
           if-no-files-found: error
-
-      - name: Workspace engine identity
-        run: |
-          smoke='
-          import assert from "node:assert/strict";
-          import { DataflowDefinitionError, DataflowGraph, NodeId, TriggerRule, UNBOUNDED, Width } from "dataflow-engine";
-          import { choose, context, parallel } from "junco-scheduler";
-          const graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-          graph.addNode({ id: NodeId.create("only"), state: undefined, trigger: TriggerRule.always(), step: async function* () { return 42; } });
-          const invalid = context({ graph, scheduler: choose({ rank: () => 0, width: () => -1 }) });
-          await assert.rejects(invalid.step(), (error) => error instanceof DataflowDefinitionError);
-          assert.equal(graph.results().size, 0);
-          assert.deepEqual([...await context({ graph, scheduler: parallel() }).run()], [["only", 42]]);
-          console.log(`consumer-engine-identity-${RUNTIME}: ok`);
-          '
-          bun --no-install --eval "const RUNTIME = \"bun\";$smoke"
-          node --input-type=module --eval "const RUNTIME = \"node\";$smoke"
-
-      # The relocated launcher resolves Pi's CLI and the tools extension from the hoisted workspace.
-      - name: junco-agent CLI smoke
-        working-directory: junco-agency/packages/junco-agent
-        run: |
-          status=0
-          usage=$(bun run cli 2>&1) || status=$?
-          test "$status" -eq 2
-          grep -F 'Usage: bun run cli <dedicated-btrfs-seed> [Pi options or prompt]' <<<"$usage"
-          seed=$(mktemp -d)
-          home=$(mktemp -d)
-          version=$(env -i PATH="$PATH" HOME="$home" PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 bun run cli "$seed" --version)
-          echo "$version"
-          grep -Fx '0.99.2' <<<"$version"

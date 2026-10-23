@@ -2,12 +2,6 @@
 export * as agent from "junco-agent";
 export * as mcp from "junco-mcp";
 export * as tools from "junco-tools";
-export {
-  LspTool,
-  type LspToolDetails,
-  type LspToolInput,
-  type LspToolOptions,
-} from "junco-tools";
 export type {
   Agentic,
   AgenticInput,

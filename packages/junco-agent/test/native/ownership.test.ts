@@ -17,7 +17,7 @@ import {
 import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import { JuncoAgent } from "../../src/index.ts";
-import { scripted } from "../harness.ts";
+import { scripted } from "../../../../test/support.ts";
 
 const TIMEOUT = 60_000;
 

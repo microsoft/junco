@@ -10,9 +10,7 @@ import {
   type AssistantMessage,
   type Context,
   contentText,
-  createModels,
   fauxAssistantMessage,
-  fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
@@ -26,7 +24,8 @@ import {
   tracer as tracerApi,
   workflows,
 } from "junco-agency";
-import { fauxRuntime } from "./support.ts";
+import { userTexts } from "./deterministic-support.ts";
+import { fauxRuntime, scripted } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 const revision = (previous: string) =>
@@ -38,17 +37,7 @@ const requests: Request[] = [];
 const recording =
   (reply: string) =>
   (context: Context): AssistantMessage => {
-    const users: string[] = [];
-    for (const message of context.messages) {
-      if (message.role === "user") {
-        users.push(
-          typeof message.content === "string"
-            ? message.content
-            : contentText(message.content),
-        );
-      }
-    }
-    requests.push({ users });
+    requests.push({ users: userTexts(context.messages) });
     return fauxAssistantMessage(reply);
   };
 
@@ -57,20 +46,16 @@ const recording =
  * yield holds the run at exactly one provider request until the next explicit `next()`.
  */
 async function assertPublicYieldBoundary(): Promise<void> {
-  const yieldFaux = fauxProvider({
-    api: "yield-workflow-smoke",
-    provider: "yield-workflow-smoke",
-    tokenSize: { min: 4, max: 4 },
-  });
-  yieldFaux.setResponses([
-    fauxAssistantMessage(
-      [fauxToolCall("yield", { reason: "review" }, { id: "public-yield" })],
-      { stopReason: "toolUse" },
-    ),
-    fauxAssistantMessage("resumed"),
-  ]);
-  const yieldModels = createModels();
-  yieldModels.setProvider(yieldFaux.provider);
+  const { faux: yieldFaux, models: yieldModels } = scripted(
+    [
+      fauxAssistantMessage(
+        [fauxToolCall("yield", { reason: "review" }, { id: "public-yield" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("resumed"),
+    ],
+    "yield-workflow-smoke",
+  );
   const sessions = new MemorySessionRepo();
   let member: agentApi.JuncoAgent | undefined;
   try {

@@ -23,43 +23,6 @@ export interface ShellMuxLease {
   release(): Promise<void>;
 }
 
-class Lease implements ShellMuxLease {
-  #released: Promise<void> | undefined;
-
-  constructor(
-    readonly mux: NativeMux,
-    readonly native: NativeModule,
-    readonly policy: Policy,
-  ) {}
-
-  get closed(): boolean {
-    return this.#released !== undefined;
-  }
-
-  release(): Promise<void> {
-    this.#released ??= (async () => {
-      // Native close drains every policy record first; the flush then makes the last one —
-      // often the violation that ended the run — observable before release resolves.
-      const closed = await this.mux.close().then(
-        () => undefined,
-        (error: unknown) => ({ error }),
-      );
-      try {
-        await flushLog();
-      } catch (flushError) {
-        if (closed === undefined) throw flushError;
-        throw new AggregateError(
-          [closed.error, flushError],
-          "ShellMux close and log flush failed",
-          { cause: closed.error },
-        );
-      }
-      if (closed !== undefined) throw closed.error;
-    })();
-    return this.#released;
-  }
-}
-
 /** Opens owned {@link ShellMuxLease}s. */
 export const ShellMuxLease = {
   /**
@@ -108,7 +71,37 @@ export const ShellMuxLease = {
             options.onResourceEvent!(event);
           },
     );
-    const lease = new Lease(mux, native, policy);
+    let released: Promise<void> | undefined;
+    const lease: ShellMuxLease = {
+      mux,
+      native,
+      policy,
+      get closed() {
+        return released !== undefined;
+      },
+      release() {
+        released ??= (async () => {
+          // Native close drains every policy record first; the flush then makes the last one —
+          // often the violation that ended the run — observable before release resolves.
+          const closed = await mux.close().then(
+            () => undefined,
+            (error: unknown) => ({ error }),
+          );
+          try {
+            await flushLog();
+          } catch (flushError) {
+            if (closed === undefined) throw flushError;
+            throw new AggregateError(
+              [closed.error, flushError],
+              "ShellMux close and log flush failed",
+              { cause: closed.error },
+            );
+          }
+          if (closed !== undefined) throw closed.error;
+        })();
+        return released;
+      },
+    };
     try {
       await mux.validateCwd(cwd);
     } catch (error) {

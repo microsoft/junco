@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
   type Context,
+  contentText,
   type FauxResponseFactory,
   fauxAssistantMessage,
   fauxToolCall,
@@ -25,6 +26,7 @@ import {
   OssSearchTool,
   ReviewTool,
 } from "../examples/oss-committee/oss-committee.ts";
+import { userTexts } from "./deterministic-support.ts";
 import { scripted } from "./support.ts";
 
 export const request = "Design a C# TUI for committee decision history.";
@@ -58,16 +60,10 @@ const defaultSearchResponse = () =>
 
 /** The most recent user-facing message of a model request, including array-form Pi content. */
 function latestUserText(context: Context): string {
-  for (let index = context.messages.length - 1; index >= 0; index--) {
-    const message = context.messages[index]!;
-    if (message.role !== "user") continue;
-    return typeof message.content === "string"
-      ? message.content
-      : message.content
-          .map((block) => (block.type === "text" ? block.text : ""))
-          .join("");
-  }
-  throw new Error("Scripted actor request has no user message");
+  const text = userTexts(context.messages).at(-1);
+  if (text === undefined)
+    throw new Error("Scripted actor request has no user message");
+  return text;
 }
 
 /** The text of the request's latest message, which must be a result of tool `name`. */
@@ -267,9 +263,7 @@ export async function scriptedCommittee(
     for (const message of context.messages.slice(roundStart + 1)) {
       if (message.role !== "toolResult" || message.toolName !== "search_oss")
         continue;
-      const text = message.content
-        .flatMap((block) => (block.type === "text" ? [block.text] : []))
-        .join("");
+      const text = contentText(message.content, "");
       if (message.isError) {
         failed = true;
         reports.push(

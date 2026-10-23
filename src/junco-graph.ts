@@ -497,11 +497,6 @@ export class JuncoGraph<
     return this.#controller.signal;
   }
 
-  /** {@link JuncoGraph.compact} of this graph. */
-  compact(policy: CompactionPolicy): Promise<void> {
-    return JuncoGraph.compact(this, policy);
-  }
-
   /** The process-wide complaint history every agent and graph shares. */
   get issueLog(): typeof issueLog {
     return issueLog;

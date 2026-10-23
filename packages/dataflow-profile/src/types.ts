@@ -17,8 +17,6 @@ export type ProfileRecord<R extends ResourceKind = ResourceKind> = {
   readonly range: readonly (readonly [number, number])[];
   /** Largest observed per-activation value; the fallback floor. */
   readonly bound: number;
-  /** Reserved for time-segmented profiles; never read. */
-  readonly shape?: readonly number[];
 };
 export type Profile<R extends ResourceKind = ResourceKind> = Omit<ProfileRecord<R>, "unit"> & ProfileData<R>;
 export type ProfilesFile = {

@@ -3,11 +3,12 @@ import {
   EdgeId,
   type EdgeIdType,
   type Message,
+  messagesOf,
   type NodeIdType,
   type ParentView,
 } from "dataflow-engine";
 import { type Static, type TSchema, Type } from "typebox";
-import { Value } from "typebox/value";
+import { checkToolInput } from "./tool-support.js";
 
 const recvParameters = Type.Object({}, { additionalProperties: false });
 const sendParameters = Type.Object(
@@ -62,18 +63,6 @@ const recvTools = new WeakSet<object>();
 const sendTools = new WeakSet<object>();
 const infoTools = new WeakSet<object>();
 
-function check<S extends TSchema>(
-  tool: string,
-  schema: S,
-  input: unknown,
-): Static<S> {
-  if (Value.Check(schema, input)) return input;
-  const [error] = Value.Errors(schema, input);
-  throw new Error(
-    `Invalid ${tool} input${error ? `: ${error.instancePath} ${error.message}` : ""}`,
-  );
-}
-
 async function receive<N, T>(
   host:
     | NonNullable<ConstructorParameters<typeof RecvTool<N, T>>[0]>
@@ -81,14 +70,11 @@ async function receive<N, T>(
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<RecvTool<N, T>["execute"]> {
-  check("recv", recvParameters, input);
+  checkToolInput("recv", recvParameters, input);
   signal?.throwIfAborted();
   if (host === undefined) throw new Error("recv requires a JuncoGraph host");
   const { view } = host;
-  const messages: Message<N>[] = [];
-  for (const id of view.messages.keys())
-    for (const payload of view.messages.get(id) ?? [])
-      messages.push({ id, payload });
+  const messages = messagesOf(view);
   const values: Message<T>[] = [];
   for (const id of view.values.keys())
     values.push({ id, payload: view.values.get(id) as T });
@@ -105,7 +91,7 @@ async function emit<N>(
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<SendTool["execute"]> {
-  const { id, payload } = check("send", sendParameters, input);
+  const { id, payload } = checkToolInput("send", sendParameters, input);
   signal?.throwIfAborted();
   if (host === undefined) throw new Error("send requires a JuncoGraph host");
   host.send({ id: EdgeId.create(id), payload: payload as N });
@@ -120,7 +106,7 @@ async function describe(
   input: unknown,
   signal: AbortSignal | undefined,
 ): ReturnType<InfoTool["execute"]> {
-  check("info", infoParameters, input);
+  checkToolInput("info", infoParameters, input);
   signal?.throwIfAborted();
   if (host === undefined) throw new Error("info requires a JuncoGraph host");
   const details = host.info();

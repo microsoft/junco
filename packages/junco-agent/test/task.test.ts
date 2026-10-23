@@ -23,17 +23,15 @@ import {
   type TaskToolDetails,
   type TaskToolHost,
 } from "junco-tools";
+import { userTexts } from "../../../test/deterministic-support.ts";
+import { flushMacrotasks, scripted, toolTurn } from "../../../test/support.ts";
 import { JuncoAgent } from "../src/index.ts";
 import {
   assertTools,
   countingTool,
   isCode,
   newAgent,
-  scripted,
   settledText,
-  tick,
-  toolTurn,
-  userTexts,
 } from "./harness.ts";
 
 const TIMEOUT = 5_000;
@@ -793,7 +791,7 @@ test(
         agent.next(),
       );
       await started.promise;
-      for (let index = 0; index < 5; index += 1) await tick();
+      for (let index = 0; index < 5; index += 1) await flushMacrotasks();
       assert.equal(calls, 1);
       release.resolve([{ id: "a", name: "alpha" }, { id: "b" }]);
       assert.equal(settledText(await outcome), "done");

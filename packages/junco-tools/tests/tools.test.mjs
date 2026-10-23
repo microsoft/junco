@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   access,
   mkdir,
@@ -10,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -25,7 +27,6 @@ import {
   BashTool,
   isMarshPolicyDenied,
   LockPolicy,
-  LspTool,
   MARSH_POLICY_DENIED,
   ShellMuxOperations,
   ToolCollection,
@@ -1423,8 +1424,22 @@ test("policy denial is classified by its exact code", () => {
 
 test("LspTool.create rejects under Node", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "junco-tools-lsp-"));
+  // A Node child, so the Bun runner (where LspTool is supported) checks the Node refusal too.
+  const probe = [
+    `const { LspTool } = await import(${JSON.stringify(new URL("../dist/index.js", import.meta.url).href)});`,
+    "await LspTool.create(process.cwd()).then(",
+    "  () => process.exit(1),",
+    "  (error) => process.exit(error instanceof Error ? 0 : 2),",
+    ");",
+  ].join("\n");
   try {
-    await assert.rejects(LspTool.create(directory), Error);
+    await promisify(execFile)(
+      "node",
+      ["--input-type=module", "--eval", probe],
+      {
+        cwd: directory,
+      },
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

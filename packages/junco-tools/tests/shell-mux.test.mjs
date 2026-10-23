@@ -266,7 +266,9 @@ test("a collection's resources limit and monitor only its own commands", {
     const started = events.filter((event) => event.kind === "started");
     const finished = events.filter((event) => event.kind === "finished");
     assert.equal(started.length, 2, JSON.stringify(events));
-    assert.equal(started[0].owner, undefined);
+    // The collection's own tools act as its forked owner, distinct from the binding's.
+    assert.equal(typeof started[0].owner, "string");
+    assert.notEqual(started[0].owner, binding.owner);
     assert.equal(started[0].command, probe);
     assert.equal(typeof binding.owner, "string");
     assert.equal(started[1].owner, binding.owner);
@@ -407,9 +409,8 @@ test("a separately loaded module copy opens and releases its own mux", {
 }, async () => {
   const { root, seed } = await seedFixture();
   const native = await copyTreeNative();
-  const copy = await import(
-    new URL("../dist/shell-mux.js?copy", import.meta.url).href
-  );
+  // Relative with a query: Bun ignores the query on a `file:` URL and would return the cached module.
+  const copy = await import("../dist/shell-mux.js?copy");
   assert.notEqual(copy.ShellMuxLease, ShellMuxLease);
   let original;
   let copied;

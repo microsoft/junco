@@ -17,11 +17,9 @@ import {
   type Context,
   contentText,
   type FauxResponseStep,
-  InMemoryCredentialStore,
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { McpAbortError, McpClient } from "@earendil-works/pi-mcp";
 import {
   getJuncoMcpToolIdentity,
@@ -30,10 +28,11 @@ import {
   JuncoMcpTools,
 } from "junco-mcp";
 import { isTaskTool, LockPolicy, type NativeModule, ToolCollection, TaskTool } from "junco-tools";
-import { isMarshPolicyDenied } from "junco-tools/errors";
+import { errorGraph, isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import { JuncoAgent, JuncoAgentError } from "../../src/index.ts";
-import { countingTool, scripted, settledText, toolTurn } from "../harness.ts";
+import { countingTool, settledText } from "../harness.ts";
+import { fauxRuntime, scripted, toolTurn } from "../../../../test/support.ts";
 import { withNativeCleanup } from "../../../../test/native-support.ts";
 
 const SERVER = fileURLToPath(
@@ -93,32 +92,13 @@ const reportResults: FauxResponseStep = (context: Context) =>
       .join("|"),
   );
 
-async function fauxRuntime(responses: readonly FauxResponseStep[]) {
-  const { faux } = scripted(responses);
-  const credentials = new InMemoryCredentialStore();
-  await credentials.modify("faux", async () => ({
-    type: "api_key",
-    key: "fixture-login",
-  }));
-  const models = await ModelRuntime.create({
-    credentials,
-    modelsPath: null,
-    refreshOnCreate: false,
-  });
-  models.registerNativeProvider(faux.provider);
-  return models;
-}
-
-function contains(error: unknown, predicate: (error: unknown) => boolean): boolean {
-  if (predicate(error)) return true;
-  if (error instanceof AggregateError && error.errors.some((inner) => contains(inner, predicate)))
-    return true;
-  return error instanceof Error && error.cause !== undefined && contains(error.cause, predicate);
+function contains(error: unknown, predicate: (error: Error) => boolean): boolean {
+  return [...errorGraph(error)].filter((v): v is Error => v instanceof Error).some(predicate);
 }
 
 test("create runs an MCP tool beside an ordinary tool", async () => {
   const ordinary = countingTool("ordinary");
-  const models = await fauxRuntime([
+  const { models } = await fauxRuntime([
     toolTurn(
       fauxToolCall("mcp__fx__echo", { text: "from mcp" }, { id: "m1" }),
       fauxToolCall("ordinary", {}, { id: "o1" }),
@@ -191,7 +171,7 @@ test("two agents reusing one definition get their own servers; closing one leave
       reportResults,
     ];
     const first = await JuncoAgent.create({
-      models: await fauxRuntime(responses("f")),
+      models: (await fauxRuntime(responses("f"))).models,
       provider: "faux",
       model: "faux-1",
       cwd: seed,
@@ -201,7 +181,7 @@ test("two agents reusing one definition get their own servers; closing one leave
     });
     const forgetFirst = defer(() => first.return());
     const second = await JuncoAgent.create({
-      models: await fauxRuntime(responses("s")),
+      models: (await fauxRuntime(responses("s"))).models,
       provider: "faux",
       model: "faux-1",
       cwd: seed,
@@ -219,7 +199,7 @@ test("two agents reusing one definition get their own servers; closing one leave
   }), TIMEOUT);
 
 test("a failing source, a name conflict or an unknown active tool closes only that factory's resources", async () => {
-  const models = await fauxRuntime([]);
+  const { models } = await fauxRuntime([]);
   const tracker = trackConnections();
   try {
     // The good definition connects first; the failing one rejects initialization.
@@ -290,7 +270,7 @@ test("a late Marsh denial surfaces from agent disposal", () =>
     await writer!.execute("own", { path: "agent-owned.txt", content: "first\n" } as never);
     await owner.close().finally(forgetOwner);
 
-    const models = await fauxRuntime([
+    const { models } = await fauxRuntime([
       toolTurn(
         fauxToolCall(
           "mcp__intruder__write_file",
@@ -496,7 +476,7 @@ test("subagents of a mixed list share ordinary tools and reconnect every definit
   withNativeCleanup(async (defer) => {
     const ordinary = countingTool("ordinary");
     const task = new TaskTool();
-    const models = await fauxRuntime([
+    const { models } = await fauxRuntime([
       toolTurn(
         fauxToolCall("mcp__b__read_state", {}, { id: "b" }),
         fauxToolCall("ordinary", {}, { id: "o" }),

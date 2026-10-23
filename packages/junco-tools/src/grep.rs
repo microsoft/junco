@@ -27,11 +27,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
-use napi::{
-    JsString,
-    bindgen_prelude::*,
-    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-};
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -127,10 +123,6 @@ pub struct GrepOptions<'env> {
     pub max_columns: Option<u32>,
     /// Output mode (content, filesWithMatches, or count).
     pub mode: Option<GrepOutputMode>,
-    /// Maximum matches collected per file (content mode). Keeps one hot file
-    /// from exhausting the global `max_count` budget before other files are
-    /// reached.
-    pub max_count_per_file: Option<u32>,
     /// Abort signal for cancelling the operation.
     pub signal: Option<Unknown<'env>>,
     /// Timeout in milliseconds for the operation.
@@ -414,14 +406,14 @@ impl Sink for MatchCollector {
         match ctx.kind() {
             SinkContextKind::Before => {
                 self.context_before.push(ContextLine {
-                    line_number: crate::utils::clamp_u32(line_number),
+                    line_number: u32::try_from(line_number).unwrap_or(u32::MAX),
                     line,
                 });
             }
             SinkContextKind::After => {
                 if let Some(last_match) = self.matches.last_mut() {
                     last_match.context_after.push(ContextLine {
-                        line_number: crate::utils::clamp_u32(line_number),
+                        line_number: u32::try_from(line_number).unwrap_or(u32::MAX),
                         line,
                     });
                 }
@@ -548,7 +540,6 @@ struct SearchParams {
     max_columns: Option<u32>,
     mode: OutputMode,
     max_count: Option<u64>,
-    max_count_per_file: Option<u64>,
     offset: u64,
     multiline: bool,
 }
@@ -760,7 +751,7 @@ fn to_public_match(matched: CollectedMatch) -> Match {
         Some(matched.context_after.into_vec())
     };
     Match {
-        line_number: crate::utils::clamp_u32(matched.line_number),
+        line_number: u32::try_from(matched.line_number).unwrap_or(u32::MAX),
         line: matched.line,
         context_before,
         context_after,
@@ -833,7 +824,6 @@ pub(crate) struct GrepConfig {
     pub(crate) context: Option<u32>,
     pub(crate) max_columns: Option<u32>,
     pub(crate) mode: Option<GrepOutputMode>,
-    pub(crate) max_count_per_file: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,15 +1082,9 @@ const GREP_STREAM_WINDOW: usize = 512;
 
 fn per_file_params(params: SearchParams) -> SearchParams {
     let file_limit = match params.mode {
-        OutputMode::Content => {
-            let global = params
-                .max_count
-                .map(|max| max.saturating_add(params.offset));
-            match (global, params.max_count_per_file) {
-                (Some(global), Some(per_file)) => Some(global.min(per_file)),
-                (global, per_file) => global.or(per_file),
-            }
-        }
+        OutputMode::Content => params
+            .max_count
+            .map(|max| max.saturating_add(params.offset)),
         OutputMode::Count => None,
         OutputMode::FilesWithMatches => Some(1),
     };
@@ -1689,7 +1673,7 @@ fn push_count_match(matches: &mut Vec<GrepMatch>, path: String, match_count: u64
         context_before: None,
         context_after: None,
         truncated: None,
-        match_count: Some(crate::utils::clamp_u32(match_count)),
+        match_count: Some(u32::try_from(match_count).unwrap_or(u32::MAX)),
     });
 }
 
@@ -1719,7 +1703,7 @@ fn aggregate_parallel_results(
     let mut matches = Vec::new();
     let mut total_matches = 0u64;
     let mut files_with_matches = 0u32;
-    let files_searched = crate::utils::clamp_u32(files_searched);
+    let files_searched = u32::try_from(files_searched).unwrap_or(u32::MAX);
     let mut skipped = 0u64;
     let mut emitted = 0u64;
     let mut limit_reached = false;
@@ -1847,7 +1831,6 @@ fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
         max_columns,
         mode,
         max_count,
-        max_count_per_file: None,
         offset,
         multiline,
     };
@@ -1862,28 +1845,23 @@ fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
 
     SearchResult {
         matches: result.matches.into_iter().map(to_public_match).collect(),
-        match_count: crate::utils::clamp_u32(result.match_count),
+        match_count: u32::try_from(result.match_count).unwrap_or(u32::MAX),
         limit_reached: result.limit_reached,
         error: None,
     }
 }
 
-pub(crate) fn grep_sync(
-    options: GrepConfig,
-    on_match: Option<&ThreadsafeFunction<GrepMatch>>,
-    ct: task::CancelToken,
-) -> Result<GrepResult> {
+pub(crate) fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult> {
     let ignore_case = options.ignore_case.unwrap_or(false);
     let multiline = options.multiline.unwrap_or(false);
     match build_matcher(&options.pattern, ignore_case, multiline)? {
-        CompiledMatcher::Rust(matcher) => grep_sync_with_matcher(options, on_match, ct, &matcher),
-        CompiledMatcher::Pcre(matcher) => grep_sync_with_matcher(options, on_match, ct, &matcher),
+        CompiledMatcher::Rust(matcher) => grep_sync_with_matcher(options, ct, &matcher),
+        CompiledMatcher::Pcre(matcher) => grep_sync_with_matcher(options, ct, &matcher),
     }
 }
 
 fn grep_sync_with_matcher<M: Matcher + Sync>(
     options: GrepConfig,
-    on_match: Option<&ThreadsafeFunction<GrepMatch>>,
     ct: task::CancelToken,
     matcher: &M,
 ) -> Result<GrepResult> {
@@ -1909,7 +1887,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
     let include_hidden = options.hidden.unwrap_or(true);
     let use_gitignore = options.gitignore.unwrap_or(true);
     let glob = options.glob.as_deref();
-    let _ = glob_util::try_compile_glob(glob, true)?;
+    if let Some(glob) = glob.map(str::trim).filter(|value| !value.is_empty()) {
+        glob_util::compile_walk_glob(glob_util::build_glob_pattern(glob, true))?;
+    }
     let type_filter = resolve_type_filter(options.type_filter.as_deref());
 
     let params = SearchParams {
@@ -1918,7 +1898,6 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
         max_columns,
         mode: output_mode,
         max_count,
-        max_count_per_file: options.max_count_per_file.map(u64::from),
         offset,
         multiline,
     };
@@ -2038,7 +2017,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
                     context_before: None,
                     context_after: None,
                     truncated: None,
-                    match_count: Some(crate::utils::clamp_u32(search.match_count)),
+                    match_count: Some(u32::try_from(search.match_count).unwrap_or(u32::MAX)),
                 });
             }
             OutputMode::FilesWithMatches => {
@@ -2059,7 +2038,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 
         return Ok(GrepResult {
             matches,
-            total_matches: crate::utils::clamp_u32(search.match_count),
+            total_matches: u32::try_from(search.match_count).unwrap_or(u32::MAX),
             files_with_matches: 1,
             files_searched: 1,
             limit_reached: if limit_reached { Some(true) } else { None },
@@ -2080,26 +2059,14 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
         run_streaming_grep(scope, matcher, params, &ct)?;
     let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
         aggregate_parallel_results(results, params, files_searched);
-
-    // Fire callbacks after aggregation so offset/limit semantics match returned
-    // results.
-    if let Some(callback) = on_match {
-        for grep_match in &matches {
-            callback.call(
-                Ok(grep_match.clone()),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        }
-    }
-
     Ok(GrepResult {
         matches,
-        total_matches: crate::utils::clamp_u32(total_matches),
+        total_matches: u32::try_from(total_matches).unwrap_or(u32::MAX),
         files_with_matches,
         files_searched,
         limit_reached: if limit_reached { Some(true) } else { None },
         skipped_oversized: if skipped_oversized > 0 {
-            Some(crate::utils::clamp_u32(skipped_oversized))
+            Some(u32::try_from(skipped_oversized).unwrap_or(u32::MAX))
         } else {
             None
         },
@@ -2202,7 +2169,6 @@ pub(crate) fn prepare(options: GrepOptions<'_>) -> (GrepConfig, task::CancelToke
         context,
         max_columns,
         mode,
-        max_count_per_file,
         timeout_ms,
         signal,
     } = options;
@@ -2217,7 +2183,6 @@ pub(crate) fn prepare(options: GrepOptions<'_>) -> (GrepConfig, task::CancelToke
         hidden,
         gitignore,
         max_count,
-        max_count_per_file,
         offset,
         context_before,
         context_after,
@@ -2233,12 +2198,7 @@ mod tests {
     #[cfg(unix)]
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     #[cfg(unix)]
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, SystemTime, UNIX_EPOCH},
-    };
+    use std::{fs, path::Path, time::Duration};
 
     use grep_matcher::Matcher;
 
@@ -2246,37 +2206,7 @@ mod tests {
     use super::{GrepConfig, GrepOutputMode, grep_sync};
     use super::{escape_unescaped_parentheses, sanitize_braces};
     #[cfg(unix)]
-    use crate::task;
-
-    #[cfg(unix)]
-    struct TempDirGuard(PathBuf);
-
-    #[cfg(unix)]
-    impl TempDirGuard {
-        fn new() -> Self {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time is after UNIX_EPOCH")
-                .as_nanos();
-            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let pid = std::process::id();
-            let path = std::env::temp_dir().join(format!("pi-grep-test-{pid}-{nanos}-{seq}"));
-            fs::create_dir_all(&path).expect("create temp test directory");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::{task, testing::TempDir};
 
     #[cfg(unix)]
     fn write_file(path: &Path, content: &str) {
@@ -2315,7 +2245,6 @@ mod tests {
             context: None,
             max_columns: None,
             mode: None,
-            max_count_per_file: None,
         }
     }
 
@@ -2408,7 +2337,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_supports_pcre2_lookaround_and_backreferences() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("lookahead.txt"), "foobar\nfoobaz\n");
         write_file(
             &root.path().join("backreference.txt"),
@@ -2430,7 +2359,7 @@ mod tests {
         ] {
             let mut config = base_grep_config(root.path());
             config.pattern = pattern.to_string();
-            let result = grep_sync(config, None, task::CancelToken::default())
+            let result = grep_sync(config, task::CancelToken::default())
                 .unwrap_or_else(|err| panic!("`{pattern}` should search with PCRE2: {err}"));
 
             assert_eq!(result.total_matches, 1, "`{pattern}` should match once");
@@ -2448,7 +2377,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_supports_multiline_pcre2_backreferences_and_lookahead() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(
             &root.path().join("schema.yml"),
             "  - not_null:\n      severity: warn\n",
@@ -2458,7 +2387,7 @@ mod tests {
         config.pattern = r"^(\s+)- (not_null|unique|accepted_values|relationships|expression_is_true|[a-z_]+):\s*$\n(?!\1    (arguments|config|description|name):)".to_string();
         config.multiline = Some(true);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
+        let result = grep_sync(config, task::CancelToken::default())
             .expect("multiline PCRE2 pattern should search without terminating the process");
 
         assert_eq!(result.total_matches, 1);
@@ -2469,16 +2398,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_directory_skips_fifo_entries() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("regular.txt"), "needle\n");
         make_fifo(&root.path().join("skip-me.fifo"));
 
-        let result = grep_sync(
-            base_grep_config(root.path()),
-            None,
-            task::CancelToken::default(),
-        )
-        .expect("directory grep should succeed");
+        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 1);
         assert_eq!(result.files_with_matches, 1);
@@ -2490,16 +2415,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_directory_counts_searched_files_without_storing_no_match_results() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("a.txt"), "needle\n");
         write_file(&root.path().join("b.txt"), "haystack\n");
 
-        let result = grep_sync(
-            base_grep_config(root.path()),
-            None,
-            task::CancelToken::default(),
-        )
-        .expect("directory grep should succeed");
+        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 1);
         assert_eq!(result.files_with_matches, 1);
@@ -2511,7 +2432,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_sync_with_gitignore_skips_ignored_rs_files() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         fs::create_dir_all(root.path().join(".git")).expect("create repo marker");
         fs::write(root.path().join(".gitignore"), "ignored.rs\nignored-dir/\n")
             .expect("write gitignore");
@@ -2526,7 +2447,7 @@ mod tests {
         config.gitignore = Some(true);
         config.glob = Some("*.rs".to_string());
 
-        let result = grep_sync(config, None, task::CancelToken::default())
+        let result = grep_sync(config, task::CancelToken::default())
             .expect("gitignore-aware grep should succeed");
 
         assert_eq!(result.total_matches, 1);
@@ -2540,15 +2461,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_files_with_matches_counts_all_searched_files_when_none_match() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("a.txt"), "haystack a\n");
         write_file(&root.path().join("b.txt"), "haystack b\n");
 
         let mut config = base_grep_config(root.path());
         config.mode = Some(GrepOutputMode::FilesWithMatches);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("directory grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 0);
         assert_eq!(result.files_with_matches, 0);
@@ -2559,7 +2480,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_directory_applies_offset_and_limit_in_walker_order() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("a.txt"), "needle a1\nneedle a2\n");
         write_file(&root.path().join("b.txt"), "needle b1\n");
         write_file(&root.path().join("c.txt"), "haystack\n");
@@ -2568,8 +2489,8 @@ mod tests {
         config.max_count = Some(2);
         config.offset = Some(1);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("directory grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -2584,7 +2505,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_count_mode_limit_applies_to_matches_not_files() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("a.txt"), "needle a1\nneedle a2\n");
         write_file(&root.path().join("b.txt"), "needle b1\n");
 
@@ -2592,8 +2513,8 @@ mod tests {
         config.mode = Some(GrepOutputMode::Count);
         config.max_count = Some(2);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("directory grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -2606,12 +2527,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_streaming_respects_pre_cancelled_token() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("regular.txt"), "needle\n");
 
         let ct = task::CancelToken::new(Some(0), None);
         std::thread::sleep(Duration::from_millis(1));
-        let result = grep_sync(base_grep_config(root.path()), None, ct);
+        let result = grep_sync(base_grep_config(root.path()), ct);
 
         let Err(err) = result else {
             panic!("pre-cancelled grep should fail before returning matches");
@@ -2625,11 +2546,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_special_root_path_returns_empty_result() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let fifo = root.path().join("direct.fifo");
         make_fifo(&fifo);
 
-        let result = grep_sync(base_grep_config(&fifo), None, task::CancelToken::default())
+        let result = grep_sync(base_grep_config(&fifo), task::CancelToken::default())
             .expect("special-file grep should return an empty result");
 
         assert!(result.matches.is_empty());
@@ -2642,7 +2563,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grep_multiline_matches_cross_line_patterns() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(
             &root.path().join("code.txt"),
             "fn foo() {\n  return 1;\n}\n",
@@ -2652,8 +2573,8 @@ mod tests {
         config.pattern = r"foo\(\) \{\n  return".to_string();
         config.multiline = Some(true);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("multiline grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("multiline grep should succeed");
 
         assert_eq!(
             result.total_matches, 1,
@@ -2665,48 +2586,13 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn grep_per_file_max_count_preserves_file_diversity() {
-        let root = TempDirGuard::new();
-        write_file(
-            &root.path().join("a.txt"),
-            "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n",
-        );
-        write_file(&root.path().join("z.txt"), "needle z\n");
-
-        let mut config = base_grep_config(root.path());
-        config.max_count = Some(4);
-        config.max_count_per_file = Some(2);
-
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("directory grep should succeed");
-
-        let paths: Vec<&str> = result
-            .matches
-            .iter()
-            .map(|matched| matched.path.as_str())
-            .collect();
-        assert_eq!(
-            paths,
-            ["a.txt", "a.txt", "z.txt"],
-            "hot file must not starve later files"
-        );
-        assert_eq!(result.files_with_matches, 2);
-        assert_eq!(result.limit_reached, Some(true));
-    }
-
-    #[cfg(unix)]
-    fn content_search_params(
-        max_count: u64,
-        max_count_per_file: Option<u64>,
-    ) -> super::SearchParams {
+    fn content_search_params(max_count: u64) -> super::SearchParams {
         super::SearchParams {
             context_before: 0,
             context_after: 0,
             max_columns: None,
             mode: super::OutputMode::Content,
             max_count: Some(max_count),
-            max_count_per_file,
             offset: 0,
             multiline: false,
         }
@@ -2720,7 +2606,6 @@ mod tests {
             max_columns: None,
             mode,
             max_count: None,
-            max_count_per_file: None,
             offset: 0,
             multiline: false,
         }
@@ -2850,12 +2735,12 @@ mod tests {
 
         super::GrepResult {
             matches,
-            total_matches: crate::utils::clamp_u32(total_matches),
+            total_matches: u32::try_from(total_matches).unwrap_or(u32::MAX),
             files_with_matches,
             files_searched,
             limit_reached: limit_reached.then_some(true),
             skipped_oversized: (skipped_oversized > 0)
-                .then(|| crate::utils::clamp_u32(skipped_oversized)),
+                .then(|| u32::try_from(skipped_oversized).unwrap_or(u32::MAX)),
         }
     }
 
@@ -2875,7 +2760,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_content_matches_sequential_with_context_and_gitignore() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         populate_parallel_parity_tree(root.path());
         let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
         let params = unlimited_params(super::OutputMode::Content, 1);
@@ -2904,7 +2789,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_count_and_files_modes_match_sequential_reference() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         populate_parallel_parity_tree(root.path());
 
         for (mode, output_mode) in [
@@ -2918,7 +2803,7 @@ mod tests {
             config.gitignore = Some(true);
             config.mode = Some(output_mode);
 
-            let actual = grep_sync(config, None, task::CancelToken::default())
+            let actual = grep_sync(config, task::CancelToken::default())
                 .expect("parallel grep should succeed");
             let expected = sequential_reference_result(root.path(), unlimited_params(mode, 0));
 
@@ -2929,7 +2814,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_type_filter_limits_search_to_matching_extensions() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let mut expected = Vec::new();
         for index in 0..150 {
             let source = format!("dir_{:02}/source_{index:03}.rs", index % 6);
@@ -2947,8 +2832,8 @@ mod tests {
         let mut config = base_grep_config(root.path());
         config.type_filter = Some("rs".to_string());
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("parallel grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("parallel grep should succeed");
         let paths: Vec<&str> = result
             .matches
             .iter()
@@ -2963,7 +2848,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_large_budget_stops_walking_before_scanning_tree() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let file_count = 3_000;
         for index in 0..file_count {
             write_file(&root.path().join(format!("{index:04}.txt")), "needle\n");
@@ -2972,8 +2857,8 @@ mod tests {
         let mut config = base_grep_config(root.path());
         config.max_count = Some(100);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("parallel grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("parallel grep should succeed");
 
         assert_eq!(result.limit_reached, Some(true));
         assert_eq!(result.matches.len(), 100);
@@ -2989,7 +2874,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_defers_oversized_results_until_after_normal_results() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_oversized_file(&root.path().join("000_big.txt"), "needle big 0\n");
         write_oversized_file(&root.path().join("001_big.txt"), "needle big 1\n");
         for index in 0..300 {
@@ -2999,12 +2884,8 @@ mod tests {
             );
         }
 
-        let result = grep_sync(
-            base_grep_config(root.path()),
-            None,
-            task::CancelToken::default(),
-        )
-        .expect("parallel grep should succeed");
+        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+            .expect("parallel grep should succeed");
         let paths: Vec<&str> = result
             .matches
             .iter()
@@ -3020,14 +2901,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parallel_streaming_respects_cancelled_token_mid_walk() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         for index in 0..1_000 {
             write_file(&root.path().join(format!("{index:04}.txt")), "needle\n");
         }
 
         let ct = task::CancelToken::new(Some(1), None);
         std::thread::sleep(Duration::from_millis(5));
-        let result = grep_sync(base_grep_config(root.path()), None, ct);
+        let result = grep_sync(base_grep_config(root.path()), ct);
 
         let Err(err) = result else {
             panic!("cancelled parallel grep should fail before returning matches");
@@ -3041,11 +2922,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn streaming_grep_stops_after_first_page_content_budget() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("a.txt"), "needle a1\nneedle a2\n");
         write_file(&root.path().join("z.txt"), "needle z\n");
         let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
-        let params = content_search_params(1, None);
+        let params = content_search_params(1);
 
         let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
             super::GrepScope {
@@ -3067,41 +2948,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn streaming_grep_budget_counts_returned_matches_under_per_file_cap() {
-        let root = TempDirGuard::new();
-        write_file(&root.path().join("a.txt"), "needle a1\nneedle a2\n");
-        write_file(&root.path().join("b.txt"), "needle b1\nneedle b2\n");
-        write_file(&root.path().join("c.txt"), "needle c1\nneedle c2\n");
-        let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
-        let params = content_search_params(3, Some(1));
-
-        let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
-            super::GrepScope {
-                use_gitignore: false,
-                ..test_scope(root.path())
-            },
-            &matcher,
-            params,
-            &task::CancelToken::default(),
-        )
-        .expect("streaming grep should succeed");
-
-        assert_eq!(skipped_oversized, 0);
-        assert_eq!(files_searched, 3);
-        assert_eq!(results.len(), 3);
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.matches.len())
-                .sum::<usize>(),
-            3
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn streaming_grep_quits_parallel_after_large_budget() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let budget = super::ORDERED_STREAMING_STOP_MAX_COUNT + 1;
         let file_count = super::GREP_STREAM_WINDOW * 3;
         let expected_paths: Vec<String> = (0..file_count)
@@ -3111,7 +2959,7 @@ mod tests {
             write_file(&root.path().join(path), "needle\n");
         }
         let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
-        let params = content_search_params(budget, None);
+        let params = content_search_params(budget);
 
         let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
             super::GrepScope {
@@ -3183,13 +3031,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn windowed_streaming_skips_oversized_when_normal_matches_satisfy_budget() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let normal_paths = populate_windowed_oversized_tree(root.path());
         let mut config = base_grep_config(root.path());
         config.max_count = Some(65);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("windowed grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("windowed grep should succeed");
         let paths: Vec<&str> = result
             .matches
             .iter()
@@ -3212,13 +3060,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn windowed_streaming_emits_deferred_oversized_after_normals_when_budget_remains() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let normal_paths = populate_windowed_oversized_tree(root.path());
         let mut config = base_grep_config(root.path());
         config.max_count = Some(100);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("windowed grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("windowed grep should succeed");
         let paths: Vec<&str> = result
             .matches
             .iter()
@@ -3235,15 +3083,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn oversized_file_is_searched_over_its_prefix_window() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_oversized_file(&root.path().join("big.txt"), "needle\n");
 
-        let result = grep_sync(
-            base_grep_config(root.path()),
-            None,
-            task::CancelToken::default(),
-        )
-        .expect("directory grep should succeed");
+        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         // Match in the leading window is found; the file is counted as searched,
         // not skipped.
@@ -3257,7 +3101,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn oversized_prefix_read_returns_stable_snapshot_after_rewrite() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let path = root.path().join("big.txt");
         let prefix_len = usize::try_from(super::MAX_FILE_BYTES).expect("MAX_FILE_BYTES fits usize");
         let oversized_len = prefix_len + 1024;
@@ -3279,18 +3123,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn oversized_results_follow_normal_results_regardless_of_path_order() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         // `a_big.txt` sorts before `z_small.txt` lexically, but as an oversized
         // file it must still be emitted after the normal-sized file.
         write_oversized_file(&root.path().join("a_big.txt"), "needle\n");
         write_file(&root.path().join("z_small.txt"), "needle\n");
 
-        let result = grep_sync(
-            base_grep_config(root.path()),
-            None,
-            task::CancelToken::default(),
-        )
-        .expect("directory grep should succeed");
+        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         let paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(
@@ -3304,7 +3144,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn oversized_pass_skipped_when_budget_satisfied_by_normal_files() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         write_file(&root.path().join("small.txt"), "needle\n");
         write_oversized_file(&root.path().join("big.txt"), "needle\n");
 
@@ -3313,8 +3153,8 @@ mod tests {
         let mut config = base_grep_config(root.path());
         config.max_count = Some(1);
 
-        let result = grep_sync(config, None, task::CancelToken::default())
-            .expect("directory grep should succeed");
+        let result =
+            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(
             result.total_matches, 1,
@@ -3328,11 +3168,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn single_oversized_target_searches_prefix() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-grep-test");
         let big = root.path().join("big.txt");
         write_oversized_file(&big, "needle\n");
 
-        let result = grep_sync(base_grep_config(&big), None, task::CancelToken::default())
+        let result = grep_sync(base_grep_config(&big), task::CancelToken::default())
             .expect("single-file grep should succeed");
 
         assert_eq!(result.total_matches, 1);

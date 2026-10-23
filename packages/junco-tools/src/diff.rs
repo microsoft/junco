@@ -29,7 +29,7 @@ use crate::{
 const LF: u16 = 0x000a;
 
 /// One jsdiff change object: a run of added, removed, or common tokens.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct DiffChange {
     /// Joined token text for this run (lines keep their `\n` terminators).
     pub value: Utf16String,
@@ -53,7 +53,7 @@ pub struct DiffRun {
 }
 
 /// One hunk of a unified diff, matching jsdiff `structuredPatch` hunks.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct PatchHunk {
     /// 1-based first line of the hunk in the old text.
     pub old_start: u32,
@@ -98,7 +98,7 @@ pub struct DiffStreamProgress {
 }
 
 /// Exact line-diff output produced when a [`DiffStream`] finishes.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct DiffStreamResult {
     /// Line-token Myers runs used to align the complete files.
     pub runs: Vec<DiffRun>,

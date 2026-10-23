@@ -17,7 +17,7 @@ import type { Policy } from "./policy.js";
 import { ReadTool } from "./read.js";
 import { ReleaseTool } from "./release.js";
 import { ShellMuxLease } from "./shell-mux.js";
-import { resolveToolPath } from "./tool-support.js";
+import { resolveToolPath, trackPromise } from "./tool-support.js";
 
 export interface ToolCollectionOptions {
   bash?: BashToolOptions;
@@ -142,12 +142,8 @@ export class ToolCollection {
       const signal = args[2];
       args[2] = signal ? AbortSignal.any([signal, abort]) : abort;
       const invocation = execute.apply(tool, args);
-      for (const set of [this.#invocations, own]) {
-        set.add(invocation);
-        const settled = () => set.delete(invocation);
-        invocation.then(settled, settled);
-      }
-      return invocation;
+      trackPromise(own, invocation);
+      return trackPromise(this.#invocations, invocation);
     };
   }
 

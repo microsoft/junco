@@ -84,9 +84,9 @@ export type CodeRegistration = {
   readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
 };
 /** Definition keyed by the code node's id in the workflow config. */
-export interface DeterministicNode<C = unknown> {
-  create(context: CodeContext<C>): CodeRegistration | Promise<CodeRegistration>;
-}
+export type DeterministicNode<C = unknown> = (
+  context: CodeContext<C>,
+) => CodeRegistration | Promise<CodeRegistration>;
 export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   readonly scheduler: (
@@ -566,7 +566,7 @@ async function buildGraph(
       });
       c.partialRoots.delete(child.graph);
     } else if (node.kind === "code") {
-      const created = await c.options.code![id]!.create({
+      const created = await c.options.code![id]!({
         graph: g,
         label,
         node: id,
@@ -748,7 +748,8 @@ export async function build<C = unknown>(
   ): Promise<Execution> => {
     try {
       const c: Construction = {
-        options,
+        // Code nodes receive exactly this build's `context`, so erasing `C` is sound.
+        options: options as BuildOptions,
         policy,
         collection,
         profiled,

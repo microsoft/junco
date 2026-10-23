@@ -10,11 +10,11 @@ const fixturePrefix = fileURLToPath(
   new URL("../target/bash-test-", import.meta.url),
 );
 
-export const text = (result) =>
+export const text = (result, separator = "\n") =>
   result.content
     .filter((part) => part.type === "text")
     .map((part) => part.text)
-    .join("\n");
+    .join(separator);
 
 export const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -258,22 +258,13 @@ export function collector(onOutput) {
 
 /** A promise resolved by observed output and rejected when `signal` aborts. */
 export function deferred(signal, label = "fixture wait") {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolveFn, rejectFn) => {
-    resolve = resolveFn;
-    reject = rejectFn;
-  });
+  const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
   const onAbort = () =>
     reject(new Error(`${label} aborted before it was satisfied`));
   if (signal?.aborted) onAbort();
   else signal?.addEventListener("abort", onAbort, { once: true });
-  return {
-    promise,
-    resolve: (value) => resolve(value),
-    reject: (error) => reject(error),
-  };
+  return { promise, resolve, reject };
 }
 
 /** Create the gate file that releases a `heldChild`. */

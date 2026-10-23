@@ -1,0 +1,1 @@
+export function quote(value: string): string;

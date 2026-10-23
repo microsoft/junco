@@ -25,7 +25,9 @@ use pi_edit::text::{normalize_to_lf, strip_bom};
 use pi_edit::{EditError, EditResult, FileOp};
 
 use crate::NativeMux;
-use crate::ast::{self, AstFindOptions, AstFindResult, AstReplaceOptions, AstReplaceResult};
+use crate::ast::{
+    self, AstApplyOptions, AstFindOptions, AstFindResult, AstReplaceOptions, AstReplaceResult,
+};
 use crate::edit::{EditApplyOutcome, EditFileOutcome, EditPolicy, EditStore};
 use crate::glob::{self, GlobOptions, GlobResult};
 use crate::grep::{self, GrepOptions, GrepResult};
@@ -360,7 +362,7 @@ impl NativeMux {
                     let root = view.physical(&root)?;
                     utf8(&root)?.clone_into(&mut config.path);
                     let mut result =
-                        grep::grep_sync(config, None, ct).map_err(|error| view.error(error))?;
+                        grep::grep_sync(config, ct).map_err(|error| view.error(error))?;
                     let mut read = HashSet::new();
                     let mut files = Vec::new();
                     for entry in &mut result.matches {
@@ -464,8 +466,9 @@ impl NativeMux {
             routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let view = View::new(ctx, &seed)?;
                 spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
-                let mut persist =
-                    |path: &Path, output: &str| replace_file(ctx, &view.logical(path), output);
+                let mut persist = |path: &Path, output: &str| {
+                    replace_file(ctx, &view.logical(path), output.as_bytes())
+                };
                 let mut result = spec
                     .run(ct, &mut persist)
                     .map_err(|error| view.error(error))?;
@@ -481,6 +484,47 @@ impl NativeMux {
                     }
                 }
                 Ok(result)
+            }),
+            resolve,
+        )
+    }
+
+    /// A routed line-edit apply under `cwd`: every file is preflighted (baseline hash, lexical
+    /// path, regular file, before-lines) before any write; then each path is released so a fresh
+    /// owner may take it.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn ast_apply<'env>(
+        &self,
+        env: &'env Env,
+        cwd: String,
+        options: AstApplyOptions<'env>,
+    ) -> Result<PromiseRaw<'env, Vec<String>>> {
+        let (spec, ct) = ast::prepare_apply(options);
+        let root = PathBuf::from(&cwd);
+        let tool = JuncoTool::AstEdit {
+            root: root.clone(),
+            apply: true,
+        };
+        let session = Arc::clone(&self.session);
+        let seed = session.seed().to_path_buf();
+        env.spawn_future_with_callback(
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
+                let view = View::new(ctx, &seed)?;
+                let root = view.physical(&root)?;
+                let mut persist = |path: &Path, bytes: &[u8]| {
+                    if let Some(parent) = path.parent().filter(|parent| !parent.is_dir()) {
+                        ctx.create_dir_all(&view.logical(parent))?;
+                    }
+                    replace_file(ctx, &view.logical(path), bytes)
+                };
+                let files = spec
+                    .run(ct, &root, &mut persist)
+                    .map_err(|error| view.error(error))?;
+                for file in &files {
+                    ctx.release(&view.logical(&root.join(file)))
+                        .map_err(|error| view.text(error.to_string()))?;
+                }
+                Ok(files)
             }),
             resolve,
         )
@@ -568,7 +612,7 @@ impl NativeMux {
 
 /// Replaces `path` (as callers name it) with `content` through the call's context, so that on the
 /// managed route the write is the call's evidence.
-fn replace_file(ctx: &BuiltinContext, path: &Path, content: &str) -> std::io::Result<()> {
+fn replace_file(ctx: &BuiltinContext, path: &Path, content: &[u8]) -> std::io::Result<()> {
     ctx.open(
         path,
         std::fs::OpenOptions::new()
@@ -576,7 +620,7 @@ fn replace_file(ctx: &BuiltinContext, path: &Path, content: &str) -> std::io::Re
             .create(true)
             .truncate(true),
     )?
-    .write_all(content.as_bytes())
+    .write_all(content)
 }
 
 /// One hashline edit call, applied inside its call's view.
@@ -771,7 +815,7 @@ impl FsWriter<'_> {
             let source = self.touch(&request.absolute);
             let destination = self.touch(destination);
             self.create_parent(&destination).map_err(failed)?;
-            replace_file(self.ctx, &destination, &content).map_err(failed)?;
+            replace_file(self.ctx, &destination, content.as_bytes()).map_err(failed)?;
             self.ctx.remove_file(&source).map_err(failed)?;
             return Ok(content);
         }
@@ -792,7 +836,7 @@ impl FsWriter<'_> {
                 if request.op == FileOp::Create {
                     self.create_parent(&path).map_err(failed)?;
                 }
-                replace_file(self.ctx, &path, &content).map_err(failed)?;
+                replace_file(self.ctx, &path, content.as_bytes()).map_err(failed)?;
                 Ok(content)
             }
             FileOp::Noop => Err(EditError::Writer(

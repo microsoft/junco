@@ -5,16 +5,12 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
-  type Context,
-  createModels,
+  contentText,
   type FauxProviderHandle,
   type FauxResponseFactory,
   type FauxResponseStep,
   fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
   InMemoryCredentialStore,
-  type ToolCall,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
@@ -44,6 +40,14 @@ import { pi, type SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
 
+import {
+  type Plan,
+  runAvailable,
+  scheduleCall,
+  schedulerRequestOf,
+  scripted,
+  toolTurn,
+} from "../packages/junco-scheduler/test/support.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
 export type AgencyContext = SchedulerContext<
@@ -54,34 +58,12 @@ export type AgencyContext = SchedulerContext<
   JuncoGraph<AgenticInput, AssistantMessage>
 >;
 
-// Every real agent has an in-memory session; scheduler requests are stateless snapshots.
-let providers = 0;
-
-/** A faux model serving `responses` in order. */
-export function scripted(responses: readonly FauxResponseStep[] = []) {
-  const name = `faux-${++providers}`;
-  const faux = fauxProvider({
-    api: name,
-    provider: name,
-    tokenSize: { min: 4, max: 4 },
-  });
-  faux.setResponses([...responses]);
-  const models = createModels();
-  models.setProvider(faux.provider);
-  return { faux, models, model: faux.getModel() };
-}
-
 /** A `ModelRuntime` with a saved login for a faux `provider` serving `responses` in order. */
 export async function fauxRuntime(
   responses: readonly FauxResponseStep[],
   provider = "faux",
 ) {
-  const faux = fauxProvider({
-    api: provider,
-    provider,
-    tokenSize: { min: 4, max: 4 },
-  });
-  faux.setResponses([...responses]);
+  const { faux } = scripted(responses, provider);
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(provider, async () => ({
     type: "api_key",
@@ -96,10 +78,6 @@ export async function fauxRuntime(
   models.registerNativeProvider(faux.provider);
   return { models, faux };
 }
-
-/** A faux assistant turn calling `calls`. */
-export const toolTurn = (...calls: ToolCall[]) =>
-  fauxAssistantMessage(calls, { stopReason: "toolUse" });
 
 /** Native options over `responses` with a fresh in-memory session, under `LockPolicy`. */
 export async function nativeOptions(
@@ -180,35 +158,8 @@ export function waitingTool(
   };
 }
 
-/** The typed snapshot appended to the model request. */
-export function schedulerRequestOf(
-  context: Context,
-): SchedulerRequest<AgencyNodeMetadata> {
-  for (let index = context.messages.length - 1; index >= 0; index--) {
-    const message = context.messages[index]!;
-    if (message.role !== "user") continue;
-    const content =
-      typeof message.content === "string"
-        ? message.content
-        : message.content
-            .map((block) => (block.type === "text" ? block.text : ""))
-            .join("");
-    if (content.startsWith("SchedulerSnapshot:\n")) {
-      return JSON.parse(
-        content.slice("SchedulerSnapshot:\n".length),
-      ) as SchedulerRequest<AgencyNodeMetadata>;
-    }
-  }
-  throw new Error("request carries no SchedulerSnapshot");
-}
-
-export type Decision = { readonly waves: readonly (readonly string[])[] };
-
-export const runAvailable = (
-  request: SchedulerRequest<AgencyNodeMetadata>,
-): Decision => ({
-  waves: [request.nodes.map((node) => node.id)],
-});
+export { runAvailable, scheduleCall, schedulerRequestOf, scripted, toolTurn };
+export type Decision = Plan;
 
 export function schedulerModel(
   decide: (
@@ -220,7 +171,10 @@ export function schedulerModel(
   const decisions: Decision[] = [];
   const respond: FauxResponseFactory = (context) => {
     faux.appendResponses([respond]);
-    const decision = decide(schedulerRequestOf(context), decisions.length);
+    const decision = decide(
+      schedulerRequestOf<AgencyNodeMetadata>(context),
+      decisions.length,
+    );
     decisions.push(decision);
     return fauxAssistantMessage(
       [scheduleCall(decision.waves, `schedule-${decisions.length}`)],
@@ -230,11 +184,6 @@ export function schedulerModel(
   faux.setResponses([respond]);
   return { faux, models, model, decisions };
 }
-
-export const scheduleCall = (
-  waves: readonly (readonly string[])[],
-  id: string,
-) => fauxToolCall("schedule", { waves }, { id });
 
 export type Script =
   | ((request: SchedulerRequest<AgencyNodeMetadata>, index: number) => Decision)
@@ -287,9 +236,7 @@ export async function drive(agentic: JuncoAgentProtocol): Promise<AgenticStep> {
 export function settledText(step: AgenticStep): string {
   if (step.kind !== "settled")
     throw new Error(`expected a settled step, got ${step.kind}`);
-  return step.message.content
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("");
+  return contentText(step.message.content, "");
 }
 
 /** Let queued work run; used only to show that nothing progressed, never to wait for progress. */

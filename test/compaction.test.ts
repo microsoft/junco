@@ -39,6 +39,7 @@ import {
   userTexts,
   yieldsThen,
 } from "./deterministic-support.ts";
+import { flushMacrotasks } from "./support.ts";
 
 // Graph compaction policies over real dataflow graphs of MockAgent members whose scripted
 // compaction replaces history with `user("x")` (one token). Every model has a 100-token window.
@@ -93,9 +94,6 @@ const node = (agent: MockAgent, id: string) => ({
   description: id,
   trigger: TriggerRule.always(),
 });
-
-const flushMacrotask = () =>
-  new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
  * Available a=40, b=41, f=20; c=39 with an unsatisfied trigger; d=70 whose availability rejects;
@@ -171,7 +169,7 @@ describe("policy selection", () => {
           ),
         ),
       );
-      assert.equal(await graph.compact(name), undefined);
+      assert.equal(await JuncoGraph.compact(graph, name), undefined);
 
       for (const [key, agent] of Object.entries(agents)) {
         const changed = expected.includes(key);
@@ -410,7 +408,7 @@ describe("policy boundaries", () => {
     }
     const compaction = JuncoGraph.compact(graph, "all");
     void compaction.catch(() => undefined);
-    await flushMacrotask();
+    await flushMacrotasks();
     assert.equal(await idle.context_size(), 1);
     assert.equal(held.status, "suspended");
     assert.deepEqual(userTexts(held.history), ["t".repeat(200), "hold"]);

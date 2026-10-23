@@ -1,6 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Static, type TSchema, Type } from "typebox";
-import { Value } from "typebox/value";
+import { type Static, Type } from "typebox";
+import { checkToolInput } from "./tool-support.js";
 
 const nonBlank = (description: string) =>
   Type.String({ pattern: "\\S", description });
@@ -175,7 +175,7 @@ export const AssignedTaskTool: new (input: TaskInput) => AssignedTaskTool =
     };
 
     constructor(input: TaskInput) {
-      const batch = detach(check(launchSchema, input));
+      const batch = detach(checkToolInput("task", launchSchema, input));
       const count = batch.tasks.length;
       this.description =
         `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
@@ -209,14 +209,6 @@ export function invokeTaskTool(
   return admit(tool, host, toolCallId, input, signal);
 }
 
-function check<S extends TSchema>(schema: S, input: unknown): Static<S> {
-  if (Value.Check(schema, input)) return input;
-  const [error] = Value.Errors(schema, input);
-  throw new Error(
-    `Invalid task input${error ? `: ${error.instancePath} ${error.message}` : ""}`,
-  );
-}
-
 /** A detached snapshot: later caller mutation cannot change what a host admits. */
 function detach(input: TaskInput): TaskInput {
   return {
@@ -240,12 +232,17 @@ function detach(input: TaskInput): TaskInput {
 /** The request `input` makes of `tool`'s host. */
 function requestOf(tool: object, input: unknown): TaskRequest {
   if (typeof input === "object" && input !== null && "action" in input) {
-    const { action, id, attempt } = check(decisionSchema, input);
+    const { action, id, attempt } = checkToolInput(
+      "task",
+      decisionSchema,
+      input,
+    );
     return { action, id, attempt };
   }
   const assigned = assignedInputs.get(tool);
-  if (assigned === undefined) return detach(check(launchSchema, input));
-  check(triggerSchema, input);
+  if (assigned === undefined)
+    return detach(checkToolInput("task", launchSchema, input));
+  checkToolInput("task", triggerSchema, input);
   return detach(assigned);
 }
 

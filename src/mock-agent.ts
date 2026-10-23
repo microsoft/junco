@@ -44,8 +44,10 @@ import {
   type AgenticStep,
   JuncoAgentError,
   type Agentic as JuncoAgentProtocol,
+  resolveStagedPrompt,
+  validateActiveTools,
 } from "junco-agent";
-import { type Contract, type Issue, issueLog } from "junco-tools";
+import { type Contract, type Issue, issueLog, trackPromise } from "junco-tools";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
 // Hook outcomes and maintenance results come from typed records; the iterator, admission, queue,
@@ -215,45 +217,6 @@ export const NO_USAGE: ProfileSet = constantProfiles({
   memory: bytes(0),
   tokens: tokens(0),
 });
-
-function track<R>(
-  pending: Set<Promise<unknown>>,
-  promise: Promise<R>,
-): Promise<R> {
-  pending.add(promise);
-  const settled = () => pending.delete(promise);
-  promise.then(settled, settled);
-  return promise;
-}
-
-function validateActiveTools(
-  tools: readonly AgentTool[],
-  names: readonly string[],
-): void {
-  const available = new Set<string>();
-  for (const tool of tools) {
-    if (available.has(tool.name))
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Duplicate tool name: ${tool.name}`,
-      );
-    available.add(tool.name);
-  }
-  const active = new Set<string>();
-  for (const name of names) {
-    if (active.has(name))
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Duplicate active tool: ${name}`,
-      );
-    if (!available.has(name))
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Unknown active tool: ${name}`,
-      );
-    active.add(name);
-  }
-}
 
 function validateRun(run: MockRun): void {
   const { frames } = run;
@@ -536,9 +499,9 @@ export class MockAgent<
     this.#history.push(...this.#nextTurn.splice(0), prompt);
     const run = new RunRecord();
     this.#run = run;
-    const settlement = track(
+    const settlement = trackPromise(
       this.#operations,
-      track(this.#drives, this.#drive(run, script)),
+      trackPromise(this.#drives, this.#drive(run, script)),
     );
     settlement.then(
       (message) => this.#settle(run, { kind: "settled", message }),
@@ -678,7 +641,7 @@ export class MockAgent<
   #operation<R>(start: () => Promise<R>): Promise<R> {
     if (this.#closing) return Promise.reject(closedError());
     try {
-      return track(this.#operations, start());
+      return trackPromise(this.#operations, start());
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1009,7 +972,7 @@ export class MockAgent<
       if (failure !== undefined) throw failure.error;
       return { clearedSteer, clearedFollowUp };
     })();
-    return track(
+    return trackPromise(
       this.#operations,
       joined.finally(() => {
         this.#aborting = false;
@@ -1080,28 +1043,14 @@ export class MockAgent<
           });
         } else {
           // A function reads, without draining, the graph view of this `next`.
-          let prompt: unknown = text;
+          let prompt: string;
           try {
-            if (typeof text === "function") {
-              if (demand.inputs === undefined)
-                throw new JuncoAgentError(
-                  "invalid_state",
-                  "A prompt function requires ParentView inputs",
-                );
-              prompt = text(demand.inputs);
-              if (typeof prompt !== "string")
-                throw new JuncoAgentError(
-                  "invalid_argument",
-                  "A prompt function must return a string",
-                );
-            }
+            prompt = resolveStagedPrompt(text, demand.inputs);
           } catch (error) {
             this.#publish({ step: { kind: "failed", error } });
             return;
           }
-          void this.#admit(this.#user(prompt as string, images)).catch(
-            () => {},
-          );
+          void this.#admit(this.#user(prompt, images)).catch(() => {});
         }
       }
       return;

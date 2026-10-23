@@ -323,14 +323,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -609,14 +601,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -883,14 +867,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -1185,14 +1161,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -1471,14 +1439,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -1745,14 +1705,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -2047,14 +1999,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -2333,14 +2277,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false
@@ -2607,14 +2543,6 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1.7976931348623157e+308
-                    },
-                    "shape": {
-                      "type": "array",
-                      "items": {
-                        "type": "number",
-                        "minimum": -1.7976931348623157e+308,
-                        "maximum": 1.7976931348623157e+308
-                      }
                     }
                   },
                   "additionalProperties": false

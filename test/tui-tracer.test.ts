@@ -4,6 +4,7 @@ import { appendFileSync, readFileSync, watch } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { quote } from "../packages/junco-tools/tests/helpers.mjs";
 import { withNativeCleanup } from "./native-support.ts";
 
 const root = join(import.meta.dir, "..");
@@ -307,7 +308,6 @@ async function openPty(
     notify();
   };
   const watcher = watch(stateFile, readPhases);
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const command = `stty rows 30 cols ${width}; exec ${quote(process.execPath)} run test/tui-tracer.fixture.ts ${flags.map(quote).join(" ")}`;
   const child = Bun.spawn(
     ["script", "--quiet", "--return", "--command", command, "/dev/null"],

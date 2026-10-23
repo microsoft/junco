@@ -41,7 +41,6 @@ const profile = Type.Union(RESOURCE_KINDS.map(resource => Type.Object({
   }, strict),
   range: Type.Array(Type.Tuple([nonnegative(), nonnegative()])),
   bound: nonnegative(),
-  shape: Type.Optional(Type.Array(finite())),
 }, strict)));
 
 export const ProfilesFileSchema = Type.Object({

@@ -12,7 +12,7 @@ import { NodeId, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { type AgenticOptions, JuncoAgent } from "junco-agent";
 import { LockPolicy } from "junco-tools";
-import { LspTool, tools } from "../src/index.ts";
+import { tools } from "../src/index.ts";
 import { resultText, terminalPorts } from "./deterministic-support.ts";
 import {
   type AgencyContext,
@@ -355,7 +355,7 @@ test(
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "junco-agency-lsp-"));
     try {
-      const lsp = await LspTool.create(directory, { readOnly: true });
+      const lsp = await tools.LspTool.create(directory, { readOnly: true });
       try {
         let status: ToolResultMessage | undefined;
         let failure: ToolResultMessage | undefined;
@@ -452,15 +452,15 @@ test(
           assert.equal(error.name, "ToolError", action);
         }
 
-        await LspTool.shutdown();
-        await LspTool.shutdown();
+        await tools.LspTool.shutdown();
+        await tools.LspTool.shutdown();
         const again = await tools.LspTool.create(directory, { readOnly: true });
         const restarted = await again.execute("restarted-status", {
           action: "status",
         });
         assert.equal(restarted.details?.success, true);
       } finally {
-        await LspTool.shutdown();
+        await tools.LspTool.shutdown();
       }
     } finally {
       await rm(directory, { recursive: true, force: true });

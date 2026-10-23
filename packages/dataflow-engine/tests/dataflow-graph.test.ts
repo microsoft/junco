@@ -41,15 +41,12 @@ import {
   UNBOUNDED,
   Width,
 } from "../src/index.ts";
+import { queued } from "./support.ts";
 
 type Graph = DataflowGraph<void, number, string, never>;
 
 const newGraph = (): Graph =>
   new DataflowGraph<void, number, string, never>(Width.create(1), UNBOUNDED);
-
-/** The live backlog still queued on `edge`, for asserting what a firing did and did not consume. */
-const queued = (edge: Edge<number, string>): readonly number[] =>
-  E.isLeft(edge.transport) ? [...edge.transport.left] : [];
 
 /** Read `count` off every edge named by the candidate's trigger. */
 const fixedReader =

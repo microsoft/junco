@@ -45,39 +45,35 @@ type VerusRoundContext = {
 };
 
 /** Validate the translation and sample diagnostics before the persistent Reviewer starts. */
-const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = {
-  create({ policy, context }) {
-    return {
-      state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
-        const inputs = yield [];
-        signal.throwIfAborted();
-        const message = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
-        const report = syntax.finalText(message, "Verifier");
-        context.reviewerBaseline = context.verification.runs();
-        context.members.Reviewer.stagePrompt(context.assignment + `Current Verifier report (evidence):\n${report}\n\nInspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.`);
-        return message!;
-      }, policy),
-    };
-  },
+const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
+  return {
+    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+      const inputs = yield [];
+      signal.throwIfAborted();
+      const message = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
+      const report = syntax.finalText(message, "Verifier");
+      context.reviewerBaseline = context.verification.runs();
+      context.members.Reviewer.stagePrompt(context.assignment + `Current Verifier report (evidence):\n${report}\n\nInspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.`);
+      return message!;
+    }, policy),
+  };
 };
 
 /** Cleanup is admitted only after a complete review and fresh Reviewer diagnostics. */
-const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = {
-  create({ policy, context }) {
-    return {
-      state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
-        const inputs = yield [];
-        signal.throwIfAborted();
-        const message = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
-        const report = syntax.finalText(message, "Reviewer");
-        if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline) {
-          throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
-        }
-        context.members.Cleanup.stagePrompt(context.assignment + `Current Reviewer report (evidence):\n${report}\n\nSimplify real source/proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.`);
-        return message!;
-      }, policy),
-    };
-  },
+const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
+  return {
+    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+      const inputs = yield [];
+      signal.throwIfAborted();
+      const message = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
+      const report = syntax.finalText(message, "Reviewer");
+      if (context.reviewerBaseline === undefined || context.verification.runs() <= context.reviewerBaseline) {
+        throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
+      }
+      context.members.Cleanup.stagePrompt(context.assignment + `Current Reviewer report (evidence):\n${report}\n\nSimplify real source/proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.`);
+      return message!;
+    }, policy),
+  };
 };
 
 const errorCode = (error: unknown): unknown => error instanceof Error && "code" in error ? error.code : undefined;

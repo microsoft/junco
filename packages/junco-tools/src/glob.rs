@@ -2,9 +2,8 @@
 //! caching.
 //!
 //! # Overview
-//! Resolves a search root, scans entries via `pi-walker`, applies glob matching
-//! plus optional file-type filtering, and optionally streams each accepted
-//! match through a callback.
+//! Resolves a search root, scans entries via `pi-walker`, and applies glob
+//! matching plus optional file-type filtering.
 //!
 //! The walker always skips `.git`, and skips `node_modules` unless explicitly
 //! requested.
@@ -16,14 +15,10 @@
 
 use std::{cmp::Ordering, path::Path};
 
-use napi::{
-    bindgen_prelude::*,
-    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-};
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-// Re-export entry types so existing `glob::FileType` / `glob::GlobMatch` paths still work.
-pub use crate::iofs::{FileType, GlobMatch};
+use crate::iofs::{FileType, GlobMatch};
 use crate::{glob_util, iofs, task};
 
 /// Input options for `glob`, including traversal, filtering, and cancellation.
@@ -165,12 +160,8 @@ fn collect_native_filtered_matches(
 }
 
 /// Executes walker-owned glob filtering plus optional native file-type
-/// filtering, then optionally streams each returned match.
-fn run_glob(
-    config: GlobConfig,
-    on_match: Option<&ThreadsafeFunction<GlobMatch>>,
-    ct: task::CancelToken,
-) -> Result<GlobResult> {
+/// filtering.
+fn run_glob(config: GlobConfig, ct: task::CancelToken) -> Result<GlobResult> {
     let walk_glob_pattern = glob_util::build_glob_pattern(&config.pattern, config.recursive);
     // Non-recursive patterns bound the walk: `dir/*` must not traverse the
     // entire subtree under `dir` to match only direct children.
@@ -223,26 +214,8 @@ fn run_glob(
         // truncation.
         matches.sort_by(compare_matches_by_rank);
         matches.truncate(config.max_results);
-        if let Some(callback) = on_match {
-            for matched_entry in &matches {
-                callback.call(
-                    Ok(matched_entry.clone()),
-                    ThreadsafeFunctionCallMode::NonBlocking,
-                );
-            }
-        }
     }
-    if !config.sort_by_mtime
-        && let Some(callback) = on_match
-    {
-        for matched_entry in &matches {
-            callback.call(
-                Ok(matched_entry.clone()),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        }
-    }
-    let total_matches = matches.len().min(u32::MAX as usize) as u32;
+    let total_matches = u32::try_from(matches.len()).unwrap_or(u32::MAX);
     Ok(GlobResult {
         matches,
         total_matches,
@@ -309,7 +282,6 @@ impl GlobSpec {
                 cache: cache.unwrap_or(false),
                 pattern,
             },
-            None,
             ct,
         )
     }
@@ -355,39 +327,9 @@ pub(crate) fn prepare(options: GlobOptions<'_>) -> (GlobSpec, task::CancelToken)
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDirGuard(PathBuf);
-
-    impl TempDirGuard {
-        fn new() -> Self {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time is after UNIX_EPOCH")
-                .as_nanos();
-            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("pi-glob-test-{timestamp}-{counter}"));
-            fs::create_dir_all(&path).expect("create temp test directory");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::TempDir;
 
     fn match_paths(result: &super::GlobResult) -> Vec<&str> {
         result
@@ -399,7 +341,7 @@ mod tests {
 
     #[test]
     fn run_glob_with_gitignore_prunes_ignored_directory_but_keeps_matching_sibling() {
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-glob-test");
         fs::create_dir_all(root.path().join(".git")).expect("create repo marker");
         fs::write(root.path().join(".gitignore"), "ignored/\n").expect("write gitignore");
         fs::create_dir_all(root.path().join("ignored")).expect("create ignored directory");
@@ -420,7 +362,6 @@ mod tests {
                 sort_by_mtime: false,
                 cache: false,
             },
-            None,
             crate::task::CancelToken::default(),
         )
         .expect("glob succeeds");
@@ -443,7 +384,7 @@ mod tests {
         // this defends the boundary: matches AT the bound depth must survive,
         // deeper entries must not appear, and the mtime-ranked mode (the glob
         // tool default) must behave identically to the streaming mode.
-        let root = TempDirGuard::new();
+        let root = TempDir::new("pi-glob-test");
         fs::write(root.path().join("top.txt"), "top").expect("write top file");
         fs::create_dir_all(root.path().join("deep/nested")).expect("create nested dirs");
         fs::write(root.path().join("deep/child.txt"), "mid").expect("write mid file");
@@ -463,7 +404,6 @@ mod tests {
                     sort_by_mtime: true,
                     cache: false,
                 },
-                None,
                 crate::task::CancelToken::default(),
             )
             .expect("glob succeeds")

@@ -19,10 +19,6 @@ import { context as nativeContext } from "junco-scheduler";
 import {
   agent,
   graph,
-  LspTool,
-  type LspToolDetails,
-  type LspToolInput,
-  type LspToolOptions,
   mcp,
   schedules,
   tools,
@@ -929,13 +925,13 @@ export async function lspToolTypesThroughBothRoutes(
   cwd: string,
   base: agent.AgenticOptions,
 ) {
-  const options: LspToolOptions = { readOnly: true };
+  const options: tools.LspToolOptions = { readOnly: true };
   const routedOptions: tools.LspToolOptions = { readOnly: false };
-  const flat: LspTool = await LspTool.create(cwd, options);
+  const flat: tools.LspTool = await tools.LspTool.create(cwd, options);
   const routed: tools.LspTool = await tools.LspTool.create(cwd, routedOptions);
-  const execute: LspTool["execute"] = flat.execute;
+  const execute: tools.LspTool["execute"] = flat.execute;
   const routedExecute: tools.LspTool["execute"] = routed.execute;
-  const status: LspToolInput = { action: "status" };
+  const status: tools.LspToolInput = { action: "status" };
   const diagnostics: tools.LspToolInput = {
     action: "diagnostics",
     file: "src/index.ts",
@@ -945,7 +941,7 @@ export async function lspToolTypesThroughBothRoutes(
     await execute("status-1", status),
     await routedExecute("diagnostics-1", diagnostics),
   ];
-  const details: (LspToolDetails | undefined)[] = results.map(
+  const details: (tools.LspToolDetails | undefined)[] = results.map(
     (result) => result.details,
   );
   const succeeded: boolean[] = details.map(
@@ -956,11 +952,11 @@ export async function lspToolTypesThroughBothRoutes(
     ...base,
     tools: [flat, routed],
   });
-  await LspTool.shutdown();
+  await tools.LspTool.shutdown();
   await tools.LspTool.shutdown();
 
   // @ts-expect-error an LSP action outside the upstream set is rejected
-  const unknownAction: LspToolInput = { action: "format" };
+  const unknownAction: tools.LspToolInput = { action: "format" };
   const textLine: tools.LspToolInput = {
     action: "hover",
     file: "a.ts",
@@ -969,7 +965,7 @@ export async function lspToolTypesThroughBothRoutes(
     symbol: "x",
   };
   // @ts-expect-error readOnly is a boolean
-  const textReadOnly: LspToolOptions = { readOnly: "yes" };
+  const textReadOnly: tools.LspToolOptions = { readOnly: "yes" };
   return [
     succeeded,
     routedDetails,
@@ -1029,7 +1025,7 @@ export async function mcpDefinitionsComposeWithAgentFactories(
   cwd: string,
   base: agent.AgenticOptions,
   tool: TaggedTool,
-  lsp: LspTool,
+  lsp: tools.LspTool,
   collection: tools.ToolCollection,
 ) {
   const server: mcp.JuncoMcpServerOptions = {

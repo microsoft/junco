@@ -7,7 +7,6 @@ import {
   Edge,
   EmitOnce,
   NodeId,
-  renderPretty,
   TriggerRule,
   UNBOUNDED,
   Width,
@@ -42,7 +41,7 @@ test("layout rectangles identify exact escaped labels, not drawing substrings", 
   g.addEdge(nodes[0]!, nodes[1]!, Edge.message("A"));
   g.addEdge(nodes[0]!, nodes[1]!, Edge.value("parallel"));
   g.addEdge(nodes[1]!, nodes[1]!, Edge.message("self"));
-  const [section] = renderTuiGraph(renderPretty(g));
+  const [section] = renderTuiGraph(g);
   assert.ok(section);
   assert.deepEqual(
     section.boxes.map((box) => box.id),
@@ -73,7 +72,7 @@ test("shared nested scopes, empty scopes and recursion retain preorder geometry"
   const rec = graph();
   add(rec, "Back", root);
   add(root, "Rec", rec);
-  const sections = renderTuiGraph(renderPretty(root));
+  const sections = renderTuiGraph(root);
   assert.deepEqual(
     sections.map((s) => s.path),
     [[], ["Left"], ["Right"], ["Empty"], ["Rec"], ["Rec", "Back"]],
@@ -82,12 +81,12 @@ test("shared nested scopes, empty scopes and recursion retain preorder geometry"
   assert.equal(sections[2]!.boxes[0]!.id, "A");
   assert.ok(sections[3]!.lines.join("\n").includes("(empty graph)"));
   assert.ok(sections[5]!.lines.join("\n").includes("(recursive reference)"));
-  assert.deepEqual(renderTuiGraph(""), [
+  assert.deepEqual(renderTuiGraph(graph()), [
     { path: [], lines: ["(empty graph)"], boxes: [] },
   ]);
 });
 
-test("long layouts restore library settings on success and validation failure", () => {
+test("long layouts restore library settings on success", () => {
   const g = graph();
   let previous = add(g, "node-0");
   for (let i = 1; i < 40; i++) {
@@ -100,15 +99,9 @@ test("long layouts restore library settings on success and validation failure", 
   mermaidAscii.setGraphDirection("LR");
   mermaidAscii.setUseAscii(true);
   try {
-    assert.equal(renderTuiGraph(renderPretty(g))[0]!.boxes.length, 40);
+    assert.equal(renderTuiGraph(g)[0]!.boxes.length, 40);
     assert.equal(mermaidAscii.graphDirection, "LR");
     assert.equal(mermaidAscii.useAscii, true);
-    assert.throws(() =>
-      renderTuiGraph('graph TD;\nn0["A"];\nn0 -->|"edge"| n1;'),
-    );
-    assert.equal(mermaidAscii.graphDirection, "LR");
-    assert.equal(mermaidAscii.useAscii, true);
-    assert.throws(() => renderTuiGraph('graph TD;\nn0["A"];\nn0["B"];'));
   } finally {
     mermaidAscii.setGraphDirection(direction);
     mermaidAscii.setUseAscii(ascii);

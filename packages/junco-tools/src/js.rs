@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "Transplanted verbatim from Oh My Pi pi-natives; junco's tools exercise a subset"
-)]
-
 //! Borrowing JavaScript strings at the N-API boundary.
 //!
 //! Node-API never hands out a pointer into a JS string's backing store: every
@@ -15,17 +10,10 @@
 //!
 //! [`utf16`] is the default: it is the JS string's own encoding, so it is the
 //! only accessor that never transcodes. [`utf8`] exists for algorithms that are
-//! byte- or `str`-shaped (terminal escape parsing, syntect, paths). Reach for
-//! [`into_string`] only when the text must outlive the N-API callback — a value
-//! moved into a worker task, a channel, or an async body.
-//! Short, bounded strings — ANSI colours, font names, language ids — skip the
-//! arena entirely: [`InlineStr`] decodes them into a fixed-size array that
-//! lives in the struct itself, so a whole options object crosses with no
-//! allocation.
+//! byte- or `str`-shaped (terminal escape parsing, syntect, paths).
 
 use std::{
     cell::{Cell, UnsafeCell},
-    fmt,
     ops::{Deref, Range},
     ptr::{self, NonNull},
     slice, str,
@@ -33,7 +21,7 @@ use std::{
 
 use napi::{
     Error, JsString, JsValue, Result, Status,
-    bindgen_prelude::{FromNapiValue, ToNapiValue, TypeName, ValidateNapiValue},
+    bindgen_prelude::{ToNapiValue, TypeName},
     sys,
 };
 
@@ -313,117 +301,6 @@ pub fn utf16_append(value: JsString<'_>, out: &mut Vec<u16>) -> Result<Range<usi
     Ok(start..out.len())
 }
 
-/// Copy `value` into an owned `String`.
-///
-/// Only for text that outlives the N-API callback: a worker task, a channel
-/// message, or an async body. Synchronous consumers must borrow instead.
-pub fn into_string(value: JsString<'_>) -> Result<String> {
-    let raw = value.value();
-    // SAFETY: `raw` is a validated JS string from the current callback.
-    unsafe { String::from_napi_value(raw.env, raw.value) }
-}
-
-/// A JS string decoded into a fixed-capacity inline buffer, no heap involved.
-///
-/// Holds `N` bytes with a `u8` length, so the whole value is `N + 1` bytes and
-/// an options struct full of them costs nothing to build. Node-API needs one
-/// byte for its NUL terminator, leaving [`Self::CAPACITY`] usable; longer input
-/// is a caller error rather than a silent truncation, so an escape sequence can
-/// never arrive half-copied.
-///
-/// Storage is UTF-8: every consumer of these values wants `&str`, and the
-/// inputs are ASCII, so this is the encoding that avoids a transcode at the
-/// point of use. Use [`utf16`] for text whose consumer works in code units.
-#[derive(Clone)]
-pub struct InlineStr<const N: usize>(heapless::Vec<u8, N, u8>);
-
-impl<const N: usize> InlineStr<N> {
-    /// Usable bytes, excluding the NUL slot Node-API requires.
-    pub const CAPACITY: usize = N - 1;
-
-    /// Build from Rust text, for tests and native-side defaults.
-    pub fn new(text: &str) -> Result<Self> {
-        if text.len() > Self::CAPACITY {
-            return Err(too_long(text.len(), Self::CAPACITY));
-        }
-        heapless::Vec::from_slice(text.as_bytes())
-            .map(Self)
-            .map_err(|_| too_long(text.len(), Self::CAPACITY))
-    }
-}
-
-fn too_long(len: usize, capacity: usize) -> Error {
-    Error::new(
-        Status::InvalidArg,
-        format!("string is {len} bytes, expected at most {capacity}"),
-    )
-}
-
-impl<const N: usize> Deref for InlineStr<N> {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        // SAFETY: both constructors validate the bytes as UTF-8 before storing
-        // them, and the buffer is immutable afterwards.
-        unsafe { str::from_utf8_unchecked(&self.0) }
-    }
-}
-
-impl<const N: usize> fmt::Debug for InlineStr<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
-    }
-}
-
-impl<const N: usize> TypeName for InlineStr<N> {
-    fn type_name() -> &'static str {
-        "String"
-    }
-
-    fn value_type() -> napi::ValueType {
-        napi::ValueType::String
-    }
-}
-
-impl<const N: usize> ValidateNapiValue for InlineStr<N> {}
-
-impl<const N: usize> FromNapiValue for InlineStr<N> {
-    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-        let mut len = 0;
-        // SAFETY: `napi_val` is a JS string owned by the live callback; a null
-        // buffer asks Node-API for the byte length only.
-        let status =
-            unsafe { sys::napi_get_value_string_utf8(env, napi_val, ptr::null_mut(), 0, &mut len) };
-        napi::check_status!(status, "Failed to measure JavaScript string")?;
-        if len > Self::CAPACITY {
-            return Err(too_long(len, Self::CAPACITY));
-        }
-
-        let mut buf: heapless::Vec<u8, N, u8> = heapless::Vec::new();
-        buf.resize_default(N)
-            .map_err(|_| too_long(len, Self::CAPACITY))?;
-        let mut written = 0;
-        // SAFETY: same string, and `buf` is filled to `N`, which holds the
-        // measured length plus the NUL terminator Node-API writes.
-        let status = unsafe {
-            sys::napi_get_value_string_utf8(env, napi_val, buf.as_mut_ptr().cast(), N, &mut written)
-        };
-        napi::check_status!(status, "Failed to read JavaScript string")?;
-        buf.truncate(written);
-        if let Err(error) = str::from_utf8(&buf) {
-            return Err(Error::new(Status::InvalidArg, error.to_string()));
-        }
-        Ok(Self(buf))
-    }
-}
-
-impl<const N: usize> ToNapiValue for InlineStr<N> {
-    unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
-        // SAFETY: `env` is the live callback environment.
-        unsafe { ToNapiValue::to_napi_value(env, &*val) }
-    }
-}
-
 /// Owned UTF-16 text crossing the N-API boundary as a JavaScript string.
 ///
 /// Junco pins napi 3.9.0, whose `napi::bindgen_prelude::Utf16String` keeps its
@@ -441,23 +318,11 @@ impl From<Vec<u16>> for Utf16String {
     }
 }
 
-impl From<String> for Utf16String {
-    fn from(text: String) -> Self {
-        Self(text.encode_utf16().collect())
-    }
-}
-
 impl Deref for Utf16String {
     type Target = [u16];
 
     fn deref(&self) -> &[u16] {
         &self.0
-    }
-}
-
-impl fmt::Debug for Utf16String {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&String::from_utf16_lossy(&self.0), f)
     }
 }
 
@@ -468,32 +333,6 @@ impl TypeName for Utf16String {
 
     fn value_type() -> napi::ValueType {
         napi::ValueType::String
-    }
-}
-
-impl ValidateNapiValue for Utf16String {}
-
-impl FromNapiValue for Utf16String {
-    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-        let mut len = 0;
-        // SAFETY: `napi_val` is a JS string owned by the live callback; a null
-        // buffer asks Node-API for the code-unit length only.
-        let status = unsafe {
-            sys::napi_get_value_string_utf16(env, napi_val, ptr::null_mut(), 0, &mut len)
-        };
-        napi::check_status!(status, "Failed to measure JavaScript string")?;
-        // Node-API writes a NUL terminator past the measured length.
-        len += 1;
-        let mut buf = vec![0u16; len];
-        let mut written = 0;
-        // SAFETY: same string, and `buf` holds the measured length plus the
-        // NUL slot Node-API writes.
-        let status = unsafe {
-            sys::napi_get_value_string_utf16(env, napi_val, buf.as_mut_ptr(), len, &mut written)
-        };
-        napi::check_status!(status, "Failed to read JavaScript string")?;
-        buf.truncate(written);
-        Ok(Self(buf))
     }
 }
 

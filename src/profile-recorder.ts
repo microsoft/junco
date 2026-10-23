@@ -4,8 +4,6 @@ import {
   type DataflowGraph,
   type DataflowRunTrace,
   type DataflowTracer,
-  DummyTracer,
-  type NodeId,
 } from "dataflow-engine";
 import type { Sample } from "dataflow-profile";
 import { JuncoAgent } from "junco-agent";
@@ -17,8 +15,6 @@ export type ProfileRecorderOptions = {
   readonly path: string;
   /** Set when the collection monitors: every sample then carries memory in bytes. */
   readonly monitored?: boolean;
-  /** A tracer that also observes the run; `DummyTracer` when omitted. */
-  readonly inner?: DataflowTracer;
 };
 
 type Activation = {
@@ -39,7 +35,6 @@ type Activation = {
 export class ProfileRecorder implements DataflowTracer {
   readonly #path: string;
   readonly #monitored: boolean;
-  readonly #inner: DataflowTracer;
   readonly #prefixes = new WeakMap<object, string>();
   readonly #live = new Map<string, Activation>();
   // ponytail: late events land on the owner's last activation until it is written; a later one is dropped.
@@ -53,7 +48,6 @@ export class ProfileRecorder implements DataflowTracer {
   constructor(options: ProfileRecorderOptions) {
     this.#path = options.path;
     this.#monitored = options.monitored ?? false;
-    this.#inner = options.inner ?? new DummyTracer();
   }
 
   readonly onResourceEvent = (event: NativeResourceEvent): void => {
@@ -71,12 +65,10 @@ export class ProfileRecorder implements DataflowTracer {
   startRun<S, N, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
-    const inner = this.#inner.startRun(graph);
     const prefix = this.#prefixes.get(graph) ?? "";
     const runId = randomUUID();
     return {
       startNode: (id, phase, inputs) => {
-        const step = inner.startNode(id, phase, inputs);
         const node = prefix === "" ? String(id) : `${prefix}/${id}`;
         const state = graph.getNode(id)?.state;
         if (state instanceof JuncoGraph) this.#prefixes.set(state, node);
@@ -117,7 +109,6 @@ export class ProfileRecorder implements DataflowTracer {
         };
         return {
           end: (result) => {
-            step.end(result);
             settle();
             act.ended = {
               runtime: performance.now() - act.startedAt,
@@ -128,25 +119,20 @@ export class ProfileRecorder implements DataflowTracer {
             this.#pending.push(act);
           },
           fail: (error) => {
-            step.fail(error);
             settle();
           },
         };
       },
-      end: (results) => {
-        inner.end(results);
+      end: () => {
         void this.#write();
       },
-      fail: (error) => {
-        inner.fail(error);
+      fail: () => {
         void this.#write();
       },
     };
   }
 
-  complain(nodeId: NodeId, complaint: string): void {
-    this.#inner.complain(nodeId, complaint);
-  }
+  complain(): void {}
 
   #write(): Promise<void> {
     const batch = this.#pending;
@@ -190,7 +176,6 @@ export class ProfileRecorder implements DataflowTracer {
 
   async flush(): Promise<void> {
     await this.#write();
-    await this.#inner.flush();
     if (this.#failure !== undefined) throw this.#failure;
   }
 }
