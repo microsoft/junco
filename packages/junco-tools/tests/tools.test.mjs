@@ -464,6 +464,7 @@ test("pre-aborted calls reject without mutating or clobbering the signal", {
       ["grep", { pattern: "a1", path: "." }],
       ["find", { pattern: "*.txt" }],
       ["ast_grep", { patterns: ["$X"], path: "." }],
+      ["code_graph", { action: "map", path: "." }],
       ["ast_edit", { rewrites: { a1: "a2" }, path: ".", dryRun: false }],
       ["edit", { input: `[a.txt#${tag}]\nPUT 1.=1:\n+A2\n` }],
       ["diff", { oldText: "a\n", newText: "b\n" }],
@@ -500,6 +501,7 @@ test("missing paths propagate real failures", { timeout: 30_000 }, async () => {
       ["grep", { pattern: "x", path: "nope" }],
       ["find", { pattern: "*", path: "nope" }],
       ["ast_grep", { patterns: ["$X"], path: "nope" }],
+      ["code_graph", { action: "search", query: "x", path: "nope" }],
     ]) {
       await assert.rejects(
         ws.call(name, input),
@@ -507,6 +509,71 @@ test("missing paths propagate real failures", { timeout: 30_000 }, async () => {
         name,
       );
     }
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("code_graph maps, searches, walks and refreshes on every call", {
+  timeout: 60_000,
+}, async () => {
+  const a = "export function foo() { return 1 }\nexport class A {}\n";
+  const ws = await workspace({
+    "src/a.ts": a,
+    "src/b.ts":
+      'import { foo } from "./a";\nimport { A } from "./a";\nexport const bar = () => foo();\nexport class B extends A { run() { return bar() } }\n',
+  });
+  try {
+    const found = (
+      await ws.call("code_graph", { action: "search", query: "foo" })
+    ).details.result;
+    assert.equal(found.hits[0].node.name, "foo");
+    assert.equal(
+      JSON.parse(await ws.file(".junco/graph/graph.json")).files["src/a.ts"]
+        .lang,
+      "typescript",
+    );
+    await assert.rejects(
+      ws.call("code_graph", { action: "search" }),
+      /search requires query/,
+    );
+
+    const deps = (
+      await ws.call("code_graph", {
+        action: "deps",
+        symbol: "foo",
+        direction: "in",
+      })
+    ).details.result;
+    assert.ok(deps.nodes.some(({ node }) => node.name === "bar"));
+    await assert.rejects(
+      ws.call("code_graph", { action: "deps", symbol: "foo", direction: "up" }),
+      /invalid direction: up/,
+    );
+    const outline = (
+      await ws.call("code_graph", {
+        action: "deps",
+        symbol: "src/a.ts",
+        direction: "out",
+        relations: ["contains"],
+      })
+    ).details.result;
+    assert.deepEqual(outline.nodes.map(({ node }) => node.name).sort(), [
+      "A",
+      "foo",
+    ]);
+
+    await ws.write("src/a.ts", `${a}export function extra() {}\n`);
+    const refreshed = (
+      await ws.call("code_graph", { action: "search", query: "extra" })
+    ).details.result;
+    assert.equal(refreshed.hits[0].node.name, "extra");
+
+    const map = (await ws.call("code_graph", { action: "map" })).details.result;
+    assert.deepEqual(
+      map.clusters.map((c) => c.dir),
+      ["src"],
+    );
   } finally {
     await ws.dispose();
   }

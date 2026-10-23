@@ -1621,6 +1621,8 @@ dependencies = [
  "pi-walker",
  "ratatui",
  "regex",
+ "rust-graph",
+ "serde_json",
  "sha2",
  "smallvec",
  "tokio",
@@ -2758,6 +2760,20 @@ checksum = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc"
 dependencies = [
  "archery",
  "smallvec",
+]
+
+[[package]]
+name = "rust-graph"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-core",
+ "ignore",
+ "pi-ast",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tree-sitter",
 ]
 
 [[package]]

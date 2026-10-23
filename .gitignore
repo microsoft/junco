@@ -10,3 +10,6 @@ coverage/
 
 # Local omp project config at any depth (skills are installed there as links to skills/).
 .omp/
+
+# junco-tools' code_graph cache — regenerable, not committed.
+.junco/
