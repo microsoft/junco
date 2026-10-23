@@ -46,6 +46,19 @@ export {
   type MarshPolicyDeniedError,
 } from "./errors.js";
 export { FindTool } from "./find.js";
+export {
+  type CodeGraphAction,
+  type CodeGraphResult,
+  CodeGraphTool,
+  type GraphDependencyResult,
+  type GraphEdge,
+  type GraphHub,
+  type GraphMapResult,
+  type GraphNode,
+  type GraphNodeKind,
+  type GraphRelation,
+  type GraphSearchResult,
+} from "./graph.js";
 export { GrepTool } from "./grep.js";
 export {
   LspTool,

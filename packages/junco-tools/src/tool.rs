@@ -30,6 +30,7 @@ use crate::ast::{
 };
 use crate::edit::{EditApplyOutcome, EditFileOutcome, EditPolicy, EditStore};
 use crate::glob::{self, GlobOptions, GlobResult};
+use crate::graph::{self, GraphOptions};
 use crate::grep::{self, GrepOptions, GrepResult};
 use crate::mux::{RoutedError, Session};
 use crate::routed_error::resolve;
@@ -49,6 +50,8 @@ pub(crate) enum JuncoTool {
     AstGrep { root: PathBuf },
     /// `ast_edit` under `root`; only an applying call writes.
     AstEdit { root: PathBuf, apply: bool },
+    /// A code-graph build or query under `root`; it rewrites only the graph cache.
+    Graph { root: PathBuf },
     /// A hashline `edit` resolved against `cwd`.
     Edit { cwd: PathBuf },
     /// `release` of one file's ownership.
@@ -64,6 +67,7 @@ impl From<&JuncoTool> for Action {
             | JuncoTool::Find { .. }
             | JuncoTool::Grep { .. }
             | JuncoTool::AstGrep { .. }
+            | JuncoTool::Graph { .. }
             | JuncoTool::AstEdit { apply: false, .. } => Self::Read,
             JuncoTool::Edit { .. } | JuncoTool::AstEdit { apply: true, .. } => Self::Edit,
             JuncoTool::Release { .. } => Self::Release,
@@ -83,6 +87,7 @@ impl MarshTool for JuncoTool {
             Self::Find { root } => format!("junco find {}", root.display()),
             Self::Grep { root } => format!("junco grep {}", root.display()),
             Self::AstGrep { root } => format!("junco ast_grep {}", root.display()),
+            Self::Graph { root } => format!("junco graph {}", root.display()),
             Self::AstEdit { root, apply: false } => format!("junco ast_edit {}", root.display()),
             Self::AstEdit { root, apply: true } => {
                 format!("junco ast_edit --apply {}", root.display())
@@ -440,6 +445,33 @@ impl NativeMux {
                     }
                 }
                 Ok(result)
+            }),
+            resolve,
+        )
+    }
+
+    /// A routed code-graph query (`map`, `search`, or `deps`) over the refreshed graph at
+    /// `options.path` or `cwd`. Results are root-relative; `View::text` rewrites the seed
+    /// only in error messages.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn graph<'env>(
+        &self,
+        env: &'env Env,
+        cwd: String,
+        options: GraphOptions<'env>,
+    ) -> Result<PromiseRaw<'env, String>> {
+        let (mut spec, ct) = graph::prepare(options)?;
+        let root = PathBuf::from(spec.path.as_deref().unwrap_or(&cwd));
+        let tool = JuncoTool::Graph { root: root.clone() };
+        let session = Arc::clone(&self.session);
+        let seed = session.seed().to_path_buf();
+        env.spawn_future_with_callback(
+            routed(session, self.owner.clone(), cwd, tool, move |ctx| {
+                let view = View::new(ctx, &seed)?;
+                spec.path = Some(utf8(&view.physical(&root)?)?.to_owned());
+                spec.run(ct)
+                    .map(|json| view.text(json))
+                    .map_err(|error| view.text(error))
             }),
             resolve,
         )

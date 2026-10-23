@@ -10,6 +10,7 @@ import { BashTool } from "./bash.js";
 import { DiffTool } from "./diff.js";
 import { EditTool } from "./edit.js";
 import { FindTool } from "./find.js";
+import { CodeGraphTool } from "./graph.js";
 import { GrepTool } from "./grep.js";
 import type { NativeModule } from "./native.js";
 import { ShellMuxOperations } from "./operations.js";
@@ -183,6 +184,7 @@ export class ToolCollection {
         AstGrepTool.create(root, native, mux),
         AstEditTool.create(root, native, mux),
         DiffTool.create(native),
+        CodeGraphTool.create(root, native, mux),
       ];
       return new ToolCollection(
         mux,

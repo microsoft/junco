@@ -6,6 +6,7 @@ mod edit;
 mod frontend;
 mod glob;
 mod glob_util;
+mod graph;
 mod grep;
 mod iofs;
 mod js;

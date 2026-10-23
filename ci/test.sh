@@ -19,6 +19,9 @@ step "junco-tools Rust: rustfmt, Clippy, unit tests (CopyTree)"
   node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
 )
 
+step "rust-graph: unit and integration tests"
+(cd crates/rust-graph && cargo test --locked)
+
 # Before junco-tools, whose declaration build imports the engine's public types.
 step "Build dataflow-engine"
 (cd packages/dataflow-engine && bun run build)
