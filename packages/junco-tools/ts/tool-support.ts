@@ -15,6 +15,8 @@ import {
   truncateHead,
   truncateLine,
 } from "@earendil-works/pi-coding-agent";
+import type { Static, TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 /** Mirrors Pi's `UNICODE_SPACES` set from `utils/paths.js`. */
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -157,6 +159,30 @@ export async function withNativeSignal<T>(
   } finally {
     signal.removeEventListener("abort", forward);
   }
+}
+
+/** Add `promise` to `pending` until it settles; returns `promise`. */
+export function trackPromise<T>(
+  pending: Set<Promise<unknown>>,
+  promise: Promise<T>,
+): Promise<T> {
+  pending.add(promise);
+  const settled = () => pending.delete(promise);
+  promise.then(settled, settled);
+  return promise;
+}
+
+/** `input` typed by `schema`, or an `Invalid <tool> input` error naming the first violation. */
+export function checkToolInput<S extends TSchema>(
+  tool: string,
+  schema: S,
+  input: unknown,
+): Static<S> {
+  if (Value.Check(schema, input)) return input;
+  const [error] = Value.Errors(schema, input);
+  throw new Error(
+    `Invalid ${tool} input${error ? `: ${error.instancePath} ${error.message}` : ""}`,
+  );
 }
 
 export { DEFAULT_MAX_BYTES, truncateHead, truncateLine };

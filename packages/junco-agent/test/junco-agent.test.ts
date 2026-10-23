@@ -25,6 +25,13 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { issueLog, YieldTool } from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
+import { userTexts } from "../../../test/deterministic-support.ts";
+import {
+  fauxRuntime,
+  flushMacrotasks,
+  scripted,
+  toolTurn,
+} from "../../../test/support.ts";
 import {
   type AgenticStep,
   JuncoAgent,
@@ -38,12 +45,8 @@ import {
   isCode,
   nativeOptions,
   newAgent,
-  scripted,
   settledText,
   step,
-  tick,
-  toolTurn,
-  userTexts,
 } from "./harness.ts";
 
 const TIMEOUT = 5_000;
@@ -129,7 +132,7 @@ test("a staged prompt starts only on demand and blocks an explicit overlapping p
   try {
     assert.equal(agent.status, "ready");
     await assert.rejects(agent.prompt("explicit"), isCode("busy"));
-    await tick();
+    await flushMacrotasks();
     assert.equal(faux.state.callCount, 0);
     assert.equal(settledText(await agent.next()), "staged done");
     assert.equal(agent.status, "idle");
@@ -160,7 +163,7 @@ test("a callback prompt runs once on demand with the supplied view and static im
   );
   try {
     assert.equal(agent.status, "ready");
-    await tick();
+    await flushMacrotasks();
     assert.equal(seen.length, 0);
     assert.equal(faux.state.callCount, 0);
     assert.equal(settledText(await agent.next(view)), "done");
@@ -179,7 +182,7 @@ test("a callback prompt runs once on demand with the supplied view and static im
       extra = true;
       return result;
     });
-    await tick();
+    await flushMacrotasks();
     assert.equal(extra, false);
     await agent.return();
     assert.deepEqual(await waiting, { value: undefined, done: true });
@@ -275,7 +278,7 @@ test("stagePrompt is busy while staged, suspended or awaited, and closed after r
     assert.equal(settledText(await agent.next()), "second");
     assert.equal(other, 0);
     const queued = agent.next();
-    await tick();
+    await flushMacrotasks();
     assert.throws(() => agent.stagePrompt("queued"), isCode("busy"));
     await agent.return();
     assert.deepEqual(await queued, { value: undefined, done: true });
@@ -306,7 +309,7 @@ test("turn_end subscribers see the full successful yield result before the next 
       ],
     });
     assert.deepEqual(turns[0], { ids: ["y1"], errors: [false] });
-    await tick();
+    await flushMacrotasks();
     assert.equal(faux.state.callCount, 1);
     assert.equal(agent.status, "suspended");
     assert.equal(settledText(await agent.next()), "resumed");
@@ -370,7 +373,7 @@ test(
     try {
       const pending = agent.next();
       await started.promise;
-      await tick();
+      await flushMacrotasks();
       assert.deepEqual(order, ["mutate:start"]);
       release.resolve();
       assert.deepEqual(step(await pending), {
@@ -474,7 +477,7 @@ test(
     try {
       const prompt = agent.prompt("apply both edits");
       await firstStarted.promise;
-      await tick();
+      await flushMacrotasks();
       assert.deepEqual(started, ["edit"]);
       release.resolve();
       assert.equal((await prompt).content[0]?.type, "text");
@@ -725,7 +728,7 @@ test(
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
       const pending = agent.prompt("held").catch((error: unknown) => error);
-      await tick();
+      await flushMacrotasks();
       const closing = agent.return();
       assert.equal(agent.status, "closed");
       await assert.rejects(agent.prompt("late"), isCode("closed"));
@@ -808,7 +811,7 @@ test(
         return result;
       });
       await assertClosedSurface();
-      await tick();
+      await flushMacrotasks();
       assert.equal(closed, false);
       await mutation.end(BACKGROUND_CONTEXT);
       assert.deepEqual(await closing, { value: undefined, done: true });
@@ -825,18 +828,7 @@ test(
 );
 
 test("the resolving factory accepts explicit tools and rejects duplicate tool names", async () => {
-  const { faux } = scripted([fauxAssistantMessage("created")]);
-  const credentials = new InMemoryCredentialStore();
-  await credentials.modify("faux", async () => ({
-    type: "api_key",
-    key: "fixture-login",
-  }));
-  const models = await ModelRuntime.create({
-    credentials,
-    modelsPath: null,
-    refreshOnCreate: false,
-  });
-  models.registerNativeProvider(faux.provider);
+  const { models } = await fauxRuntime([fauxAssistantMessage("created")]);
   const agent = await JuncoAgent.create({
     models,
     provider: "faux",
@@ -1213,8 +1205,8 @@ test(
       assert.equal(step(await agent.next()).kind, "yield");
       const before = await agent.context_size();
       const compaction = agent.compact();
-      await tick();
-      await tick();
+      await flushMacrotasks();
+      await flushMacrotasks();
       assert.equal(faux.state.callCount, 1);
       assert.equal(compactions, 0);
       assert.equal(agent.status, "suspended");
@@ -1228,7 +1220,7 @@ test(
         extra = true;
         return result;
       });
-      await tick();
+      await flushMacrotasks();
       assert.equal(extra, false);
       await agent.return();
       assert.deepEqual(await waiting, { value: undefined, done: true });
@@ -1258,9 +1250,9 @@ test(
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
       const prompt = agent.prompt("held ".repeat(64));
-      await tick();
+      await flushMacrotasks();
       const compaction = agent.compact();
-      await tick();
+      await flushMacrotasks();
       assert.equal(faux.state.callCount, 0);
       await mutation.end(BACKGROUND_CONTEXT);
       assert.equal((await prompt).stopReason, "stop");
@@ -1400,7 +1392,7 @@ test(
     try {
       assert.equal(step(await agent.next()).kind, "yield");
       const compaction = agent.compact();
-      await tick();
+      await flushMacrotasks();
       await agent.return();
       await assert.rejects(compaction, isCode("closed"));
       assert.equal(faux.state.callCount, 1);
@@ -1675,7 +1667,7 @@ test(
       assert.equal(await mainTip(session), target);
       assert.equal(await session.getLabel(target, BACKGROUND_CONTEXT), "kept");
       assert.equal(await agent.context_size(), 2);
-      await tick();
+      await flushMacrotasks();
       assert.equal(demanded, false);
       assert.equal(runs, 0);
       assert.equal(faux.state.callCount, 0);
@@ -1982,7 +1974,7 @@ test(
           () => undefined,
           (error: unknown) => error,
         );
-      await tick();
+      await flushMacrotasks();
       const closing = agent.return();
       await mutation.end(BACKGROUND_CONTEXT);
       assert.deepEqual(await closing, { value: undefined, done: true });
@@ -2275,7 +2267,7 @@ test(
       assert.equal(agent.status, "closed");
       const message = await prompt;
       assert.equal(message.role, "assistant");
-      await tick();
+      await flushMacrotasks();
       assert.equal(faux.state.callCount, 1);
       assert.deepEqual(await agent.next(), { value: undefined, done: true });
     } finally {

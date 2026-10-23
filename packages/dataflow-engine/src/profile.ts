@@ -28,6 +28,29 @@ export type PortFeature =
       readonly measure: Measure;
       readonly ports: readonly EdgeId[];
     };
+/** Each feature's value from per-port `read`s, folding derived features from 0; `undefined` if any read is. */
+export function measureFeatures(
+  features: readonly PortFeature[],
+  read: (port: EdgeId, measure: Measure) => number | undefined,
+): number[] | undefined {
+  const values: number[] = [];
+  for (const feature of features) {
+    if ("port" in feature) {
+      const value = read(feature.port, feature.measure);
+      if (value === undefined) return undefined;
+      values.push(value);
+      continue;
+    }
+    let value = 0;
+    for (const port of feature.ports) {
+      const next = read(port, feature.measure);
+      if (next === undefined) return undefined;
+      value = feature.derived === "sum" ? value + next : Math.max(value, next);
+    }
+    values.push(value);
+  }
+  return values;
+}
 /** Index-aligned with `ProfileData.features`. */
 export type FeatureVector = readonly number[];
 /** Numbers are in the owning profile's unit. */

@@ -1,4 +1,4 @@
-import { DataflowDefinitionError, EdgeId, RESOURCE_KINDS, type PortFeature, type ResourceKind } from "dataflow-engine";
+import { DataflowDefinitionError, EdgeId, measureFeatures, RESOURCE_KINDS, type PortFeature, type ResourceKind } from "dataflow-engine";
 import { evaluate } from "./predict.js";
 import { THRESHOLDS, type Model, type Pin, type PinsFile, type ProfileRecord, type ProfilesFile, type Sample } from "./types.js";
 import { unitOf, type UnitSymbol } from "./units.js";
@@ -16,17 +16,6 @@ export type FitRow = {
 };
 
 type Candidate = { model: Model; features: readonly PortFeature[]; x: number[][]; r2?: number; score: number };
-
-function featureValue(sample: Sample, feature: PortFeature): number | undefined {
-  if ("port" in feature) return sample.features[feature.port]?.[feature.measure];
-  let value = 0;
-  for (const port of feature.ports) {
-    const next = sample.features[port]?.[feature.measure];
-    if (next === undefined) return undefined;
-    value = feature.derived === "sum" ? value + next : Math.max(value, next);
-  }
-  return value;
-}
 
 /** Normal equations with partial pivoting; singular candidates are not usable. */
 function linear(x: readonly (readonly number[])[], y: readonly number[]): Extract<Model, { kind: "linear" }> | undefined {
@@ -91,12 +80,8 @@ function fitModel(kind: Model["kind"], x: number[][], y: number[]): Model | unde
 function fitCandidate(pin: Pin, rows: readonly Sample[], y: number[], total: number): Candidate | undefined {
   const x: number[][] = [];
   for (const row of rows) {
-    const values: number[] = [];
-    for (const feature of pin.features) {
-      const value = featureValue(row, feature);
-      if (value === undefined) return undefined;
-      values.push(value);
-    }
+    const values = measureFeatures(pin.features, (port, measure) => row.features[port]?.[measure]);
+    if (values === undefined) return undefined;
     x.push(values);
   }
   const model = fitModel(pin.model, x, y);
@@ -141,7 +126,7 @@ function fitResource<R extends ResourceKind>(node: string, resource: R, rows: re
       throw new DataflowDefinitionError(`fit ${node}/${resource}: pinned ${pin.model} has invalid features`);
     for (const row of rows)
       for (const feature of pin.features)
-        if (featureValue(row, feature) === undefined)
+        if (measureFeatures([feature], (port, measure) => row.features[port]?.[measure]) === undefined)
           throw new DataflowDefinitionError(`fit ${node}/${resource}: pinned feature ${renderFeatures([feature])} is not defined on every row`);
     const fitted = fitCandidate(pin, rows, y, total);
     if (!fitted) throw new DataflowDefinitionError(`fit ${node}/${resource}: pinned ${pin.model} cannot be fitted (singular or insufficient data)`);

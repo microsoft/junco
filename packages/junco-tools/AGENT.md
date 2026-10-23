@@ -21,7 +21,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/shell-mux.ts` | `ShellMuxLease.create`: opens one fresh, owned ShellMux per call with its policy (default `LockPolicy`), validates cwd, logs policy decisions, and returns a lease whose `release()` closes the mux and flushes the policy log. |
 | `ts/operations.ts` | Pi `BashOperations` adapter: borrows a supplied mux or lazily owns one (default `LockPolicy`), its own runs, timeout/abort handling, and local `close()`. |
 | `src/ast.rs`, `src/diff.rs`, `src/edit.rs`, `src/glob.rs`, `src/glob_util.rs`, `src/grep.rs`, `src/iofs.rs`, `src/js.rs` | Oh My Pi `pi-natives` binding modules transplanted from the pinned revision (see `LICENSE.oh-my-pi`), verbatim except for the routing seams: filesystem exports split into a JS-thread `prepare` and an engine run `src/tool.rs` calls, `ast_edit` writing through a host writer, and `EditStore`'s tracked keys. `grep.rs` is the implementation, not a binding: upstream has no importable grep library. |
-| `src/task.rs`, `src/testing.rs`, `src/utils.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
+| `src/task.rs`, `src/testing.rs` | Blocking-task/cancellation support those modules need, adapted from the same revision. |
 | `ts/tool-support.ts` | Shared adapter primitives: path resolution/display, editable-text normalization, bounded output, u32 validation, and `withNativeSignal`. |
 | `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
 | `ts/mime.ts` | Pi's image type sniffing, ported verbatim because Pi does not export it. |
@@ -42,7 +42,8 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `tests/tools.test.mjs` | Collection file tools over a CopyTree seed: hashline provenance, snapshot fidelity, staging, search boundaries, publication gating, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
 | `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
-| `tests/extension.btrfs.test.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, ownership release without a live peer and removal-triggered release (both across reopening the seed), and nested-seed refusal on a real btrfs seed. |
+| `tests/extension.btrfs.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, ownership release without a live peer and removal-triggered release (both across reopening the seed), and nested-seed refusal on a real btrfs seed. Runs only as a fixture child (`test:btrfs`). |
+| `tests/extension.test.mjs` | Lets plain `bun test` run that lane: owns one fixture around a Node run of `extension.btrfs.mjs`. |
 
 `dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco-agency workspace root's `bun.lock`.
 

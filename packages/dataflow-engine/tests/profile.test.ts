@@ -7,35 +7,16 @@ import {
   DataflowDefinitionError,
   DataflowGraph,
   Edge,
-  EdgeId,
   gigabytes,
   mebibytes,
   megabytes,
   NodeId,
-  type ProfileData,
-  type ResourceKind,
-  type ResourceUnit,
   StepNode,
   TriggerRule,
   tokens,
   UNBOUNDED,
 } from "../src/index.ts";
-
-function stub<R extends ResourceKind>(
-  resource: R,
-  unit: ResourceUnit<R>,
-  ...ports: string[]
-): ProfileData<R> {
-  return {
-    resource,
-    unit,
-    features: ports.map((port) => ({
-      port: EdgeId.create(port),
-      measure: "count",
-    })),
-    predict: () => ({ value: 0, safe: 0, source: "model" }),
-  };
-}
+import { stubProfile } from "./profile-support.ts";
 
 test("unprofiled nodes expose the shared empty profiles through observations", () => {
   const graph = new DataflowGraph<void, number, string, never>(
@@ -66,7 +47,7 @@ test("resource keys cannot disguise another profile kind", () => {
         new StepNode<void, number, string, "memory">(() => [], {
           state: undefined,
           trigger: TriggerRule.always(),
-          profiles: { memory: stub("runtime", seconds) as never },
+          profiles: { memory: stubProfile("runtime", seconds) as never },
         }),
       ),
     (error) =>
@@ -85,7 +66,7 @@ test("profile ports must be inbound message edges at evaluation", async () => {
       id: NodeId.create("consumer"),
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: { memory: stub("memory", megabytes, "x") },
+      profiles: { memory: stubProfile("memory", megabytes, ["x"]) },
     }),
   );
   const rejects = () =>
@@ -100,7 +81,7 @@ test("profile ports must be inbound message edges at evaluation", async () => {
     new StepNode<void, number, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: { memory: stub("memory", megabytes) },
+      profiles: { memory: stubProfile("memory", megabytes) },
     }),
   );
   graph.addEdge(source, node, Edge.value("x"));
@@ -114,14 +95,14 @@ test("profile ports must be inbound message edges at evaluation", async () => {
     new StepNode<void, number, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: { memory: stub("memory", megabytes) },
+      profiles: { memory: stubProfile("memory", megabytes) },
     }),
   );
   const dst = valid.addNode(
     new StepNode<void, number, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: { memory: stub("memory", megabytes, "x") },
+      profiles: { memory: stubProfile("memory", megabytes, ["x"]) },
     }),
   );
   valid.addEdge(src, dst, Edge.message("x"));

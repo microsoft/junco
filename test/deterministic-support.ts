@@ -32,6 +32,8 @@ import {
   type Scheduler,
 } from "junco-scheduler";
 import { LockPolicy } from "junco-tools";
+import { queued } from "../packages/dataflow-engine/tests/support.ts";
+import { userTexts } from "../packages/junco-scheduler/test/support.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
 // Deterministic agency scaffolding: real junco-scheduler policies and real JuncoGraphs whose node
@@ -242,19 +244,7 @@ export const resultText = (
   return O.isSome(result) ? textOf(result.value) : undefined;
 };
 
-/** The user texts of `messages`, in order. */
-export const userTexts = (messages: readonly AgentMessage[]): string[] =>
-  messages.flatMap((message) =>
-    message.role !== "user"
-      ? []
-      : [
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .map((block) => (block.type === "text" ? block.text : ""))
-                .join(""),
-        ],
-  );
+export { queued, userTexts };
 
 /** The user texts of each request. */
 export const requestTexts = <T extends AgentTool>(

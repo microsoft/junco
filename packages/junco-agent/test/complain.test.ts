@@ -11,22 +11,14 @@ import {
   type Context,
   fauxAssistantMessage,
   fauxToolCall,
-  InMemoryCredentialStore,
   type Message,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { EdgeId, NodeId } from "dataflow-engine";
 import { ComplainTool, isComplainTool, issueLog } from "junco-tools";
+import { userTexts } from "../../../test/deterministic-support.ts";
+import { fauxRuntime, scripted, toolTurn } from "../../../test/support.ts";
 import { JuncoAgent, SYSTEM_INSTRUCTION } from "../src/index.ts";
-import {
-  countingTool,
-  isCode,
-  newAgent,
-  scripted,
-  settledText,
-  toolTurn,
-  userTexts,
-} from "./harness.ts";
+import { countingTool, isCode, newAgent, settledText } from "./harness.ts";
 
 const complainCall = (complaint: string, id: string) =>
   fauxToolCall("complain", { complaint }, { id });
@@ -114,20 +106,9 @@ test("complaint-only configurations still offer and execute exactly one genuine 
       "create",
       async () => {
         const requests: Context[] = [];
-        const { faux } = scripted(
+        const { models } = await fauxRuntime(
           complainThenSettle("create", "c-create", requests),
         );
-        const credentials = new InMemoryCredentialStore();
-        await credentials.modify("faux", async () => ({
-          type: "api_key",
-          key: "fixture-login",
-        }));
-        const models = await ModelRuntime.create({
-          credentials,
-          modelsPath: null,
-          refreshOnCreate: false,
-        });
-        models.registerNativeProvider(faux.provider);
         const agent = await JuncoAgent.create({
           models,
           provider: "faux",

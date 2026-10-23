@@ -692,7 +692,7 @@ export async function compactionPoliciesThroughBothRoutes(graph: JuncoGraph) {
     "more-than-forty-available",
   ];
   for (const policy of flat) await JuncoGraph.compact(graph, policy);
-  for (const policy of routed) await graph.compact(policy);
+  for (const policy of routed) await JuncoGraph.compact(graph, policy);
   const fractions: number[] = [...flat, ...routed].map(policyFraction);
   // @ts-expect-error the namespaced policy type rejects an unknown policy
   const unknown: graphApi.nodes.CompactionPolicy = "half";

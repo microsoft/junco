@@ -28,7 +28,7 @@ export type {
   ParentView,
   StepFn,
 } from "./node.js";
-export { Message } from "./node.js";
+export { Message, messagesOf } from "./node.js";
 export type { Pretty } from "./pretty.js";
 export { renderPretty } from "./pretty.js";
 export type {
@@ -48,6 +48,7 @@ export type {
 export {
   COMPOSE,
   constantProfile,
+  measureFeatures,
   NO_PROFILES,
   RESOURCE_KINDS,
   RESOURCES,

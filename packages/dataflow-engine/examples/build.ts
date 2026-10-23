@@ -45,7 +45,7 @@ export async function buildExamples(noTracing = false): Promise<{
     target: "bun",
     format: "esm",
     packages: "bundle",
-    splitting: true,
+    splitting: false,
     sourcemap: "external",
     env: "disable",
     naming: { entry: "[dir]/[name].[ext]" },

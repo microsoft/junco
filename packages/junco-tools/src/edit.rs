@@ -43,10 +43,6 @@ fn parse_mode(mode: &str) -> Result<EditMode> {
         .ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
 }
 
-fn reason(err: impl std::fmt::Display) -> napi::Error {
-    napi::Error::from_reason(err.to_string())
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Policy and result objects
 // ═══════════════════════════════════════════════════════════════════════════
@@ -652,5 +648,6 @@ pub fn hashline_count_ops(input: String) -> Vec<HashlineOpCount> {
 /// Decode notebook JSON into the editable cell-marker text.
 #[napi]
 pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<String> {
-    pi_edit::notebook::notebook_to_editable_text(&json, &display_path).map_err(reason)
+    pi_edit::notebook::notebook_to_editable_text(&json, &display_path)
+        .map_err(|err| napi::Error::from_reason(err.to_string()))
 }

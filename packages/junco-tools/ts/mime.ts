@@ -8,9 +8,7 @@
 export const IMAGE_TYPE_SNIFF_BYTES = 4100;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-export function detectSupportedImageMimeType(
-  buffer: Uint8Array,
-): string | null {
+export function detectSupportedImageMimeType(buffer: Buffer): string | null {
   if (startsWith(buffer, [0xff, 0xd8, 0xff])) {
     return buffer[3] === 0xf7 ? null : "image/jpeg";
   }
@@ -32,18 +30,18 @@ export function detectSupportedImageMimeType(
   return null;
 }
 
-function isPng(buffer: Uint8Array): boolean {
+function isPng(buffer: Buffer): boolean {
   return (
     buffer.length >= 16 &&
-    readUint32BE(buffer, PNG_SIGNATURE.length) === 13 &&
+    buffer.readUInt32BE(PNG_SIGNATURE.length) === 13 &&
     startsWithAscii(buffer, 12, "IHDR")
   );
 }
 
-function isAnimatedPng(buffer: Uint8Array): boolean {
+function isAnimatedPng(buffer: Buffer): boolean {
   let offset = PNG_SIGNATURE.length;
   while (offset + 8 <= buffer.length) {
-    const chunkLength = readUint32BE(buffer, offset);
+    const chunkLength = buffer.readUInt32BE(offset);
     const chunkTypeOffset = offset + 4;
     if (startsWithAscii(buffer, chunkTypeOffset, "acTL")) return true;
     if (startsWithAscii(buffer, chunkTypeOffset, "IDAT")) return false;
@@ -54,11 +52,11 @@ function isAnimatedPng(buffer: Uint8Array): boolean {
   return false;
 }
 
-function isBmp(buffer: Uint8Array): boolean {
+function isBmp(buffer: Buffer): boolean {
   if (buffer.length < 26) return false;
-  const declaredFileSize = readUint32LE(buffer, 2);
-  const pixelDataOffset = readUint32LE(buffer, 10);
-  const dibHeaderSize = readUint32LE(buffer, 14);
+  const declaredFileSize = buffer.readUInt32LE(2);
+  const pixelDataOffset = buffer.readUInt32LE(10);
+  const dibHeaderSize = buffer.readUInt32LE(14);
   if (declaredFileSize !== 0 && declaredFileSize < 26) return false;
   if (pixelDataOffset < 14 + dibHeaderSize) return false;
   if (declaredFileSize !== 0 && pixelDataOffset >= declaredFileSize)
@@ -66,38 +64,16 @@ function isBmp(buffer: Uint8Array): boolean {
   let colorPlanes: number;
   let bitsPerPixel: number;
   if (dibHeaderSize === 12) {
-    colorPlanes = readUint16LE(buffer, 22);
-    bitsPerPixel = readUint16LE(buffer, 24);
+    colorPlanes = buffer.readUInt16LE(22);
+    bitsPerPixel = buffer.readUInt16LE(24);
   } else if (dibHeaderSize >= 40 && dibHeaderSize <= 124) {
     if (buffer.length < 30) return false;
-    colorPlanes = readUint16LE(buffer, 26);
-    bitsPerPixel = readUint16LE(buffer, 28);
+    colorPlanes = buffer.readUInt16LE(26);
+    bitsPerPixel = buffer.readUInt16LE(28);
   } else {
     return false;
   }
   return colorPlanes === 1 && [1, 4, 8, 16, 24, 32].includes(bitsPerPixel);
-}
-
-function readUint16LE(buffer: Uint8Array, offset: number): number {
-  return (buffer[offset] ?? 0) + ((buffer[offset + 1] ?? 0) << 8);
-}
-
-function readUint32BE(buffer: Uint8Array, offset: number): number {
-  return (
-    (buffer[offset] ?? 0) * 0x1000000 +
-    ((buffer[offset + 1] ?? 0) << 16) +
-    ((buffer[offset + 2] ?? 0) << 8) +
-    (buffer[offset + 3] ?? 0)
-  );
-}
-
-function readUint32LE(buffer: Uint8Array, offset: number): number {
-  return (
-    (buffer[offset] ?? 0) +
-    ((buffer[offset + 1] ?? 0) << 8) +
-    ((buffer[offset + 2] ?? 0) << 16) +
-    (buffer[offset + 3] ?? 0) * 0x1000000
-  );
 }
 
 function startsWith(buffer: Uint8Array, bytes: number[]): boolean {

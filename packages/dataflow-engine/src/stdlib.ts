@@ -1,5 +1,5 @@
 import * as E from "fp-ts/lib/Either.js";
-import { from } from "./builders.js";
+import { EmitOnce, from } from "./builders.js";
 import type { Edge } from "./edges.js";
 import { DataflowDefinitionError } from "./errors.js";
 import type { NodeId } from "./identity.js";
@@ -64,12 +64,12 @@ type ConstNodeSpec<S, N, T> = Omit<
  * graph.addEdge(source, left, a).addEdge(source, right, b);
  * ```
  */
-export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T> {
-  declare readonly id?: NodeId;
-  declare readonly description?: string;
-  declare readonly state: S;
-  readonly trigger: TriggerRule<N, T>;
-  readonly step: () => NodeGenerator<N, T>;
+export class ConstFanout<S, N, T>
+  extends EmitOnce<S, N, T>
+  implements ConstNodeSpec<S, N, T>
+{
+  declare readonly is_available?: AvailabilityFn<unknown, unknown>;
+  declare readonly on_error?: never;
 
   constructor(
     payload: N,
@@ -93,12 +93,11 @@ export class ConstFanout<S, N, T> implements ConstNodeSpec<S, N, T> {
         }
       }
     }
-    Object.assign(this, registration);
-    this.trigger = TriggerRule.always<N, T>();
-    this.step = async function* (): NodeGenerator<N, T> {
-      yield capturedOutputs.map((edge) => Message.create(edge, payload));
-      return ret;
-    };
+    super(
+      () => capturedOutputs.map((edge) => Message.create(edge, payload)),
+      ret,
+      { ...registration, trigger: TriggerRule.always<N, T>() },
+    );
   }
 }
 

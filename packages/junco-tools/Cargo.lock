@@ -1262,15 +1262,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash32"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1299,16 +1290,6 @@ source = "git+https://github.com/elefthei/hashconsing?rev=6d79a7e287adbb9a8e43dd
 dependencies = [
  "bumpalo",
  "lazy_static",
-]
-
-[[package]]
-name = "heapless"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
-dependencies = [
- "hash32",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -1623,12 +1604,10 @@ dependencies = [
  "brush-core",
  "crossterm",
  "flume",
- "globset",
  "grep-matcher",
  "grep-pcre2",
  "grep-regex",
  "grep-searcher",
- "heapless",
  "libc",
  "marsh-btrfs",
  "marsh-core",
@@ -1642,6 +1621,7 @@ dependencies = [
  "pi-walker",
  "ratatui",
  "regex",
+ "sha2",
  "smallvec",
  "tokio",
 ]
@@ -2926,6 +2906,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

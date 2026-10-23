@@ -7,6 +7,7 @@ export type {
   AgenticYieldReason,
   TokenMonitorConfig,
 } from "./agentic.js";
+export { resolveStagedPrompt, validateActiveTools } from "./agentic.js";
 export {
   type AgenticRun,
   JuncoAgent,

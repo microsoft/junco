@@ -11,6 +11,7 @@ import type {
 import type { NativeModule } from "./native.js";
 import type { Policy } from "./policy.js";
 import { ShellMuxLease } from "./shell-mux.js";
+import { trackPromise } from "./tool-support.js";
 
 const closedError = () => new Error("ShellMux session is closed");
 
@@ -104,20 +105,14 @@ export class ShellMuxOperations implements BashOperations {
     };
   }
 
-  #track<T>(promise: Promise<T>): Promise<T> {
-    this.#pending.add(promise);
-    const settled = () => this.#pending.delete(promise);
-    promise.then(settled, settled);
-    return promise;
-  }
-
   // Tracked before it is awaited, so close() drains an in-flight open and releases what it
   // produced; a rejected attempt is cleared so later calls retry.
   #acquire(cwd: string): Promise<NativeMux> {
     if (this.#mux !== undefined) return Promise.resolve(this.#mux);
     if (this.#acquiring === undefined) {
       const borrowed = this.#borrowed;
-      const attempt = this.#track(
+      const attempt = trackPromise(
+        this.#pending,
         (async () => {
           if (borrowed !== undefined) {
             await borrowed.validateCwd(cwd);
@@ -236,7 +231,7 @@ export class ShellMuxOperations implements BashOperations {
         signal?.removeEventListener("abort", onAbort);
       }
     })();
-    return this.#track(execution);
+    return trackPromise(this.#pending, execution);
   };
 
   close(): Promise<void> {

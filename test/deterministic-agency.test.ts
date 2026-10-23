@@ -21,7 +21,6 @@ import {
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
-import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgentError } from "junco-agent";
 import {
@@ -45,6 +44,7 @@ import {
   assistant,
   pause,
   policyContext,
+  queued,
   reason,
   requestTexts,
   resultText,
@@ -56,6 +56,7 @@ import {
   userTexts,
   yieldsThen,
 } from "./deterministic-support.ts";
+import { flushMacrotasks } from "./support.ts";
 
 // JuncoGraphs of mock members, coroutines and nested graphs on the real round-robin and parallel
 // policies. Graphs, schedules, recursive lifecycle and cancellation are real.
@@ -186,10 +187,6 @@ const detached = (child: PolicyContext, description = "nested") => ({
   state: child,
 });
 
-/** The messages currently queued on message edge `edge`. */
-const queued = (edge: Edge<AgenticInput, AssistantMessage>): AgenticInput[] =>
-  E.isLeft(edge.transport) ? [...edge.transport.left] : [];
-
 /** The stop reason of `id`'s retained result. */
 const stopReason = (graph: Pick<PolicyGraph, "result">, id: NodeId) => {
   const result = graph.result(id);
@@ -214,10 +211,6 @@ async function stepUntil(
   }
   assert.fail("condition not reached within 64 graph windows");
 }
-
-/** Let every queued microtask run; shows only that nothing progressed, never waits for progress. */
-const flushMacrotask = () =>
-  new Promise<void>((resolve) => setImmediate(resolve));
 
 for (const strategy of STRATEGIES) {
   describe(strategy, () => {
@@ -897,7 +890,7 @@ for (const strategy of STRATEGIES) {
       });
       await Promise.all([grandchildGate.aborted, siblingGate.aborted]);
       assert.equal(await childWindow, childSignal.reason);
-      await flushMacrotask();
+      await flushMacrotasks();
       assert.equal(aborted, false);
       assert.equal(siblingGate.finished, false);
       siblingGate.release();
@@ -988,7 +981,7 @@ for (const strategy of STRATEGIES) {
       await gate.started;
       controller.abort(cancelled);
       await gate.aborted;
-      await flushMacrotask();
+      await flushMacrotasks();
       assert.equal(settled, false);
       gate.release();
       await assert.rejects(running, (error) => error === cancelled);

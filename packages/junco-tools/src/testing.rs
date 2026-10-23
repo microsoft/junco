@@ -3,7 +3,38 @@
 //! Any state exposed here MUST be gated on `#[cfg(test)]` — it does not ship
 //! in release builds.
 
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+/// A fresh directory under the system temp dir, removed on drop.
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(prefix: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{counter}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temp test directory");
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Global mutex serializing tests that mutate the process-wide
 /// [`std::panic`] hook.

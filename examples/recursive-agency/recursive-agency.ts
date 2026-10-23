@@ -27,20 +27,18 @@ type Request = schedules.SchedulerRequest<schedules.AgencyNodeMetadata>;
 type Plan = { readonly waves: readonly (readonly string[])[] };
 
 /** Join both root branches, retaining the child's exact result after validating both reports. */
-const Join: syntax.DeterministicNode = {
-  create({ policy }) {
-    return {
-      state: new graphApi.nodes.Deterministic<graphApi.nodes.AgenticInput, AssistantMessage>(async function* () {
-        const inputs = yield [];
-        for (const id of ["0->Join", "1->Join"]) {
-          const result = inputs.values.get(graphApi.EdgeId.create(id));
-          if (result?.stopReason !== "stop" || !contentText(result.content).trim())
-            throw new Error(`${id} did not produce a complete report`);
-        }
-        return inputs.values.get(graphApi.EdgeId.create("0->Join"))!;
-      }, policy),
-    };
-  },
+const Join: syntax.DeterministicNode = ({ policy }) => {
+  return {
+    state: new graphApi.nodes.Deterministic<graphApi.nodes.AgenticInput, AssistantMessage>(async function* () {
+      const inputs = yield [];
+      for (const id of ["0->Join", "1->Join"]) {
+        const result = inputs.values.get(graphApi.EdgeId.create(id));
+        if (result?.stopReason !== "stop" || !contentText(result.content).trim())
+          throw new Error(`${id} did not produce a complete report`);
+      }
+      return inputs.values.get(graphApi.EdgeId.create("0->Join"))!;
+    }, policy),
+  };
 };
 
 let providers = 0;

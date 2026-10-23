@@ -142,9 +142,7 @@ export type CodeRegistration = {
   readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;  // overrides BuildOptions.available for this id
   readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
 };
-export interface DeterministicNode<C = unknown> {
-  create(context: CodeContext<C>): CodeRegistration | Promise<CodeRegistration>;
-}
+export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => CodeRegistration | Promise<CodeRegistration>;
 // graph.nodes.Deterministic: new Deterministic<AgenticInput, AssistantMessage>(
 //   async function* (signal, collection?) : NodeGenerator, policy, collection?)
 ```
@@ -155,42 +153,38 @@ import { contentText } from "@earendil-works/pi-ai";
 import { graph, type syntax } from "junco-agency";
 
 /** Publishes the assignment once to both competitors, then parks (like `emit`, but text comes from context). */
-export const Goals: syntax.DeterministicNode<{ goals: string }> = {
-  create({ context, edges, policy }) {
-    const outputs = ["Goals~>Direct", "Goals~>Ralph"].map((id) => edges.get(id)!);
-    let published = false;
-    return {
-      state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
-        while (true) {
-          signal.throwIfAborted();
-          published = true;
-          yield outputs.map((edge) => graph.Message.create(edge, { kind: "prompt", text: context.goals }));
-        }
-      }, policy),
-      is_available: () => !published,
-    };
-  },
+export const Goals: syntax.DeterministicNode<{ goals: string }> = ({ context, edges, policy }) => {
+  const outputs = ["Goals~>Direct", "Goals~>Ralph"].map((id) => edges.get(id)!);
+  let published = false;
+  return {
+    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+      while (true) {
+        signal.throwIfAborted();
+        published = true;
+        yield outputs.map((edge) => graph.Message.create(edge, { kind: "prompt", text: context.goals }));
+      }
+    }, policy),
+    is_available: () => !published,
+  };
 };
 
 /** Joins two value reports, validates them, and prepares one assignment message. */
-export const Join: syntax.DeterministicNode = {
-  create({ edges, policy }) {
-    const a = graph.EdgeId.create("A->Join"), b = graph.EdgeId.create("B->Join");
-    let published = false;
-    return {
-      state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* () {
-        const inputs = yield [];                                   // prime; consumes nothing
-        const text = [inputs.values.get(a), inputs.values.get(b)].map((m, i) => {
-          if (m?.stopReason !== "stop") throw new Error(`${i ? "B" : "A"} did not finish normally`);
-          return contentText(m.content).trim();
-        }).join("\n\n");
-        published = true;
-        while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, { kind: "prompt", text })];
-      }, policy),
-      is_available: (_view, triggered) => triggered && !published,
-      contract: (edgeId) => ({ expect: edgeId === a ? "A's normally completed report." : "B's normally completed report." }),
-    };
-  },
+export const Join: syntax.DeterministicNode = ({ edges, policy }) => {
+  const a = graph.EdgeId.create("A->Join"), b = graph.EdgeId.create("B->Join");
+  let published = false;
+  return {
+    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* () {
+      const inputs = yield [];                                   // prime; consumes nothing
+      const text = [inputs.values.get(a), inputs.values.get(b)].map((m, i) => {
+        if (m?.stopReason !== "stop") throw new Error(`${i ? "B" : "A"} did not finish normally`);
+        return contentText(m.content).trim();
+      }).join("\n\n");
+      published = true;
+      while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, { kind: "prompt", text })];
+    }, policy),
+    is_available: (_view, triggered) => triggered && !published,
+    contract: (edgeId) => ({ expect: edgeId === a ? "A's normally completed report." : "B's normally completed report." }),
+  };
 };
 ```
 

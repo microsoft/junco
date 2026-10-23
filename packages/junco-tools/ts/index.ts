@@ -1,5 +1,4 @@
 export type {
-  BashOperations,
   BashToolDetails,
   BashToolInput,
   BashToolOptions,
@@ -7,15 +6,22 @@ export type {
 export type {
   EditStore,
   NativeMux,
-  NativePolicy,
   NativeProcess,
   NativeProcessOptions,
   NativeResourceEvent,
   NativeResourceOptions,
-  NativeResourceSample,
   NativeRunResult,
 } from "../native/index.js";
-export { AstEditTool, AstGrepTool } from "./ast.js";
+export {
+  AstEditTool,
+  AstGrepTool,
+  applySourceEdits,
+  captureBaseline,
+  isRepoRelativePath,
+  repositorySourceReader,
+  requireWorkTreeRoot,
+  type SourceEdit,
+} from "./ast.js";
 export { BashTool } from "./bash.js";
 export {
   type ToolBinding,
@@ -25,7 +31,6 @@ export {
 export {
   ComplainTool,
   type ComplainToolHost,
-  type Complaint,
   type ComplaintContext,
   type Issue,
   invokeComplainTool,
@@ -56,14 +61,6 @@ export { ReadTool } from "./read.js";
 export { ReleaseTool } from "./release.js";
 export { ShellMuxLease } from "./shell-mux.js";
 export {
-  applySourceEdits,
-  captureBaseline,
-  isRepoRelativePath,
-  repositorySourceReader,
-  requireWorkTreeRoot,
-  type SourceEdit,
-} from "./source-edits.js";
-export {
   AssignedTaskTool,
   invokeTaskTool,
   isAssignedTaskTool,
@@ -71,11 +68,11 @@ export {
   type TaskCall,
   type TaskDecision,
   type TaskInput,
-  type TaskRequest,
   TaskTool,
   type TaskToolDetails,
   type TaskToolHost,
 } from "./task.js";
+export { trackPromise } from "./tool-support.js";
 export {
   isYieldTool,
   YieldTool,

@@ -70,17 +70,20 @@ import {
   type TaskToolHost,
   type ToolBinding,
   ToolCollection,
+  trackPromise,
   YieldTool,
 } from "junco-tools";
-import { isMarshPolicyDenied } from "junco-tools/errors";
-import type {
-  Agentic,
-  AgenticInput,
-  AgenticOptions,
-  AgenticStatus,
-  AgenticStep,
-  AgenticYieldReason,
-  TokenMonitorConfig,
+import { disposeThenRethrow, isMarshPolicyDenied } from "junco-tools/errors";
+import {
+  type Agentic,
+  type AgenticInput,
+  type AgenticOptions,
+  type AgenticStatus,
+  type AgenticStep,
+  type AgenticYieldReason,
+  resolveStagedPrompt,
+  type TokenMonitorConfig,
+  validateActiveTools,
 } from "./agentic.js";
 
 export class JuncoAgentError extends Error {
@@ -328,36 +331,6 @@ function validateTokenMonitor({
     );
 }
 
-function validateActiveTools(
-  tools: readonly AgentTool[],
-  names: readonly string[],
-): void {
-  const available = new Set<string>();
-  for (const tool of tools) {
-    if (available.has(tool.name)) {
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Duplicate tool name: ${tool.name}`,
-      );
-    }
-    available.add(tool.name);
-  }
-  const active = new Set<string>();
-  for (const name of names) {
-    if (active.has(name))
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Duplicate active tool: ${name}`,
-      );
-    if (!available.has(name))
-      throw new JuncoAgentError(
-        "invalid_argument",
-        `Unknown active tool: ${name}`,
-      );
-    active.add(name);
-  }
-}
-
 /**
  * `tools` with every genuine complaint tool replaced in place by `own`, or `own` appended when none
  * is present, and the collection's genuine `release` tool appended when absent. Duplicates and
@@ -405,15 +378,6 @@ function valueOrThrow<T, E>(
   return result.value;
 }
 
-function track<T>(
-  pending: Set<Promise<unknown>>,
-  promise: Promise<T>,
-): Promise<T> {
-  pending.add(promise);
-  const settled = () => pending.delete(promise);
-  promise.then(settled, settled);
-  return promise;
-}
 type RunRequest = Extract<
   OperationRequest,
   { kind: "prompt" | "skill" | "prompt_template" }
@@ -482,26 +446,6 @@ type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
   readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
 };
 const closedError = () => new JuncoAgentError("closed", "JuncoAgent is closed");
-
-/** A staged prompt's text: a function reads, without draining, the graph view of its `next`. */
-function stagedText(
-  prompt: NonNullable<AgenticOptions["prompt"]>,
-  inputs: ParentView<AgenticInput, AssistantMessage> | undefined,
-): string {
-  if (typeof prompt === "string") return prompt;
-  if (inputs === undefined)
-    throw new JuncoAgentError(
-      "invalid_state",
-      "A prompt function requires ParentView inputs",
-    );
-  const text: unknown = prompt(inputs);
-  if (typeof text !== "string")
-    throw new JuncoAgentError(
-      "invalid_argument",
-      "A prompt function must return a string",
-    );
-  return text;
-}
 
 /** A cooperative iterator around a single native Pi lane; the native lane is never public. */
 export class JuncoAgent<
@@ -1288,9 +1232,9 @@ export class JuncoAgent<
   #admit(request: RunRequest): Promise<AssistantMessage> {
     const run = new RunRecord(request.kind);
     this.#currentRun = run;
-    const settlement = track(
+    const settlement = trackPromise(
       this.#operations,
-      track(this.#drives, this.#driveRun(run, request)),
+      trackPromise(this.#drives, this.#driveRun(run, request)),
     );
     settlement.then(
       (message) => this.#settle(run, { kind: "settled", message }),
@@ -1309,7 +1253,7 @@ export class JuncoAgent<
     run.operationId = admitted.operationId;
     if (run.stopping || this.#closing) {
       // An abort might have seen an idle lane while accept was still pending.
-      const repeat = track(
+      const repeat = trackPromise(
         this.#operations,
         this.#nativeLane.abort(BACKGROUND_CONTEXT),
       );
@@ -1369,7 +1313,7 @@ export class JuncoAgent<
   #operation<R>(start: () => Promise<R>): Promise<R> {
     if (this.#closing) return Promise.reject(closedError());
     try {
-      return track(this.#operations, start());
+      return trackPromise(this.#operations, start());
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1820,52 +1764,42 @@ export class JuncoAgent<
         live();
         return children;
       } catch (error) {
-        const failures: unknown[] = [];
-        for (const child of children) {
-          try {
-            await child.return();
-          } catch (failure) {
-            failures.push(failure);
-          }
-        }
-        if (failures.length > 0)
-          throw new AggregateError(
-            [error, ...failures],
-            "JuncoAgent.createSubagents cleanup failed",
-            { cause: error },
-          );
-        throw error;
+        return disposeThenRethrow(
+          children,
+          error,
+          "JuncoAgent.createSubagents cleanup failed",
+        );
       }
     });
   }
-  steer(text: string, options?: { images?: ImageContent[] }): Promise<void> {
-    return this.#operation(async () => {
-      valueOrThrow(
-        await this.#nativeLane.steer(text, options?.images, BACKGROUND_CONTEXT),
-      );
-    });
+  #laneResult<R, E>(
+    start: () => Promise<{ ok: true; value: R } | { ok: false; error: E }>,
+  ): Promise<R> {
+    return this.#operation(async () => valueOrThrow(await start()));
   }
-  followUp(text: string, options?: { images?: ImageContent[] }): Promise<void> {
-    return this.#operation(async () => {
-      valueOrThrow(
-        await this.#nativeLane.followUp(
-          text,
-          options?.images,
-          BACKGROUND_CONTEXT,
-        ),
-      );
-    });
+  async steer(
+    text: string,
+    options?: { images?: ImageContent[] },
+  ): Promise<void> {
+    await this.#laneResult(() =>
+      this.#nativeLane.steer(text, options?.images, BACKGROUND_CONTEXT),
+    );
   }
-  nextTurn(text: string, options?: { images?: ImageContent[] }): Promise<void> {
-    return this.#operation(async () => {
-      valueOrThrow(
-        await this.#nativeLane.nextRun(
-          text,
-          options?.images,
-          BACKGROUND_CONTEXT,
-        ),
-      );
-    });
+  async followUp(
+    text: string,
+    options?: { images?: ImageContent[] },
+  ): Promise<void> {
+    await this.#laneResult(() =>
+      this.#nativeLane.followUp(text, options?.images, BACKGROUND_CONTEXT),
+    );
+  }
+  async nextTurn(
+    text: string,
+    options?: { images?: ImageContent[] },
+  ): Promise<void> {
+    await this.#laneResult(() =>
+      this.#nativeLane.nextRun(text, options?.images, BACKGROUND_CONTEXT),
+    );
   }
   appendMessage(message: AgentMessage): Promise<void> {
     return this.#operation(async () => {
@@ -2184,7 +2118,7 @@ export class JuncoAgent<
         throw new AggregateError(failures, "JuncoAgent abort failed");
       return { clearedSteer, clearedFollowUp };
     })();
-    return track(
+    return trackPromise(
       this.#operations,
       joined.finally(() => {
         this.#aborting = false;
@@ -2257,7 +2191,7 @@ export class JuncoAgent<
         } else {
           let prompt: string;
           try {
-            prompt = stagedText(text, demand.inputs);
+            prompt = resolveStagedPrompt(text, demand.inputs);
           } catch (error) {
             this.#publish({ step: { kind: "failed", error } });
             return;

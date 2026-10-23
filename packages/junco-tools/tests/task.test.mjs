@@ -9,15 +9,10 @@ import {
   isTaskTool,
   TaskTool,
 } from "../dist/task.js";
+import { text } from "./helpers.mjs";
 import { assistantText, scriptedModel, toolResult } from "./scripted-model.mjs";
 
 // Native-free: only dist/task.js, Pi's bare Agent and an instance-scoped faux provider.
-
-const text = (result) =>
-  result.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("");
 
 /** A host recording each request: one handle per launched task, the retried ID, none for ignore. */
 function recordingHost() {
@@ -87,8 +82,8 @@ test("an explicitly hosted task tool works in a bare Pi agent and its handles re
       tasks: [{ id: "handle-1-0", name: "alpha" }, { id: "handle-1-1" }],
     });
     // The serialized handles are what the model sees.
-    assert.match(text(result), /handle-1-0/);
-    assert.match(text(result), /handle-1-1/);
+    assert.match(text(result, ""), /handle-1-0/);
+    assert.match(text(result, ""), /handle-1-1/);
     assert.equal(assistantText(agent.state.messages.at(-1)), "continued");
     assert.equal(faux.state.callCount, 2);
   } finally {
@@ -270,7 +265,7 @@ test("host rejection and a mismatched handle count fail the call", async () => {
     await agent.waitForIdle();
     const result = toolResult(capture.context.messages, "refused");
     assert.equal(result.isError, true);
-    assert.match(text(result), /host refused/);
+    assert.match(text(result, ""), /host refused/);
     assert.equal(assistantText(agent.state.messages.at(-1)), "after refusal");
   } finally {
     await settle(agent);
@@ -460,7 +455,7 @@ test("both task variants pass valid decisions to the host as exactly { action, i
       signal,
     );
     assert.deepEqual(retried.details, { tasks: [{ id: "task-1" }] });
-    assert.match(text(retried), /task-1/);
+    assert.match(text(retried, ""), /task-1/);
     const ignored = await invokeTaskTool(
       tool,
       host,
@@ -469,7 +464,7 @@ test("both task variants pass valid decisions to the host as exactly { action, i
       signal,
     );
     assert.deepEqual(ignored.details, { tasks: [] });
-    assert.equal(text(ignored), "Ignored task task-2.");
+    assert.equal(text(ignored, ""), "Ignored task task-2.");
     assert.deepEqual(
       calls.map(({ toolCallId, input }) => [toolCallId, input]),
       [

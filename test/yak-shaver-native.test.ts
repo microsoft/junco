@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -156,7 +157,6 @@ async function apply(
     baseline.set(path, hash);
   return applySourceEdits(fixture.seed, fixture.mux, edits, baseline, {
     label: `candidate-${rank} (rank ${rank})`,
-    principal: `yak-apply-${rank}`,
   });
 }
 
@@ -384,6 +384,7 @@ test("refused proposals change neither source nor index", async () => {
       "target.ts": "alpha\nbeta\n",
       "be.ts": Buffer.from([0xfe, 0xff, 0x00, 0x61, 0x00, 0x0a]),
       "bad.ts": Buffer.from([0x61, 0xff, 0x0a]),
+      "linked.ts": "linked\n",
     },
     async (fixture) => {
       const outside = await mkdtemp(
@@ -394,6 +395,11 @@ test("refused proposals change neither source nor index", async () => {
         await symlink(
           join(fixture.seed, "nowhere"),
           join(fixture.seed, "dangling"),
+        );
+        await symlink("valid.ts", join(fixture.seed, "alias.ts"));
+        await link(
+          join(fixture.seed, "linked.ts"),
+          join(fixture.seed, "linked-twin.ts"),
         );
         const before = await state(fixture);
         const valid = replace("valid.ts", 1, ["one"], ["ONE"]);
@@ -407,19 +413,19 @@ test("refused proposals change neither source nor index", async () => {
             "wrong baseline hash",
             [valid, replace("target.ts", 1, ["alpha"], ["A"])],
             { "target.ts": "0".repeat(64) },
-            /changed since its batch baseline/,
+            /changed since its baseline/,
           ],
           [
             "wrong before text",
             [valid, replace("target.ts", 2, ["gamma"], ["G"])],
             {},
-            /does not match beforeLines/,
+            /target\.ts:2: expected "gamma", found "beta"/,
           ],
           [
             "out of range",
             [valid, replace("target.ts", 3, ["x"], [])],
             {},
-            /outside target\.ts/,
+            /target\.ts:3: edit out of range/,
           ],
           [
             "intra-proposal overlap",
@@ -429,7 +435,7 @@ test("refused proposals change neither source nor index", async () => {
               replace("target.ts", 2, ["beta"], ["b"]),
             ],
             {},
-            /overlap/,
+            /target\.ts: overlapping edits/,
           ],
           [
             "create collision",
@@ -495,13 +501,25 @@ test("refused proposals change neither source nor index", async () => {
             "UTF-16BE source",
             [valid, replace("be.ts", 1, ["a"], ["b"])],
             {},
-            /UTF-16BE source is unsupported/,
+            /be\.ts: not valid UTF-8 text/,
           ],
           [
             "malformed UTF-8",
             [valid, replace("bad.ts", 1, ["a"], ["b"])],
             {},
-            /malformed UTF-8/,
+            /bad\.ts: not valid UTF-8 text/,
+          ],
+          [
+            "symlink target",
+            [valid, replace("alias.ts", 1, ["one"], ["ONE"])],
+            {},
+            /alias\.ts is not a regular file/,
+          ],
+          [
+            "hard-linked target",
+            [valid, replace("linked.ts", 1, ["linked"], ["LINKED"])],
+            {},
+            /linked\.ts has 2 hard links/,
           ],
         ];
         for (const [name, edits, overrides, message] of refusals) {
@@ -509,7 +527,11 @@ test("refused proposals change neither source nor index", async () => {
             apply(fixture, 1, edits, overrides),
             (error: Error) => {
               assert.match(error.message, message, name);
-              assert.match(error.message, /changes were discarded/, name);
+              assert.match(
+                error.message,
+                /^Applying .* failed: .*; nothing was written$/m,
+                name,
+              );
               return true;
             },
           );
@@ -543,7 +565,6 @@ test("refused proposals change neither source nor index", async () => {
             await captureBaseline(fixture.seed, ["valid.ts"]),
             {
               label: "cancelled application",
-              principal: "cancelled",
               signal: aborted.signal,
             },
           ),

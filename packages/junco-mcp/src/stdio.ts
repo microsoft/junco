@@ -69,7 +69,6 @@ export class ShellMuxStdioTransport implements McpTransport {
   readonly #options: Readonly<ShellMuxStdioTransportOptions>;
   readonly #principal = `junco-mcp-${randomUUID()}`;
   readonly #maxMessageBytes: number;
-  readonly #maxStderrBytes: number;
   readonly #messageListeners = new Set<McpTransportMessageListener>();
   readonly #errorListeners = new Set<McpTransportErrorListener>();
   readonly #closeListeners = new Set<McpTransportCloseListener>();
@@ -105,7 +104,6 @@ export class ShellMuxStdioTransport implements McpTransport {
     });
     this.#maxMessageBytes =
       options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
-    this.#maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     this.#closed = promise;
     this.#resolveClosed = resolve;
@@ -124,7 +122,7 @@ export class ShellMuxStdioTransport implements McpTransport {
     return this.#terminal;
   }
 
-  /** The last `maxStderrBytes` of piped stderr, for diagnostics. */
+  /** The last `DEFAULT_MAX_STDERR_BYTES` of piped stderr, for diagnostics. */
   get stderr(): string {
     return Buffer.concat(this.#stderr, this.#stderrBytes).toString("utf8");
   }
@@ -349,7 +347,7 @@ export class ShellMuxStdioTransport implements McpTransport {
   }
 
   #retainStderr(chunk: Buffer): void {
-    const limit = this.#maxStderrBytes;
+    const limit = DEFAULT_MAX_STDERR_BYTES;
     if (chunk.length >= limit) {
       this.#stderr = [chunk.subarray(chunk.length - limit)];
       this.#stderrBytes = limit;

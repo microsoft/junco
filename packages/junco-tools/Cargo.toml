@@ -36,14 +36,13 @@ pi-edit = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4dac
 async-trait = "0.1"
 ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
 flume = "0.12"
-globset = "0.4"
 grep-matcher = "0.1"
 grep-pcre2 = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
-heapless = "0.9"
 parking_lot = "0.12.5"
 regex = "1"
+sha2 = "0.10"
 smallvec = { version = "1.16.2", features = ["serde", "write", "union", "const_new"] }
 
 [target.'cfg(unix)'.dev-dependencies]

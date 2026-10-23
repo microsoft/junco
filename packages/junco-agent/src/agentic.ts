@@ -21,7 +21,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { EdgeIdType, ParentView } from "dataflow-engine";
 import type { ComplainToolHost, Contract, ToolCollection } from "junco-tools";
-import type { JuncoAgent } from "./junco-agent.js";
+import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
 
 /**
  * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
@@ -210,3 +210,54 @@ export type AgenticOptions<
   /** Usage growth reports for this agent and every subagent it creates; see {@link TokenMonitorConfig}. */
   readonly tokenMonitor?: TokenMonitorConfig;
 };
+
+/** Reject duplicate tool names and duplicate or unknown active names. */
+export function validateActiveTools(
+  tools: readonly AgentTool[],
+  names: readonly string[],
+): void {
+  const available = new Set<string>();
+  for (const tool of tools) {
+    if (available.has(tool.name)) {
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate tool name: ${tool.name}`,
+      );
+    }
+    available.add(tool.name);
+  }
+  const active = new Set<string>();
+  for (const name of names) {
+    if (active.has(name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate active tool: ${name}`,
+      );
+    if (!available.has(name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Unknown active tool: ${name}`,
+      );
+    active.add(name);
+  }
+}
+
+/** A staged prompt's text: a function reads, without draining, the graph view of its `next`. */
+export function resolveStagedPrompt(
+  prompt: NonNullable<AgenticOptions["prompt"]>,
+  inputs: ParentView<AgenticInput, AssistantMessage> | undefined,
+): string {
+  if (typeof prompt === "string") return prompt;
+  if (inputs === undefined)
+    throw new JuncoAgentError(
+      "invalid_state",
+      "A prompt function requires ParentView inputs",
+    );
+  const text: unknown = prompt(inputs);
+  if (typeof text !== "string")
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "A prompt function must return a string",
+    );
+  return text;
+}

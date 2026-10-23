@@ -11,7 +11,6 @@ import {
   DummyTracer,
   type Node,
   type NodeIdType,
-  renderPretty,
 } from "dataflow-engine";
 import type { JuncoAgent } from "junco-agent";
 import { flushLog, redirectLog } from "junco-tools/log";
@@ -94,13 +93,13 @@ type Scope = {
   graph: Graph;
   serial: number;
   members: Map<string, string>;
+  links: [string, string, string][];
   marker?: "empty" | "recursive";
 };
 type Scene = {
   graph: Graph;
   scopes: Map<string, Scope>;
   contained: Set<Graph>;
-  mermaid?: string;
   binding: string;
   sections: readonly TuiGraphSection[];
   failed: boolean;
@@ -469,6 +468,7 @@ export class TuiTracer implements DataflowTracer {
         graph: current,
         serial: serialOf(current),
         members: new Map(),
+        links: [],
       };
       scopes.set(JSON.stringify(path), scope);
       if (ancestry.has(current)) {
@@ -482,12 +482,13 @@ export class TuiTracer implements DataflowTracer {
           visit(node.state as Graph, [...path, id]);
         }
       });
-      current.forEachLink((from, to) => {
+      current.forEachLink((from, to, edge) => {
         if (!scope.members.has(from) || !scope.members.has(to)) {
           throw new Error(
             "TuiTracer topology contains an unregistered link endpoint",
           );
         }
+        scope.links.push([from, to, String(edge.id)]);
       });
       if (scope.members.size === 0) scope.marker = "empty";
       ancestry.delete(current);
@@ -499,6 +500,7 @@ export class TuiTracer implements DataflowTracer {
         scope.serial,
         scope.marker,
         Array.from(scope.members),
+        scope.links,
       ]),
     );
     return { scopes, contained, binding };
@@ -512,15 +514,8 @@ export class TuiTracer implements DataflowTracer {
       scene.scopes = topology.scopes;
       scene.contained = topology.contained;
       scene.binding = topology.binding;
-      const mermaid = renderPretty(scene.graph);
-      const changed =
-        scene.failed || scene.mermaid !== mermaid || bindingChanged;
-      const sections =
-        scene.mermaid === mermaid && !scene.failed
-          ? scene.sections
-          : renderTuiGraph(mermaid);
-      scene.mermaid = mermaid;
-      scene.sections = sections;
+      const changed = scene.failed || bindingChanged;
+      if (changed) scene.sections = renderTuiGraph(scene.graph);
       scene.failed = false;
       return changed;
     } catch (error) {
@@ -1033,7 +1028,14 @@ export class TuiTracer implements DataflowTracer {
             run.message = undefined;
           }
         });
-        on("tool_start", ({ lane, runId, toolCallId, toolName, args }) => {
+        const recordTool = (
+          lane: string | undefined,
+          runId: unknown,
+          toolCallId: string,
+          toolName: string,
+          phase: "args" | "progress" | "result" | "error",
+          value: unknown,
+        ): void => {
           this.#record({
             nodeKey,
             recordId: JSON.stringify([
@@ -1041,45 +1043,41 @@ export class TuiTracer implements DataflowTracer {
               lane,
               runId,
               toolCallId,
-              "start",
+              phase === "args" ? "start" : "progress",
             ]),
-            text: `${laneLabel(lane)}tool ${escapeTuiLabel(toolName)} args ${formatTuiPayload(args)}`,
+            ...(phase === "args" ? {} : { mode: "replace" as const }),
+            text: `${laneLabel(lane)}tool ${escapeTuiLabel(toolName)} ${phase} ${formatTuiPayload(value)}`,
+            ...(phase === "result" || phase === "error"
+              ? { tone: phase === "error" ? "error" : "normal" }
+              : {}),
           });
-        });
+        };
+        on("tool_start", ({ lane, runId, toolCallId, toolName, args }) =>
+          recordTool(lane, runId, toolCallId, toolName, "args", args),
+        );
         on(
           "tool_update",
-          ({ lane, runId, toolCallId, toolName, partialResult }) => {
-            this.#record({
-              nodeKey,
-              recordId: JSON.stringify([
-                nodeKey,
-                lane,
-                runId,
-                toolCallId,
-                "progress",
-              ]),
-              mode: "replace",
-              text: `${laneLabel(lane)}tool ${escapeTuiLabel(toolName)} progress ${formatTuiPayload(partialResult)}`,
-            });
-          },
+          ({ lane, runId, toolCallId, toolName, partialResult }) =>
+            recordTool(
+              lane,
+              runId,
+              toolCallId,
+              toolName,
+              "progress",
+              partialResult,
+            ),
         );
         on(
           "tool_end",
-          ({ lane, runId, toolCallId, toolName, result, isError }) => {
-            this.#record({
-              nodeKey,
-              recordId: JSON.stringify([
-                nodeKey,
-                lane,
-                runId,
-                toolCallId,
-                "progress",
-              ]),
-              mode: "replace",
-              text: `${laneLabel(lane)}tool ${escapeTuiLabel(toolName)} ${isError ? "error" : "result"} ${formatTuiPayload(result)}`,
-              tone: isError ? "error" : "normal",
-            });
-          },
+          ({ lane, runId, toolCallId, toolName, result, isError }) =>
+            recordTool(
+              lane,
+              runId,
+              toolCallId,
+              toolName,
+              isError ? "error" : "result",
+              result,
+            ),
         );
         on("run_end", (event) => {
           runs.delete(runKey(event.lane, event.runId));

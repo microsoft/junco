@@ -337,8 +337,11 @@ async function renderingFailure(before: string) {
     });
     const forgetGraph = defer(() => graph.close());
     const failure = new Error("tui retained rendering failure");
-    graph.pretty = () => {
-      throw failure;
+    // Fail only the TUI layout walk; scheduler observations use the same link iterator.
+    const forEachLink = graph.forEachLink.bind(graph);
+    graph.forEachLink = (callback) => {
+      if (new Error().stack?.includes("frameOf")) throw failure;
+      forEachLink(callback);
     };
     const id = graph.addNode({
       id: NodeId.create("RenderFailure"),

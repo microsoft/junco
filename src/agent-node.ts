@@ -5,6 +5,7 @@ import {
   type EdgeIdType,
   fires,
   type Message,
+  messagesOf,
   type Node,
   type NodeGenerator,
   NodeId,
@@ -35,6 +36,7 @@ import type {
   TaskToolHost,
   ToolCollection,
 } from "junco-tools";
+import { disposeThenRethrow, errorGraph } from "junco-tools/errors";
 import { cancellation } from "./agent-operations.js";
 import type { Agentic, AgenticInput, AgenticNode } from "./agentic.js";
 import { JuncoGraph } from "./junco-graph.js";
@@ -120,47 +122,22 @@ const closedNode = (): JuncoAgentError =>
   new JuncoAgentError("closed", "Agentic node closed before prompt settlement");
 
 /** Close agents no graph owns, then rethrow `primary` with any cleanup failures. */
-async function disposeStaged(
+const disposeStaged = (
   children: readonly { readonly agent: JuncoAgent }[],
   primary: unknown,
-): Promise<never> {
-  const failures: unknown[] = [];
-  for (const { agent } of children) {
-    try {
-      await agent.return();
-    } catch (failure) {
-      failures.push(failure);
-    }
-  }
-  if (failures.length > 0)
-    throw new AggregateError(
-      [primary, ...failures],
-      "Staged subagent cleanup failed",
-      { cause: primary },
-    );
-  throw primary;
-}
-
-/** `error` and every value reachable from it through `Error.cause` and `AggregateError.errors`. */
-function reachable(error: unknown): Set<unknown> {
-  const seen = new Set<unknown>();
-  const pending = [error];
-  while (pending.length > 0) {
-    const value = pending.pop();
-    if (seen.has(value)) continue;
-    seen.add(value);
-    if (value instanceof AggregateError) pending.push(...value.errors);
-    if (value instanceof Error && "cause" in value) pending.push(value.cause);
-  }
-  return seen;
-}
+): Promise<never> =>
+  disposeThenRethrow(
+    children.map(({ agent }) => agent),
+    primary,
+    "Staged subagent cleanup failed",
+  );
 
 /**
  * Whether `cleanup` reports a failure beyond `failure`: closing a faulted agent rethrows the fault
  * that failed it, which is no separate cleanup failure.
  */
 function addsFailure(cleanup: unknown, failure: unknown): boolean {
-  const known = reachable(failure);
+  const known = new Set(errorGraph(failure));
   const seen = new Set<unknown>();
   const pending = [cleanup];
   while (pending.length > 0) {
@@ -228,28 +205,19 @@ function parseReport(text: string): TaskReport {
  */
 function taskErrorText(error: unknown): string {
   const lines: string[] = [];
-  const seen = new Set<object>();
-  const visit = (value: unknown): void => {
+  for (const value of errorGraph(error)) {
     try {
-      if (typeof value === "object" && value !== null) {
-        if (seen.has(value)) return;
-        seen.add(value);
-      }
-      if (!(value instanceof Error)) {
-        lines.push(String(value));
-        return;
-      }
       lines.push(
-        value.message === "" ? value.name : `${value.name}: ${value.message}`,
+        !(value instanceof Error)
+          ? String(value)
+          : value.message === ""
+            ? value.name
+            : `${value.name}: ${value.message}`,
       );
-      if (value instanceof AggregateError)
-        for (const inner of value.errors) visit(inner);
-      if ("cause" in value) visit(value.cause);
     } catch {
       lines.push("Unprintable subagent error");
     }
-  };
-  visit(error);
+  }
   return lines.join("\n");
 }
 
@@ -259,15 +227,6 @@ function hasMessages(
   for (const id of view.messages.keys())
     if ((view.messages.get(id)?.length ?? 0) > 0) return true;
   return false;
-}
-
-/** The batch one activation received: each payload with its edge, in edge then delivery order. */
-function deliveredMessages<N, T>(view: ParentView<N, T>): Message<N>[] {
-  const delivered: Message<N>[] = [];
-  for (const id of view.messages.keys())
-    for (const payload of view.messages.get(id) ?? [])
-      delivered.push({ id, payload });
-  return delivered;
 }
 
 /**
@@ -569,7 +528,7 @@ export class AgentDriver {
   #retain(
     view: ParentView<AgenticInput, AssistantMessage>,
   ): Message<AgenticInput>[] {
-    const messages = deliveredMessages(view);
+    const messages = messagesOf(view);
     for (const { id, payload } of messages) {
       const retained = this.messages.get(id);
       if (retained === undefined) this.messages.set(id, [payload]);
@@ -876,7 +835,7 @@ export class AgentDriver {
           while (true) {
             await driver.activate(this, messages, graph.signal);
             if (driver.result !== undefined) return driver.result;
-            messages = deliveredMessages(yield []).filter(
+            messages = messagesOf(yield []).filter(
               ({ id }) => id !== SOURCE_EDGE,
             );
           }

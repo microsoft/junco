@@ -6,8 +6,8 @@ import type {
   NodeIdType as NodeId,
 } from "dataflow-engine";
 import { Type } from "typebox";
-import { Value } from "typebox/value";
 import { log } from "./log.js";
+import { checkToolInput } from "./tool-support.js";
 
 /** Free-form complaint text, in the reporting agent's own words. */
 export type Complaint = string;
@@ -185,12 +185,7 @@ async function record<N>(
   input: { complaint: Complaint },
   signal: AbortSignal = neverAborted,
 ): Promise<AgentToolResult<undefined>> {
-  if (!Value.Check(complainParameters, input)) {
-    const [error] = Value.Errors(complainParameters, input);
-    throw new Error(
-      `Invalid complain input${error ? `: ${error.instancePath} ${error.message}` : ""}`,
-    );
-  }
+  checkToolInput("complain", complainParameters, input);
   signal.throwIfAborted();
   const { nodeId, messages, prompt, tracer } = context();
   host.complain(

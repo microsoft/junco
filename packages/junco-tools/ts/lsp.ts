@@ -52,11 +52,6 @@ interface LspToolFields {
   readonly name: UpstreamLspTool["name"];
   readonly label: UpstreamLspTool["label"];
   readonly description: string;
-  readonly summary: UpstreamLspTool["summary"];
-  readonly loadMode: UpstreamLspTool["loadMode"];
-  readonly strict: UpstreamLspTool["strict"];
-  readonly approval: UpstreamLspTool["approval"];
-  readonly formatApprovalDetails: UpstreamLspTool["formatApprovalDetails"];
   /** Plain JSON Schema converted once from upstream's schema and shared by all tools. */
   readonly parameters: TUnsafe<LspToolInput>;
   /**
@@ -121,7 +116,11 @@ export type LspTool = AgentTool<
   TUnsafe<LspToolInput>,
   LspToolDetails | undefined
 > &
-  LspToolFields;
+  LspToolFields &
+  Pick<
+    UpstreamLspTool,
+    "summary" | "loadMode" | "strict" | "approval" | "formatApprovalDetails"
+  >;
 
 /** Creates {@link LspTool}s and releases their process-wide language-server clients. */
 export const LspTool = {

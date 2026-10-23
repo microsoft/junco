@@ -1294,60 +1294,58 @@ type FinalizeBatchContext = {
 };
 
 /** Finalize ready lanes in order, publishing each successful application before examining the next. */
-const FinalizeBatch: syntax.DeterministicNode<FinalizeBatchContext> = {
-  create({ graph: workflow, policy, collection, context }) {
-    const { lanes, outcomes, apply } = context;
-    const last = lanes.reduce((last, lane) => lane.work.rank > last.work.rank ? lane : last);
-    const ready = (lane: CandidateGraphLane, results: ReadonlyMap<graph.NodeIdType, AssistantMessage>): boolean => {
-      if (outcomes.has(lane.work.rank)) return false;
-      if (results.get(lane.proposerId) === undefined) return workflow.getNode(lane.proposerId)?.status === "done";
-      return lane.proposal.peek()?.kind !== "proposal" || results.has(lane.judgeId) || workflow.getNode(lane.judgeId)?.status === "done";
-    };
-    return {
-      is_available: (_view, triggered) => {
-        if (!triggered) return false;
+const FinalizeBatch: syntax.DeterministicNode<FinalizeBatchContext> = ({ graph: workflow, policy, collection, context }) => {
+  const { lanes, outcomes, apply } = context;
+  const last = lanes.reduce((last, lane) => lane.work.rank > last.work.rank ? lane : last);
+  const ready = (lane: CandidateGraphLane, results: ReadonlyMap<graph.NodeIdType, AssistantMessage>): boolean => {
+    if (outcomes.has(lane.work.rank)) return false;
+    if (results.get(lane.proposerId) === undefined) return workflow.getNode(lane.proposerId)?.status === "done";
+    return lane.proposal.peek()?.kind !== "proposal" || results.has(lane.judgeId) || workflow.getNode(lane.judgeId)?.status === "done";
+  };
+  return {
+    is_available: (_view, triggered) => {
+      if (!triggered) return false;
+      const results = workflow.results();
+      return lanes.some((lane) => ready(lane, results));
+    },
+    state: new Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (nodeSignal) {
+      const signal = context.signal === undefined ? nodeSignal : AbortSignal.any([nodeSignal, context.signal]);
+      yield [];
+      while (true) {
+        signal.throwIfAborted();
         const results = workflow.results();
-        return lanes.some((lane) => ready(lane, results));
-      },
-      state: new Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (nodeSignal) {
-        const signal = context.signal === undefined ? nodeSignal : AbortSignal.any([nodeSignal, context.signal]);
-        yield [];
-        while (true) {
-          signal.throwIfAborted();
-          const results = workflow.results();
-          for (const lane of lanes) {
-            if (!ready(lane, results)) continue;
-            const analysis = completedAnalysis(lane, results);
-            const { rank, candidate } = lane.work;
-            const base = { rank, candidateId: candidate.definition.id, depth: candidate.depth, callerCount: candidate.callerIds.length };
-            if (!("verdict" in analysis)) {
-              const { proposal } = analysis;
-              outcomes.set(rank, { ...base, status: "no-proposal", proposal, reason: proposal.reason });
-              continue;
-            }
-            const { proposal, verdict } = analysis;
-            const failures = gateFailures(proposal, verdict);
-            if (failures.length > 0) {
-              outcomes.set(rank, { ...base, status: "rejected", proposal, verdict, reason: failures.join("; ") });
-              continue;
-            }
-            signal.throwIfAborted();
-            const files = await apply({ rank, candidate, proposal, verdict }, signal);
-            outcomes.set(rank, {
-              ...base,
-              status: "applied",
-              proposal,
-              verdict,
-              files,
-              reason: `All four criteria passed; applied and released ${files.join(", ")}; +${proposal.metrics.addedCallerDefinitions} caller definitions, ${proposal.metrics.netLinesRemoved} projected net nonblank lines removed`,
-            });
+        for (const lane of lanes) {
+          if (!ready(lane, results)) continue;
+          const analysis = completedAnalysis(lane, results);
+          const { rank, candidate } = lane.work;
+          const base = { rank, candidateId: candidate.definition.id, depth: candidate.depth, callerCount: candidate.callerIds.length };
+          if (!("verdict" in analysis)) {
+            const { proposal } = analysis;
+            outcomes.set(rank, { ...base, status: "no-proposal", proposal, reason: proposal.reason });
+            continue;
           }
-          if (outcomes.size === lanes.length) return results.get(last.proposerId)!;
-          yield [];
+          const { proposal, verdict } = analysis;
+          const failures = gateFailures(proposal, verdict);
+          if (failures.length > 0) {
+            outcomes.set(rank, { ...base, status: "rejected", proposal, verdict, reason: failures.join("; ") });
+            continue;
+          }
+          signal.throwIfAborted();
+          const files = await apply({ rank, candidate, proposal, verdict }, signal);
+          outcomes.set(rank, {
+            ...base,
+            status: "applied",
+            proposal,
+            verdict,
+            files,
+            reason: `All four criteria passed; applied and released ${files.join(", ")}; +${proposal.metrics.addedCallerDefinitions} caller definitions, ${proposal.metrics.netLinesRemoved} projected net nonblank lines removed`,
+          });
         }
-      }, policy, collection),
-    };
-  },
+        if (outcomes.size === lanes.length) return results.get(last.proposerId)!;
+        yield [];
+      }
+    }, policy, collection),
+  };
 };
 
 /** Expand the declarative role template into this batch's ranked lanes. */
@@ -1558,7 +1556,6 @@ function liveRunner(options: {
       // Model-produced bytes publish under the protected policy, never the trusted build's.
       const files = await tools.applySourceEdits(root, collection.mux, refactor.proposal.edits, targets, {
         label: `${refactor.proposal.candidateId} (rank ${refactor.rank})`,
-        principal: `yak-apply-${refactor.rank}`,
         ...(applySignal === undefined ? {} : { signal: applySignal }),
       });
       options.onApplied(refactor, files);

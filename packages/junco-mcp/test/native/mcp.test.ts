@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { McpAbortError, McpConnectionClosedError } from "@earendil-works/pi-mcp";
 import { LockPolicy, type NativeModule, type NativeMux, type NativeProcess, ToolCollection, ShellMuxOperations } from "junco-tools";
-import { isMarshPolicyDenied } from "junco-tools/errors";
+import { errorGraph, isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import {
   getJuncoMcpToolIdentity,
@@ -142,16 +142,8 @@ function fixtureRunning(pid: number): boolean {
 }
 
 /** Every message in `error`, its causes, and any aggregated errors. */
-function failureMessages(error: unknown, seen = new Set<unknown>()): string[] {
-  if (!(error instanceof Error) || seen.has(error)) return [];
-  seen.add(error);
-  return [
-    error.message,
-    ...(error instanceof AggregateError
-      ? error.errors.flatMap((inner) => failureMessages(inner, seen))
-      : []),
-    ...failureMessages(error.cause, seen),
-  ];
+function failureMessages(error: unknown): string[] {
+  return [...errorGraph(error)].filter((v): v is Error => v instanceof Error).map((e) => e.message);
 }
 
 async function rejection(promise: Promise<unknown>): Promise<string[]> {

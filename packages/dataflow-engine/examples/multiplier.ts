@@ -1,5 +1,5 @@
 import { context, roundRobin } from "junco-scheduler";
-import type { NodeGenerator } from "../src/index.ts";
+import type { DataflowTracer, NodeGenerator } from "../src/index.ts";
 import {
   DataflowGraph,
   Edge,
@@ -13,59 +13,65 @@ import { ExampleTracer } from "./tracing.ts";
 
 const sourceToMultiplier = Edge.message<number, string>("sourceToMultiplier");
 const multiplierToSink = Edge.message<number, string>("multiplierToSink");
-const results: number[] = [];
-const tracer = ExampleTracer.create("examples/multiplier");
-const graph = new DataflowGraph<void, number, string, never>(
-  Width.create(1),
-  Width.create(1),
-  tracer,
-);
+export async function runMultiplier(tracer?: DataflowTracer) {
+  const results: number[] = [];
+  const graph = new DataflowGraph<void, number, string, never>(
+    Width.create(1),
+    Width.create(1),
+    tracer,
+  );
 
-const sourceId = graph.addNode({
-  state: undefined,
-  trigger: TriggerRule.always(),
-  step: async function* (): NodeGenerator<number, string> {
-    yield [Message.create(sourceToMultiplier, 1)];
-    yield [Message.create(sourceToMultiplier, 2)];
-    yield [Message.create(sourceToMultiplier, 3)];
-    return "source done";
-  },
-});
-
-const multiplierId = graph.addNode(
-  new StepNode<void, number, string>(
-    (_state, view) =>
-      from(view, sourceToMultiplier).map((value) =>
-        Message.create(multiplierToSink, value * 2),
-      ),
-    {
-      state: undefined,
-      trigger: TriggerRule.when(sourceToMultiplier),
+  const sourceId = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: async function* (): NodeGenerator<number, string> {
+      yield [Message.create(sourceToMultiplier, 1)];
+      yield [Message.create(sourceToMultiplier, 2)];
+      yield [Message.create(sourceToMultiplier, 3)];
+      return "source done";
     },
-  ),
-);
+  });
 
-const sinkId = graph.addNode(
-  new StepNode<void, number, string>(
-    (_state, view) => {
-      results.push(...from(view, multiplierToSink));
-      return [];
-    },
-    {
-      state: undefined,
-      trigger: TriggerRule.when(multiplierToSink),
-    },
-  ),
-);
+  const multiplierId = graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) =>
+        from(view, sourceToMultiplier).map((value) =>
+          Message.create(multiplierToSink, value * 2),
+        ),
+      {
+        state: undefined,
+        trigger: TriggerRule.when(sourceToMultiplier),
+      },
+    ),
+  );
 
-graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
-graph.addEdge(multiplierId, sinkId, multiplierToSink);
+  const sinkId = graph.addNode(
+    new StepNode<void, number, string>(
+      (_state, view) => {
+        results.push(...from(view, multiplierToSink));
+        return [];
+      },
+      {
+        state: undefined,
+        trigger: TriggerRule.when(multiplierToSink),
+      },
+    ),
+  );
 
-try {
+  graph.addEdge(sourceId, multiplierId, sourceToMultiplier);
+  graph.addEdge(multiplierId, sinkId, multiplierToSink);
+
   const execution = context({ scheduler: roundRobin(), graph });
-  await execution.run();
+  const completed = await execution.run();
+  return { results, completed, graph, sourceId, multiplierId, sinkId };
+}
 
-  console.log(JSON.stringify(results));
-} finally {
-  await tracer.flush();
+if (import.meta.main) {
+  const tracer = ExampleTracer.create("examples/multiplier");
+  try {
+    const r = await runMultiplier(tracer);
+    console.log(JSON.stringify(r.results));
+  } finally {
+    await tracer.flush();
+  }
 }

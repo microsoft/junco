@@ -3,6 +3,7 @@ import {
   type EdgeIdType,
   type InputSchedule,
   type Measure,
+  measureFeatures,
   type NodeIdType,
   type ParentView,
   type ResourceKind,
@@ -51,31 +52,9 @@ function safeCost<S, N, T, C>(
   if (plan === undefined)
     throw new DataflowDefinitionError(`${who}: node "${id}" is not available`);
   const view = snapshot.inputs.get(id)!;
-  const features = profile.features.map((feature) => {
-    if ("port" in feature)
-      return countPort(
-        id,
-        profile.resource,
-        feature.port,
-        feature.measure,
-        view,
-        plan,
-      );
-    let value = 0;
-    for (const port of feature.ports) {
-      const count = countPort(
-        id,
-        profile.resource,
-        port,
-        feature.measure,
-        view,
-        plan,
-      );
-      value =
-        feature.derived === "sum" ? value + count : Math.max(value, count);
-    }
-    return value;
-  });
+  const features = measureFeatures(profile.features, (port, measure) =>
+    countPort(id, profile.resource, port, measure, view, plan),
+  )!;
   return profile.predict(features).safe * profile.unit.scale;
 }
 

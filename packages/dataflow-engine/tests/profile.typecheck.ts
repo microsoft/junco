@@ -6,30 +6,18 @@ import {
   NodeId,
   type NodeSpec,
   type ProfileData,
-  type ResourceKind,
-  type ResourceUnit,
   StepNode,
   TriggerRule,
   tokens,
   UNBOUNDED,
 } from "../src/index.ts";
+import { stubProfile } from "./profile-support.ts";
 
 type Expect<T extends true> = T;
 type Equal<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
     ? true
     : false;
-function stub<R extends ResourceKind>(
-  resource: R,
-  unit: ResourceUnit<R>,
-): ProfileData<R> {
-  return {
-    resource,
-    unit,
-    features: [],
-    predict: () => ({ value: 0, safe: 0, source: "model" }),
-  };
-}
 const spec: NodeSpec<void, number, string> = {
   state: undefined,
   trigger: TriggerRule.always(),
@@ -56,8 +44,8 @@ const profiled = new DataflowGraph<
   "memory" | "runtime"
 >(UNBOUNDED, UNBOUNDED);
 const profiles = {
-  memory: stub("memory", megabytes),
-  runtime: stub("runtime", seconds),
+  memory: stubProfile("memory", megabytes),
+  runtime: stubProfile("runtime", seconds),
 };
 profiled.addNode({ ...spec, profiles });
 profiled.addNode(
