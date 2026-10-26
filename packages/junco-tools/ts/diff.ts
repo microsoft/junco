@@ -1,8 +1,14 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { DiffStreamResult } from "../native/index.js";
 import type { NativeModule } from "./native.js";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 import {
   type BoundedToolDetails,
   boundedToolResult,
@@ -10,6 +16,35 @@ import {
   requireU32,
   throwIfAborted,
 } from "./tool-support.js";
+
+const DIFF = {
+  resource: "edits",
+  category: "diff",
+  tool: "diff",
+  operation: "execute",
+} as const;
+
+/** Line counts of the typed Myers runs, never reparsed from hunks. */
+function diffMetrics({
+  details: { result },
+}: AgentToolResult<BoundedToolDetails<DiffStreamResult>>) {
+  let added = 0;
+  let removed = 0;
+  let unchanged = 0;
+  for (const run of result.runs) {
+    if (run.added) added += run.count;
+    else if (run.removed) removed += run.count;
+    else unchanged += run.count;
+  }
+  return {
+    counters: {
+      lines_added: added,
+      lines_removed: removed,
+      lines_unchanged: unchanged,
+      hunks: result.hunks.length,
+    },
+  };
+}
 
 const diffSchema = Type.Object({
   oldText: Type.String({ description: "Original text" }),
@@ -30,6 +65,9 @@ const diffSchema = Type.Object({
 export const DiffTool = {
   create(
     native: NativeModule,
+    recorder?:
+      | ProfileRecorder<"edits">
+      | (() => ProfileRecorder<"edits"> | undefined),
   ): AgentTool<typeof diffSchema, BoundedToolDetails<DiffStreamResult>> {
     const tool = {
       name: "diff",
@@ -38,40 +76,48 @@ export const DiffTool = {
         "Compute a unified diff between oldText and newText without changing files.",
       promptSnippet: "Diff two texts without touching the filesystem",
       parameters: diffSchema,
-      async execute(_toolCallId, params, signal) {
-        throwIfAborted(signal);
-        if (params.context !== undefined)
-          requireU32("context", params.context, 0);
+      execute(_toolCallId, params, signal) {
+        return profileToolCall(
+          captureRecorder(recorder),
+          DIFF,
+          signal,
+          async () => {
+            throwIfAborted(signal);
+            if (params.context !== undefined)
+              requireU32("context", params.context, 0);
 
-        const stream = new native.DiffStream();
-        stream.push(native.DiffSide.Old, params.oldText);
-        stream.push(native.DiffSide.New, params.newText);
-        stream.finishSide(native.DiffSide.Old);
-        stream.finishSide(native.DiffSide.New);
-        // Myers has no internal interruption point, so the worker is always
-        // awaited to completion; cancellation is reported after it settles.
-        const result = await stream.finish(params.context);
-        throwIfAborted(signal);
+            const stream = new native.DiffStream();
+            stream.push(native.DiffSide.Old, params.oldText);
+            stream.push(native.DiffSide.New, params.newText);
+            stream.finishSide(native.DiffSide.Old);
+            stream.finishSide(native.DiffSide.New);
+            // Myers has no internal interruption point, so the worker is always
+            // awaited to completion; cancellation is reported after it settles.
+            const result = await stream.finish(params.context);
+            throwIfAborted(signal);
 
-        if (result.hunks.length === 0) {
-          return {
-            content: [{ type: "text", text: "No differences." }],
-            details: { result },
-          };
-        }
-        const lines = ["--- before", "+++ after"];
-        for (const hunk of result.hunks) {
-          lines.push(
-            `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
-            ...hunk.lines,
-          );
-        }
-        return boundedToolResult(lines.join("\n"), result);
+            if (result.hunks.length === 0) {
+              return {
+                content: [{ type: "text", text: "No differences." }],
+                details: { result },
+              };
+            }
+            const lines = ["--- before", "+++ after"];
+            for (const hunk of result.hunks) {
+              lines.push(
+                `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+                ...hunk.lines,
+              );
+            }
+            return boundedToolResult(lines.join("\n"), result);
+          },
+          diffMetrics,
+        );
       },
     } satisfies ToolDefinition<
       typeof diffSchema,
       BoundedToolDetails<DiffStreamResult>
     >;
-    return tool;
+    return markProfileOwned(tool, () => DIFF);
   },
 };

@@ -4,6 +4,19 @@ import {
   createBashTool as createPiBashTool,
   createBashToolDefinition as createPiBashToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
+
+const BASH = {
+  resource: "memory",
+  category: "bash",
+  tool: "bash",
+  operation: "execute",
+} as const;
 
 /**
  * Pi's bash tool over caller-supplied operations, normally a ShellMux operations owner the
@@ -14,6 +27,9 @@ import {
  * definition object it is merged into keeps Pi's renderers and prompt metadata,
  * so the same object serves a bare Agent and Pi registration. Both factories
  * receive one options object, so they share a single operations owner.
+ *
+ * Each call records as `bash` in `recorder` (or the invocation's); Pi's nonzero-exit result
+ * counts as an error.
  */
 export const BashTool = {
   create(
@@ -21,14 +37,23 @@ export const BashTool = {
     options: BashToolOptions & {
       operations: NonNullable<BashToolOptions["operations"]>;
     },
+    recorder?:
+      | ProfileRecorder<"memory">
+      | (() => ProfileRecorder<"memory"> | undefined),
   ): AgentTool<any> {
     // Guards JavaScript callers the type cannot.
     if (options?.operations === undefined) {
       throw new TypeError("BashTool.create: options.operations is required");
     }
-    return Object.assign(
+    const tool = Object.assign(
       createPiBashToolDefinition(cwd, options),
       createPiBashTool(cwd, options),
     );
+    const { execute } = tool;
+    tool.execute = (toolCallId, params, signal, onUpdate) =>
+      profileToolCall(captureRecorder(recorder), BASH, signal, () =>
+        execute(toolCallId, params, signal, onUpdate),
+      );
+    return markProfileOwned(tool, () => BASH);
   },
 };

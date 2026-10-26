@@ -65,11 +65,11 @@ test("recorded nested activations fit profiles that admit a strict memory schedu
   const directory = await mkdtemp(join(tmpdir(), "junco-profile-recorder-"));
   try {
     const path = join(directory, "samples.jsonl");
-    const recorder = new tracer.ProfileRecorder({ path, monitored: true });
+    const recorder = new tracer.JsonlRecorder({ path, monitored: true });
     const doc = document();
     const execution = await JuncoGraph.fromYaml(doc, {
       ...options(directory),
-      tracer: recorder,
+      recorder,
     });
     try {
       const results = await execution.run();
@@ -134,11 +134,11 @@ test("failed activations are excluded while successful activations survive a fai
   );
   try {
     const path = join(directory, "samples.jsonl");
-    const recorder = new tracer.ProfileRecorder({ path });
+    const recorder = new tracer.JsonlRecorder({ path });
     const cause = new Error("provider down");
     const execution = await JuncoGraph.fromYaml(document(), {
       ...options(directory),
-      tracer: recorder,
+      recorder,
       createAgent: async (spec) =>
         spec.node === "Final"
           ? new MockAgent({ runs: [run([{ step: failed(cause) }])] })
@@ -178,10 +178,10 @@ test("flush reports an append failure queued at run end", async () => {
     join(tmpdir(), "junco-profile-recorder-append-"),
   );
   try {
-    const recorder = new tracer.ProfileRecorder({ path: directory });
+    const recorder = new tracer.JsonlRecorder({ path: directory });
     const execution = await JuncoGraph.fromYaml(document(), {
       ...options(directory),
-      tracer: recorder,
+      recorder,
     });
     try {
       await execution.run();
@@ -189,6 +189,170 @@ test("flush reports an append failure queued at run end", async () => {
     } finally {
       await execution.graph.close();
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("JSONL reduction keeps same-path agent activations independent", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "junco-profile-recorder-reduce-"),
+  );
+  try {
+    const path = join(directory, "samples.jsonl");
+    const recorder = new tracer.JsonlRecorder({ path, monitored: true });
+    const graph = recorder.add_context("Inner");
+    const view = graph.add_context("Work:er");
+    assert.equal(view.path, "Inner::Work%3Aer");
+    assert.equal(view.root, recorder);
+    const lease = {};
+    const [agentA, agentB] = [{}, {}];
+    const usage = (source: object, totalTokens: number) =>
+      view.record({
+        resource: "tokens",
+        kind: "usage",
+        source,
+        usage: {
+          input: totalTokens,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      });
+    const memory = (owner: string | undefined, memoryBytes: number) =>
+      view.record({
+        resource: "memory",
+        kind: "resource",
+        source: lease,
+        event: {
+          kind: "sample",
+          pipelineId: 1,
+          owner,
+          sample: {
+            elapsedMs: 1,
+            memoryBytes,
+            memoryPeakBytes: memoryBytes,
+            cpuUsageMs: 0,
+            cpuUserMs: 0,
+            cpuSystemMs: 0,
+            cpuThrottledMs: 0,
+            pids: 1,
+            oomKills: 0,
+          },
+        },
+      });
+    const activation = (
+      agent: object | undefined,
+      owner: string | undefined,
+    ): tracer.ProfileActivation => ({
+      runId: "run-1",
+      firedAt: "2026-10-26T00:00:00.000Z",
+      features: { "Start~>Worker": { count: 1 } },
+      agent,
+      owner,
+    });
+    const op = { resource: "operations", category: "graph", tool: "" } as const;
+    const start = (act: tracer.ProfileActivation) =>
+      view.record({
+        ...op,
+        kind: "start",
+        operation: "prime",
+        activation: act,
+      });
+    const finish = (
+      act: tracer.ProfileActivation,
+      outcome: "success" | "error" = "success",
+    ) =>
+      view.record({
+        ...op,
+        kind: "finish",
+        operation: "prime",
+        activation: act,
+        outcome,
+        durationMs: 5,
+      });
+    const evaluated = () =>
+      graph.record({
+        ...op,
+        kind: "finish",
+        operation: "evaluate",
+        outcome: "success",
+        durationMs: 9,
+      });
+    const rows = () => parseSamples(readFileSync(path, "utf8"));
+
+    usage(agentA, 100); // history before the activation is not its usage
+    const a = activation(agentA, "owner-a");
+    const b = activation(agentB, "owner-b");
+    start(a);
+    start(b);
+    usage(agentA, 3);
+    usage(agentB, 7);
+    memory("owner-a", 30);
+    memory("owner-b", 90);
+    memory("owner-unknown", 500);
+    memory(undefined, 600);
+    finish(a);
+    finish(b);
+    memory("owner-a", 40); // late, before serialization
+    evaluated();
+    await recorder.flush();
+    memory("owner-a", 1000); // late, after serialization: dropped
+
+    const c = activation(agentA, "owner-a");
+    const plain = activation(undefined, undefined);
+    const failedRun = activation(agentB, "owner-b");
+    start(c);
+    start(plain);
+    start(failedRun);
+    finish(c);
+    finish(plain);
+    finish(failedRun, "error");
+    memory("owner-b", 700); // the failed activation keeps it from b
+    evaluated();
+    await recorder.flush();
+    await recorder.flush();
+    const samples = rows();
+    assert.deepEqual(
+      samples.map((sample) => [
+        sample.node,
+        sample.resources.tokens,
+        sample.resources.memory,
+      ]),
+      [
+        ["Inner/Work:er", 3, 40],
+        ["Inner/Work:er", 7, 90],
+        ["Inner/Work:er", 0, 0],
+        ["Inner/Work:er", undefined, 0],
+      ],
+    );
+    assert.deepEqual(samples[0]?.units, {
+      runtime: "ms",
+      tokens: "tok",
+      memory: "B",
+    });
+    assert.deepEqual(samples[3]?.units, { runtime: "ms", memory: "B" });
+    assert.equal(samples[0]?.resources.runtime, 5);
+    assert.deepEqual(samples[0]?.features, { "Start~>Worker": { count: 1 } });
+
+    const negative = activation(agentB, "owner-b");
+    start(negative);
+    usage(agentB, -20);
+    finish(negative);
+    evaluated();
+    await assert.rejects(
+      recorder.flush(),
+      /JsonlRecorder: invalid tokens sample/,
+    );
+    assert.equal(rows().length, 4);
+    const closing = recorder.close();
+    assert.equal(recorder.close(), closing);
+    await assert.rejects(closing, /JsonlRecorder: invalid tokens sample/);
+    start(activation(agentA, "owner-a")); // ignored after close
+    assert.throws(() => recorder.add_context("x"), /JsonlRecorder: closed/);
+    assert.equal(rows().length, 4);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

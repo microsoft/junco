@@ -29,7 +29,7 @@
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
     "check:ci": "bun run --bun biome ci .",
-    "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-graph.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts",
+    "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-graph.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/grafana-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts",
     "test:coverage": "bun run test --coverage",
     "test:integration": "bun test ./test/junco-agency.test.ts ./test/scheduler-dsl.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/std-workflows.test.ts ./test/yak-shaver.test.ts ./test/verus.test.ts",
     "test:native": "bun test ./test/policy-yield.test.ts ./test/mcp-graphs.test.ts ./test/yak-shaver-native.test.ts ./test/tui-tracer.test.ts ./test/profile-recorder-native.test.ts",
@@ -47,6 +47,7 @@
     "@earendil-works/pi-agent-core": "0.99.2",
     "@earendil-works/pi-ai": "0.99.2",
     "@earendil-works/pi-coding-agent": "0.99.2",
+    "@grafana/grafana-foundation-sdk": "0.0.21",
     "dataflow-engine": "workspace:*",
     "dataflow-profile": "workspace:*",
     "fp-ts": "^2.16.11",
@@ -54,8 +55,8 @@
     "junco-mcp": "workspace:*",
     "junco-scheduler": "workspace:*",
     "junco-tools": "workspace:*",
-    "ngraph.graph": "^20.1.2",
     "mermaid-ascii": "1.0.0",
+    "ngraph.graph": "^20.1.2",
     "typebox": "1.3.34"
   },
   "devDependencies": {

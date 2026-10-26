@@ -8,6 +8,7 @@ import {
   type AgentMessage,
   type AgentTool,
   type AgentToolCall,
+  type AgentToolResult,
   BACKGROUND_CONTEXT,
   createBranchSummaryMessage,
   createCompactionSummaryMessage,
@@ -28,6 +29,7 @@ import {
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEventStream,
   ImageContent,
   Model,
   Models,
@@ -49,9 +51,11 @@ import {
 } from "junco-mcp";
 import {
   AssignedTaskTool,
+  beginOperation,
   ComplainTool,
   type ComplaintContext,
   type Contract,
+  hasProfileOwner,
   InfoTool,
   type Issue,
   invokeComplainTool,
@@ -61,8 +65,14 @@ import {
   issueLog,
   isTaskTool,
   isYieldTool,
+  type ProfileOperation,
+  type ProfileOutcome,
+  type ProfileRecorder,
   type Prompt,
+  profileOperationOf,
+  profileToolCall,
   RecvTool,
+  runWithRecorder,
   SendTool,
   type TaskCall,
   type TaskInput,
@@ -184,6 +194,12 @@ export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
   /** One line the graph wants in the model's next request about this node's inbox; undefined when nothing needs reading. Read per request, never persisted. */
   readonly briefing?: () => string | undefined;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
+  /** The graph's own view of the profiling session; the agent records under its node ID there. */
+  readonly recorder?: ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  >;
+  /** This activation's final graph node ID; default the agent's own {@link JuncoAgent.nodeId}. */
+  readonly recorderNodeId?: string;
 };
 
 /** Checks a hosted `task` launch before admission; throwing rejects it. See {@link JuncoAgent.setTaskPolicy}. */
@@ -420,6 +436,8 @@ class RunRecord implements AgenticRun {
   prompt: Prompt | undefined;
   /** Why the latest request could not be snapshotted, when it could not. */
   promptCaptureError: unknown;
+  /** Records this run's one terminal outcome; undefined without a recorder. */
+  finish: ((outcome: ProfileOutcome) => void) | undefined;
 
   constructor(readonly kind: AgenticRun["kind"]) {
     const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
@@ -438,6 +456,11 @@ type BoundaryBase = {
 /** A pause: the run resumes once `gate` resolves. */
 type HeldBoundary = BoundaryBase & {
   readonly gate: PromiseWithResolvers<void>;
+  /** When and where this yield was recognized, until it resumes or is suppressed. */
+  waiting?: {
+    readonly recorder: ProfileRecorder<"operations">;
+    readonly at: number;
+  };
 };
 type Boundary = (BoundaryBase & { readonly gate?: undefined }) | HeldBoundary;
 type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
@@ -446,6 +469,42 @@ type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
   readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
 };
 const closedError = () => new JuncoAgentError("closed", "JuncoAgent is closed");
+const RUN = {
+  resource: "operations",
+  category: "agent",
+  tool: "",
+  operation: "run",
+} as const;
+const TURN = {
+  resource: "operations",
+  category: "agent",
+  tool: "",
+  operation: "turn",
+} as const;
+const HANDOFF = {
+  resource: "operations",
+  category: "agent",
+  tool: "yield",
+  operation: "handoff",
+} as const;
+const MODEL_REQUEST = {
+  resource: "tokens",
+  category: "agent",
+  tool: "",
+  operation: "model_request",
+} as const;
+const MAINTENANCE_REQUEST = {
+  resource: "tokens",
+  category: "agent",
+  tool: "",
+  operation: "maintenance_request",
+} as const;
+const UNREGISTERED = {
+  resource: "operations",
+  category: "custom",
+  tool: "unregistered",
+  operation: "invalid",
+} as const;
 
 /** A cooperative iterator around a single native Pi lane; the native lane is never public. */
 export class JuncoAgent<
@@ -702,6 +761,30 @@ export class JuncoAgent<
   #close: Promise<void> | undefined;
   /** The graph activation {@link runWithNodeContext} binds for its work. */
   #nodeContext: JuncoAgentNodeContext | undefined;
+  /** This agent's view of its constructor recorder, used outside graph placements. */
+  readonly #ownRecorder:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
+  /** The graph placement {@link runWithNodeContext} binds. */
+  #placement:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
+  /** Where the latest admitted run started. */
+  #runPlacement:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
+  /** The bound graph placement, else this agent's own view of its `recorder` option. */
+  get recorder():
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined {
+    return this.#placement ?? this.#ownRecorder;
+  }
+  /** Where current work records: the bound placement, else the latest run's, else this agent's own. */
+  #currentRecorder():
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined {
+    return this.#placement ?? this.#runPlacement ?? this.#ownRecorder;
+  }
   /** Checks each hosted `task` launch before admission; see {@link setTaskPolicy}. */
   #taskPolicy: TaskPolicy | undefined;
   /** What graphs do with this agent's failed tasks; see {@link setTaskFailurePolicy}. */
@@ -717,6 +800,9 @@ export class JuncoAgent<
   ) {
     if (options.tokenMonitor !== undefined)
       validateTokenMonitor(options.tokenMonitor);
+    this.#ownRecorder = options.recorder?.add_context(
+      options.recorderNodeId ?? this.nodeId,
+    );
     this.#options = options;
     this.collection = options.collection;
     this.#owned = owned;
@@ -736,7 +822,7 @@ export class JuncoAgent<
       };
     }
     // The single borrowing site: every agent over a collection acts as its own owner.
-    owned.binding ??= options.collection?.bind();
+    owned.binding ??= options.collection?.bind(() => this.#currentRecorder());
   }
 
   /** Complete the asynchronous native acquisition before any caller uses the agent. */
@@ -753,6 +839,8 @@ export class JuncoAgent<
       resources: _resources,
       collection: _collection,
       contract: _contract,
+      recorder: _recorder,
+      recorderNodeId: _recorderNodeId,
       tokenMonitor,
       activeToolNames,
       ...native
@@ -809,6 +897,18 @@ export class JuncoAgent<
       });
       if (tokenMonitor !== undefined)
         await this.#monitorUsage(harness, tokenMonitor);
+      // Committed increments only: restored history never replays as a usage event.
+      if (this.#ownRecorder !== undefined)
+        harness.events.on("usage", ({ row }) => {
+          const recorder: ProfileRecorder<"tokens"> | undefined =
+            this.#currentRecorder();
+          recorder?.record({
+            resource: "tokens",
+            kind: "usage",
+            source: this,
+            usage: row.usage,
+          });
+        });
     } catch (error) {
       this.#closing = true;
       const failures: unknown[] = [];
@@ -902,7 +1002,34 @@ export class JuncoAgent<
           run.promptCaptureError = error;
         }
       }
-      return models.streamSimple(model, context, options);
+      const recorder: ProfileRecorder<"tokens"> | undefined =
+        this.#currentRecorder();
+      const finish = beginOperation(
+        recorder,
+        run === undefined ? MAINTENANCE_REQUEST : MODEL_REQUEST,
+      );
+      if (finish === undefined)
+        return models.streamSimple(model, context, options);
+      let stream: AssistantMessageEventStream;
+      try {
+        stream = models.streamSimple(model, context, options);
+      } catch (error) {
+        finish("error");
+        throw error;
+      }
+      // Observes the final message without consuming the caller's iterator.
+      stream.result().then(
+        ({ stopReason }) =>
+          finish(
+            stopReason === "aborted"
+              ? "cancelled"
+              : stopReason === "error"
+                ? "error"
+                : "success",
+          ),
+        () => finish("error"),
+      );
+      return stream;
     };
     const completeSimple: Models["completeSimple"] = (
       model,
@@ -951,99 +1078,121 @@ export class JuncoAgent<
         }
         this.#runsByToolSignal.set(signal, run);
         if (isYieldTool(tool)) run.batch?.executedYields.set(id, tool);
-        try {
-          const node = this.#nodeContext;
-          const host = node?.task;
-          if (host !== undefined && isTaskTool(tool)) {
-            const assigned = isAssignedTaskTool(tool);
-            return await invokeTaskTool(
-              tool,
-              async (toolCallId, input, admission) => {
-                if ("action" in input)
-                  return host(toolCallId, input, admission);
-                if (assigned && this.#taskAdmitted)
-                  throw new Error(
-                    "Task batch already admitted; wait for its results.",
-                  );
-                this.#taskPolicy?.(input);
-                // `task` runs sequentially, so no second launch overlaps this admission.
-                const handles = await host(toolCallId, input, admission);
-                // Committed before the receipt is checked: a fulfilled host admitted children.
-                if (assigned) this.#taskAdmitted = true;
-                return handles;
-              },
-              id,
-              params as TaskCall,
-              signal,
+        // This agent's own owner-bound counterpart of a collection tool.
+        const selected = this.#owned.binding?.tools.get(tool) ?? tool;
+        const recorder = this.#currentRecorder();
+        const dispatch = async (): Promise<AgentToolResult<unknown>> => {
+          try {
+            const node = this.#nodeContext;
+            const host = node?.task;
+            if (host !== undefined && isTaskTool(tool)) {
+              const assigned = isAssignedTaskTool(tool);
+              return await invokeTaskTool(
+                tool,
+                async (toolCallId, input, admission) => {
+                  if ("action" in input)
+                    return host(toolCallId, input, admission);
+                  if (assigned && this.#taskAdmitted)
+                    throw new Error(
+                      "Task batch already admitted; wait for its results.",
+                    );
+                  this.#taskPolicy?.(input);
+                  // `task` runs sequentially, so no second launch overlaps this admission.
+                  const handles = await host(toolCallId, input, admission);
+                  // Committed before the receipt is checked: a fulfilled host admitted children.
+                  if (assigned) this.#taskAdmitted = true;
+                  return handles;
+                },
+                id,
+                params as TaskCall,
+                signal,
+              );
+            }
+            const messaging = node?.messaging;
+            if (messaging !== undefined) {
+              // Each agent's own bound node, whatever host a shared tool was constructed with.
+              if (RecvTool.is(tool))
+                return await RecvTool.invoke(
+                  tool,
+                  messaging,
+                  id,
+                  params as Parameters<typeof RecvTool.invoke>[3],
+                  signal,
+                );
+              if (SendTool.is(tool))
+                return await SendTool.invoke(
+                  tool,
+                  messaging,
+                  id,
+                  params as Parameters<typeof SendTool.invoke>[3],
+                  signal,
+                );
+              if (InfoTool.is(tool))
+                return await InfoTool.invoke(
+                  tool,
+                  messaging,
+                  id,
+                  params as Parameters<typeof InfoTool.invoke>[3],
+                  signal,
+                );
+            }
+            if (isComplainTool(tool)) {
+              if (run.prompt === undefined)
+                throw new JuncoAgentError(
+                  "invalid_state",
+                  "Cannot record complaint: model request snapshot unavailable",
+                  { cause: run.promptCaptureError },
+                );
+              const bound = node?.complaint ?? {
+                nodeId: this.nodeId,
+                messages: [],
+              };
+              return await invokeComplainTool(
+                tool,
+                this,
+                { ...bound, prompt: run.prompt },
+                id,
+                params as Parameters<typeof invokeComplainTool>[4],
+                signal,
+              );
+            }
+            return await selected.execute(id, params, signal, (update) =>
+              onUpdate(update),
             );
+          } catch (error) {
+            if (isMarshPolicyDenied(error)) {
+              run.batch?.reasons.set(id, {
+                kind: "policy",
+                toolCallId: id,
+                toolName: tool.name,
+                reason: error.message,
+              });
+            }
+            throw error;
           }
-          const messaging = node?.messaging;
-          if (messaging !== undefined) {
-            // Each agent's own bound node, whatever host a shared tool was constructed with.
-            if (RecvTool.is(tool))
-              return await RecvTool.invoke(
-                tool,
-                messaging,
-                id,
-                params as Parameters<typeof RecvTool.invoke>[3],
+        };
+        // Source-instrumented tools account their own calls.
+        return runWithRecorder(recorder, () =>
+          recorder === undefined || hasProfileOwner(selected)
+            ? dispatch()
+            : profileToolCall(
+                recorder,
+                this.#toolOperation(tool),
                 signal,
-              );
-            if (SendTool.is(tool))
-              return await SendTool.invoke(
-                tool,
-                messaging,
-                id,
-                params as Parameters<typeof SendTool.invoke>[3],
-                signal,
-              );
-            if (InfoTool.is(tool))
-              return await InfoTool.invoke(
-                tool,
-                messaging,
-                id,
-                params as Parameters<typeof InfoTool.invoke>[3],
-                signal,
-              );
-          }
-          if (isComplainTool(tool)) {
-            if (run.prompt === undefined)
-              throw new JuncoAgentError(
-                "invalid_state",
-                "Cannot record complaint: model request snapshot unavailable",
-                { cause: run.promptCaptureError },
-              );
-            const bound = node?.complaint ?? {
-              nodeId: this.nodeId,
-              messages: [],
-            };
-            return await invokeComplainTool(
-              tool,
-              this,
-              { ...bound, prompt: run.prompt },
-              id,
-              params as Parameters<typeof invokeComplainTool>[4],
-              signal,
-            );
-          }
-          // This agent's own owner-bound counterpart of a collection tool.
-          return await (this.#owned.binding?.tools.get(tool) ?? tool).execute(
-            id,
-            params,
-            signal,
-            (update) => onUpdate(update),
-          );
-        } catch (error) {
-          if (isMarshPolicyDenied(error)) {
-            run.batch?.reasons.set(id, {
-              kind: "policy",
-              toolCallId: id,
-              toolName: tool.name,
-              reason: error.message,
-            });
-          }
-          throw error;
-        }
+                dispatch,
+              ),
+        );
       },
+    };
+  }
+
+  /** Generic labels of an unmarked registered tool: genuine MCP wrappers, else custom. */
+  #toolOperation(tool: AgentTool): ProfileOperation<"operations"> {
+    return {
+      resource: "operations",
+      category: getJuncoMcpToolIdentity(tool) === undefined ? "custom" : "mcp",
+      tool: tool.name,
+      operation: "execute",
     };
   }
 
@@ -1062,11 +1211,33 @@ export class JuncoAgent<
     );
     if (calls.length === 0) return;
     run.batch = { reasons: new Map(), executedYields: new Map() };
+    const recorder = this.#currentRecorder();
+    if (recorder !== undefined)
+      for (const call of calls) {
+        const tool = this.#tools.find(({ name }) => name === call.name);
+        const operation =
+          tool === undefined
+            ? UNREGISTERED
+            : (profileOperationOf(
+                this.#owned.binding?.tools.get(tool) ?? tool,
+                call.arguments,
+              ) ?? this.#toolOperation(tool));
+        recorder.record({
+          kind: "metrics",
+          counters: { requested: 1 },
+          ...operation,
+        });
+      }
     this.observeToolBatch?.(run, message, calls);
   }
 
   #onTurnEnd(event: Extract<HarnessEvent, { type: "turn_end" }>): void {
     if (event.lane !== "main") return;
+    this.#currentRecorder()?.record({
+      kind: "metrics",
+      counters: { turns_completed: 1 },
+      ...TURN,
+    });
     const run = this.#runForOperation(event.runId);
     if (run === undefined) return;
     run.lastMessage = event.message;
@@ -1111,6 +1282,15 @@ export class JuncoAgent<
       ready: false,
     };
     run.held = boundary;
+    const recorder = this.#currentRecorder();
+    if (recorder !== undefined) {
+      boundary.waiting = { recorder, at: performance.now() };
+      recorder.record({
+        kind: "metrics",
+        counters: { yield_recognized: 1 },
+        ...HANDOFF,
+      });
+    }
     this.#publish(boundary);
   }
 
@@ -1118,6 +1298,37 @@ export class JuncoAgent<
   #runForOperation(operationId: string): RunRecord | undefined {
     const run = this.#currentRun;
     return run?.operationId === operationId ? run : undefined;
+  }
+
+  /** Counts `boundary`'s yielded turn as `next()` receives it. */
+  #handOff(boundary: HeldBoundary): void {
+    const { waiting, step } = boundary;
+    if (waiting === undefined || step.kind !== "yield") return;
+    const tool = step.reasons.filter(({ kind }) => kind === "tool").length;
+    waiting.recorder.record({
+      kind: "metrics",
+      counters: {
+        turns_yielded: 1,
+        tool_yield_reasons: tool,
+        policy_yield_reasons: step.reasons.length - tool,
+      },
+      ...HANDOFF,
+    });
+  }
+
+  /** Ends `boundary`'s wait once: `resumed` by a later `next()`, otherwise suppressed. */
+  #endWait(boundary: HeldBoundary, resumed: boolean): void {
+    const waiting = boundary.waiting;
+    if (waiting === undefined) return;
+    boundary.waiting = undefined;
+    const waited = performance.now() - waiting.at;
+    waiting.recorder.record({
+      kind: "metrics",
+      counters: resumed
+        ? { yield_resumed: 1, yield_wait_ms: waited }
+        : { yield_wait_ms: waited },
+      ...HANDOFF,
+    });
   }
 
   #readyYield(run: RunRecord | undefined): void {
@@ -1232,6 +1443,8 @@ export class JuncoAgent<
   #admit(request: RunRequest): Promise<AssistantMessage> {
     const run = new RunRecord(request.kind);
     this.#currentRun = run;
+    this.#runPlacement = this.#placement ?? this.#ownRecorder;
+    run.finish = beginOperation(this.#runPlacement, RUN);
     const settlement = trackPromise(
       this.#operations,
       trackPromise(this.#drives, this.#driveRun(run, request)),
@@ -1304,6 +1517,15 @@ export class JuncoAgent<
   #settle(run: RunRecord, step: AgenticStep): void {
     this.#readyYield(run);
     if (this.#currentRun === run) this.#currentRun = undefined;
+    const stopReason =
+      step.kind === "settled" ? step.message.stopReason : undefined;
+    run.finish?.(
+      run.stopping || stopReason === "aborted"
+        ? "cancelled"
+        : step.kind === "settled" && stopReason !== "error"
+          ? "success"
+          : "error",
+    );
     run.prompt = undefined;
     run.promptCaptureError = undefined;
     this.#publish({ step, run });
@@ -1432,11 +1654,23 @@ export class JuncoAgent<
   ): Promise<R> {
     if (this.#nodeContext !== undefined)
       throw new JuncoAgentError("busy", "A node context is already bound");
+    const parent = context.recorder;
+    // One profiling session per hierarchy: a placed agent records into the graph's session.
+    if (parent !== undefined && parent.root !== this.#options.recorder?.root)
+      throw new JuncoAgentError(
+        "invalid_argument",
+        "ProfileRecorder instance mismatch",
+      );
+    const placement = parent?.add_context(
+      context.recorderNodeId ?? this.nodeId,
+    );
     this.#nodeContext = context;
+    this.#placement = placement;
     try {
       return await work();
     } finally {
       this.#nodeContext = undefined;
+      this.#placement = undefined;
     }
   }
 
@@ -1743,6 +1977,7 @@ export class JuncoAgent<
                 activeToolNames,
                 resources,
                 tokenMonitor: this.#options.tokenMonitor,
+                recorder: this.#options.recorder,
               },
               owned,
             );
@@ -2031,6 +2266,7 @@ export class JuncoAgent<
     if (unread !== -1) this.#boundaries.splice(unread, 1);
     const consumed = this.#held.indexOf(held);
     if (consumed !== -1) this.#held.splice(consumed, 1);
+    this.#endWait(held, false);
     held.gate.resolve();
   }
   #markStopping(): void {
@@ -2157,7 +2393,10 @@ export class JuncoAgent<
         if (boundary.ready === false) return;
         this.#boundaries.shift();
         this.#demands.shift();
-        if (boundary.gate !== undefined) this.#held.push(boundary);
+        if (boundary.gate !== undefined) {
+          this.#held.push(boundary);
+          this.#handOff(boundary);
+        }
         demand.resolve({ value: boundary.step, done: false });
         continue;
       }
@@ -2173,6 +2412,7 @@ export class JuncoAgent<
       const held = this.#held.shift();
       if (held !== undefined) {
         if (held.run?.held === held) held.run.held = undefined;
+        this.#endWait(held, true);
         held.gate.resolve();
       } else if (this.#staged !== undefined) {
         const { text, images } = this.#staged;
@@ -2242,11 +2482,15 @@ export class JuncoAgent<
     const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
     const dependents = this.#startDependents("close");
     this.#cancelRuns();
-    for (const boundary of this.#held.splice(0)) boundary.gate.resolve();
+    for (const boundary of this.#held.splice(0)) {
+      this.#endWait(boundary, false);
+      boundary.gate.resolve();
+    }
     for (let index = this.#boundaries.length - 1; index >= 0; index--) {
       const boundary = this.#boundaries[index];
       if (boundary.gate === undefined) continue;
       this.#boundaries.splice(index, 1);
+      this.#endWait(boundary, false);
       boundary.gate.resolve();
     }
     this.#close = this.#finishClose(aborting, dependents);

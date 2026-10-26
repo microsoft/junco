@@ -3,10 +3,26 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { NativeMux } from "../native/index.js";
 import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
+import {
   displayToolPath,
   resolveToolPath,
   throwIfAborted,
 } from "./tool-support.js";
+
+const RELEASE = {
+  resource: "operations",
+  category: "release",
+  tool: "release",
+  operation: "execute",
+} as const;
+
+// Only an awaited native release resolves the call.
+const releaseMetrics = () => ({ counters: { releases: 1 } });
 
 const releaseSchema = Type.Object(
   {
@@ -28,6 +44,9 @@ export const ReleaseTool = {
   create(
     cwd: string,
     mux: NativeMux,
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
   ): AgentTool<typeof releaseSchema, undefined> {
     const tool = {
       name: "release",
@@ -37,21 +56,29 @@ export const ReleaseTool = {
       promptSnippet: "Relinquish ownership of a file you wrote",
       parameters: releaseSchema,
       executionMode: "sequential",
-      async execute(_toolCallId, { file }, signal) {
-        throwIfAborted(signal);
-        const absolutePath = resolveToolPath(cwd, file);
-        await mux.release(cwd, absolutePath);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Released ${displayToolPath(cwd, absolutePath)}`,
-            },
-          ],
-          details: undefined,
-        };
+      execute(_toolCallId, { file }, signal) {
+        return profileToolCall(
+          captureRecorder(recorder),
+          RELEASE,
+          signal,
+          async () => {
+            throwIfAborted(signal);
+            const absolutePath = resolveToolPath(cwd, file);
+            await mux.release(cwd, absolutePath);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Released ${displayToolPath(cwd, absolutePath)}`,
+                },
+              ],
+              details: undefined,
+            };
+          },
+          releaseMetrics,
+        );
       },
     } satisfies ToolDefinition<typeof releaseSchema, undefined>;
-    return tool;
+    return markProfileOwned(tool, () => RELEASE);
   },
 };

@@ -4,6 +4,13 @@ import { Type } from "typebox";
 import type { NativeMux } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileMetrics,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
+import {
   type BoundedToolDetails,
   boundedToolResult,
   requireU32,
@@ -322,12 +329,133 @@ const codeGraphSchema = Type.Object({
   ),
 });
 
+/** The bounded labels of a `code_graph` call with raw `args`; anything undecodable is `invalid`. */
+function graphOperation(args: unknown) {
+  const { action, clusterView = "list" } =
+    typeof args === "object" && args !== null
+      ? (args as { action?: unknown; clusterView?: unknown })
+      : {};
+  const operation =
+    action === "map" || action === "search" || action === "deps"
+      ? action
+      : action === "cluster" &&
+          CLUSTER_VIEWS.includes(clusterView as GraphClusterView)
+        ? `cluster.${clusterView as GraphClusterView}`
+        : "invalid";
+  return {
+    resource: "operations",
+    category: "graphTool",
+    tool: "code_graph",
+    operation,
+  } as const;
+}
+
+const sum = <T>(rows: readonly T[], of: (row: T) => number): number =>
+  rows.reduce((total, row) => total + of(row), 0);
+
+/** Result counters/gauges of one `operation`; result counts are per query, not unique entities. */
+function graphMetrics(
+  operation: string,
+  result: CodeGraphResult,
+): ProfileMetrics {
+  if (operation === "map") {
+    const map = result as GraphMapResult;
+    return {
+      counters: {
+        files: map.files,
+        symbols: map.symbols,
+        edges: map.edges,
+        languages: map.languages.length,
+        clusters: map.clusters.length,
+        hotspots: map.hotspots.length,
+        hubs: sum(map.clusters, (c) => c.hubs.length),
+      },
+    };
+  }
+  if (operation === "search") {
+    const search = result as GraphSearchResult;
+    return {
+      counters: {
+        hits: search.hits.length,
+        candidates: search.total_candidates,
+      },
+    };
+  }
+  if (operation === "deps") {
+    const deps = result as GraphDependencyResult;
+    return {
+      counters: {
+        nodes: deps.nodes.length,
+        edges: deps.edges.length,
+        truncated: Number(deps.truncated),
+      },
+      gauges: {
+        max_depth_last: deps.nodes.reduce(
+          (max, n) => Math.max(max, n.depth),
+          0,
+        ),
+      },
+    };
+  }
+  const cluster = result as GraphClusterResult;
+  const gauges = {
+    result_total_last: cluster.total,
+    offset_last: cluster.offset,
+    k_last: cluster.k,
+    omnipresent_threshold_last: cluster.omnipresent_threshold,
+    next_offset_last: cluster.next_offset,
+    has_next_page_last: Number(cluster.next_offset !== null),
+  };
+  if (cluster.view === "list")
+    return {
+      counters: {
+        rows: cluster.clusters.length,
+        clusters: cluster.clusters.length,
+        matching_files: sum(cluster.clusters, (c) => c.matching_files),
+        cluster_files: sum(cluster.clusters, (c) => c.cluster.file_count),
+        sample_files: sum(
+          cluster.clusters,
+          (c) => c.cluster.sample_files.length,
+        ),
+        contained_clusters: sum(cluster.clusters, (c) => Number(c.contained)),
+        library_clusters: sum(cluster.clusters, (c) =>
+          Number(c.cluster.library),
+        ),
+      },
+      gauges,
+    };
+  if (cluster.view === "members")
+    return {
+      counters: {
+        rows: cluster.members.length,
+        members: cluster.members.length,
+        cluster_files: cluster.cluster.file_count,
+      },
+      gauges,
+    };
+  const n = cluster.neighbors;
+  return {
+    counters: {
+      rows: n.length,
+      neighbors: n.length,
+      incoming_edges: sum(n, (r) => r.incoming?.edges ?? 0),
+      outgoing_edges: sum(n, (r) => r.outgoing?.edges ?? 0),
+      incoming_targets: sum(n, (r) => r.incoming?.targets ?? 0),
+      outgoing_targets: sum(n, (r) => r.outgoing?.targets ?? 0),
+    },
+    gauges,
+  };
+}
+
 /** The deterministic tree-sitter code graph as one routed read on `mux`; the index builds on first use and refreshes on every call. */
 export const CodeGraphTool = {
   create(
     cwd: string,
     _native: NativeModule,
     mux: NativeMux,
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
   ): AgentTool<typeof codeGraphSchema, BoundedToolDetails<CodeGraphResult>> {
     const tool = {
       name: "code_graph",
@@ -337,80 +465,105 @@ export const CodeGraphTool = {
       promptSnippet:
         "Map a repo, find symbols, trace dependencies and browse symbol clusters",
       parameters: codeGraphSchema,
-      async execute(_toolCallId, params, signal) {
-        if (params.action === "cluster") {
-          if (params.maxSize === 0)
-            throw new Error("max_size must be greater than zero");
-          if (
-            params.limit !== undefined &&
-            Number.isInteger(params.limit) &&
-            (params.limit < 1 || params.limit > 100)
-          )
-            throw new Error("cluster limit must be between 1 and 100");
-        }
-        for (const [field, minimum] of [
-          ["limit", 1],
-          ["depth", 1],
-          ["maxSize", 1],
-          ["omnipresent", 0],
-          ["offset", 0],
-        ] as const) {
-          if (params[field] !== undefined)
-            requireU32(field, params[field], minimum);
-        }
-        if (params.action === "search") {
-          if ((params.query ?? "").trim() === "")
-            throw new Error("search requires query");
-        } else if (params.action === "cluster") {
-          const view = params.clusterView ?? "list";
-          if (!CLUSTER_VIEWS.includes(view))
-            throw new Error(`invalid cluster view: ${view}`);
-          if (
-            params.direction !== undefined &&
-            !["in", "out", "both"].includes(params.direction)
-          )
-            throw new Error(`invalid direction: ${params.direction}`);
-          if (view === "list") {
-            if (
-              params.clusterId !== undefined ||
-              params.direction !== undefined
-            )
-              throw new Error(
-                "cluster list does not accept clusterId or direction",
-              );
-          } else {
-            if ((params.clusterId ?? "").trim() === "")
-              throw new Error(`cluster ${view} requires clusterId`);
-            if (
-              view === "members" &&
-              (params.directory !== undefined || params.direction !== undefined)
-            )
-              throw new Error(
-                "cluster members does not accept directory or direction",
-              );
-            if (view === "neighbors" && params.directory !== undefined)
-              throw new Error("cluster neighbors does not accept directory");
-          }
-        } else if (params.action === "deps") {
-          if ((params.symbol ?? "").trim() === "")
-            throw new Error("deps requires symbol");
-          // Direction and relation names are validated by the native prepare branch.
-        }
-        throwIfAborted(signal);
-        const json = await withNativeSignal(signal, (nativeSignal) =>
-          mux.graph(cwd, {
-            ...params,
-            path: resolveToolPath(cwd, params.path ?? "."),
-            signal: nativeSignal,
-          }),
+      execute(_toolCallId, params, signal) {
+        const scope = captureRecorder(recorder);
+        const operation = graphOperation(params);
+        let responseBytes = 0;
+        return profileToolCall(
+          scope,
+          operation,
+          signal,
+          async () => {
+            if (params.action === "cluster") {
+              if (params.maxSize === 0)
+                throw new Error("max_size must be greater than zero");
+              if (
+                params.limit !== undefined &&
+                Number.isInteger(params.limit) &&
+                (params.limit < 1 || params.limit > 100)
+              )
+                throw new Error("cluster limit must be between 1 and 100");
+            }
+            for (const [field, minimum] of [
+              ["limit", 1],
+              ["depth", 1],
+              ["maxSize", 1],
+              ["omnipresent", 0],
+              ["offset", 0],
+            ] as const) {
+              if (params[field] !== undefined)
+                requireU32(field, params[field], minimum);
+            }
+            if (params.action === "search") {
+              if ((params.query ?? "").trim() === "")
+                throw new Error("search requires query");
+            } else if (params.action === "cluster") {
+              const view = params.clusterView ?? "list";
+              if (!CLUSTER_VIEWS.includes(view))
+                throw new Error(`invalid cluster view: ${view}`);
+              if (
+                params.direction !== undefined &&
+                !["in", "out", "both"].includes(params.direction)
+              )
+                throw new Error(`invalid direction: ${params.direction}`);
+              if (view === "list") {
+                if (
+                  params.clusterId !== undefined ||
+                  params.direction !== undefined
+                )
+                  throw new Error(
+                    "cluster list does not accept clusterId or direction",
+                  );
+              } else {
+                if ((params.clusterId ?? "").trim() === "")
+                  throw new Error(`cluster ${view} requires clusterId`);
+                if (
+                  view === "members" &&
+                  (params.directory !== undefined ||
+                    params.direction !== undefined)
+                )
+                  throw new Error(
+                    "cluster members does not accept directory or direction",
+                  );
+                if (view === "neighbors" && params.directory !== undefined)
+                  throw new Error(
+                    "cluster neighbors does not accept directory",
+                  );
+              }
+            } else if (params.action === "deps") {
+              if ((params.symbol ?? "").trim() === "")
+                throw new Error("deps requires symbol");
+              // Direction and relation names are validated by the native prepare branch.
+            }
+            throwIfAborted(signal);
+            const json = await withNativeSignal(signal, (nativeSignal) =>
+              mux.graph(cwd, {
+                ...params,
+                path: resolveToolPath(cwd, params.path ?? "."),
+                signal: nativeSignal,
+              }),
+            );
+            throwIfAborted(signal);
+            if (scope !== undefined)
+              responseBytes = Buffer.byteLength(json, "utf8");
+            return boundedToolResult(json, JSON.parse(json) as CodeGraphResult);
+          },
+          ({ details: { result } }) => {
+            const { counters, gauges } = graphMetrics(
+              operation.operation,
+              result,
+            );
+            return {
+              counters: { ...counters, response_bytes: responseBytes },
+              gauges,
+            };
+          },
         );
-        throwIfAborted(signal);
-        return boundedToolResult(json, JSON.parse(json) as CodeGraphResult);
       },
     } satisfies ToolDefinition<
       typeof codeGraphSchema,
       BoundedToolDetails<CodeGraphResult>
     >;
-    return tool;
+    return markProfileOwned(tool, graphOperation);
   },
 };

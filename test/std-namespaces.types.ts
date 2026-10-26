@@ -1334,3 +1334,24 @@ export async function messagingToolsAreNominalAgentTools(
     vague,
   ];
 }
+
+export async function profileRecordersAreOneSharedInterface(
+  jsonl: tracer.JsonlRecorder,
+) {
+  const grafana: tracer.GrafanaRecorder = await tracer.GrafanaRecorder.create();
+  const full: tracer.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  > = grafana;
+  const fromJsonl: tracer.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  > = new tracer.JsonlRecorder({ path: "samples.jsonl", monitored: true });
+  // The `tools` and `tracer` names are the same imported interface.
+  const memory: tools.ProfileRecorder<"memory"> =
+    full.add_context("standalone");
+  const same: tracer.ProfileRecorder<"memory"> = memory;
+  const url: string = grafana.dashboardUrl;
+  const stream: string = grafana.streamId;
+  // @ts-expect-error ProfileRecorder is type-only
+  void new tracer.ProfileRecorder();
+  return [jsonl, fromJsonl, same, url, stream];
+}

@@ -60,7 +60,29 @@ For explicit acquisition, use `const tui = await tracer.TuiTracer.create("My wor
 
 Share one tracer across child graphs: Ralph and promoted task graphs inherit their parent's observer; separately constructed children must receive the same explicit tracer from their caller. Close all graphs before calling `await observer.flush()` once for the shared observer. TUI `flush()` draws the final state and waits for `q`/Esc before restoring the terminal; `q`/Esc can also dismiss early without cancelling computation. `await tui.close()` or async disposal restores without waiting for dismissal. Flushing or closing an unused lazy instance performs no terminal I/O. While the screen is owned, do not write directly to stdout/stderr; capture MCP stderr (`stderr: "pipe"`) and print final results only after restoration. Tab switches pane focus; arrows, PageUp/PageDown and Home/End pan or scroll, and End resumes trace tail-follow.
 
-`tracer.ProfileRecorder({ path, monitored? })` appends one `dataflow-profile` Sample JSON line per successful node activation, automatically at run end and on `flush()`. Runtime is milliseconds; real `JuncoAgent` token usage is the Pi cumulative total delta; mocks/non-agents have no tokens. With `monitored: true`, memory is the maximum attributed pipeline memory/peak bytes (zero without pipelines), not a sum of concurrent pipelines. Connect `onResourceEvent` to the collection's monitor callback using `JuncoAgent.owner` / `ToolBinding.owner`. Late events update the owner's last ended activation only until serialization; later events are dropped. Failed activations are not sampled. Share the recorder across nested graphs for matching `id` / `parentNodeId/id` keys, close graphs/collections to drain events, then flush (append errors reject).
+Profiling uses a separate `recorder` dependency, never a tracer: one application-owned `tools.ProfileRecorder<R>` session whose resource union `R` is a set of singleton strings. Graphs, agents and collections take `recorder?: tools.ProfileRecorder<"memory" | "tokens" | "edits" | "operations">` (graphs and agents also `recorderNodeId`); narrowing to a producer's singleton, such as `ProfileRecorder<"memory">` for `ShellMuxLease.create(cwd, { recorder })`, is plain assignment, and `add_context(nodeId)` derives the `::`-joined node context of the same session (`.root`). Every graph, agent and collection in one hierarchy must share that root, else construction rejects with `ProfileRecorder instance mismatch`. Two sinks implement it:
+
+- `new tracer.JsonlRecorder({ path, monitored? })` appends one `dataflow-profile` Sample JSON line per successful graph activation, automatically at each graph evaluation end and on `flush()`, keyed by its node IDs joined with `/` (`Inner/Worker`). Runtime is milliseconds; a real `JuncoAgent`'s tokens are its committed usage since the activation started (zero when none); mocks/non-agents have no tokens. With `monitored: true`, memory is the maximum attributed pipeline memory/peak bytes (zero without pipelines), not a sum of concurrent pipelines. Late events update the owner's last ended activation only until serialization; later events are dropped. Failed activations are not sampled; a negative or non-finite final resource rejects `flush()` with `JsonlRecorder: invalid <resource> sample` instead of writing the row.
+- `await tracer.GrafanaRecorder.create({ url?, intervalMs? })` (defaults `http://localhost:8000`, 1000 ms) creates or updates the tagged `junco-telemetry` dashboard (built with `@grafana/grafana-foundation-sdk`; an untagged dashboard at that UID is a conflict) and, from the first recorded event, pushes Influx line-protocol snapshots to Grafana Live stream `recorder.streamId`. Open `recorder.dashboardUrl`: memory, peak memory, tokens, token rates per node and in total, plus operation, resource/token and inclusive graph-context tables. Memory is shell-pipeline cgroup memory, not host heap; peaks are sampled. Live keeps no history: a browser shows only what it received while connected. Requests carry no credentials: the Grafana instance must grant anonymous users an organization role allowed to write dashboards and push to Live (e.g. `GF_AUTH_ANONYMOUS_ENABLED=true`, `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin`); errors carry only an operation and status. Transport failures stop pushing without retries and reject `flush()`/`close()`.
+
+Close graphs, agents and caller-owned collections first (native close drains the final resource events), then `await recorder.close()` once; closing a source never closes the recorder.
+
+```ts
+import { JuncoGraph, tracer } from "junco-agency";
+
+const recorder = await tracer.GrafanaRecorder.create();
+console.log(recorder.dashboardUrl);
+try {
+  const execution = await JuncoGraph.fromYaml(document, { ...options, recorder });
+  try {
+    await execution.run();
+  } finally {
+    await execution.graph.close();
+  }
+} finally {
+  await recorder.close();
+}
+```
 
 Operational logs still use `junco-tools/log`'s one process-wide [tslog](https://github.com/fullstack-build/tslog) logger. `LOG_LEVEL` (`SILLY`, `TRACE`, `DEBUG`, `INFO` — the default — `WARN`, `ERROR`, `FATAL`) is read once at startup; missing/blank means INFO, names are trimmed and case-insensitive, and unknown or numeric values fail before native or model work. `issueLog`'s complaint-observer failures use WARN. The logger receives every junco-policy capability decision of the ShellMux `ShellMuxLease.create` opens: violations at INFO (`junco-policy authorize: policy violated`, with principal, action, resource segments, failed precondition and allowed fixes) and, under `LOG_LEVEL=DEBUG`, tentative grants. While the TUI owns the terminal, admitted operational logs are redirected exclusively into its trace pane. Each mux's `lease.release()` (and so a collection's final release) drains these records; its `flushLog()` barrier waits for drawing, not keyboard dismissal. Outside the TUI that barrier flushes stdout.
 

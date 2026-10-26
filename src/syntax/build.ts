@@ -68,6 +68,12 @@ export type AgentSpec = {
   readonly skills: Skill[];
   readonly cwd: string;
   readonly collection?: tools.ToolCollection;
+  /** The immediate parent graph's recorder view; the agent's context is `recorderNodeId` in it. */
+  readonly recorder?: tools.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  >;
+  /** The agent's local node ID. */
+  readonly recorderNodeId?: string;
 };
 /** What a `kind: code` definition sees when its node is registered. */
 export type CodeContext<C = unknown> = {
@@ -77,6 +83,11 @@ export type CodeContext<C = unknown> = {
   readonly edges: ReadonlyMap<string, Edge>;
   readonly policy: tools.Policy;
   readonly collection?: tools.ToolCollection;
+  /** The enclosing graph's recorder view; the node's context is `recorderNodeId` in it. */
+  readonly recorder?: tools.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  >;
+  readonly recorderNodeId?: string;
   readonly context: C;
   readonly signal?: AbortSignal;
 };
@@ -98,7 +109,7 @@ export type BuildOptions<C = unknown> = {
   readonly collection?: tools.ToolCollection;
   /** Limits/monitoring of the collection build creates; rejected with collection, agents or createAgent. */
   readonly resources?: tools.NativeResourceOptions;
-  /** Monitor callback; pair with resources.monitorIntervalMs (e.g. ProfileRecorder.onResourceEvent). */
+  /** Monitor callback; pair with resources.monitorIntervalMs. Recorders take `recorder` instead. */
   readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
   /** Fitted profiles keyed by id or parentNodeId/id; a present node overrides its YAML profiles. */
   readonly profiles?: ProfilesFile;
@@ -108,6 +119,12 @@ export type BuildOptions<C = unknown> = {
   /** Models per strength; required when build creates agents. */
   readonly ladder?: Ladder;
   readonly tracer?: tracer.DataflowTracer;
+  /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
+  readonly recorder?: tools.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  >;
+  /** The root graph's context in `recorder` (default: the recorder's own context). */
+  readonly recorderNodeId?: string;
   readonly tools?: Readonly<Record<string, AgentTool>>;
   /**
    * Prepared agents keyed by node path (`Worker` or `Child/Worker`), exclusive with createAgent.
@@ -284,6 +301,8 @@ export function createJuncoAgent(
     cwd: spec.cwd,
     tools: spec.tools,
     collection: spec.collection,
+    recorder: spec.recorder,
+    recorderNodeId: spec.recorderNodeId,
     ...(spec.skills.length ? { resources: { skills: spec.skills } } : {}),
   });
 }
@@ -469,9 +488,9 @@ async function registerAgent(
   const instance = c.agents
     ? c.agents.get(key)!
     : c.options.createAgent
-      ? await c.options.createAgent(c.specs.next().value!)
+      ? await c.options.createAgent(placed(c.specs.next().value!, g, id))
       : await createJuncoAgent(
-          c.specs.next().value!,
+          placed(c.specs.next().value!, g, id),
           c.options.ladder!,
           c.options.models,
         );
@@ -506,6 +525,12 @@ async function registerAgent(
   }
 }
 
+/** `spec` at node `id` of `g`, carrying `g`'s recorder view when it records. */
+const placed = (spec: AgentSpec, g: JuncoGraph, id: string): AgentSpec =>
+  g.recorder === undefined
+    ? spec
+    : { ...spec, recorder: g.recorder, recorderNodeId: id };
+
 async function buildGraph(
   c: Construction,
   spec: GraphSpec,
@@ -513,6 +538,8 @@ async function buildGraph(
   observer: tracer.DataflowTracer | undefined,
   parentOutputs: readonly Edge[],
   path: string,
+  recorder: BuildOptions["recorder"],
+  recorderNodeId: string | undefined,
 ): Promise<Execution> {
   c.options.signal?.throwIfAborted();
   const edges = createEdges(spec);
@@ -539,6 +566,8 @@ async function buildGraph(
     observer,
     c.policy,
     c.collection,
+    recorder,
+    recorderNodeId,
   );
   c.partialRoots.add(g);
   const hook = (id: string) => c.options.available?.[id]?.({ graph: g, edges });
@@ -572,6 +601,8 @@ async function buildGraph(
         g.tracer,
         outbound,
         key,
+        g.recorder,
+        id,
       );
       g.addNode({
         ...registration,
@@ -587,6 +618,8 @@ async function buildGraph(
         edges,
         policy: c.policy,
         collection: c.collection,
+        recorder: g.recorder,
+        recorderNodeId: id,
         context: c.options.context,
         signal: c.options.signal,
       });
@@ -792,6 +825,8 @@ export async function build<C = unknown>(
         options.tracer,
         [],
         "",
+        options.recorder,
+        options.recorderNodeId,
       );
       if (options.createAgentOwnership !== "caller")
         for (const policy of c.borrowed) policy.agentOwnership = "graph";
@@ -805,6 +840,7 @@ export async function build<C = unknown>(
       options.cwd,
       {
         policy,
+        ...(options.recorder ? { recorder: options.recorder } : {}),
         ...(options.resources ? { resources: options.resources } : {}),
         ...(options.onResourceEvent
           ? { onResourceEvent: options.onResourceEvent }

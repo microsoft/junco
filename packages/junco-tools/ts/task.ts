@@ -1,6 +1,16 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 import { checkToolInput } from "./tool-support.js";
+
+type Recorder =
+  | ProfileRecorder<"operations">
+  | (() => ProfileRecorder<"operations"> | undefined);
 
 const nonBlank = (description: string) =>
   Type.String({ pattern: "\\S", description });
@@ -107,8 +117,11 @@ export type TaskToolHost = (
   signal: AbortSignal,
 ) => Promise<TaskToolDetails["tasks"]>;
 
-/** Tools this module created. Only these are graph primitives; a same-named or copied tool is not. */
-const taskTools = new WeakSet<object>();
+/**
+ * Tools this module created, with their recorders. Only these are graph primitives; a same-named
+ * or copied tool is not.
+ */
+const taskTools = new WeakMap<object, Recorder | undefined>();
 /** The detached batch of each assigned tool, kept off its model-facing schema. */
 const assignedInputs = new WeakMap<object, TaskInput>();
 
@@ -136,7 +149,10 @@ export type AssignedTaskTool = AgentTool<
  * the host a `JuncoAgent` scopes to a graph activation; without either it fails rather than
  * pretend success.
  */
-export const TaskTool: new (host?: TaskToolHost) => TaskTool = class {
+export const TaskTool: new (
+  host?: TaskToolHost,
+  recorder?: Recorder,
+) => TaskTool = class {
   name = "task";
   label = "task";
   description =
@@ -149,12 +165,13 @@ export const TaskTool: new (host?: TaskToolHost) => TaskTool = class {
   executionMode: TaskTool["executionMode"] = "sequential";
   execute: TaskTool["execute"];
 
-  constructor(host?: TaskToolHost) {
+  constructor(host?: TaskToolHost, recorder?: Recorder) {
     this.execute = (toolCallId, input, signal) => {
       if (!host) throw new Error("task requires a JuncoGraph host");
       return admit(this, host, toolCallId, input, signal);
     };
-    taskTools.add(this);
+    taskTools.set(this, recorder);
+    markProfileOwned(this, (args) => taskOperation(this, args));
   }
 };
 
@@ -163,28 +180,31 @@ export const TaskTool: new (host?: TaskToolHost) => TaskTool = class {
  * model calls it with `{}`, and may also send decisions about failed tasks. It has no host of its
  * own.
  */
-export const AssignedTaskTool: new (input: TaskInput) => AssignedTaskTool =
-  class {
-    name = "task";
-    label = "task";
-    description: string;
-    parameters = assignedParameters;
-    executionMode: AssignedTaskTool["executionMode"] = "sequential";
-    execute: AssignedTaskTool["execute"] = () => {
-      throw new Error("task requires a JuncoGraph host");
-    };
-
-    constructor(input: TaskInput) {
-      const batch = detach(checkToolInput("task", launchSchema, input));
-      const count = batch.tasks.length;
-      this.description =
-        `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
-        "assignments are fixed. This returns one handle per task immediately; each subagent's " +
-        `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`;
-      taskTools.add(this);
-      assignedInputs.set(this, batch);
-    }
+export const AssignedTaskTool: new (
+  input: TaskInput,
+  recorder?: Recorder,
+) => AssignedTaskTool = class {
+  name = "task";
+  label = "task";
+  description: string;
+  parameters = assignedParameters;
+  executionMode: AssignedTaskTool["executionMode"] = "sequential";
+  execute: AssignedTaskTool["execute"] = () => {
+    throw new Error("task requires a JuncoGraph host");
   };
+
+  constructor(input: TaskInput, recorder?: Recorder) {
+    const batch = detach(checkToolInput("task", launchSchema, input));
+    const count = batch.tasks.length;
+    this.description =
+      `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
+      "assignments are fixed. This returns one handle per task immediately; each subagent's " +
+      `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`;
+    taskTools.set(this, recorder);
+    assignedInputs.set(this, batch);
+    markProfileOwned(this, (args) => taskOperation(this, args));
+  }
+};
 
 /** Whether `tool` is a `task` tool constructed by {@link TaskTool} or {@link AssignedTaskTool}. */
 export function isTaskTool(tool: object): tool is TaskTool | AssignedTaskTool {
@@ -229,6 +249,26 @@ function detach(input: TaskInput): TaskInput {
   };
 }
 
+/** The bounded labels of a call with raw `args` on `tool`, following {@link requestOf}'s decoding. */
+function taskOperation(tool: object, args: unknown) {
+  const action =
+    typeof args !== "object" || args === null
+      ? "invalid"
+      : "action" in args
+        ? args.action === "retry" || args.action === "ignore"
+          ? args.action
+          : "invalid"
+        : assignedInputs.has(tool)
+          ? "assigned"
+          : "launch";
+  return {
+    resource: "operations",
+    category: "task",
+    tool: "task",
+    operation: action,
+  } as const;
+}
+
 /** The request `input` makes of `tool`'s host. */
 function requestOf(tool: object, input: unknown): TaskRequest {
   if (typeof input === "object" && input !== null && "action" in input) {
@@ -246,12 +286,28 @@ function requestOf(tool: object, input: unknown): TaskRequest {
   return detach(assigned);
 }
 
-async function admit(
+function admit(
   tool: object,
   host: TaskToolHost,
   toolCallId: string,
   input: unknown,
   signal: AbortSignal = neverAborted,
+): Promise<AgentToolResult<TaskToolDetails>> {
+  return profileToolCall(
+    captureRecorder(taskTools.get(tool)),
+    taskOperation(tool, input),
+    signal,
+    () => admitted(tool, host, toolCallId, input, signal),
+    ({ details }) => ({ counters: { handles_returned: details.tasks.length } }),
+  );
+}
+
+async function admitted(
+  tool: object,
+  host: TaskToolHost,
+  toolCallId: string,
+  input: unknown,
+  signal: AbortSignal,
 ): Promise<AgentToolResult<TaskToolDetails>> {
   const request = requestOf(tool, input);
   signal.throwIfAborted();

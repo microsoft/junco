@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
@@ -5,6 +6,7 @@ import {
   DataflowGraph,
   type DataflowObservation,
   type DataflowRunOptions,
+  type DataflowRunTrace,
   type DataflowTracer,
   Edge,
   type EdgeIdType,
@@ -13,6 +15,7 @@ import {
   NodeId,
   type NodeIdType,
   type NodeSpec,
+  type ParentView,
   Sink,
   Source,
   type StepFn,
@@ -26,8 +29,11 @@ import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, JuncoAgentError } from "junco-agent";
 import { parallel, type SchedulerContext } from "junco-scheduler";
 import {
+  beginOperation,
   type Contract,
   issueLog,
+  type ProfileActivation,
+  type ProfileRecorder,
   ToolCollection,
   type ToolCollectionOptions,
 } from "junco-tools";
@@ -111,6 +117,175 @@ const FULLNESS_THRESHOLD = 0.4;
 /** One hold on a collection, released once. */
 type Hold = { close(): Promise<void> };
 
+/** Thrown when one hierarchy mixes recorder sessions, or omits one where its parent records. */
+const recorderMismatch = (): TypeError =>
+  new TypeError("ProfileRecorder instance mismatch");
+
+/** Rejects two recorders of different sessions; an absent one matches anything. */
+function checkRecorder(
+  expected: { readonly root: object } | undefined,
+  actual: { readonly root: object } | undefined,
+): void {
+  if (
+    expected !== undefined &&
+    actual !== undefined &&
+    expected.root !== actual.root
+  )
+    throw recorderMismatch();
+}
+
+/** Isolates one observer callback exactly as the engine does. */
+function observe<U>(callback: () => U): U | undefined {
+  try {
+    return callback();
+  } catch (error) {
+    console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+    return undefined;
+  }
+}
+
+const EVALUATE = {
+  resource: "operations",
+  category: "graph",
+  tool: "",
+  operation: "evaluate",
+} as const;
+
+/**
+ * A graph's tracer when it has a recorder: forwards every callback to the caller's tracer and,
+ * isolated from it, records graph evaluation and node activations at the graph's current view.
+ */
+class RecorderBridge implements DataflowTracer {
+  constructor(readonly delegate: DataflowTracer) {}
+
+  startRun<S, N, T, EH>(
+    graph: DataflowGraph<S, N, T, EH>,
+  ): DataflowRunTrace<N, T> {
+    const run = observe(() => this.delegate.startRun(graph));
+    const view: ProfileRecorder<"operations"> | undefined =
+      graph instanceof JuncoGraph ? graph.recorder : undefined;
+    const finish = observe(() => beginOperation(view, EVALUATE));
+    const runId = randomUUID();
+    const outcome = (error: unknown) =>
+      (graph instanceof JuncoGraph && graph.signal.aborted) ||
+      (error instanceof Error && error.name === "AbortError")
+        ? "cancelled"
+        : "error";
+    return {
+      startNode: (id, phase, inputs) => {
+        const step = observe(() => run?.startNode(id, phase, inputs));
+        const activation = observe(() =>
+          startActivation(graph, view, runId, id, phase, inputs),
+        );
+        return {
+          end: (result) => {
+            observe(() => step?.end(result));
+            observe(() => activation?.(result));
+          },
+          fail: (error) => {
+            observe(() => step?.fail(error));
+            observe(() => activation?.(outcome(error)));
+          },
+        };
+      },
+      end: (results) => {
+        observe(() => run?.end(results));
+        observe(() => {
+          view?.record({
+            kind: "metrics",
+            ...EVALUATE,
+            gauges: { retained_results_last: results.size },
+          });
+          finish?.("success");
+        });
+      },
+      fail: (error) => {
+        observe(() => run?.fail(error));
+        observe(() => finish?.(outcome(error)));
+      },
+    };
+  }
+
+  complain(nodeId: NodeIdType, complaint: string): void {
+    this.delegate.complain(nodeId, complaint);
+  }
+
+  flush(): Promise<void> {
+    return this.delegate.flush();
+  }
+}
+
+/**
+ * Records one activation's start at node `id` of `graphView` and returns its completion: a step
+ * result succeeds, an outcome fails.
+ */
+function startActivation<S, N, T, EH>(
+  graph: DataflowGraph<S, N, T, EH>,
+  graphView: ProfileRecorder<"operations"> | undefined,
+  runId: string,
+  id: NodeIdType,
+  phase: "prime" | "resume",
+  inputs: ParentView<N, T> | undefined,
+):
+  | ((
+      end: IteratorResult<readonly unknown[], T> | "error" | "cancelled",
+    ) => void)
+  | undefined {
+  const view = graphView?.add_context(String(id));
+  if (view === undefined) return undefined;
+  // Registration metadata survives task promotion, unlike the node's mutable state.
+  const node = graph.getNode(id);
+  const candidate = node && nodePolicies.get(node.step)?.agent;
+  const agent = candidate instanceof JuncoAgent ? candidate : undefined;
+  const activation: ProfileActivation = {
+    runId,
+    firedAt: new Date().toISOString(),
+    features:
+      inputs === undefined
+        ? {}
+        : Object.fromEntries(
+            [...inputs.messages.keys()].map((edge) => [
+              String(edge),
+              { count: inputs.messages.get(edge)?.length ?? 0 },
+            ]),
+          ),
+    agent,
+    owner: agent?.owner,
+  };
+  const operation = {
+    resource: "operations",
+    category: "graph",
+    tool: "",
+    operation: phase,
+    activation,
+  } as const;
+  const finish = beginOperation(view, operation);
+  if (inputs !== undefined) {
+    let messages = 0;
+    for (const edge of inputs.messages.keys())
+      messages += inputs.messages.get(edge)?.length ?? 0;
+    view.record({
+      kind: "metrics",
+      ...operation,
+      counters: {
+        input_messages: messages,
+        input_values: [...inputs.values.keys()].length,
+      },
+    });
+  }
+  return (end) => {
+    if (typeof end === "string") return finish?.(end);
+    view.record({
+      kind: "metrics",
+      ...operation,
+      counters: end.done
+        ? { activations_returned: 1, output_values: 1 }
+        : { activations_yielded: 1, output_messages: end.value.length },
+    });
+    finish?.("success");
+  };
+}
+
 /** A passive native work graph owning its agents, child graphs and coroutines. */
 export class JuncoGraph<
   N = AgenticInput,
@@ -128,6 +303,16 @@ export class JuncoGraph<
   /** The creator hold this graph owns, when {@link create} built it. */
   #owned: Hold | undefined;
   #observation: DataflowObservation<Agentic<N, T>, N, T> | undefined;
+  /** The caller's tracer; {@link tracer} is a recorder bridge around it when a recorder is set. */
+  readonly #delegate: DataflowTracer;
+  /** This graph's own context: the constructor recorder at `recorderNodeId`. */
+  readonly #recorder:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
+  /** The placement of the drive {@link runWithRecorder} brackets. */
+  #placement:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
 
   readonly source: Source<N, T>;
   readonly sink: Sink<N, T>;
@@ -144,6 +329,8 @@ export class JuncoGraph<
     tracer: DataflowTracer | undefined,
     policy: ToolCollection["policy"],
     collection?: ToolCollection,
+    recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    recorderNodeId?: string,
   ) {
     if (!(source instanceof Source) || !(sink instanceof Sink))
       throw new TypeError("JuncoGraph requires Source and Sink ports");
@@ -156,7 +343,18 @@ export class JuncoGraph<
     if (claimedPorts.has(source) || claimedPorts.has(sink))
       throw new TypeError("Graph ports are already owned by a JuncoGraph");
     checkPolicy(policy, collection);
-    super(window, threads, tracer ?? TuiTracer.shared());
+    checkRecorder(recorder, collection?.recorder);
+    const delegate =
+      tracer instanceof RecorderBridge
+        ? tracer.delegate
+        : (tracer ?? TuiTracer.shared());
+    super(
+      window,
+      threads,
+      recorder === undefined ? delegate : new RecorderBridge(delegate),
+    );
+    this.#delegate = delegate;
+    this.#recorder = recorder?.add_context(recorderNodeId ?? "");
     this.policy = policy;
     this.source = source;
     this.sink = sink;
@@ -217,12 +415,18 @@ export class JuncoGraph<
     return build(doc, options);
   }
 
-  /** Build and return the caller's context, adopting its graph into one owned collection. */
+  /**
+   * Build and return the caller's context, adopting its graph into one owned collection; the
+   * collection and `build` receive `options.recorder`.
+   */
   static async create<N, T, EH, C = AgencyNodeMetadata>(
     cwd: string,
     options: ToolCollectionOptions,
     build: (
       collection: ToolCollection,
+      recorder:
+        | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | undefined,
     ) =>
       | SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>
       | Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>,
@@ -233,7 +437,7 @@ export class JuncoGraph<
       | SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>
       | undefined;
     try {
-      execution = await build(collection);
+      execution = await build(collection, options.recorder);
       execution.graph.#adopt(collection);
       return execution;
     } catch (error) {
@@ -262,6 +466,10 @@ export class JuncoGraph<
       readonly sink: Sink<N, T>;
       readonly policy: ToolCollection["policy"];
       readonly tracer?: DataflowTracer;
+      readonly recorder?: ProfileRecorder<
+        "memory" | "tokens" | "edits" | "operations"
+      >;
+      readonly recorderNodeId?: string;
     },
   ): SchedulerContext<
     Agentic<N, T>,
@@ -277,6 +485,9 @@ export class JuncoGraph<
       UNBOUNDED,
       options.tracer,
       options.policy,
+      undefined,
+      options.recorder,
+      options.recorderNodeId,
     );
     try {
       const edges = new Map<string, Edge<N, T>>();
@@ -329,6 +540,8 @@ export class JuncoGraph<
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
+    recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    recorderNodeId?: string,
   ): SchedulerContext<
     Agentic<N, T>,
     N,
@@ -343,6 +556,9 @@ export class JuncoGraph<
       UNBOUNDED,
       tracer,
       JuncoGraph.#nodePolicy(root),
+      undefined,
+      recorder,
+      recorderNodeId,
     );
     try {
       graph.appendChildren(graph.addNode(root), inputs, child);
@@ -492,6 +708,36 @@ export class JuncoGraph<
     return this.#collection;
   }
 
+  /** The current drive's placement, else this graph's own recorder context. */
+  get recorder():
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined {
+    return this.#placement ?? this.#recorder;
+  }
+
+  /**
+   * Run `work` with this graph placed at `recorder`, a view of its own recorder session: a parent
+   * drives a reused or prebuilt child at the child's actual position.
+   */
+  async runWithRecorder<T>(
+    recorder: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    work: () => T | Promise<T>,
+  ): Promise<T> {
+    if (this.#recorder === undefined || this.#recorder.root !== recorder.root)
+      throw recorderMismatch();
+    if (this.#placement !== undefined)
+      throw new JuncoAgentError(
+        "invalid_state",
+        "Graph recorder placement is already active",
+      );
+    this.#placement = recorder;
+    try {
+      return await work();
+    } finally {
+      this.#placement = undefined;
+    }
+  }
+
   /** Aborted by {@link abort} (then replaced once that settles) and, terminally, by {@link close}. */
   get signal(): AbortSignal {
     return this.#controller.signal;
@@ -510,6 +756,21 @@ export class JuncoGraph<
     const state = spec.state;
     const nested = isNestedContext<N, T>(state);
     const policy = JuncoGraph.#nodePolicy(spec, this.policy);
+    if (this.#recorder !== undefined) {
+      const child = nested
+        ? state.graph
+        : state instanceof JuncoGraph
+          ? state
+          : undefined;
+      const member =
+        child === undefined
+          ? state instanceof JuncoAgent
+            ? state.recorder
+            : this.#recorder
+          : child.#recorder;
+      if (member === undefined) throw recorderMismatch();
+      checkRecorder(this.#recorder, member);
+    }
     let complete: CompleteNode<N, T>;
     if (spec.step !== undefined) {
       const port =
@@ -545,9 +806,13 @@ export class JuncoGraph<
     else throw new TypeError("An agentic node requires a step");
     const id = super.addNode(complete);
     const current = (): AbortSignal => this.signal;
+    const recorder = () => this.recorder;
     const { contract } = complete;
     registeredNodeContexts.set(this.getNode(id)!, {
-      tracer: this.tracer,
+      tracer: this.#delegate,
+      get recorder() {
+        return recorder();
+      },
       get signal() {
         return current();
       },
@@ -612,7 +877,11 @@ export class JuncoGraph<
         signal.throwIfAborted();
         if (graph.available().size > 0) {
           try {
-            await execution.step({ signal });
+            const placement = parent.recorder?.add_context(String(this.id));
+            const drive = () => execution.step({ signal });
+            await (placement === undefined
+              ? drive()
+              : graph.runWithRecorder(placement, drive));
           } catch (error) {
             throw cancellation(signal, error);
           }
@@ -698,6 +967,7 @@ export class JuncoGraph<
       throw new TypeError(
         "Collection policy does not match the selected policy",
       );
+    checkRecorder(this.#recorder, collection.recorder);
     const seen = new Set<object>();
     const stack: unknown[] = [this];
     while (stack.length > 0) {

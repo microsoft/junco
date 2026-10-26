@@ -25,9 +25,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   BashTool,
+  DiffTool,
   isMarshPolicyDenied,
   LockPolicy,
   MARSH_POLICY_DENIED,
+  runWithRecorder,
   ShellMuxOperations,
   ToolCollection,
 } from "../dist/index.js";
@@ -36,16 +38,19 @@ import {
   closeFixture,
   collector,
   copyTreeNative,
+  counter,
   deferred,
   fixture,
   hashlineTag,
   heldChild,
   nativeEnv,
+  outcomes,
   release,
   sdkResources,
   seedFixture,
   settleAgent,
   testNative,
+  testRecorder,
   text,
 } from "./helpers.mjs";
 import {
@@ -59,7 +64,7 @@ import {
  * the seed; its marsh state lives beside it, inside the disposable scratch root, as does the
  * empty directory `outside`. `dispose` closes the collection, then removes the tree.
  */
-async function workspace(files = {}, { sandbox = "shared" } = {}) {
+async function workspace(files = {}, { sandbox = "shared", recorder } = {}) {
   const { root: scratch, seed: root } = await seedFixture({ files });
   const outside = join(scratch, "outside");
   try {
@@ -69,6 +74,7 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
       native,
       sandbox,
       policy: LockPolicy,
+      recorder,
     });
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
@@ -2114,5 +2120,131 @@ test("LspTool.create rejects under Node", { timeout: 30_000 }, async () => {
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recorded tools count each call once with typed result metrics", {
+  timeout: 60_000,
+}, async () => {
+  const recorder = testRecorder();
+  const { events } = recorder.root;
+  const ws = await workspace(
+    { "src/a.txt": "alpha\nbeta\n", "src/b.txt": "gamma\n" },
+    { recorder },
+  );
+  try {
+    assert.equal(ws.collection.recorder, recorder);
+    const diff = await ws.call("diff", {
+      oldText: "a\nb\n",
+      newText: "a\nc\n",
+    });
+    assert.equal(diff.details.result.hunks.length, 1);
+    assert.deepEqual(outcomes(events, "diff"), ["success"]);
+    assert.equal(counter(events, "diff", "lines_added"), 1);
+    assert.equal(counter(events, "diff", "lines_removed"), 1);
+    assert.equal(counter(events, "diff", "lines_unchanged"), 1);
+    assert.equal(counter(events, "diff", "hunks"), 1);
+    assert.ok(
+      events.every(
+        (event) => event.tool !== "diff" || event.resource === "edits",
+      ),
+    );
+
+    const grep = await ws.call("grep", { pattern: "a", path: "src" });
+    assert.equal(counter(events, "grep", "matches"), grep.details.totalMatches);
+    assert.equal(counter(events, "grep", "files_with_matches"), 2);
+    assert.equal(
+      counter(events, "grep", "files_searched"),
+      grep.details.filesSearched,
+    );
+    assert.equal(counter(events, "grep", "match_limit_reached"), 0);
+
+    await ws.call("find", { pattern: "*.txt", path: "src" });
+    assert.equal(counter(events, "find", "paths_returned"), 2);
+    assert.equal(counter(events, "find", "result_limit_reached"), 0);
+
+    const tag = tagOf(text(await ws.call("read", { path: "src/a.txt" })));
+    assert.deepEqual(outcomes(events, "read"), ["success"]);
+    assert.ok(counter(events, "read", "output_text_bytes") > 0);
+    await ws.call("edit", { input: `[src/a.txt#${tag}]\nPUT 2.=2:\n+delta\n` });
+    assert.equal(await ws.file("src/a.txt"), "alpha\ndelta\n");
+    await assert.rejects(
+      ws.call("edit", { input: "[src/a.txt#0000]\nPUT 1.=1:\n+x\n" }),
+    );
+    assert.deepEqual(outcomes(events, "edit", "apply"), ["success", "error"]);
+    assert.equal(counter(events, "edit", "files_updated"), 1);
+    assert.equal(counter(events, "edit", "files_created"), 0);
+
+    await ws.call("release", { file: "src/a.txt" });
+    assert.equal(counter(events, "release", "releases"), 1);
+
+    // Validation errors and pre-aborted calls are attempts with a terminal outcome.
+    await assert.rejects(
+      ws.call("diff", { oldText: "", newText: "", context: -1 }),
+    );
+    await assert.rejects(
+      ws.call("diff", { oldText: "a", newText: "b" }, AbortSignal.abort()),
+    );
+    assert.deepEqual(outcomes(events, "diff"), [
+      "success",
+      "error",
+      "cancelled",
+    ]);
+    const starts = events.filter((event) => event.kind === "start").length;
+    const finishes = events.filter((event) => event.kind === "finish").length;
+    assert.equal(starts, finishes, "inflight returns to zero");
+    assert.ok(events.every((event) => event.at === ""));
+
+    // A refused call after close is no admitted attempt.
+    const before = events.length;
+    await ws.collection.close();
+    await assert.rejects(
+      ws.call("diff", { oldText: "a", newText: "b" }),
+      /closed/,
+    );
+    assert.equal(events.length, before);
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("bound, direct and invocation-scoped tools record in exactly one view", {
+  timeout: 60_000,
+}, async () => {
+  const recorder = testRecorder();
+  const { events } = recorder.root;
+  const ws = await workspace({ "a.txt": "a\n" });
+  try {
+    const diffInput = { oldText: "a\n", newText: "b\n" };
+    // The collection itself records nowhere; its binding records in the agent's view.
+    await ws.call("diff", diffInput);
+    assert.equal(events.length, 0);
+    const agent = recorder.add_context("agent");
+    const binding = ws.collection.bind(() => agent);
+    try {
+      const diff = ws.collection.tools.find((tool) => tool.name === "diff");
+      await binding.tools.get(diff).execute("bound", diffInput);
+      assert.deepEqual(outcomes(events, "diff"), ["success"]);
+      assert.ok(events.every((event) => event.at === "agent"));
+    } finally {
+      await binding.close();
+    }
+
+    // One shared direct tool: an invocation view overrides its constructor view per call.
+    events.length = 0;
+    const shared = DiffTool.create(ws.native, recorder.add_context("fallback"));
+    const other = recorder.add_context("other");
+    await Promise.all([
+      shared.execute("plain", diffInput),
+      runWithRecorder(other, () => shared.execute("scoped", diffInput)),
+      runWithRecorder(undefined, () => shared.execute("masked", diffInput)),
+    ]);
+    const finishes = events.filter((event) => event.kind === "finish");
+    assert.deepEqual(finishes.map((event) => event.at).sort(), [
+      "fallback",
+      "other",
+    ]);
+  } finally {
+    await ws.dispose();
   }
 });

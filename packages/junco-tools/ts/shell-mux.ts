@@ -7,6 +7,7 @@ import type {
 import { flushLog, log, logPolicyDecision } from "./log.js";
 import type { NativeModule } from "./native.js";
 import { LockPolicy, type Policy } from "./policy.js";
+import type { ProfileRecorder } from "./profile-recorder.js";
 
 /** One owner's ShellMux. Releasing it closes that mux; no other owner shares it. */
 export interface ShellMuxLease {
@@ -16,6 +17,16 @@ export interface ShellMuxLease {
   readonly policy: Policy;
   /** True once release began. */
   readonly closed: boolean;
+  /** Receives this mux's resource events at pipelines without a registered owner. */
+  readonly recorder?: ProfileRecorder<"memory">;
+  /**
+   * Attributes `owner`'s pipelines to `recorder()`, resolved at each pipeline's first event and
+   * kept until it finishes. A later registration affects only later pipelines.
+   */
+  registerRecorderOwner(
+    owner: string,
+    recorder: () => ProfileRecorder<"memory"> | undefined,
+  ): void;
   /**
    * Closes the mux after every resource callback returns, then flushes the policy log so its
    * last record is observable. Every call returns the same terminal result.
@@ -47,9 +58,62 @@ export const ShellMuxLease = {
        * the mux: `release()` resolves only after the last event returned.
        */
       readonly onResourceEvent?: (event: NativeResourceEvent) => void;
+      /**
+       * Receives every resource event as well, beside `onResourceEvent`; enables monitoring at
+       * `resources.monitorIntervalMs` (default 1000).
+       */
+      readonly recorder?: ProfileRecorder<"memory">;
     } = {},
   ): Promise<ShellMuxLease> {
-    const { policy = LockPolicy, sandbox = "shared" } = options;
+    const { policy = LockPolicy, sandbox = "shared", recorder } = options;
+    const owners = new Map<
+      string,
+      () => ProfileRecorder<"memory"> | undefined
+    >();
+    let onResourceEvent = options.onResourceEvent;
+    let resources = options.resources;
+    if (recorder !== undefined) {
+      resources = {
+        ...resources,
+        monitorIntervalMs: resources?.monitorIntervalMs ?? 1000,
+      };
+      // Opaque: pipeline IDs are unique only within this lease.
+      const source = {};
+      // `owner\0pipelineId` → the view its first event resolved, until it finishes.
+      const pins = new Map<string, ProfileRecorder<"memory">>();
+      const caller = onResourceEvent;
+      onResourceEvent = (event) => {
+        let failure: { error: unknown } | undefined;
+        try {
+          const key = `${event.owner ?? ""}\0${event.pipelineId}`;
+          let view = pins.get(key);
+          if (view === undefined) {
+            view =
+              (event.owner === undefined
+                ? undefined
+                : owners.get(event.owner)?.()) ?? recorder;
+            pins.set(key, view);
+          }
+          if (event.kind === "finished") pins.delete(key);
+          view.record({ resource: "memory", kind: "resource", source, event });
+        } catch (error) {
+          failure = { error };
+        }
+        if (caller !== undefined) {
+          try {
+            caller(event);
+          } catch (error) {
+            if (failure === undefined) throw error;
+            throw new AggregateError(
+              [failure.error, error],
+              "ShellMuxLease: recorder and onResourceEvent failed",
+              { cause: failure.error },
+            );
+          }
+        }
+        if (failure !== undefined) throw failure.error;
+      };
+    }
     // Dynamic by design: importing junco-tools must not load the addon.
     const native = options.native ?? (await import("junco-tools/native"));
     // The native producer's filter is fixed here: grants at DEBUG or below, violations at INFO
@@ -61,14 +125,14 @@ export const ShellMuxLease = {
         sandbox,
         policy: policy.toNative(native),
         policyDebug: level <= DefaultLogLevels.DEBUG,
-        resources: options.resources,
+        resources,
       },
       level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
-      options.onResourceEvent === undefined
+      onResourceEvent === undefined
         ? undefined
         : (error: Error | null, event: NativeResourceEvent) => {
             if (error !== null) throw error;
-            options.onResourceEvent!(event);
+            onResourceEvent(event);
           },
     );
     let released: Promise<void> | undefined;
@@ -76,6 +140,10 @@ export const ShellMuxLease = {
       mux,
       native,
       policy,
+      recorder,
+      registerRecorderOwner(owner, recorder) {
+        owners.set(owner, recorder);
+      },
       get closed() {
         return released !== undefined;
       },

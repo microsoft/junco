@@ -1,5 +1,6 @@
 // `tracer`: the execution observer. A direct `JuncoGraph` takes one explicitly;
 // `TuiTracer.shared()` selects interactive TUI or the stateless `DummyTracer` no-op.
+// Profile recorders are a separate `recorder` dependency, never a tracer.
 
 export {
   type DataflowRunTrace,
@@ -7,8 +8,15 @@ export {
   type DataflowTracer,
   DummyTracer,
 } from "dataflow-engine";
-export {
+export type {
+  ProfileActivation,
+  ProfileEvent,
+  ProfileOperation,
   ProfileRecorder,
-  type ProfileRecorderOptions,
-} from "../profile-recorder.js";
+} from "junco-tools";
+export {
+  GrafanaRecorder,
+  type GrafanaRecorderOptions,
+} from "../grafana-recorder.js";
+export { JsonlRecorder, type JsonlRecorderOptions } from "../jsonl-recorder.js";
 export { TuiTracer } from "../tui-tracer.js";

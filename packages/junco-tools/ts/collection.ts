@@ -15,6 +15,12 @@ import { GrepTool } from "./grep.js";
 import type { NativeModule } from "./native.js";
 import { ShellMuxOperations } from "./operations.js";
 import type { Policy } from "./policy.js";
+import {
+  captureRecorder,
+  hasProfileOwner,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 import { ReadTool } from "./read.js";
 import { ReleaseTool } from "./release.js";
 import { ShellMuxLease } from "./shell-mux.js";
@@ -37,6 +43,12 @@ export interface ToolCollectionOptions {
   onResourceEvent?: (event: NativeResourceEvent) => void;
   /** Display/ordering label for the default bash operations; never a policy identity. */
   principal?: string;
+  /**
+   * This collection's view: every tool records its calls there (or in the invocation's, see
+   * `runWithRecorder`), and the mux its resource events, enabling monitoring (see
+   * `ShellMuxLease.create`).
+   */
+  recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">;
 }
 
 /**
@@ -56,6 +68,12 @@ export interface ToolBinding {
 type BuildTools = (
   mux: NativeMux,
   operations: NonNullable<BashToolOptions["operations"]>,
+  recorder:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | (() =>
+        | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | undefined)
+    | undefined,
 ) => AgentTool<any>[];
 
 /**
@@ -100,6 +118,9 @@ export class ToolCollection {
   #creatorRelease: Promise<void> | undefined;
   /** The final teardown, once started; fences execution and further leases. */
   #closing: Promise<void> | undefined;
+  readonly #recorder:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
 
   private constructor(
     mux: NativeMux,
@@ -107,6 +128,9 @@ export class ToolCollection {
     lease: ShellMuxLease,
     operations: ShellMuxOperations | undefined,
     customOperations: NonNullable<BashToolOptions["operations"]> | undefined,
+    recorder:
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | undefined,
   ) {
     this.policy = lease.policy;
     this.mux = lease.mux;
@@ -115,22 +139,43 @@ export class ToolCollection {
     this.#operations = operations;
     this.#build = build;
     this.#customOperations = customOperations;
-    const tools = build(mux, customOperations ?? operations!);
+    this.#recorder = recorder;
+    const tools = build(mux, customOperations ?? operations!, recorder);
     for (const tool of tools) {
-      this.#fence(tool, this.#abort.signal, () => undefined, new Set());
+      this.#fence(
+        tool,
+        this.#abort.signal,
+        () => undefined,
+        new Set(),
+        recorder,
+      );
     }
     this.tools = tools;
+  }
+
+  /** This collection's view, which its own tools and the default {@link bind} record in. */
+  get recorder():
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined {
+    return this.#recorder;
   }
 
   /**
    * Routes `tool`'s executions through this collection's fence: refused once teardown began or
    * `closed()` reports an error, aborted by `abort`, and tracked in `own` and the collection.
+   * Admitted calls of a tool not accounting its own are recorded as `custom` in `recorder`.
    */
   #fence(
     tool: AgentTool<any>,
     abort: AbortSignal,
     closed: () => Error | undefined,
     own: Set<Promise<unknown>>,
+    recorder:
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | (() =>
+          | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+          | undefined)
+      | undefined,
   ): void {
     const execute = tool.execute;
     // Every Pi and junco tool takes its AbortSignal third; definitions add a trailing context.
@@ -142,7 +187,23 @@ export class ToolCollection {
       if (refusal !== undefined) return Promise.reject(refusal);
       const signal = args[2];
       args[2] = signal ? AbortSignal.any([signal, abort]) : abort;
-      const invocation = execute.apply(tool, args);
+      const profile = hasProfileOwner(tool)
+        ? undefined
+        : captureRecorder(recorder);
+      const invocation =
+        profile === undefined
+          ? execute.apply(tool, args)
+          : profileToolCall(
+              profile,
+              {
+                resource: "operations",
+                category: "custom",
+                tool: tool.name,
+                operation: "execute",
+              },
+              args[2],
+              () => execute.apply(tool, args),
+            );
       trackPromise(own, invocation);
       return trackPromise(this.#invocations, invocation);
     };
@@ -153,6 +214,7 @@ export class ToolCollection {
     options: ToolCollectionOptions = {},
   ): Promise<ToolCollection> {
     const root = resolveToolPath(process.cwd(), cwd);
+    const { recorder } = options;
     // Rejects outside a seed: every file tool needs one.
     const lease = await ShellMuxLease.create(root, {
       native: options.native,
@@ -160,12 +222,15 @@ export class ToolCollection {
       policy: options.policy,
       resources: options.resources,
       onResourceEvent: options.onResourceEvent,
+      recorder,
     });
     const { native } = lease;
     let operations: ShellMuxOperations | undefined;
     try {
       // This collection's own owner: no other collection over the same seed shares it.
       const mux = lease.mux.forkOwner();
+      if (recorder !== undefined && mux.owner !== undefined)
+        lease.registerRecorderOwner(mux.owner, () => recorder);
       const store = new native.EditStore();
       operations = options.bash?.operations
         ? undefined
@@ -173,18 +238,19 @@ export class ToolCollection {
             native,
             mux,
             principal: options.principal,
+            recorder,
           });
-      const build: BuildTools = (mux, operations) => [
-        ReadTool.create(root, store, native, mux),
-        BashTool.create(root, { ...options.bash, operations }),
-        EditTool.create(root, store, native, mux),
-        ReleaseTool.create(root, mux),
-        GrepTool.create(root, store, native, mux),
-        FindTool.create(root, native, mux),
-        AstGrepTool.create(root, native, mux),
-        AstEditTool.create(root, native, mux),
-        DiffTool.create(native),
-        CodeGraphTool.create(root, native, mux),
+      const build: BuildTools = (mux, operations, recorder) => [
+        ReadTool.create(root, store, native, mux, recorder),
+        BashTool.create(root, { ...options.bash, operations }, recorder),
+        EditTool.create(root, store, native, mux, recorder),
+        ReleaseTool.create(root, mux, recorder),
+        GrepTool.create(root, store, native, mux, recorder),
+        FindTool.create(root, native, mux, recorder),
+        AstGrepTool.create(root, native, mux, recorder),
+        AstEditTool.create(root, native, mux, recorder),
+        DiffTool.create(native, recorder),
+        CodeGraphTool.create(root, native, mux, recorder),
       ];
       return new ToolCollection(
         mux,
@@ -192,6 +258,7 @@ export class ToolCollection {
         lease,
         operations,
         options.bash?.operations,
+        recorder,
       );
     } catch (error) {
       const failures: unknown[] = [];
@@ -239,21 +306,41 @@ export class ToolCollection {
    * binding's `close()`. They share this collection's `EditStore`, mux session and invocation
    * fence; their bash commands run on owner-bound operations of their own, except that supplied
    * custom bash operations are shared as they are. Throws once final teardown has started.
+   *
+   * Their calls, and this owner's resource events, record in `recorder` (a getter is resolved
+   * per call, and per pipeline at its first event), by default this collection's view.
    */
-  bind(): ToolBinding {
+  bind(
+    recorder:
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | (() =>
+          | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+          | undefined)
+      | undefined = this.#recorder,
+  ): ToolBinding {
     const mux = this.mux.forkOwner();
     const owner = mux.owner;
     if (owner === undefined)
       throw new Error("ToolCollection.bind: the forked mux has no owner");
     const hold = this.lease();
+    if (recorder !== undefined) {
+      this.#lease.registerRecorderOwner(
+        owner,
+        typeof recorder === "function" ? recorder : () => recorder,
+      );
+    }
     const stop = new AbortController();
     const signal = AbortSignal.any([this.#abort.signal, stop.signal]);
     const invocations = new Set<Promise<unknown>>();
     const operations = this.#customOperations
       ? undefined
-      : new ShellMuxOperations({ native: this.native, mux });
+      : new ShellMuxOperations({ native: this.native, mux, recorder });
     let closing: Promise<void> | undefined;
-    const bound = this.#build(mux, this.#customOperations ?? operations!);
+    const bound = this.#build(
+      mux,
+      this.#customOperations ?? operations!,
+      recorder,
+    );
     const tools = new Map<AgentTool<any>, AgentTool<any>>();
     bound.forEach((tool, index) => {
       this.#fence(
@@ -264,6 +351,7 @@ export class ToolCollection {
             ? undefined
             : new Error("ToolBinding is closed"),
         invocations,
+        recorder,
       );
       tools.set(this.tools[index]!, tool);
     });
