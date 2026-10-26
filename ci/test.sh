@@ -20,7 +20,7 @@ step "junco-tools Rust: rustfmt, Clippy, unit tests (CopyTree)"
 )
 
 step "rust-graph: unit and integration tests"
-(cd crates/rust-graph && cargo test --locked)
+(cd packages/junco-tools/crates/rust-graph && cargo test --locked)
 
 # Before junco-tools, whose declaration build imports the engine's public types.
 step "Build dataflow-engine"

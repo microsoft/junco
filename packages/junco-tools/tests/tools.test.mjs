@@ -56,12 +56,14 @@ import {
 
 /**
  * A CopyTree seed holding `files`, plus a collection that opens its own mux on it. `root` is
- * the seed; its marsh state lives beside it, inside the disposable scratch root. `dispose`
- * closes the collection, then removes the tree.
+ * the seed; its marsh state lives beside it, inside the disposable scratch root, as does the
+ * empty directory `outside`. `dispose` closes the collection, then removes the tree.
  */
 async function workspace(files = {}, { sandbox = "shared" } = {}) {
   const { root: scratch, seed: root } = await seedFixture({ files });
+  const outside = join(scratch, "outside");
   try {
+    await mkdir(outside);
     const native = await copyTreeNative();
     const collection = await ToolCollection.create(root, {
       native,
@@ -71,6 +73,7 @@ async function workspace(files = {}, { sandbox = "shared" } = {}) {
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
       root,
+      outside,
       mux: collection.mux,
       native,
       collection,
@@ -573,6 +576,608 @@ test("code_graph maps, searches, walks and refreshes on every call", {
     assert.deepEqual(
       map.clusters.map((c) => c.dir),
       ["src"],
+    );
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("code_graph browses clusters and refreshes membership", {
+  timeout: 60_000,
+}, async () => {
+  const local = "export function local() { return 1 }\n";
+  const ws = await workspace({
+    "src/a.ts":
+      'import { b } from "../src2/b";\nexport function a() { return b() }\n',
+    "src2/b.ts":
+      'import { a } from "../src/a";\nexport function b() { return a() }\n',
+    "src/local.ts": local,
+    "src2/other.ts": "export function other() { return 2 }\n",
+  });
+  const options = { action: "cluster", maxSize: 1, omnipresent: 4294967295 };
+  const call = async (input = {}, signal) => {
+    const result = await ws.call(
+      "code_graph",
+      { ...options, ...input },
+      signal,
+    );
+    assert.deepEqual(JSON.parse(text(result)), result.details.result);
+    return result.details.result;
+  };
+  try {
+    const all = await call();
+    assert.equal(all.view, "list");
+    assert.equal(all.total, 3);
+    const src = await call({ directory: "src" });
+    assert.equal(src.total, 2);
+    const cycle = src.clusters.find((r) => r.cluster.file_count === 2);
+    assert.equal(cycle.matching_files, 1);
+    assert.equal(cycle.contained, false);
+    assert.deepEqual(cycle.cluster.sample_files, ["src/a.ts", "src2/b.ts"]);
+    const single = src.clusters.find((r) => r.cluster.file_count === 1);
+    assert.equal(single.contained, true);
+    assert.deepEqual(single.cluster.sample_files, ["src/local.ts"]);
+    assert.deepEqual(await call({ directory: "./src//./" }), src);
+    const src2 = await call({ directory: "src2" });
+    assert.equal(src2.total, 2);
+    assert.ok(
+      src2.clusters.some(
+        (r) => r.cluster.id === cycle.cluster.id && !r.contained,
+      ),
+    );
+    assert.deepEqual(
+      src2.clusters.find((r) => r.contained).cluster.sample_files,
+      ["src2/other.ts"],
+    );
+    assert.equal((await call({ directory: "absent" })).total, 0);
+    const members = await call({
+      clusterView: "members",
+      clusterId: cycle.cluster.id,
+    });
+    assert.deepEqual(
+      members.members.map((m) => [m.id, m.start_line, m.end_line]),
+      [
+        ["src/a.ts#a:2", 2, 2],
+        ["src2/b.ts#b:2", 2, 2],
+      ],
+    );
+    const ids = [];
+    let offset = 0;
+    let page;
+    do {
+      page = await call({ limit: 1, offset });
+      ids.push(...page.clusters.map((r) => r.cluster.id));
+      offset = page.next_offset;
+    } while (offset !== null);
+    assert.deepEqual(
+      ids,
+      all.clusters.map((r) => r.cluster.id),
+    );
+    assert.equal(page.next_offset, null);
+    const beyond = await call({ offset: 4294967295 });
+    assert.deepEqual(beyond.clusters, []);
+    assert.equal(beyond.next_offset, null);
+    const neighbors = await call({
+      clusterView: "neighbors",
+      clusterId: single.cluster.id,
+    });
+    assert.equal(neighbors.total, 0);
+    assert.deepEqual(neighbors.neighbors, []);
+    await ws.write(
+      "src/local.ts",
+      `${local}export function extra() { return 3 }\n`,
+    );
+    const refreshed = await call({ directory: "src" });
+    assert.equal(refreshed.total, 3);
+    const extra = refreshed.clusters.find(
+      (r) => r.cluster.top === "src/local.ts#extra:2",
+    );
+    const extraMembers = await call({
+      clusterView: "members",
+      clusterId: extra.cluster.id,
+    });
+    assert.deepEqual(
+      extraMembers.members.map((m) => m.id),
+      ["src/local.ts#extra:2"],
+    );
+    for (const [input, error] of [
+      [
+        { clusterView: "members", clusterId: "unknown" },
+        /no cluster named unknown/,
+      ],
+      [{ clusterView: "bad" }, /invalid cluster view: bad/],
+      [
+        {
+          clusterView: "neighbors",
+          clusterId: cycle.cluster.id,
+          direction: "up",
+        },
+        /invalid direction: up/,
+      ],
+      [{ clusterView: "members" }, /cluster members requires clusterId/],
+      [
+        { clusterView: "neighbors", clusterId: " " },
+        /cluster neighbors requires clusterId/,
+      ],
+      [
+        { clusterId: cycle.cluster.id },
+        /cluster list does not accept clusterId or direction/,
+      ],
+      [
+        { direction: "out" },
+        /cluster list does not accept clusterId or direction/,
+      ],
+      [
+        {
+          clusterView: "members",
+          clusterId: cycle.cluster.id,
+          directory: "src",
+        },
+        /cluster members does not accept directory or direction/,
+      ],
+      [
+        {
+          clusterView: "members",
+          clusterId: cycle.cluster.id,
+          direction: "out",
+        },
+        /cluster members does not accept directory or direction/,
+      ],
+      [
+        {
+          clusterView: "neighbors",
+          clusterId: cycle.cluster.id,
+          directory: "src",
+        },
+        /cluster neighbors does not accept directory/,
+      ],
+      [
+        { directory: "src/../lib" },
+        /cluster directory must be a non-empty root-relative directory/,
+      ],
+      [{ limit: 0 }, /cluster limit must be between 1 and 100/],
+      [{ limit: 101 }, /cluster limit must be between 1 and 100/],
+      [{ maxSize: 0 }, /max_size must be greater than zero/],
+      [{ maxSize: 1.5 }, /maxSize must be an integer/],
+      [{ maxSize: 4294967296 }, /maxSize must be an integer/],
+      [{ omnipresent: -1 }, /omnipresent must be an integer/],
+      [{ omnipresent: 4294967296 }, /omnipresent must be an integer/],
+      [{ offset: -1 }, /offset must be an integer/],
+      [{ offset: NaN }, /offset must be an integer/],
+      [{ offset: 4294967296 }, /offset must be an integer/],
+      [{ limit: Infinity }, /limit must be an integer/],
+      [{ path: "missing-root" }, /missing-root|no such file|not found/i],
+    ])
+      await assert.rejects(call(input), error);
+    await assert.rejects(call({}, AbortSignal.abort()));
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("code_graph extracts Rocq, Lean and macro-contained Verus", {
+  timeout: 60_000,
+}, async () => {
+  const rocq =
+    "From Proofs Require Import Base.\nLemma reuse_rocq (n : nat) : n = n.\nProof. exact (identity_rocq n). Qed.\n";
+  const lean =
+    "import Demo.Base\nnamespace Client\ntheorem reuse_lean (n : Nat) : Demo.identity_lean n = n := by\n  exact Demo.identity_eq n\nend Client\n";
+  const verus =
+    "mod proof;\nuse crate::proof::lemma_identity;\nverus! {\npub fn run_verus(n: u64) -> u64 {\n  proof { lemma_identity(n); }\n  n\n}\n}\n";
+  const ws = await workspace({
+    "rocq/Proofs/Base.v":
+      "Lemma identity_rocq (n : nat) : n = n.\nProof. reflexivity. Qed.\n",
+    "rocq/Proofs/Main.v": rocq,
+    "lean/Demo/Base.lean":
+      "namespace Demo\ndef identity_lean (n : Nat) : Nat := n\ntheorem identity_eq (n : Nat) : identity_lean n = n := by rfl\nend Demo\n",
+    "lean/Main.lean": lean,
+    "rust/Cargo.toml":
+      '[package]\nname="graph_languages_fixture"\nversion="0.1.0"\n',
+    "rust/src/lib.rs": verus,
+    "rust/src/proof.rs":
+      "verus! {\npub open spec fn identity_verus(n: u64) -> u64 { n }\npub proof fn lemma_identity(n: u64) ensures identity_verus(n) == n {}\n}\n",
+    "rust/src/plain.rs":
+      'pub fn plain_rust() -> &\'static str { "verus! { proof fn fake() {} }" }\n',
+  });
+  const call = async (args) => {
+    const result = await ws.call("code_graph", args);
+    assert.deepEqual(JSON.parse(text(result)), result.details.result);
+    return result.details.result;
+  };
+  try {
+    const map = await call({ action: "map" });
+    assert.deepEqual(map.languages, ["lean", "rocq", "rust", "verus"]);
+    for (const [lang, query, path, line, target, targetFile, sourceFile] of [
+      [
+        "coq",
+        "reuse_rocq",
+        "rocq/Proofs/Main.v",
+        2,
+        "identity_rocq",
+        "rocq/Proofs/Base.v",
+        rocq,
+      ],
+      [
+        "lean4",
+        "reuse_lean",
+        "lean/Main.lean",
+        3,
+        "identity_eq",
+        "lean/Demo/Base.lean",
+        lean,
+      ],
+      [
+        "verus",
+        "run_verus",
+        "rust/src/lib.rs",
+        4,
+        "lemma_identity",
+        "rust/src/proof.rs",
+        verus,
+      ],
+    ]) {
+      const found = await call({
+        action: "search",
+        query,
+        lang,
+        kinds: ["function"],
+      });
+      const node = found.hits[0].node;
+      assert.equal(node.path, path);
+      assert.equal(node.start_line, line);
+      const deps = await call({
+        action: "deps",
+        symbol: node.id,
+        direction: "out",
+      });
+      assert.ok(
+        deps.nodes.some(
+          ({ node }) => node.name === target && node.path === targetFile,
+        ),
+      );
+      const imports = await call({
+        action: "deps",
+        symbol: path,
+        direction: "out",
+        relations: ["imports"],
+      });
+      assert.ok(imports.nodes.some(({ node }) => node.path === targetFile));
+      const options = {
+        action: "cluster",
+        maxSize: 1,
+        omnipresent: 4294967295,
+        limit: 100,
+      };
+      const listed = await call({ ...options, directory: path.split("/")[0] });
+      const row = listed.clusters.find(
+        ({ cluster }) => cluster.top === node.id,
+      );
+      assert.ok(row, `missing cluster for ${node.id}`);
+      const members = await call({
+        ...options,
+        clusterView: "members",
+        clusterId: row.cluster.id,
+      });
+      assert.deepEqual(
+        members.members.map(({ id }) => id),
+        [node.id],
+      );
+      const neighbors = await call({
+        ...options,
+        clusterView: "neighbors",
+        clusterId: row.cluster.id,
+        direction: "out",
+      });
+      assert.ok(
+        neighbors.neighbors.some(({ cluster }) => cluster.top.includes(target)),
+      );
+      const extra =
+        lang === "coq"
+          ? "\nLemma refreshed_rocq : True. Proof. exact I. Qed.\n"
+          : lang === "lean4"
+            ? "\ndef refreshed_lean : Nat := 1\n"
+            : "\nverus! { pub proof fn refreshed_verus() {} }\n";
+      await ws.write(path, sourceFile + extra);
+      const refreshed = await call({
+        action: "search",
+        query: "refreshed",
+        lang,
+        kinds: ["function"],
+      });
+      assert.ok(
+        refreshed.hits.some(
+          ({ node }) => node.path === path && node.name.startsWith("refreshed"),
+        ),
+      );
+    }
+    const ordinary = await call({
+      action: "search",
+      query: "plain_rust",
+      lang: "rust",
+      kinds: ["function"],
+    });
+    assert.equal(ordinary.hits[0].node.path, "rust/src/plain.rs");
+    const cache = JSON.parse(await ws.file(".junco/graph/graph.json"));
+    cache.extractor = 1; // The pre-language-support cache treated verus! as opaque Rust.
+    cache.files["rust/src/lib.rs"].nodes = [];
+    cache.files["rust/src/lib.rs"].raw_edges = [];
+    cache.files["rust/src/lib.rs"].lang = "rust";
+    await ws.write(".junco/graph/graph.json", JSON.stringify(cache));
+    const rebuilt = await call({
+      action: "search",
+      query: "run_verus",
+      lang: "verus",
+      kinds: ["function"],
+    });
+    assert.equal(rebuilt.hits[0].node.name, "run_verus");
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("code_graph extracts Fstar modules, interfaces and injected Pulse", {
+  timeout: 60_000,
+}, async () => {
+  const mainPath = "fstar/Demo.Main.fst";
+  const basePath = "fstar/Demo.Base.fst";
+  const main = [
+    "module Demo.Main",
+    "open Demo.Base",
+    "include Demo.Included",
+    "module B = Demo.Base",
+    "open Demo.Only",
+    "let reuse_fstar (n:nat) : nat =",
+    "  B.identity_fstar (identity_fstar n)",
+    "let proof_fstar (n:nat) : Lemma (B.identity_fstar n == n) =",
+    "  ()",
+    "let use_interface (n:nat) : nat = declared_only n",
+    "let use_included (n:nat) : nat = included_fstar n",
+    "let shadow_fstar (identity_fstar:nat) : nat = identity_fstar",
+    "```pulse",
+    "fn pulse_fstar (n:nat)",
+    "{ return B.identity_fstar n; }",
+    "```",
+    "",
+  ].join("\n");
+  const ws = await workspace({
+    [basePath]: "module Demo.Base\nlet identity_fstar (n:nat) : nat = n\n",
+    "fstar/Demo.Base.fsti":
+      "module Demo.Base\nval identity_fstar : n:nat -> nat\n",
+    "fstar/Demo.Only.fsti":
+      "module Demo.Only\nval declared_only : n:nat -> nat\n",
+    "fstar/Demo.Included.fst":
+      "module Demo.Included\nlet included_fstar (n:nat) : nat = n\n",
+    [mainPath]: main,
+    "fstar/demo.fst.config.json": '{"options": ["--no_default_includes"]}',
+  });
+  const call = async (args) => {
+    const result = await ws.call("code_graph", args);
+    assert.deepEqual(JSON.parse(text(result)), result.details.result);
+    return result.details.result;
+  };
+  const find = async (name, path = mainPath) => {
+    const result = await call({
+      action: "search",
+      query: name,
+      lang: "f*",
+      kinds: ["function"],
+      limit: 100,
+    });
+    const node = result.hits.find(
+      ({ node }) => node.name === name && node.path === path,
+    )?.node;
+    assert.ok(node, `missing ${path}#${name}`);
+    return node;
+  };
+  try {
+    const map = await call({ action: "map" });
+    assert.deepEqual(map.languages, ["fstar"]);
+    const reuse = await find("reuse_fstar");
+    assert.deepEqual([reuse.start_line, reuse.end_line], [6, 7]);
+    const identity = await find("identity_fstar", basePath);
+    const declaration = await find("identity_fstar", "fstar/Demo.Base.fsti");
+    const only = await find("declared_only", "fstar/Demo.Only.fsti");
+    assert.deepEqual(
+      [
+        declaration.start_line,
+        declaration.end_line,
+        only.start_line,
+        only.end_line,
+      ],
+      [2, 2, 2, 2],
+    );
+    const proof = await find("proof_fstar");
+    assert.deepEqual([proof.start_line, proof.end_line], [8, 9]);
+    const pulse = await find("pulse_fstar");
+    assert.deepEqual([pulse.start_line, pulse.end_line], [14, 15]);
+    for (const source of [reuse, proof, pulse]) {
+      const deps = await call({
+        action: "deps",
+        symbol: source.id,
+        direction: "out",
+      });
+      assert.deepEqual(
+        deps.nodes
+          .filter(({ node }) => node.name === "identity_fstar")
+          .map(({ node }) => node.id),
+        [identity.id],
+        `${source.name} must resolve to the implementation, not lose the call to a paired interface`,
+      );
+    }
+    for (const [name, target, path] of [
+      ["use_interface", only.name, only.path],
+      ["use_included", "included_fstar", "fstar/Demo.Included.fst"],
+    ]) {
+      const source = await find(name);
+      const deps = await call({
+        action: "deps",
+        symbol: source.id,
+        direction: "out",
+      });
+      assert.ok(
+        deps.nodes.some(
+          ({ node }) => node.name === target && node.path === path,
+        ),
+      );
+    }
+    const shadow = await find("shadow_fstar");
+    const shadowDeps = await call({
+      action: "deps",
+      symbol: shadow.id,
+      direction: "out",
+    });
+    assert.ok(
+      !shadowDeps.nodes.some(({ node }) => node.name === "identity_fstar"),
+    );
+    const imports = await call({
+      action: "deps",
+      symbol: mainPath,
+      direction: "out",
+      relations: ["imports"],
+    });
+    assert.deepEqual(imports.nodes.map(({ node }) => node.path).sort(), [
+      basePath,
+      "fstar/Demo.Included.fst",
+      "fstar/Demo.Only.fsti",
+    ]);
+    const options = {
+      action: "cluster",
+      maxSize: 1,
+      omnipresent: 4294967295,
+      limit: 100,
+    };
+    const listed = await call({ ...options, directory: "fstar" });
+    for (const source of [reuse, pulse]) {
+      const row = listed.clusters.find(
+        ({ cluster }) => cluster.top === source.id,
+      );
+      assert.ok(row, `missing cluster for ${source.id}`);
+      const members = await call({
+        ...options,
+        clusterView: "members",
+        clusterId: row.cluster.id,
+      });
+      assert.deepEqual(
+        members.members.map(({ id }) => id),
+        [source.id],
+      );
+      const neighbors = await call({
+        ...options,
+        clusterView: "neighbors",
+        clusterId: row.cluster.id,
+        direction: "out",
+      });
+      assert.ok(
+        neighbors.neighbors.some(
+          ({ cluster, outgoing }) =>
+            cluster.top === identity.id && outgoing.edges === 1,
+        ),
+      );
+    }
+    await ws.write(
+      mainPath,
+      `${main}let refreshed_fstar (n:nat) : nat = B.identity_fstar n\n`,
+    );
+    const refreshed = await find("refreshed_fstar");
+    assert.equal(refreshed.start_line, 17);
+    const cache = JSON.parse(await ws.file(".junco/graph/graph.json"));
+    assert.ok(Object.values(cache.files).every(({ lang }) => lang === "fstar"));
+    cache.extractor = 1; // Old snapshots did not extract F* or its opaque Pulse bodies.
+    cache.files[mainPath].nodes = [];
+    cache.files[mainPath].raw_edges = [];
+    await ws.write(".junco/graph/graph.json", JSON.stringify(cache));
+    assert.equal((await find("reuse_fstar")).id, reuse.id);
+    assert.equal((await find("pulse_fstar")).id, pulse.id);
+    assert.equal((await find("refreshed_fstar")).id, refreshed.id);
+  } finally {
+    await ws.dispose();
+  }
+});
+
+test("code_graph Fstar include paths refresh external dependencies", {
+  timeout: 60_000,
+}, async () => {
+  const ws = await workspace(
+    {
+      "Main.fst": [
+        "module Main",
+        "open Lib",
+        "let use_lib (n:nat) : nat = pick n",
+        "#lang-pulse",
+        "fn pulse_lib (n:nat) { return pick n; }",
+        "",
+      ].join("\n"),
+      "main.fst.config.json": JSON.stringify({
+        include_dirs: ["../outside/lib1"],
+        options: ["--no_default_includes"],
+      }),
+    },
+    { sandbox: "always" },
+  );
+  const library = async (lib, source) => {
+    await mkdir(join(ws.outside, lib), { recursive: true });
+    await writeFile(join(ws.outside, lib, "Lib.fst"), source);
+  };
+  const calls = [];
+  const call = async (args) => {
+    const result = await ws.call("code_graph", args);
+    calls.push(text(result));
+    return result.details.result;
+  };
+  /** Main.fst's import, and what its F* and Pulse functions call. */
+  const selected = async (fstar) => {
+    const out = async (symbol, relations) =>
+      (
+        await call({
+          action: "deps",
+          symbol,
+          direction: "out",
+          relations,
+          ...(fstar && { fstar }),
+        })
+      ).nodes.map(({ node }) => node.id);
+    return [
+      ...(await out("Main.fst", ["imports"])),
+      ...(await out("use_lib", ["calls"])),
+      ...(await out("pulse_lib", ["calls"])),
+    ];
+  };
+  try {
+    await library("lib1", "module Lib\nlet pick (n:nat) : nat = n\n");
+    await library("lib2", "module Lib\nlet other = 0\nlet pick (n:nat) : nat = n\n");
+    const lib1 = "../outside/lib1/Lib.fst";
+    const lib2 = "../outside/lib2/Lib.fst";
+    assert.deepEqual(await selected(), [
+      lib1,
+      `${lib1}#Lib.pick:2`,
+      `${lib1}#Lib.pick:2`,
+    ]);
+    const fstar = { includeDirs: ["../outside/lib2"] };
+    assert.deepEqual(await selected(fstar), [
+      lib2,
+      `${lib2}#Lib.pick:3`,
+      `${lib2}#Lib.pick:3`,
+    ]);
+    await library(
+      "lib2",
+      "module Lib\nlet other = 0\n\nlet pick (n:nat) : nat = n\n",
+    );
+    assert.deepEqual(await selected(fstar), [
+      lib2,
+      `${lib2}#Lib.pick:4`,
+      `${lib2}#Lib.pick:4`,
+    ]);
+    const found = await call({ action: "search", query: "pick", fstar });
+    assert.ok(found.hits.some(({ node }) => node.id === `${lib2}#Lib.pick:4`));
+    assert.ok(calls.every((json) => !json.includes(".marsh")));
+    await assert.rejects(
+      access(join(ws.outside, "lib2", ".junco")),
+      (error) => error.code === "ENOENT",
+    );
+    await access(join(ws.root, ".junco/graph/graph.json"));
+    await assert.rejects(
+      ws.mux.graph(join(ws.outside, "lib2"), { action: "map" }),
+      /outside ShellMux seed/,
     );
   } finally {
     await ws.dispose();

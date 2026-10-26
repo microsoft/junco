@@ -2800,6 +2800,7 @@ name = "rust-graph"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
+ "cc",
  "ignore",
  "petgraph",
  "pi-ast",
@@ -2808,6 +2809,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]

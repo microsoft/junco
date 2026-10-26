@@ -21,10 +21,13 @@ pub struct FileEntry {
     pub mtime_ms: u64,
     /// sha256 hex of the file bytes.
     pub hash: String,
-    /// `SupportLang::canonical_name()`.
+    /// Canonical registered language name (including rocq, lean, verus and fstar).
     pub lang: String,
     /// Excludes the File node itself (File node id == path).
     pub nodes: Vec<Node>,
+    /// Indices of declaration-only nodes; paired implementations win name resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<u32>,
     pub raw_edges: Vec<RawEdge>,
     pub imports: Vec<ImportSpec>,
     pub error: Option<String>,

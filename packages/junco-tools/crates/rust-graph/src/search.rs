@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use pi_ast::SupportLang;
+use crate::lang::Language;
 
 use crate::model::{Graph, Node, SearchHit, SearchQuery, SearchResult};
 
@@ -44,7 +44,7 @@ pub fn search(graph: &Graph, query: &SearchQuery) -> SearchResult {
         query.limit.min(100)
     } as usize;
     let wanted_lang = query.lang.as_deref().map(|l| {
-        SupportLang::from_alias(l).map_or_else(
+        Language::from_alias(l).map_or_else(
             || l.trim().to_ascii_lowercase(),
             |s| s.canonical_name().to_string(),
         )

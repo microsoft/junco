@@ -8,6 +8,7 @@ publish = false
 
 [workspace]
 resolver = "3"
+exclude = ["crates/rust-graph"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -44,7 +45,7 @@ parking_lot = "0.12.5"
 regex = "1"
 sha2 = "0.10"
 serde_json = "1"
-rust-graph = { path = "../../crates/rust-graph" }
+rust-graph = { path = "crates/rust-graph" }
 smallvec = { version = "1.16.2", features = ["serde", "write", "union", "const_new"] }
 
 [target.'cfg(unix)'.dev-dependencies]

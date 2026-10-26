@@ -46,8 +46,9 @@
     "LICENSE.oh-my-pi"
   ],
   "scripts": {
-    "build:native": "node scripts/with-junco-build-env.mjs cargo update -p marsh-core -p junco-policy && node scripts/with-junco-build-env.mjs napi build --platform --release --esm --output-dir native --js index.js --dts index.d.ts -- --locked",
-    "build:native:test": "node scripts/with-junco-build-env.mjs napi build --platform --esm --features test-fs --output-dir target/native-test --js index.js --dts index.d.ts -- --locked",
+    "grammars": "node scripts/with-junco-build-env.mjs cargo xtask grammars",
+    "build:native": "bun run grammars && node scripts/with-junco-build-env.mjs cargo update -p marsh-core -p junco-policy && node scripts/with-junco-build-env.mjs napi build --platform --release --esm --output-dir native --js index.js --dts index.d.ts -- --locked",
+    "build:native:test": "bun run grammars && node scripts/with-junco-build-env.mjs napi build --platform --esm --features test-fs --output-dir target/native-test --js index.js --dts index.d.ts -- --locked",
     "build:ts": "tsc -p tsconfig.json",
     "build": "bun run build:native && bun run build:ts",
     "test": "timeout --signal=TERM --kill-after=5s 900s node --test --test-concurrency=1 tests/shell-mux.test.mjs tests/bash.test.mjs tests/agent.test.mjs tests/tools.test.mjs tests/task.test.mjs tests/complain.test.mjs tests/messaging.test.mjs",

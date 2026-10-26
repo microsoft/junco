@@ -1,2 +1,6 @@
 [net]
 git-fetch-with-cli = true
+
+[alias]
+# Run from packages/junco-tools; `cargo xtask grammars` generates rust-graph's vendored parsers.
+xtask = "run --release --locked --manifest-path xtask/Cargo.toml --"
