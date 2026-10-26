@@ -1,11 +1,15 @@
 //! Per-language import resolution: an import's module text → root-relative files in the graph.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     path::Path,
 };
 
-use crate::{lang::ImportResolver, model::FileEntry};
+use crate::{
+    lang::ImportResolver,
+    model::{FileEntry, NodeKind},
+};
 
 /// Files an import resolves to, and the names it brings in when the resolver knows them better
 /// than the query did (`use a::{b, c}`). Empty names mean every name of those files.
@@ -13,6 +17,22 @@ use crate::{lang::ImportResolver, model::FileEntry};
 pub struct Resolved {
     pub paths: Vec<String>,
     pub names: Option<Vec<String>>,
+}
+
+/// The query retains `From Prefix Require Target` as `Prefix:Target`.
+pub(super) fn rocq_module(module: &str) -> Cow<'_, str> {
+    match module.split_once(':') {
+        Some(("Import" | "Export", target)) => Cow::Borrowed(target),
+        Some((prefix, target)) => Cow::Owned(format!("{prefix}.{target}")),
+        None => Cow::Borrowed(module),
+    }
+}
+
+pub(super) fn fstar_module(module: &str) -> (&str, Option<&str>) {
+    match module.split_once(':') {
+        Some((alias, target)) => (target, Some(alias)),
+        None => (module, None),
+    }
 }
 
 impl From<Vec<String>> for Resolved {
@@ -58,6 +78,8 @@ pub struct Imports<'a> {
     cargo_dirs: HashMap<String, Option<String>>,
     /// Nearest `(go.mod dir, module path)` per source dir.
     go_mods: HashMap<String, Option<(String, String)>>,
+    /// Literal -Q/-R mappings, cached per nearest _CoqProject directory.
+    rocq_roots: HashMap<String, Vec<(String, String)>>,
 }
 
 impl<'a> Imports<'a> {
@@ -75,6 +97,7 @@ impl<'a> Imports<'a> {
             dirs,
             cargo_dirs: HashMap::new(),
             go_mods: HashMap::new(),
+            rocq_roots: HashMap::new(),
         }
     }
 
@@ -88,6 +111,10 @@ impl<'a> Imports<'a> {
             ImportResolver::Rust => self.rust(file, module),
             ImportResolver::Go => self.go(file, module).into(),
             ImportResolver::Java => self.java(module),
+            ImportResolver::Rocq => self.rocq(file, module).into(),
+            ImportResolver::Lean => self.logical_module(module, "lean").into(),
+            // F* modules resolve per compiler context: `FstarScopes::module`.
+            ImportResolver::Fstar => Resolved::default(),
             ImportResolver::C => self.c(dir, module).into(),
             ImportResolver::Ruby => match module.strip_prefix("require_relative:") {
                 Some(m) if m.ends_with(".rb") => self.first(dir, [m]),
@@ -123,6 +150,86 @@ impl<'a> Imports<'a> {
                     .is_some_and(|head| head.is_empty() || head.ends_with('/'))
             })
             .collect()
+    }
+
+    /// Logical modules are absolute within their source root, never a fuzzy basename match.
+    fn logical_module(&self, module: &str, extension: &str) -> Vec<String> {
+        let relative = format!("{}.{extension}", module.replace('.', "/"));
+        let exact = self.first("", [&relative]);
+        if !exact.is_empty() {
+            return exact;
+        }
+        match self.by_suffix(&relative).as_slice() {
+            [one] => vec![one.to_string()],
+            _ => Vec::new(),
+        }
+    }
+
+    fn rocq(&mut self, file: &str, module: &str) -> Vec<String> {
+        let logical = rocq_module(module);
+        if matches!(module.split_once(':'), Some(("Import" | "Export", _)))
+            && self.files[file]
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::Module && node.name == logical)
+        {
+            return vec![file.to_string()]; // Opening an already-declared local module.
+        }
+        if let Some(project) = self.ancestor_with(file, "_CoqProject") {
+            let roots = self.rocq_roots.entry(project.clone()).or_insert_with(|| {
+                let text = std::fs::read_to_string(self.root.join(&project).join("_CoqProject"))
+                    .unwrap_or_default();
+                let words: Vec<_> = text
+                    .lines()
+                    .flat_map(|line| line.split('#').next().unwrap_or("").split_whitespace())
+                    .collect();
+                words
+                    .windows(3)
+                    .filter_map(|words| {
+                        if !matches!(words[0], "-Q" | "-R") {
+                            return None;
+                        }
+                        let path = words[1].trim_matches('"');
+                        let directory = if Path::new(path).is_absolute() {
+                            self.root
+                                .join(&project)
+                                .join(path)
+                                .strip_prefix(self.root)
+                                .ok()?
+                                .to_str()?
+                                .to_string()
+                        } else {
+                            join(&project, path)?
+                        };
+                        Some((directory, words[2].trim_matches('"').to_string()))
+                    })
+                    .collect()
+            });
+            let mut paths = Vec::new();
+            let mut mapped = false;
+            for (directory, prefix) in roots.iter() {
+                let tail = if prefix.is_empty() {
+                    Some(logical.as_ref())
+                } else {
+                    logical
+                        .strip_prefix(prefix.as_str())
+                        .and_then(|rest| rest.strip_prefix('.'))
+                };
+                let Some(tail) = tail else { continue };
+                mapped = true;
+                if let Some(path) = join(directory, &format!("{}.v", tail.replace('.', "/")))
+                    && self.files.contains_key(&path)
+                {
+                    paths.push(path);
+                }
+            }
+            if mapped {
+                paths.sort();
+                paths.dedup();
+                return if paths.len() == 1 { paths } else { Vec::new() };
+            }
+        }
+        self.logical_module(&logical, "v")
     }
 
     /// Nearest ancestor dir (root-relative) of `file` containing `marker`.

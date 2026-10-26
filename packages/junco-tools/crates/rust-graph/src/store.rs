@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     EXTRACTOR_VERSION, GRAPH_VERSION, Heartbeat, cache_path,
     extract::extract,
-    lang::{LangSpec, spec_for_path},
+    fstar_paths::{FstarConfig, discover},
+    lang::{Family, LangSpec, spec_for_name, spec_for_path},
     model::{BuildReport, FileEntry, Graph},
     resolve::resolve,
 };
@@ -107,6 +108,7 @@ fn file_entry(
         hash,
         lang: spec.lang.canonical_name().to_string(),
         nodes: Vec::new(),
+        declarations: Vec::new(),
         raw_edges: Vec::new(),
         imports: Vec::new(),
         error: None,
@@ -115,7 +117,11 @@ fn file_entry(
         entry.error = Some("larger than 1 MiB".into());
     } else if let Ok(source) = std::str::from_utf8(&bytes) {
         let x = extract(rel, source, spec);
+        if let Some(lang) = x.lang {
+            entry.lang = lang.to_string();
+        }
         entry.nodes = x.nodes;
+        entry.declarations = x.declarations;
         entry.raw_edges = x.raw_edges;
         entry.imports = x.imports;
         entry.error = x.error;
@@ -128,6 +134,7 @@ fn file_entry(
 pub fn build(
     root: &Path,
     full: bool,
+    fstar: Option<&FstarConfig>,
     heartbeat: Heartbeat<'_>,
 ) -> Result<(Graph, BuildReport), String> {
     let started = Instant::now();
@@ -142,7 +149,20 @@ pub fn build(
         }
     };
 
-    let paths = walk(&root, heartbeat)?;
+    let mut paths = walk(&root, heartbeat)?;
+    let sources: Vec<&str> = paths
+        .iter()
+        .filter(|(_, spec)| spec.family == Family::Fstar)
+        .map(|(path, _)| path.as_str())
+        .collect();
+    let scopes = discover(&root, &sources, fstar, heartbeat)?;
+    let fstar_spec = spec_for_name("fstar").expect("F* is registered");
+    paths.extend(
+        scopes
+            .external()
+            .iter()
+            .map(|path| (path.clone(), fstar_spec)),
+    );
     let entries: Vec<(String, FileEntry, bool)> = paths
         .par_iter()
         .map(|(rel, spec)| {
@@ -157,7 +177,7 @@ pub fn build(
     let files: BTreeMap<String, FileEntry> = entries.into_iter().map(|(p, e, _)| (p, e)).collect();
     let files_removed = cached.keys().filter(|k| !files.contains_key(*k)).count() as u32;
     heartbeat()?;
-    let (edges, unresolved_imports) = resolve(&files, &root);
+    let (edges, unresolved_imports) = resolve(&files, &root, &scopes);
     let graph = Graph {
         version: GRAPH_VERSION,
         extractor: EXTRACTOR_VERSION,

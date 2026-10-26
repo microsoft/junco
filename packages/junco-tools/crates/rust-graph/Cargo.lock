@@ -500,6 +500,7 @@ name = "rust-graph"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
+ "cc",
  "ignore",
  "petgraph",
  "pi-ast",
@@ -509,6 +510,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]

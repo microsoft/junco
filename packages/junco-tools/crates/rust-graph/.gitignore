@@ -1,0 +1,5 @@
+/target
+# Pinned upstream checkouts made by `cargo xtask grammars` (run from packages/junco-tools;
+# `build:native`, and so the workspace `bun install`, runs it). Only the provenance notes are tracked.
+/vendor/*
+!/vendor/README.md
