@@ -812,16 +812,9 @@ export class JuncoGraph<
     const requests: (() => unknown)[] = [];
     const gates = new Set<Promise<void>>();
     const seenGraphs = new Set<object>();
-    const seenResources = new Set<object>();
+    /** Each resource reached, and whether any registration of it is graph-owned. */
+    const resources = new Map<Resource<N, T>, boolean>();
     const joined = new Set<Promise<void>>();
-    const resource = (member: Resource<N, T>): void => {
-      if (seenResources.has(member)) return;
-      seenResources.add(member);
-      if (kind === "close") requests.push(() => member[Symbol.asyncDispose]());
-      else if (member instanceof Deterministic)
-        requests.push(() => member.abort(reason));
-      else if (member.status !== "closed") requests.push(() => member.abort());
-    };
     const stack: JuncoGraph<N, T, never>[] = [this];
     while (stack.length > 0) {
       const graph = stack.pop()!;
@@ -844,21 +837,30 @@ export class JuncoGraph<
       const children: JuncoGraph<N, T, never>[] = [];
       graph.forEachNode((_, node) => {
         const state = node.state;
-        if (
-          kind === "close" &&
-          nodePolicies.get(node.step)?.closedTaskState === state
-        )
-          return;
+        const policy = nodePolicies.get(node.step);
+        if (kind === "close" && policy?.closedTaskState === state) return;
         if (state instanceof JuncoGraph) children.push(state);
         else if (
           state instanceof JuncoAgent ||
           state instanceof MockAgent ||
           state instanceof Deterministic
         )
-          resource(state);
+          resources.set(
+            state,
+            resources.get(state) === true ||
+              policy?.agentOwnership !== "caller",
+          );
       });
       for (let index = children.length - 1; index >= 0; index--)
         stack.push(children[index]!);
+    }
+    // Graph ownership dominates whatever the traversal order; caller-owned agents are only aborted.
+    for (const [member, owned] of resources) {
+      if (kind === "close" && owned)
+        requests.push(() => member[Symbol.asyncDispose]());
+      else if (member instanceof Deterministic)
+        requests.push(() => member.abort(reason));
+      else if (member.status !== "closed") requests.push(() => member.abort());
     }
 
     const operations = Promise.withResolvers<void>();

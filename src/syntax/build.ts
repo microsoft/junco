@@ -30,6 +30,8 @@ import {
   type AgencyNodeMetadata,
   context,
   type Ladder,
+  type NodePolicy,
+  nodePolicies,
   resolveRung,
   validateLadder,
 } from "../node-policy.js";
@@ -114,10 +116,16 @@ export type BuildOptions<C = unknown> = {
    * configured on these agents; node prompts, contracts and profiles still apply.
    */
   readonly agents?: Readonly<Record<string, agent.JuncoAgent>>;
-  /** Factory agents stay caller-owned on construction failure; registered agents belong to the graph on success. */
+  /** Factory agents stay caller-owned on construction failure; `createAgentOwnership` decides on success. */
   readonly createAgent?: (
     spec: AgentSpec,
   ) => Promise<agent.JuncoAgent | MockAgent>;
+  /**
+   * Owner of successfully registered factory agents (default `"graph"`, which disposes them on
+   * close). `"caller"`: graph close aborts and joins them but never disposes them, so persistent
+   * agents can serve one graph per round. Requires `createAgent`.
+   */
+  readonly createAgentOwnership?: "graph" | "caller";
   readonly available?: Readonly<
     Record<
       string,
@@ -483,13 +491,19 @@ async function registerAgent(
             );
           return { expect: byEdge[edgeId]! };
         };
-  g.addNode({
+  const registered = g.addNode({
     ...registration,
     trigger: resolveTrigger(spec, id, node.trigger),
     state: instance,
     policy: c.policy,
     ...(contract ? { contract } : {}),
   });
+  if (c.options.createAgent) {
+    // No await since registration: until the build commits, rollback never disposes this agent.
+    const policy = nodePolicies.get(g.getNode(registered)!.step)!;
+    policy.agentOwnership = "caller";
+    c.borrowed.push(policy);
+  }
 }
 
 async function buildGraph(
@@ -526,7 +540,7 @@ async function buildGraph(
     c.policy,
     c.collection,
   );
-  if (c.options.createAgent === undefined) c.partialRoots.add(g);
+  c.partialRoots.add(g);
   const hook = (id: string) => c.options.available?.[id]?.({ graph: g, edges });
   sinkHook = hook("$sink");
   const execution = context({
@@ -653,8 +667,10 @@ type Construction = {
   readonly agents: ReadonlyMap<string, agent.JuncoAgent> | undefined;
   /** Owned agents in acquisition order, including prepared agents not yet registered. */
   readonly acquired: agent.JuncoAgent[];
-  /** Owned graphs not yet adopted by a parent. */
+  /** Graphs not yet adopted by a parent. */
   readonly partialRoots: Set<JuncoGraph>;
+  /** Registered factory nodes, caller-owned until the whole build commits. */
+  readonly borrowed: NodePolicy[];
 };
 type Registration = {
   readonly id: graph.NodeIdType;
@@ -710,6 +726,13 @@ export async function build<C = unknown>(
       throw new graph.DataflowDefinitionError(
         "junco-syntax: agents and createAgent are mutually exclusive",
       );
+    if (
+      options.createAgentOwnership !== undefined &&
+      options.createAgent === undefined
+    )
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: createAgentOwnership requires createAgent",
+      );
     if (agents) validateAgents(doc.graph, agents);
     creates =
       !options.collection &&
@@ -760,8 +783,9 @@ export async function build<C = unknown>(
         ](),
         agents,
         ...owned,
+        borrowed: [],
       };
-      return await buildGraph(
+      const execution = await buildGraph(
         c,
         doc.graph,
         doc.graph.name ?? "graph",
@@ -769,6 +793,9 @@ export async function build<C = unknown>(
         [],
         "",
       );
+      if (options.createAgentOwnership !== "caller")
+        for (const policy of c.borrowed) policy.agentOwnership = "graph";
+      return execution;
     } catch (error) {
       return rollback(owned, error);
     }

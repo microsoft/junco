@@ -1442,6 +1442,49 @@ describe("task tool through a graph-driven agent", () => {
     for (const child of created) assert.equal(child.status, "closed");
   });
 
+  test("a caller-owned promoted agent survives its round's close, which closes every worker, and runs again in a fresh round", async () => {
+    const r = registry("caller", "worker");
+    r.script("caller", [
+      toolTurn(taskCall([{ task: "a", model: r.model("worker") }])),
+      fauxAssistantMessage("interim"),
+      fauxAssistantMessage("round 1 final"),
+      fauxAssistantMessage("round 2 final"),
+    ]);
+    r.script("worker", [fauxAssistantMessage("a-report")]);
+    const caller = await newCaller(r.models, "caller", [
+      new toolsApi.TaskTool(),
+    ]);
+    const created = trackSubagents(caller);
+    const round = async (prompt: string) => {
+      const execution = await JuncoGraph.fromYaml(
+        `graph:\n  nodes:\n    caller:\n      prompt: ${prompt}\n  edges:\n    - from: caller\n      to: $sink\n`,
+        {
+          cwd: process.cwd(),
+          scheduler: () => schedules.parallel(),
+          tracer: quiet,
+          createAgent: async () => caller,
+          createAgentOwnership: "caller",
+        },
+      );
+      try {
+        const results = await execution.run();
+        return contentText(
+          results.get(graph.NodeId.create("caller"))?.content ?? [],
+        );
+      } finally {
+        await execution.graph.close();
+      }
+    };
+
+    assert.equal(await round("Start"), "round 1 final");
+    assert.equal(created.length, 1);
+    assert.equal(created[0]!.status, "closed");
+    assert.notEqual(caller.status, "closed");
+    assert.equal(await round("Again"), "round 2 final");
+    assert.equal(created.length, 1);
+    assert.notEqual(caller.status, "closed");
+  });
+
   test("a native error stop asks the caller with its real output by default; the caller's ignore finishes the batch", async () => {
     const r = registry("caller", "worker");
     let finalContext: Context | undefined;

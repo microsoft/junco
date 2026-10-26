@@ -277,6 +277,7 @@ export const ReviewRound = {
         review: members.Reducer.getTools().find((tool) => tool.name === "review")!,
       },
       createAgent: async (spec) => members[spec.node as MemberId],
+      createAgentOwnership: "caller",
       available: {
         Librarian: ({ graph, edges }) => (_view, triggered) => {
           if (!triggered && graph.getNode(graphApi.NodeId.create("Librarian"))!.status !== "running") return false;
@@ -321,6 +322,7 @@ export async function convene(
     for (;;) {
       signal?.throwIfAborted();
       const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected, ladder);
+      await using round = execution.graph;
       const plan = (await execution.run({ signal })).get(reducerId);
       signal?.throwIfAborted();
       const verdict = review.takeVerdict();

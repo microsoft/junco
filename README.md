@@ -396,6 +396,7 @@ try {
 - The sink is held until the final round; `graph.result(Ralph)` and outbound value edges retain the latest draft. Factories decline graph levels without `Ralph->Ralph` by returning `undefined`, leaving their nodes and outer sink at default availability. `examples/mixed/mixed.ts` nests Ralph and sends only its final answer to Reviewer.
 
 - `fromYaml` requires a ladder when it creates agents. Supplying `createAgent` makes the ladder optional; omission leaves supplied agents' settings untouched. A ladder is validated even with `createAgent`. Default creation starts at `med`; the scheduler's selected strength is applied before execution.
+- Successfully registered `createAgent` agents belong to the graph by default; `createAgentOwnership: "caller"` (requires `createAgent`) keeps them caller-owned, so graph close aborts and joins them without disposing them. Use it for a fresh graph per round over persistent agents, closing each round's graph. Construction failure never disposes factory agents.
 - Optional `params` substitute `{{ params.name }}` verbatim in YAML text before parsing; parsed objects reject `params`. Runtime `{{edge}}` prompt substitutions remain separate. Code definitions are passed by node ID, never loaded from YAML paths.
 
 ### Coroutines: `Deterministic` and `{ ...options, state: coroutine }`
