@@ -828,7 +828,12 @@ export class AgentDriver {
     ): Promise<TaskContext> => {
       const staged = driver.staged;
       driver.staged = [];
-      const rootPolicy: NodePolicy = { agent, inputMode: "all-messages" };
+      // The agent's owner follows it to the root; spawned workers stay graph-owned.
+      const rootPolicy: NodePolicy = {
+        agent,
+        inputMode: "all-messages",
+        agentOwnership: policy.agentOwnership,
+      };
       const rootStep: StepFn<Agentic, AgenticInput, AssistantMessage> =
         async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
           let messages: Message<AgenticInput>[] = [];

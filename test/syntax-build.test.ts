@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
+  type AssistantMessage,
   contentText,
   fauxAssistantMessage,
   fauxToolCall,
@@ -13,18 +14,21 @@ import { megabytes } from "dataflow-engine";
 import {
   type AgenticInput,
   agent,
+  Deterministic,
   graph,
   JuncoGraph,
   MockAgent,
   schedules,
   tools,
   tracer,
+  trigger,
   workflows,
 } from "junco-agency";
 import { Type } from "typebox";
 import {
   type BuildOptions,
   build,
+  type DeterministicNode,
   resolveAgents,
 } from "../src/syntax/build.ts";
 import { parse } from "../src/syntax/parse.ts";
@@ -2250,3 +2254,208 @@ test("createAgent instances remain caller-owned when construction fails", async 
     await collection.close();
   }
 });
+
+/** Counts every disposal of `instance`, whether by a graph or by its owner. */
+function countDisposals(instance: MockAgent): { count: number } {
+  const disposals = { count: 0 };
+  const dispose = instance.return.bind(instance);
+  instance.return = (value) => {
+    disposals.count++;
+    return dispose(value);
+  };
+  return disposals;
+}
+const aborts = (instance: MockAgent) =>
+  instance.calls.filter(({ method }) => method === "abort").length;
+const roundDoc = (prompt: string) =>
+  parse({
+    graph: {
+      nodes: { A: { prompt } },
+      edges: [{ from: "A", to: "$sink" }],
+    },
+  });
+
+test("caller-owned factory agents survive each round's graph close and close once with their owner", async () => {
+  const instance = new MockAgent({
+    runs: ["answer-1", "answer-2"].map((text) =>
+      run([settle(assistant(text))]),
+    ),
+  });
+  const disposals = countDisposals(instance);
+  try {
+    for (const round of [1, 2]) {
+      const execution = await build(roundDoc(`round ${round}`), {
+        ...options(),
+        createAgent: async () => instance,
+        createAgentOwnership: "caller",
+      });
+      try {
+        await execution.run();
+        assert.equal(resultText(execution.graph), `answer-${round}`);
+      } finally {
+        await execution.graph.close();
+      }
+      assert.equal(aborts(instance), round, "close aborts and joins");
+      assert.equal(disposals.count, 0);
+      assert.notEqual(instance.status, "closed");
+    }
+    assert.deepEqual(lastPrompts(instance), ["round 1", "round 2"]);
+  } finally {
+    await instance.return();
+  }
+  assert.equal(disposals.count, 1);
+  assert.equal(instance.status, "closed");
+});
+
+for (const ownership of [undefined, "graph"] as const)
+  test(`${ownership ?? "default"} factory ownership disposes the agent on graph close`, async () => {
+    const instance = mock("done");
+    const disposals = countDisposals(instance);
+    const execution = await build(roundDoc("work"), {
+      ...options(),
+      createAgent: async () => instance,
+      ...(ownership ? { createAgentOwnership: ownership } : {}),
+    });
+    await execution.run();
+    assert.notEqual(instance.status, "closed");
+    await execution.graph.close();
+    assert.equal(disposals.count, 1);
+    assert.equal(instance.status, "closed");
+  });
+
+for (const nested of [false, true])
+  test(`graph ownership of an agent dominates its caller-owned registration (${nested ? "graph" : "caller"} registration reached first)`, async () => {
+    const instance = mock("unused");
+    const disposals = countDisposals(instance);
+    const nodes = { A: { prompt: "work" } };
+    const edges = [{ from: "A", to: "$sink" }];
+    const execution = await build(
+      parse({
+        graph: nested
+          ? {
+              nodes: { Child: { kind: "graph", graph: { nodes, edges } } },
+              edges: [{ from: "Child", to: "$sink" }],
+            }
+          : { nodes, edges },
+      }),
+      {
+        ...options(),
+        createAgent: async () => instance,
+        createAgentOwnership: "caller",
+      },
+    );
+    execution.graph.addNode({
+      id: graph.NodeId.create("Owned"),
+      trigger: trigger.TriggerRule.always(),
+      policy: tools.LockPolicy,
+      state: instance,
+    });
+    await execution.graph.close();
+    assert.equal(disposals.count, 1);
+    assert.equal(instance.status, "closed");
+  });
+
+test("createAgentOwnership requires createAgent", async () => {
+  await assert.rejects(
+    build(document(), { ...options(), createAgentOwnership: "caller" }),
+    (error) =>
+      error instanceof graph.DataflowDefinitionError &&
+      error.message ===
+        "junco-syntax: createAgentOwnership requires createAgent",
+  );
+});
+
+for (const boundary of ["factory", "code", "availability"] as const)
+  for (const ownership of [undefined, "caller"] as const)
+    for (const cleanupFails of [false, true])
+      test(`a later ${boundary} failure rolls back ${ownership ?? "default"}-ownership leases and deterministic state without disposing earlier factory agents${cleanupFails ? ", cleanup failure after the primary" : ""}`, async () => {
+        const primary = new Error(`${boundary} sentinel`);
+        const cleanup = new Error("deterministic close sentinel");
+        const { collection, active } = countedCollection();
+        const earlier = mock("unused");
+        const disposals = countDisposals(earlier);
+        let deterministic: Deterministic | undefined;
+        const Code: DeterministicNode = ({ policy, collection }) => {
+          deterministic = new Deterministic<AgenticInput, AssistantMessage>(
+            async function* () {
+              yield [];
+              return assistant("code");
+            },
+            policy,
+            collection,
+          );
+          const close = deterministic.close.bind(deterministic);
+          deterministic.close = () =>
+            close().then(() => {
+              if (cleanupFails) throw cleanup;
+            });
+          return { state: deterministic };
+        };
+        try {
+          await assert.rejects(
+            build(
+              parse({
+                graph: {
+                  nodes: {
+                    Child: {
+                      kind: "graph",
+                      graph: {
+                        nodes: {
+                          A: {},
+                          Code: { kind: "code", trigger: "always" },
+                        },
+                        edges: [{ from: "A", to: "$sink" }],
+                      },
+                    },
+                    Last:
+                      boundary === "code"
+                        ? { kind: "code", trigger: "always" }
+                        : {},
+                  },
+                  edges: [{ from: "Child", to: "$sink" }],
+                },
+              }),
+              {
+                ...options(),
+                collection,
+                code: {
+                  Code,
+                  Last: () => {
+                    throw primary;
+                  },
+                },
+                createAgent: async (spec) => {
+                  if (spec.node === "Last") throw primary;
+                  return earlier;
+                },
+                ...(ownership ? { createAgentOwnership: ownership } : {}),
+                ...(boundary === "availability"
+                  ? {
+                      available: {
+                        Last: () => {
+                          throw primary;
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            ),
+            (error) => {
+              if (!cleanupFails) assert.equal(error, primary);
+              else {
+                assert.ok(error instanceof AggregateError);
+                assert.deepEqual(error.errors, [primary, cleanup]);
+              }
+              return true;
+            },
+          );
+          assert.equal(deterministic?.signal.aborted, true);
+          assert.equal(active.leases, 0, "graph and deterministic leases");
+          assert.equal(disposals.count, 0);
+          assert.equal(aborts(earlier), 1);
+          assert.notEqual(earlier.status, "closed");
+        } finally {
+          await earlier.return();
+          await collection.close();
+        }
+      });

@@ -191,6 +191,7 @@ export const VerusRound = {
       code: { PrepareReviewer, PrepareCleanup },
       ...(ladder === undefined ? {} : { ladder }),
       createAgent: async (spec) => members[spec.node as VerusRole],
+      createAgentOwnership: "caller",
     });
     return { execution, reviewerId: graph.NodeId.create("Reviewer"), cleanupId: graph.NodeId.create("Cleanup") };
   },
@@ -214,6 +215,7 @@ export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMemb
     for (;;) {
       signal?.throwIfAborted();
       const round = await VerusRound.create(workspace, members, verification, feedback, observer, ladder);
+      await using roundGraph = round.execution.graph;
       const results = await round.execution.run({ signal });
       signal?.throwIfAborted();
       verification.runs(); // Pi turns tool errors into model feedback; retain operational failures.

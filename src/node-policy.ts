@@ -94,6 +94,8 @@ export type NodePolicy = {
    * it rather than rethrowing a teardown failure the caller already received.
    */
   closedTaskState?: object;
+  /** `"caller"`: graph close aborts and joins this body's agent without disposing it; omitted means graph-owned. */
+  agentOwnership?: "graph" | "caller";
 };
 
 /** Source-derived policy metadata; native descriptions remain on native observations. */
