@@ -15,6 +15,12 @@ import type {
 import type { ToolCollection } from "./collection.js";
 import type { NativeModule } from "./native.js";
 import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
+import {
   type BoundedToolDetails,
   boundedToolResult,
   NATIVE_U32_MAX,
@@ -132,7 +138,16 @@ export const AstGrepTool = {
     cwd: string,
     native: NativeModule,
     mux: NativeMux,
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
   ): AgentTool<typeof astGrepSchema, BoundedToolDetails<AstFindResult>> {
+    const operation = {
+      resource: "operations",
+      category: "AstGrep",
+      tool: "ast_grep",
+      operation: "search",
+    } as const;
     const tool = {
       name: "ast_grep",
       label: "AST Grep",
@@ -140,38 +155,65 @@ export const AstGrepTool = {
         "Search files with AST structural patterns; use read or grep for hashline edit anchors.",
       promptSnippet: "Search code by AST structure instead of text",
       parameters: astGrepSchema,
-      async execute(_toolCallId, params, signal) {
-        throwIfAborted(signal);
-        const patterns = params.patterns.filter(
-          (pattern) => pattern.trim() !== "",
-        );
-        if (patterns.length === 0)
-          throw new Error("patterns must contain at least one pattern");
-        if (params.limit !== undefined) requireU32("limit", params.limit, 1);
-        if (params.offset !== undefined) requireU32("offset", params.offset, 0);
+      execute(_toolCallId, params, signal) {
+        const scope = captureRecorder(recorder);
+        let responseBytes = 0;
+        return profileToolCall(
+          scope,
+          operation,
+          signal,
+          async () => {
+            throwIfAborted(signal);
+            const patterns = params.patterns.filter(
+              (pattern) => pattern.trim() !== "",
+            );
+            if (patterns.length === 0)
+              throw new Error("patterns must contain at least one pattern");
+            if (params.limit !== undefined)
+              requireU32("limit", params.limit, 1);
+            if (params.offset !== undefined)
+              requireU32("offset", params.offset, 0);
 
-        const result = await withNativeSignal(signal, (nativeSignal) =>
-          mux.astGrep(cwd, {
-            patterns,
-            path: resolveToolPath(cwd, params.path ?? "."),
-            glob: params.glob,
-            lang: params.lang,
-            selector: params.selector,
-            strictness: params.strictness as AstMatchStrictness | undefined,
-            limit: params.limit,
-            offset: params.offset,
-            includeMeta: params.includeMeta,
-            signal: nativeSignal,
+            const result = await withNativeSignal(signal, (nativeSignal) =>
+              mux.astGrep(cwd, {
+                patterns,
+                path: resolveToolPath(cwd, params.path ?? "."),
+                glob: params.glob,
+                lang: params.lang,
+                selector: params.selector,
+                strictness: params.strictness as AstMatchStrictness | undefined,
+                limit: params.limit,
+                offset: params.offset,
+                includeMeta: params.includeMeta,
+                signal: nativeSignal,
+              }),
+            );
+            throwIfAborted(signal);
+            const text = JSON.stringify(result, null, 2);
+            if (scope !== undefined)
+              responseBytes = Buffer.byteLength(text, "utf8");
+            return boundedToolResult(text, result);
+          },
+          ({ details: { result } }) => ({
+            counters: {
+              matches_returned: result.matches.length,
+              matches: result.totalMatches,
+              files_with_matches: result.filesWithMatches,
+              files_searched: result.filesSearched,
+              limit_reached: Number(result.limitReached),
+              ...(result.parseErrors === undefined
+                ? {}
+                : { parse_errors: result.parseErrors.length }),
+              response_bytes: responseBytes,
+            },
           }),
         );
-        throwIfAborted(signal);
-        return boundedToolResult(JSON.stringify(result, null, 2), result);
       },
     } satisfies ToolDefinition<
       typeof astGrepSchema,
       BoundedToolDetails<AstFindResult>
     >;
-    return tool;
+    return markProfileOwned(tool, () => operation);
   },
 };
 
@@ -189,7 +231,23 @@ export const AstEditTool = {
     cwd: string,
     native: NativeModule,
     mux: NativeMux,
+    recorder?:
+      | ProfileRecorder<"edits">
+      | (() => ProfileRecorder<"edits"> | undefined),
   ): AgentTool<typeof astEditSchema, BoundedToolDetails<AstReplaceResult>> {
+    // Only an explicit `dryRun: false` writes; anything else is a preview.
+    const operationOf = (args: unknown) =>
+      ({
+        resource: "edits",
+        category: "AstEdit",
+        tool: "ast_edit",
+        operation:
+          typeof args === "object" &&
+          args !== null &&
+          (args as { dryRun?: unknown }).dryRun === false
+            ? "apply"
+            : "preview",
+      }) as const;
     const tool = {
       name: "ast_edit",
       label: "AST Edit",
@@ -198,52 +256,93 @@ export const AstEditTool = {
       promptSnippet: "Rewrite code by AST structure",
       parameters: astEditSchema,
       executionMode: "sequential",
-      async execute(_toolCallId, params, signal) {
-        throwIfAborted(signal);
-        const rewrites: Record<string, string> = {};
-        for (const [pattern, replacement] of Object.entries(params.rewrites)) {
-          if (pattern.trim() !== "") rewrites[pattern] = replacement;
-        }
-        if (Object.keys(rewrites).length === 0) {
-          throw new Error("rewrites must contain at least one pattern");
-        }
-        if (params.maxReplacements !== undefined)
-          requireU32("maxReplacements", params.maxReplacements, 1);
-        if (params.maxFiles !== undefined)
-          requireU32("maxFiles", params.maxFiles, 1);
+      execute(_toolCallId, params, signal) {
+        const scope = captureRecorder(recorder);
+        let responseBytes = 0;
+        return profileToolCall(
+          scope,
+          operationOf(params),
+          signal,
+          async () => {
+            throwIfAborted(signal);
+            const rewrites: Record<string, string> = {};
+            for (const [pattern, replacement] of Object.entries(
+              params.rewrites,
+            )) {
+              if (pattern.trim() !== "") rewrites[pattern] = replacement;
+            }
+            if (Object.keys(rewrites).length === 0) {
+              throw new Error("rewrites must contain at least one pattern");
+            }
+            if (params.maxReplacements !== undefined)
+              requireU32("maxReplacements", params.maxReplacements, 1);
+            if (params.maxFiles !== undefined)
+              requireU32("maxFiles", params.maxFiles, 1);
 
-        const root = resolveToolPath(cwd, params.path ?? ".");
-        const applying = params.dryRun === false;
-        let result: AstReplaceResult;
-        try {
-          result = await withNativeSignal(signal, (nativeSignal) =>
-            mux.astEdit(cwd, {
-              rewrites,
-              path: root,
-              glob: params.glob,
-              lang: params.lang,
-              selector: params.selector,
-              strictness: params.strictness as AstMatchStrictness | undefined,
-              dryRun: params.dryRun,
-              maxReplacements: params.maxReplacements,
-              maxFiles: params.maxFiles,
-              failOnParseError: params.failOnParseError,
-              signal: nativeSignal,
-            }),
-          );
-        } finally {
-          // Runs even on failure: a partially applied rewrite must not leave the
-          // walker cache advertising pre-edit bytes.
-          if (applying) native.invalidateFsScanCache(root);
-        }
-        throwIfAborted(signal);
-        return boundedToolResult(JSON.stringify(result, null, 2), result);
+            const root = resolveToolPath(cwd, params.path ?? ".");
+            const applying = params.dryRun === false;
+            let result: AstReplaceResult;
+            try {
+              result = await withNativeSignal(signal, (nativeSignal) =>
+                mux.astEdit(cwd, {
+                  rewrites,
+                  path: root,
+                  glob: params.glob,
+                  lang: params.lang,
+                  selector: params.selector,
+                  strictness: params.strictness as
+                    | AstMatchStrictness
+                    | undefined,
+                  dryRun: params.dryRun,
+                  maxReplacements: params.maxReplacements,
+                  maxFiles: params.maxFiles,
+                  failOnParseError: params.failOnParseError,
+                  signal: nativeSignal,
+                }),
+              );
+            } finally {
+              // Runs even on failure: a partially applied rewrite must not leave the
+              // walker cache advertising pre-edit bytes.
+              if (applying) native.invalidateFsScanCache(root);
+            }
+            throwIfAborted(signal);
+            const text = JSON.stringify(result, null, 2);
+            if (scope !== undefined)
+              responseBytes = Buffer.byteLength(text, "utf8");
+            return boundedToolResult(text, result);
+          },
+          ({ details: { result } }) => {
+            let deleted = 0;
+            let inserted = 0;
+            for (const change of result.changes) {
+              deleted += change.deletedLength;
+              inserted += Buffer.byteLength(change.after, "utf8");
+            }
+            return {
+              counters: {
+                replacements: result.totalReplacements,
+                files_touched: result.filesTouched,
+                files_searched: result.filesSearched,
+                change_records: result.changes.length,
+                file_change_records: result.fileChanges.length,
+                deleted_bytes: deleted,
+                inserted_bytes: inserted,
+                net_bytes: inserted - deleted,
+                limit_reached: Number(result.limitReached),
+                ...(result.parseErrors === undefined
+                  ? {}
+                  : { parse_errors: result.parseErrors.length }),
+                response_bytes: responseBytes,
+              },
+            };
+          },
+        );
       },
     } satisfies ToolDefinition<
       typeof astEditSchema,
       BoundedToolDetails<AstReplaceResult>
     >;
-    return tool;
+    return markProfileOwned(tool, operationOf);
   },
 };
 

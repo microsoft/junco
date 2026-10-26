@@ -26,14 +26,17 @@ import {
   childCommand,
   closeFixture,
   collector,
+  counter,
   deferred,
   expectedLines,
   fixture,
   heldChild,
   nativeEnv,
   numberedLines,
+  outcomes,
   quote,
   release,
+  testRecorder,
   text,
 } from "./helpers.mjs";
 
@@ -1570,6 +1573,62 @@ test("closing an operations owner joins its run and leaves a borrowed mux open",
     assert.equal(text(after), "still open\n");
   } finally {
     await Promise.allSettled([run]);
+    await closeFixture(instance);
+  }
+});
+
+test("recorded bash and shell exec count exits, timeouts and cancellation", {
+  timeout: 30_000,
+}, async () => {
+  const instance = await fixture();
+  const recorder = testRecorder();
+  const { events } = recorder.root;
+  const memory = recorder.add_context("leaf");
+  try {
+    const operations = new ShellMuxOperations({
+      mux: instance.mux,
+      native: instance.native,
+      recorder: memory,
+    });
+    const tool = BashTool.create(instance.seed, { operations }, () => memory);
+    await tool.execute("ok", { command: "printf hello" });
+    const failed = await tool.execute("exit", { command: "exit 3" });
+    assert.equal(failed.isError, true);
+    await assert.rejects(
+      tool.execute("timeout", { command: "sleep 5", timeout: 0.3 }),
+    );
+    const abort = new AbortController();
+    const running = tool.execute("abort", { command: "sleep 5" }, abort.signal);
+    await delay(300);
+    abort.abort();
+    await assert.rejects(running);
+
+    assert.deepEqual(outcomes(events, "bash"), [
+      "success",
+      "error",
+      "error",
+      "cancelled",
+    ]);
+    assert.deepEqual(outcomes(events, "", "exec"), [
+      "success",
+      "error",
+      "error",
+      "cancelled",
+    ]);
+    assert.equal(counter(events, "", "output_bytes"), 5);
+    assert.equal(counter(events, "", "nonzero_exits"), 1);
+    assert.equal(counter(events, "", "timeouts"), 1);
+    assert.equal(counter(events, "", "cancellations"), 1);
+    const exitCodes = events
+      .filter((event) => event.gauges?.exit_code_last !== undefined)
+      .map((event) => event.gauges.exit_code_last);
+    assert.deepEqual(exitCodes, [0, 3]);
+    assert.ok(
+      events.every(
+        (event) => event.resource === "memory" && event.at === "leaf",
+      ),
+    );
+  } finally {
     await closeFixture(instance);
   }
 });

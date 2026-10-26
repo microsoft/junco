@@ -7,6 +7,12 @@ import type {
 } from "dataflow-engine";
 import { Type } from "typebox";
 import { log } from "./log.js";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 import { checkToolInput } from "./tool-support.js";
 
 /** Free-form complaint text, in the reporting agent's own words. */
@@ -121,8 +127,19 @@ const complainParameters = deepFreeze(
   ),
 );
 
-/** Tools this module created. A same-named or copied tool is not a complaint tool. */
-const complainTools = new WeakSet<object>();
+type Recorder =
+  | ProfileRecorder<"operations">
+  | (() => ProfileRecorder<"operations"> | undefined);
+
+/** Tools this module created, with their recorders. A same-named or copied tool is not a complaint tool. */
+const complainTools = new WeakMap<object, Recorder | undefined>();
+
+const complainOperation = {
+  resource: "operations",
+  category: "complain",
+  tool: "complain",
+  operation: "execute",
+} as const;
 
 /** Shared by executions that receive no abort signal. */
 const neverAborted = new AbortController().signal;
@@ -138,6 +155,7 @@ export type ComplainTool = AgentTool<typeof complainParameters, undefined>;
 export const ComplainTool: new <N = unknown>(
   host?: ComplainToolHost,
   context?: () => ComplaintContext<N>,
+  recorder?: Recorder,
 ) => ComplainTool = class<N> {
   name = "complain";
   label = "complain";
@@ -149,13 +167,18 @@ export const ComplainTool: new <N = unknown>(
   executionMode: ComplainTool["executionMode"] = "sequential";
   execute: ComplainTool["execute"];
 
-  constructor(host?: ComplainToolHost, context?: () => ComplaintContext<N>) {
+  constructor(
+    host?: ComplainToolHost,
+    context?: () => ComplaintContext<N>,
+    recorder?: Recorder,
+  ) {
     this.execute = (_toolCallId, input, signal) => {
       if (host === undefined || context === undefined)
         throw new Error("complain requires an agent context");
-      return record(host, context, input, signal);
+      return record(host, context, input, signal, recorder);
     };
-    complainTools.add(this);
+    complainTools.set(this, recorder);
+    markProfileOwned(this, () => complainOperation);
     Object.freeze(this);
   }
 };
@@ -176,24 +199,34 @@ export function invokeComplainTool<N>(
 ): Promise<AgentToolResult<undefined>> {
   if (!isComplainTool(tool))
     throw new TypeError("Not a complain tool constructed by ComplainTool");
-  return record(host, () => context, input, signal);
+  return record(host, () => context, input, signal, complainTools.get(tool));
 }
 
-async function record<N>(
+function record<N>(
   host: ComplainToolHost,
   context: () => ComplaintContext<N>,
   input: { complaint: Complaint },
   signal: AbortSignal = neverAborted,
+  recorder: Recorder | undefined,
 ): Promise<AgentToolResult<undefined>> {
-  checkToolInput("complain", complainParameters, input);
-  signal.throwIfAborted();
-  const { nodeId, messages, prompt, tracer } = context();
-  host.complain(
-    { nodeId, messages, prompt, complaint: input.complaint },
-    tracer,
+  return profileToolCall(
+    captureRecorder(recorder),
+    complainOperation,
+    signal,
+    async () => {
+      checkToolInput("complain", complainParameters, input);
+      signal.throwIfAborted();
+      const { nodeId, messages, prompt, tracer } = context();
+      host.complain(
+        { nodeId, messages, prompt, complaint: input.complaint },
+        tracer,
+      );
+      return {
+        content: [{ type: "text", text: "Complaint recorded." }],
+        details: undefined,
+      };
+    },
+    // Resolving means the host appended the complaint.
+    () => ({ counters: { complaints_recorded: 1 } }),
   );
-  return {
-    content: [{ type: "text", text: "Complaint recorded." }],
-    details: undefined,
-  };
 }

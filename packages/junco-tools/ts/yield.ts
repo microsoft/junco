@@ -1,5 +1,11 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 
 const yieldParameters = Type.Object(
   { reason: Type.String({ minLength: 1 }) },
@@ -12,6 +18,13 @@ export type YieldToolDetails = { readonly reason: string };
 /** Tools this module created. Only these are scheduling primitives; a same-named tool is not. */
 const yieldTools = new WeakSet<object>();
 
+const yieldOperation = {
+  resource: "operations",
+  category: "yield",
+  tool: "yield",
+  operation: "execute",
+} as const;
+
 /** The explicit voluntary-suspension tool. */
 export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
 
@@ -21,20 +34,39 @@ export type YieldTool = AgentTool<typeof yieldParameters, YieldToolDetails>;
  * after the turn's tool batch completes and before its next model request until its iterator is
  * resumed. A plain Pi agent simply continues.
  */
-export const YieldTool: new () => YieldTool = class {
+export const YieldTool: new (
+  recorder?:
+    | ProfileRecorder<"operations">
+    | (() => ProfileRecorder<"operations"> | undefined),
+) => YieldTool = class {
   name = "yield";
   label = "yield";
   description =
     "Pause after this turn's tool calls finish and hand control back to the scheduler. " +
     "Give the reason you are pausing; you continue from here when resumed.";
   parameters = yieldParameters;
-  execute: YieldTool["execute"] = async (_toolCallId, { reason }) => ({
-    content: [{ type: "text", text: reason }],
-    details: { reason },
-  });
+  execute: YieldTool["execute"];
 
-  constructor() {
+  constructor(
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
+  ) {
+    this.execute = (_toolCallId, params, signal) =>
+      profileToolCall(
+        captureRecorder(recorder),
+        yieldOperation,
+        signal,
+        async () => {
+          const { reason } = params;
+          return {
+            content: [{ type: "text", text: reason }],
+            details: { reason },
+          };
+        },
+      );
     yieldTools.add(this);
+    markProfileOwned(this, () => yieldOperation);
   }
 };
 

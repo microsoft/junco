@@ -10,8 +10,24 @@ import type {
 } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import type { Policy } from "./policy.js";
+import {
+  beginOperation,
+  captureRecorder,
+  type ProfileRecorder,
+} from "./profile-recorder.js";
 import { ShellMuxLease } from "./shell-mux.js";
 import { trackPromise } from "./tool-support.js";
+
+const SHELL_EXEC = {
+  resource: "memory",
+  category: "shell",
+  tool: "",
+  operation: "exec",
+} as const;
+
+type MemoryRecorder =
+  | ProfileRecorder<"memory">
+  | (() => ProfileRecorder<"memory"> | undefined);
 
 const closedError = () => new Error("ShellMux session is closed");
 
@@ -49,6 +65,7 @@ export class ShellMuxOperations implements BashOperations {
     readonly resources?: NativeResourceOptions;
     readonly onResourceEvent?: (event: NativeResourceEvent) => void;
   };
+  readonly #recorder: MemoryRecorder | undefined;
   #mux: NativeMux | undefined;
   #owned: ShellMuxLease | undefined;
   #acquiring: Promise<NativeMux> | undefined;
@@ -63,6 +80,11 @@ export class ShellMuxOperations implements BashOperations {
     readonly policy?: Policy;
     readonly resources?: NativeResourceOptions;
     readonly onResourceEvent?: (event: NativeResourceEvent) => void;
+    /**
+     * Records each command as `shell/exec`, and, for an owned mux, its resource events
+     * (see `ShellMuxLease.create`); a getter is resolved per command and at acquisition.
+     */
+    readonly recorder?: MemoryRecorder;
     principal?: string;
   }) {
     const borrowed = options?.mux;
@@ -96,6 +118,7 @@ export class ShellMuxOperations implements BashOperations {
     }
     this.#borrowed = borrowed;
     this.#principal = options?.principal ?? `pi-${randomUUID()}`;
+    this.#recorder = options?.recorder;
     this.#acquisition = {
       native: options?.native,
       sandbox: options?.sandbox,
@@ -120,14 +143,25 @@ export class ShellMuxOperations implements BashOperations {
             this.#mux = borrowed;
             return borrowed;
           }
-          const lease = await ShellMuxLease.create(cwd, this.#acquisition);
+          const recorder = this.#recorder;
+          const lease = await ShellMuxLease.create(cwd, {
+            ...this.#acquisition,
+            recorder: typeof recorder === "function" ? recorder() : recorder,
+          });
           if (this.#closing !== undefined) {
             await lease.release();
             throw closedError();
           }
           this.#owned = lease;
-          this.#mux = lease.mux.forkOwner();
-          return this.#mux;
+          const mux = lease.mux.forkOwner();
+          if (recorder !== undefined && mux.owner !== undefined) {
+            lease.registerRecorderOwner(
+              mux.owner,
+              typeof recorder === "function" ? recorder : () => recorder,
+            );
+          }
+          this.#mux = mux;
+          return mux;
         })(),
       );
       this.#acquiring = attempt;
@@ -138,8 +172,46 @@ export class ShellMuxOperations implements BashOperations {
     return this.#acquiring;
   }
 
-  /** An own bound function, so detached upstream invocation works. */
-  readonly exec: BashOperations["exec"] = async (
+  /**
+   * An own bound function, so detached upstream invocation works. With a recorder, the whole
+   * command through its output/cleanup fence is one `shell/exec` operation.
+   */
+  readonly exec: BashOperations["exec"] = async (command, cwd, options) => {
+    const recorder = captureRecorder(this.#recorder);
+    const finish = beginOperation(recorder, SHELL_EXEC);
+    if (finish === undefined) return this.#exec(command, cwd, options);
+    const counters: Record<string, number> = { output_bytes: 0 };
+    const gauges: Record<string, number> = {};
+    let outcome: "success" | "error" | "cancelled" = "error";
+    try {
+      const result = await this.#exec(command, cwd, {
+        ...options,
+        onData: (data) => {
+          counters.output_bytes += data.length;
+          options.onData(data);
+        },
+      });
+      if (result.exitCode !== null) {
+        gauges.exit_code_last = result.exitCode;
+        if (result.exitCode !== 0) counters.nonzero_exits = 1;
+        else outcome = "success";
+      }
+      return result;
+    } catch (error) {
+      if (options.signal?.aborted) {
+        outcome = "cancelled";
+        counters.cancellations = 1;
+      } else if (error instanceof Error && error.message.startsWith("timeout:"))
+        // `#exec`'s own timeout rejection.
+        counters.timeouts = 1;
+      throw error;
+    } finally {
+      recorder?.record({ kind: "metrics", counters, gauges, ...SHELL_EXEC });
+      finish(outcome);
+    }
+  };
+
+  readonly #exec: BashOperations["exec"] = async (
     command,
     cwd,
     { onData, signal, timeout, env },

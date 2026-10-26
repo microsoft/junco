@@ -542,3 +542,55 @@ test("decision receipts must match the decision", async () => {
     /no such task/,
   );
 });
+
+/** A tiny ProfileRecorder collecting events; `sum`/`gauge` read one operation's metrics. */
+function profileRecorder() {
+  const events = [];
+  const recorder = {
+    path: "",
+    add_context: () => recorder,
+    record: (event) => events.push(event),
+    flush: async () => {},
+    close: async () => {},
+    events,
+    of: (operation) => events.filter((e) => e.operation === operation),
+    count: (operation, kind, outcome) =>
+      recorder
+        .of(operation)
+        .filter(
+          (e) =>
+            e.kind === kind && (outcome === undefined || e.outcome === outcome),
+        ).length,
+    sum: (operation, field) =>
+      recorder
+        .of(operation)
+        .reduce((total, e) => total + (e.counters?.[field] ?? 0), 0),
+  };
+  recorder.root = recorder;
+  return recorder;
+}
+
+test("task calls count once with bounded action labels", async () => {
+  const recorder = profileRecorder();
+  const { host } = recordingHost();
+  const signal = new AbortController().signal;
+  const tool = new TaskTool(host, recorder);
+  await tool.execute(
+    "a",
+    { context: "c", tasks: [{ task: "x" }, { task: "y" }] },
+    signal,
+  );
+  await invokeTaskTool(
+    tool,
+    host,
+    "b",
+    { context: "c", tasks: [{ task: "z" }] },
+    signal,
+  );
+  await assert.rejects(
+    tool.execute("c", { action: "explode", id: "x", attempt: 1 }, signal),
+  );
+  assert.equal(recorder.count("launch", "start"), 2);
+  assert.equal(recorder.sum("launch", "handles_returned"), 3);
+  assert.equal(recorder.count("invalid", "finish", "error"), 1);
+});

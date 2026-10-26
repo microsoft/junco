@@ -271,3 +271,38 @@ export function deferred(signal, label = "fixture wait") {
 export async function release(gate) {
   await writeFile(gate, "release\n");
 }
+
+/**
+ * A minimal `ProfileRecorder` session: every view shares `root`, whose `events` collects each
+ * recorded event with the recording view's `path` as `at`.
+ */
+export function testRecorder() {
+  const root = { events: [] };
+  const view = (path) => ({
+    root,
+    path,
+    add_context: (id) =>
+      id === "" ? view(path) : view(path ? `${path}::${id}` : id),
+    record: (event) => root.events.push({ at: path, ...event }),
+    flush: async () => {},
+    close: async () => {},
+  });
+  return view("");
+}
+
+/** Terminal outcomes, in order, of `events` labelled `tool`/`operation`. */
+export const outcomes = (events, tool, operation) =>
+  events
+    .filter(
+      (event) =>
+        event.kind === "finish" &&
+        event.tool === tool &&
+        (operation === undefined || event.operation === operation),
+    )
+    .map((event) => event.outcome);
+
+/** The summed counter `name` of `events` labelled `tool`. */
+export const counter = (events, tool, name) =>
+  events
+    .filter((event) => event.kind === "metrics" && event.tool === tool)
+    .reduce((sum, event) => sum + (event.counters?.[name] ?? 0), 0);

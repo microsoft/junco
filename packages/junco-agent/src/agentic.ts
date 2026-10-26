@@ -20,7 +20,12 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import type { EdgeIdType, ParentView } from "dataflow-engine";
-import type { ComplainToolHost, Contract, ToolCollection } from "junco-tools";
+import type {
+  ComplainToolHost,
+  Contract,
+  ProfileRecorder,
+  ToolCollection,
+} from "junco-tools";
 import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
 
 /**
@@ -209,6 +214,16 @@ export type AgenticOptions<
   readonly contract?: (edgeId: EdgeIdType) => Contract;
   /** Usage growth reports for this agent and every subagent it creates; see {@link TokenMonitorConfig}. */
   readonly tokenMonitor?: TokenMonitorConfig;
+  /**
+   * Profiling session view this agent records into outside a graph placement, at
+   * `recorder.add_context(recorderNodeId ?? nodeId)`. Subagents inherit it; a graph activation
+   * places the agent under that graph's view of the same session.
+   */
+  readonly recorder?: ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations"
+  >;
+  /** This agent's node ID under `recorder`; default its own `nodeId`. */
+  readonly recorderNodeId?: string;
 };
 
 /** Reject duplicate tool names and duplicate or unknown active names. */

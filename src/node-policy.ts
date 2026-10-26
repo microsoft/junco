@@ -24,7 +24,7 @@ import {
   type SchedulerContext,
   context as schedulerContext,
 } from "junco-scheduler";
-import type { ToolCollection } from "junco-tools";
+import type { ProfileRecorder, ToolCollection } from "junco-tools";
 import type { Agentic, AgenticNode } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
@@ -114,6 +114,10 @@ export type NodeRegistration = Pick<
   "send" | "info"
 > & {
   readonly tracer: DataflowTracer;
+  /** The owning graph's current recorder view, if it records. */
+  readonly recorder:
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | undefined;
   /** The owning graph's current signal. */
   readonly signal: AbortSignal;
   /** Validate the original sender's message route without publishing or consuming anything. */

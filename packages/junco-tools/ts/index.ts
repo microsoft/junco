@@ -76,6 +76,24 @@ export { type Contract, InfoTool, RecvTool, SendTool } from "./messaging.js";
 export type { NativeModule } from "./native.js";
 export { ShellMuxOperations } from "./operations.js";
 export { EmptyPolicy, LockPolicy, Policy } from "./policy.js";
+export {
+  beginOperation,
+  captureRecorder,
+  hasProfileOwner,
+  markProfileOwned,
+  type ProfileActivation,
+  type ProfileEvent,
+  type ProfileMetrics,
+  type ProfileOperation,
+  type ProfileOutcome,
+  type ProfileRecorder,
+  profileContexts,
+  profileOperationOf,
+  profilePath,
+  profileToolCall,
+  recordToolResult,
+  runWithRecorder,
+} from "./profile-recorder.js";
 export { ReadTool } from "./read.js";
 export { ReleaseTool } from "./release.js";
 export { ShellMuxLease } from "./shell-mux.js";

@@ -9,10 +9,23 @@ import {
 import type { NativeMux } from "../native/index.js";
 import type { NativeModule } from "./native.js";
 import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
+import {
   requireU32,
   throwIfAborted,
   withNativeSignal,
 } from "./tool-support.js";
+
+const FIND = {
+  resource: "operations",
+  category: "find",
+  tool: "find",
+  operation: "search",
+} as const;
 
 /**
  * Pi's find tool backed by the native walker.
@@ -29,6 +42,9 @@ export const FindTool = {
     cwd: string,
     native: NativeModule,
     mux: NativeMux,
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
   ): AgentTool<
     ReturnType<typeof createPiFindTool>["parameters"],
     FindToolDetails | undefined
@@ -36,47 +52,68 @@ export const FindTool = {
     const base = createPiFindToolDefinition(cwd);
     const tool = {
       ...base,
-      async execute(toolCallId, params, signal, onUpdate) {
-        throwIfAborted(signal);
-        if (params.limit !== undefined) requireU32("limit", params.limit, 1);
-        // Built per call so concurrent invocations never share a mutable signal.
-        const scoped = createPiFindTool(cwd, {
-          operations: {
-            async exists(absolutePath) {
-              throwIfAborted(signal);
-              return mux.exists(cwd, absolutePath);
-            },
-            async glob(pattern, root, options) {
-              throwIfAborted(signal);
-              const result = await withNativeSignal(signal, (nativeSignal) =>
-                mux.glob(cwd, {
-                  pattern,
-                  path: root,
-                  recursive: true,
-                  hidden: true,
-                  gitignore: true,
-                  cache: false,
-                  includeNodeModules: false,
-                  maxResults: options.limit,
-                  signal: nativeSignal,
-                }),
-              );
-              // Pi's adapter relativizes against the search root, so hand it
-              // absolute paths rather than the walker's root-relative ones.
-              return result.matches.map((match) =>
-                resolveNodePath(root, match.path),
-              );
-            },
+      execute(toolCallId, params, signal, onUpdate) {
+        // Paths the native walker delivered, before Pi renders them.
+        let paths = 0;
+        return profileToolCall(
+          captureRecorder(recorder),
+          FIND,
+          signal,
+          async () => {
+            throwIfAborted(signal);
+            if (params.limit !== undefined)
+              requireU32("limit", params.limit, 1);
+            // Built per call so concurrent invocations never share a mutable signal.
+            const scoped = createPiFindTool(cwd, {
+              operations: {
+                async exists(absolutePath) {
+                  throwIfAborted(signal);
+                  return mux.exists(cwd, absolutePath);
+                },
+                async glob(pattern, root, options) {
+                  throwIfAborted(signal);
+                  const result = await withNativeSignal(
+                    signal,
+                    (nativeSignal) =>
+                      mux.glob(cwd, {
+                        pattern,
+                        path: root,
+                        recursive: true,
+                        hidden: true,
+                        gitignore: true,
+                        cache: false,
+                        includeNodeModules: false,
+                        maxResults: options.limit,
+                        signal: nativeSignal,
+                      }),
+                  );
+                  paths += result.matches.length;
+                  // Pi's adapter relativizes against the search root, so hand it
+                  // absolute paths rather than the walker's root-relative ones.
+                  return result.matches.map((match) =>
+                    resolveNodePath(root, match.path),
+                  );
+                },
+              },
+            });
+            // No signal for the inner factory: its immediate-abort wrapper would
+            // otherwise settle the call while a native worker is still draining.
+            return scoped.execute(toolCallId, params, undefined, onUpdate);
           },
-        });
-        // No signal for the inner factory: its immediate-abort wrapper would
-        // otherwise settle the call while a native worker is still draining.
-        return scoped.execute(toolCallId, params, undefined, onUpdate);
+          ({ details }) => ({
+            counters: {
+              paths_returned: paths,
+              result_limit_reached: Number(
+                details?.resultLimitReached !== undefined,
+              ),
+            },
+          }),
+        );
       },
     } satisfies ToolDefinition<
       ReturnType<typeof createPiFindTool>["parameters"],
       FindToolDetails | undefined
     >;
-    return tool;
+    return markProfileOwned(tool, () => FIND);
   },
 };

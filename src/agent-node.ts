@@ -30,6 +30,7 @@ import {
 import type { SchedulerContext } from "junco-scheduler";
 import type {
   Contract,
+  ProfileRecorder,
   TaskDecision,
   TaskInput,
   TaskToolDetails,
@@ -99,6 +100,12 @@ type DriverBinding = {
 const ROOT = NodeId.create("root");
 const SOURCE_WAKE: AgenticInput = { kind: "nextTurn", text: "" };
 const SOURCE_EDGE = EdgeId.create("$source->root");
+const TASK_LIFECYCLE = {
+  resource: "operations",
+  category: "task",
+  tool: "task",
+  operation: "lifecycle",
+} as const;
 type TaskContext = SchedulerContext<
   Agentic,
   AgenticInput,
@@ -248,6 +255,8 @@ export class AgentDriver {
    * keep using it after promotion makes the agent an inner spawn root.
    */
   registration: NodeRegistration | undefined;
+  /** The outer node's ID in that registration's graph: its recorder context. */
+  nodeId: string | undefined;
   #outputSink: Sink<AgenticInput, AssistantMessage> | undefined;
   #messageHost:
     | NonNullable<
@@ -355,6 +364,11 @@ export class AgentDriver {
       this.tasks.set(record.id, record);
       this.outstanding.add(record.id);
     }
+    this.#lifecycle({
+      batches_admitted: 1,
+      tasks_admitted: prepared.length,
+      attempts_admitted: prepared.length,
+    });
     return prepared.map(({ record: { id, name } }) =>
       name === undefined ? { id } : { id, name },
     );
@@ -375,13 +389,14 @@ export class AgentDriver {
         `Task ${id} awaits a decision about attempt ${record.attempt}, not ${attempt}`,
       );
     if (action === "ignore") {
-      this.#resolve(record);
+      this.#resolve(record, { tasks_ignored: 1 });
       return [];
     }
     // Reserved while acquiring, so a concurrent decision cannot start a second attempt.
     record.state = "retrying";
     try {
       this.staged.push(await this.#acquire(caller, record, signal));
+      this.#lifecycle({ attempts_admitted: 1, retry_attempts: 1 });
     } catch (error) {
       record.state = "awaiting-decision";
       throw error;
@@ -412,11 +427,22 @@ export class AgentDriver {
     };
   }
 
-  /** Ends `record` as completed or ignored; its batch's last resolution queues its completion. */
-  #resolve(record: TaskRecord): void {
+  /**
+   * Ends `record` as completed or ignored, recording `counters` with its resolution; its batch's
+   * last resolution queues its completion.
+   */
+  #resolve(
+    record: TaskRecord,
+    counters: Readonly<Record<string, number>>,
+  ): void {
     record.state = "terminal";
     this.outstanding.delete(record.id);
     record.batch.open -= 1;
+    this.#lifecycle({
+      ...counters,
+      tasks_resolved: 1,
+      ...(record.batch.open === 0 ? { batches_completed: 1 } : {}),
+    });
     if (record.batch.open === 0)
       this.notices.push(
         JSON.stringify({ type: "task_batch_complete", ids: record.batch.ids }),
@@ -445,11 +471,12 @@ export class AgentDriver {
       return;
     if (report.status === "completed") {
       this.notices.push(report);
-      this.#resolve(record);
+      this.#resolve(record, { tasks_completed: 1 });
       return;
     }
+    this.#lifecycle({ tasks_failed: 1 });
     if (record.policy === "ignore") {
-      this.#resolve(record);
+      this.#resolve(record, { tasks_ignored: 1 });
       return;
     }
     let error = report.error;
@@ -460,6 +487,7 @@ export class AgentDriver {
         this.staged.push(
           await this.#acquire(this.agent as JuncoAgent, record, signal),
         );
+        this.#lifecycle({ attempts_admitted: 1, retry_attempts: 1 });
         return;
       } catch (failure) {
         if (signal.aborted) throw failure;
@@ -471,6 +499,21 @@ export class AgentDriver {
       ...report,
       ...(error === undefined ? {} : { error }),
       decisionRequired: true,
+    });
+  }
+
+  /** Task commits, at the logical task owner's node context with the current outstanding count. */
+  #lifecycle(counters: Readonly<Record<string, number>>): void {
+    const id = this.nodeId;
+    const view: ProfileRecorder<"operations"> | undefined =
+      id === undefined
+        ? undefined
+        : this.registration?.recorder?.add_context(id);
+    view?.record({
+      kind: "metrics",
+      ...TASK_LIFECYCLE,
+      counters,
+      gauges: { tasks_outstanding: this.outstanding.size },
     });
   }
 
@@ -574,7 +617,9 @@ export class AgentDriver {
           await this.#receiveTaskReport(message, reportSignal);
       return this.#advance();
     };
-    const tracer = registeredNodeContexts.get(node)?.tracer;
+    const registration = registeredNodeContexts.get(node);
+    const tracer = registration?.tracer;
+    const recorder = registration?.recorder;
     const detach =
       tracer instanceof TuiTracer
         ? tracer.observeAgent(node, agent.events)
@@ -606,6 +651,9 @@ export class AgentDriver {
             messages,
             ...(tracer === undefined ? {} : { tracer }),
           },
+          ...(recorder === undefined
+            ? {}
+            : { recorder, recorderNodeId: String(node.id) }),
         },
         advance,
       );
@@ -916,6 +964,8 @@ export class AgentDriver {
           staged,
           childNode,
           registeredNodeContexts.get(node)?.tracer,
+          registeredNodeContexts.get(node)?.recorder,
+          String(node.id),
         );
         graph = execution.graph;
         graph
@@ -944,7 +994,10 @@ export class AgentDriver {
     };
 
     /** One bounded advance of the expanded graph, then registration of newly accepted tasks. */
-    const advanceGraph = async (execution: TaskContext): Promise<void> => {
+    const advanceGraph = async (
+      execution: TaskContext,
+      nodeId: string,
+    ): Promise<void> => {
       const graph = execution.graph;
       const signal = graph.signal;
       signal.throwIfAborted();
@@ -956,7 +1009,12 @@ export class AgentDriver {
         });
       if (graph.available().size > 0) {
         try {
-          await execution.step({ signal });
+          // The promoted node's actual position, never the former agent's own context.
+          const placement = driver.registration?.recorder?.add_context(nodeId);
+          const drive = () => execution.step({ signal });
+          await (placement === undefined
+            ? drive()
+            : graph.runWithRecorder(placement, drive));
         } catch (error) {
           const abort = failureAbort;
           failureAbort = undefined;
@@ -1007,6 +1065,7 @@ export class AgentDriver {
       async function* (): NodeGenerator<AgenticInput, AssistantMessage> {
         // Captured once, at priming: a promoted agent keeps this node's routes and topology.
         driver.registration = registeredNodeContexts.get(this);
+        driver.nodeId = String(this.id);
         // A later run of a re-armed node: same agent and retained inbox, a fresh settlement.
         if (driver.result !== undefined) {
           if (spawned !== undefined)
@@ -1040,7 +1099,7 @@ export class AgentDriver {
               }
             } else {
               spawned.graph.source.enqueue(fresh);
-              await advanceGraph(spawned);
+              await advanceGraph(spawned, String(this.id));
             }
             const result = finished();
             if (result !== undefined) {

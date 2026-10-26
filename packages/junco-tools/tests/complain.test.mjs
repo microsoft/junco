@@ -294,3 +294,56 @@ test("context and host failures propagate without acknowledgement", async () => 
   );
   assert.equal(issueLog.length, before);
 });
+
+/** A tiny ProfileRecorder collecting events; `sum`/`gauge` read one operation's metrics. */
+function profileRecorder() {
+  const events = [];
+  const recorder = {
+    path: "",
+    add_context: () => recorder,
+    record: (event) => events.push(event),
+    flush: async () => {},
+    close: async () => {},
+    events,
+    of: (operation) => events.filter((e) => e.operation === operation),
+    count: (operation, kind, outcome) =>
+      recorder
+        .of(operation)
+        .filter(
+          (e) =>
+            e.kind === kind && (outcome === undefined || e.outcome === outcome),
+        ).length,
+    sum: (operation, field) =>
+      recorder
+        .of(operation)
+        .reduce((total, e) => total + (e.counters?.[field] ?? 0), 0),
+  };
+  recorder.root = recorder;
+  return recorder;
+}
+
+test("a complaint call counts once, direct or invoked", async () => {
+  const recorder = profileRecorder();
+  const host = loggingHost();
+  const context = { nodeId: "n", messages: [], prompt: prompt() };
+  const tool = new ComplainTool(host, () => context, recorder);
+  await tool.execute("c1", { complaint: "stuck" });
+  await invokeComplainTool(
+    tool,
+    host,
+    context,
+    "c2",
+    { complaint: "again" },
+    new AbortController().signal,
+  );
+  await assert.rejects(tool.execute("c3", { complaint: " " }));
+  assert.equal(recorder.count("execute", "start"), 3);
+  assert.equal(recorder.count("execute", "finish", "success"), 2);
+  assert.equal(recorder.count("execute", "finish", "error"), 1);
+  assert.equal(recorder.sum("execute", "complaints_recorded"), 2);
+  assert.ok(
+    recorder.events.every(
+      (e) => e.resource === "operations" && e.tool === "complain",
+    ),
+  );
+});

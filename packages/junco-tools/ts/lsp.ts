@@ -10,7 +10,31 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/lsp";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type TUnsafe, Type } from "typebox";
+import {
+  captureRecorder,
+  markProfileOwned,
+  type ProfileRecorder,
+  profileToolCall,
+} from "./profile-recorder.js";
 import { resolveToolPath } from "./tool-support.js";
+
+/** The upstream actions, the only operation labels a call may carry. */
+const LSP_ACTIONS: Record<LspToolInput["action"], true> = {
+  diagnostics: true,
+  definition: true,
+  references: true,
+  hover: true,
+  symbols: true,
+  rename: true,
+  rename_file: true,
+  code_actions: true,
+  type_definition: true,
+  implementation: true,
+  status: true,
+  reload: true,
+  capabilities: true,
+  request: true,
+};
 
 /** Options for {@link LspTool.create}. */
 export interface LspToolOptions {
@@ -133,7 +157,13 @@ export const LspTool = {
    * @returns A Pi `AgentTool` delegating to upstream oh-my-pi.
    * @throws {Error} `LspTool requires Bun >=1.3.14` when not running under Bun.
    */
-  async create(cwd: string, options: LspToolOptions = {}): Promise<LspTool> {
+  async create(
+    cwd: string,
+    options: LspToolOptions = {},
+    recorder?:
+      | ProfileRecorder<"operations">
+      | (() => ProfileRecorder<"operations"> | undefined),
+  ): Promise<LspTool> {
     if (!("Bun" in globalThis)) {
       throw new Error("LspTool requires Bun >=1.3.14");
     }
@@ -159,7 +189,19 @@ export const LspTool = {
     sharedLspParameters ??= Type.Unsafe<LspToolInput>(
       delegate.parameters.toJsonSchema(),
     );
-    return {
+    const describe = (args: unknown) => {
+      const action = (args as { action?: unknown } | null | undefined)?.action;
+      return {
+        resource: "operations",
+        category: "lsp",
+        tool: delegate.name,
+        operation:
+          typeof action === "string" && Object.hasOwn(LSP_ACTIONS, action)
+            ? action
+            : "invalid",
+      } as const;
+    };
+    const tool: LspTool = {
       name: delegate.name,
       label: delegate.label,
       description: delegate.description,
@@ -169,20 +211,29 @@ export const LspTool = {
       approval: delegate.approval,
       formatApprovalDetails: delegate.formatApprovalDetails,
       parameters: sharedLspParameters,
-      execute: async (toolCallId, params, signal, onUpdate) => {
-        const result = await delegate.execute(
-          toolCallId,
-          params,
+      execute: (toolCallId, params, signal, onUpdate) =>
+        profileToolCall(
+          captureRecorder(recorder),
+          describe(params),
           signal,
-          onUpdate && ((partial) => onUpdate(toPiLspResult(partial))),
-        );
-        const converted = toPiLspResult(result);
-        if (converted.isError) {
-          throw new Error(contentText(result.content, "\n"), { cause: result });
-        }
-        return converted;
-      },
+          async () => {
+            const result = await delegate.execute(
+              toolCallId,
+              params,
+              signal,
+              onUpdate && ((partial) => onUpdate(toPiLspResult(partial))),
+            );
+            const converted = toPiLspResult(result);
+            if (converted.isError) {
+              throw new Error(contentText(result.content, "\n"), {
+                cause: result,
+              });
+            }
+            return converted;
+          },
+        ),
     };
+    return markProfileOwned(tool, describe);
   },
 
   /**

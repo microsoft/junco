@@ -22,7 +22,13 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { issueLog, YieldTool } from "junco-tools";
+import {
+  issueLog,
+  type ProfileEvent,
+  type ProfileRecorder,
+  profileContexts,
+  YieldTool,
+} from "junco-tools";
 import { MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { Type } from "typebox";
 import { userTexts } from "../../../test/deterministic-support.ts";
@@ -2576,6 +2582,360 @@ test(
       }
     } finally {
       await restored.return();
+    }
+  },
+  TIMEOUT,
+);
+
+// Profiling ----------------------------------------------------------------------------------------
+
+type Recorded = { readonly path: string; readonly event: ProfileEvent<string> };
+
+/** One in-memory profiling session recording every event with its context path. */
+function profileRecorder() {
+  const events: Recorded[] = [];
+  const recorder: ProfileRecorder<string> = {
+    get root() {
+      return recorder;
+    },
+    path: "",
+    add_context: (nodeId) => contexts.add([], nodeId),
+    record: (event) => {
+      events.push({ path: "", event });
+    },
+    flush: async () => {},
+    close: async () => {},
+  };
+  const contexts = profileContexts(
+    recorder,
+    (_ids, path, event) => {
+      events.push({ path, event });
+    },
+    () => {},
+  );
+  return { recorder, events };
+}
+
+type Labels = {
+  readonly category: string;
+  readonly tool: string;
+  readonly operation: string;
+};
+const AGENT_RUN = { category: "agent", tool: "", operation: "run" };
+const HANDOFF = { category: "agent", tool: "yield", operation: "handoff" };
+
+const labelled = (event: ProfileEvent<string>, labels: Labels) =>
+  event.kind !== "usage" &&
+  event.kind !== "resource" &&
+  event.category === labels.category &&
+  event.tool === labels.tool &&
+  event.operation === labels.operation;
+
+/** The summed counter `name` of `labels`. */
+function counter(events: readonly Recorded[], labels: Labels, name: string) {
+  let total = 0;
+  for (const { event } of events)
+    if (event.kind === "metrics" && labelled(event, labels))
+      total += event.counters?.[name] ?? 0;
+  return total;
+}
+
+/** Start count and terminal outcomes of `labels`, in order. */
+function calls(events: readonly Recorded[], labels: Labels) {
+  return {
+    starts: events.filter(
+      ({ event }) => event.kind === "start" && labelled(event, labels),
+    ).length,
+    outcomes: events.flatMap(({ event }) =>
+      event.kind === "finish" && labelled(event, labels) ? [event.outcome] : [],
+    ),
+  };
+}
+
+test(
+  "recorder: committed usage rows only, at the agent's own context, inherited by subagents",
+  async () => {
+    const repo = new MemorySessionRepo();
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const { faux, models, model } = scripted([fauxAssistantMessage("old")]);
+    const first = await JuncoAgent.fromResolved({
+      session,
+      models,
+      model,
+      systemPrompt: "sys",
+    });
+    try {
+      await first.prompt("history");
+    } finally {
+      await first.return();
+    }
+    const { recorder, events } = profileRecorder();
+    faux.setResponses([fauxAssistantMessage("new")]);
+    const agent = await JuncoAgent.fromResolved({
+      session: await repo.open(session.metadata, BACKGROUND_CONTEXT),
+      models,
+      model,
+      systemPrompt: "sys",
+      recorder,
+      recorderNodeId: "solo",
+    });
+    const rows: unknown[] = [];
+    let restored = 0;
+    agent.events.on("usage", ({ row, totals }) => {
+      rows.push(row.usage);
+      restored = totals.totalTokens - row.usage.totalTokens;
+    });
+    try {
+      assert.deepEqual(events, []);
+      assert.equal(agent.recorder?.path, "solo");
+      assert.equal(agent.recorder?.root, recorder);
+      await agent.prompt("now");
+      assert.ok(restored > 0);
+      const usage = events.filter(({ event }) => event.kind === "usage");
+      assert.equal(rows.length, 1);
+      assert.deepEqual(
+        usage.map(({ path, event }) =>
+          event.kind === "usage"
+            ? {
+                path,
+                resource: event.resource,
+                source: event.source,
+                usage: event.usage,
+              }
+            : undefined,
+        ),
+        rows.map((row) => ({
+          path: "solo",
+          resource: "tokens",
+          source: agent,
+          usage: row,
+        })),
+      );
+      assert.deepEqual(calls(events, AGENT_RUN), {
+        starts: 1,
+        outcomes: ["success"],
+      });
+      assert.deepEqual(
+        calls(events, {
+          category: "agent",
+          tool: "",
+          operation: "model_request",
+        }),
+        { starts: 1, outcomes: ["success"] },
+      );
+      assert.equal(
+        counter(
+          events,
+          { category: "agent", tool: "", operation: "turn" },
+          "turns_completed",
+        ),
+        1,
+      );
+      assert.ok(events.every(({ path }) => path === "solo"));
+      const [child] = await agent.createSubagents([{ tools: [] }]);
+      try {
+        assert.equal(child!.recorder?.root, recorder);
+        assert.equal(child!.recorder?.path, child!.nodeId);
+      } finally {
+        await child!.return();
+      }
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "recorder: two yields in one batch hand off one turn and resume once",
+  async () => {
+    const { recorder, events } = profileRecorder();
+    const { agent } = await newAgent(
+      [
+        toolTurn(yieldCall("first", "y1"), yieldCall("second", "y2")),
+        fauxAssistantMessage("after"),
+      ],
+      { tools: [new YieldTool()], prompt: "go", recorder },
+    );
+    try {
+      assert.equal(step(await agent.next()).kind, "yield");
+      // Two successful yield tool calls, however the yield tool is instrumented.
+      assert.deepEqual(
+        events.flatMap(({ event }) =>
+          event.kind === "finish" && event.tool === "yield"
+            ? [event.outcome]
+            : [],
+        ),
+        ["success", "success"],
+      );
+      assert.equal(counter(events, HANDOFF, "yield_recognized"), 1);
+      assert.equal(counter(events, HANDOFF, "turns_yielded"), 1);
+      assert.equal(counter(events, HANDOFF, "tool_yield_reasons"), 2);
+      assert.equal(counter(events, HANDOFF, "policy_yield_reasons"), 0);
+      assert.equal(counter(events, HANDOFF, "yield_resumed"), 0);
+      assert.equal(settledText(await agent.next()), "after");
+      assert.equal(counter(events, HANDOFF, "yield_resumed"), 1);
+      assert.ok(counter(events, HANDOFF, "yield_wait_ms") >= 0);
+      assert.equal(
+        events.filter(
+          ({ event }) =>
+            event.kind === "metrics" &&
+            labelled(event, HANDOFF) &&
+            event.counters?.yield_wait_ms !== undefined,
+        ).length,
+        1,
+      );
+      assert.equal(counter(events, HANDOFF, "turns_yielded"), 1);
+      assert.deepEqual(calls(events, AGENT_RUN), {
+        starts: 1,
+        outcomes: ["success"],
+      });
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "recorder: an aborted unread yield is recognized but never handed off; the run is cancelled once",
+  async () => {
+    const { recorder, events } = profileRecorder();
+    const { agent } = await newAgent(
+      [toolTurn(yieldCall("wait", "y1")), fauxAssistantMessage("never")],
+      { tools: [new YieldTool()], recorder },
+    );
+    const ended = Promise.withResolvers<void>();
+    agent.events.on("turn_end", () => ended.resolve());
+    try {
+      const run = agent.prompt("go");
+      await ended.promise;
+      assert.equal(counter(events, HANDOFF, "yield_recognized"), 1);
+      await agent.abort();
+      await run.catch(() => {});
+      assert.equal(counter(events, HANDOFF, "turns_yielded"), 0);
+      assert.equal(counter(events, HANDOFF, "yield_resumed"), 0);
+      assert.ok(
+        events.some(
+          ({ event }) =>
+            event.kind === "metrics" &&
+            labelled(event, HANDOFF) &&
+            event.counters?.yield_wait_ms !== undefined,
+        ),
+      );
+      assert.deepEqual(calls(events, AGENT_RUN), {
+        starts: 1,
+        outcomes: ["cancelled"],
+      });
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "recorder: custom tools count requested calls separately from executed calls, exactly once",
+  async () => {
+    const { recorder, events } = profileRecorder();
+    const custom = countingTool("custom");
+    const blocked: AgentTool = {
+      ...countingTool("prepared").tool,
+      prepareArguments: () => {
+        throw new Error("bad arguments");
+      },
+    };
+    const { agent } = await newAgent(
+      [
+        toolTurn(
+          fauxToolCall("custom", {}, { id: "c1" }),
+          fauxToolCall("prepared", {}, { id: "p1" }),
+          fauxToolCall("ghost", {}, { id: "g1" }),
+        ),
+        fauxAssistantMessage("done"),
+      ],
+      { tools: [custom.tool, blocked], recorder },
+    );
+    const CUSTOM = { category: "custom", tool: "custom", operation: "execute" };
+    const PREPARED = {
+      category: "custom",
+      tool: "prepared",
+      operation: "execute",
+    };
+    try {
+      assert.equal((await agent.prompt("go")).stopReason, "stop");
+      assert.equal(custom.state.executions, 1);
+      assert.equal(counter(events, CUSTOM, "requested"), 1);
+      assert.deepEqual(calls(events, CUSTOM), {
+        starts: 1,
+        outcomes: ["success"],
+      });
+      assert.equal(counter(events, CUSTOM, "output_text_bytes"), 2);
+      assert.equal(counter(events, PREPARED, "requested"), 1);
+      assert.deepEqual(calls(events, PREPARED), { starts: 0, outcomes: [] });
+      assert.equal(
+        counter(
+          events,
+          { category: "custom", tool: "unregistered", operation: "invalid" },
+          "requested",
+        ),
+        1,
+      );
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "recorder: a node context places the agent under the graph's view of the same session only",
+  async () => {
+    const { recorder, events } = profileRecorder();
+    const { agent } = await newAgent([fauxAssistantMessage("placed")], {
+      recorder,
+      recorderNodeId: "own",
+    });
+    const { agent: bare } = await newAgent([]);
+    const other = profileRecorder().recorder;
+    try {
+      const graph = recorder.add_context("nodeId1").add_context("nodeId2");
+      await agent.runWithNodeContext(
+        { recorder: graph, recorderNodeId: "NodeId_f" },
+        async () => {
+          assert.equal(agent.recorder?.path, "nodeId1::nodeId2::NodeId_f");
+          await assert.rejects(
+            agent.runWithNodeContext({}, async () => {}),
+            isCode("busy"),
+          );
+          await agent.prompt("go");
+        },
+      );
+      assert.equal(agent.recorder?.path, "own");
+      assert.ok(events.length > 0);
+      assert.ok(
+        events.every(({ path }) => path === "nodeId1::nodeId2::NodeId_f"),
+      );
+      assert.equal(
+        events.filter(({ event }) => event.kind === "usage").length,
+        1,
+      );
+      let ran = false;
+      for (const [target, context] of [
+        [agent, { recorder: other.add_context("g") }],
+        [bare, { recorder: graph }],
+      ] as const)
+        await assert.rejects(
+          target.runWithNodeContext(context, async () => {
+            ran = true;
+          }),
+          /ProfileRecorder instance mismatch/,
+        );
+      assert.equal(ran, false);
+      assert.equal(agent.recorder?.path, "own");
+      assert.equal(bare.recorder, undefined);
+    } finally {
+      await Promise.all([agent.return(), bare.return()]);
     }
   },
   TIMEOUT,

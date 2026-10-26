@@ -34,7 +34,11 @@ import {
   trigger,
 } from "../src/index.ts";
 import { registeredNodeContexts } from "../src/node-policy.ts";
-import { userTexts } from "./deterministic-support.ts";
+import {
+  assistant,
+  terminalPorts,
+  userTexts,
+} from "./deterministic-support.ts";
 import { type AgencyContext, toolTurn, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
@@ -96,6 +100,7 @@ async function newCaller(
   provider: string,
   tools: AgentTool[],
   contract?: (edgeId: graph.EdgeIdType) => toolsApi.Contract,
+  recorder?: toolsApi.ProfileRecorder<string>,
 ): Promise<Agent> {
   const model = models.getModels(provider)[0];
   assert.ok(model);
@@ -104,6 +109,7 @@ async function newCaller(
     models,
     model,
     systemPrompt: "sys",
+    ...(recorder === undefined ? {} : { recorder }),
     tools,
     ...(contract === undefined ? {} : { contract }),
   });
@@ -279,7 +285,10 @@ function callerNode(caller: Agent, prompt = "Start") {
   };
 }
 
-function taskExecution(observer: tracer.DataflowTracer): AgencyContext {
+function taskExecution(
+  observer: tracer.DataflowTracer,
+  recorder?: toolsApi.ProfileRecorder<string>,
+): AgencyContext {
   const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(
     () => {
       throw new graph.DataflowDefinitionError(
@@ -310,6 +319,8 @@ function taskExecution(observer: tracer.DataflowTracer): AgencyContext {
     graph.UNBOUNDED,
     observer,
     LockPolicy,
+    undefined,
+    recorder,
   );
   return schedules.context({ graph: work, scheduler: schedules.parallel() });
 }
@@ -2366,5 +2377,387 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(children("a").length, 2, "the retry was allocated");
     for (const child of children("a")) assert.equal(child.status, "closed");
     assert.equal(r.calls("a"), 1, "the retry never ran");
+  });
+});
+
+type Recorded = {
+  readonly path: string;
+  readonly event: toolsApi.ProfileEvent<string>;
+};
+
+/** A session recording every event with its context path; contexts are interned frozen views. */
+function testRecorder(session: object = {}) {
+  const events: Recorded[] = [];
+  const views = new Map<string, toolsApi.ProfileRecorder<string>>();
+  const view = (path: string): toolsApi.ProfileRecorder<string> => {
+    const known = views.get(path);
+    if (known !== undefined) return known;
+    const created: toolsApi.ProfileRecorder<string> = Object.freeze({
+      root: session,
+      path,
+      add_context: (id: string) =>
+        id === ""
+          ? created
+          : view(
+              path === ""
+                ? toolsApi.profilePath([id])
+                : `${path}::${toolsApi.profilePath([id])}`,
+            ),
+      record: (event: toolsApi.ProfileEvent<string>) => {
+        events.push({ path, event });
+      },
+      flush: async () => {},
+      close: async () => {},
+    });
+    views.set(path, created);
+    return created;
+  };
+  return { recorder: view(""), events };
+}
+
+/** Summed counters of `operation`'s metrics at `path`, and its latest gauges. */
+function metricsAt(
+  events: readonly Recorded[],
+  path: string,
+  operation: string,
+) {
+  const counters: Record<string, number> = {};
+  let gauges: Record<string, number | null> = {};
+  for (const { path: at, event } of events) {
+    if (
+      at !== path ||
+      event.kind !== "metrics" ||
+      event.operation !== operation
+    )
+      continue;
+    for (const [key, value] of Object.entries(event.counters ?? {}))
+      counters[key] = (counters[key] ?? 0) + value;
+    gauges = { ...gauges, ...event.gauges };
+  }
+  return { counters, gauges };
+}
+
+/** Every path a graph event was recorded at. */
+const graphPaths = (events: readonly Recorded[]) =>
+  new Set(
+    events.flatMap(({ path, event }) =>
+      event.kind !== "usage" &&
+      event.kind !== "resource" &&
+      event.category === "graph"
+        ? [path]
+        : [],
+    ),
+  );
+
+describe("task promotion under a recorder", () => {
+  async function recordedCaller(
+    r: ReturnType<typeof registry>,
+    names: string[],
+    policy: agentApi.TaskFailurePolicy,
+    turns: FauxResponseStep[],
+  ) {
+    const { recorder, events } = testRecorder();
+    r.script("caller", [
+      toolTurn(taskCall(names.map((name) => taskOn(r, name)))),
+      ...turns,
+    ]);
+    const caller = await newCaller(
+      r.models,
+      "caller",
+      [new toolsApi.TaskTool()],
+      undefined,
+      recorder,
+    );
+    caller.setTaskFailurePolicy(policy);
+    const execution = taskExecution(quiet, recorder);
+    const outer = execution.graph;
+    closers.push(() => outer.close());
+    wireOutput(outer, outer.addNode(callerNode(caller)));
+    return { caller, outer, execution, events };
+  }
+
+  test("retries record caller, caller::root, sibling task and attempt paths and lifecycle counts", async () => {
+    const r = registry("caller", "a", "b");
+    worker(r, "a", 2);
+    worker(r, "b");
+    const { caller, outer, execution, events } = await recordedCaller(
+      r,
+      ["a", "b"],
+      { retries: 2 },
+      answering(
+        () => assert.fail("no failure question"),
+        () => fauxAssistantMessage("final"),
+      ),
+    );
+
+    await execution.run();
+    const [a, b] = taskNodes(outer);
+    assert.ok(a && b);
+    const escaped = (id: string) => `caller::${toolsApi.profilePath([id])}`;
+    assert.deepEqual(
+      graphPaths(events),
+      new Set([
+        "",
+        "caller",
+        "$sink",
+        "caller::root",
+        "caller::$sink",
+        escaped(a),
+        escaped(b),
+        escaped(`${a}:attempt:2`),
+        escaped(`${a}:attempt:3`),
+      ]),
+    );
+    assert.equal(escaped(`${a}:attempt:2`), `caller::${a}%3Aattempt%3A2`);
+    const { counters, gauges } = metricsAt(events, "caller", "lifecycle");
+    assert.deepEqual(counters, {
+      batches_admitted: 1,
+      tasks_admitted: 2,
+      attempts_admitted: 4,
+      retry_attempts: 2,
+      tasks_failed: 2,
+      tasks_completed: 2,
+      tasks_resolved: 2,
+      batches_completed: 1,
+    });
+    assert.deepEqual(gauges, { tasks_outstanding: 0 });
+    // The caller's node names its agent until promotion; then its Spawn root does.
+    const activations = (path: string) =>
+      events.flatMap(({ path: at, event }) =>
+        at === path && event.kind === "start" && event.activation
+          ? [event.activation]
+          : [],
+      );
+    assert.equal(activations("caller")[0]?.agent, caller);
+    assert.equal(activations("caller")[0]?.owner, caller.owner);
+    assert.equal(activations("caller").at(-1)?.agent, undefined);
+    assert.ok(activations("caller::root").length > 0);
+    for (const activation of activations("caller::root"))
+      assert.equal(activation.agent, caller);
+  });
+
+  test("ignore resolves a failed task once", async () => {
+    const r = registry("caller", "a", "b");
+    worker(r, "a", 1);
+    worker(r, "b");
+    const { execution, events } = await recordedCaller(
+      r,
+      ["a", "b"],
+      "ignore",
+      answering(undefined, () => fauxAssistantMessage("final")),
+    );
+
+    await execution.run();
+    assert.deepEqual(metricsAt(events, "caller", "lifecycle").counters, {
+      batches_admitted: 1,
+      tasks_admitted: 2,
+      attempts_admitted: 2,
+      tasks_failed: 1,
+      tasks_ignored: 1,
+      tasks_completed: 1,
+      tasks_resolved: 2,
+      batches_completed: 1,
+    });
+  });
+
+  test("a rejected retry allocation adds no attempt", async () => {
+    const r = registry("caller", "a");
+    worker(r, "a", 1);
+    let acquisitions = 0;
+    const { execution, events } = await recordedCaller(
+      r,
+      ["a"],
+      { retries: 1 },
+      answering(
+        (report) => [decision("ignore", report, "ignore")],
+        () => fauxAssistantMessage("final"),
+      ),
+    );
+    const caller = execution.graph.getNode(graph.NodeId.create("caller"))
+      ?.state as unknown as Agent;
+    childrenOf(caller, undefined, () => {
+      if (++acquisitions > 1) throw new Error("no capacity");
+    });
+
+    await execution.run();
+    assert.deepEqual(metricsAt(events, "caller", "lifecycle").counters, {
+      batches_admitted: 1,
+      tasks_admitted: 1,
+      attempts_admitted: 1,
+      tasks_failed: 1,
+      tasks_ignored: 1,
+      tasks_resolved: 1,
+      batches_completed: 1,
+    });
+  });
+});
+
+describe("graph recorder bridge", () => {
+  /** nodeId1 ⊃ nodeId2 ⊃ NodeId_f, each graph traced by `delegate`. */
+  function nested(
+    delegate: tracer.DataflowTracer,
+    recorder: toolsApi.ProfileRecorder<string>,
+  ) {
+    const level = (
+      view:
+        | toolsApi.ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | undefined,
+      id: string,
+      member: (g: JuncoGraph) => graph.NodeIdType,
+    ) => {
+      const ports = terminalPorts();
+      const g = new JuncoGraph(
+        ports.source,
+        ports.sink,
+        graph.Width.create(1),
+        graph.UNBOUNDED,
+        delegate,
+        LockPolicy,
+        undefined,
+        view,
+        id,
+      );
+      ports.connect(g, member(g));
+      return schedules.context({ graph: g, scheduler: schedules.parallel() });
+    };
+    return level(recorder, "nodeId1", (outer) =>
+      outer.addNode({
+        id: graph.NodeId.create("nodeId2"),
+        trigger: trigger.TriggerRule.always(),
+        state: level(outer.recorder, "nodeId2", (inner) =>
+          inner.addNode({
+            id: graph.NodeId.create("NodeId_f"),
+            trigger: trigger.TriggerRule.always(),
+            state: new Deterministic<AgenticInput, AssistantMessage>(
+              async function* () {
+                yield [];
+                return assistant("f");
+              },
+              LockPolicy,
+            ),
+          }),
+        ),
+      }),
+    );
+  }
+
+  /** A tracer counting its runs and activations, throwing from every callback when `fail`. */
+  function counting(fail: boolean) {
+    const seen = { runs: 0, nodes: 0, ends: 0 };
+    const check = () => {
+      if (fail) throw new Error("tracer failure");
+    };
+    const observer: tracer.DataflowTracer = {
+      startRun: () => {
+        seen.runs += 1;
+        check();
+        return {
+          startNode: () => {
+            seen.nodes += 1;
+            check();
+            return { end: check, fail: check };
+          },
+          end: () => {
+            seen.ends += 1;
+            check();
+          },
+          fail: check,
+        };
+      },
+      complain: () => {},
+      flush: async () => {},
+    };
+    return { observer, seen };
+  }
+
+  test("nested graphs record at wrapper paths once per run despite a throwing delegate", async () => {
+    const { recorder, events } = testRecorder();
+    const { observer, seen } = counting(true);
+    const execution = nested(observer, recorder);
+    closers.push(() => execution.graph.close());
+
+    const results = await execution.run();
+    assert.equal(
+      contentText(results.get(execution.graph.sink.id)?.content ?? []),
+      "f",
+    );
+    const paths = graphPaths(events);
+    assert.ok(paths.has("nodeId1::nodeId2::NodeId_f"));
+    assert.ok(paths.has("nodeId1::nodeId2"));
+    for (const path of paths)
+      assert.ok(
+        path === "nodeId1" || path.startsWith("nodeId1::"),
+        `no unplaced path ${path}`,
+      );
+    const evaluations = events.filter(
+      ({ event }) =>
+        event.kind === "start" &&
+        event.category === "graph" &&
+        event.operation === "evaluate",
+    );
+    assert.equal(evaluations.length, seen.runs, "one bridge per graph run");
+    const leaf = events.find(
+      ({ path, event }) =>
+        path === "nodeId1::nodeId2::NodeId_f" && event.kind === "finish",
+    )?.event;
+    assert.equal(leaf?.kind === "finish" && leaf.outcome, "success");
+    assert.equal(
+      leaf?.kind === "finish" ? leaf.activation?.agent : "absent",
+      undefined,
+    );
+    for (const { event } of evaluations)
+      assert.equal(event.kind === "start" && event.activation, undefined);
+  });
+
+  test("a throwing recorder cannot hide delegate observations", async () => {
+    const { observer, seen } = counting(false);
+    const recorder = testRecorder().recorder;
+    const throwing: toolsApi.ProfileRecorder<string> = {
+      ...recorder,
+      add_context: () => throwing,
+      record: () => {
+        throw new Error("recorder failure");
+      },
+    };
+    const execution = nested(observer, throwing);
+    closers.push(() => execution.graph.close());
+
+    await execution.run();
+    assert.ok(seen.runs >= 2 && seen.nodes > 0);
+    assert.equal(seen.ends, seen.runs);
+  });
+
+  test("a nested graph from another session or none is rejected before work", () => {
+    const { recorder } = testRecorder();
+    assert.throws(
+      () =>
+        nested(new tracer.DummyTracer(), recorder).graph.addNode({
+          id: graph.NodeId.create("stranger"),
+          trigger: trigger.TriggerRule.always(),
+          state: nested(new tracer.DummyTracer(), testRecorder().recorder),
+        }),
+      /ProfileRecorder instance mismatch/,
+    );
+    const ports = terminalPorts();
+    const bare = new JuncoGraph(
+      ports.source,
+      ports.sink,
+      graph.Width.create(1),
+      graph.UNBOUNDED,
+      quiet,
+      LockPolicy,
+    );
+    assert.throws(
+      () =>
+        nested(new tracer.DummyTracer(), recorder).graph.addNode({
+          id: graph.NodeId.create("bare"),
+          trigger: trigger.TriggerRule.always(),
+          state: schedules.context({
+            graph: bare,
+            scheduler: schedules.parallel(),
+          }),
+        }),
+      /ProfileRecorder instance mismatch/,
+    );
   });
 });

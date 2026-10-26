@@ -23,6 +23,7 @@ import {
   release,
   seedFixture,
   testNative,
+  testRecorder,
   text,
 } from "./helpers.mjs";
 
@@ -878,6 +879,179 @@ test("a release in shared mode publishes without a live peer", {
   } finally {
     await cleanup(
       () => mux.close(),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("a recorder lease pins each pipeline's view and composes with onResourceEvent", {
+  timeout: 30_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const real = await testNative();
+  // The real CopyTree mux, with its resource callback captured to deliver monitor events.
+  const opened = [];
+  const native = {
+    ...real,
+    NativeMux: {
+      async open(at, options, onPolicyDecision, onResourceEvent) {
+        opened.push({ options, emit: onResourceEvent });
+        return real.NativeMux.openCopyTree(
+          at,
+          options,
+          onPolicyDecision,
+          onResourceEvent,
+        );
+      },
+    },
+  };
+  const recorder = testRecorder();
+  const { events } = recorder.root;
+  const leaseView = recorder.add_context("lease");
+  const callerEvents = [];
+  let callerThrows = false;
+  let recorderThrows = false;
+  const failing = {
+    ...leaseView,
+    record: (event) => {
+      if (recorderThrows) throw new Error("recorder failed");
+      leaseView.record(event);
+    },
+  };
+  const leases = [];
+  try {
+    const lease = await ShellMuxLease.create(seed, {
+      native,
+      resources: { pids: 4 },
+      recorder: failing,
+      onResourceEvent: (event) => {
+        callerEvents.push(event);
+        if (callerThrows) throw new Error("caller failed");
+      },
+    });
+    leases.push(lease);
+    assert.equal(lease.recorder, failing);
+    assert.deepEqual(opened[0].options.resources, {
+      pids: 4,
+      monitorIntervalMs: 1000,
+    });
+    const emit = (kind, owner, pipelineId) =>
+      opened[0].emit(null, { kind, owner, pipelineId, sample: undefined });
+
+    lease.registerRecorderOwner("o1", () => recorder.add_context("A"));
+    emit("started", "o1", 1);
+    // A later registration affects later pipelines only, until this one finishes.
+    lease.registerRecorderOwner("o1", () => recorder.add_context("B"));
+    emit("sample", "o1", 1);
+    emit("finished", "o1", 1);
+    emit("started", "o1", 2);
+    emit("started", "unknown", 3);
+    emit("started", undefined, 4);
+    lease.registerRecorderOwner("o2", () => undefined);
+    emit("started", "o2", 5);
+    assert.deepEqual(
+      events.map((event) => [
+        event.at,
+        event.event.kind,
+        event.event.pipelineId,
+      ]),
+      [
+        ["A", "started", 1],
+        ["A", "sample", 1],
+        ["A", "finished", 1],
+        ["B", "started", 2],
+        ["lease", "started", 3],
+        ["lease", "started", 4],
+        ["lease", "started", 5],
+      ],
+    );
+    assert.ok(
+      events.every(
+        (event) => event.resource === "memory" && event.kind === "resource",
+      ),
+    );
+    assert.ok(events.every((event) => event.source === events[0].source));
+    assert.equal(callerEvents.length, 7);
+
+    // Either consumer failing still delivers to the other, then surfaces.
+    recorderThrows = true;
+    assert.throws(() => emit("sample", undefined, 4), /recorder failed/);
+    assert.equal(callerEvents.length, 8);
+    recorderThrows = false;
+    callerThrows = true;
+    assert.throws(() => emit("sample", undefined, 4), /caller failed/);
+    assert.equal(events.length, 8);
+    callerThrows = false;
+
+    // An explicit interval stays; a distinct lease has a distinct source.
+    const second = await ShellMuxLease.create(seed, {
+      native,
+      resources: { monitorIntervalMs: 50 },
+      recorder: leaseView,
+    });
+    leases.push(second);
+    assert.deepEqual(opened[1].options.resources, { monitorIntervalMs: 50 });
+    opened[1].emit(null, { kind: "started", owner: "o1", pipelineId: 1 });
+    assert.notEqual(events.at(-1).source, events[0].source);
+
+    // Without a recorder the paired-option validation is unchanged.
+    await assert.rejects(
+      ShellMuxLease.create(seed, {
+        native,
+        resources: { monitorIntervalMs: 100 },
+      }),
+      /monitorIntervalMs requires an onResourceEvent callback/,
+    );
+  } finally {
+    await cleanup(...leases.map((lease) => () => lease.release()), () =>
+      rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("collection bindings attribute their owner's pipelines to the bound view", {
+  timeout: 30_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const real = await testNative();
+  let emit;
+  const native = {
+    ...real,
+    NativeMux: {
+      async open(at, options, onPolicyDecision, onResourceEvent) {
+        emit = onResourceEvent;
+        return real.NativeMux.openCopyTree(
+          at,
+          options,
+          onPolicyDecision,
+          onResourceEvent,
+        );
+      },
+    },
+  };
+  const recorder = testRecorder();
+  const { events } = recorder.root;
+  const collection = await ToolCollection.create(seed, { native, recorder });
+  try {
+    let current = recorder.add_context("first");
+    const binding = collection.bind(() => current);
+    const fallback = collection.bind();
+    emit(null, { kind: "started", owner: binding.owner, pipelineId: 1 });
+    current = recorder.add_context("second");
+    emit(null, { kind: "sample", owner: binding.owner, pipelineId: 1 });
+    emit(null, { kind: "started", owner: binding.owner, pipelineId: 2 });
+    emit(null, { kind: "started", owner: fallback.owner, pipelineId: 3 });
+    // Closing a binding keeps its attribution for pipelines still draining.
+    await binding.close();
+    emit(null, { kind: "finished", owner: binding.owner, pipelineId: 2 });
+    await fallback.close();
+    assert.deepEqual(
+      events.map((event) => event.at),
+      ["first", "first", "second", "", "second"],
+    );
+  } finally {
+    await cleanup(
+      () => collection.close(),
       () => rm(root, { recursive: true, force: true }),
     );
   }

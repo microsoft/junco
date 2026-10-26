@@ -213,3 +213,113 @@ test("a copied tool cannot acquire graph authority through companion invoke", as
     TypeError,
   );
 });
+
+/** A tiny ProfileRecorder collecting events; `sum`/`gauge` read one operation's metrics. */
+function profileRecorder() {
+  const events = [];
+  const recorder = {
+    path: "",
+    add_context: () => recorder,
+    record: (event) => events.push(event),
+    flush: async () => {},
+    close: async () => {},
+    events,
+    of: (operation) => events.filter((e) => e.operation === operation),
+    count: (operation, kind, outcome) =>
+      recorder
+        .of(operation)
+        .filter(
+          (e) =>
+            e.kind === kind && (outcome === undefined || e.outcome === outcome),
+        ).length,
+    sum: (operation, field) =>
+      recorder
+        .of(operation)
+        .reduce((total, e) => total + (e.counters?.[field] ?? 0), 0),
+  };
+  recorder.root = recorder;
+  return recorder;
+}
+
+test("messaging tools count each send, recv and info call once, direct or invoked", async () => {
+  const recorder = profileRecorder();
+  const sent = [];
+  const sendHost = {
+    send(message) {
+      if (message.id !== EdgeId.create("ok")) throw new Error("no such route");
+      sent.push(message);
+    },
+  };
+  const send = new SendTool(sendHost, recorder);
+  await call(send, { id: "ok", payload: 1 });
+  await SendTool.invoke(
+    send,
+    sendHost,
+    "c",
+    { id: "ok", payload: 2 },
+    new AbortController().signal,
+  );
+  await assert.rejects(
+    call(send, { id: "missing", payload: 3 }),
+    /no such route/,
+  );
+  assert.equal(sent.length, 2);
+  assert.equal(recorder.sum("execute", "messages_sent"), 2);
+  assert.equal(
+    recorder.events.filter((e) => e.tool === "send" && e.kind === "start")
+      .length,
+    3,
+  );
+  assert.equal(
+    recorder.events.filter((e) => e.tool === "send" && e.outcome === "error")
+      .length,
+    1,
+  );
+
+  const recvEvents = () => recorder.events.filter((e) => e.tool === "recv");
+  const host = inbox(
+    [[EdgeId.create("a"), ["a1", "a2"]]],
+    [[EdgeId.create("v"), undefined]],
+  );
+  const recv = new RecvTool(host, () => recorder);
+  await call(recv);
+  await RecvTool.invoke(recv, host, "c", {}, new AbortController().signal);
+  const sum = (field) =>
+    recvEvents().reduce((t, e) => t + (e.counters?.[field] ?? 0), 0);
+  assert.equal(sum("messages_received"), 2);
+  assert.equal(sum("values_received"), 1);
+  assert.equal(
+    recvEvents().filter((e) => e.kind === "finish" && e.outcome === "success")
+      .length,
+    2,
+  );
+  await assert.rejects(
+    call(new RecvTool(undefined, recorder)),
+    /requires a JuncoGraph host/,
+  );
+  assert.equal(recvEvents().filter((e) => e.outcome === "error").length, 1);
+  assert.equal(sum("messages_received"), 2);
+
+  const info = new InfoTool(
+    {
+      info: () => ({
+        parents: [{ id: "p", edgeId: "e1", kind: "message", expect: "x" }],
+        children: [
+          { id: "c", edgeId: "e2", kind: "value", expect: "y" },
+          { id: "d", edgeId: "e3", kind: "message", expect: "z" },
+        ],
+      }),
+    },
+    recorder,
+  );
+  await call(info);
+  const metrics = recorder.events.find(
+    (e) => e.tool === "info" && e.counters?.parents !== undefined,
+  );
+  assert.deepEqual(metrics.counters, {
+    parents: 1,
+    children: 2,
+    message_routes: 2,
+    value_routes: 1,
+  });
+});

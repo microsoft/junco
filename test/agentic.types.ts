@@ -52,13 +52,19 @@ import {
 } from "junco-scheduler";
 import { type PiOptions, pi } from "junco-scheduler/agent";
 import {
+  beginOperation,
   type Contract,
+  captureRecorder,
   EmptyPolicy,
   type Issue,
   isComplainTool,
   LockPolicy,
   type Policy,
-  type ToolCollection,
+  type ProfileActivation,
+  type ProfileRecorder,
+  ShellMuxLease,
+  ShellMuxOperations,
+  ToolCollection,
 } from "junco-tools";
 import type { Graph } from "ngraph.graph";
 import {
@@ -80,6 +86,7 @@ import {
   type MockTerminal,
   type MockTranscript,
   schedules,
+  tracer,
 } from "../src/index.ts";
 import type { NodePolicy } from "../src/node-policy.ts";
 
@@ -1312,4 +1319,146 @@ export function agencyMetadataIsSourceExact(
   // @ts-expect-error metadata is readonly
   metadata.lastYield = undefined;
   return [status, lastYield, numericStatus];
+}
+
+export async function profileRecordersNarrowByResource(
+  jsonl: tracer.JsonlRecorder,
+  grafana: tracer.GrafanaRecorder,
+  three: ProfileRecorder<"memory" | "tokens" | "edits">,
+  activation: ProfileActivation,
+  agent: JuncoAgent,
+  source: Source<AgenticInput, AssistantMessage>,
+  sink: Sink<AgenticInput, AssistantMessage>,
+) {
+  // Both concrete sinks satisfy the identical full producer union.
+  const sinks: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">[] =
+    [jsonl, grafana, jsonl.add_context("a"), grafana.add_context("a")];
+  const full = sinks[0];
+  // Narrowing is plain assignment; add_context preserves the narrowed union.
+  const memory: ProfileRecorder<"memory"> = three;
+  const leaf: ProfileRecorder<"memory"> = memory.add_context("leaf");
+  const edits: ProfileRecorder<"edits"> = full.add_context("x");
+  three.record({
+    resource: "tokens",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  three.record({
+    resource: "edits",
+    kind: "start",
+    category: "AstEdit",
+    tool: "ast_edit",
+    operation: "apply",
+    activation,
+  });
+  three.record({
+    resource: "edits",
+    kind: "finish",
+    category: "AstEdit",
+    tool: "ast_edit",
+    operation: "apply",
+    activation,
+    outcome: "success",
+    durationMs: 1,
+  });
+  const finish = beginOperation(memory, {
+    resource: "memory",
+    category: "shell",
+    tool: "",
+    operation: "exec",
+  });
+  finish?.("cancelled");
+  const captured: ProfileRecorder<"edits"> | undefined = captureRecorder(edits);
+
+  // The same full handle feeds every source dependency, whatever its backend.
+  const lease = await ShellMuxLease.create("/tmp", { recorder: memory });
+  const operations = new ShellMuxOperations({ recorder: () => leaf });
+  const collection = await ToolCollection.create("/tmp", { recorder: full });
+  const binding = collection.bind(() => grafana);
+  const graph = new JuncoGraph(
+    source,
+    sink,
+    Width.create(1),
+    UNBOUNDED,
+    new tracer.DummyTracer(),
+    LockPolicy,
+    collection,
+    full,
+    "root",
+  );
+  const graphView: ProfileRecorder<"tokens"> | undefined = graph.recorder;
+  const agentView: ProfileRecorder<"edits"> | undefined = agent.recorder;
+
+  memory.record({
+    // @ts-expect-error memory-only cannot record token usage
+    resource: "tokens",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  // @ts-expect-error a usage payload is never memory
+  memory.record({
+    resource: "memory",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  memory.record({
+    // @ts-expect-error memory-only cannot record edits metrics
+    resource: "edits",
+    kind: "metrics",
+    category: "AstEdit",
+    tool: "ast_edit",
+    operation: "apply",
+    counters: {},
+  });
+  memory.record({
+    // @ts-expect-error memory-only cannot record operations events
+    resource: "operations",
+    kind: "start",
+    category: "graph",
+    tool: "",
+    operation: "evaluate",
+  });
+  // @ts-expect-error narrowing never widens back
+  const wider: ProfileRecorder<"memory" | "tokens"> = memory;
+  // @ts-expect-error nor erases to every resource
+  const erased: ProfileRecorder<string> = memory;
+  // @ts-expect-error add_context keeps the narrow union
+  const widerChild: ProfileRecorder<"memory" | "edits"> =
+    memory.add_context("c");
+  // @ts-expect-error capture never widens a supplied view
+  const widerCapture: ProfileRecorder<"memory" | "edits"> | undefined =
+    captureRecorder(memory);
+  // @ts-expect-error the session identity is not a recorder
+  const fromRoot: ProfileRecorder<"memory"> = memory.root;
+  beginOperation(memory, {
+    // @ts-expect-error an operation cannot widen the recorder's capability
+    resource: "edits",
+    category: "AstEdit",
+    tool: "ast_edit",
+    operation: "apply",
+  });
+  // @ts-expect-error memory-only cannot satisfy a collection's full requirement
+  await ToolCollection.create("/tmp", { recorder: memory });
+  await JuncoAgent.fromResolved({
+    ...({} as Parameters<typeof JuncoAgent.fromResolved>[0]),
+    // @ts-expect-error nor an agent's
+    recorder: memory,
+  });
+  return [
+    lease,
+    operations,
+    binding,
+    graph,
+    graphView,
+    agentView,
+    captured,
+    wider,
+    erased,
+    widerChild,
+    widerCapture,
+    fromRoot,
+  ];
 }
