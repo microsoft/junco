@@ -58,7 +58,6 @@
         "test/agentic.types.ts",
         "test/compaction.test.ts",
         "test/deterministic-agency.test.ts",
-        "test/graft-preprocessing.test.ts",
         "test/task.test.ts"
       ],
       "linter": { "rules": { "correctness": { "useYield": "off" } } }

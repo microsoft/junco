@@ -1,6 +1,6 @@
 # Junco TypeScript API reference
 
-Escape hatch for what Junco YAML cannot express: `kind: code` node bodies (`graph.nodes.Deterministic`, `graph.Message`, `graph.from`, `TriggerRule`), resource scheduling with `schedules.limit`/`lowest`/`highest`, graph compaction, tracer internals, hand-wired `DataflowGraph`/`JuncoGraph` programs and the Trail/graft mapper. Read only the heading you need.
+Escape hatch for what Junco YAML cannot express: `kind: code` node bodies (`graph.nodes.Deterministic`, `graph.Message`, `graph.from`, `TriggerRule`), resource scheduling with `schedules.limit`/`lowest`/`highest`, graph compaction, tracer internals, and hand-wired `DataflowGraph`/`JuncoGraph` programs. Read only the heading you need.
 
 Contents: `## Public API` → `### graph`, `### graph.nodes`, `### workflows and schedules.ralph`, `### graph.trigger`, `### agent`, `### tools`, `### mcp`, `### schedules`, `### Resource profiles and schedules`, `### Graph compaction`, `### tracer`, `### Supporting Pi APIs`; `## Composition patterns`; `## Executable example` (hand-wired `DataflowGraph`).
 
