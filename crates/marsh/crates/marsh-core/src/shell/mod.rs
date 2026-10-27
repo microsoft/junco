@@ -32,10 +32,9 @@ mod snapshot;
 mod view;
 
 pub use error::{ShellError, ShellErrorKind};
-pub use junco_policy::{Action, Principal};
 pub use policy::{
-    Bump, Denial, EmptyPolicy, Event, LockPolicy, Policy, PolicyDecision, PolicyObserver,
-    PolicyValidator,
+    Action, Bump, Denial, EmptyPolicy, Event, LockPolicy, Policy, PolicyDecision, PolicyEvent,
+    PolicyHistory, PolicyObserver, PolicyValidator, Principal, Resource,
 };
 pub use sandbox_policy::{CommandContext, MarshTool, SandboxPolicy, ShellCommand};
 pub use signal::Signal;

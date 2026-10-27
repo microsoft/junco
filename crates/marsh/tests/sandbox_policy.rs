@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Controlled, Seed, TIMEOUT, controlled, denied, join, launch, run, scratch};
-use junco_policy::{Event, PolicyDecision, Resource};
 use marsh::{
-    Action, CommandContext, ExecutionResult, MarshTool, RcLoadBehavior, SandboxPolicy, Shell,
-    ShellBuilder, ShellCommand, ShellError, ShellErrorKind, ShellVariable, SourceInfo,
+    Action, CommandContext, Event, ExecutionResult, MarshTool, PolicyDecision, RcLoadBehavior,
+    Resource, SandboxPolicy, Shell, ShellBuilder, ShellCommand, ShellError, ShellErrorKind,
+    ShellVariable, SourceInfo,
 };
 use marsh_btrfs::fake::CopyTree;
 use serial_test::serial;

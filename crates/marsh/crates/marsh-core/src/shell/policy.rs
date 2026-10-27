@@ -1,6 +1,7 @@
 //! Stage 3: complete baseline diff, freshness, and an atomic ordered capability batch.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -9,10 +10,130 @@ use super::completion::{Completion, Finalize};
 use super::execution::ExecutedCommand;
 use super::session::{Authority, Session};
 use super::{ShellError, ShellErrorKind};
-pub(super) use junco_policy::{Action, Principal, Resource};
-pub use junco_policy::{Bump, Event, PolicyDecision};
+pub use junco_policy::{Action, Bump, PolicyDecision};
 use marsh_lib::RecoverPoison as _;
 use marsh_wal::CommitOp;
+
+/// Identity of the actor requesting a capability.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Principal(String);
+
+impl Principal {
+    /// Creates a principal from an owned or borrowed string.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the principal's exact string value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Principal {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for Principal {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for Principal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Ordered path segments naming a protected resource.
+///
+/// Equality is structural: segment count, order, and exact segment text all matter. Display joins
+/// segments with `/` for diagnostics only; it is not the equality representation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Resource(Vec<String>);
+
+impl Resource {
+    /// Creates a resource by collecting ordered path segments.
+    pub fn new(segments: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self(segments.into_iter().map(Into::into).collect())
+    }
+
+    /// Returns the resource's ordered path segments.
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for Resource {
+    fn from(segments: [&str; N]) -> Self {
+        Self::new(segments)
+    }
+}
+
+impl From<Vec<&str>> for Resource {
+    fn from(segments: Vec<&str>) -> Self {
+        Self::new(segments)
+    }
+}
+
+impl From<Vec<String>> for Resource {
+    fn from(segments: Vec<String>) -> Self {
+        Self(segments)
+    }
+}
+
+impl fmt::Display for Resource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut segments = self.0.iter();
+        if let Some(first) = segments.next() {
+            formatter.write_str(first)?;
+            for segment in segments {
+                formatter.write_str("/")?;
+                formatter.write_str(segment)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Owned capability-product event: what Marsh records, logs, and reports.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Event {
+    /// Actor requesting the capability.
+    pub principal: Principal,
+    /// Requested operation.
+    pub action: Action,
+    /// Protected resource.
+    pub resource: Resource,
+}
+
+impl Event {
+    /// Creates an event from values convertible to the owned component types.
+    pub fn new(
+        principal: impl Into<Principal>,
+        action: Action,
+        resource: impl Into<Resource>,
+    ) -> Self {
+        Self {
+            principal: principal.into(),
+            action,
+            resource: resource.into(),
+        }
+    }
+
+    /// This event as the compact borrowed value a policy evaluates.
+    pub fn as_policy_event(&self) -> PolicyEvent<'_> {
+        junco_policy::LockEvent::new(&self.principal, self.action, &self.resource)
+    }
+}
+
+/// One owned [`Event`] borrowed for a single policy evaluation.
+pub type PolicyEvent<'a> = junco_policy::LockEvent<&'a Principal, &'a Resource>;
+/// Committed and tentative events of one evaluation, borrowed from owned history.
+pub type PolicyHistory<'a> = junco_policy::History<PolicyEvent<'a>>;
 
 /// Receives every capability decision `Authority::check` makes, in order, before its effect.
 /// A grant is tentative: a later denial in the same batch or a failed publication rolls it back.
@@ -32,7 +153,7 @@ impl PolicyObserver {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Denial {
     /// The rejected request.
-    pub event: junco_policy::Event,
+    pub event: Event,
     /// The precondition that failed.
     pub failed_precondition: String,
     /// Policy-provided ways to make the request legal.
@@ -60,7 +181,7 @@ pub trait Policy: Send + Sync + 'static {
     fn evaluator<'batch>(
         &'batch self,
         arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&[Event], &Event) -> PolicyDecision + 'batch>;
+    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>;
 }
 
 /// The ownership-lock capability policy: a shell's default.
@@ -70,7 +191,8 @@ impl Policy for LockPolicy {
     fn evaluator<'batch>(
         &'batch self,
         arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&[Event], &Event) -> PolicyDecision + 'batch> {
+    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>
+    {
         let mut evaluator = junco_policy::LockPolicy::new(arena);
         Box::new(move |history, event| evaluator.decide(history, event))
     }
@@ -83,7 +205,8 @@ impl Policy for EmptyPolicy {
     fn evaluator<'batch>(
         &'batch self,
         _arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&[Event], &Event) -> PolicyDecision + 'batch> {
+    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>
+    {
         Box::new(|_, _| PolicyDecision::Grant)
     }
 }
@@ -113,10 +236,11 @@ impl PolicyValidator {
             ));
         }
         let arena = Bump::new();
+        let history =
+            PolicyHistory::from_events(authority.history.iter().map(Event::as_policy_event));
+        let candidate = event.as_policy_event();
         let mut policy = junco_policy::LockPolicy::new(&arena);
-        let decision = policy.decide(&authority.history, event);
-        drop(authority);
-        Ok(decision)
+        Ok(policy.decide(&history, &candidate))
     }
     pub(super) fn read(&self) -> RwLockReadGuard<'_, Authority> {
         self.authority.read().recover()
@@ -143,31 +267,36 @@ impl Authority {
         events: &[Event],
         observer: Option<&PolicyObserver>,
     ) -> Result<(), Vec<Denial>> {
-        let arena = Bump::new();
-        let mut decide = shell_policy.evaluator(&arena);
-        let checkpoint = self.history.len();
-        let mut denials = Vec::new();
-        for event in events {
-            let decision = decide(&self.history, event);
-            if let Some(observer) = observer {
-                observer.notify(event, &decision);
+        let denials = {
+            let arena = Bump::new();
+            let mut history =
+                PolicyHistory::from_events(self.history.iter().map(Event::as_policy_event));
+            let mut decide = shell_policy.evaluator(&arena);
+            let mut denials = Vec::new();
+            for event in events {
+                let candidate = event.as_policy_event();
+                let decision = decide(&history, &candidate);
+                if let Some(observer) = observer {
+                    observer.notify(event, &decision);
+                }
+                match decision {
+                    PolicyDecision::Grant => history.push(candidate),
+                    PolicyDecision::Deny {
+                        failed_precondition,
+                        allowed_fixes,
+                    } => denials.push(Denial {
+                        event: event.clone(),
+                        failed_precondition,
+                        allowed_fixes,
+                    }),
+                }
             }
-            match decision {
-                PolicyDecision::Grant => self.history.push(event.clone()),
-                PolicyDecision::Deny {
-                    failed_precondition,
-                    allowed_fixes,
-                } => denials.push(Denial {
-                    event: event.clone(),
-                    failed_precondition,
-                    allowed_fixes,
-                }),
-            }
-        }
+            denials
+        };
         if denials.is_empty() {
+            self.history.extend_from_slice(events);
             Ok(())
         } else {
-            self.history.truncate(checkpoint);
             Err(denials)
         }
     }
@@ -330,7 +459,7 @@ fn translate(executed: &ExecutedCommand) -> Result<Vec<Event>, ShellError> {
             Action::Edit
         };
         for path in &effects.writes {
-            ordered.push((*order, write.clone(), path.as_path()));
+            ordered.push((*order, write, path.as_path()));
         }
         if let Some(path) = &effects.release {
             ordered.push((*order, Action::Release, path.as_path()));
@@ -346,7 +475,7 @@ fn translate(executed: &ExecutedCommand) -> Result<Vec<Event>, ShellError> {
         if last.get(&resource) == Some(&action) {
             continue;
         }
-        last.insert(resource.clone(), action.clone());
+        last.insert(resource.clone(), action);
         events.push(Event::new(principal.clone(), action, resource));
     }
     Ok(events)
@@ -367,4 +496,57 @@ pub(super) fn resource_of(path: &Path) -> Result<Option<Resource>, ShellError> {
         segments.push(component.to_owned());
     }
     Ok(Some(Resource::from(segments)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn borrowed_policy_batch_preserves_atomic_history() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observer = PolicyObserver::new({
+            let seen = Arc::clone(&seen);
+            move |event, decision| {
+                let granted = matches!(decision, PolicyDecision::Grant);
+                seen.lock().unwrap().push((event.clone(), granted));
+            }
+        });
+        let initial = Event::new("alice", Action::Edit, Resource::from(["a/b"]));
+        let mut authority = Authority::default();
+        authority.history.push(initial.clone());
+
+        let batch = [
+            Event::new("bob", Action::Read, Resource::from(["a", "b"])),
+            Event::new("mallory", Action::Edit, Resource::from(["a/b"])),
+            Event::new("alice", Action::Release, Resource::from(["a/b"])),
+            Event::new("eve", Action::Edit, Resource::from(["a", "b"])),
+        ];
+        let denials = authority
+            .check(&LockPolicy, &batch, Some(&observer))
+            .expect_err("the batch has two refused capabilities");
+        let denied: Vec<_> = denials.iter().map(|denial| &denial.event).collect();
+        assert_eq!(denied, [&batch[1], &batch[3]]);
+        let markers: Vec<_> = seen.lock().unwrap().iter().cloned().collect();
+        assert_eq!(
+            markers,
+            [
+                (batch[0].clone(), true),
+                (batch[1].clone(), false),
+                (batch[2].clone(), true),
+                (batch[3].clone(), false),
+            ]
+        );
+        assert_eq!(authority.history, [initial.clone()]);
+
+        let retry = batch[3].clone();
+        authority
+            .check(&LockPolicy, std::slice::from_ref(&retry), Some(&observer))
+            .expect("the rejected batch left no read claim behind");
+        assert_eq!(authority.history, [initial, retry.clone()]);
+        assert_eq!(seen.lock().unwrap().last(), Some(&(retry, true)));
+    }
 }

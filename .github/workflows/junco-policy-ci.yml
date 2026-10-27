@@ -1,4 +1,4 @@
-name: CI
+name: Junco Policy CI
 
 on:
   push:
@@ -12,6 +12,9 @@ jobs:
     name: Validator (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/junco-policy
     strategy:
       fail-fast: false
       matrix:
@@ -33,9 +36,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-            fuzz/target
-          key: validator-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
+            crates/junco-policy/target
+            crates/junco-policy/fuzz/target
+          key: validator-cargo-${{ runner.os }}-${{ hashFiles('crates/junco-policy/Cargo.lock', 'crates/junco-policy/fuzz/Cargo.lock') }}
           restore-keys: validator-cargo-${{ runner.os }}-
 
       - name: Check formatting
@@ -59,6 +62,9 @@ jobs:
     name: MSRV (Rust 1.91.0)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/junco-policy
 
     steps:
       - name: Checkout
@@ -77,6 +83,9 @@ jobs:
     name: libFuzzer smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/junco-policy
     strategy:
       fail-fast: false
       matrix:
@@ -102,8 +111,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-fuzz
-            fuzz/target
-          key: fuzz-cargo-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}
+            crates/junco-policy/fuzz/target
+          key: fuzz-cargo-${{ runner.os }}-${{ hashFiles('crates/junco-policy/fuzz/Cargo.lock') }}
           restore-keys: fuzz-cargo-${{ runner.os }}-
 
       - name: Install cargo-fuzz
@@ -119,5 +128,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts-${{ matrix.os }}
-          path: fuzz/artifacts/
+          path: crates/junco-policy/fuzz/artifacts/
           if-no-files-found: ignore

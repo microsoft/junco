@@ -277,7 +277,13 @@ impl marsh::Policy for OneEditPerBatch {
     fn evaluator<'batch>(
         &'batch self,
         _arena: &'batch marsh::Bump,
-    ) -> Box<dyn FnMut(&[marsh::Event], &marsh::Event) -> marsh::PolicyDecision + 'batch> {
+    ) -> Box<
+        dyn FnMut(
+                &marsh::PolicyHistory<'batch>,
+                &marsh::PolicyEvent<'batch>,
+            ) -> marsh::PolicyDecision
+            + 'batch,
+    > {
         let mut edited = false;
         Box::new(move |_, event| {
             if event.action != marsh::Action::Edit {

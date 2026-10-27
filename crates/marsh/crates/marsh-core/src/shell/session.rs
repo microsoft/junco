@@ -66,7 +66,7 @@ pub(super) struct GrantedCapability {
 impl From<&Event> for GrantedCapability {
     fn from(event: &Event) -> Self {
         Self {
-            action: event.action.clone(),
+            action: event.action,
             resource: event.resource.clone(),
         }
     }

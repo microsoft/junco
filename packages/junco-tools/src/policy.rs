@@ -3,12 +3,13 @@
 
 use std::sync::Arc;
 
-use marsh_core::{Bump, Event, Policy, PolicyDecision};
+use marsh_core::{Bump, Policy, PolicyDecision, PolicyEvent, PolicyHistory};
 use napi::bindgen_prelude::{FromNapiValue, TypeName, ValidateNapiValue};
 use napi::{ValueType, sys};
 use napi_derive::napi;
 
-type Evaluator<'batch> = Box<dyn FnMut(&[Event], &Event) -> PolicyDecision + 'batch>;
+type Evaluator<'batch> =
+    Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>;
 
 /// One immutable marsh authorization policy, shareable across muxes of this addon.
 #[napi]
