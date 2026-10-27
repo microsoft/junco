@@ -1,0 +1,51 @@
+[package]
+name = "junco-policy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.91"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+# The generator/policy harness. It lives here rather than in the library so the shipped crate
+# carries no fuzzing code, and so the libFuzzer target, the criterion benchmark and the
+# no-surprise oracle all drive one implementation.
+[lib]
+name = "lock_policy_harness"
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1.4"
+
+[dependencies.junco-policy]
+path = ".."
+
+[dev-dependencies]
+# `plotters` is what turns the HTML report on: criterion 0.8 wires the report to whichever plotting
+# backend exists (`lib.rs:411`), and without a backend it emits JSON only. The `html_reports`
+# feature is vestigial in 0.8 — declared but referenced nowhere — so enabling it would document a
+# gate that no longer exists. `rayon` stays off; it only parallelizes report rendering.
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+    "plotters",
+] }
+
+[[bin]]
+name = "lock_policy"
+path = "fuzz_targets/lock_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bench]]
+name = "lock_policy"
+path = "benches/lock_policy.rs"
+harness = false
+
+[[example]]
+name = "lock_policy_strictness"
+path = "examples/lock_policy_strictness.rs"
