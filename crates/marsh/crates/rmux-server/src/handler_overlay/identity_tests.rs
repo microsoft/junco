@@ -1,0 +1,306 @@
+use super::super::client_support::install_managed_client_resolution_pause;
+use super::super::overlay_support::{AttachedOverlayInput, ClientOverlayState};
+use super::super::scripting_support::QueueExecutionContext;
+use super::super::test_support::spawn_accounted_attach_control_drain;
+use super::super::RequestHandler;
+use rmux_proto::{
+    KillSessionRequest, LinkWindowRequest, NewWindowRequest, PaneTarget, RespawnPaneRequest,
+    Target, UnlinkWindowRequest, WindowTarget,
+};
+use tokio::time::{timeout, Duration};
+
+use crate::test_fixtures::{Fixture, SessionSpec, TestRequest};
+use crate::test_names::session_name;
+
+async fn execute_overlay(
+    handler: &RequestHandler,
+    requester_pid: u32,
+    command: &str,
+) -> Result<(), rmux_proto::RmuxError> {
+    let parsed = handler.parse_control_commands(command).await?;
+    handler
+        .execute_parsed_commands_for_test(requester_pid, parsed)
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn client_selector_and_explicit_pane_target_keep_distinct_identities() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("overlay-selector-alpha");
+    let beta = session_name("overlay-selector-beta");
+    let alpha_pid = 971_001;
+    let beta_pid = 971_002;
+    SessionSpec::create(&handler, &alpha).await;
+    SessionSpec::create(&handler, &beta).await;
+    let _alpha_rx = handler.attach_client(alpha_pid, &alpha).await;
+    let _beta_rx = handler.attach_client(beta_pid, &beta).await;
+
+    execute_overlay(
+        &handler,
+        alpha_pid,
+        &format!("display-menu -c {beta_pid} -t {alpha}:0.0 Item i 'display-message chosen'"),
+    )
+    .await
+    .expect("menu opens on selected client");
+    {
+        let active_attach = handler.active_attach.lock().await;
+        let Some(ClientOverlayState::Menu(menu)) = active_attach.by_pid[&beta_pid].overlay.as_ref()
+        else {
+            panic!("selected client owns the menu");
+        };
+        assert_eq!(
+            menu.current_target,
+            rmux_proto::Target::Pane(PaneTarget::with_window(alpha.clone(), 0, 0))
+        );
+    }
+    handler
+        .clear_interactive_overlay(beta_pid, true)
+        .await
+        .expect("menu cleanup");
+
+    execute_overlay(
+        &handler,
+        alpha_pid,
+        &format!("display-popup -N -c {beta_pid} -t {alpha}:0.0 -T Popup"),
+    )
+    .await
+    .expect("popup opens on selected client");
+    let active_attach = handler.active_attach.lock().await;
+    let Some(ClientOverlayState::Popup(popup)) = active_attach.by_pid[&beta_pid].overlay.as_ref()
+    else {
+        panic!("selected client owns the popup");
+    };
+    assert_eq!(
+        popup.current_target,
+        rmux_proto::Target::Pane(PaneTarget::with_window(alpha, 0, 0))
+    );
+}
+
+#[tokio::test]
+async fn same_pid_replacement_during_client_resolution_cannot_receive_menu() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("overlay-client-aba");
+    let pid = 971_011;
+    SessionSpec::create(&handler, &alpha).await;
+    let _old_rx = handler.attach_client(pid, &alpha).await;
+    let pause = install_managed_client_resolution_pause(pid);
+    let parsed = handler
+        .parse_control_commands(&format!(
+            "display-menu -c {pid} Item i 'display-message chosen'"
+        ))
+        .await
+        .expect("menu parses");
+    let task_handler = handler.clone();
+    let task = tokio::spawn(async move {
+        task_handler
+            .execute_parsed_commands_for_test(pid, parsed)
+            .await
+    });
+    timeout(Duration::from_secs(2), pause.reached.notified())
+        .await
+        .expect("client resolution pauses");
+
+    let _replacement_rx = handler.attach_client(pid, &alpha).await;
+    pause.release.notify_one();
+    let result = timeout(Duration::from_secs(2), task)
+        .await
+        .expect("menu command finishes")
+        .expect("menu task does not panic");
+    assert!(result.is_err(), "stale client identity must fail closed");
+    assert!(handler.active_attach.lock().await.by_pid[&pid]
+        .overlay
+        .is_none());
+}
+
+#[tokio::test]
+async fn menu_action_is_discarded_after_target_pane_respawn() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("overlay-pane-respawn");
+    let pid = 971_021;
+    SessionSpec::create(&handler, &alpha).await;
+    // The respawn below refreshes this attached session, and a simulated
+    // transport that never reads its controls saturates the client's bounded
+    // control backlog. Production then closes and removes the overloaded
+    // client, so the stale-menu question could never be asked. Service the
+    // transport with the same accounting a real client performs.
+    let control_rx = handler.attach_client(pid, &alpha).await;
+    let control_drain = spawn_accounted_attach_control_drain(&handler, pid, control_rx).await;
+    let client_identity = handler.active_attach_identity_for_test(pid).await;
+    let menu_command =
+        format!("display-menu -t {alpha}:0.0 Item i 'set-buffer -b stale-menu-fired executed'");
+    execute_overlay(&handler, pid, &menu_command)
+        .await
+        .expect("menu opens");
+
+    TestRequest::send_ok(
+        &handler,
+        RespawnPaneRequest {
+            command: Some(vec![crate::test_shell::stdin_discard_command()]),
+            ..Fixture::fixture(PaneTarget::with_window(alpha.clone(), 0, 0))
+        },
+    )
+    .await;
+    assert!(
+        handler.current_live_attach_input(client_identity).await,
+        "the respawn must not disconnect the serviced client"
+    );
+
+    let mut pending_input = Vec::new();
+    let forwarded = handler
+        .handle_attached_live_input_inner(pid, &mut pending_input, b"i")
+        .await
+        .expect("stale menu input is consumed");
+    assert!(
+        !forwarded,
+        "stale menu input must not reach the respawned pane"
+    );
+    assert!(pending_input.is_empty());
+    assert!(handler.active_attach.lock().await.by_pid[&pid]
+        .overlay
+        .is_none());
+    {
+        let state = handler.state.lock().await;
+        assert!(
+            state.buffers.get("stale-menu-fired").is_none(),
+            "the retired menu's action must not execute"
+        );
+    }
+    assert!(
+        handler.current_live_attach_input(client_identity).await,
+        "the same client must still be live after the stale menu retires"
+    );
+
+    // Positive control: the identical menu captured against the respawned pane
+    // still executes, so the retirement above is stale-target rejection rather
+    // than blanket menu-input loss or lost requester authority.
+    execute_overlay(&handler, pid, &menu_command)
+        .await
+        .expect("menu reopens against the respawned pane");
+    let mut pending_input = Vec::new();
+    let forwarded = handler
+        .handle_attached_live_input_inner(pid, &mut pending_input, b"i")
+        .await
+        .expect("current menu input is consumed");
+    assert!(!forwarded, "menu input must not reach the respawned pane");
+    assert!(pending_input.is_empty());
+    {
+        let state = handler.state.lock().await;
+        assert_eq!(
+            state.buffers.get("stale-menu-fired"),
+            Some(b"executed".as_slice())
+        );
+    }
+    control_drain.abort();
+}
+
+#[tokio::test]
+async fn popup_is_discarded_after_same_window_is_unlinked_and_relinked() {
+    let handler = RequestHandler::new();
+    let host = session_name("overlay-relink-host");
+    let owner = session_name("overlay-relink-owner");
+    let alias = session_name("overlay-relink-alias");
+    let pid = 971_031;
+    for session in [&host, &owner, &alias] {
+        SessionSpec::create(&handler, session).await;
+    }
+    let _control_rx = handler.attach_client(pid, &host).await;
+    handler
+        .create_window(NewWindowRequest {
+            target_window_index: Some(1),
+            ..Fixture::fixture(&alias)
+        })
+        .await;
+    let owner_window = WindowTarget::with_window(owner.clone(), 0);
+    TestRequest::send_ok(
+        &handler,
+        LinkWindowRequest {
+            kill_destination: true,
+            ..Fixture::fixture((&owner_window, WindowTarget::with_window(alias.clone(), 0)))
+        },
+    )
+    .await;
+    execute_overlay(
+        &handler,
+        pid,
+        &format!("display-popup -N -t {alias}:0.0 -T Popup"),
+    )
+    .await
+    .expect("popup opens on linked pane");
+
+    TestRequest::send_ok(
+        &handler,
+        UnlinkWindowRequest {
+            target: WindowTarget::with_window(alias.clone(), 0),
+            kill_if_last: false,
+        },
+    )
+    .await;
+    TestRequest::send_ok(
+        &handler,
+        LinkWindowRequest {
+            before: true,
+            ..Fixture::fixture((&owner_window, WindowTarget::with_window(alias.clone(), 1)))
+        },
+    )
+    .await;
+
+    let mut pending = Vec::new();
+    let outcome = handler
+        .handle_attached_overlay_input(pid, &mut pending, b"x")
+        .await
+        .expect("stale popup input is consumed");
+    assert_eq!(outcome, AttachedOverlayInput::Consumed);
+    assert!(pending.is_empty());
+    assert!(handler.active_attach.lock().await.by_pid[&pid]
+        .overlay
+        .is_none());
+}
+
+#[tokio::test]
+async fn overlay_command_context_rejects_a_same_name_session_replacement_after_validation() {
+    let handler = RequestHandler::new();
+    let host = session_name("overlay-command-host");
+    let target = session_name("overlay-command-target");
+    let pid = 971_041;
+    SessionSpec::create(&handler, &host).await;
+    SessionSpec::create(&handler, &target).await;
+    let _control_rx = handler.attach_client(pid, &host).await;
+    let client = handler.active_attach_identity_for_test(pid).await;
+    let target = Target::Session(target);
+    let identity = {
+        let mut state = handler.state.lock().await;
+        let active_attach = handler.active_attach.lock().await;
+        let active = active_attach
+            .by_pid
+            .get(&pid)
+            .expect("client remains attached");
+        let identity =
+            super::identity::OverlayIdentity::capture(&mut state, client, target.clone())
+                .expect("overlay target identity captures");
+        assert!(identity.matches(&state, active, &target));
+        identity
+    };
+    let context =
+        identity.command_context(QueueExecutionContext::without_caller_cwd(), target.clone());
+
+    let target_name = target.session_name().clone();
+    TestRequest::send_ok(&handler, KillSessionRequest::fixture(&target_name)).await;
+    SessionSpec::create(&handler, &target_name).await;
+
+    let commands = handler
+        .parse_control_commands("set-buffer -b overlay-command-aba fired")
+        .await
+        .expect("overlay command parses");
+    let result = handler
+        .execute_parsed_commands(pid, commands, context)
+        .await;
+    assert!(result.is_err(), "replacement session must fail closed");
+    assert!(handler
+        .state
+        .lock()
+        .await
+        .buffers
+        .show(Some("overlay-command-aba"))
+        .is_err());
+}

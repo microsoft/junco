@@ -1,0 +1,33 @@
+[package]
+name = "marsh-btrfs"
+description = "btrfs snapshot isolation for the marsh shell"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[features]
+fake = []
+
+[dependencies]
+marsh-lib = { path = "../marsh-lib", default-features = false }
+thiserror = "2"
+sha1 = "0.10"
+hex = "0.4"
+btrfsutil = "=0.2.0"
+proc-mounts = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+mockall = "0.13"
+tempfile = "3"
+
+
+[lints]
+workspace = true

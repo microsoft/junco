@@ -1,0 +1,405 @@
+use super::*;
+use crate::test_fixtures::{Fixture, SessionSpec, Sizeless, TestRequest};
+
+#[tokio::test]
+async fn new_session_uses_the_default_size_when_request_omits_geometry() {
+    let handler = RequestHandler::new();
+    let response = handler
+        .handle(Request::NewSession(NewSessionRequest {
+            size: None,
+            ..Fixture::fixture("alpha")
+        }))
+        .await;
+
+    assert_eq!(
+        response,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: session_name("alpha"),
+            detached: true,
+            output: None,
+        })
+    );
+
+    let exists = handler
+        .handle(Request::HasSession(HasSessionRequest {
+            target: session_name("alpha"),
+        }))
+        .await;
+    assert_eq!(
+        exists,
+        Response::HasSession(rmux_proto::HasSessionResponse { exists: true })
+    );
+
+    let removed = handler
+        .handle(Request::KillSession(KillSessionRequest {
+            target: session_name("alpha"),
+            kill_all_except_target: false,
+            clear_alerts: false,
+            kill_group: false,
+        }))
+        .await;
+    assert_eq!(
+        removed,
+        Response::KillSession(rmux_proto::KillSessionResponse { existed: true })
+    );
+
+    let recreated = handler
+        .handle(Request::NewSession(NewSessionRequest::fixture("alpha")))
+        .await;
+    assert_eq!(
+        recreated,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: session_name("alpha"),
+            detached: true,
+            output: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn new_session_honors_global_base_index_and_default_size() {
+    let handler = RequestHandler::new();
+
+    for (option, value) in [
+        (OptionName::BaseIndex, "3"),
+        (OptionName::DefaultSize, "120x32"),
+    ] {
+        handler
+            .set_option(ScopeSelector::Global, option, value)
+            .await;
+    }
+
+    SessionSpec::create(&handler, Sizeless("alpha")).await;
+
+    let state = handler.state.lock().await;
+    let session = state
+        .sessions
+        .session(&session_name("alpha"))
+        .expect("created session must exist");
+    let window = session
+        .window_at(3)
+        .expect("base-index must drive the first window index");
+    assert_eq!(session.active_window_index(), 3);
+    assert_eq!(
+        window.size(),
+        TerminalSize {
+            cols: 120,
+            rows: 32
+        }
+    );
+}
+
+#[tokio::test]
+async fn new_session_uses_default_command_when_request_omits_command() {
+    let handler = RequestHandler::new();
+    // Keep the initial pane alive until its lifecycle metadata is inspected.
+    // A short-lived `printf` may exit and remove the detached session first
+    // when the full test suite runs under load.
+    let default_command = "cat";
+    handler
+        .set_option(
+            ScopeSelector::Global,
+            OptionName::DefaultCommand,
+            default_command,
+        )
+        .await;
+
+    SessionSpec::create(&handler, "alpha").await;
+
+    let state = handler.state.lock().await;
+    let session = state
+        .sessions
+        .session(&session_name("alpha"))
+        .expect("created session must exist");
+    let pane = session
+        .window_at(0)
+        .and_then(|window| window.pane(0))
+        .expect("initial pane must exist");
+    let lifecycle = state
+        .pane_lifecycle(pane.id())
+        .expect("initial pane lifecycle must be recorded");
+    assert_eq!(
+        lifecycle.command(),
+        Some([default_command.to_owned()].as_slice())
+    );
+}
+
+#[tokio::test]
+async fn duplicate_new_session_returns_the_duplicate_session_error() {
+    let handler = RequestHandler::new();
+    let request = Request::NewSession(NewSessionRequest {
+        detached: false,
+        size: Some(TerminalSize::new(100, 30)),
+        ..Fixture::fixture("alpha")
+    });
+
+    let first = handler.handle(request.clone()).await;
+    let duplicate = handler.handle(request).await;
+
+    assert!(matches!(first, Response::NewSession(_)));
+    assert_eq!(
+        duplicate,
+        Response::Error(rmux_proto::ErrorResponse {
+            error: RmuxError::DuplicateSession("alpha".to_owned()),
+        })
+    );
+}
+
+/// A session creation that fails must leave neither the name nor its environment behind.
+///
+/// The failure is provoked with a start directory outside this server's seed, which is the
+/// spawn refusal that is still *synchronous*: a named directory the daemon cannot give the job
+/// is refused while the request is being answered. A missing program no longer serves here —
+/// the engine admits the job and the exec failure surfaces asynchronously inside the pane, the
+/// same way tmux reports it — so aiming at that would be measuring the shell, not the rollback
+/// this test is about.
+#[tokio::test]
+async fn failed_new_session_spawn_does_not_leak_environment_into_reused_name() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("failed-spawn-environment");
+    let sentinel = "RMUX_FAILED_SESSION_ENVIRONMENT";
+    let outside_seed = std::env::temp_dir().join("rmux-new-session-environment-outside-seed");
+
+    let failed = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            working_directory: Some(outside_seed.to_string_lossy().into_owned()),
+            environment: Some(vec![format!("{sentinel}=stale")]),
+            // Keep the spawn synchronous so this regression covers both
+            // rollback branches instead of the deferred startup path.
+            print_session_info: true,
+            skip_environment_update: true,
+            ..Fixture::fixture(&alpha)
+        })))
+        .await;
+
+    assert!(
+        matches!(failed, Response::Error(_)),
+        "a start directory outside the seed must fail session creation, got {failed:?}"
+    );
+    {
+        let state = handler.state.lock().await;
+        assert!(state.sessions.session(&alpha).is_none());
+        assert_eq!(state.environment.session_value(&alpha, sentinel), None);
+    }
+
+    SessionSpec::create(&handler, &alpha).await;
+
+    let state = handler.state.lock().await;
+    assert_eq!(state.environment.session_value(&alpha, sentinel), None);
+}
+
+#[tokio::test]
+async fn attach_if_exists_reports_attach_semantics_without_new_session_hook() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("alpha");
+    SessionSpec::create(&handler, Sizeless(&alpha)).await;
+
+    TestRequest::send_ok(
+        &handler,
+        SetHookRequest::fixture((
+            ScopeSelector::Global,
+            HookName::AfterNewSession,
+            "set-environment -g ATTACH_EXISTING_HOOK ran",
+        )),
+    )
+    .await;
+
+    let reused = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            size: None,
+            attach_if_exists: true,
+            ..Fixture::fixture(&alpha)
+        })))
+        .await;
+
+    assert_eq!(
+        reused,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: alpha,
+            detached: false,
+            output: None,
+        })
+    );
+    let state = handler.state.lock().await;
+    assert_eq!(
+        state.environment.global_value("ATTACH_EXISTING_HOOK"),
+        None,
+        "attaching an existing session must not emit after-new-session"
+    );
+    drop(state);
+
+    SessionSpec::create(&handler, Sizeless("fresh-after-hook")).await;
+    let state = handler.state.lock().await;
+    assert_eq!(
+        state.environment.global_value("ATTACH_EXISTING_HOOK"),
+        Some("ran"),
+        "creating a session must continue to emit after-new-session"
+    );
+}
+
+#[tokio::test]
+async fn grouped_new_session_without_explicit_name_uses_tmux_suffix_shape() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("alpha");
+
+    SessionSpec::create(&handler, Sizeless(&alpha)).await;
+
+    let grouped = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            session_name: None,
+            size: None,
+            group_target: Some(alpha.clone()),
+            print_session_info: true,
+            print_format: Some("#{session_name}".to_owned()),
+            ..Fixture::fixture(&alpha)
+        })))
+        .await;
+
+    assert_eq!(
+        grouped,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: session_name("alpha-1"),
+            detached: true,
+            output: Some(rmux_proto::CommandOutput::from_stdout(
+                b"alpha-1\n".to_vec()
+            )),
+        })
+    );
+
+    let listed = handler
+        .handle(Request::ListSessions(ListSessionsRequest {
+            format: Some("#{session_name}".to_owned()),
+            filter: None,
+            sort_order: None,
+            reversed: false,
+        }))
+        .await;
+    let Response::ListSessions(listed) = listed else {
+        panic!("list-sessions should succeed after grouped creation");
+    };
+    let stdout = std::str::from_utf8(listed.output.stdout()).expect("utf-8 stdout");
+    assert_eq!(stdout, "alpha\nalpha-1\n");
+}
+
+#[tokio::test]
+async fn new_session_print_resolves_captured_identity_after_concurrent_rename() {
+    let handler = RequestHandler::new();
+    let old_name = session_name("print-before-rename");
+    let new_name = session_name("print-after-rename");
+    let session_id = handler.state.lock().await.sessions.next_session_id();
+    let pause = handler.install_new_session_output_pause(session_id);
+    let create_handler = handler.clone();
+    let create = tokio::spawn(async move {
+        create_handler
+            .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+                size: None,
+                print_session_info: true,
+                print_format: Some("#{session_name}:#{session_id}".to_owned()),
+                ..Fixture::fixture(old_name)
+            })))
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), pause.reached.notified())
+        .await
+        .expect("new-session reaches the pre-print pause");
+    TestRequest::send_ok(
+        &handler,
+        RenameSessionRequest {
+            target: session_name("print-before-rename"),
+            new_name: new_name.clone(),
+        },
+    )
+    .await;
+    pause.release.notify_one();
+
+    assert_eq!(
+        create.await.expect("new-session task joins"),
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: new_name.clone(),
+            detached: true,
+            output: Some(rmux_proto::CommandOutput::from_stdout(
+                format!("{new_name}:{session_id}\n").into_bytes(),
+            )),
+        })
+    );
+}
+
+#[tokio::test]
+async fn auto_named_session_uses_next_global_session_id_after_named_sessions() {
+    let handler = RequestHandler::new();
+    for name in ["0", "1", "bob"] {
+        SessionSpec::create(&handler, Sizeless(name)).await;
+    }
+
+    let unnamed = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            session_name: None,
+            size: None,
+            print_session_info: true,
+            print_format: Some("#{session_name}".to_owned()),
+            ..Fixture::fixture("unnamed")
+        })))
+        .await;
+
+    assert_eq!(
+        unnamed,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: session_name("3"),
+            detached: true,
+            output: Some(rmux_proto::CommandOutput::from_stdout(b"3\n".to_vec())),
+        })
+    );
+}
+
+#[tokio::test]
+async fn grouped_new_session_rejects_shell_command_like_tmux() {
+    let handler = RequestHandler::new();
+    let alpha = session_name("alpha");
+
+    SessionSpec::create(&handler, Sizeless(&alpha)).await;
+
+    let grouped = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            size: None,
+            group_target: Some(alpha),
+            command: Some(vec!["cat".to_owned()]),
+            ..Fixture::fixture("peer")
+        })))
+        .await;
+
+    assert!(
+        matches!(grouped, Response::Error(ErrorResponse { error: RmuxError::Server(ref message) }) if message == "command or window name given with target"),
+        "expected grouped new-session command rejection, got {grouped:?}"
+    );
+}
+
+#[tokio::test]
+async fn grouped_new_session_uses_next_global_session_id_suffix_when_group_is_new() {
+    let handler = RequestHandler::new();
+    for name in ["0", "1", "bob"] {
+        SessionSpec::create(&handler, Sizeless(name)).await;
+    }
+
+    let grouped = handler
+        .handle(Request::NewSessionExt(Box::new(NewSessionExtRequest {
+            session_name: None,
+            size: None,
+            group_target: Some(session_name("stacy")),
+            print_session_info: true,
+            print_format: Some("#{session_name}:#{session_group}".to_owned()),
+            ..Fixture::fixture("stacy")
+        })))
+        .await;
+
+    assert_eq!(
+        grouped,
+        Response::NewSession(rmux_proto::NewSessionResponse {
+            session_name: session_name("stacy-3"),
+            detached: true,
+            output: Some(rmux_proto::CommandOutput::from_stdout(
+                b"stacy-3:stacy\n".to_vec(),
+            )),
+        })
+    );
+}
