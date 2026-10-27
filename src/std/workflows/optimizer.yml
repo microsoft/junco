@@ -1,0 +1,349 @@
+# Junco profile optimizer: measures an instrumented target workflow in fresh child processes and
+# has one persistent editor agent patch its scheduler, model-ladder and limit tuning regions until
+# the requested stop predicates hold. Driven only by `schedules.runOptimizer`, which supplies the
+# code nodes, the editor's two tools and the scheduler:
+#   Init -> Evaluate -> Editor -> Feedback -> Evaluate ... -> Final -> $sink
+# Every state edge carries the complete OptimizationState; the schema below is its contract.
+graph:
+  name: JuncoProfileOptimizer
+  threads: 1
+  nodes:
+    Init:
+      kind: code
+      description: Emits the initial optimization state once.
+      trigger: always
+    Evaluate:
+      kind: code
+      description: >-
+        Runs and scores the target, promotes or restores candidates, decides convergence, and
+        stages the next editor assignment or the terminal state.
+      trigger: { any: [initial-state, feedback-state] }
+    Editor:
+      description: Authors one tuning-region patch per assignment through edit_tuning.
+      tools: [read_target, edit_tuning]
+      trigger: editor-assignment
+      contracts:
+        editor-assignment: >-
+          The complete optimization state for one ticketed turn; read it with recv, then call
+          read_target and at most one successful edit_tuning for the assigned axis.
+        editor-loop: Your previous turn's final message; it only re-arms the editor.
+      system: |
+        You tune one existing Junco workflow for a measured objective. Each turn you receive the
+        complete optimization state on edge editor-assignment (read it with recv): the request,
+        the incumbent anchor, every earlier trial with its measured runs, and every earlier edit.
+        The host runs, measures and scores the target; you never run it and never report scores.
+
+        Per turn:
+        1. Call recv to read the state. Its editTicket is your ticket. The axis is
+           request.axes[axisIndex].
+        2. Call read_target for the current workflow YAML and TypeScript and its tsHash.
+        3. Call edit_tuning once with the ticket, that axis, expectedTsHash, the complete new
+           interior of that axis's tuning region as source, and a one-line reason. If it is
+           rejected, read the error, correct the patch and call it again.
+        4. Finish with one short plain-text sentence describing the change.
+
+        Change exactly one tuning axis per turn, relative to the incumbent region source shown in
+        the state (anchor.candidate.sources). Prefer configurations not yet measured; history
+        shows which proposals failed, were infeasible or did not improve. Write real TypeScript
+        in the target's existing style, using only bindings the file already imports.
+
+        Region bindings you must keep defining:
+        - scheduler: `optimizerScheduler(label: string)` returning the scheduling policy. Choices:
+          the existing factory, `schedules.parallel()`, `schedules.roundRobin(undefined, width)`,
+          `schedules.choose({ rank, width: () => width })`. `schedules.lowest(kind)` and
+          `schedules.highest(kind)` (kind "tokens" | "memory" | "runtime") are rank callbacks for
+          choose, not schedulers. Ranking needs complete node profiles. Never change which model
+          rung a node uses from this region, and keep every existing work node schedulable.
+        - ladder: `optimizerLadder` (a complete ladder with smol, low, med, high and xhigh rungs,
+          each `{ model: "provider/model-id", thinking? }`, or undefined for a deterministic
+          target) and `optimizerStrength` (a `(snapshot, nodeId) => rung-name` selector, or
+          undefined to keep the base policy's "med" rung). Use only model/thinking pairs listed
+          in request.allowedModels, and change rungs that target work actually uses.
+        - limits: `optimizerLimits: { memoryBytes?, tokens?, tools?, scope? }` with nonnegative
+          numbers within request.limitBounds and scope "evaluation" | "batch" | "activation".
+          Memory is predicted per-decision admission; tokens and tools cap actual usage, and a
+          violated cap makes the run ineligible. The target keeps its original hard limits
+          outside your region.
+
+        Never put region marker comments or NUL characters in source, never resubmit the
+        incumbent bytes unchanged, and never edit anything outside the assigned region.
+    Feedback:
+      kind: code
+      description: Records the settled editor turn's receipt as an edit outcome.
+      trigger: { all: [awaiting-edit, editor-complete] }
+    Final:
+      kind: code
+      description: Returns the terminal optimization state.
+      trigger: terminal-state
+  edges:
+    - id: initial-state
+      from: Init
+      to: Evaluate
+      kind: message
+      schema: &state
+        type: object
+        additionalProperties: false
+        required:
+          - request
+          - current
+          - anchor
+          - baselineScore
+          - graphHash
+          - cycle
+          - axisIndex
+          - cycleImproved
+          - explored
+          - stableValues
+          - editTicket
+          - history
+          - stop
+        properties:
+          request:
+            type: object
+            additionalProperties: false
+            required:
+              - target
+              - sessionDir
+              - workloadId
+              - objective
+              - constraints
+              - repeats
+              - stop
+              - axes
+              - allowedModels
+              - limitBounds
+            properties:
+              target:
+                type: object
+                additionalProperties: false
+                required: [yaml, ts, cwd, argv]
+                properties:
+                  yaml: { type: string, minLength: 1 }
+                  ts: { type: string, minLength: 1 }
+                  cwd: { type: string, minLength: 1 }
+                  argv: &argv
+                    type: array
+                    minItems: 1
+                    items: { type: string, minLength: 1 }
+                  resetArgv: *argv
+              sessionDir: { type: string, minLength: 1 }
+              workloadId: { type: string, minLength: 1 }
+              objective:
+                type: object
+                additionalProperties: false
+                required: [metric, direction]
+                properties:
+                  metric: &metric
+                    anyOf:
+                      - type: object
+                        additionalProperties: false
+                        required: [kind]
+                        properties:
+                          kind: { enum: [tokens, memory] }
+                      - type: object
+                        additionalProperties: false
+                        required: [kind, node, edgeId, reduce]
+                        properties:
+                          kind: { const: probe }
+                          node: { type: string }
+                          edgeId: { type: string, minLength: 1 }
+                          reduce: { enum: [single, last, min, max, sum, mean] }
+                  direction: { enum: [minimize, maximize] }
+              constraints:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [metric, op, threshold]
+                  properties:
+                    metric: *metric
+                    op: { enum: ["<=", ">="] }
+                    threshold: { type: number }
+              repeats: { type: integer, minimum: 1 }
+              stop:
+                type: object
+                additionalProperties: false
+                minProperties: 1
+                properties:
+                  target: { type: number }
+                  improvement:
+                    type: object
+                    additionalProperties: false
+                    required: [kind, value]
+                    properties:
+                      kind: { enum: [absolute, relative] }
+                      value: { type: number, exclusiveMinimum: 0 }
+                  plateau:
+                    type: object
+                    additionalProperties: false
+                    required: [window, absoluteTolerance, relativeTolerance]
+                    properties:
+                      window: { type: integer, minimum: 2 }
+                      absoluteTolerance: { type: number, minimum: 0 }
+                      relativeTolerance: { type: number, minimum: 0 }
+              axes:
+                type: array
+                minItems: 1
+                uniqueItems: true
+                items: &axis { enum: [scheduler, ladder, limits] }
+              allowedModels:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [model]
+                  properties:
+                    model: { type: string, pattern: "^[^/]+/.+$" }
+                    thinking: { enum: [minimal, low, medium, high, xhigh, max] }
+              limitBounds:
+                type: object
+                additionalProperties: false
+                properties:
+                  memoryBytes: { type: number, minimum: 0 }
+                  tokens: { type: number, minimum: 0 }
+                  tools: { type: integer, minimum: 0 }
+              runBudget: { type: integer, minimum: 1 }
+              timeBudgetMs: { type: integer, minimum: 1 }
+          current: &candidate
+            type: object
+            additionalProperties: false
+            required: [sources, tsHash]
+            properties:
+              sources:
+                type: object
+                additionalProperties: false
+                required: [scheduler, ladder, limits]
+                properties:
+                  scheduler: { type: string }
+                  ladder: { type: string }
+                  limits: { type: string }
+              tsHash: &hash { type: string, pattern: "^[0-9a-f]{64}$" }
+          anchor:
+            type: object
+            additionalProperties: false
+            required: [candidate, score]
+            properties:
+              candidate: *candidate
+              score: &score { type: [number, "null"] }
+          baselineScore: *score
+          graphHash: { anyOf: [*hash, { type: "null" }] }
+          cycle: { type: integer, minimum: 0 }
+          axisIndex: { type: integer, minimum: 0 }
+          cycleImproved: { type: boolean }
+          explored: { type: array, uniqueItems: true, items: *axis }
+          stableValues: { type: array, items: { type: number } }
+          editTicket: { type: [string, "null"] }
+          history:
+            type: array
+            items:
+              anyOf:
+                - type: object
+                  additionalProperties: false
+                  required: [kind, phase, axis, candidate, runs, score, feasible]
+                  properties:
+                    kind: { const: trial }
+                    phase: { enum: [baseline, candidate, remeasure, confirmation] }
+                    axis: { enum: [scheduler, ladder, limits, null] }
+                    candidate: *candidate
+                    runs:
+                      type: array
+                      items:
+                        type: object
+                        additionalProperties: false
+                        required: [run, directory, status, objective, constraints, error]
+                        properties:
+                          run: { type: integer, minimum: 1 }
+                          directory: { type: string }
+                          status: { enum: [running, ok, failed, cancelled] }
+                          objective: &summary
+                            anyOf:
+                              - type: object
+                                additionalProperties: false
+                                required: [value, unit, count]
+                                properties:
+                                  value: { type: number }
+                                  unit: { enum: [tok, B, null] }
+                                  count: { type: integer, minimum: 1 }
+                              - type: "null"
+                          constraints: { type: array, items: *summary }
+                          error: &text { type: [string, "null"] }
+                    score: *score
+                    feasible: { type: boolean }
+                - type: object
+                  additionalProperties: false
+                  required:
+                    [kind, ticket, axis, beforeHash, afterHash, source, reason, accepted, error]
+                  properties:
+                    kind: { const: edit }
+                    ticket: { type: string }
+                    axis: *axis
+                    beforeHash: *hash
+                    afterHash: { anyOf: [*hash, { type: "null" }] }
+                    source: *text
+                    reason: { type: string }
+                    accepted: { type: boolean }
+                    error: *text
+          stop:
+            anyOf:
+              - type: "null"
+              - type: object
+                additionalProperties: false
+                required: [kind, reason]
+                properties:
+                  kind: { enum: [converged, cancelled, budget, blocked, failed] }
+                  reason: { type: string }
+    - id: feedback-state
+      from: Feedback
+      to: Evaluate
+      kind: message
+      schema: *state
+    - id: editor-assignment
+      from: Evaluate
+      to: Editor
+      kind: message
+      schema: *state
+    - id: awaiting-edit
+      from: Evaluate
+      to: Feedback
+      kind: message
+      schema: *state
+    - id: editor-loop
+      from: Editor
+      to: Editor
+      schema: &assistant
+        type: object
+        required: [role, content, stopReason]
+        properties:
+          role: { const: assistant }
+          content:
+            type: array
+            items:
+              anyOf:
+                - type: object
+                  required: [type, text]
+                  properties: { type: { const: text }, text: { type: string } }
+                - type: object
+                  required: [type, thinking]
+                  properties: { type: { const: thinking }, thinking: { type: string } }
+                - type: object
+                  required: [type, id, name, arguments]
+                  properties:
+                    type: { const: toolCall }
+                    id: { type: string }
+                    name: { type: string }
+                    arguments: { type: object }
+          stopReason: { enum: [pending, stop, length, toolUse, error, aborted, deferred] }
+          errorMessage: { type: string }
+    - id: editor-complete
+      from: Editor
+      to: Feedback
+      schema: *assistant
+    - id: terminal-state
+      from: Evaluate
+      to: Final
+      kind: message
+      schema: *state
+    - id: result
+      from: Final
+      to: $sink
+      schema: *state

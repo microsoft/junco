@@ -1,5 +1,5 @@
 // Compile-only: every type exported through the root `graph`, `trigger`, `tracer`, `schedules`,
-// `agent`, `tools` and `mcp` namespaces, plus the flat LSP types, used as a consumer would: typed
+// `workflows`, `agent`, `tools` and `mcp` namespaces, plus the flat LSP types, used as a consumer would: typed
 // construction, callbacks and narrowing, with deliberate rejections. Detailed generic rules stay in
 // the engine and scheduler fixtures. Covered by tsconfig.typecheck.json; never executed.
 
@@ -25,6 +25,7 @@ import {
   tools,
   tracer,
   trigger,
+  workflows,
 } from "../src/index.ts";
 
 type TaggedSkill = Skill & { readonly tag: "skill" };
@@ -1378,4 +1379,57 @@ export async function profileRecordersAreOneSharedInterface(
   // @ts-expect-error ProfileRecorder is type-only
   void new tracer.ProfileRecorder();
   return [jsonl, fromJsonl, same, url, stream];
+}
+
+export async function profileOptimizerIsAStandardWorkflow(signal: AbortSignal) {
+  const yaml: string = workflows.optimizer;
+  const request: schedules.OptimizationRequest = {
+    target: {
+      yaml: "/work/workflow.yml",
+      ts: "/work/workflow.ts",
+      cwd: "/work",
+      argv: ["bun", "run", "workflow.ts"],
+    },
+    sessionDir: "/work/.junco/profile-optimizer/session-1",
+    workloadId: "fixed-corpus",
+    objective: { metric: { kind: "tokens" }, direction: "minimize" },
+    constraints: [
+      {
+        metric: {
+          kind: "probe",
+          node: "",
+          edgeId: "quality",
+          reduce: "single",
+        },
+        op: ">=",
+        threshold: 0.9,
+      },
+    ],
+    repeats: 3,
+    stop: { improvement: { kind: "relative", value: 0.2 } },
+    axes: ["scheduler", "ladder", "limits"],
+    allowedModels: [{ model: "provider/model", thinking: "low" }],
+    limitBounds: { tokens: 20_000 },
+  };
+  const state: schedules.OptimizationState = await schedules.runOptimizer(
+    request,
+    {
+      signal,
+      editorRung: { model: "provider/editor" },
+    },
+  );
+  const kind:
+    | "converged"
+    | "cancelled"
+    | "budget"
+    | "blocked"
+    | "failed"
+    | undefined = state.stop?.kind;
+  const incumbent: number | null = state.anchor.score;
+  const invalid: schedules.OptimizationRequest = {
+    ...request,
+    // @ts-expect-error an objective direction is "minimize" or "maximize"
+    objective: { metric: { kind: "memory" }, direction: "lower" },
+  };
+  return [yaml, kind, incumbent, invalid];
 }

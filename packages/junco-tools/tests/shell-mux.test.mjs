@@ -215,13 +215,7 @@ test("a collection's resources limit and monitor only its own commands", {
       /keeps the resources/,
     );
     const first = await bash(limited, probe);
-    if (text(first).includes("cgroup resource control unavailable")) {
-      // Fail-closed without delegation: the command never ran, and said why.
-      assert.equal(first.isError, true);
-      assert.doesNotMatch(text(first), /^\d+$/m);
-      console.log("skipping: cgroup delegation unavailable");
-      return;
-    }
+    assert.ok(!first.isError, text(first));
     assert.equal(text(first), "4\n");
     const binding = limited.bind();
     try {
