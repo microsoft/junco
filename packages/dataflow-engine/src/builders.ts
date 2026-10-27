@@ -1,3 +1,4 @@
+import type { Static, TSchema } from "typebox";
 import type { Edge } from "./edges.js";
 import type { NodeId } from "./identity.js";
 import type {
@@ -13,14 +14,19 @@ import type {
 import type { Profiles, ResourceKind } from "./profile.js";
 import type { TriggerRule } from "./trigger.js";
 
-/** Shared empty result for `from`. Safe to alias: the return type is `readonly N[]`. */
+/** Shared empty result for `from`. Safe to alias: the return type is a readonly array. */
 const NO_MESSAGES: readonly never[] = [];
 
-/** This turn's batch from `edge`, empty when it did not fire. */
-export const from = <N, T>(
-  view: ParentView<N, T>,
+/**
+ * This turn's batch from `edge`, empty when it did not fire. `edge` may admit a narrower schema
+ * than the graph-wide view; the batch narrows with it, since `edge` admitted every payload it holds.
+ */
+export const from = <G extends TSchema, N extends G, T>(
+  view: ParentView<G, T>,
   edge: Edge<N, T>,
-): readonly N[] => view.messages.get(edge.id) ?? NO_MESSAGES;
+): readonly Static<N>[] =>
+  (view.messages.get(edge.id) as readonly Static<N>[] | undefined) ??
+  NO_MESSAGES;
 
 /**
  * A complete node spec whose body never terminates: after its priming yield, `fn` maps the
@@ -31,7 +37,7 @@ export const from = <N, T>(
  * what a pure sink wants. `options` supplies everything but the body; its own properties are copied
  * onto the spec.
  */
-export class StepNode<S, N, T, K extends ResourceKind = never>
+export class StepNode<S, N extends TSchema, T, K extends ResourceKind = never>
   implements NodeSpec<S, N, T>
 {
   declare readonly id?: NodeId;
@@ -63,7 +69,7 @@ export class StepNode<S, N, T, K extends ResourceKind = never>
  * the real batch. A source therefore runs in two turns: turn one yields its batch, turn two returns
  * `ret`. `options` supplies everything but the body; its own properties are copied onto the spec.
  */
-export class EmitOnce<S, N, T, K extends ResourceKind = never>
+export class EmitOnce<S, N extends TSchema, T, K extends ResourceKind = never>
   implements NodeSpec<S, N, T>
 {
   declare readonly id?: NodeId;

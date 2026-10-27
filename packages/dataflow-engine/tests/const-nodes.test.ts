@@ -2,6 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, type TSchema, Type } from "typebox";
 import type { EdgeIdType, MessageSchedule, NodeIdType } from "../src/index.ts";
 import {
   ConstFanin,
@@ -19,16 +20,19 @@ import {
   Width,
 } from "../src/index.ts";
 
-type Payload = { readonly value: number };
+const NumberSchema = Type.Number();
+const NumbersSchema = Type.Array(NumberSchema);
+const PayloadSchema = Type.Object({ value: Type.Number() });
+type Payload = Static<typeof PayloadSchema>;
 
-const newGraph = <N>(): DataflowGraph<void, N, string, never> =>
+const newGraph = <N extends TSchema>(): DataflowGraph<void, N, string, never> =>
   new DataflowGraph<void, N, string, never>(Width.create(1), UNBOUNDED);
 
 /** Register a never-finishing sink on `edge` that records every payload it receives. */
-const addSink = <N>(
+const addSink = <N extends TSchema>(
   graph: DataflowGraph<void, N, string, never>,
   edge: Edge<N, string>,
-  seen: N[],
+  seen: Static<N>[],
 ): NodeIdType =>
   graph.addNode(
     new StepNode<void, N, string>(
@@ -44,7 +48,7 @@ const addSink = <N>(
   );
 
 /** A never-firing node that only serves as the origin of public `graph.emit` calls. */
-const addExternal = <N>(
+const addExternal = <N extends TSchema>(
   graph: DataflowGraph<void, N, string, never>,
 ): NodeIdType =>
   graph.addNode(
@@ -55,11 +59,11 @@ const addExternal = <N>(
   );
 
 test("ConstFanout sends the same payload once per captured output, then returns its ret", async () => {
-  const graph = newGraph<Payload>();
+  const graph = newGraph<typeof PayloadSchema>();
   const payload: Payload = { value: 7 };
-  const a = Edge.message<Payload, string>("a");
-  const b = Edge.message<Payload, string>("b");
-  const c = Edge.message<Payload, string>("c");
+  const a = Edge.message<typeof PayloadSchema, string>("a", PayloadSchema);
+  const b = Edge.message<typeof PayloadSchema, string>("b", PayloadSchema);
+  const c = Edge.message<typeof PayloadSchema, string>("c", PayloadSchema);
   const outputs = [a, b, c];
   const source = graph.addNode(
     new ConstFanout(payload, outputs, { state: undefined, ret: "source done" }),
@@ -87,7 +91,7 @@ test("ConstFanout sends the same payload once per captured output, then returns 
 });
 
 test("ConstFanout with no outputs emits nothing and completes", async () => {
-  const graph = newGraph<number>();
+  const graph = newGraph<typeof NumberSchema>();
   const source = graph.addNode(
     new ConstFanout(1, [], { state: undefined, ret: "empty" }),
   );
@@ -98,14 +102,14 @@ test("ConstFanout with no outputs emits nothing and completes", async () => {
 });
 
 test("ConstFanout rejects value edges and repeated output ids", () => {
-  const a = Edge.message<number, string>("a");
+  const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
   assert.throws(
     () => new ConstFanout(1, [a, a], { state: undefined, ret: "" }),
     DataflowDefinitionError,
   );
   assert.throws(
     () =>
-      new ConstFanout(1, [a, Edge.value<number, string>("v")], {
+      new ConstFanout(1, [a, Edge.value("v", Type.String())], {
         state: undefined,
         ret: "",
       }),
@@ -115,11 +119,16 @@ test("ConstFanout rejects value edges and repeated output ids", () => {
 
 test("ConstFanin sends one list in configured input order only after every input contributed", async () => {
   type Constant = number[];
-  const graph = newGraph<Constant | Constant[]>();
-  const a = Edge.message<Constant, string>("a");
-  const b = Edge.message<Constant, string>("b");
-  const c = Edge.message<Constant, string>("c");
-  const list = Edge.message<Constant[], string>("list");
+  const ConstantSchema = NumbersSchema;
+  const ConstantsSchema = Type.Array(ConstantSchema);
+  const graph = newGraph<typeof ConstantSchema | typeof ConstantsSchema>();
+  const a = Edge.message<typeof ConstantSchema, string>("a", ConstantSchema);
+  const b = Edge.message<typeof ConstantSchema, string>("b", ConstantSchema);
+  const c = Edge.message<typeof ConstantSchema, string>("c", ConstantSchema);
+  const list = Edge.message<typeof ConstantsSchema, string>(
+    "list",
+    ConstantsSchema,
+  );
   const constA = [1];
   const constB = [2];
   const constC = [3];
@@ -167,10 +176,13 @@ test("ConstFanin sends one list in configured input order only after every input
 });
 
 test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => {
-  const a = Edge.message<number, string>("a");
-  const b = Edge.message<number, string>("b");
-  const c = Edge.message<number, string>("c");
-  const list = Edge.message<number[], string>("list");
+  const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
+  const c = Edge.message<typeof NumberSchema, string>("c", NumberSchema);
+  const list = Edge.message<typeof NumbersSchema, string>(
+    "list",
+    NumbersSchema,
+  );
   const scripted: Map<EdgeIdType, MessageSchedule>[] = [
     new Map(),
     new Map([[c.id, 1]]),
@@ -178,10 +190,12 @@ test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => 
     new Map([[a.id, 1]]),
   ];
   let join: NodeIdType | undefined;
-  const graph = new DataflowGraph<void, number | number[], string, never>(
-    Width.create(1),
-    UNBOUNDED,
-  );
+  const graph = new DataflowGraph<
+    void,
+    typeof NumberSchema | typeof NumbersSchema,
+    string,
+    never
+  >(Width.create(1), UNBOUNDED);
   const advance = () =>
     graph.evaluate(async (execute) => {
       const schedule = [...graph.available()].map(([id, availability]) => [
@@ -224,13 +238,19 @@ test("ConstFanin survives empty and one-edge-at-a-time deliveries", async () => 
 });
 
 test("separately constructed collectors keep independent progress", async () => {
-  const graph = newGraph<number | number[]>();
-  const a1 = Edge.message<number, string>("a1");
-  const b1 = Edge.message<number, string>("b1");
-  const a2 = Edge.message<number, string>("a2");
-  const b2 = Edge.message<number, string>("b2");
-  const list1 = Edge.message<number[], string>("list1");
-  const list2 = Edge.message<number[], string>("list2");
+  const graph = newGraph<typeof NumberSchema | typeof NumbersSchema>();
+  const a1 = Edge.message<typeof NumberSchema, string>("a1", NumberSchema);
+  const b1 = Edge.message<typeof NumberSchema, string>("b1", NumberSchema);
+  const a2 = Edge.message<typeof NumberSchema, string>("a2", NumberSchema);
+  const b2 = Edge.message<typeof NumberSchema, string>("b2", NumberSchema);
+  const list1 = Edge.message<typeof NumbersSchema, string>(
+    "list1",
+    NumbersSchema,
+  );
+  const list2 = Edge.message<typeof NumbersSchema, string>(
+    "list2",
+    NumbersSchema,
+  );
   const options = { state: undefined, ret: "done" };
   const join1 = graph.addNode(new ConstFanin([a1, b1], list1, options));
   const join2 = graph.addNode(new ConstFanin([a2, b2], list2, options));
@@ -261,10 +281,13 @@ test("separately constructed collectors keep independent progress", async () => 
 });
 
 test("ConstFanin with no inputs sends one empty list and completes", async () => {
-  const graph = newGraph<number | number[]>();
-  const list = Edge.message<number[], string>("list");
+  const graph = newGraph<typeof NumberSchema | typeof NumbersSchema>();
+  const list = Edge.message<typeof NumbersSchema, string>(
+    "list",
+    NumbersSchema,
+  );
   const join = graph.addNode(
-    new ConstFanin<undefined, number, string>([], list, {
+    new ConstFanin<undefined, typeof NumberSchema, string>([], list, {
       state: undefined,
       ret: "empty",
     }),
@@ -279,19 +302,22 @@ test("ConstFanin with no inputs sends one empty list and completes", async () =>
 });
 
 test("ConstFanin rejects value edges and repeated input ids", () => {
-  const a = Edge.message<number, string>("a");
-  const list = Edge.message<number[], string>("list");
+  const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const list = Edge.message<typeof NumbersSchema, string>(
+    "list",
+    NumbersSchema,
+  );
   const options = { state: undefined, ret: "" };
   assert.throws(
     () => new ConstFanin([a, a], list, options),
     DataflowDefinitionError,
   );
   assert.throws(
-    () => new ConstFanin([a, Edge.value<number, string>("v")], list, options),
+    () => new ConstFanin([a, Edge.value("v", Type.String())], list, options),
     DataflowDefinitionError,
   );
   assert.throws(
-    () => new ConstFanin([a], Edge.value<number[], string>("vl"), options),
+    () => new ConstFanin([a], Edge.value("vl", Type.String()), options),
     DataflowDefinitionError,
   );
 });

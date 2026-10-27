@@ -4,6 +4,8 @@
 linker = "hoisted"
 
 [test]
+# Upstream grammar checkouts contain Node-addon tests; Junco links their C parsers directly.
+pathIgnorePatterns = ["packages/junco-tools/crates/rust-graph/vendor/**"]
 # `bun run test:coverage` reports agency source coverage only; each package proves its own
 # implementation through its own suite.
 coverageReporter = ["text", "lcov"]

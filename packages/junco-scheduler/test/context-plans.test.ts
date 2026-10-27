@@ -11,16 +11,19 @@ import {
   triggerInputs,
   UNBOUNDED,
 } from "dataflow-engine";
+import { Type } from "typebox";
 import { context, select } from "../src/index.ts";
 
+const StringSchema = Type.String();
+
 test("snapshot plans predict the same limited batch the context consumes", async () => {
-  const graph = new DataflowGraph<void, string, string, never>(
+  const graph = new DataflowGraph<void, typeof StringSchema, string, never>(
     UNBOUNDED,
     UNBOUNDED,
   );
-  const edge = Edge.message<string, string>("in");
+  const edge = Edge.message<typeof StringSchema, string>("in", StringSchema);
   const source = graph.addNode(
-    new EmitOnce<void, string, string>(
+    new EmitOnce<void, typeof StringSchema, string>(
       () => ["a", "b", "c"].map((s) => Message.create(edge, s)),
       "done",
       { state: undefined, trigger: TriggerRule.always() },
@@ -28,7 +31,7 @@ test("snapshot plans predict the same limited batch the context consumes", async
   );
   const consumed: string[][] = [];
   const sink = graph.addNode(
-    new StepNode<void, string, string>(
+    new StepNode<void, typeof StringSchema, string>(
       (_state, view) => {
         consumed.push([...from(view, edge)]);
         return [];

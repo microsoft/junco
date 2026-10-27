@@ -52,7 +52,7 @@ type Operation = {
 const DASHBOARD = "junco-telemetry";
 const DASHBOARDS =
   "/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
-// ponytail: one Live push per snapshot, capped at Grafana's 500 KiB; shard streams if a measured workload exceeds it.
+// ponytail: each Live push is capped at Grafana's 500 KiB; shard streams if a measured snapshot exceeds it.
 const PUSH_LIMIT = 500 * 1024;
 const TIMEOUT_MS = 5000;
 const FIELD = /^[a-z][a-z0-9_]*$/;
@@ -120,6 +120,8 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
   readonly #operations = new Map<string, Operation>();
   readonly #pipelines = new Map<object, Map<string, Pipeline>>();
   readonly #active = new Set<Pipeline>();
+  /** Probe points awaiting their own push, in record order. */
+  #probes: string[] = [];
   #peak = 0;
   #clock: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
@@ -180,6 +182,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
         this.#operations.clear();
         this.#pipelines.clear();
         this.#active.clear();
+        this.#probes = [];
       }
     })();
     return this.#closing;
@@ -221,7 +224,22 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     if (event.kind === "usage") this.#usage(path, event.usage);
     else if (event.kind === "resource")
       this.#resource(path, event.source, event.event);
+    else if (event.kind === "probe")
+      this.#probe(path, event.edgeId, event.value);
     else this.#operation(path, event);
+  }
+
+  /** Queues one `junco_probe` point at receipt time; no later push could carry it once stopped. */
+  #probe(path: string, edgeId: string, value: number): void {
+    if (this.#stopped) return;
+    if (!Number.isFinite(value)) {
+      this.#fail(new Error("GrafanaRecorder: invalid probe value"));
+      return;
+    }
+    // Live keeps one point per series and millisecond of a push, so each point is pushed alone.
+    this.#probes.push(
+      `junco_probe,node=${tag(label(path))},edge_id=${tag(edgeId)} value=${value} ${BigInt(Date.now()) * 1_000_000n}`,
+    );
   }
 
   #usage(
@@ -314,7 +332,10 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
 
   #operation(
     path: string,
-    event: Exclude<ProfileEvent<string>, { kind: "usage" | "resource" }>,
+    event: Exclude<
+      ProfileEvent<string>,
+      { kind: "usage" | "resource" | "probe" }
+    >,
   ): void {
     const { resource, category, tool, operation } = event;
     if (resource === "" || category === "" || operation === "") {
@@ -519,30 +540,39 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     return this.#drain;
   }
 
+  /** Pushes the queued probe points one request each, then the snapshot; any failure stops pushing. */
   async #push(): Promise<void> {
     if (this.#stopped) return;
-    const body = this.#snapshot();
+    const probes = this.#probes;
+    this.#probes = [];
     try {
-      if (Buffer.byteLength(body) > PUSH_LIMIT)
-        throw new Error("GrafanaRecorder: snapshot exceeds 500 KiB");
-      const response = await request(
-        `${this.#base}/api/live/push/${this.streamId}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "text/plain; charset=utf-8",
-          },
-          body,
-        },
-        "live push",
-      );
-      await response.body?.cancel();
-      if (!response.ok) throw failure("live push", response);
+      // ponytail: one sequential request per probe point; batch points of distinct series/ms if probe rates outgrow it.
+      for (const line of probes) await this.#send("probe", `${line}\n`);
+      await this.#send("snapshot", this.#snapshot());
     } catch (error) {
       this.#stopped = true;
+      this.#probes = [];
       clearInterval(this.#timer);
       this.#fail(error);
     }
+  }
+
+  async #send(kind: "probe" | "snapshot", body: string): Promise<void> {
+    if (Buffer.byteLength(body) > PUSH_LIMIT)
+      throw new Error(`GrafanaRecorder: ${kind} exceeds 500 KiB`);
+    const response = await request(
+      `${this.#base}/api/live/push/${this.streamId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body,
+      },
+      "live push",
+    );
+    await response.body?.cancel();
+    if (!response.ok) throw failure("live push", response);
   }
 }
 
@@ -757,21 +787,21 @@ async function dashboard() {
     {
       title: "Tool and execution metrics",
       targets: [query("junco_operation")],
-      grid: { x: 0, y: 20, w: 24, h: 12 },
+      grid: { x: 0, y: 28, w: 24, h: 12 },
       description:
         "Latest operation counters and gauges by node, resource, category, tool and operation; metric names carry units.",
     },
     {
       title: "Resource and token details",
       targets: [query("junco_node"), query("junco_total", undefined, "B")],
-      grid: { x: 0, y: 32, w: 24, h: 10 },
+      grid: { x: 0, y: 40, w: 24, h: 10 },
       description:
         "Direct per-node resource and token fields; rows without a node label are session totals.",
     },
     {
       title: "Graph context totals",
       targets: [query("junco_context")],
-      grid: { x: 0, y: 42, w: 24, h: 10 },
+      grid: { x: 0, y: 50, w: 24, h: 10 },
       description:
         "Inclusive rollups of each evaluated graph context over its descendants.",
     },
@@ -822,6 +852,18 @@ async function dashboard() {
         )
         .withTarget(query(panel.measurement, [panel.field])),
     );
+  board.withPanel(
+    new timeseries.PanelBuilder()
+      .id(++id)
+      .title("Edge probes")
+      .description(
+        "Numeric edge values at recorder receipt time, labeled by graph context and edge ID.",
+      )
+      .datasource(GRAFANA)
+      .gridPos({ x: 0, y: 20, w: 24, h: 8 })
+      .displayName(`\${__field.labels.node} \${__field.labels.edge_id}`)
+      .withTarget(query("junco_probe", ["value"])),
+  );
   for (const panel of tables)
     board.withPanel(
       new table.PanelBuilder()

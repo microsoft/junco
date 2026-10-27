@@ -6,9 +6,9 @@ import {
   type PromptTemplate,
   type Skill,
 } from "@earendil-works/pi-agent-core";
-import {
-  type FauxProviderHandle,
-  type FauxResponseStep,
+import type {
+  FauxProviderHandle,
+  FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import { isComplainTool } from "junco-tools";
 import { Type } from "typebox";

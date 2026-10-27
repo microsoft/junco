@@ -12,11 +12,12 @@ import {
   Width,
 } from "dataflow-engine";
 import mermaidAscii from "mermaid-ascii";
+import { type TNever, Type } from "typebox";
 import { escapeTuiLabel, renderTuiGraph } from "../src/tui-graph.ts";
 import { formatTuiPayload } from "../src/tui-tracer.ts";
 
 const graph = () =>
-  new DataflowGraph<unknown, unknown, string, unknown>(
+  new DataflowGraph<unknown, TNever, string, unknown>(
     Width.create(1),
     UNBOUNDED,
     new DummyTracer(),
@@ -38,9 +39,9 @@ test("layout rectangles identify exact escaped labels, not drawing substrings", 
   const g = graph();
   const ids = ["A", "AA", 'A"#\n', "分析🤖"];
   const nodes = ids.map((id) => add(g, id));
-  g.addEdge(nodes[0]!, nodes[1]!, Edge.message("A"));
-  g.addEdge(nodes[0]!, nodes[1]!, Edge.value("parallel"));
-  g.addEdge(nodes[1]!, nodes[1]!, Edge.message("self"));
+  g.addEdge(nodes[0]!, nodes[1]!, Edge.message("A", Type.Never()));
+  g.addEdge(nodes[0]!, nodes[1]!, Edge.value("parallel", Type.String()));
+  g.addEdge(nodes[1]!, nodes[1]!, Edge.message("self", Type.Never()));
   const [section] = renderTuiGraph(g);
   assert.ok(section);
   assert.deepEqual(
@@ -91,7 +92,7 @@ test("long layouts restore library settings on success", () => {
   let previous = add(g, "node-0");
   for (let i = 1; i < 40; i++) {
     const next = add(g, `node-${i}`);
-    g.addEdge(previous, next, Edge.value(`edge-${i}`));
+    g.addEdge(previous, next, Edge.value(`edge-${i}`, Type.String()));
     previous = next;
   }
   const direction = mermaidAscii.graphDirection;

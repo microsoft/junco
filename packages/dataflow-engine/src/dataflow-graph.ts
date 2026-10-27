@@ -5,12 +5,13 @@ import type { Graph } from "ngraph.graph";
 import createGraph from "ngraph.graph";
 import type { IDoc } from "prettier-printer";
 import * as PP from "prettier-printer";
+import { type Static, type TSchema, Type } from "typebox";
 import type {
   DataflowRunTrace,
   DataflowStepTrace,
   DataflowTracer,
 } from "./dataflow-tracer.js";
-import type { Edge } from "./edges.js";
+import { checkPayload, type Edge } from "./edges.js";
 import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
@@ -32,6 +33,12 @@ import type {
   Schedule,
 } from "./scheduler.js";
 import { satisfiedEdges } from "./trigger.js";
+import {
+  assertUsageAllowed,
+  holdsUsageFailure,
+  runWithUsageBudgets,
+  type UsageBudget,
+} from "./usage-limits.js";
 import type { Width } from "./width.js";
 
 /** Characters Mermaid would read as markup, entities, comments/directives, math or label ends. */
@@ -58,7 +65,7 @@ const whenTriggered = (_view: unknown, triggered: boolean): boolean =>
  * holds no copy of either. It holds only what an edge cannot answer: which edges point AT this node
  * (ngraph exposes no inbound-only accessor) and a reusable view over them.
  */
-type NodeRuntime<N, T> = {
+type NodeRuntime<N extends TSchema, T> = {
   /** Inbound edge id -> the edge itself. Pure topology; all transport state lives in the `Edge`. */
   readonly inbound: Map<EdgeId, Edge<N, T>>;
   /** Stable, non-destructive readiness view reading through to `inbound`'s edges. */
@@ -73,7 +80,7 @@ type NodeRuntime<N, T> = {
  * `messages` exposes an inbound message edge's live queue; `values` exposes only RESOLVED value
  * cells, which is what makes `values.has(id)` mean "this parent has returned".
  */
-const probeOf = <N, T>(
+const probeOf = <N extends TSchema, T>(
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
 ): ParentView<N, T> => ({
   messages: {
@@ -127,8 +134,8 @@ const NO_KEYS: readonly never[] = [];
  * An absent batch answers every lookup empty and enumerates nothing, so a node whose plan read
  * `"none"` — or whose queues were empty — needs no batch object at all.
  */
-const viewOf = <N, T>(
-  batch: ReadonlyMap<EdgeId, readonly N[]> | undefined,
+const viewOf = <N extends TSchema, T>(
+  batch: ReadonlyMap<EdgeId, readonly Static<N>[]> | undefined,
   values: Lookup<EdgeId, T>,
 ): ParentView<N, T> => ({
   messages: {
@@ -149,7 +156,7 @@ export type DataflowRunOptions = {
   readonly signal?: AbortSignal;
 };
 
-export type DataflowObservation<S, N, T> = {
+export type DataflowObservation<S, N extends TSchema, T> = {
   readonly nodes: ReadonlyMap<
     NodeId,
     Readonly<
@@ -169,7 +176,7 @@ export type DataflowObservation<S, N, T> = {
   readonly version: number;
 };
 
-export type DataflowExecution<N, T> = (
+export type DataflowExecution<N extends TSchema, T> = (
   schedule: Schedule,
   options?: {
     readonly resolveInputs?: (
@@ -177,12 +184,19 @@ export type DataflowExecution<N, T> = (
       live: NodeAvailability<N, T>,
     ) => InputSchedule;
     readonly onColumn?: (selected: readonly NodeId[]) => void;
+    /** Each selected node's own usage ledgers, added inside the ambient ones for its activation. */
+    readonly usageBudgets?: ReadonlyMap<NodeId, readonly UsageBudget[]>;
   },
 ) => Promise<void>;
 
 /** Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. */
-export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
-  implements Pretty
+export class DataflowGraph<
+  S,
+  N extends TSchema,
+  T,
+  EH,
+  K extends ResourceKind = never,
+> implements Pretty
 {
   // Keep ngraph's mutable storage kind-erased; addNode enforces K at the public boundary.
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
@@ -297,7 +311,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
 
     this.#graph.addLink(from, to, edge);
 
-    this.#runtime.get(to)!.inbound.set(edge.id, edge);
+    this.#runtimeOf(to).inbound.set(edge.id, edge);
     this.#version++;
     return this;
   }
@@ -305,6 +319,16 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
   /** The node registered under `id`, or `undefined` if none. */
   getNode(id: NodeId): Node<S, N, T, K> | undefined {
     return this.#graph.getNode(id)?.data as Node<S, N, T, K> | undefined;
+  }
+
+  /** `id`'s runtime state; `addNode` registers one for every node. */
+  #runtimeOf(id: NodeId): NodeRuntime<N, T> {
+    const runtime = this.#runtime.get(id);
+    if (runtime === undefined)
+      throw new DataflowDefinitionError(
+        `Dataflow node "${id}" has no runtime state`,
+      );
+    return runtime;
   }
 
   /** The value `id` returned, or `O.none` if it has not finished. */
@@ -340,7 +364,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
             : { description: node.description }),
         }),
       );
-      inputs.set(id, snapshotView(this.#runtime.get(id)!.probe));
+      inputs.set(id, snapshotView(this.#runtimeOf(id).probe));
     });
     const links: (readonly [NodeId, NodeId, EdgeId, "message" | "value"])[] =
       [];
@@ -394,10 +418,13 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
       document.push(PP.lineBreak, `${"  ".repeat(depth)}${statement}`);
     };
 
-    function appendGraph<GS, GN, GT, GEH, GK extends ResourceKind>(
-      graph: DataflowGraph<GS, GN, GT, GEH, GK>,
-      depth: number,
-    ): boolean {
+    function appendGraph<
+      GS,
+      GN extends TSchema,
+      GT,
+      GEH,
+      GK extends ResourceKind,
+    >(graph: DataflowGraph<GS, GN, GT, GEH, GK>, depth: number): boolean {
       const synthetic = new Map<NodeId, string>();
       graph.forEachNode((id, node) => {
         const key = `n${next++}`;
@@ -458,7 +485,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
     this.#graph.forEachNode((graphNode) => {
       const node = graphNode.data;
       if (node.status === "done") return;
-      const runtime = this.#runtime.get(node.id)!;
+      const runtime = this.#runtimeOf(node.id);
       const { trigger } = node;
       const satisfied = satisfiedEdges(trigger, runtime.inbound, node.id);
       const triggered =
@@ -486,16 +513,20 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
   #consume(
     runtime: NodeRuntime<N, T>,
     inputs: InputSchedule,
-  ): Map<EdgeId, N[]> | undefined {
-    let batch: Map<EdgeId, N[]> | undefined;
+  ): Map<EdgeId, Static<N>[]> | undefined {
+    let batch: Map<EdgeId, Static<N>[]> | undefined;
     for (const [edgeId, count] of inputs) {
       if (count === "none") continue;
-      const edge = runtime.inbound.get(edgeId)!;
+      const edge = runtime.inbound.get(edgeId);
+      if (edge === undefined)
+        throw new DataflowDefinitionError(
+          `Dataflow schedule reads edge "${edgeId}", which is not an inbound edge`,
+        );
       if (E.isRight(edge.transport)) continue; // value edges pop nothing
       const queue = edge.transport.left;
       const taken = queue.splice(0, count === "all" ? queue.length : count);
       if (taken.length === 0) continue;
-      batch ??= new Map<EdgeId, N[]>();
+      batch ??= new Map<EdgeId, Static<N>[]>();
       batch.set(edgeId, taken);
     }
     return batch;
@@ -503,7 +534,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
 
   #assertProfiles(): void {
     this.forEachNode((id, node) => {
-      const inbound = this.#runtime.get(id)!.inbound;
+      const inbound = this.#runtimeOf(id).inbound;
       for (const profile of Object.values(node.profiles) as ProfileData[]) {
         for (const feature of profile.features) {
           const ports = "port" in feature ? [feature.port] : feature.ports;
@@ -579,8 +610,9 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
       return work;
     };
     try {
-      if (this.tracer !== undefined)
-        trace = this.#observe(() => this.tracer!.startRun(this));
+      const { tracer } = this;
+      if (tracer !== undefined)
+        trace = this.#observe(() => tracer.startRun(this));
       options?.signal?.throwIfAborted();
       let outcome: { ok: true; value: R } | { ok: false; error: unknown };
       try {
@@ -603,10 +635,12 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
         throw outcome.error;
       }
       if (drained?.status === "rejected") throw drained.reason;
-      if (trace !== undefined) this.#observe(() => trace!.end(this.#results));
+      const run = trace;
+      if (run !== undefined) this.#observe(() => run.end(this.#results));
       return outcome.value;
     } catch (error) {
-      if (trace !== undefined) this.#observe(() => trace!.fail(error));
+      const run = trace;
+      if (run !== undefined) this.#observe(() => run.fail(error));
       throw error;
     } finally {
       active = false;
@@ -634,7 +668,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
         const availability = live.get(entry.id);
         if (availability === undefined) continue;
         const inputs =
-          this.#graph.getNode(entry.id)!.data.status === "running"
+          availability.status === "running"
             ? (options?.resolveInputs?.(entry, availability) ?? entry.inputs)
             : entry.inputs;
         column.push({ id: entry.id, inputs });
@@ -644,7 +678,13 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
       // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
       // rejection, and the error thrown is deterministically the lowest-lane one.
       const settled = await Promise.allSettled(
-        column.map((entry) => this.#runNode(entry, execution, signal)),
+        column.map((entry) =>
+          runWithUsageBudgets(
+            options?.usageBudgets?.get(entry.id) ?? [],
+            entry.id,
+            () => this.#runNode(entry, execution, signal),
+          ),
+        ),
       );
       options?.onColumn?.(Object.freeze(column.map((entry) => entry.id)));
       const failed = settled.find((outcome) => outcome.status === "rejected");
@@ -654,8 +694,9 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
   }
 
   /**
-   * Invoke one tracer callback, isolating the computation from it: a synchronous observer
-   * exception is reported and swallowed, so it can neither become a node error nor mask one.
+   * Invoke one tracer or edge-probe callback, isolating the computation from it: a synchronous
+   * observer exception is reported and swallowed, so it can neither become a node error nor mask
+   * one.
    */
   #observe<U>(callback: () => U): U | undefined {
     try {
@@ -730,7 +771,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
    *   edges, or a numeric count that is not a positive integer.
    */
   #assertInputs(id: NodeId, inputs: InputSchedule): void {
-    const inbound = this.#runtime.get(id)!.inbound;
+    const inbound = this.#runtimeOf(id).inbound;
     for (const [edgeId, count] of inputs) {
       if (!inbound.has(edgeId)) {
         throw new DataflowDefinitionError(
@@ -754,16 +795,22 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
    * activation: `"prime"` with no view, `"resume"` with exactly the delivered view.
    *
    * A throw from the body itself (`step()` or `next()`) ends the node; a configured `on_error` then
-   * runs once in this activation and its batch is routed instead of a result. Wiring, scheduling
-   * and routing failures never reach the hook.
+   * runs once in this activation and its batch is routed instead of a result. Wiring, scheduling,
+   * routing and usage-limit failures never reach the hook. A usage budget that already failed
+   * refuses the activation before it starts, and fails it after the body returns, before routing.
    */
   async #runNode(
     { id, inputs }: NodeSchedule,
     execution: DataflowRunTrace<N, T> | undefined,
     signal: AbortSignal | undefined,
   ): Promise<void> {
-    const node = this.#graph.getNode(id)!.data;
-    const runtime = this.#runtime.get(id)!;
+    const node = this.#graph.getNode(id)?.data;
+    if (node === undefined)
+      throw new DataflowDefinitionError(
+        `Dataflow node "${id}" is not registered`,
+      );
+    const runtime = this.#runtimeOf(id);
+    assertUsageAllowed();
     let activation: DataflowStepTrace<N, T> | undefined;
     /** The current throw, if any, came from the node body. */
     let inBody = false;
@@ -780,6 +827,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
         node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
         step = await node.generator.next();
+        assertUsageAllowed();
         inBody = false;
       } else {
         if (node.generator === undefined) {
@@ -798,12 +846,13 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
           );
         inBody = true;
         step = await node.generator.next(view);
+        assertUsageAllowed();
         inBody = false;
       }
 
       if (step.done === true) {
         node.status = "done";
-        this.#recordReturn(id, step.value);
+        this.#recordReturn(node, step.value);
       } else {
         for (const message of step.value) this.emit(id, message);
       }
@@ -813,8 +862,10 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
       node.status = "done";
       const failed = activation;
       if (failed !== undefined) this.#observe(() => failed.fail(cause));
-      // A wiring violation raised while routing a yield is a graph bug, not a node error.
-      if (cause instanceof DataflowDefinitionError) throw cause;
+      // A wiring violation raised while routing a yield is a graph bug, not a node error; an
+      // exhausted usage budget is no failure to recover from.
+      if (cause instanceof DataflowDefinitionError || holdsUsageFailure(cause))
+        throw cause;
       if (!inBody || node.on_error === undefined)
         throw new DataflowNodeError<EH>(id, cause as EH);
       // Cancellation of a configured node is not a failure to recover from.
@@ -823,7 +874,11 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
       try {
         messages = await node.on_error(cause, signal); // method call: the node is `this`
       } catch (error) {
-        if (error instanceof DataflowDefinitionError) throw error;
+        if (
+          error instanceof DataflowDefinitionError ||
+          holdsUsageFailure(error)
+        )
+          throw error;
         if (signal?.aborted === true && error === signal.reason) throw error;
         throw new DataflowNodeError<EH>(id, error as EH);
       }
@@ -834,50 +889,93 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never>
   }
 
   /**
-   * Push `message.payload` onto the outbound message edge of `fromId` carrying `message.id`.
+   * Push `message.payload` onto the outbound message edge of `fromId` carrying `message.id`, then
+   * report it to the edge's `probe`, if any.
    *
    * Only enqueues: it does not drive the graph, consume inputs, complete `fromId`, or resolve a
    * value edge. The next availability/read decision observes the queued payload.
    *
-   * @throws {DataflowDefinitionError} when no such edge is wired, or when it is a value edge.
+   * @throws {DataflowDefinitionError} when no such edge is wired, when it is a value edge, or when
+   *   the payload fails the edge's schema; nothing is queued then.
    */
   emit(fromId: NodeId, message: Message<N>): void {
-    this.messageQueue(fromId, message.id).push(message.payload);
+    const edge = this.messageEdge(fromId, message);
+    edge.transport.left.push(message.payload);
     this.#version++;
+    const probe = edge.probe;
+    if (probe !== undefined) this.#observe(() => probe(message.payload));
   }
 
-  /** Validate sender-local routing without modifying its transport. */
-  protected messageQueue(fromId: NodeId, edgeId: EdgeId): Queue<N> {
+  /**
+   * Validate sender-local routing and the destination edge's schema without modifying its
+   * transport, returning the message edge.
+   *
+   * @throws {DataflowDefinitionError} when no such edge is wired, when it is a value edge, or when
+   *   `message.payload` fails the edge's schema.
+   */
+  protected messageEdge(
+    fromId: NodeId,
+    message: Message<N>,
+  ): Edge<N, T> & { transport: E.Left<Queue<Static<N>>> } {
+    const edgeId = message.id;
     for (const link of this.#graph.getLinks(fromId) ?? []) {
       if (link.fromId !== fromId || link.data.id !== edgeId) continue;
-      const transport = link.data.transport;
-      if (E.isRight(transport)) {
+      const edge = link.data;
+      if (E.isRight(edge.transport)) {
         throw new DataflowDefinitionError(
           `Node ${fromId} emitted a message on value edge "${edgeId}"`,
         );
       }
-      return transport.left;
+      const { schema } = edge;
+      if (!Type.IsSchema(schema))
+        throw new DataflowDefinitionError(
+          `Message edge "${edgeId}" has no schema`,
+        );
+      checkPayload(
+        schema,
+        message.payload,
+        `Invalid payload for message edge "${edgeId}"`,
+      );
+      // Narrowed by the `isRight` rejection above.
+      return edge as Edge<N, T> & { transport: E.Left<Queue<Static<N>>> };
     }
     throw new DataflowDefinitionError(
       `Node ${fromId} emitted on unwired edge "${edgeId}"`,
     );
   }
 
-  /** Record `nodeId`'s return value and fan it into every outbound value edge; a self-edge re-arms it. */
-  #recordReturn(nodeId: NodeId, value: T): void {
+  /**
+   * Record `nodeId`'s return value and fan it into every outbound value edge; a self-edge re-arms
+   * it. Every outbound value edge's schema is checked first, so a rejected value publishes nothing.
+   * Each delivery is then reported to that edge's `probe`, if any.
+   *
+   * @throws {DataflowDefinitionError} when the value fails an outbound value edge's schema.
+   */
+  #recordReturn(node: Node<S, N, T>, value: T): void {
+    const nodeId = node.id;
+    const links = this.#graph.getLinks(nodeId) ?? [];
+    for (const link of links) {
+      if (link.fromId !== nodeId || E.isLeft(link.data.transport)) continue;
+      checkPayload(
+        link.data.schema,
+        value,
+        `Invalid payload for value edge "${link.data.id}"`,
+      );
+    }
     this.#results.set(nodeId, value);
-    for (const link of this.#graph.getLinks(nodeId) ?? []) {
+    for (const link of links) {
       if (link.fromId !== nodeId) continue;
       const edge = link.data;
       if (E.isLeft(edge.transport)) continue; // message edge
       edge.transport = E.right(O.some(value));
-      if (link.toId === nodeId) this.#rearm(nodeId);
+      if (link.toId === nodeId) this.#rearm(node);
+      const probe = edge.probe;
+      if (probe !== undefined) this.#observe(() => probe(value));
     }
   }
 
   /** A delivery on a node's own feedback edge after it returned starts another run of the node. */
-  #rearm(nodeId: NodeId): void {
-    const node = this.#graph.getNode(nodeId)!.data;
+  #rearm(node: Node<S, N, T>): void {
     if (node.status !== "done") return;
     node.status = "ready";
     node.generator = undefined;

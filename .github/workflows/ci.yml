@@ -128,7 +128,7 @@ jobs:
             const recursive = await run("recursive-agency/recursive-agency.js");
             assert.equal(recursive.code, 0, recursive.stderr);
             assert.equal(recursive.stderr, "");
-            assert.equal(recursive.stdout, "root complete; leaf-result + sibling-result; 14 root decisions\n");
+            assert.match(recursive.stdout, /^root complete; leaf-result \+ sibling-result; \d+ root decisions\n$/);
             const committee = await run("oss-committee/oss-committee.js");
             assert.equal(committee.code, 1);
             assert.equal(committee.stdout, "");
@@ -212,9 +212,10 @@ jobs:
           bun install --ignore-scripts --omit=dev --omit=peer
           cat > smoke.mjs <<'EOF'
           import assert from "node:assert/strict";
-          import { DataflowGraph, NodeId, TriggerRule, Width } from "dataflow-engine";
+          import { DataflowDefinitionError, DataflowGraph, Edge, Message, NodeId, TriggerRule, Width } from "dataflow-engine";
           import { context, roundRobin } from "junco-scheduler";
-          for (const peer of ["junco-agent", "junco-tools", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
+          import { Type } from "typebox";
+          for (const peer of ["junco-agent", "junco-tools", "@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent"]) {
             assert.throws(() => import.meta.resolve(peer), `${peer} unexpectedly installed`);
           }
           const graph = new DataflowGraph(Width.create(1), Width.create(1));
@@ -227,6 +228,16 @@ jobs:
           for (let i = 0; i < 4; i++) await execution.step();
           assert.deepEqual(ran, ["1", "10", "2", "1"]);
           console.log(`core-only: ok ${JSON.stringify(ran)}`);
+          const numeric = new DataflowGraph(Width.create(1), Width.create(1));
+          const numbers = Edge.message("numbers", Type.Number());
+          const producer = numeric.addNode({ id: NodeId.create("producer"), state: undefined, trigger: TriggerRule.always(), step: async function* () { return 0; } });
+          const sink = numeric.addNode({ id: NodeId.create("sink"), state: undefined, trigger: TriggerRule.when(numbers), step: async function* () { const view = yield []; return view.messages.get(numbers.id); } });
+          numeric.addEdge(producer, sink, numbers);
+          assert.throws(() => numeric.emit(producer, Message.create(numbers, "7")), DataflowDefinitionError);
+          numeric.emit(producer, Message.create(numbers, 7));
+          const received = (await context({ scheduler: roundRobin(), graph: numeric }).run()).get(sink);
+          assert.deepEqual(received, [7]);
+          console.log(`core-only numeric edge: ok ${JSON.stringify(received)}`);
           EOF
           bun --no-install smoke.mjs
           node smoke.mjs

@@ -72,7 +72,14 @@ export {
   type LspToolInput,
   type LspToolOptions,
 } from "./lsp.js";
-export { type Contract, InfoTool, RecvTool, SendTool } from "./messaging.js";
+export {
+  type Contract,
+  InfoTool,
+  RecvTool,
+  type RecvToolHost,
+  SendTool,
+  type SendToolHost,
+} from "./messaging.js";
 export type { NativeModule } from "./native.js";
 export { ShellMuxOperations } from "./operations.js";
 export { EmptyPolicy, LockPolicy, Policy } from "./policy.js";
@@ -99,9 +106,6 @@ export { ReleaseTool } from "./release.js";
 export { ShellMuxLease } from "./shell-mux.js";
 export {
   AssignedTaskTool,
-  invokeTaskTool,
-  isAssignedTaskTool,
-  isTaskTool,
   type TaskCall,
   type TaskDecision,
   type TaskInput,

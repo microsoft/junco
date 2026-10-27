@@ -20,6 +20,7 @@ import type {
   NativeTuiNode,
   NativeTuiTrace,
 } from "junco-tools/native";
+import type { TSchema } from "typebox";
 import { nodePolicies } from "./node-policy.js";
 import {
   escapeTuiLabel,
@@ -87,7 +88,7 @@ export function formatTuiPayload(record: unknown): string {
 }
 
 // Generic graph parameters are erased only in retained topology, never in observer handles.
-type Graph = DataflowGraph<unknown, unknown, unknown, unknown>;
+type Graph = DataflowGraph<unknown, TSchema, unknown, unknown>;
 type Metadata = { node: NativeTuiNode; rawId: string; agent: boolean };
 type Scope = {
   graph: Graph;
@@ -136,7 +137,7 @@ function badgeBytes(node?: NativeTuiNode): number {
   return byteLength(badge) <= maximum
     ? byteLength(badge)
     : byteLength(
-        utf8Prefix(badge, maximum - byteLength(TRUNCATED)) + TRUNCATED + " ",
+        `${utf8Prefix(badge, maximum - byteLength(TRUNCATED))}${TRUNCATED} `,
       );
 }
 
@@ -433,23 +434,18 @@ export class TuiTracer implements DataflowTracer {
   #registerNode(
     graph: Graph,
     id: string,
-    node: Node<unknown, unknown, unknown>,
+    node: Node<unknown, TSchema, unknown>,
   ): string {
     const serial = serialOf(graph);
     const key = JSON.stringify([serial, id]);
     this.#nodeKeys.set(node, key);
-    const agent = nodePolicies.get(node.step)?.agent !== undefined;
-    const previous = this.#metadata.get(key);
-    if (previous === undefined) {
+    if (!this.#metadata.has(key)) {
       this.#metadata.set(key, {
         node: { key, nodeId: escapeTuiLabel(id), scope: `g${serial}` },
         rawId: id,
-        agent,
+        agent: nodePolicies.get(node.step)?.agent !== undefined,
       });
       this.#unpublishedNodes.add(key);
-    } else {
-      // Task promotion replaces the step, not this concrete member's agent identity.
-      previous.agent ||= agent;
     }
     return key;
   }
@@ -622,10 +618,12 @@ export class TuiTracer implements DataflowTracer {
     if (this.#native !== undefined) {
       try {
         this.#native.setGraph(
-          Array.from(
-            this.#unpublishedNodes,
-            (key) => this.#metadata.get(key)!.node,
-          ),
+          Array.from(this.#unpublishedNodes, (key) => {
+            const metadata = this.#metadata.get(key);
+            if (metadata === undefined)
+              throw new Error(`TuiTracer has no metadata for node ${key}`);
+            return metadata.node;
+          }),
           this.#lines,
           this.#boxes,
         );
@@ -687,7 +685,8 @@ export class TuiTracer implements DataflowTracer {
       let bytes = byteLength(entry.record.text);
       const parts = [entry.record.text];
       for (const character of record.text) {
-        const code = character.codePointAt(0)!;
+        // UTF-16 unit: an astral character's high surrogate escapes exactly like its code point.
+        const code = character.charCodeAt(0);
         const escaped =
           character === "\n"
             ? character
@@ -711,15 +710,16 @@ export class TuiTracer implements DataflowTracer {
     }
     entry.bytes = entry.badgeBytes + byteLength(entry.record.text);
     this.#pendingBytes += entry.bytes;
-    while (
-      this.#pendingBytes > HISTORY_BYTES ||
-      this.#pending.size > HISTORY_RECORDS
-    ) {
-      const first = this.#pending.entries().next().value!;
-      this.#pending.delete(first[0]);
-      this.#pendingBytes -= first[1].bytes;
-      if (first[1].indexKey !== undefined)
-        this.#pendingIndex.delete(first[1].indexKey);
+    for (const [serial, pending] of this.#pending) {
+      if (
+        this.#pendingBytes <= HISTORY_BYTES &&
+        this.#pending.size <= HISTORY_RECORDS
+      )
+        break;
+      this.#pending.delete(serial);
+      this.#pendingBytes -= pending.bytes;
+      if (pending.indexKey !== undefined)
+        this.#pendingIndex.delete(pending.indexKey);
       ++this.#omitted;
     }
   }
@@ -754,7 +754,7 @@ export class TuiTracer implements DataflowTracer {
     }
   }
 
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     if (this.#closed) return quiet.startRun(graph);
@@ -886,7 +886,7 @@ export class TuiTracer implements DataflowTracer {
   }
 
   /** Observe only the concrete scheduled member; subscriptions never own agent execution. */
-  observeAgent<S, N, T>(
+  observeAgent<S, N extends TSchema, T>(
     node: Node<S, N, T>,
     events: JuncoAgent["events"],
   ): () => void {

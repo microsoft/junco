@@ -4,9 +4,10 @@ import { dirname, resolve } from "node:path";
 import {
   type AgentTool,
   formatSkillsForSystemPrompt,
+  type PromptTemplate,
   type Skill,
 } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
 import {
   loadSkillsFromDir,
   type ModelRuntime,
@@ -22,7 +23,9 @@ import {
   type SchedulerContext,
 } from "junco-scheduler";
 import * as tools from "junco-tools";
-import type { Agentic, AgenticInput } from "../agentic.js";
+import { type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
+import type { Agentic } from "../agentic.js";
 import { Deterministic } from "../deterministic.js";
 import { JuncoGraph } from "../junco-graph.js";
 import type { MockAgent } from "../mock-agent.js";
@@ -52,13 +55,28 @@ import {
   type NodeSpec,
 } from "./schema.js";
 
-type Edge = graph.Edge<AgenticInput, AssistantMessage>;
+/** YAML schemas are loaded at runtime: their payload/result domains are only known dynamically. */
+type Edge = graph.Edge<TSchema, unknown>;
 type Execution = SchedulerContext<
-  Agentic,
-  AgenticInput,
-  AssistantMessage,
+  Agentic<TSchema, unknown>,
+  TSchema,
+  unknown,
   AgencyNodeMetadata,
-  JuncoGraph
+  JuncoGraph<TSchema, unknown>
+>;
+type YamlAgent = agent.JuncoAgent<
+  Skill,
+  PromptTemplate,
+  AgentTool,
+  TSchema,
+  unknown
+>;
+type YamlMockAgent = MockAgent<
+  Skill,
+  PromptTemplate,
+  AgentTool,
+  TSchema,
+  unknown
 >;
 export type AgentSpec = {
   readonly graph: string;
@@ -70,14 +88,14 @@ export type AgentSpec = {
   readonly collection?: tools.ToolCollection;
   /** The immediate parent graph's recorder view; the agent's context is `recorderNodeId` in it. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   >;
   /** The agent's local node ID. */
   readonly recorderNodeId?: string;
 };
 /** What a `kind: code` definition sees when its node is registered. */
 export type CodeContext<C = unknown> = {
-  readonly graph: JuncoGraph;
+  readonly graph: JuncoGraph<TSchema, unknown>;
   readonly label: string;
   readonly node: string;
   readonly edges: ReadonlyMap<string, Edge>;
@@ -85,15 +103,15 @@ export type CodeContext<C = unknown> = {
   readonly collection?: tools.ToolCollection;
   /** The enclosing graph's recorder view; the node's context is `recorderNodeId` in it. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   >;
   readonly recorderNodeId?: string;
   readonly context: C;
   readonly signal?: AbortSignal;
 };
 export type CodeRegistration = {
-  readonly state: Deterministic<AgenticInput, AssistantMessage>;
-  readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;
+  readonly state: Deterministic<TSchema, unknown>;
+  readonly is_available?: Available;
   readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
 };
 /** Definition keyed by the code node's id in the workflow config. */
@@ -104,7 +122,12 @@ export type BuildOptions<C = unknown> = {
   readonly cwd: string;
   readonly scheduler: (
     graph: string,
-  ) => Scheduler<Agentic, AgenticInput, AssistantMessage, AgencyNodeMetadata>;
+  ) => Scheduler<
+    Agentic<TSchema, unknown>,
+    TSchema,
+    unknown,
+    AgencyNodeMetadata
+  >;
   readonly policy?: tools.Policy;
   readonly collection?: tools.ToolCollection;
   /** Limits/monitoring of the collection build creates; rejected with collection, agents or createAgent. */
@@ -121,7 +144,7 @@ export type BuildOptions<C = unknown> = {
   readonly tracer?: tracer.DataflowTracer;
   /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   >;
   /** The root graph's context in `recorder` (default: the recorder's own context). */
   readonly recorderNodeId?: string;
@@ -132,11 +155,11 @@ export type BuildOptions<C = unknown> = {
    * registered agents owned by the graph. Models, tools, skills and system prompts are already
    * configured on these agents; node prompts, contracts and profiles still apply.
    */
-  readonly agents?: Readonly<Record<string, agent.JuncoAgent>>;
+  readonly agents?: Readonly<Record<string, YamlAgent>>;
   /** Factory agents stay caller-owned on construction failure; `createAgentOwnership` decides on success. */
   readonly createAgent?: (
     spec: AgentSpec,
-  ) => Promise<agent.JuncoAgent | MockAgent>;
+  ) => Promise<YamlAgent | YamlMockAgent>;
   /**
    * Owner of successfully registered factory agents (default `"graph"`, which disposes them on
    * close). `"caller"`: graph close aborts and joins them but never disposes them, so persistent
@@ -147,27 +170,26 @@ export type BuildOptions<C = unknown> = {
     Record<
       string,
       (context: {
-        graph: JuncoGraph;
+        graph: JuncoGraph<TSchema, unknown>;
         edges: ReadonlyMap<string, Edge>;
-      }) => graph.AvailabilityFn<AgenticInput, AssistantMessage> | undefined
+      }) => Available | undefined
     >
   >;
   readonly context?: C;
   readonly signal?: AbortSignal;
 };
-export type FromYamlOptions<C = unknown> = BuildOptions<C> & {
-  readonly params?: ParseOptions["params"];
-};
+export type FromYamlOptions<C = unknown> = BuildOptions<C> & ParseOptions;
 
-/** The trimmed text of `member`'s normally completed result; throws on a missing, abnormal or blank result. */
-export function finalText(
-  message: AssistantMessage | undefined,
-  member: string,
-): string {
-  if (message?.stopReason !== "stop") {
-    const detail = message?.errorMessage ? `: ${message.errorMessage}` : "";
+/** The trimmed text of `member`'s normally completed assistant result; throws on a missing, non-assistant, abnormal or blank result. */
+export function finalText(message: unknown, member: string): string {
+  if (message === undefined)
+    throw new Error(`${member} did not finish normally: no final message`);
+  if (!Value.Check(agent.AssistantMessageSchema, message))
+    throw new Error(`${member} did not produce an assistant message`);
+  if (message.stopReason !== "stop") {
+    const detail = message.errorMessage ? `: ${message.errorMessage}` : "";
     throw new Error(
-      `${member} did not finish normally: ${message?.stopReason ?? "no final message"}${detail}`,
+      `${member} did not finish normally: ${message.stopReason}${detail}`,
     );
   }
   const text = contentText(message.content).trim();
@@ -238,10 +260,16 @@ export async function resolveAgents(
     if (!isAgent(node)) continue;
     const skills: Skill[] = [];
     for (const name of node.skills ?? []) {
-      const skill =
-        loaded.get(name) ??
-        (await loadSkill(name, resolve(options.cwd, doc.skills![name]!)));
-      loaded.set(name, skill);
+      let skill = loaded.get(name);
+      if (skill === undefined) {
+        const path = doc.skills?.[name];
+        if (path === undefined)
+          throw new TypeError(
+            `build: unknown skill "${name}" for node "${id}"`,
+          );
+        skill = await loadSkill(name, resolve(options.cwd, path));
+        loaded.set(name, skill);
+      }
       skills.push(skill);
     }
     const extra = (node.tools ?? []).map((name) => {
@@ -259,7 +287,12 @@ export async function resolveAgents(
     const servers = (node.mcp ?? []).map((name) => {
       let definition = definitions.get(name);
       if (!definition) {
-        definition = mcpDefinition(name, doc.mcp![name]!);
+        const server = doc.mcp?.[name];
+        if (server === undefined)
+          throw new TypeError(
+            `build: unknown mcp server "${name}" for node "${id}"`,
+          );
+        definition = mcpDefinition(name, server);
         definitions.set(name, definition);
       }
       return definition;
@@ -287,12 +320,12 @@ export function createJuncoAgent(
   spec: AgentSpec,
   ladder: Ladder,
   models?: ModelRuntime,
-): Promise<agent.JuncoAgent> {
+): Promise<YamlAgent> {
   const { provider, modelId, thinking } = resolveRung(
     ladder,
     DEFAULT_MODEL_STRENGTH,
   );
-  return agent.JuncoAgent.create({
+  return agent.JuncoAgent.create<Skill, PromptTemplate, TSchema, unknown>({
     provider,
     model: modelId,
     models,
@@ -350,7 +383,7 @@ function nodeProfiles(
     return profilesOf(
       file,
       key,
-      Object.keys(file.nodes[key]!) as graph.ResourceKind[],
+      Object.keys(file.nodes[key]) as graph.ResourceKind[],
     );
   if (node.profiles !== undefined)
     return Object.fromEntries(
@@ -366,15 +399,54 @@ function nodeProfiles(
     : undefined;
 }
 
-function createEdges(spec: GraphSpec): Map<string, Edge> {
+/** Edge `id` of `edges`; parse guarantees every referenced edge is declared. */
+function edgeOf(edges: ReadonlyMap<string, Edge>, id: string): Edge {
+  const edge = edges.get(id);
+  if (edge === undefined)
+    throw new graph.DataflowDefinitionError(`unknown edge "${id}"`);
+  return edge;
+}
+
+/**
+ * The engine edges of `spec`. A `probe: true` edge reports each publication to the owning graph's
+ * recorder current at delivery time (`recorder`), tagged with its edge ID.
+ */
+function createEdges(
+  spec: GraphSpec,
+  recorder: (() => BuildOptions["recorder"]) | undefined,
+): Map<string, Edge> {
   return new Map(
-    (spec.edges ?? []).map((edge) => [
-      edgeId(edge),
-      edge.kind === "message"
-        ? graph.Edge.message<AgenticInput, AssistantMessage>(edgeId(edge))
-        : graph.Edge.value<AgenticInput, AssistantMessage>(edgeId(edge)),
-    ]),
+    (spec.edges ?? []).map((edge): [string, Edge] => {
+      const id = edgeId(edge);
+      const probe =
+        edge.probe === true && recorder !== undefined
+          ? (value: unknown) =>
+              // parse admits probes on numeric types only; the engine checked `value` against it.
+              recorder()?.record({
+                resource: "probe",
+                kind: "probe",
+                edgeId: id,
+                value: value as number,
+              })
+          : undefined;
+      return [
+        id,
+        edge.kind === "message"
+          ? graph.Edge.message<TSchema, unknown>(id, edge.schema, probe)
+          : graph.Edge.value(id, edge.schema, probe),
+      ];
+    }),
   );
+}
+
+/** The admission domain of a port routing onto `edges`: `Never` when empty, else their union. */
+function domain(edges: Iterable<Edge>): TSchema {
+  const schemas = [...new Set(edges)].map((edge) => edge.schema);
+  return schemas.length === 0
+    ? Type.Never()
+    : schemas.length === 1
+      ? schemas[0]
+      : Type.Union(schemas);
 }
 
 function createSource(
@@ -382,35 +454,36 @@ function createSource(
   label: string,
   edges: ReadonlyMap<string, Edge>,
   profiles: graph.ProfileSet | undefined,
-): graph.Source<AgenticInput, AssistantMessage> {
-  return new graph.Source<AgenticInput, AssistantMessage>(
+): graph.Source<TSchema, unknown> {
+  const routes = spec.source?.routes;
+  return new graph.Source<TSchema, unknown>(
     (view) => {
-      const routes = spec.source?.routes;
       if (routes === undefined)
         throw new graph.DataflowDefinitionError(
           `${label} does not accept external input`,
         );
-      const messages: graph.Message<AgenticInput>[] = [];
-      function forward(id: string, payload: AgenticInput): void {
-        if (!Object.hasOwn(routes!, id))
+      const messages: graph.Message<TSchema>[] = [];
+      const forward = (id: string, payload: unknown): void => {
+        if (!Object.hasOwn(routes, id))
           throw new graph.DataflowDefinitionError(
             `${label} does not accept input on edge "${id}"`,
           );
-        for (const target of routes![id]!)
-          messages.push(graph.Message.create(edges.get(target)!, payload));
-      }
+        for (const target of routes[id])
+          messages.push(graph.Message.create(edgeOf(edges, target), payload));
+      };
       for (const id of view.messages.keys())
         for (const payload of view.messages.get(id) ?? []) forward(id, payload);
-      for (const id of view.values.keys())
-        forward(id, {
-          kind: "prompt",
-          text: finalText(view.values.get(id), id),
-        });
+      for (const id of view.values.keys()) forward(id, view.values.get(id));
       return messages;
     },
     {
       id: graph.NodeId.create("$source"),
       description: spec.source?.description,
+      schema: domain(
+        Object.values(routes ?? {})
+          .flat()
+          .map((target) => edgeOf(edges, target)),
+      ),
       ...(profiles ? { profiles } : {}),
     },
   );
@@ -418,30 +491,27 @@ function createSource(
 
 function createSink(
   spec: GraphSpec,
+  edges: ReadonlyMap<string, Edge>,
   parentOutputs: readonly Edge[],
-  result: (id: string) => O.Option<AssistantMessage>,
+  result: (id: string) => O.Option<unknown>,
   is_available: Available | undefined,
   profiles: graph.ProfileSet | undefined,
-): graph.Sink<AgenticInput, AssistantMessage> {
-  const returns = spec.sink?.returns ?? inboundEdges(spec, "$sink")[0]!.from;
-  return new graph.Sink<AgenticInput, AssistantMessage>(
-    async function* (
-      port,
-    ): graph.NodeGenerator<AgenticInput, AssistantMessage> {
+): graph.Sink<TSchema, unknown> {
+  const returns = spec.sink?.returns ?? inboundEdges(spec, "$sink")[0].from;
+  return new graph.Sink<TSchema, unknown>(
+    async function* (port): graph.NodeGenerator<TSchema, unknown> {
       yield [];
       const r = result(returns);
       if (O.isNone(r)) throw new Error(`${returns} did not produce a result`);
-      if (parentOutputs.length) {
-        const text = finalText(r.value, returns);
-        for (const edge of parentOutputs)
-          port.send(graph.Message.create(edge, { kind: "prompt", text }));
-      }
+      for (const edge of parentOutputs)
+        port.send(graph.Message.create(edge, r.value));
       return r.value;
     },
     {
       id: graph.NodeId.create("$sink"),
       description: spec.sink?.description,
-      trigger: resolveTrigger(spec, "$sink", spec.sink?.trigger),
+      schema: domain(parentOutputs),
+      trigger: resolveTrigger(spec, "$sink", edges, spec.sink?.trigger),
       ...(is_available ? { is_available } : {}),
       ...(profiles ? { profiles } : {}),
     },
@@ -449,25 +519,22 @@ function createSink(
 }
 
 function registerEmit(
-  g: JuncoGraph,
+  g: JuncoGraph<TSchema, unknown>,
   registration: Registration,
   text: string,
   outbound: readonly Edge[],
 ): void {
   let published = false;
-  const state = new Deterministic<AgenticInput, AssistantMessage>(
-    async function* (
-      signal,
-    ): graph.NodeGenerator<AgenticInput, AssistantMessage> {
-      const payload = { kind: "prompt", text } as const;
-      while (true) {
-        signal.throwIfAborted();
-        published = true;
-        yield outbound.map((edge) => graph.Message.create(edge, payload));
-      }
-    },
-    tools.EmptyPolicy,
-  );
+  const state = new Deterministic<TSchema, unknown>(async function* (
+    signal,
+  ): graph.NodeGenerator<TSchema, unknown> {
+    const payload = { kind: "prompt", text } as const;
+    while (true) {
+      signal.throwIfAborted();
+      published = true;
+      yield outbound.map((edge) => graph.Message.create(edge, payload));
+    }
+  }, tools.EmptyPolicy);
   g.addNode({
     ...registration,
     trigger: graph.TriggerRule.always(),
@@ -478,24 +545,41 @@ function registerEmit(
 
 async function registerAgent(
   c: Construction,
-  g: JuncoGraph,
+  g: JuncoGraph<TSchema, unknown>,
   spec: GraphSpec,
+  edges: ReadonlyMap<string, Edge>,
   id: string,
   node: Extract<NodeSpec, { kind?: "agent" }>,
   registration: Registration,
   key: string,
 ): Promise<void> {
-  const instance = c.agents
-    ? c.agents.get(key)!
-    : c.options.createAgent
-      ? await c.options.createAgent(placed(c.specs.next().value!, g, id))
-      : await createJuncoAgent(
-          placed(c.specs.next().value!, g, id),
-          c.options.ladder!,
-          c.options.models,
+  let instance: YamlAgent | YamlMockAgent;
+  if (c.agents) {
+    const prepared = c.agents.get(key);
+    if (prepared === undefined)
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: missing prepared agent for node "${key}"`,
+      );
+    instance = prepared;
+  } else {
+    const next = c.specs.next();
+    if (next.done)
+      throw new graph.DataflowDefinitionError(
+        `junco-syntax: no agent spec for node "${key}"`,
+      );
+    const spec = placed(next.value, g, id);
+    if (c.options.createAgent) instance = await c.options.createAgent(spec);
+    else {
+      const { ladder } = c.options;
+      if (ladder === undefined)
+        throw new graph.DataflowDefinitionError(
+          "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
         );
-  if (!c.agents && !c.options.createAgent)
-    c.acquired.push(instance as agent.JuncoAgent);
+      const created = await createJuncoAgent(spec, ladder, c.options.models);
+      c.acquired.push(created);
+      instance = created;
+    }
+  }
   if (node.prompt !== undefined)
     instance.stagePrompt(compilePrompt(node.prompt));
   const byEdge = node.contracts;
@@ -508,25 +592,35 @@ async function registerAgent(
               "invalid_state",
               `No contract for edge "${edgeId}"`,
             );
-          return { expect: byEdge[edgeId]! };
+          return { expect: byEdge[edgeId] };
         };
   const registered = g.addNode({
     ...registration,
-    trigger: resolveTrigger(spec, id, node.trigger),
+    trigger: resolveTrigger(spec, id, edges, node.trigger),
     state: instance,
     policy: c.policy,
     ...(contract ? { contract } : {}),
   });
   if (c.options.createAgent) {
     // No await since registration: until the build commits, rollback never disposes this agent.
-    const policy = nodePolicies.get(g.getNode(registered)!.step)!;
+    const step = g.getNode(registered)?.step;
+    const policy = step && nodePolicies.get(step);
+    if (policy === undefined)
+      throw new agent.JuncoAgentError(
+        "invalid_state",
+        `Node "${id}" has no policy`,
+      );
     policy.agentOwnership = "caller";
     c.borrowed.push(policy);
   }
 }
 
 /** `spec` at node `id` of `g`, carrying `g`'s recorder view when it records. */
-const placed = (spec: AgentSpec, g: JuncoGraph, id: string): AgentSpec =>
+const placed = (
+  spec: AgentSpec,
+  g: JuncoGraph<TSchema, unknown>,
+  id: string,
+): AgentSpec =>
   g.recorder === undefined
     ? spec
     : { ...spec, recorder: g.recorder, recorderNodeId: id };
@@ -542,12 +636,16 @@ async function buildGraph(
   recorderNodeId: string | undefined,
 ): Promise<Execution> {
   c.options.signal?.throwIfAborted();
-  const edges = createEdges(spec);
+  const edges = createEdges(
+    spec,
+    recorder === undefined ? undefined : () => g.recorder,
+  );
   const portProfiles = c.profiled ? ZERO : undefined;
   const source = createSource(spec, label, edges, portProfiles);
   let sinkHook: Available | undefined;
   const sink = createSink(
     spec,
+    edges,
     parentOutputs,
     (id) => g.result(graph.NodeId.create(id)),
     c.options.available?.$sink
@@ -556,7 +654,7 @@ async function buildGraph(
     portProfiles,
   );
   // parse validated these dynamic integers; Width.create only accepts numeric literals.
-  const g: JuncoGraph = new JuncoGraph(
+  const g = new JuncoGraph<TSchema, unknown>(
     source,
     sink,
     (spec.window ?? 1) as graph.WidthType,
@@ -581,7 +679,7 @@ async function buildGraph(
     c.options.signal?.throwIfAborted();
     const outbound = outboundEdges(spec, id)
       .filter((e) => e.kind === "message")
-      .map((e) => edges.get(edgeId(e))!);
+      .map((e) => edgeOf(edges, edgeId(e)));
     const is_available = hook(id);
     const key = path === "" ? id : `${path}/${id}`;
     const profiles = nodeProfiles(c, key, node);
@@ -606,12 +704,17 @@ async function buildGraph(
       );
       g.addNode({
         ...registration,
-        trigger: resolveTrigger(spec, id, node.trigger),
+        trigger: resolveTrigger(spec, id, edges, node.trigger),
         state: child,
       });
       c.partialRoots.delete(child.graph);
     } else if (node.kind === "code") {
-      const created = await c.options.code![id]!({
+      const definition = c.options.code?.[id];
+      if (definition === undefined)
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: code node "${id}" has no definition in options.code`,
+        );
+      const created = await definition({
         graph: g,
         label,
         node: id,
@@ -626,19 +729,19 @@ async function buildGraph(
       g.addNode({
         ...registration,
         ...(created.is_available ? { is_available: created.is_available } : {}),
-        trigger: resolveTrigger(spec, id, node.trigger),
+        trigger: resolveTrigger(spec, id, edges, node.trigger),
         state: created.state,
         ...(created.contract ? { contract: created.contract } : {}),
       });
     } else {
-      await registerAgent(c, g, spec, id, node, registration, key);
+      await registerAgent(c, g, spec, edges, id, node, registration, key);
     }
   }
   for (const edge of spec.edges ?? [])
     g.addEdge(
       graph.NodeId.create(edge.from),
       graph.NodeId.create(edge.to),
-      edges.get(edgeId(edge))!,
+      edgeOf(edges, edgeId(edge)),
     );
   return execution;
 }
@@ -673,16 +776,30 @@ async function rollback(
   throw error;
 }
 
+/**
+ * A placeholder's text for one payload of edge `id`: chat input text (`appendMessage` contributes
+ * nothing) or a normally completed assistant result. Other payloads are read through `recv` or code.
+ */
+function render(payload: unknown, id: string): string {
+  if (Value.Check(agent.AgenticInputSchema, payload))
+    return "text" in payload ? payload.text : "";
+  if (Value.Check(agent.AssistantMessageSchema, payload))
+    return finalText(payload, id);
+  throw new TypeError(
+    `Prompt placeholder {{${id}}} renders only AgenticInput or AssistantMessage payloads; read edge "${id}" with recv or a code node`,
+  );
+}
+
 function compilePrompt(
   text: string,
-): NonNullable<agent.AgenticOptions["prompt"]> {
+): string | ((inputs: graph.ParentView<TSchema, unknown>) => string) {
   if (![...text.matchAll(PLACEHOLDER)].length) return text;
   return (inputs) =>
     text.replace(PLACEHOLDER, (_, id: string) => {
       const key = graph.EdgeId.create(id);
-      if (inputs.values.has(key)) return finalText(inputs.values.get(key), id);
+      if (inputs.values.has(key)) return render(inputs.values.get(key), id);
       return (inputs.messages.get(key) ?? [])
-        .map((m) => ("text" in m ? (m.text ?? "") : ""))
+        .map((payload) => render(payload, id))
         .join("\n\n");
     });
 }
@@ -697,25 +814,25 @@ type Construction = {
   readonly collection: tools.ToolCollection | undefined;
   readonly profiled: boolean;
   readonly specs: Iterator<AgentSpec>;
-  readonly agents: ReadonlyMap<string, agent.JuncoAgent> | undefined;
+  readonly agents: ReadonlyMap<string, YamlAgent> | undefined;
   /** Owned agents in acquisition order, including prepared agents not yet registered. */
-  readonly acquired: agent.JuncoAgent[];
+  readonly acquired: YamlAgent[];
   /** Graphs not yet adopted by a parent. */
-  readonly partialRoots: Set<JuncoGraph>;
+  readonly partialRoots: Set<JuncoGraph<TSchema, unknown>>;
   /** Registered factory nodes, caller-owned until the whole build commits. */
   readonly borrowed: NodePolicy[];
 };
 type Registration = {
   readonly id: graph.NodeIdType;
   readonly description: string | undefined;
-  readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;
+  readonly is_available?: Available;
   readonly profiles?: graph.ProfileSet;
 };
-type Available = graph.AvailabilityFn<AgenticInput, AssistantMessage>;
+type Available = graph.AvailabilityFn<TSchema, unknown>;
 
 function validateAgents(
   spec: GraphSpec,
-  agents: ReadonlyMap<string, agent.JuncoAgent>,
+  agents: ReadonlyMap<string, YamlAgent>,
 ): void {
   if (new Set(agents.values()).size !== agents.size)
     throw new graph.DataflowDefinitionError(
@@ -749,7 +866,7 @@ export async function build<C = unknown>(
       : new Map(Object.entries(options.agents));
   const owned = {
     acquired: agents ? [...new Set(agents.values())] : [],
-    partialRoots: new Set<JuncoGraph>(),
+    partialRoots: new Set<JuncoGraph<TSchema, unknown>>(),
   };
   let creates: boolean;
   let profiled: boolean;

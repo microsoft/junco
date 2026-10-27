@@ -10,7 +10,7 @@
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { graph, JuncoGraph, schedules, syntax } from "junco-agency";
-import { runCli } from "../support.ts";
+import { runCli, type YamlExecution } from "../support.ts";
 import source from "./mixed.yml" with { type: "text" };
 
 const LADDER = schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" });
@@ -20,7 +20,7 @@ export const goalsPrompt = (document.graph.nodes.Goals as Extract<syntax.NodeSpe
 
 /** Build the mixed graph and identify its final Reviewer. */
 export interface MixedGraph {
-  execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>>;
+  execution: YamlExecution;
   reviewerId: graph.NodeIdType;
 }
 

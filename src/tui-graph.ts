@@ -2,6 +2,7 @@ import { DataflowGraph, type ResourceKind } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import type { TextEdge } from "mermaid-ascii";
 import mermaidAscii from "mermaid-ascii";
+import type { TSchema } from "typebox";
 
 export type TuiNodeBox = {
   readonly id: string;
@@ -18,7 +19,7 @@ export type TuiGraphSection = {
 
 const UNSUPPORTED = "Unsupported DataflowGraph layout";
 
-type AnyGraph = DataflowGraph<unknown, unknown, unknown, unknown>;
+type AnyGraph = DataflowGraph<unknown, TSchema, unknown, unknown>;
 
 /** One graph scope: its node labels and links, plus nested subgraph scopes. */
 interface Frame {
@@ -139,9 +140,13 @@ function* preorder(frame: Frame): Generator<Frame> {
 }
 
 /** Root and nested canvases in preorder, with section-relative geometry. */
-export function renderTuiGraph<S, N, T, EH, K extends ResourceKind>(
-  graph: DataflowGraph<S, N, T, EH, K>,
-): readonly TuiGraphSection[] {
+export function renderTuiGraph<
+  S,
+  N extends TSchema,
+  T,
+  EH,
+  K extends ResourceKind,
+>(graph: DataflowGraph<S, N, T, EH, K>): readonly TuiGraphSection[] {
   const root = frameOf(graph as unknown as AnyGraph, [], new Set([graph]));
   if (root.nodes.length === 0) {
     return [{ path: [], lines: ["(empty graph)"], boxes: [] }];

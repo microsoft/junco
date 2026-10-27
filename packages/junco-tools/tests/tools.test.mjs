@@ -1150,7 +1150,10 @@ test("code_graph Fstar include paths refresh external dependencies", {
   };
   try {
     await library("lib1", "module Lib\nlet pick (n:nat) : nat = n\n");
-    await library("lib2", "module Lib\nlet other = 0\nlet pick (n:nat) : nat = n\n");
+    await library(
+      "lib2",
+      "module Lib\nlet other = 0\nlet pick (n:nat) : nat = n\n",
+    );
     const lib1 = "../outside/lib1/Lib.fst";
     const lib2 = "../outside/lib2/Lib.fst";
     assert.deepEqual(await selected(), [

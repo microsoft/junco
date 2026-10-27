@@ -21,20 +21,20 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco-agency";
+import type { TSchema } from "typebox";
 import { runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
 
 /** Validate both reports before publishing the dependency report as the graph result. */
 export const Reports: syntax.DeterministicNode = ({ policy }) => {
   return {
-    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* () {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
       const inputs = yield [];
       syntax.finalText(inputs.values.get(graph.EdgeId.create("Research->Reports")), "Research");
       const result = inputs.values.get(graph.EdgeId.create("Dependencies->Reports"));
       syntax.finalText(result, "Dependencies");
-      return result!;
+      return result;
     }, policy),
   };
 };
@@ -112,8 +112,8 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     const results = await execution.run({ signal });
     signal?.throwIfAborted();
-    researchText = contentText(results.get(graph.NodeId.create("Research"))!.content).trim();
-    dependencyText = contentText(results.get(execution.graph.sink.id)!.content).trim();
+    researchText = syntax.finalText(results.get(graph.NodeId.create("Research")), "Research");
+    dependencyText = syntax.finalText(results.get(execution.graph.sink.id), "Dependencies");
   }
   signal?.throwIfAborted();
   console.log(`Central classes:\n${researchText}`);

@@ -10,7 +10,6 @@ import {
   type DataflowTracer,
   Edge,
   type EdgeIdType,
-  type Message,
   type NodeGenerator,
   NodeId,
   type NodeIdType,
@@ -26,7 +25,11 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { JuncoAgent, JuncoAgentError } from "junco-agent";
+import {
+  type AgenticInputSchema,
+  JuncoAgent,
+  JuncoAgentError,
+} from "junco-agent";
 import { parallel, type SchedulerContext } from "junco-scheduler";
 import {
   beginOperation,
@@ -34,16 +37,20 @@ import {
   issueLog,
   type ProfileActivation,
   type ProfileRecorder,
+  RecvTool,
+  SendTool,
   ToolCollection,
   type ToolCollectionOptions,
 } from "junco-tools";
 import type { Graph } from "ngraph.graph";
+import type { TSchema } from "typebox";
 import { AgentDriver } from "./agent-node.js";
 import { cancellation, settleAll } from "./agent-operations.js";
 import type {
   Agentic,
-  AgenticInput,
   AgenticNode,
+  AnyJuncoAgent,
+  AnyMockAgent,
   CompactionPolicy,
 } from "./agentic.js";
 import { Deterministic } from "./deterministic.js";
@@ -61,19 +68,19 @@ import { build, type FromYamlOptions } from "./syntax/build.js";
 import { parse } from "./syntax/parse.js";
 import { TuiTracer } from "./tui-tracer.js";
 
-type NestedContext<N, T> = SchedulerContext<
+type NestedContext<N extends TSchema, T> = SchedulerContext<
   Agentic<N, T>,
   N,
   T,
   never,
   JuncoGraph<N, T>
 >;
-type NestedNode<N, T> = Extract<
+type NestedNode<N extends TSchema, T> = Extract<
   AgenticNode<N, T>,
   { readonly state: NestedContext<N, T>; readonly step?: never }
 >;
 
-export function isNestedContext<N, T>(
+export function isNestedContext<N extends TSchema, T>(
   value: unknown,
 ): value is NestedContext<N, T> {
   return (
@@ -92,7 +99,7 @@ export function isNestedContext<N, T>(
 const claimedPorts = new WeakSet<object>();
 
 /** A complete spec as the native graph registers it, with this graph's policy and contract. */
-type CompleteNode<N, T> = NodeSpec<Agentic<N, T>, N, T> & {
+type CompleteNode<N extends TSchema, T> = NodeSpec<Agentic<N, T>, N, T> & {
   readonly policy: ToolCollection["policy"];
   readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
@@ -104,7 +111,11 @@ type Cascade = {
 };
 
 /** A prompt agent or coroutine a cascade operates on directly. */
-type Resource<N, T> = JuncoAgent | MockAgent | Deterministic<N, T>;
+type Resource = AnyJuncoAgent | AnyMockAgent | Deterministic<TSchema, unknown>;
+
+/** Any graph a cascade reaches; it reads only domain-free lifecycle fields, never payloads. */
+// biome-ignore lint/suspicious/noExplicitAny: graphs are invariant in their domains; lifecycle storage only.
+type AnyGraph = JuncoGraph<any, any, any>;
 
 type Kind = "abort" | "close";
 
@@ -158,7 +169,7 @@ const EVALUATE = {
 class RecorderBridge implements DataflowTracer {
   constructor(readonly delegate: DataflowTracer) {}
 
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     const run = observe(() => this.delegate.startRun(graph));
@@ -219,7 +230,7 @@ class RecorderBridge implements DataflowTracer {
  * Records one activation's start at node `id` of `graphView` and returns its completion: a step
  * result succeeds, an outcome fails.
  */
-function startActivation<S, N, T, EH>(
+function startActivation<S, N extends TSchema, T, EH>(
   graph: DataflowGraph<S, N, T, EH>,
   graphView: ProfileRecorder<"operations"> | undefined,
   runId: string,
@@ -233,7 +244,7 @@ function startActivation<S, N, T, EH>(
   | undefined {
   const view = graphView?.add_context(String(id));
   if (view === undefined) return undefined;
-  // Registration metadata survives task promotion, unlike the node's mutable state.
+  // The registered body's policy names its prompt agent, whatever the node's state.
   const node = graph.getNode(id);
   const candidate = node && nodePolicies.get(node.step)?.agent;
   const agent = candidate instanceof JuncoAgent ? candidate : undefined;
@@ -288,7 +299,7 @@ function startActivation<S, N, T, EH>(
 
 /** A passive native work graph owning its agents, child graphs and coroutines. */
 export class JuncoGraph<
-  N = AgenticInput,
+  N extends TSchema = typeof AgenticInputSchema,
   T = AssistantMessage,
   EH = never,
 > extends DataflowGraph<Agentic<N, T>, N, T, EH> {
@@ -307,11 +318,11 @@ export class JuncoGraph<
   readonly #delegate: DataflowTracer;
   /** This graph's own context: the constructor recorder at `recorderNodeId`. */
   readonly #recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
   /** The placement of the drive {@link runWithRecorder} brackets. */
   #placement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
 
   readonly source: Source<N, T>;
@@ -329,7 +340,9 @@ export class JuncoGraph<
     tracer: DataflowTracer | undefined,
     policy: ToolCollection["policy"],
     collection?: ToolCollection,
-    recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    recorder?: ProfileRecorder<
+      "memory" | "tokens" | "edits" | "operations" | "probe"
+    >,
     recorderNodeId?: string,
   ) {
     if (!(source instanceof Source) || !(sink instanceof Sink))
@@ -392,25 +405,26 @@ export class JuncoGraph<
 
   /**
    * The workflow a YAML document (text or parsed object) and its config define; see `syntax`.
-   * Prepared agents transfer ownership at entry, including when parsing fails.
+   * Prepared agents transfer ownership at entry, including when parsing fails. Its schemas are
+   * loaded at runtime, so its domains are `TSchema`/`unknown`; consumers narrow with `Value.Check`.
    */
   static async fromYaml<C = unknown>(
     source: string | object,
     config: FromYamlOptions<C>,
   ): Promise<
     SchedulerContext<
-      Agentic,
-      AgenticInput,
-      AssistantMessage,
+      Agentic<TSchema, unknown>,
+      TSchema,
+      unknown,
       AgencyNodeMetadata,
-      JuncoGraph
+      JuncoGraph<TSchema, unknown>
     >
   > {
     await using prepared = new AsyncDisposableStack();
     for (const instance of new Set(Object.values(config.agents ?? {})))
       prepared.use(instance);
-    const { params, ...options } = config;
-    const doc = parse(source, params === undefined ? {} : { params });
+    const { params, sourceName, ...options } = config;
+    const doc = parse(source, { params, sourceName });
     prepared.move();
     return build(doc, options);
   }
@@ -419,13 +433,15 @@ export class JuncoGraph<
    * Build and return the caller's context, adopting its graph into one owned collection; the
    * collection and `build` receive `options.recorder`.
    */
-  static async create<N, T, EH, C = AgencyNodeMetadata>(
+  static async create<N extends TSchema, T, EH, C = AgencyNodeMetadata>(
     cwd: string,
     options: ToolCollectionOptions,
     build: (
       collection: ToolCollection,
       recorder:
-        | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | ProfileRecorder<
+            "memory" | "tokens" | "edits" | "operations" | "probe"
+          >
         | undefined,
     ) =>
       | SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>
@@ -457,8 +473,16 @@ export class JuncoGraph<
     throw new AggregateError(failures, "Graph construction failed");
   }
 
-  /** Map work in insertion order, preserving skeleton IDs and allocating fresh transports. */
-  static map<S, L, N = AgenticInput, T = AssistantMessage>(
+  /**
+   * Map work in insertion order, preserving skeleton IDs and allocating fresh transports, each a
+   * message edge of the source's schema.
+   */
+  static map<
+    S,
+    L,
+    N extends TSchema = typeof AgenticInputSchema,
+    T = AssistantMessage,
+  >(
     skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
     f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
     options: {
@@ -467,7 +491,7 @@ export class JuncoGraph<
       readonly policy: ToolCollection["policy"];
       readonly tracer?: DataflowTracer;
       readonly recorder?: ProfileRecorder<
-        "memory" | "tokens" | "edits" | "operations"
+        "memory" | "tokens" | "edits" | "operations" | "probe"
       >;
       readonly recorderNodeId?: string;
     },
@@ -491,14 +515,21 @@ export class JuncoGraph<
     );
     try {
       const edges = new Map<string, Edge<N, T>>();
+      const wired: [from: string, to: string, edge: Edge<N, T>][] = [];
       skeleton.forEachLink((link) => {
-        edges.set(link.id, Edge.message<N, T>(link.id));
+        const edge = Edge.message<N, T>(link.id, options.source.schema);
+        edges.set(link.id, edge);
+        wired.push([String(link.fromId), String(link.toId), edge]);
       });
       skeleton.forEachNode((node) => {
         const inputs: TriggerEntry<N, T>[] = [];
         for (const link of skeleton.getLinks(node.id) ?? [])
-          if (link.toId === node.id)
-            inputs.push(TriggerEntry.on(edges.get(link.id)!));
+          if (link.toId === node.id) {
+            const edge = edges.get(link.id);
+            if (edge === undefined)
+              throw new TypeError(`Graph link "${link.id}" has no edge`);
+            inputs.push(TriggerEntry.on(edge));
+          }
         const mapped = f(node.data);
         if (mapped instanceof JuncoGraph)
           throw new TypeError("Nested graph node requires a SchedulerContext");
@@ -517,13 +548,8 @@ export class JuncoGraph<
           id: NodeId.create(String(node.id)),
         } as AgenticNode<N, T>);
       });
-      skeleton.forEachLink((link) => {
-        graph.addEdge(
-          NodeId.create(String(link.fromId)),
-          NodeId.create(String(link.toId)),
-          edges.get(link.id)!,
-        );
-      });
+      for (const [from, to, edge] of wired)
+        graph.addEdge(NodeId.create(from), NodeId.create(to), edge);
       return context({ scheduler: parallel(), graph });
     } catch (error) {
       claimedPorts.delete(options.source);
@@ -532,16 +558,26 @@ export class JuncoGraph<
     }
   }
 
-  /** Register a root and its paired task children; members remain caller-owned on failure. */
-  static spawn<Input, N = AgenticInput, T = AssistantMessage>(
+  /**
+   * Register a root and its paired task children; members remain caller-owned on failure. The
+   * synthetic edges carry `messageSchema`, the source's schema by default.
+   */
+  static spawn<
+    Input,
+    N extends TSchema = typeof AgenticInputSchema,
+    T = AssistantMessage,
+  >(
     source: Source<N, T>,
     sink: Sink<N, T>,
     root: AgenticNode<N, T>,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
-    recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    recorder?: ProfileRecorder<
+      "memory" | "tokens" | "edits" | "operations" | "probe"
+    >,
     recorderNodeId?: string,
+    messageSchema: N = source.schema,
   ): SchedulerContext<
     Agentic<N, T>,
     N,
@@ -561,7 +597,7 @@ export class JuncoGraph<
       recorderNodeId,
     );
     try {
-      graph.appendChildren(graph.addNode(root), inputs, child);
+      graph.appendChildren(graph.addNode(root), inputs, child, messageSchema);
       return context({ scheduler: parallel(), graph });
     } catch (error) {
       claimedPorts.delete(source);
@@ -571,7 +607,7 @@ export class JuncoGraph<
   }
 
   /** Resolve managed-state authorization without binding a policy to any graph. */
-  static #nodePolicy<N, T>(
+  static #nodePolicy<N extends TSchema, T>(
     spec: AgenticNode<N, T> | CompleteNode<N, T>,
     graphPolicy?: ToolCollection["policy"],
   ): ToolCollection["policy"] {
@@ -631,7 +667,7 @@ export class JuncoGraph<
    * @throws {JuncoAgentError} `invalid_argument` for an unknown policy; `invalid_state` when a
    *   fullness policy cannot measure a candidate's context window.
    */
-  static async compact<A extends Agentic<N, T>, N, T, EH>(
+  static async compact<A extends Agentic<N, T>, N extends TSchema, T, EH>(
     graph: DataflowGraph<A, N, T, EH>,
     policy: CompactionPolicy,
   ): Promise<void> {
@@ -710,7 +746,7 @@ export class JuncoGraph<
 
   /** The current drive's placement, else this graph's own recorder context. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined {
     return this.#placement ?? this.#recorder;
   }
@@ -720,7 +756,9 @@ export class JuncoGraph<
    * drives a reused or prebuilt child at the child's actual position.
    */
   async runWithRecorder<T>(
-    recorder: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+    recorder: ProfileRecorder<
+      "memory" | "tokens" | "edits" | "operations" | "probe"
+    >,
     work: () => T | Promise<T>,
   ): Promise<T> {
     if (this.#recorder === undefined || this.#recorder.root !== recorder.root)
@@ -798,17 +836,14 @@ export class JuncoGraph<
     else if (nested)
       complete = this.#graphNode(spec as NestedNode<N, T>, policy);
     else if (state instanceof JuncoAgent || state instanceof MockAgent)
-      // The step-less agent branch exists only on chat wires, where N/T are AgenticInput/AssistantMessage.
-      complete = AgentDriver.node(state, {
-        ...(spec as unknown as Parameters<typeof AgentDriver.node>[1]),
-        policy,
-      }) as unknown as CompleteNode<N, T>;
+      complete = AgentDriver.node<N, T>(state, { ...spec, policy });
     else throw new TypeError("An agentic node requires a step");
     const id = super.addNode(complete);
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
+    const schemas = () => this.#messageSchemas(id);
     const { contract } = complete;
-    registeredNodeContexts.set(this.getNode(id)!, {
+    const registration: NodeRegistration<N, T> = {
       tracer: this.#delegate,
       get recorder() {
         return recorder();
@@ -816,39 +851,76 @@ export class JuncoGraph<
       get signal() {
         return current();
       },
-      assertSend: (edgeId) => {
-        this.signal.throwIfAborted();
-        this.messageQueue(id, edgeId);
+      get sendParameters() {
+        return schemas().sendParameters;
+      },
+      get recvOutputSchema() {
+        return schemas().recvOutputSchema;
       },
       send: (message) => {
         this.signal.throwIfAborted();
-        this.emit(id, message as Message<N>);
+        this.emit(id, message);
       },
       info: () => this.#nodeInfo(id),
       ...(contract === undefined ? {} : { contract }),
-    });
+    };
+    const node = this.getNode(id);
+    if (node === undefined)
+      throw new JuncoAgentError("invalid_state", `Node "${id}" not registered`);
+    registeredNodeContexts.set(node, registration);
     return id;
   }
 
   /**
    * Register one child per element of `inputs` under the already registered `rootId`, each with
-   * two fresh message edges: `${rootId}->${childId}` from the root and `${childId}->${rootId}` back
-   * to it; children are never linked to each other. Errors propagate synchronously; children
-   * registered before the failure stay in this graph.
+   * two fresh message edges of `messageSchema` (the source's by default): `${rootId}->${childId}`
+   * from the root and `${childId}->${rootId}` back to it; children are never linked to each other.
+   * Errors propagate synchronously; children registered before the failure stay in this graph.
    */
   appendChildren<Input>(
     rootId: NodeIdType,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
+    messageSchema: N = this.source.schema,
   ): void {
     for (const input of inputs) {
       const childId = this.addNode(child(input));
       this.addEdge(
         rootId,
         childId,
-        Edge.message<N, T>(`${rootId}->${childId}`),
-      ).addEdge(childId, rootId, Edge.message<N, T>(`${childId}->${rootId}`));
+        Edge.message<N, T>(`${rootId}->${childId}`, messageSchema),
+      ).addEdge(
+        childId,
+        rootId,
+        Edge.message<N, T>(`${childId}->${rootId}`, messageSchema),
+      );
     }
+  }
+
+  /**
+   * Node `id`'s messaging schemas over its actual links, computed per call so a late edge is
+   * visible: `send` over its outbound message edges, `recv` over its inbound message and value
+   * edges.
+   */
+  #messageSchemas(
+    id: NodeIdType,
+  ): Pick<NodeRegistration<N, T>, "sendParameters" | "recvOutputSchema"> {
+    const routes: (readonly [EdgeIdType, TSchema])[] = [];
+    const messages: (readonly [EdgeIdType, TSchema])[] = [];
+    const values: (readonly [EdgeIdType, TSchema])[] = [];
+    this.forEachLink((from, to, edge) => {
+      const route = [edge.id, edge.schema] as const;
+      if (E.isRight(edge.transport)) {
+        if (to === id) values.push(route);
+        return;
+      }
+      if (from === id) routes.push(route);
+      if (to === id) messages.push(route);
+    });
+    return {
+      sendParameters: SendTool.parametersFor(routes),
+      recvOutputSchema: RecvTool.outputSchemaFor(messages, values),
+    };
   }
 
   /** Prime without input consumption; each resume admits input and advances one child decision. */
@@ -927,7 +999,8 @@ export class JuncoGraph<
     // ponytail: info scans graph links; add an adjacency index only if large graphs make this hot.
     this.forEachLink((from, to, edge) => {
       if (from !== id && to !== id) return;
-      const receiver = registeredNodeContexts.get(this.getNode(to)!)?.contract;
+      const node = this.getNode(to);
+      const receiver = node && registeredNodeContexts.get(node)?.contract;
       if (receiver === undefined)
         throw new JuncoAgentError(
           "invalid_state",
@@ -1078,16 +1151,15 @@ export class JuncoGraph<
 
   /** Iterative native-state traversal keeps shared and cyclic graph ownership stack-safe. */
   #cascade(kind: Kind, reason: unknown): Cascade {
-    const graphs: JuncoGraph<N, T, never>[] = [];
+    const graphs: AnyGraph[] = [];
     const requests: (() => unknown)[] = [];
     const gates = new Set<Promise<void>>();
     const seenGraphs = new Set<object>();
     /** Each resource reached, and whether any registration of it is graph-owned. */
-    const resources = new Map<Resource<N, T>, boolean>();
+    const resources = new Map<Resource, boolean>();
     const joined = new Set<Promise<void>>();
-    const stack: JuncoGraph<N, T, never>[] = [this];
-    while (stack.length > 0) {
-      const graph = stack.pop()!;
+    const stack: AnyGraph[] = [this];
+    for (let graph = stack.pop(); graph !== undefined; graph = stack.pop()) {
       if (seenGraphs.has(graph)) continue;
       seenGraphs.add(graph);
       if (graph !== this) {
@@ -1104,11 +1176,10 @@ export class JuncoGraph<
       graphs.push(graph);
       const active = graph.activeEvaluation;
       if (active !== undefined) gates.add(active);
-      const children: JuncoGraph<N, T, never>[] = [];
+      const children: AnyGraph[] = [];
       graph.forEachNode((_, node) => {
         const state = node.state;
         const policy = nodePolicies.get(node.step);
-        if (kind === "close" && policy?.closedTaskState === state) return;
         if (state instanceof JuncoGraph) children.push(state);
         else if (
           state instanceof JuncoAgent ||
@@ -1122,7 +1193,7 @@ export class JuncoGraph<
           );
       });
       for (let index = children.length - 1; index >= 0; index--)
-        stack.push(children[index]!);
+        stack.push(children[index]);
     }
     // Graph ownership dominates whatever the traversal order; caller-owned agents are only aborted.
     for (const [member, owned] of resources) {

@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type {
+  AgentTool,
+  PromptTemplate,
+  Skill,
+} from "@earendil-works/pi-agent-core";
 import {
-  type AssistantMessage,
+  type Context,
   contentText,
   fauxAssistantMessage,
   fauxToolCall,
+  type Tool,
 } from "@earendil-works/pi-ai";
 import { megabytes } from "dataflow-engine";
 import {
@@ -24,14 +29,18 @@ import {
   trigger,
   workflows,
 } from "junco-agency";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 import {
   type BuildOptions,
   build,
+  createJuncoAgent,
   type DeterministicNode,
   resolveAgents,
 } from "../src/syntax/build.ts";
+import { ValidationError } from "../src/syntax/errors.ts";
 import { parse } from "../src/syntax/parse.ts";
+import type { JuncoDocument } from "../src/syntax/schema.ts";
 import {
   assistant,
   requestTexts,
@@ -40,9 +49,57 @@ import {
   userTexts,
 } from "./deterministic-support.ts";
 import { fauxRuntime } from "./support.ts";
-import { Emitter } from "./syntax-code-nodes.fixture.ts";
+import {
+  Collect,
+  Constant,
+  Emitter,
+  Forward,
+  Increment,
+} from "./syntax-code-nodes.fixture.ts";
 
-const mock = (text: string, prompt?: string) =>
+/** Edge schemas: chat inputs (AgenticInput) and native assistant results. */
+const prompt = {
+  anyOf: [
+    {
+      type: "object",
+      required: ["kind", "text"],
+      properties: {
+        kind: { enum: ["prompt", "steer", "followUp", "nextTurn", "error"] },
+        text: { type: "string" },
+      },
+    },
+    {
+      type: "object",
+      required: ["kind", "message"],
+      properties: {
+        kind: { const: "appendMessage" },
+        message: {
+          type: "object",
+          required: ["role"],
+          properties: { role: { type: "string" } },
+        },
+      },
+    },
+  ],
+};
+const reply = {
+  type: "object",
+  required: ["role", "content", "stopReason"],
+  properties: {
+    role: { const: "assistant" },
+    content: { type: "array" },
+    stopReason: { type: "string" },
+  },
+};
+type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
+type YamlAgent = agent.JuncoAgent<
+  Skill,
+  PromptTemplate,
+  AgentTool,
+  TSchema,
+  unknown
+>;
+const mock = (text: string, prompt?: string): YamlMock =>
   new MockAgent({ prompt, runs: [run([settle(assistant(text))])] });
 const document = () =>
   parse({
@@ -56,8 +113,13 @@ const document = () =>
             source: { routes: { "Start~>Inner": ["$source~>Worker"] } },
             nodes: { Worker: { trigger: "$source~>Worker" } },
             edges: [
-              { from: "$source", to: "Worker", kind: "message" },
-              { from: "Worker", to: "$sink" },
+              {
+                from: "$source",
+                to: "Worker",
+                kind: "message",
+                schema: prompt,
+              },
+              { from: "Worker", to: "$sink", schema: reply },
             ],
           },
         },
@@ -67,9 +129,9 @@ const document = () =>
         },
       },
       edges: [
-        { from: "Start", to: "Inner", kind: "message" },
-        { from: "Inner", to: "Final", kind: "message" },
-        { from: "Final", to: "$sink" },
+        { from: "Start", to: "Inner", kind: "message", schema: prompt },
+        { from: "Inner", to: "Final", kind: "message", schema: reply },
+        { from: "Final", to: "$sink", schema: reply },
       ],
     },
   });
@@ -161,6 +223,7 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
   edges:
     - from: A
       to: $sink
+      schema: { type: object, required: [role], properties: { role: { const: assistant } } }
 `;
   const instance = mock("done");
   const execution = await JuncoGraph.fromYaml(source, {
@@ -198,7 +261,7 @@ test("fromYaml accepts a parsed document and runs nested agents", async () => {
 test("fromYaml closes prepared agents once when YAML parsing fails", async () => {
   const { models } = await fauxRuntime([]);
   const { collection, events, active } = countedCollection();
-  const instance = await agent.JuncoAgent.create({
+  const instance: YamlAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "faux-1",
     models,
@@ -215,11 +278,14 @@ test("fromYaml closes prepared agents once when YAML parsing fails", async () =>
     await assert.rejects(
       JuncoGraph.fromYaml("graph: [", {
         ...options(),
+        sourceName: "pipeline.yml",
         agents: { A: instance, B: instance },
       }),
       (error) =>
+        error instanceof ValidationError &&
         error instanceof graph.DataflowDefinitionError &&
-        /invalid YAML/.test(error.message),
+        error.code === "yaml" &&
+        error.message.includes("pipeline.yml:1:9"),
     );
     assert.equal(disposals, 1);
     assert.deepEqual(events, ["bind-close:1"]);
@@ -230,19 +296,44 @@ test("fromYaml closes prepared agents once when YAML parsing fails", async () =>
   }
 });
 
+test("fromYaml rejects an invalid document before creating any agent", async () => {
+  let created = 0;
+  for (const [source, code] of [
+    [
+      "graph:\n  nodes: { A: {} }\n  edges: [{ from: A, to: $sink }]\n",
+      "edge-schema",
+    ],
+    [
+      "graph:\n  nodes: { A: {} }\n  edges: [{ from: A, to: Nope, schema: {} }]\n",
+      "reference",
+    ],
+  ])
+    await assert.rejects(
+      JuncoGraph.fromYaml(source, {
+        ...options(),
+        createAgent: async () => {
+          created++;
+          throw new Error("createAgent reached for an invalid document");
+        },
+      }),
+      (error) => error instanceof ValidationError && error.code === code,
+    );
+  assert.equal(created, 0);
+});
+
 type AvailabilityFactory = NonNullable<BuildOptions["available"]>[string];
-const lastPrompts = (instance: MockAgent) =>
+const lastPrompts = (instance: YamlMock) =>
   requestTexts(instance.requests).map((texts) => texts.at(-1));
 /** Reads a settled result's text, failing the test when `id` has none. */
 function resultText(
-  g: graph.JuncoGraph,
+  g: Pick<graph.JuncoGraph<TSchema, unknown>, "result" | "sink">,
   id: graph.NodeIdType = g.sink.id,
 ): string {
   const result = g.result(id);
   if (result._tag !== "Some") assert.fail(`${id} has no result`);
+  assert.ok(Value.Check(agent.AssistantMessageSchema, result.value));
   return contentText(result.value.content);
 }
-/** Admits `id` while `allowed(triggered)` holds and keeps an already running node resumable. */
 const resumable =
   (id: string, allowed: (triggered: boolean) => boolean): AvailabilityFactory =>
   ({ graph: g }) =>
@@ -329,7 +420,7 @@ test("named tools extend fresh builtins and cannot shadow them", async () => {
   const doc = parse({
     graph: {
       nodes: { A: { tools: ["custom"] } },
-      edges: [{ from: "A", to: "$sink" }],
+      edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
   const [spec] = await resolveAgents(doc, {
@@ -347,7 +438,7 @@ test("named tools extend fresh builtins and cannot shadow them", async () => {
   const shadow = parse({
     graph: {
       nodes: { A: { tools: ["shadow"] } },
-      edges: [{ from: "A", to: "$sink" }],
+      edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
   await assert.rejects(
@@ -370,14 +461,18 @@ test("skills are loaded once, advertised and reject nonexistent registry paths",
       skills: { guide: "guide/SKILL.md" },
       graph: {
         nodes: {
-          A: { system: "Base", skills: ["guide", "guide"] },
+          A: { system: "Base", skills: ["guide"] },
+          B: { skills: ["guide"] },
         },
-        edges: [{ from: "A", to: "$sink" }],
+        edges: [
+          { from: "A", to: "B", schema: reply },
+          { from: "B", to: "$sink", schema: reply },
+        ],
       },
     });
-    const [spec] = await resolveAgents(doc, { cwd });
-    assert.ok(spec);
-    assert.equal(spec.skills[0], spec.skills[1]);
+    const [spec, other] = await resolveAgents(doc, { cwd });
+    assert.ok(spec && other);
+    assert.equal(spec.skills[0], other.skills[0]);
     assert.equal(spec.skills[0]?.content, content);
     assert.ok(spec.systemPrompt?.startsWith("Base\n\n"));
     assert.ok(spec.systemPrompt?.includes("Follow the guide."));
@@ -403,27 +498,34 @@ test("resolution walks declarations depth-first and retains graph labels", async
           kind: "graph",
           graph: {
             name: "child-label",
+            source: { routes: { "First->Child": [] } },
             nodes: {
               Before: {},
               Grandchild: {
                 kind: "graph",
                 graph: {
+                  source: { routes: { "Before->Grandchild": [] } },
                   nodes: { Deep: {} },
-                  edges: [{ from: "Deep", to: "$sink" }],
+                  edges: [{ from: "Deep", to: "$sink", schema: reply }],
                 },
               },
               After: {},
             },
             sink: { returns: "After" },
             edges: [
-              { from: "Before", to: "$sink" },
-              { from: "After", to: "$sink" },
+              { from: "Before", to: "Grandchild", schema: reply },
+              { from: "Grandchild", to: "After", schema: reply },
+              { from: "After", to: "$sink", schema: reply },
             ],
           },
         },
         Last: {},
       },
-      edges: [{ from: "Last", to: "$sink" }],
+      edges: [
+        { from: "First", to: "Child", schema: reply },
+        { from: "Child", to: "Last", schema: reply },
+        { from: "Last", to: "$sink", schema: reply },
+      ],
     },
   });
   const specs = await resolveAgents(doc, { cwd: process.cwd() });
@@ -441,7 +543,7 @@ test("resolution walks declarations depth-first and retains graph labels", async
     parse({
       graph: {
         nodes: { A: {} },
-        edges: [{ from: "A", to: "$sink" }],
+        edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
     { cwd: process.cwd() },
@@ -470,7 +572,10 @@ test("collection tools win over code tools, code tools fill gaps, and builtins a
             A: { tools: ["shared", "fallback"] },
             B: { tools: ["shared"] },
           },
-          edges: [{ from: "A", to: "$sink" }],
+          edges: [
+            { from: "A", to: "B", schema: reply },
+            { from: "B", to: "$sink", schema: reply },
+          ],
         },
       }),
       {
@@ -504,7 +609,7 @@ test("collection tools win over code tools, code tools fill gaps, and builtins a
         parse({
           graph: {
             nodes: { Unknown: { tools: ["missing"] } },
-            edges: [{ from: "Unknown", to: "$sink" }],
+            edges: [{ from: "Unknown", to: "$sink", schema: reply }],
           },
         }),
         { cwd: process.cwd(), collection: counted.collection },
@@ -539,18 +644,21 @@ mcp:
 graph:
   nodes:
     A:
-      mcp: [plain, timed, plain]
+      mcp: [plain, timed]
     B:
       mcp: [timed, plain]
   edges:
     - from: A
+      to: B
+      schema: { type: object }
+    - from: B
       to: $sink
+      schema: { type: object }
 `),
     { cwd: process.cwd() },
   );
   const [a, b] = specs;
   assert.ok(a && b);
-  assert.equal(a.tools[5], a.tools[7]);
   assert.equal(a.tools[5], b.tools[6]);
   assert.equal(a.tools[6], b.tools[5]);
   assert.notEqual(a.tools[5], a.tools[6]);
@@ -569,19 +677,21 @@ test("skills retain content, resolve same-directory symlinks and cache repeated 
         skills: { guide: "guide/SKILL.md", alias: "guide/alias.md" },
         graph: {
           nodes: {
-            A: { skills: ["guide", "guide", "alias"] },
+            A: { skills: ["guide", "alias"] },
             B: { skills: ["alias", "guide"] },
           },
-          edges: [{ from: "A", to: "$sink" }],
+          edges: [
+            { from: "A", to: "B", schema: reply },
+            { from: "B", to: "$sink", schema: reply },
+          ],
         },
       }),
       { cwd },
     );
     const [a, b] = specs;
     assert.ok(a && b);
-    assert.equal(a.skills[0], a.skills[1]);
     assert.equal(a.skills[0], b.skills[1]);
-    assert.equal(a.skills[2], b.skills[0]);
+    assert.equal(a.skills[1], b.skills[0]);
     for (const skill of [...a.skills, ...b.skills]) {
       assert.equal(skill.name, "guide");
       assert.equal(skill.content, content);
@@ -628,7 +738,7 @@ for (const row of [
             skills: { invalid: `${row.name}/${row.file}` },
             graph: {
               nodes: { A: { skills: ["invalid"] } },
-              edges: [{ from: "A", to: "$sink" }],
+              edges: [{ from: "A", to: "$sink", schema: reply }],
             },
           }),
           { cwd },
@@ -727,7 +837,7 @@ const revision = (previous: string) =>
   `assignment\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
 
 test("a value self-loop runs Ralph once per round and publishes only the last", async () => {
-  const instance = new MockAgent({
+  const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
       run([settle(assistant(text))]),
     ),
@@ -760,7 +870,7 @@ test("a value self-loop runs Ralph once per round and publishes only the last", 
 });
 
 test("default rounds is two and a staged round survives graph steps", async () => {
-  const instance = new MockAgent({
+  const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
       run([settle(assistant(text))]),
     ),
@@ -799,7 +909,7 @@ for (const [name, draft, error] of [
   ],
 ] as const)
   test(`an invalid intermediate draft (${name}) fails Ralph before the next round`, async () => {
-    const instance = new MockAgent({
+    const instance: YamlMock = new MockAgent({
       runs: [assistant("draft-1"), draft, assistant("draft-3")].map((message) =>
         run([settle(message)]),
       ),
@@ -882,7 +992,7 @@ test("ralph rejects an invalid round count before building", () => {
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {
   const inner = ralphDoc().graph;
   inner.source = { routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
-  const instance = new MockAgent({
+  const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2"].map((text) => run([settle(assistant(text))])),
   });
   const final = mock("final reply");
@@ -895,9 +1005,9 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
           Final: { prompt: "{{ Wrapper~>Final }}" },
         },
         edges: [
-          { from: "$source", to: "Wrapper", kind: "message" },
-          { from: "Wrapper", to: "Final", kind: "message" },
-          { from: "Final", to: "$sink" },
+          { from: "$source", to: "Wrapper", kind: "message", schema: prompt },
+          { from: "Wrapper", to: "Final", kind: "message", schema: reply },
+          { from: "Final", to: "$sink", schema: reply },
         ],
       },
     }),
@@ -929,8 +1039,8 @@ test("value templates normalize final text", async () => {
         B: { prompt: "value={{ A->B }}", trigger: "A->B" },
       },
       edges: [
-        { from: "A", to: "B" },
-        { from: "B", to: "$sink" },
+        { from: "A", to: "B", schema: reply },
+        { from: "B", to: "$sink", schema: reply },
       ],
     },
   });
@@ -960,19 +1070,23 @@ for (const trigger of [
       parse({
         graph: {
           nodes: {
+            Start: { kind: "code", trigger: "always" },
             Left: { prompt: "left" },
             Right: { prompt: "right" },
             Consumer: { trigger, prompt: "{{left}}/{{right}}" },
           },
           edges: [
-            { from: "Left", to: "Consumer", id: "left" },
-            { from: "Right", to: "Consumer", id: "right" },
-            { from: "Consumer", to: "$sink" },
+            { from: "Start", to: "Left", schema: { type: "null" } },
+            { from: "Start", to: "Right", schema: { type: "null" } },
+            { from: "Left", to: "Consumer", id: "left", schema: reply },
+            { from: "Right", to: "Consumer", id: "right", schema: reply },
+            { from: "Consumer", to: "$sink", schema: reply },
           ],
         },
       }),
       {
         ...options(),
+        code: { Start: Constant(null) },
         createAgent: async (spec) =>
           spec.node === "Consumer" ? consumer : mock(spec.node),
         available: { Right: resumable("Right", () => rightAllowed) },
@@ -1013,10 +1127,10 @@ test("source fan-out preserves inbox payloads and sink waits for both value resu
           Right: { prompt: "{{ $source~>Right }}" },
         },
         edges: [
-          { from: "$source", to: "Left", kind: "message" },
-          { from: "$source", to: "Right", kind: "message" },
-          { from: "Left", to: "$sink" },
-          { from: "Right", to: "$sink" },
+          { from: "$source", to: "Left", kind: "message", schema: prompt },
+          { from: "$source", to: "Right", kind: "message", schema: prompt },
+          { from: "Left", to: "$sink", schema: reply },
+          { from: "Right", to: "$sink", schema: reply },
         ],
       },
     }),
@@ -1114,14 +1228,22 @@ test("recursive graphs have fresh local ports and publish one final to messages 
     siblingSeed: ["$source~>Worker"],
   };
   doc.graph.nodes.Fan = { prompt: "{{ fan }}" };
+  doc.graph.sink = { returns: "Final" };
   doc.graph.nodes.Final = {
     prompt: "{{Inner~>Final}}|{{childValue}}|{{siblingValue}}",
   };
   doc.graph.edges!.push(
-    { from: "Start", to: "Sibling", kind: "message", id: "siblingSeed" },
-    { from: "Inner", to: "Fan", kind: "message", id: "fan" },
-    { from: "Inner", to: "Final", id: "childValue" },
-    { from: "Sibling", to: "Final", id: "siblingValue" },
+    {
+      from: "Start",
+      to: "Sibling",
+      kind: "message",
+      id: "siblingSeed",
+      schema: prompt,
+    },
+    { from: "Inner", to: "Fan", kind: "message", id: "fan", schema: reply },
+    { from: "Inner", to: "Final", id: "childValue", schema: reply },
+    { from: "Sibling", to: "Final", id: "siblingValue", schema: reply },
+    { from: "Fan", to: "$sink", schema: reply },
   );
   const final = mock("final"),
     fan = mock("fan");
@@ -1137,7 +1259,7 @@ test("recursive graphs have fresh local ports and publish one final to messages 
   try {
     const sources = new Set(),
       sinks = new Set();
-    function visit(g: graph.JuncoGraph) {
+    function visit(g: graph.JuncoGraph<TSchema, unknown>) {
       const view = g.observe();
       assert.equal(
         [...view.nodes.values()].filter(
@@ -1177,35 +1299,61 @@ test("recursive graphs have fresh local ports and publish one final to messages 
   }
 });
 
-for (const routes of [undefined, { accepted: ["input"] }])
-  test(`scheduled ingress rejects ${routes ? "unrouted input" : "closed source"}`, async () => {
-    const execution = await build(
+test("scheduled ingress rejects unrouted input", async () => {
+  const execution = await build(
+    parse({
+      graph: {
+        source: { routes: { accepted: ["input"] } },
+        nodes: { A: { prompt: "{{input}}" } },
+        edges: [
+          {
+            from: "$source",
+            to: "A",
+            kind: "message",
+            id: "input",
+            schema: prompt,
+          },
+          { from: "A", to: "$sink", schema: reply },
+        ],
+      },
+    }),
+    { ...options(), createAgent: async () => mock("unused") },
+  );
+  try {
+    enqueuePrompts(execution, "wrong", { kind: "prompt", text: "go" });
+    await assert.rejects(
+      execution.run(),
+      /does not accept input on edge "wrong"/,
+    );
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("unrouted source edges are rejected at parse time", () => {
+  assert.throws(
+    () =>
       parse({
         graph: {
-          source: routes ? { routes } : undefined,
           nodes: { A: { prompt: "{{input}}" } },
           edges: [
-            { from: "$source", to: "A", kind: "message", id: "input" },
-            { from: "A", to: "$sink" },
+            {
+              from: "$source",
+              to: "A",
+              kind: "message",
+              id: "input",
+              schema: prompt,
+            },
+            { from: "A", to: "$sink", schema: reply },
           ],
         },
       }),
-      { ...options(), createAgent: async () => mock("unused") },
-    );
-    try {
-      enqueuePrompts(execution, "wrong", { kind: "prompt", text: "go" });
-      await assert.rejects(
-        execution.run(),
-        routes
-          ? /does not accept input on edge "wrong"/
-          : /does not accept external input/,
-      );
-    } finally {
-      await execution.graph.close();
-    }
-  });
+    (error) =>
+      error instanceof ValidationError && error.code === "source-route",
+  );
+});
 
-test("value ingress becomes a prompt and empty routes drop only that input", async () => {
+test("value ingress is forwarded raw and empty routes drop only that input", async () => {
   const a = mock("done");
   const execution = await build(
     parse({
@@ -1213,8 +1361,14 @@ test("value ingress becomes a prompt and empty routes drop only that input", asy
         source: { routes: { drop: [], value: ["input"] } },
         nodes: { A: { prompt: "{{input}}" } },
         edges: [
-          { from: "$source", to: "A", kind: "message", id: "input" },
-          { from: "A", to: "$sink" },
+          {
+            from: "$source",
+            to: "A",
+            kind: "message",
+            id: "input",
+            schema: { anyOf: [prompt, reply] },
+          },
+          { from: "A", to: "$sink", schema: reply },
         ],
       },
     }),
@@ -1242,7 +1396,7 @@ test("early sink identifies the selected predecessor that has not returned", asy
       graph: {
         sink: { trigger: "always" },
         nodes: { A: { trigger: "never" } },
-        edges: [{ from: "A", to: "$sink" }],
+        edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
     { ...options(), createAgent: async () => mock("unused") },
@@ -1272,8 +1426,8 @@ for (const text of ["", "   ", "bad-stop"])
             B: { prompt: "{{report}}" },
           },
           edges: [
-            { from: "A", to: "B", id: "report" },
-            { from: "B", to: "$sink" },
+            { from: "A", to: "B", id: "report", schema: reply },
+            { from: "B", to: "$sink", schema: reply },
           ],
         },
       }),
@@ -1281,7 +1435,7 @@ for (const text of ["", "   ", "bad-stop"])
         ...options(),
         createAgent: async (spec) =>
           spec.node === "A"
-            ? new MockAgent({ runs: [run([settle(bad)])] })
+            ? (new MockAgent({ runs: [run([settle(bad)])] }) satisfies YamlMock)
             : consumer,
       },
     );
@@ -1305,7 +1459,7 @@ test("mixed repeated placeholders preserve order, paragraph joins and optional e
   const execution = await build(
     parse({
       graph: {
-        source: { routes: { seed: ["m"] } },
+        source: { routes: { seed: ["m", "seed-a", "seed-optional"] } },
         nodes: {
           A: { prompt: "go" },
           Optional: { trigger: "never" },
@@ -1315,10 +1469,36 @@ test("mixed repeated placeholders preserve order, paragraph joins and optional e
           },
         },
         edges: [
-          { from: "$source", to: "B", kind: "message", id: "m" },
-          { from: "A", to: "B", id: "v" },
-          { from: "Optional", to: "B", kind: "message", id: "optional" },
-          { from: "B", to: "$sink" },
+          {
+            from: "$source",
+            to: "B",
+            kind: "message",
+            id: "m",
+            schema: prompt,
+          },
+          {
+            from: "$source",
+            to: "A",
+            kind: "message",
+            id: "seed-a",
+            schema: prompt,
+          },
+          {
+            from: "$source",
+            to: "Optional",
+            kind: "message",
+            id: "seed-optional",
+            schema: prompt,
+          },
+          { from: "A", to: "B", id: "v", schema: reply },
+          {
+            from: "Optional",
+            to: "B",
+            kind: "message",
+            id: "optional",
+            schema: prompt,
+          },
+          { from: "B", to: "$sink", schema: reply },
         ],
       },
     }),
@@ -1354,7 +1534,7 @@ test("explicit widths serialize real activations and nested work uses the shared
     peak = 0,
     activations = 0;
   class Observer extends tracer.DummyTracer {
-    override startRun<S, N, T, EH>(
+    override startRun<S, N extends TSchema, T, EH>(
       g: graph.DataflowGraph<S, N, T, EH>,
     ): tracer.DataflowRunTrace<N, T> {
       seen.add(g);
@@ -1410,19 +1590,28 @@ for (const nested of [false, true])
   test(`default no-agent construction ${nested ? "recurses" : "stays native"} without a collection`, async () => {
     const child = {
       sink: { trigger: "never" },
-      nodes: { Seed: { kind: "emit", text: "go" } },
-      edges: [{ from: "Seed", to: "$sink", kind: "message" }],
+      nodes: {
+        Seed: { kind: "emit", text: "go" },
+        Terminal: { kind: "code", trigger: "never" },
+      },
+      edges: [
+        { from: "Seed", to: "Terminal", kind: "message", schema: prompt },
+        { from: "Terminal", to: "$sink", schema: { type: "null" } },
+      ],
     };
     const doc = parse({
       graph: nested
         ? {
             sink: { trigger: "never" },
             nodes: { Child: { kind: "graph", trigger: "never", graph: child } },
-            edges: [{ from: "Child", to: "$sink" }],
+            edges: [{ from: "Child", to: "$sink", schema: reply }],
           }
         : child,
     });
-    const execution = await build(doc, options());
+    const execution = await build(doc, {
+      ...options(),
+      code: { Terminal: Constant(null) },
+    });
     try {
       await execution.run();
       assert.equal(
@@ -1448,7 +1637,7 @@ test("default build uses real offline agents and releases only borrowed collecti
             prompt: "offline task",
           },
         },
-        edges: [{ from: "A", to: "$sink" }],
+        edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
     { ...options(), models, collection, ladder: fauxLadder },
@@ -1482,7 +1671,7 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
         parse({
           graph: {
             nodes: { A: {} },
-            edges: [{ from: "A", to: "$sink" }],
+            edges: [{ from: "A", to: "$sink", schema: reply }],
           },
         }),
         {
@@ -1540,7 +1729,7 @@ for (const row of [
               ...(row.skill === undefined ? {} : { skills: [row.skill] }),
             },
           },
-          edges: [{ from: "A", to: "$sink" }],
+          edges: [{ from: "A", to: "$sink", schema: reply }],
         },
       });
       let requests = 0;
@@ -1697,8 +1886,9 @@ for (const advertised of [true, false])
                 to: "Receiver",
                 kind: "message",
                 id: "handoff",
+                schema: prompt,
               },
-              { from: "Receiver", to: "$sink" },
+              { from: "Receiver", to: "$sink", schema: reply },
             ],
           },
         }),
@@ -1750,7 +1940,10 @@ for (const nested of [false, true])
           A: {},
           B: {},
         },
-        edges: [{ from: "B", to: "$sink" }],
+        edges: [
+          { from: "A", to: "B", schema: reply },
+          { from: "B", to: "$sink", schema: reply },
+        ],
       };
       const doc = parse({
         graph: nested
@@ -1759,7 +1952,10 @@ for (const nested of [false, true])
                 Child: { kind: "graph", graph: successful },
                 Missing: {},
               },
-              edges: [{ from: "Child", to: "$sink" }],
+              edges: [
+                { from: "Child", to: "Missing", schema: reply },
+                { from: "Missing", to: "$sink", schema: reply },
+              ],
             }
           : {
               ...successful,
@@ -1767,6 +1963,11 @@ for (const nested of [false, true])
                 ...successful.nodes,
                 Missing: {},
               },
+              edges: [
+                { from: "A", to: "B", schema: reply },
+                { from: "B", to: "Missing", schema: reply },
+                { from: "Missing", to: "$sink", schema: reply },
+              ],
             },
       });
       try {
@@ -1825,7 +2026,7 @@ const codeDocument = (id = "Emitter") =>
     graph: {
       name: "Codes",
       nodes: { [id]: { kind: "code", trigger: "always" } },
-      edges: [{ from: id, to: "$sink" }],
+      edges: [{ from: id, to: "$sink", schema: reply }],
     },
   });
 const codeOptions = (log: string[]) => ({
@@ -1858,7 +2059,7 @@ test("nested code nodes resolve their configured definition by local node id", a
     parse({
       graph: {
         nodes: { Nested: { kind: "graph", graph: doc.graph } },
-        edges: [{ from: "Nested", to: "$sink" }],
+        edges: [{ from: "Nested", to: "$sink", schema: reply }],
       },
     }),
     codeOptions(log),
@@ -1994,7 +2195,7 @@ test("prepared agents use node paths, skip factory configuration and belong to t
     },
   ]);
   const { collection, active } = countedCollection();
-  const worker = await agent.JuncoAgent.create({
+  const worker: YamlAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "faux-1",
     models,
@@ -2002,7 +2203,7 @@ test("prepared agents use node paths, skip factory configuration and belong to t
     collection,
     prompt: "work",
   });
-  const final = await agent.JuncoAgent.create({
+  const final: YamlAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "faux-1",
     models,
@@ -2044,14 +2245,14 @@ for (const boundary of [
   test(`prepared agents transfer ownership before ${boundary} failure`, async () => {
     const { models } = await fauxRuntime([]);
     const { collection, events, active } = countedCollection();
-    const instance = await agent.JuncoAgent.create({
+    const instance: YamlAgent = await agent.JuncoAgent.create({
       provider: "faux",
       model: "faux-1",
       models,
       tools: [],
       collection,
     });
-    const extra =
+    const extra: YamlAgent | undefined =
       boundary === "unused"
         ? await agent.JuncoAgent.create({
             provider: "faux",
@@ -2072,7 +2273,23 @@ for (const boundary of [
               ? { Missing: { kind: "code" } }
               : {}),
         },
-        edges: [{ from: "A", to: "$sink" }],
+        edges: [
+          ...(boundary === "missing" || boundary === "duplicate"
+            ? [{ from: "A", to: "B", schema: reply }]
+            : boundary === "code definition"
+              ? [{ from: "A", to: "Missing", schema: reply }]
+              : []),
+          {
+            from:
+              boundary === "missing" || boundary === "duplicate"
+                ? "B"
+                : boundary === "code definition"
+                  ? "Missing"
+                  : "A",
+            to: "$sink",
+            schema: reply,
+          },
+        ],
       },
     });
     const expected = {
@@ -2135,7 +2352,7 @@ for (const [label, nested, failing] of [
       const { collection, events, active } = countedCollection(
         cleanupFails ? { binding: 2, error: cleanup } : undefined,
       );
-      const members: agent.JuncoAgent[] = [];
+      const members: YamlAgent[] = [];
       for (let i = 0; i < 3; i++)
         members.push(
           await agent.JuncoAgent.create({
@@ -2148,9 +2365,12 @@ for (const [label, nested, failing] of [
         );
       const child = {
         nodes: { A: {}, B: {} },
-        edges: [{ from: "B", to: "$sink" }],
+        edges: [
+          { from: "A", to: "B", schema: reply },
+          { from: "B", to: "$sink", schema: reply },
+        ],
       };
-      const graphs: graph.JuncoGraph[] = [];
+      const graphs: graph.JuncoGraph<TSchema, unknown>[] = [];
       try {
         await assert.rejects(
           build(
@@ -2158,11 +2378,19 @@ for (const [label, nested, failing] of [
               graph: nested
                 ? {
                     nodes: { Child: { kind: "graph", graph: child }, Last: {} },
-                    edges: [{ from: "Child", to: "$sink" }],
+                    edges: [
+                      { from: "Child", to: "Last", schema: reply },
+                      { from: "Last", to: "$sink", schema: reply },
+                    ],
                   }
                 : {
                     ...child,
                     nodes: { ...child.nodes, Last: {} },
+                    edges: [
+                      { from: "A", to: "B", schema: reply },
+                      { from: "B", to: "Last", schema: reply },
+                      { from: "Last", to: "$sink", schema: reply },
+                    ],
                   },
             }),
             {
@@ -2219,7 +2447,7 @@ for (const [label, nested, failing] of [
 test("createAgent instances remain caller-owned when construction fails", async () => {
   const { models } = await fauxRuntime([]);
   const { collection, active } = countedCollection();
-  const instance = await agent.JuncoAgent.create({
+  const instance: YamlAgent = await agent.JuncoAgent.create({
     provider: "faux",
     model: "faux-1",
     models,
@@ -2233,7 +2461,10 @@ test("createAgent instances remain caller-owned when construction fails", async 
         parse({
           graph: {
             nodes: { A: {}, B: {} },
-            edges: [{ from: "B", to: "$sink" }],
+            edges: [
+              { from: "A", to: "B", schema: reply },
+              { from: "B", to: "$sink", schema: reply },
+            ],
           },
         }),
         {
@@ -2256,7 +2487,7 @@ test("createAgent instances remain caller-owned when construction fails", async 
 });
 
 /** Counts every disposal of `instance`, whether by a graph or by its owner. */
-function countDisposals(instance: MockAgent): { count: number } {
+function countDisposals(instance: YamlMock): { count: number } {
   const disposals = { count: 0 };
   const dispose = instance.return.bind(instance);
   instance.return = (value) => {
@@ -2265,18 +2496,18 @@ function countDisposals(instance: MockAgent): { count: number } {
   };
   return disposals;
 }
-const aborts = (instance: MockAgent) =>
+const aborts = (instance: YamlMock) =>
   instance.calls.filter(({ method }) => method === "abort").length;
 const roundDoc = (prompt: string) =>
   parse({
     graph: {
       nodes: { A: { prompt } },
-      edges: [{ from: "A", to: "$sink" }],
+      edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
 
 test("caller-owned factory agents survive each round's graph close and close once with their owner", async () => {
-  const instance = new MockAgent({
+  const instance: YamlMock = new MockAgent({
     runs: ["answer-1", "answer-2"].map((text) =>
       run([settle(assistant(text))]),
     ),
@@ -2328,13 +2559,13 @@ for (const nested of [false, true])
     const instance = mock("unused");
     const disposals = countDisposals(instance);
     const nodes = { A: { prompt: "work" } };
-    const edges = [{ from: "A", to: "$sink" }];
+    const edges = [{ from: "A", to: "$sink", schema: reply }];
     const execution = await build(
       parse({
         graph: nested
           ? {
               nodes: { Child: { kind: "graph", graph: { nodes, edges } } },
-              edges: [{ from: "Child", to: "$sink" }],
+              edges: [{ from: "Child", to: "$sink", schema: reply }],
             }
           : { nodes, edges },
       }),
@@ -2374,9 +2605,9 @@ for (const boundary of ["factory", "code", "availability"] as const)
         const { collection, active } = countedCollection();
         const earlier = mock("unused");
         const disposals = countDisposals(earlier);
-        let deterministic: Deterministic | undefined;
+        let deterministic: Deterministic<TSchema, unknown> | undefined;
         const Code: DeterministicNode = ({ policy, collection }) => {
-          deterministic = new Deterministic<AgenticInput, AssistantMessage>(
+          deterministic = new Deterministic<TSchema, unknown>(
             async function* () {
               yield [];
               return assistant("code");
@@ -2404,7 +2635,10 @@ for (const boundary of ["factory", "code", "availability"] as const)
                           A: {},
                           Code: { kind: "code", trigger: "always" },
                         },
-                        edges: [{ from: "A", to: "$sink" }],
+                        edges: [
+                          { from: "A", to: "Code", schema: reply },
+                          { from: "Code", to: "$sink", schema: reply },
+                        ],
                       },
                     },
                     Last:
@@ -2412,7 +2646,10 @@ for (const boundary of ["factory", "code", "availability"] as const)
                         ? { kind: "code", trigger: "always" }
                         : {},
                   },
-                  edges: [{ from: "Child", to: "$sink" }],
+                  edges: [
+                    { from: "Child", to: "Last", schema: reply },
+                    { from: "Last", to: "$sink", schema: reply },
+                  ],
                 },
               }),
               {
@@ -2459,3 +2696,393 @@ for (const boundary of ["factory", "code", "availability"] as const)
           await collection.close();
         }
       });
+
+// Raw payloads: edge schemas reach admission; ports and nested graphs forward values unchanged.
+
+const number = { type: "number" };
+const counted = {
+  type: "object",
+  required: ["count"],
+  properties: { count: { type: "number" } },
+};
+const codeBuild = (
+  doc: JuncoDocument,
+  code: BuildOptions["code"],
+  extra: Partial<BuildOptions> = {},
+) => build(doc, { ...options(), policy: tools.EmptyPolicy, code, ...extra });
+
+/** A session keeping each probe event with its interned context's path. */
+function probeRecorder() {
+  const probes: [path: string, edgeId: string, value: number][] = [];
+  const views = new Map<string, tools.ProfileRecorder<string>>();
+  const view = (path: string): tools.ProfileRecorder<string> => {
+    const known = views.get(path);
+    if (known !== undefined) return known;
+    const created: tools.ProfileRecorder<string> = Object.freeze({
+      root: probes,
+      path,
+      add_context: (id: string) =>
+        id === ""
+          ? created
+          : view(`${path === "" ? "" : `${path}::`}${tools.profilePath([id])}`),
+      record: (event: tools.ProfileEvent<string>) => {
+        if (event.kind === "probe")
+          probes.push([path, event.edgeId, event.value]);
+      },
+      flush: async () => {},
+      close: async () => {},
+    });
+    views.set(path, created);
+    return created;
+  };
+  return { recorder: view(""), probes };
+}
+const sorted = (probes: readonly (readonly unknown[])[]) =>
+  probes.map((probe) => JSON.stringify(probe)).sort();
+
+/** A numeric result crossing a nested graph; `probe` marks every edge but the array result. */
+const nestedNumbers = (
+  schema: object,
+  probe: boolean | undefined,
+): JuncoDocument => {
+  const flag = probe === undefined ? {} : { probe };
+  return parse({
+    graph: {
+      nodes: {
+        Seven: { kind: "code", trigger: "always" },
+        Child: {
+          kind: "graph",
+          graph: {
+            source: { routes: { "Seven->Child": ["$source~>Echo"] } },
+            nodes: { Echo: { kind: "code" } },
+            edges: [
+              { from: "$source", to: "Echo", kind: "message", schema, ...flag },
+              { from: "Echo", to: "$sink", schema, ...flag },
+            ],
+          },
+        },
+        Tail: { kind: "code" },
+      },
+      edges: [
+        { from: "Seven", to: "Child", schema, ...flag },
+        { from: "Child", to: "Tail", kind: "message", schema, ...flag },
+        { from: "Child", to: "Tail", id: "childValue", schema, ...flag },
+        { from: "Tail", to: "$sink", schema: { type: "array" } },
+      ],
+    },
+  });
+};
+const nestedCode = (value: unknown) => ({
+  Seven: Constant(value),
+  Echo: Forward("$source~>Echo"),
+  Tail: Collect("Child~>Tail", "childValue"),
+});
+
+for (const [name, schema, value] of [
+  ["numeric", number, 7],
+  ["object", counted, { count: 7 }],
+] as const)
+  test(`a ${name} code result crosses a nested graph raw onto parent message and value edges`, async () => {
+    const execution = await codeBuild(
+      nestedNumbers(schema, undefined),
+      nestedCode(value),
+    );
+    try {
+      await execution.run();
+      const result = execution.graph.result(execution.graph.sink.id);
+      assert.ok(result._tag === "Some" && Array.isArray(result.value));
+      const [message, child] = result.value;
+      assert.equal(message, value);
+      assert.equal(child, value);
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+test("probed edges record each publication once in their owning graph's context", async () => {
+  const { recorder, probes } = probeRecorder();
+  const execution = await codeBuild(
+    nestedNumbers(number, true),
+    nestedCode(7),
+    {
+      recorder,
+      recorderNodeId: "root",
+    },
+  );
+  try {
+    await execution.run();
+    const result = execution.graph.result(execution.graph.sink.id);
+    assert.ok(result._tag === "Some");
+    assert.deepEqual(result.value, [7, 7]);
+    assert.deepEqual(
+      sorted(probes),
+      sorted([
+        ["root", "Seven->Child", 7],
+        ["root::Child", "$source~>Echo", 7],
+        ["root::Child", "Echo->$sink", 7],
+        ["root", "Child~>Tail", 7],
+        ["root", "childValue", 7],
+      ]),
+    );
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("unprobed edges record nothing, and probes without a recorder run unchanged", async () => {
+  for (const probe of [undefined, false]) {
+    const { recorder, probes } = probeRecorder();
+    const execution = await codeBuild(
+      nestedNumbers(number, probe),
+      nestedCode(7),
+      { recorder },
+    );
+    try {
+      await execution.run();
+      assert.deepEqual(probes, []);
+    } finally {
+      await execution.graph.close();
+    }
+  }
+  const execution = await codeBuild(nestedNumbers(number, true), nestedCode(7));
+  try {
+    await execution.run();
+    const result = execution.graph.result(execution.graph.sink.id);
+    assert.ok(result._tag === "Some");
+    assert.deepEqual(result.value, [7, 7]);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("a probed source route records once per target edge; an empty route records nothing", async () => {
+  const { recorder, probes } = probeRecorder();
+  const execution = await codeBuild(
+    parse({
+      graph: {
+        source: {
+          routes: { input: ["$source~>A", "$source~>B"], empty: [] },
+        },
+        sink: { returns: "A" },
+        nodes: { A: { kind: "code" }, B: { kind: "code" } },
+        edges: [
+          {
+            from: "$source",
+            to: "A",
+            kind: "message",
+            schema: number,
+            probe: true,
+          },
+          {
+            from: "$source",
+            to: "B",
+            kind: "message",
+            schema: number,
+            probe: true,
+          },
+          { from: "A", to: "$sink", schema: number },
+          { from: "B", to: "$sink", schema: number },
+        ],
+      },
+    }),
+    { A: Forward("$source~>A"), B: Forward("$source~>B") },
+    { recorder },
+  );
+  try {
+    execution.graph.source.enqueue({
+      messages: new Map([
+        [graph.EdgeId.create("input"), [3]],
+        [graph.EdgeId.create("empty"), [4]],
+      ]),
+      values: new Map(),
+    });
+    await execution.run();
+    assert.deepEqual(
+      sorted(probes),
+      sorted([
+        ["", "$source~>A", 3],
+        ["", "$source~>B", 3],
+      ]),
+    );
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("an invalid code result fails its value edge and publishes nothing", async () => {
+  const { recorder, probes } = probeRecorder();
+  const execution = await codeBuild(
+    parse({
+      graph: {
+        nodes: { Seven: { kind: "code", trigger: "always" } },
+        edges: [{ from: "Seven", to: "$sink", schema: number, probe: true }],
+      },
+    }),
+    { Seven: Constant("7") },
+    { recorder },
+  );
+  try {
+    await assert.rejects(execution.run(), (error) => {
+      const cause =
+        error instanceof graph.DataflowNodeError ? error.error : error;
+      return (
+        cause instanceof graph.DataflowDefinitionError &&
+        cause.message.startsWith(
+          'Invalid payload for value edge "Seven->$sink"',
+        )
+      );
+    });
+    assert.equal(
+      execution.graph.result(graph.NodeId.create("Seven"))._tag,
+      "None",
+    );
+    assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
+    assert.deepEqual(probes, []);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("a numeric placeholder fails naming its edge before the agent is asked", async () => {
+  const consumer = mock("unused");
+  const execution = await build(
+    parse({
+      graph: {
+        nodes: {
+          Seven: { kind: "code", trigger: "always" },
+          A: { prompt: "count: {{Seven->A}}" },
+        },
+        edges: [
+          { from: "Seven", to: "A", schema: number },
+          { from: "A", to: "$sink", schema: reply },
+        ],
+      },
+    }),
+    {
+      ...options(),
+      code: { Seven: Constant(7) },
+      createAgent: async () => consumer,
+    },
+  );
+  try {
+    await assert.rejects(
+      execution.run(),
+      nodeFailure(/^Prompt placeholder \{\{Seven->A\}\} renders only/),
+    );
+    assert.equal(consumer.requests.length, 0);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("an agent reads a numeric code value with recv and sends a number through its edge schema", async () => {
+  const seen: { recv?: unknown; sendError?: string; tools?: Tool[] } = {};
+  const lastResult = (context: Pick<Context, "messages">, name: string) =>
+    context.messages
+      .filter(
+        (message) => message.role === "toolResult" && message.toolName === name,
+      )
+      .at(-1);
+  const { models } = await fauxRuntime([
+    (context) => {
+      seen.tools = context.messages.flatMap((message) =>
+        message.role === "system" ? (message.toolsAdded ?? []) : [],
+      );
+      return fauxAssistantMessage(fauxToolCall("recv", {}, { id: "r" }), {
+        stopReason: "toolUse",
+      });
+    },
+    (context) => {
+      const result = lastResult(context, "recv");
+      assert.ok(result?.role === "toolResult");
+      seen.recv = JSON.parse(contentText(result.content));
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "send",
+          // Pi coerces a numeric string such as "7" to the route's number before execution.
+          { id: "Worker~>Tail", payload: "seven" },
+          { id: "s1" },
+        ),
+        { stopReason: "toolUse" },
+      );
+    },
+    (context) => {
+      const result = lastResult(context, "send");
+      if (result?.role === "toolResult" && result.isError)
+        seen.sendError = contentText(result.content);
+      return fauxAssistantMessage(
+        fauxToolCall("send", { id: "Worker~>Tail", payload: 7 }, { id: "s2" }),
+        { stopReason: "toolUse" },
+      );
+    },
+    fauxAssistantMessage("done"),
+  ]);
+  const { recorder, probes } = probeRecorder();
+  const execution = await build(
+    parse({
+      graph: {
+        sink: { returns: "Tail" },
+        nodes: {
+          Seven: { kind: "code", trigger: "always" },
+          Worker: { prompt: "work" },
+          Tail: { kind: "code" },
+        },
+        edges: [
+          { from: "Seven", to: "Worker", schema: number, probe: true },
+          {
+            from: "Worker",
+            to: "Tail",
+            kind: "message",
+            schema: number,
+            probe: true,
+          },
+          { from: "Tail", to: "$sink", schema: number, probe: true },
+        ],
+      },
+    }),
+    {
+      ...options(),
+      code: { Seven: Constant(7), Tail: Increment("Worker~>Tail") },
+      createAgent: (spec) => createJuncoAgent(spec, fauxLadder, models),
+      recorder,
+    },
+  );
+  try {
+    await execution.run();
+    assert.deepEqual(seen.recv, {
+      messages: [],
+      values: [{ id: "Seven->Worker", payload: 7 }],
+    });
+    // Pi validates the model's call against the advertised edge schema before `send` runs.
+    assert.match(seen.sendError!, /payload: must be number/);
+    const send = seen.tools?.find((tool) => tool.name === "send");
+    const recv = seen.tools?.find((tool) => tool.name === "recv");
+    assert.ok(send && recv);
+    assert.ok(Value.Check(send.parameters, { id: "Worker~>Tail", payload: 7 }));
+    assert.ok(
+      !Value.Check(send.parameters, { id: "Worker~>Tail", payload: "7" }),
+    );
+    // recv's description advertises its inbound schemas: the value edge's number, no messages.
+    const output = JSON.parse(
+      recv.description.slice(recv.description.indexOf("{")),
+    );
+    assert.ok(Value.Check(output, seen.recv));
+    assert.ok(
+      !Value.Check(output, {
+        messages: [],
+        values: [{ id: "Seven->Worker", payload: "7" }],
+      }),
+    );
+    const result = execution.graph.result(execution.graph.sink.id);
+    assert.ok(result._tag === "Some");
+    assert.equal(result.value, 8);
+    // The rejected call published nothing; the accepted send was validated, then sampled once.
+    assert.deepEqual(probes, [
+      ["", "Seven->Worker", 7],
+      ["", "Worker~>Tail", 7],
+      ["", "Tail->$sink", 8],
+    ]);
+  } finally {
+    await execution.graph.close();
+  }
+});

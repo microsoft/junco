@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -19,39 +20,60 @@ import {
   Width,
 } from "../src/index.ts";
 
-type KV = {
-  readonly kind: "kv";
-  readonly source: "email" | "phone" | "snailmail";
-  readonly name: string;
-  readonly value: string;
-};
-type Grouped = {
-  readonly kind: "grouped";
-  readonly name: string;
-  readonly emails: readonly string[];
-  readonly phones: readonly string[];
-  readonly snailmails: readonly string[];
-};
-type Count = {
-  readonly kind: "count";
-  readonly label: string;
-  readonly value: number;
-};
-type Msg = KV | Grouped | Count;
+const KVSchema = Type.Object({
+  kind: Type.Literal("kv"),
+  source: Type.Union([
+    Type.Literal("email"),
+    Type.Literal("phone"),
+    Type.Literal("snailmail"),
+  ]),
+  name: Type.String(),
+  value: Type.String(),
+});
+const GroupedSchema = Type.Object({
+  kind: Type.Literal("grouped"),
+  name: Type.String(),
+  emails: Type.Array(Type.String()),
+  phones: Type.Array(Type.String()),
+  snailmails: Type.Array(Type.String()),
+});
+const CountSchema = Type.Object({
+  kind: Type.Literal("count"),
+  label: Type.String(),
+  value: Type.Number(),
+});
+const MsgSchema = Type.Union([KVSchema, GroupedSchema, CountSchema]);
+type KV = Static<typeof KVSchema>;
+type Grouped = Static<typeof GroupedSchema>;
+type Count = Static<typeof CountSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
-  const emailEdge = Edge.message<Msg, string>("email");
-  const phoneEdge = Edge.message<Msg, string>("phone");
-  const snailmailEdge = Edge.message<Msg, string>("snailmail");
-  const groupedForTsvEdge = Edge.message<Msg, string>("groupedForTsv");
+  const emailEdge = Edge.message<Msg, string>("email", MsgSchema);
+  const phoneEdge = Edge.message<Msg, string>("phone", MsgSchema);
+  const snailmailEdge = Edge.message<Msg, string>("snailmail", MsgSchema);
+  const groupedForTsvEdge = Edge.message<Msg, string>(
+    "groupedForTsv",
+    MsgSchema,
+  );
   const groupedForLudditesEdge = Edge.message<Msg, string>(
     "groupedForLuddites",
+    MsgSchema,
   );
-  const groupedForWritersEdge = Edge.message<Msg, string>("groupedForWriters");
-  const groupedForNomadsEdge = Edge.message<Msg, string>("groupedForNomads");
-  const ludditesCountEdge = Edge.message<Msg, string>("ludditesCount");
-  const writersCountEdge = Edge.message<Msg, string>("writersCount");
-  const nomadsCountEdge = Edge.message<Msg, string>("nomadsCount");
+  const groupedForWritersEdge = Edge.message<Msg, string>(
+    "groupedForWriters",
+    MsgSchema,
+  );
+  const groupedForNomadsEdge = Edge.message<Msg, string>(
+    "groupedForNomads",
+    MsgSchema,
+  );
+  const ludditesCountEdge = Edge.message<Msg, string>(
+    "ludditesCount",
+    MsgSchema,
+  );
+  const writersCountEdge = Edge.message<Msg, string>("writersCount", MsgSchema);
+  const nomadsCountEdge = Edge.message<Msg, string>("nomadsCount", MsgSchema);
 
   const emailInputs: [string, string][] = [
     ["Nathan Nomad", "nathan@example.com"],
@@ -135,12 +157,13 @@ test("cookbook: mergecontacts co-group-by-key 3-way", async () => {
         const events: Message<Msg>[] = [];
         for (const name of Object.keys(groups).sort(S.Ord.compare)) {
           const group = groups[name]!;
-          const bySource = (src: KV["source"]): readonly string[] =>
-            pipe(
+          const bySource = (src: KV["source"]): string[] => [
+            ...pipe(
               group,
               RA.filter((kv) => kv.source === src),
               RA.map((kv) => kv.value),
-            );
+            ),
+          ];
           const grouped: Grouped = {
             kind: "grouped",
             name,

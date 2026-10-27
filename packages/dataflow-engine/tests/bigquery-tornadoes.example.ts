@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -18,28 +19,32 @@ import {
   Width,
 } from "../src/index.ts";
 
-type Row = {
-  readonly kind: "row";
-  readonly month: number;
-  readonly day: number;
-  readonly tornado: boolean;
-};
-type Pair = {
-  readonly kind: "pair";
-  readonly month: number;
-  readonly count: number;
-};
-type Result = {
-  readonly kind: "result";
-  readonly month: number;
-  readonly tornado_count: number;
-};
-type Msg = Row | Pair | Result;
+const RowSchema = Type.Object({
+  kind: Type.Literal("row"),
+  month: Type.Number(),
+  day: Type.Number(),
+  tornado: Type.Boolean(),
+});
+const PairSchema = Type.Object({
+  kind: Type.Literal("pair"),
+  month: Type.Number(),
+  count: Type.Number(),
+});
+const ResultSchema = Type.Object({
+  kind: Type.Literal("result"),
+  month: Type.Number(),
+  tornado_count: Type.Number(),
+});
+const MsgSchema = Type.Union([RowSchema, PairSchema, ResultSchema]);
+type Row = Static<typeof RowSchema>;
+type Pair = Static<typeof PairSchema>;
+type Result = Static<typeof ResultSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: bigquery tornadoes count per month", async () => {
-  const rowsEdge = Edge.message<Msg, string>("rows");
-  const pairsEdge = Edge.message<Msg, string>("pairs");
-  const resultsEdge = Edge.message<Msg, string>("results");
+  const rowsEdge = Edge.message<Msg, string>("rows", MsgSchema);
+  const pairsEdge = Edge.message<Msg, string>("pairs", MsgSchema);
+  const resultsEdge = Edge.message<Msg, string>("results", MsgSchema);
 
   const results: Result[] = [];
   const tracer = ExampleTracer.create("cookbook/bigquery-tornadoes");

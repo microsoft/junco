@@ -21,6 +21,9 @@
     "test": "bun test ./tests/*.test.ts",
     "pack": "bun run build && bun pm pack --destination ./pack"
   },
+  "dependencies": {
+    "typebox": "1.3.34"
+  },
   "peerDependencies": {
     "dataflow-engine": "^0.1.0",
     "opik": "^2.2.86"

@@ -1,16 +1,20 @@
+import { Type } from "typebox";
 import type { ErrorFn, Message, NodeOptions, NodeSpec } from "../src/index.ts";
 import { EdgeId, NodeId, TriggerRule } from "../src/index.ts";
+
+const NumberSchema = Type.Number();
+type Num = typeof NumberSchema;
 
 // Exported so `noUnusedLocals` does not report the fixtures as dead. Nothing imports this file; it
 // exists to be compiled.
 
 /** Trigger is the only required option; numeric messages and string results stay generic. */
-export const triggerOnly: NodeOptions<number, string> = {
+export const triggerOnly: NodeOptions<Num, string> = {
   trigger: TriggerRule.always(),
 };
 
 /** Every common option at once, including an explicitly empty description. */
-export const fullySpecified: NodeOptions<number, string> = {
+export const fullySpecified: NodeOptions<Num, string> = {
   id: NodeId.create("fully-specified"),
   description: "",
   trigger: TriggerRule.always(),
@@ -18,7 +22,7 @@ export const fullySpecified: NodeOptions<number, string> = {
     triggered && view.messages.get(EdgeId.create("in"))?.[0] !== 0,
 };
 
-export const triggerOnlySpec: NodeSpec<null, number, string> = {
+export const triggerOnlySpec: NodeSpec<null, Num, string> = {
   ...triggerOnly,
   state: null,
   // biome-ignore lint/correctness/useYield: the source returns on its first activation.
@@ -27,7 +31,7 @@ export const triggerOnlySpec: NodeSpec<null, number, string> = {
   },
 };
 
-export const fullySpecifiedSpec: NodeSpec<{ count: number }, number, string> = {
+export const fullySpecifiedSpec: NodeSpec<{ count: number }, Num, string> = {
   ...fullySpecified,
   state: { count: 0 },
   step: async function* () {
@@ -37,14 +41,14 @@ export const fullySpecifiedSpec: NodeSpec<{ count: number }, number, string> = {
 };
 
 // @ts-expect-error trigger is required.
-export const missingTrigger: NodeOptions<number, string> = {
+export const missingTrigger: NodeOptions<Num, string> = {
   description: "no trigger",
 };
 
 const notice = EdgeId.create("notice");
 
 /** A synchronous handler returning an ordinary empty batch. */
-export const syncEmptyHandler: ErrorFn<{ count: number }, number, string> =
+export const syncEmptyHandler: ErrorFn<{ count: number }, Num, string> =
   function (error, signal) {
     const count: number = this.state.count;
     void count;
@@ -54,7 +58,7 @@ export const syncEmptyHandler: ErrorFn<{ count: number }, number, string> =
   };
 
 /** An asynchronous handler returning a readonly tuple of messages. */
-export const asyncTupleHandler: ErrorFn<{ count: number }, number, string> =
+export const asyncTupleHandler: ErrorFn<{ count: number }, Num, string> =
   async function () {
     return [
       { id: notice, payload: this.state.count },
@@ -63,7 +67,7 @@ export const asyncTupleHandler: ErrorFn<{ count: number }, number, string> =
   };
 
 /** Method-form `on_error` sees the spec's typed state. */
-export const methodHandlerSpec: NodeSpec<{ count: number }, number, string> = {
+export const methodHandlerSpec: NodeSpec<{ count: number }, Num, string> = {
   trigger: TriggerRule.always(),
   state: { count: 0 },
   // biome-ignore lint/correctness/useYield: the body throws on its first activation.
@@ -72,7 +76,7 @@ export const methodHandlerSpec: NodeSpec<{ count: number }, number, string> = {
   },
   on_error(error) {
     this.state.count += 1;
-    const batch: readonly Message<number>[] = [
+    const batch: readonly Message<Num>[] = [
       { id: notice, payload: error instanceof Error ? 1 : 0 },
     ];
     return batch;
@@ -80,14 +84,14 @@ export const methodHandlerSpec: NodeSpec<{ count: number }, number, string> = {
 };
 
 // @ts-expect-error a handler returns messages, never a result `T`.
-export const returnsResult: ErrorFn<null, number, string> = () => "fallback";
+export const returnsResult: ErrorFn<null, Num, string> = () => "fallback";
 
 // @ts-expect-error a handler returns a bare batch, not a wrapper object.
-export const returnsWrapper: ErrorFn<null, number, string> = () => ({
+export const returnsWrapper: ErrorFn<null, Num, string> = () => ({
   messages: [{ id: notice, payload: 1 }],
 });
 
-export const wrongPayload: ErrorFn<null, number, string> = () => [
+export const wrongPayload: ErrorFn<null, Num, string> = () => [
   // @ts-expect-error messages must carry payload `N`.
   { id: notice, payload: "one" },
 ];

@@ -5,7 +5,7 @@ import type {
   Message,
   NodeIdType as NodeId,
 } from "dataflow-engine";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import { log } from "./log.js";
 import {
   captureRecorder,
@@ -29,7 +29,7 @@ export type Prompt = {
 };
 
 /** One recorded complaint, with the node, delivered messages and request it arose in. */
-export type Issue<N = unknown> = {
+export type Issue<N extends TSchema = TSchema> = {
   readonly nodeId: NodeId;
   readonly messages: readonly Message<N>[];
   readonly prompt: Prompt;
@@ -37,13 +37,19 @@ export type Issue<N = unknown> = {
 };
 
 /** Everything a complaint tool needs besides the complaint text itself. */
-export type ComplaintContext<N = unknown> = Omit<Issue<N>, "complaint"> & {
+export type ComplaintContext<N extends TSchema = TSchema> = Omit<
+  Issue<N>,
+  "complaint"
+> & {
   readonly tracer?: Pick<DataflowTracer, "complain">;
 };
 
 /** The owner a complaint tool records through; `JuncoAgent` and `MockAgent` implement it. */
 export interface ComplainToolHost {
-  complain<N>(issue: Issue<N>, tracer?: Pick<DataflowTracer, "complain">): void;
+  complain<N extends TSchema>(
+    issue: Issue<N>,
+    tracer?: Pick<DataflowTracer, "complain">,
+  ): void;
 }
 
 /** Recursively freeze `value`, visiting each object once so shared or cyclic graphs terminate. */
@@ -66,12 +72,10 @@ function deepFreeze<V>(value: V, seen: WeakSet<object> = new WeakSet()): V {
 }
 
 /** Detach `issue` from caller-owned containers; opaque node payloads stay references. */
-function snapshotIssue<N>(issue: Issue<N>): Issue<unknown> {
+function snapshotIssue<N extends TSchema>(issue: Issue<N>): Issue {
   const prompt = deepFreeze(structuredClone(issue.prompt) as Prompt);
   const messages = Object.freeze(
-    issue.messages.map(({ id, payload }) =>
-      Object.freeze({ id, payload: payload as unknown }),
-    ),
+    issue.messages.map(({ id, payload }) => Object.freeze({ id, payload })),
   );
   return Object.freeze({
     nodeId: issue.nodeId,
@@ -81,7 +85,7 @@ function snapshotIssue<N>(issue: Issue<N>): Issue<unknown> {
   });
 }
 
-const issues: Issue<unknown>[] = [];
+const issues: Issue[] = [];
 
 /**
  * The process-wide, append-only complaint history shared by every graph, node and agent. Entries are
@@ -89,8 +93,11 @@ const issues: Issue<unknown>[] = [];
  */
 export const issueLog: {
   readonly length: number;
-  append<N>(issue: Issue<N>, tracer?: Pick<DataflowTracer, "complain">): void;
-  snapshot(): readonly Issue<unknown>[];
+  append<N extends TSchema>(
+    issue: Issue<N>,
+    tracer?: Pick<DataflowTracer, "complain">,
+  ): void;
+  snapshot(): readonly Issue[];
 } = Object.freeze({
   get length(): number {
     return issues.length;
@@ -99,7 +106,10 @@ export const issueLog: {
    * Commit a detached snapshot of `issue`, then notify `tracer`. A snapshot failure throws before
    * insertion; an observer failure is reported and the committed issue kept.
    */
-  append<N>(issue: Issue<N>, tracer?: Pick<DataflowTracer, "complain">): void {
+  append<N extends TSchema>(
+    issue: Issue<N>,
+    tracer?: Pick<DataflowTracer, "complain">,
+  ): void {
     const stored = snapshotIssue(issue);
     issues.push(stored);
     if (tracer === undefined) return;
@@ -109,7 +119,7 @@ export const issueLog: {
       log.warn("[dataflow-engine] DataflowTracer callback failed", error);
     }
   },
-  snapshot(): readonly Issue<unknown>[] {
+  snapshot(): readonly Issue[] {
     return Object.freeze(issues.slice());
   },
 });
@@ -152,11 +162,11 @@ export type ComplainTool = AgentTool<typeof complainParameters, undefined>;
  * `context` resolves at execution time. Without either, direct execution fails rather than pretend
  * success.
  */
-export const ComplainTool: new <N = unknown>(
+export const ComplainTool: new <N extends TSchema = TSchema>(
   host?: ComplainToolHost,
   context?: () => ComplaintContext<N>,
   recorder?: Recorder,
-) => ComplainTool = class<N> {
+) => ComplainTool = class<N extends TSchema> {
   name = "complain";
   label = "complain";
   description =
@@ -189,7 +199,7 @@ export function isComplainTool(tool: object): tool is ComplainTool {
 }
 
 /** Executes a {@link ComplainTool} through `host` and `context`, ignoring its bindings. */
-export function invokeComplainTool<N>(
+export function invokeComplainTool<N extends TSchema>(
   tool: ComplainTool,
   host: ComplainToolHost,
   context: ComplaintContext<N>,
@@ -202,7 +212,7 @@ export function invokeComplainTool<N>(
   return record(host, () => context, input, signal, complainTools.get(tool));
 }
 
-function record<N>(
+function record<N extends TSchema>(
   host: ComplainToolHost,
   context: () => ComplaintContext<N>,
   input: { complaint: Complaint },

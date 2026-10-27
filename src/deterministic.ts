@@ -1,11 +1,11 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Message, NodeGenerator, ParentView } from "dataflow-engine";
-import { JuncoAgentError } from "junco-agent";
+import { type AgenticInputSchema, JuncoAgentError } from "junco-agent";
 import type { ToolCollection } from "junco-tools";
-import type { AgenticInput } from "./agentic.js";
+import type { TSchema } from "typebox";
 import { checkPolicy } from "./node-policy.js";
 
-type Advance<N, T> = IteratorResult<Message<N>[], T>;
+type Advance<N extends TSchema, T> = IteratorResult<Message<N>[], T>;
 
 /**
  * A deterministic graph node body: one async generator speaking the engine's own
@@ -25,8 +25,10 @@ type Advance<N, T> = IteratorResult<Message<N>[], T>;
  * the generator through `return()`, discarding any cleanup batches, then releases its collection
  * lease, and rejects every later advance. Neither can preempt a body that ignores its signal.
  */
-export class Deterministic<N = AgenticInput, T = AssistantMessage>
-  implements NodeGenerator<N, T>
+export class Deterministic<
+  N extends TSchema = typeof AgenticInputSchema,
+  T = AssistantMessage,
+> implements NodeGenerator<N, T>
 {
   readonly #controller = new AbortController();
   readonly #generator: NodeGenerator<N, T>;

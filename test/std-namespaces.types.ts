@@ -16,6 +16,7 @@ import {
 } from "dataflow-engine";
 import type * as O from "fp-ts/lib/Option.js";
 import { context as nativeContext } from "junco-scheduler";
+import { type TSchema, Type } from "typebox";
 import {
   agent,
   graph,
@@ -36,19 +37,25 @@ type TaggedCreateTools = agent.JuncoAgentCreateOptions<
 >["tools"];
 
 type Counter = { count: number };
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+type Num = typeof NumberSchema;
+type Str = typeof StringSchema;
+type Chat = typeof agent.AgenticInputSchema;
 
 // --- graph: typed node construction and reading ---------------------------------------------------
 
 export async function graphTypesBuildAndReadTypedNodes(
-  g: graph.DataflowGraph<Counter, number, string, never>,
+  g: graph.DataflowGraph<Counter, Num, string, never>,
   source: graph.NodeIdType,
 ) {
-  const numbers: graph.Edge<number, string> = graph.Edge.message<
-    number,
-    string
-  >("numbers");
-  const done: graph.Edge<number, string> = graph.Edge.value<number, string>(
+  const numbers: graph.Edge<Num, string> = graph.Edge.message<Num, string>(
+    "numbers",
+    NumberSchema,
+  );
+  const done: graph.Edge<never, string> = graph.Edge.value(
     "done",
+    StringSchema,
   );
   const numbersId: graph.EdgeIdType = numbers.id;
   const doneId: graph.EdgeId = graph.EdgeId.create("done");
@@ -58,7 +65,7 @@ export async function graphTypesBuildAndReadTypedNodes(
   const queued: graph.Queue<number> = graph.Queue.from([1, 2]);
   const empty: graph.Queue<number> = graph.Queue.empty<number>();
   queued.push(3);
-  const sent: graph.Message<number> = graph.Message.create(
+  const sent: graph.Message<Num> = graph.Message.create(
     numbers,
     queued.shift() ?? empty.length,
   );
@@ -73,17 +80,17 @@ export async function graphTypesBuildAndReadTypedNodes(
   const values: graph.Lookup<graph.EdgeIdType, string> = new Map([
     [doneId, "finished"],
   ]);
-  const view: graph.ParentView<number, string> = { messages, values };
+  const view: graph.ParentView<Num, string> = { messages, values };
   const fromView: readonly number[] = graph.from(view, numbers);
 
-  const availability: graph.AvailabilityFn<number, string> = (
+  const availability: graph.AvailabilityFn<Num, string> = (
     current,
     triggered,
   ) => triggered && graph.from(current, numbers).length > 0;
-  const step: graph.StepFn<Counter, number, string> = async function* (
-    this: graph.Node<Counter, number, string>,
-  ): graph.NodeGenerator<number, string> {
-    let current: graph.ParentView<number, string> = yield [];
+  const step: graph.StepFn<Counter, Num, string> = async function* (
+    this: graph.Node<Counter, Num, string>,
+  ): graph.NodeGenerator<Num, string> {
+    let current: graph.ParentView<Num, string> = yield [];
     while (current.values.get(doneId) === undefined) {
       this.state.count += graph.from(current, numbers).length;
       const status: graph.NodeStatus = this.status;
@@ -93,26 +100,26 @@ export async function graphTypesBuildAndReadTypedNodes(
     }
     return `${this.state.count}`;
   };
-  const options: graph.NodeOptions<number, string> = {
+  const options: graph.NodeOptions<Num, string> = {
     id: sinkId,
     description: "counts numbers until done",
-    trigger: graph.trigger.TriggerRule.anyOf<number, string>(
+    trigger: graph.trigger.TriggerRule.anyOf<Num, string>(
       trigger.TriggerEntry.on(numbers),
       trigger.TriggerEntry.on(done),
     ),
     is_available: availability,
   };
-  const recover: graph.ErrorFn<Counter, number, string> = async function (
-    this: graph.Node<Counter, number, string>,
+  const recover: graph.ErrorFn<Counter, Num, string> = async function (
+    this: graph.Node<Counter, Num, string>,
     error: unknown,
     signal: AbortSignal | undefined,
-  ): Promise<readonly graph.Message<number>[]> {
+  ): Promise<readonly graph.Message<Num>[]> {
     signal?.throwIfAborted();
     return error instanceof Error
       ? [graph.Message.create(numbers, this.state.count)]
       : [];
   };
-  const spec: graph.NodeSpec<Counter, number, string> = {
+  const spec: graph.NodeSpec<Counter, Num, string> = {
     ...options,
     state: { count: 0 },
     step,
@@ -126,10 +133,10 @@ export async function graphTypesBuildAndReadTypedNodes(
   g.addEdge(source, id, numbers).addEdge(source, id, done);
   g.emit(source, sent);
 
-  const node: graph.Node<Counter, number, string> | undefined = g.getNode(id);
+  const node: graph.Node<Counter, Num, string> | undefined = g.getNode(id);
   const identified: graph.Identifiable<graph.NodeIdType> | undefined = node;
   const counted: number | undefined = node?.state.count;
-  const generator: graph.NodeGenerator<number, string> | undefined =
+  const generator: graph.NodeGenerator<Num, string> | undefined =
     node?.generator;
   const runOptions: graph.DataflowRunOptions = {
     signal: new AbortController().signal,
@@ -169,11 +176,11 @@ export async function graphTypesBuildAndReadTypedNodes(
   // @ts-expect-error zero is not a valid width
   bounded(0);
   // @ts-expect-error a numeric message cannot carry a string payload
-  const wrongPayload: graph.Message<number> = { id: numbersId, payload: "one" };
+  const wrongPayload: graph.Message<Num> = { id: numbersId, payload: "one" };
   // @ts-expect-error msg rejects a payload of the wrong type
   graph.Message.create(numbers, "one");
   // @ts-expect-error a node spec requires its step
-  const incomplete: graph.NodeSpec<Counter, number, string> = {
+  const incomplete: graph.NodeSpec<Counter, Num, string> = {
     trigger: graph.trigger.TriggerRule.always(),
     state: { count: 0 },
   };
@@ -200,25 +207,25 @@ export async function graphTypesBuildAndReadTypedNodes(
 type Task = { readonly label: string };
 
 export function spawnBuildsTypedStars(
-  root: graph.nodes.AgenticNode<number, string>,
-  child: (label: string) => graph.nodes.AgenticNode<number, string>,
-  stringChild: graph.nodes.AgenticNode<string, string>,
-  bare: graph.nodes.Agentic<number, string>,
-  state: graph.nodes.Deterministic<number, string>,
+  root: graph.nodes.AgenticNode<Num, string>,
+  child: (label: string) => graph.nodes.AgenticNode<Num, string>,
+  stringChild: graph.nodes.AgenticNode<Str, string>,
+  bare: graph.nodes.Agentic<Num, string>,
+  state: graph.nodes.Deterministic<Num, string>,
   lead: agent.JuncoAgent,
   worker: agent.JuncoAgent,
-  source: graph.nodes.Source<number, string>,
-  sink: graph.nodes.Sink<number, string>,
-  agentSource: graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>,
-  agentSink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
+  source: graph.nodes.Source<Num, string>,
+  sink: graph.nodes.Sink<Num, string>,
+  agentSource: graph.nodes.Source<Chat, AssistantMessage>,
+  agentSink: graph.nodes.Sink<Chat, AssistantMessage>,
 ) {
   const tasks: readonly Task[] = [{ label: "a" }, { label: "b" }];
   const typed: schedules.SchedulerContext<
-    graph.nodes.Agentic<number, string>,
-    number,
+    graph.nodes.Agentic<Num, string>,
+    Num,
     string,
     schedules.AgencyNodeMetadata,
-    graph.JuncoGraph<number, string>
+    graph.JuncoGraph<Num, string>
   > = graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => {
     const inferred: Task = task;
     // @ts-expect-error the factory input is the list's element type
@@ -256,7 +263,7 @@ export function spawnBuildsTypedStars(
   graph.JuncoGraph.spawn(source, sink, root, tasks, () => state);
   // @ts-expect-error the factory must return a node, not an arbitrary value
   graph.JuncoGraph.spawn(source, sink, root, tasks, (task) => task.label);
-  graph.JuncoGraph.spawn<Task, number, string>(
+  graph.JuncoGraph.spawn<Task, Num, string>(
     source,
     sink,
     root,
@@ -264,7 +271,7 @@ export function spawnBuildsTypedStars(
     // @ts-expect-error a string-message child cannot join a number-wired star
     () => stringChild,
   );
-  const managed: graph.nodes.AgenticNode<number, string> = {
+  const managed: graph.nodes.AgenticNode<Num, string> = {
     state,
     trigger: trigger.TriggerRule.never(),
   };
@@ -279,12 +286,12 @@ export function spawnBuildsTypedStars(
     }),
   );
   // @ts-expect-error a step-less coroutine's policy is owned by its state
-  const owned: graph.nodes.AgenticNode<number, string> = {
+  const owned: graph.nodes.AgenticNode<Num, string> = {
     state,
     trigger: trigger.TriggerRule.never(),
     policy: tools.LockPolicy,
   };
-  const typedGraph: graph.JuncoGraph<number, string> = typed.graph;
+  const typedGraph: graph.JuncoGraph<Num, string> = typed.graph;
   const defaultGraph: graph.JuncoGraph = defaults.graph;
   // @ts-expect-error spawn requires both positional ports
   graph.JuncoGraph.spawn(root, tasks, (task: Task) => child(task.label));
@@ -302,26 +309,26 @@ export function spawnBuildsTypedStars(
 // --- trigger and tracer ----------------------------------------------------------------------------
 
 export function triggerRulesDriveTypedNodes(
-  left: graph.Edge<number, string>,
-  right: graph.Edge<number, string>,
+  left: graph.Edge<Num, string>,
+  right: graph.Edge<Num, string>,
 ) {
   const kind: trigger.TriggerKind = "any";
-  const leftEntry: trigger.TriggerEntry<number, string> =
+  const leftEntry: trigger.TriggerEntry<Num, string> =
     trigger.TriggerEntry.on(left);
-  const literal: trigger.TriggerRule<number, string> = {
+  const literal: trigger.TriggerRule<Num, string> = {
     kind,
     rule: [leftEntry, trigger.TriggerEntry.on(right)],
   };
-  const nested: graph.trigger.TriggerRule<number, string> =
+  const nested: graph.trigger.TriggerRule<Num, string> =
     graph.trigger.TriggerRule.allOf(leftEntry);
-  const rules: trigger.TriggerRule<number, string>[] = [
+  const rules: trigger.TriggerRule<Num, string>[] = [
     literal,
     nested,
     trigger.TriggerRule.when(right),
     trigger.TriggerRule.always(),
     trigger.TriggerRule.never(),
   ];
-  const inbound = new Map<graph.EdgeIdType, graph.Edge<number, string>>([
+  const inbound = new Map<graph.EdgeIdType, graph.Edge<Num, string>>([
     [left.id, left],
     [right.id, right],
   ]);
@@ -332,26 +339,29 @@ export function triggerRulesDriveTypedNodes(
   const satisfied: (readonly graph.EdgeIdType[])[] = rules.map((rule) =>
     trigger.satisfiedEdges(rule, inbound, sink),
   );
-  const spec: graph.NodeSpec<undefined, number, string> =
-    new graph.nodes.EmitOnce(() => [graph.Message.create(left, 1)], "once", {
+  const spec: graph.NodeSpec<undefined, Num, string> = new graph.nodes.EmitOnce(
+    () => [graph.Message.create(left, 1)],
+    "once",
+    {
       trigger: literal,
       state: undefined,
-    });
-  const invalidKind: trigger.TriggerRule<number, string> = {
+    },
+  );
+  const invalidKind: trigger.TriggerRule<Num, string> = {
     // @ts-expect-error a trigger kind is "all" or "any"
     kind: "some",
     rule: [],
   };
-  const rawRule: graph.trigger.TriggerRule<number, string> = {
+  const rawRule: graph.trigger.TriggerRule<Num, string> = {
     kind: "all",
     // @ts-expect-error a rule lists edge IDs, not raw strings
     rule: ["left"],
   };
   // @ts-expect-error a number-message entry does not build a string-message rule
-  const wrongMessage: trigger.TriggerRule<string, string> =
+  const wrongMessage: trigger.TriggerRule<Str, string> =
     trigger.TriggerRule.allOf(leftEntry);
   // @ts-expect-error a string-result entry does not build a Date-result rule
-  const wrongResult: graph.trigger.TriggerRule<number, Date> =
+  const wrongResult: graph.trigger.TriggerRule<Num, Date> =
     graph.trigger.TriggerRule.anyOf(leftEntry);
   return [
     ready,
@@ -368,7 +378,7 @@ export function triggerRulesDriveTypedNodes(
 class CountingTracer implements tracer.DataflowTracer {
   readonly events: string[] = [];
 
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     traced: graph.DataflowGraph<S, N, T, EH>,
   ): tracer.DataflowRunTrace<N, T> {
     const events = this.events;
@@ -411,12 +421,12 @@ class CountingTracer implements tracer.DataflowTracer {
 }
 
 export async function tracerHandlesRetainPayloadTypes(
-  g: graph.DataflowGraph<Counter, number, string, never>,
+  g: graph.DataflowGraph<Counter, Num, string, never>,
   id: graph.NodeIdType,
-  view: graph.ParentView<number, string>,
-  edge: graph.Edge<number, string>,
-  source: graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>,
-  sink: graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>,
+  view: graph.ParentView<Num, string>,
+  edge: graph.Edge<Num, string>,
+  source: graph.nodes.Source<Chat, AssistantMessage>,
+  sink: graph.nodes.Sink<Chat, AssistantMessage>,
 ) {
   const counting = new CountingTracer();
   const tui: tracer.TuiTracer = await tracer.TuiTracer.create();
@@ -427,14 +437,14 @@ export async function tracerHandlesRetainPayloadTypes(
     tui,
     shared,
   ];
-  const run: tracer.DataflowRunTrace<number, string> = counting.startRun(g);
-  const primed: tracer.DataflowStepTrace<number, string> = run.startNode(
+  const run: tracer.DataflowRunTrace<Num, string> = counting.startRun(g);
+  const primed: tracer.DataflowStepTrace<Num, string> = run.startNode(
     id,
     "prime",
     undefined,
   );
   primed.end({ done: false, value: [] });
-  const resumed: tracer.DataflowStepTrace<number, string> = run.startNode(
+  const resumed: tracer.DataflowStepTrace<Num, string> = run.startNode(
     id,
     "resume",
     view,
@@ -448,7 +458,7 @@ export async function tracerHandlesRetainPayloadTypes(
   run.end(new Map([[id, 2]]));
   // @ts-expect-error a step phase is "prime" or "resume"
   run.startNode(id, "restart", undefined);
-  const traced = new graph.DataflowGraph<Counter, number, string, never>(
+  const traced = new graph.DataflowGraph<Counter, Num, string, never>(
     graph.Width.create(1),
     graph.UNBOUNDED,
     counting,
@@ -471,15 +481,15 @@ export async function tracerHandlesRetainPayloadTypes(
 // --- schedules ------------------------------------------------------------------------------------
 
 export async function typedSchedulerPolicyReadsPerEdge(
-  edge: graph.Edge<number, string>,
+  edge: graph.Edge<Num, string>,
 ) {
-  const g = new graph.DataflowGraph<Counter, number, string, never>(
+  const g = new graph.DataflowGraph<Counter, Num, string, never>(
     graph.Width.create(1),
     graph.Width.create(2),
   );
   const choose: schedules.Scheduler<
     Counter,
-    number,
+    Num,
     string,
     { priority: number }
   > = schedules.choose({
@@ -492,7 +502,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
   });
   const policy: schedules.Scheduler<
     Counter,
-    number,
+    Num,
     string,
     { priority: number }
   > = schedules.separate(
@@ -536,7 +546,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
   const unknownRead: MessageSchedule = "some";
   const wrongPayload: schedules.Scheduler<
     Counter,
-    string,
+    Str,
     string,
     { priority: number }
   > = () => ({ selected: [] });
@@ -552,8 +562,8 @@ export async function typedSchedulerPolicyReadsPerEdge(
 export function modelPolicyAndRequestPreserveCallerMetadata(
   options: schedules.PiOptions,
   request: schedules.SchedulerRequest<{ readonly priority: number }>,
-  numeric: graph.JuncoGraph<number, string>,
-  textual: graph.JuncoGraph<string, number>,
+  numeric: graph.JuncoGraph<Num, string>,
+  textual: graph.JuncoGraph<Str, number>,
 ) {
   const policy = schedules.pi(options);
   const numbers = schedules.context({ graph: numeric, scheduler: policy });
@@ -665,13 +675,13 @@ export async function agentProtocolNarrowsSteps(
       described.push(code);
     }
   }
-  const issue: tools.Issue<number> = {
+  const issue: tools.Issue<Num> = {
     nodeId: graph.NodeId.create("n"),
     messages: [],
     prompt: { messages: [] },
     complaint: "blocked",
   };
-  const complained: void = protocol.complain(issue);
+  const complained = protocol.complain(issue);
   // @ts-expect-error a complaint string alone is not an issue
   protocol.complain("blocked");
   // @ts-expect-error an issue carries its messages and prompt
@@ -1131,10 +1141,11 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
     }));
   };
   const task = new tools.TaskTool(host);
+  const precise: AgentTool<typeof task.parameters, tools.TaskToolDetails> =
+    task;
   const unhosted: AgentTool = new tools.TaskTool();
-  const branded: boolean = tools.isTaskTool(unhosted);
-  const admitted = await tools.invokeTaskTool(
-    task,
+  const branded: boolean = tools.TaskTool.is(unhosted);
+  const admitted = await task.invoke(
     host,
     "call-1",
     {
@@ -1155,28 +1166,25 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   // Children carry dynamically discovered MCP tools, so they are broad AgentTool agents.
   const children: agent.JuncoAgent<TaggedSkill, TaggedTemplate, AgentTool>[] =
     await specialized.createSubagents(overrides, signal);
-  const hosted: number = await specialized.runWithNodeContext(
-    { task: host },
+  const bound: number = await specialized.runWithNodeContext(
+    { briefing: () => undefined },
     async () => 1,
   );
   const batch: tools.TaskInput = { context: "c", tasks: [{ task: "x" }] };
-  const assigned: tools.AssignedTaskTool = new tools.AssignedTaskTool(batch);
-  const launched = await tools.invokeTaskTool(
-    assigned,
+  const assigned: tools.AssignedTaskTool = new tools.AssignedTaskTool(
+    batch,
     host,
-    "call-6",
-    {},
-    signal,
   );
+  const assignedTool: AgentTool<
+    typeof assigned.parameters,
+    tools.TaskToolDetails
+  > = assigned;
+  const assignedOnly: boolean = tools.AssignedTaskTool.is(unhosted);
+  const explicit: tools.TaskToolHost | undefined = assigned.host;
+  const launched = await assigned.invoke(host, "call-6", {}, signal);
   const decision: tools.TaskDecision = { action: "retry", id: "t", attempt: 1 };
   const call: tools.TaskCall = decision;
-  const retried = await tools.invokeTaskTool(
-    task,
-    host,
-    "call-7",
-    call,
-    signal,
-  );
+  const retried = await task.invoke(host, "call-7", call, signal);
   const configured: Promise<void> = specialized.setTaskBatch(batch);
   const failurePolicy: agent.TaskFailurePolicy =
     specialized.getTaskFailurePolicy();
@@ -1187,20 +1195,28 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
     mcp.getJuncoMcpToolIdentity(unhosted);
   const cancellable: mcp.JuncoMcpConnectOptions = { signal };
 
-  // @ts-expect-error a task needs its instructions
-  await task.execute("call-2", { context: "c", tasks: [{ name: "x" }] });
-  await task.execute("call-3", {
-    context: "c",
+  await task.invoke(
+    host,
+    "call-2",
+    // @ts-expect-error a task needs its instructions
+    { context: "c", tasks: [{ name: "x" }] },
+    signal,
+  );
+  await task.invoke(
+    host,
+    "call-3",
     // @ts-expect-error a model override names its provider and model ID
-    tasks: [{ task: "x", model: { provider: "p" } }],
-  });
-  await task.execute("call-4", {
-    context: "c",
+    { context: "c", tasks: [{ task: "x", model: { provider: "p" } }] },
+    signal,
+  );
+  await task.invoke(
+    host,
+    "call-4",
     // @ts-expect-error a tool subset lists tool names
-    tasks: [{ task: "x", tools: [1] }],
-  });
-  await tools.invokeTaskTool(
-    task,
+    { context: "c", tasks: [{ task: "x", tools: [1] }] },
+    signal,
+  );
+  await task.invoke(
     host,
     "c",
     // @ts-expect-error a decision retries or ignores
@@ -1210,12 +1226,7 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   // @ts-expect-error a failure policy ignores or bounds retries
   specialized.setTaskFailurePolicy("retry");
   // @ts-expect-error hosts receive the input directly, not a request wrapper
-  await tools.invokeTaskTool(
-    task,
-    host,
-    { toolCallId: "c", input: {} },
-    signal,
-  );
+  await task.invoke(host, { toolCallId: "c", input: {} }, signal);
   // @ts-expect-error a handle ID is a string
   const badHandles: tools.TaskToolDetails = { tasks: [{ id: 1 }] };
   // @ts-expect-error children never promise the caller's specialized tool type
@@ -1226,12 +1237,16 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   >[] = children;
   return [
     branded,
+    assignedOnly,
+    precise,
+    assignedTool,
     launched,
     retried,
     configured,
     failurePolicy,
     firstId,
-    hosted,
+    bound,
+    explicit,
     snapshot,
     identity,
     cancellable,
@@ -1242,14 +1257,20 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
 
 export async function messagingToolsAreNominalAgentTools(
   specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
-  view: graph.ParentView<number, string>,
+  view: graph.ParentView<Num, string>,
   signal: AbortSignal,
 ) {
   const contract: tools.Contract = { expect: "One number to add." };
+  const numbersRoute = [graph.EdgeId.create("numbers"), NumberSchema] as const;
   const host = {
     view,
+    sendParameters: tools.SendTool.parametersFor([numbersRoute]),
+    recvOutputSchema: tools.RecvTool.outputSchemaFor(
+      [numbersRoute],
+      [[graph.EdgeId.create("done"), StringSchema]],
+    ),
     consume: () => {},
-    send: (_message: graph.Message<number>) => {},
+    send: (_message: graph.Message<Num>) => {},
     info: () => ({
       parents: [
         {
@@ -1262,8 +1283,8 @@ export async function messagingToolsAreNominalAgentTools(
       children: [],
     }),
   };
-  const recv: tools.RecvTool<number, string> = new tools.RecvTool(host);
-  const send: tools.SendTool = new tools.SendTool(host);
+  const recv: tools.RecvTool<Num, string> = new tools.RecvTool(host);
+  const send: tools.SendTool<Num> = new tools.SendTool(host);
   const info: tools.InfoTool = new tools.InfoTool(host);
   const unhosted: tools.RecvTool = new tools.RecvTool();
   // Constructed values are AgentTools without unwrapping.
@@ -1273,15 +1294,18 @@ export async function messagingToolsAreNominalAgentTools(
     tools.SendTool.is(loadout[1]!),
     tools.InfoTool.is(loadout[2]!),
   ];
-  const received = await tools.RecvTool.invoke<number, string>(
+  const received = await tools.RecvTool.invoke<Num, string>(
     recv,
     host,
     "recv-1",
     {},
     signal,
   );
-  const messages: readonly graph.Message<number>[] = received.details.messages;
-  const values: readonly graph.Message<string>[] = received.details.values;
+  const messages: readonly graph.Message<Num>[] = received.details.messages;
+  const values: readonly {
+    readonly id: graph.EdgeIdType;
+    readonly payload: string;
+  }[] = received.details.values;
   await tools.SendTool.invoke(
     send,
     host,
@@ -1306,7 +1330,7 @@ export async function messagingToolsAreNominalAgentTools(
   );
 
   // @ts-expect-error a copied carrier is not a nominal recv tool
-  const plainRecv: tools.RecvTool<number, string> = { ...recv };
+  const plainRecv: tools.RecvTool<Num, string> = { ...recv };
   // @ts-expect-error a copied carrier is not a nominal send tool
   const plainSend: tools.SendTool = { ...send };
   // @ts-expect-error a copied carrier is not a nominal info tool
@@ -1340,10 +1364,10 @@ export async function profileRecordersAreOneSharedInterface(
 ) {
   const grafana: tracer.GrafanaRecorder = await tracer.GrafanaRecorder.create();
   const full: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   > = grafana;
   const fromJsonl: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   > = new tracer.JsonlRecorder({ path: "samples.jsonl", monitored: true });
   // The `tools` and `tracer` names are the same imported interface.
   const memory: tools.ProfileRecorder<"memory"> =

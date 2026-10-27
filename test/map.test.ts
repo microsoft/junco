@@ -11,8 +11,13 @@ import {
 } from "dataflow-engine";
 import { LockPolicy } from "junco-tools";
 import createGraph from "ngraph.graph";
+import { Type } from "typebox";
 import { Deterministic, JuncoGraph, schedules } from "../src/index.ts";
 import { terminalPorts } from "./deterministic-support.ts";
+
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+type NumberSchema = typeof NumberSchema;
 
 const options = { policy: LockPolicy, tracer: new DummyTracer() };
 
@@ -21,22 +26,25 @@ test("mapped skeletons execute parallel queues, feedback and isolated nodes inde
   skeleton.addNode("source", "publish");
   skeleton.addNode("worker", "sum");
   skeleton.addNode(7, "isolated");
-  const first = Edge.message<number, number>(
+  const first = Edge.message<NumberSchema, number>(
     skeleton.addLink("source", "worker").id,
+    NumberSchema,
   );
-  const second = Edge.message<number, number>(
+  const second = Edge.message<NumberSchema, number>(
     skeleton.addLink("source", "worker").id,
+    NumberSchema,
   );
-  const feedback = Edge.message<number, number>(
+  const feedback = Edge.message<NumberSchema, number>(
     skeleton.addLink("worker", "worker").id,
+    NumberSchema,
   );
   const closed: string[] = [];
   const map = () => {
-    const ports = terminalPorts<number, number>();
+    const ports = terminalPorts(NumberSchema, NumberSchema);
     const execution = JuncoGraph.map(
       skeleton,
       (text) =>
-        new Deterministic<number, number>(async function* () {
+        new Deterministic<NumberSchema, number>(async function* () {
           try {
             if (text === "isolated") return 0;
             let view = yield text === "publish"
@@ -66,8 +74,8 @@ test("mapped skeletons execute parallel queues, feedback and isolated nodes inde
   };
   const a = map();
   const b = map();
-  await using graphA = a.graph;
-  await using graphB = b.graph;
+  await using _graphA = a.graph;
+  await using _graphB = b.graph;
   for (const execution of [a, b]) {
     const results = await execution.run();
     assert.deepEqual([...results].filter(([id]) => id !== "$sink").sort(), [
@@ -92,7 +100,7 @@ test("mapped node specs seed cycles and preserve nested sink results", async () 
   const skeleton = createGraph<string, void>();
   skeleton.addNode("loop", "nested");
   skeleton.addLink("loop", "loop");
-  const childPorts = terminalPorts<number, string>();
+  const childPorts = terminalPorts(NumberSchema, StringSchema);
   const child = schedules.context({
     scheduler: schedules.parallel(),
     graph: new JuncoGraph(
@@ -106,19 +114,19 @@ test("mapped node specs seed cycles and preserve nested sink results", async () 
   });
   const member = child.graph.addNode({
     trigger: TriggerRule.always(),
-    state: new Deterministic<number, string>(async function* () {
+    state: new Deterministic<NumberSchema, string>(async function* () {
       yield [];
       return "selected";
     }, LockPolicy),
   });
   childPorts.connect(child.graph, member);
-  const ports = terminalPorts<number, string>();
+  const ports = terminalPorts(NumberSchema, StringSchema);
   const mapped = JuncoGraph.map(
     skeleton,
     () => ({
       id: NodeId.create("ignored"),
       state: child,
-      trigger: TriggerRule.always<number, string>(),
+      trigger: TriggerRule.always<NumberSchema, string>(),
     }),
     { ...options, source: ports.source, sink: ports.sink },
   );
@@ -139,11 +147,14 @@ test("mapper failure preserves caller-owned members and permits retrying unpubli
   skeleton.addNode("last", "last");
   const failure = new Error("mapping failed");
   const visited: string[] = [];
-  await using state = new Deterministic<number, number>(async function* () {
-    yield [];
-    return 1;
-  }, LockPolicy);
-  const ports = terminalPorts<number, number>();
+  await using state = new Deterministic<NumberSchema, number>(
+    async function* () {
+      yield [];
+      return 1;
+    },
+    LockPolicy,
+  );
+  const ports = terminalPorts(NumberSchema, NumberSchema);
   assert.throws(
     () =>
       JuncoGraph.map(
@@ -163,7 +174,7 @@ test("mapper failure preserves caller-owned members and permits retrying unpubli
   retrySkeleton.addNode("first", "first");
   const retry = JuncoGraph.map(
     retrySkeleton,
-    () => ({ state, trigger: TriggerRule.always<number, number>() }),
+    () => ({ state, trigger: TriggerRule.always<NumberSchema, number>() }),
     { ...options, source: ports.source, sink: ports.sink },
   );
   await using graph = retry.graph;

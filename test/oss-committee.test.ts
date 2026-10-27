@@ -1,10 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import {
-  type AssistantMessage,
-  contentText,
-  fauxAssistantMessage,
-} from "@earendil-works/pi-ai";
+import { contentText, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
   DataflowNodeError,
   DummyTracer,
@@ -12,7 +8,12 @@ import {
   NodeId,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticInput, Deterministic } from "junco-agency";
+import {
+  type AgenticInput,
+  AssistantMessageSchema,
+  Deterministic,
+} from "junco-agency";
+import { Value } from "typebox/value";
 import {
   approvedPlan,
   convene,
@@ -28,8 +29,11 @@ import {
 const quiet = new DummyTracer();
 
 const repositoryUrl = "https://github.com/tui-cs/Terminal.Gui";
-const textOf = (message: AssistantMessage) =>
-  contentText(message.content).trim();
+/** The trimmed text of a dynamic YAML result, after checking it is a native assistant message. */
+const textOf = (message: unknown) => {
+  assert.ok(Value.Check(AssistantMessageSchema, message));
+  return contentText(message.content).trim();
+};
 const rateLimited = () => new Response("rate limited", { status: 403 });
 const emptySearch = () =>
   Response.json({ incomplete_results: false, items: [] });
@@ -209,7 +213,9 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     /Librarian did not finish normally: length/,
   );
   const librarian = graph.result(NodeId.create("Librarian"));
-  assert.ok(O.isSome(librarian));
+  assert.ok(
+    O.isSome(librarian) && Value.Check(AssistantMessageSchema, librarian.value),
+  );
   assert.equal(librarian.value.stopReason, "length");
   assert.ok(O.isSome(graph.result(NodeId.create("Architect"))));
   assert.deepEqual(committee.memberInputs.Reducer, []);
@@ -237,7 +243,9 @@ test("a truncated research report never reaches the Architect", async () => {
     /Librarian did not finish normally: length/,
   );
   const librarian = graph.result(NodeId.create("Librarian"));
-  assert.ok(O.isSome(librarian));
+  assert.ok(
+    O.isSome(librarian) && Value.Check(AssistantMessageSchema, librarian.value),
+  );
   assert.equal(librarian.value.stopReason, "length");
   assert.ok(!committee.modelRequests.includes("Architect"));
   assert.ok(!committee.modelRequests.includes("Reducer"));

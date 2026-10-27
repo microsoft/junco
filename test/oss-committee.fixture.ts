@@ -26,6 +26,7 @@ import {
   OssSearchTool,
   ReviewTool,
 } from "../examples/oss-committee/oss-committee.ts";
+import type { YamlAgent } from "../examples/support.ts";
 import { userTexts } from "./deterministic-support.ts";
 import { scripted } from "./support.ts";
 
@@ -430,7 +431,7 @@ export async function scriptedCommittee(
     return fauxAssistantMessage(committeePlan(reducerInput, reducerRound + 1));
   };
 
-  const created: JuncoAgent[] = [];
+  const created: YamlAgent[] = [];
   const member = async (
     id: MemberId,
     turn: FauxResponseFactory,
@@ -440,7 +441,7 @@ export async function scriptedCommittee(
     // Match the truncated final's one-token usage; a shorter-than-budget `length` is native overflow recovery.
     if (id === "Librarian" && librarianStopReason === "length")
       model.maxTokens = 1;
-    const agent = await JuncoAgent.fromResolved({
+    const agent: YamlAgent = await JuncoAgent.fromResolved({
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,

@@ -2,13 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import {
-  AssignedTaskTool,
-  invokeTaskTool,
-  isAssignedTaskTool,
-  isTaskTool,
-  TaskTool,
-} from "../dist/task.js";
+import { AssignedTaskTool, TaskTool } from "../dist/task.js";
 import { text } from "./helpers.mjs";
 import { assistantText, scriptedModel, toolResult } from "./scripted-model.mjs";
 
@@ -42,7 +36,7 @@ test("an explicitly hosted task tool works in a bare Pi agent and its handles re
   const tool = new TaskTool(host);
   assert.equal(tool.name, "task");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(isTaskTool(tool), true);
+  assert.equal(TaskTool.is(tool), true);
 
   const { faux, model, streamFn } = scriptedModel();
   const capture = {};
@@ -166,7 +160,7 @@ test("invalid task input never reaches the host", async () => {
       JSON.stringify(input),
     );
     await assert.rejects(
-      invokeTaskTool(tool, host, "bad", input, new AbortController().signal),
+      tool.invoke(host, "bad", input, new AbortController().signal),
       /Invalid task input/,
       JSON.stringify(input),
     );
@@ -272,42 +266,33 @@ test("host rejection and a mismatched handle count fail the call", async () => {
   }
 });
 
-test("only factory-created tools are task primitives", async () => {
+test("only constructor-built tools are task primitives", async () => {
   const tool = new TaskTool();
   const copy = { ...tool };
   const impostor = { name: "task", label: "task", execute: tool.execute };
-  assert.equal(isTaskTool(copy), false);
-  assert.equal(isTaskTool(impostor), false);
-  assert.equal(isTaskTool({ name: "task" }), false);
+  const forged = Object.create(TaskTool.prototype);
+  for (const fake of [copy, impostor, forged, { name: "task" }])
+    assert.equal(TaskTool.is(fake), false);
 
   const { host, calls } = recordingHost();
   const signal = new AbortController().signal;
   const input = { context: "c", tasks: [{ task: "x" }] };
-  assert.throws(
-    () => invokeTaskTool(copy, host, "c", input, signal),
-    TypeError,
-  );
-  assert.throws(
-    () => invokeTaskTool(impostor, host, "c", input, signal),
-    TypeError,
-  );
+  for (const fake of [copy, impostor, forged])
+    assert.throws(
+      () => TaskTool.prototype.invoke.call(fake, host, "c", input, signal),
+      TypeError,
+    );
   assert.equal(calls.length, 0);
 
-  // invokeTaskTool uses the supplied host, not the one the tool was created with.
+  // invoke uses the supplied host, not the one the tool was created with.
   const own = recordingHost();
   const hosted = new TaskTool(own.host);
-  const result = await invokeTaskTool(
-    hosted,
-    host,
-    "via-invoke",
-    input,
-    signal,
-  );
+  const result = await hosted.invoke(host, "via-invoke", input, signal);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].toolCallId, "via-invoke");
   assert.equal(calls[0].signal, signal);
   assert.equal(own.calls.length, 0);
-  assert.equal(result.details.tasks.length, 1);
+  assert.deepEqual(result.details, { tasks: [{ id: "handle-1-0" }] });
 });
 
 test("an already aborted signal stops admission before the host", async () => {
@@ -323,8 +308,7 @@ test("an already aborted signal stops admission before the host", async () => {
     ),
   );
   await assert.rejects(
-    invokeTaskTool(
-      tool,
+    tool.invoke(
       host,
       "x",
       { context: "c", tasks: [{ task: "x" }] },
@@ -350,9 +334,9 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   const tool = new AssignedTaskTool(input);
   assert.equal(tool.name, "task");
   assert.equal(tool.executionMode, "sequential");
-  assert.equal(isTaskTool(tool), true);
-  assert.equal(isAssignedTaskTool(tool), true);
-  assert.equal(isAssignedTaskTool(new TaskTool()), false);
+  assert.equal(TaskTool.is(tool), true);
+  assert.equal(AssignedTaskTool.is(tool), true);
+  assert.equal(AssignedTaskTool.is(new TaskTool()), false);
   // The batch is not published to the model.
   assert.doesNotMatch(JSON.stringify(tool.parameters), /first|second/);
   assert.doesNotMatch(tool.description, /first|second/);
@@ -377,7 +361,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   };
   const { host, calls } = recordingHost();
   const signal = new AbortController().signal;
-  const result = await invokeTaskTool(tool, host, "go", {}, signal);
+  const result = await tool.invoke(host, "go", {}, signal);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].input, expected);
   assert.deepEqual(result.details, {
@@ -385,7 +369,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   });
   // Each launch gets its own snapshot: a host mutating one cannot alter the next.
   calls[0].input.tasks[0].tools.push("edit");
-  await invokeTaskTool(tool, host, "again", {}, signal);
+  await tool.invoke(host, "again", {}, signal);
   assert.deepEqual(calls[1].input, expected);
 
   // Without a host, an assigned tool fails like an unhosted ordinary one.
@@ -414,30 +398,59 @@ test("an assigned task tool rejects invalid batches and non-trigger launches", a
     { surprise: true },
   ])
     await assert.rejects(
-      invokeTaskTool(tool, host, "bad", input, signal),
+      tool.invoke(host, "bad", input, signal),
       /Invalid task input/,
       JSON.stringify(input),
     );
   // `{}` is only a trigger for an assigned batch.
   await assert.rejects(
-    invokeTaskTool(new TaskTool(), host, "bad", {}, signal),
+    new TaskTool().invoke(host, "bad", {}, signal),
     /Invalid task input/,
   );
   assert.equal(calls.length, 0);
 });
 
-test("copies of an assigned task tool are not task primitives", () => {
+test("copies and forgeries of an assigned task tool are not task primitives", async () => {
   const tool = new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] });
   const copy = { ...tool };
   const impostor = { name: "task", label: "task", execute: tool.execute };
+  const forged = Object.create(AssignedTaskTool.prototype);
   const { host, calls } = recordingHost();
   const signal = new AbortController().signal;
-  for (const fake of [copy, impostor]) {
-    assert.equal(isTaskTool(fake), false);
-    assert.equal(isAssignedTaskTool(fake), false);
-    assert.throws(() => invokeTaskTool(fake, host, "c", {}, signal), TypeError);
+  for (const fake of [copy, impostor, forged]) {
+    assert.equal(TaskTool.is(fake), false);
+    assert.equal(AssignedTaskTool.is(fake), false);
+    assert.throws(
+      () => AssignedTaskTool.prototype.invoke.call(fake, host, "c", {}, signal),
+      TypeError,
+    );
   }
   assert.equal(calls.length, 0);
+  const result = await tool.invoke(host, "go", {}, signal);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(result.details, { tasks: [{ id: "handle-1-0" }] });
+});
+
+test("constructor hosts are recoverable only from genuine tools and admit exactly once", async () => {
+  const { host, calls } = recordingHost();
+  const input = { context: "c", tasks: [{ task: "x" }] };
+  const free = new TaskTool(host);
+  const assigned = new AssignedTaskTool(input, host);
+  for (const tool of [free, assigned]) {
+    assert.equal(tool.host, host);
+    // The getter reads constructor bindings, never a copy's own fields.
+    assert.equal(
+      Reflect.get(Object.getPrototypeOf(tool), "host", { ...tool, host }),
+      undefined,
+    );
+  }
+  assert.equal(new TaskTool().host, undefined);
+  assert.equal(new AssignedTaskTool(input).host, undefined);
+
+  const result = await assigned.execute("go", {});
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].input, input);
+  assert.deepEqual(result.details, { tasks: [{ id: "handle-1-0" }] });
 });
 
 test("both task variants pass valid decisions to the host as exactly { action, id, attempt }", async () => {
@@ -447,8 +460,7 @@ test("both task variants pass valid decisions to the host as exactly { action, i
     new AssignedTaskTool({ context: "c", tasks: [{ task: "x" }] }),
   ]) {
     const { host, calls } = recordingHost();
-    const retried = await invokeTaskTool(
-      tool,
+    const retried = await tool.invoke(
       host,
       "r",
       { action: "retry", id: "task-1", attempt: 2 },
@@ -456,8 +468,7 @@ test("both task variants pass valid decisions to the host as exactly { action, i
     );
     assert.deepEqual(retried.details, { tasks: [{ id: "task-1" }] });
     assert.match(text(retried, ""), /task-1/);
-    const ignored = await invokeTaskTool(
-      tool,
+    const ignored = await tool.invoke(
       host,
       "i",
       { action: "ignore", id: "task-2", attempt: Number.MAX_SAFE_INTEGER },
@@ -506,7 +517,7 @@ test("invalid decisions never reach the host", async () => {
     const { host, calls } = recordingHost();
     for (const input of invalid)
       await assert.rejects(
-        invokeTaskTool(tool, host, "bad", input, signal),
+        tool.invoke(host, "bad", input, signal),
         /Invalid task input/,
         JSON.stringify(input),
       );
@@ -521,17 +532,16 @@ test("decision receipts must match the decision", async () => {
   const tool = new TaskTool();
   for (const handles of [[], [{ id: "other" }], [{ id: "t" }, { id: "t" }]])
     await assert.rejects(
-      invokeTaskTool(tool, async () => handles, "r", retry, signal),
+      tool.invoke(async () => handles, "r", retry, signal),
       /for a retry of t/,
       JSON.stringify(handles),
     );
   await assert.rejects(
-    invokeTaskTool(tool, async () => [{ id: "t" }], "i", ignore, signal),
+    tool.invoke(async () => [{ id: "t" }], "i", ignore, signal),
     /returned handles for ignoring t/,
   );
   await assert.rejects(
-    invokeTaskTool(
-      tool,
+    tool.invoke(
       async () => {
         throw new Error("no such task");
       },
@@ -580,8 +590,7 @@ test("task calls count once with bounded action labels", async () => {
     { context: "c", tasks: [{ task: "x" }, { task: "y" }] },
     signal,
   );
-  await invokeTaskTool(
-    tool,
+  await tool.invoke(
     host,
     "b",
     { context: "c", tasks: [{ task: "z" }] },

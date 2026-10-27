@@ -1,4 +1,5 @@
 import { context, roundRobin } from "junco-scheduler";
+import { Type } from "typebox";
 import type { DataflowTracer, NodeGenerator } from "../src/index.ts";
 import {
   DataflowGraph,
@@ -11,11 +12,19 @@ import {
 } from "../src/index.ts";
 import { ExampleTracer } from "./tracing.ts";
 
-const sourceToMultiplier = Edge.message<number, string>("sourceToMultiplier");
-const multiplierToSink = Edge.message<number, string>("multiplierToSink");
+const NumberSchema = Type.Number();
+
+const sourceToMultiplier = Edge.message<typeof NumberSchema, string>(
+  "sourceToMultiplier",
+  NumberSchema,
+);
+const multiplierToSink = Edge.message<typeof NumberSchema, string>(
+  "multiplierToSink",
+  NumberSchema,
+);
 export async function runMultiplier(tracer?: DataflowTracer) {
   const results: number[] = [];
-  const graph = new DataflowGraph<void, number, string, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
     Width.create(1),
     Width.create(1),
     tracer,
@@ -24,7 +33,7 @@ export async function runMultiplier(tracer?: DataflowTracer) {
   const sourceId = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
-    step: async function* (): NodeGenerator<number, string> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, string> {
       yield [Message.create(sourceToMultiplier, 1)];
       yield [Message.create(sourceToMultiplier, 2)];
       yield [Message.create(sourceToMultiplier, 3)];
@@ -33,7 +42,7 @@ export async function runMultiplier(tracer?: DataflowTracer) {
   });
 
   const multiplierId = graph.addNode(
-    new StepNode<void, number, string>(
+    new StepNode<void, typeof NumberSchema, string>(
       (_state, view) =>
         from(view, sourceToMultiplier).map((value) =>
           Message.create(multiplierToSink, value * 2),
@@ -46,7 +55,7 @@ export async function runMultiplier(tracer?: DataflowTracer) {
   );
 
   const sinkId = graph.addNode(
-    new StepNode<void, number, string>(
+    new StepNode<void, typeof NumberSchema, string>(
       (_state, view) => {
         results.push(...from(view, multiplierToSink));
         return [];

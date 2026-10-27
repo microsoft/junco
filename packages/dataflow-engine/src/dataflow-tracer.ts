@@ -1,3 +1,4 @@
+import type { TSchema } from "typebox";
 import type { DataflowGraph } from "./dataflow-graph.js";
 import type { NodeId } from "./identity.js";
 import type { Message, ParentView } from "./node.js";
@@ -15,7 +16,7 @@ import type { Message, ParentView } from "./node.js";
  */
 export interface DataflowTracer {
   /** Begin observing one evaluation, after its re-entry check and before planning. */
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
   /**
@@ -28,7 +29,7 @@ export interface DataflowTracer {
 }
 
 /** Observer for one evaluation scope. */
-export type DataflowRunTrace<N, T> = {
+export type DataflowRunTrace<N extends TSchema, T> = {
   /**
    * One generator activation is about to advance. `"prime"` activations receive no view;
    * `"resume"` activations receive exactly the view delivered to `next(view)`.
@@ -48,7 +49,7 @@ export type DataflowRunTrace<N, T> = {
 };
 
 /** Observer for one generator activation. */
-export type DataflowStepTrace<N, T> = {
+export type DataflowStepTrace<N extends TSchema, T> = {
   /** The activation yielded (after routing) or returned (after value-edge propagation). */
   end(step: IteratorResult<readonly Message<N>[], T>): void;
   /** The generator threw, or its yield could not be routed; `error` is the raw cause. */

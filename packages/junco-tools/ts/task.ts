@@ -1,5 +1,5 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import {
   captureRecorder,
   markProfileOwned,
@@ -118,12 +118,13 @@ export type TaskToolHost = (
 ) => Promise<TaskToolDetails["tasks"]>;
 
 /**
- * Tools this module created, with their recorders. Only these are graph primitives; a same-named
- * or copied tool is not.
+ * Tools this module constructed, with their recorders and constructor-supplied hosts. Only these
+ * are task primitives; a same-named, copied or prototype-forged tool is not.
  */
-const taskTools = new WeakMap<object, Recorder | undefined>();
-/** The detached batch of each assigned tool, kept off its model-facing schema. */
-const assignedInputs = new WeakMap<object, TaskInput>();
+const taskTools = new WeakMap<
+  object,
+  { readonly recorder?: Recorder; readonly host?: TaskToolHost }
+>();
 
 /** Shared by executions that receive no abort signal. */
 const neverAborted = new AbortController().signal;
@@ -132,210 +133,208 @@ const DECISION_HELP =
   'A failed report marked decisionRequired waits for you: call task({ action: "retry" | ' +
   '"ignore", id, attempt }) with its handle ID and attempt before finishing.';
 const START_HELP =
-  "Subagents start when you explicitly call yield or finish your current run; call yield when " +
-  "you need their reports before continuing.";
+  "Subagents start immediately in the background; you can continue working while their reports arrive.";
 
-/** A free-form `task` tool: the model supplies the whole batch. */
-export type TaskTool = AgentTool<typeof taskParameters, TaskToolDetails>;
+/** What both `task` variants share; each supplies only how a call without `action` launches. */
+abstract class TaskToolBase<P extends TSchema>
+  implements AgentTool<P, TaskToolDetails>
+{
+  readonly name = "task";
+  readonly label = "task";
+  abstract readonly description: string;
+  abstract readonly parameters: P;
+  readonly executionMode = "sequential";
+  /**
+   * Accepts input as a model or caller supplies it, keeping both variants assignable to
+   * `AgentTool`, whose `execute` receives unchecked parameters; {@link invoke} validates it.
+   */
+  readonly execute: (
+    toolCallId: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ) => Promise<AgentToolResult<TaskToolDetails>>;
 
-/** A `task` tool launching one stored batch: the model only sends `{}`. */
-export type AssignedTaskTool = AgentTool<
-  typeof assignedParameters,
-  TaskToolDetails
->;
+  constructor(host?: TaskToolHost, recorder?: Recorder) {
+    this.execute = (toolCallId, input, signal) => {
+      if (!host) throw new Error("task requires a host");
+      return this.invoke(
+        host,
+        toolCallId,
+        input as TaskCall,
+        signal ?? neverAborted,
+      );
+    };
+    taskTools.set(this, { recorder, host });
+    markProfileOwned(this, (args) => this.#operation(args));
+  }
+
+  /** The host this tool was constructed with; copies gain no authority. */
+  get host(): TaskToolHost | undefined {
+    return taskTools.get(this)?.host;
+  }
+
+  /** Executes this genuine task tool through `host`, ignoring any host it was created with. */
+  invoke(
+    host: TaskToolHost,
+    toolCallId: string,
+    input: TaskCall,
+    signal: AbortSignal,
+  ): Promise<AgentToolResult<TaskToolDetails>> {
+    const binding = taskTools.get(this);
+    if (binding === undefined)
+      throw new TypeError("Not a task tool constructed by TaskTool");
+    return profileToolCall(
+      captureRecorder(binding.recorder),
+      this.#operation(input),
+      signal,
+      async () => {
+        const request = this.#request(input);
+        signal.throwIfAborted();
+        const handles = await host(toolCallId, request, signal);
+        const tasks = handles.map(({ id, name }) =>
+          name === undefined ? { id } : { id, name },
+        );
+        let text: string;
+        if (!("action" in request)) {
+          if (tasks.length !== request.tasks.length)
+            throw new Error(
+              `task host returned ${tasks.length} handles for ${request.tasks.length} tasks`,
+            );
+          text =
+            `Scheduled ${tasks.length} subagent${tasks.length === 1 ? "" : "s"}; their reports ` +
+            `arrive later as messages carrying these IDs. ${START_HELP}\n${JSON.stringify({ tasks })}`;
+        } else if (request.action === "retry") {
+          if (tasks.length !== 1 || tasks[0]?.id !== request.id)
+            throw new Error(
+              `task host returned ${JSON.stringify(tasks)} for a retry of ${request.id}`,
+            );
+          text =
+            `Retrying task ${request.id}; its report arrives later as a message carrying this ID. ` +
+            `${START_HELP}\n${JSON.stringify({ tasks })}`;
+        } else {
+          if (tasks.length !== 0)
+            throw new Error(
+              `task host returned handles for ignoring ${request.id}`,
+            );
+          text = `Ignored task ${request.id}.`;
+        }
+        return { content: [{ type: "text", text }], details: { tasks } };
+      },
+      ({ details }) => ({
+        counters: { handles_returned: details.tasks.length },
+      }),
+    );
+  }
+
+  /** The validated launch a call without `action` makes. */
+  protected abstract launch(input: unknown): TaskInput;
+
+  /** A detached snapshot: later caller mutation cannot change what a host admits. */
+  protected snapshot(input: TaskInput): TaskInput {
+    return {
+      context: input.context,
+      tasks: input.tasks.map((item) => ({
+        ...(item.name === undefined ? {} : { name: item.name.trim() }),
+        task: item.task,
+        ...(item.model === undefined
+          ? {}
+          : {
+              model: {
+                provider: item.model.provider,
+                modelId: item.model.modelId,
+              },
+            }),
+        ...(item.tools === undefined ? {} : { tools: [...item.tools] }),
+      })),
+    };
+  }
+
+  /** The request `input` makes of the host. */
+  #request(input: unknown): TaskRequest {
+    if (typeof input === "object" && input !== null && "action" in input) {
+      const { action, id, attempt } = checkToolInput(
+        "task",
+        decisionSchema,
+        input,
+      );
+      return { action, id, attempt };
+    }
+    return this.snapshot(this.launch(input));
+  }
+
+  /** The bounded labels of a call with raw `args`, following {@link #request}'s decoding. */
+  #operation(args: unknown) {
+    const operation =
+      typeof args !== "object" || args === null
+        ? "invalid"
+        : "action" in args
+          ? args.action === "retry" || args.action === "ignore"
+            ? args.action
+            : "invalid"
+          : this instanceof AssignedTaskTool
+            ? "assigned"
+            : "launch";
+    return {
+      resource: "operations",
+      category: "task",
+      tool: "task",
+      operation,
+    } as const;
+  }
+}
 
 /**
- * Constructs a fresh {@link TaskTool}. Executing it admits subagents through `host`, or through
- * the host a `JuncoAgent` scopes to a graph activation; without either it fails rather than
- * pretend success.
+ * A free-form `task` tool: the model supplies the whole batch. Executing it admits subagents
+ * through `host`, or through the native host of the `JuncoAgent` running it; without either it
+ * fails rather than pretend success.
  */
-export const TaskTool: new (
-  host?: TaskToolHost,
-  recorder?: Recorder,
-) => TaskTool = class {
-  name = "task";
-  label = "task";
-  description =
+export class TaskTool extends TaskToolBase<typeof taskParameters> {
+  readonly description =
     "Start one or more subagents. Each runs in a fresh session with only the instructions you " +
     "give it (plus the shared context prepended to each), so be complete. This returns one handle per task " +
     "immediately. Each subagent's final report later arrives as a message carrying its handle ID. " +
     `${START_HELP} Optionally choose a registered model ({ provider, modelId }) or a ` +
     `subset of your active tool names per task; omitted values inherit yours. ${DECISION_HELP}`;
-  parameters = taskParameters;
-  executionMode: TaskTool["executionMode"] = "sequential";
-  execute: TaskTool["execute"];
+  readonly parameters = taskParameters;
 
-  constructor(host?: TaskToolHost, recorder?: Recorder) {
-    this.execute = (toolCallId, input, signal) => {
-      if (!host) throw new Error("task requires a JuncoGraph host");
-      return admit(this, host, toolCallId, input, signal);
-    };
-    taskTools.set(this, recorder);
-    markProfileOwned(this, (args) => taskOperation(this, args));
+  /** Whether {@link TaskTool} or {@link AssignedTaskTool} built `tool`; copies are not task tools. */
+  static is(tool: object): tool is TaskTool | AssignedTaskTool {
+    return taskTools.has(tool);
   }
-};
+
+  protected launch(input: unknown): TaskInput {
+    return checkToolInput("task", launchSchema, input);
+  }
+}
 
 /**
- * Constructs an {@link AssignedTaskTool} whose launch is the validated, detached `input`: the
- * model calls it with `{}`, and may also send decisions about failed tasks. It has no host of its
- * own.
+ * A `task` tool launching one validated, detached batch: the model calls it with `{}`, and may
+ * also send decisions about failed tasks. It admits through `host`, or through the native host of
+ * the `JuncoAgent` running it.
  */
-export const AssignedTaskTool: new (
-  input: TaskInput,
-  recorder?: Recorder,
-) => AssignedTaskTool = class {
-  name = "task";
-  label = "task";
-  description: string;
-  parameters = assignedParameters;
-  executionMode: AssignedTaskTool["executionMode"] = "sequential";
-  execute: AssignedTaskTool["execute"] = () => {
-    throw new Error("task requires a JuncoGraph host");
-  };
+export class AssignedTaskTool extends TaskToolBase<typeof assignedParameters> {
+  readonly description: string;
+  readonly parameters = assignedParameters;
+  /** The stored batch, kept off the model-facing schema. */
+  readonly #batch: TaskInput;
 
-  constructor(input: TaskInput, recorder?: Recorder) {
-    const batch = detach(checkToolInput("task", launchSchema, input));
-    const count = batch.tasks.length;
+  constructor(input: TaskInput, host?: TaskToolHost, recorder?: Recorder) {
+    super(host, recorder);
+    this.#batch = this.snapshot(checkToolInput("task", launchSchema, input));
+    const count = this.#batch.tasks.length;
     this.description =
       `Start your ${count} assigned subagent${count === 1 ? "" : "s"}: call task({}) once; the ` +
       "assignments are fixed. This returns one handle per task immediately; each subagent's " +
       `final report later arrives as a message carrying its handle ID. ${START_HELP} ${DECISION_HELP}`;
-    taskTools.set(this, recorder);
-    assignedInputs.set(this, batch);
-    markProfileOwned(this, (args) => taskOperation(this, args));
   }
-};
 
-/** Whether `tool` is a `task` tool constructed by {@link TaskTool} or {@link AssignedTaskTool}. */
-export function isTaskTool(tool: object): tool is TaskTool | AssignedTaskTool {
-  return taskTools.has(tool);
-}
-
-/** Whether `tool` is a `task` tool constructed by {@link AssignedTaskTool}. */
-export function isAssignedTaskTool(tool: object): tool is AssignedTaskTool {
-  return assignedInputs.has(tool);
-}
-
-/** Executes a genuine task tool through `host`, ignoring any host it was created with. */
-export function invokeTaskTool(
-  tool: TaskTool | AssignedTaskTool,
-  host: TaskToolHost,
-  toolCallId: string,
-  input: TaskCall,
-  signal: AbortSignal,
-): Promise<AgentToolResult<TaskToolDetails>> {
-  if (!isTaskTool(tool))
-    throw new TypeError("Not a task tool constructed by TaskTool");
-  return admit(tool, host, toolCallId, input, signal);
-}
-
-/** A detached snapshot: later caller mutation cannot change what a host admits. */
-function detach(input: TaskInput): TaskInput {
-  return {
-    context: input.context,
-    tasks: input.tasks.map((item) => ({
-      ...(item.name === undefined ? {} : { name: item.name.trim() }),
-      task: item.task,
-      ...(item.model === undefined
-        ? {}
-        : {
-            model: {
-              provider: item.model.provider,
-              modelId: item.model.modelId,
-            },
-          }),
-      ...(item.tools === undefined ? {} : { tools: [...item.tools] }),
-    })),
-  };
-}
-
-/** The bounded labels of a call with raw `args` on `tool`, following {@link requestOf}'s decoding. */
-function taskOperation(tool: object, args: unknown) {
-  const action =
-    typeof args !== "object" || args === null
-      ? "invalid"
-      : "action" in args
-        ? args.action === "retry" || args.action === "ignore"
-          ? args.action
-          : "invalid"
-        : assignedInputs.has(tool)
-          ? "assigned"
-          : "launch";
-  return {
-    resource: "operations",
-    category: "task",
-    tool: "task",
-    operation: action,
-  } as const;
-}
-
-/** The request `input` makes of `tool`'s host. */
-function requestOf(tool: object, input: unknown): TaskRequest {
-  if (typeof input === "object" && input !== null && "action" in input) {
-    const { action, id, attempt } = checkToolInput(
-      "task",
-      decisionSchema,
-      input,
-    );
-    return { action, id, attempt };
+  /** Whether {@link AssignedTaskTool} built `tool`; copies and forgeries are not. */
+  static is(tool: object): tool is AssignedTaskTool {
+    return taskTools.has(tool) && tool instanceof AssignedTaskTool;
   }
-  const assigned = assignedInputs.get(tool);
-  if (assigned === undefined)
-    return detach(checkToolInput("task", launchSchema, input));
-  checkToolInput("task", triggerSchema, input);
-  return detach(assigned);
-}
 
-function admit(
-  tool: object,
-  host: TaskToolHost,
-  toolCallId: string,
-  input: unknown,
-  signal: AbortSignal = neverAborted,
-): Promise<AgentToolResult<TaskToolDetails>> {
-  return profileToolCall(
-    captureRecorder(taskTools.get(tool)),
-    taskOperation(tool, input),
-    signal,
-    () => admitted(tool, host, toolCallId, input, signal),
-    ({ details }) => ({ counters: { handles_returned: details.tasks.length } }),
-  );
-}
-
-async function admitted(
-  tool: object,
-  host: TaskToolHost,
-  toolCallId: string,
-  input: unknown,
-  signal: AbortSignal,
-): Promise<AgentToolResult<TaskToolDetails>> {
-  const request = requestOf(tool, input);
-  signal.throwIfAborted();
-  const handles = await host(toolCallId, request, signal);
-  const tasks = handles.map(({ id, name }) =>
-    name === undefined ? { id } : { id, name },
-  );
-  let text: string;
-  if (!("action" in request)) {
-    if (tasks.length !== request.tasks.length)
-      throw new Error(
-        `task host returned ${tasks.length} handles for ${request.tasks.length} tasks`,
-      );
-    text =
-      `Scheduled ${tasks.length} subagent${tasks.length === 1 ? "" : "s"}; their reports ` +
-      `arrive later as messages carrying these IDs. ${START_HELP}\n${JSON.stringify({ tasks })}`;
-  } else if (request.action === "retry") {
-    if (tasks.length !== 1 || tasks[0]?.id !== request.id)
-      throw new Error(
-        `task host returned ${JSON.stringify(tasks)} for a retry of ${request.id}`,
-      );
-    text =
-      `Retrying task ${request.id}; its report arrives later as a message carrying this ID. ` +
-      `${START_HELP}\n${JSON.stringify({ tasks })}`;
-  } else {
-    if (tasks.length !== 0)
-      throw new Error(`task host returned handles for ignoring ${request.id}`);
-    text = `Ignored task ${request.id}.`;
+  protected launch(input: unknown): TaskInput {
+    checkToolInput("task", triggerSchema, input);
+    return this.#batch;
   }
-  return { content: [{ type: "text", text }], details: { tasks } };
 }

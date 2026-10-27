@@ -38,7 +38,7 @@ import {
   tokens,
 } from "dataflow-engine";
 import {
-  type AgenticInput,
+  type AgenticInputSchema,
   type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
@@ -48,6 +48,7 @@ import {
   validateActiveTools,
 } from "junco-agent";
 import { type Contract, type Issue, issueLog, trackPromise } from "junco-tools";
+import type { TSchema } from "typebox";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
 // Hook outcomes and maintenance results come from typed records; the iterator, admission, queue,
@@ -107,8 +108,10 @@ export type MockTranscript<
   S extends Skill,
   P extends PromptTemplate,
   T extends AgentTool,
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
 > = {
-  readonly prompt?: AgenticOptions["prompt"];
+  readonly prompt?: AgenticOptions<S, P, T, N, V>["prompt"];
   readonly images?: ImageContent[];
   readonly history?: readonly AgentMessage[];
   readonly models?: readonly Model<Api>[];
@@ -162,7 +165,7 @@ class RunRecord {
   readonly context: Context;
   readonly cancel: (reason?: unknown) => void;
   stopping = false;
-  held: Boundary | undefined;
+  held: GatedBoundary | undefined;
 
   constructor() {
     const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
@@ -179,12 +182,18 @@ type Resolvers<R> = {
 type Boundary = {
   readonly step: AgenticStep;
   readonly run?: RunRecord;
-  readonly gate?: Resolvers<void>;
+  readonly gate?: undefined;
 };
-type Demand = Resolvers<IteratorResult<AgenticStep, void>> & {
+/** A boundary whose run waits on `gate`; only these are ever held. */
+type GatedBoundary = Omit<Boundary, "gate"> & {
+  readonly gate: Resolvers<void>;
+};
+type Demand<N extends TSchema, V> = Resolvers<
+  IteratorResult<AgenticStep, void>
+> & {
   acted: boolean;
   /** The graph view this `next` carried, read only by a staged prompt function. */
-  readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
+  readonly inputs?: ParentView<N, V>;
 };
 
 const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
@@ -234,11 +243,13 @@ export class MockAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> implements JuncoAgentProtocol<S, P, T>
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> implements JuncoAgentProtocol<S, P, T, N, V>
 {
   /** Profiles a MockJuncoGraph attaches to this agent's node: one constant per declared kind. */
   readonly profiles: ProfileSet;
-  readonly #transcript: MockTranscript<S, P, T>;
+  readonly #transcript: MockTranscript<S, P, T, N, V>;
   #runCursor = 0;
   #maintenanceCursor = 0;
   #clock = 0;
@@ -269,16 +280,16 @@ export class MockAgent<
 
   #staged:
     | {
-        readonly text: NonNullable<AgenticOptions["prompt"]>;
+        readonly text: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>;
         readonly images?: ImageContent[];
       }
     | undefined;
   #run: RunRecord | undefined;
   readonly #drives = new Set<Promise<unknown>>();
   readonly #operations = new Set<Promise<unknown>>();
-  readonly #boundaries: Boundary[] = [];
-  readonly #held: Boundary[] = [];
-  readonly #demands: Demand[] = [];
+  readonly #boundaries: (Boundary | GatedBoundary)[] = [];
+  readonly #held: GatedBoundary[] = [];
+  readonly #demands: Demand<N, V>[] = [];
   /** FIFO of queued compactions; never rejects, so one failure cannot poison later requests. */
   #compactionTail: Promise<void> = Promise.resolve();
   #pendingCompactions = 0;
@@ -287,7 +298,7 @@ export class MockAgent<
   #closed = false;
   #close: Promise<void> | undefined;
 
-  constructor(transcript: MockTranscript<S, P, T>) {
+  constructor(transcript: MockTranscript<S, P, T, N, V>) {
     for (const run of transcript.runs) validateRun(run);
     this.#transcript = transcript;
     this.#history = [...(transcript.history ?? [])];
@@ -402,7 +413,7 @@ export class MockAgent<
   }
 
   stagePrompt(
-    prompt: NonNullable<AgenticOptions["prompt"]>,
+    prompt: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>,
     options?: { images?: ImageContent[] },
   ): void {
     this.#record(
@@ -542,14 +553,14 @@ export class MockAgent<
       if (run.stopping) return this.#interrupt(run, script);
       if (step.kind === "settled") return step.message;
       if (step.kind === "failed") throw step.error;
-      const boundary: Boundary = {
+      const boundary: GatedBoundary = {
         step,
         run,
         gate: Promise.withResolvers<void>(),
       };
       run.held = boundary;
       this.#publish(boundary);
-      await boundary.gate!.promise;
+      await boundary.gate.promise;
     }
     // Validation ends every run with a terminal frame, which returned or threw above.
     throw invalidTranscript();
@@ -678,8 +689,8 @@ export class MockAgent<
   // Complaints -------------------------------------------------------------------------------------
 
   /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
-  complain<N>(
-    issue: Issue<N>,
+  complain<C extends TSchema>(
+    issue: Issue<C>,
     tracer?: Pick<DataflowTracer, "complain">,
   ): void {
     this.#record("complain", tracer === undefined ? [issue] : [issue, tracer]);
@@ -713,9 +724,15 @@ export class MockAgent<
   }
 
   getActiveTools(): T[] {
-    return this.#activeNames.map(
-      (name) => this.#tools.find((tool) => tool.name === name)!,
-    );
+    return this.#activeNames.map((name) => {
+      const tool = this.#tools.find((tool) => tool.name === name);
+      if (tool === undefined)
+        throw new JuncoAgentError(
+          "invalid_state",
+          `Unknown active tool "${name}"`,
+        );
+      return tool;
+    });
   }
 
   getResources(): AgentHarnessResources<S, P> {
@@ -930,7 +947,7 @@ export class MockAgent<
     if (unread !== -1) this.#boundaries.splice(unread, 1);
     const consumed = this.#held.indexOf(held);
     if (consumed !== -1) this.#held.splice(consumed, 1);
-    held.gate!.resolve();
+    held.gate.resolve();
   }
 
   /** Mark the active run stopping and release its hold; its Context is cancelled separately. */
@@ -987,11 +1004,9 @@ export class MockAgent<
     return this;
   }
 
-  next(
-    inputs?: ParentView<AgenticInput, AssistantMessage>,
-  ): Promise<IteratorResult<AgenticStep, void>> {
+  next(inputs?: ParentView<N, V>): Promise<IteratorResult<AgenticStep, void>> {
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-    const demand: Demand = {
+    const demand: Demand<N, V> = {
       ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(),
       acted: false,
       ...(inputs === undefined ? {} : { inputs }),
@@ -1001,7 +1016,7 @@ export class MockAgent<
     return demand.promise;
   }
 
-  #publish(boundary: Boundary): void {
+  #publish(boundary: Boundary | GatedBoundary): void {
     this.#boundaries.push(boundary);
     this.#pump();
   }
@@ -1030,7 +1045,7 @@ export class MockAgent<
       const held = this.#held.shift();
       if (held !== undefined) {
         if (held.run?.held === held) held.run.held = undefined;
-        held.gate!.resolve();
+        held.gate.resolve();
       } else if (this.#staged !== undefined) {
         const { text, images } = this.#staged;
         this.#staged = undefined;
@@ -1097,9 +1112,9 @@ export class MockAgent<
     const stopping = this.#markStopping();
     const dependents = this.#startDependents("close");
     stopping?.cancel(closedError());
-    for (const boundary of this.#held.splice(0)) boundary.gate!.resolve();
+    for (const boundary of this.#held.splice(0)) boundary.gate.resolve();
     for (let index = this.#boundaries.length - 1; index >= 0; index--) {
-      const boundary = this.#boundaries[index]!;
+      const boundary = this.#boundaries[index];
       if (boundary.gate === undefined) continue;
       this.#boundaries.splice(index, 1);
       boundary.gate.resolve();
@@ -1128,7 +1143,7 @@ export class MockAgent<
       );
       if (index !== -1)
         demand.resolve({
-          value: this.#boundaries.splice(index, 1)[0]!.step,
+          value: this.#boundaries.splice(index, 1)[0].step,
           done: false,
         });
       else if (failure !== undefined) demand.reject(failure);

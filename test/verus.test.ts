@@ -15,7 +15,7 @@ import {
   DataflowNodeError,
   type DataflowRunTrace,
 } from "dataflow-engine";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import {
   prepareVerusSource,
   runVerusLoop,
@@ -23,7 +23,7 @@ import {
   VerusRound,
   type VerusWorkspace,
 } from "../examples/verus/verus.ts";
-import { agent, tracer } from "../src/index.ts";
+import { agent, syntax, tracer } from "../src/index.ts";
 import { leaf, nativeOptions, waitingTool } from "./support.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -112,7 +112,7 @@ class RoleTracer extends tracer.DummyTracer {
     super();
   }
 
-  override startRun<S, N, T, EH>(
+  override startRun<S, N extends TSchema, T, EH>(
     _graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     return {
@@ -370,7 +370,7 @@ describe("Verus loop", () => {
       const results = await round.execution.run();
       assert.deepEqual(samples, [7, 8]);
       assert.equal(
-        contentText(results.get(round.cleanupId)!.content),
+        syntax.finalText(results.get(round.cleanupId), "Cleanup"),
         "max.rs: cleanup ready.",
       );
     },

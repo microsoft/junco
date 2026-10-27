@@ -4,14 +4,18 @@ import { DummyTracer } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy } from "junco-tools";
+import { Type } from "typebox";
 import { graph, trigger } from "../src/index.ts";
 
 const quiet = new DummyTracer();
-type Edge = graph.Edge<number, string>;
-type Member = graph.nodes.Deterministic<number, string>;
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+type N = typeof NumberSchema;
+type Edge = graph.Edge<N, string>;
+type Member = graph.nodes.Deterministic<N, string>;
 
 function idle(started: Set<Member>): Member {
-  const state: Member = new graph.nodes.Deterministic<number, string>(
+  const state: Member = new graph.nodes.Deterministic<N, string>(
     async function* () {
       started.add(state);
       yield [];
@@ -23,17 +27,17 @@ function idle(started: Set<Member>): Member {
 }
 
 const closedSource = () =>
-  new graph.nodes.Source<number, string>(
+  new graph.nodes.Source<N, string>(
     () => {
       throw new graph.DataflowDefinitionError(
         "Spawn fixture does not accept external input",
       );
     },
-    { id: graph.NodeId.create("$source") },
+    { id: graph.NodeId.create("$source"), schema: NumberSchema },
   );
 
 type Link = { readonly edge: Edge; readonly queue: number[] };
-function linksOf(g: graph.JuncoGraph<number, string>): Map<string, Link> {
+function linksOf(g: graph.JuncoGraph<N, string>): Map<string, Link> {
   const links = new Map<string, Link>();
   g.forEachLink((from, to, edge) => {
     if (E.isRight(edge.transport)) {
@@ -58,12 +62,9 @@ describe("graph.JuncoGraph.spawn", () => {
     const root = idle(started);
     const children: Member[] = [];
     const source = closedSource();
-    const final = graph.Edge.value<number, string>("0->$sink");
-    const sink: graph.nodes.Sink<number, string> = new graph.nodes.Sink<
-      number,
-      string
-    >(
-      async function* (): graph.NodeGenerator<number, string> {
+    const final = graph.Edge.value("0->$sink", StringSchema);
+    const sink: graph.nodes.Sink<N, string> = new graph.nodes.Sink<N, string>(
+      async function* (): graph.NodeGenerator<N, string> {
         yield [];
         const result = execution.graph.result(graph.NodeId.create("0"));
         assert.ok(O.isSome(result));
@@ -71,6 +72,7 @@ describe("graph.JuncoGraph.spawn", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
         trigger: trigger.TriggerRule.when(final),
       },
     );
@@ -94,7 +96,7 @@ describe("graph.JuncoGraph.spawn", () => {
     g.addEdge(graph.NodeId.create("0"), sink.id, final);
     try {
       assert.deepEqual(calls, inputs);
-      const nodes: [string, graph.nodes.Agentic<number, string>][] = [];
+      const nodes: [string, graph.nodes.Agentic<N, string>][] = [];
       g.forEachNode((id, node) => nodes.push([id, node.state]));
       assert.deepEqual(nodes, [
         ["$source", source],
@@ -137,6 +139,17 @@ describe("graph.JuncoGraph.spawn", () => {
       assert.deepEqual([...up1.queue], [20]);
       assert.deepEqual([...down2.queue], []);
       assert.deepEqual([...up2.queue], [30]);
+      // The spawned edges carry the source's schema: a string never enters a numeric queue.
+      assert.throws(
+        () =>
+          g.emit(
+            graph.NodeId.create("0"),
+            // @ts-expect-error a string payload on a numeric edge
+            graph.Message.create(down1.edge, "12"),
+          ),
+        /Invalid payload for message edge "0->1"/,
+      );
+      assert.deepEqual([...down1.queue], [10, 11]);
       assert.equal(started.size, 0);
     } finally {
       await g.close();
@@ -148,40 +161,34 @@ describe("graph.JuncoGraph.spawn", () => {
     const names = Object.freeze(["left", "right"] as const);
     type Name = (typeof names)[number];
     const request: Record<Name, Edge> = {
-      left: graph.Edge.message("root->left"),
-      right: graph.Edge.message("root->right"),
+      left: graph.Edge.message("root->left", NumberSchema),
+      right: graph.Edge.message("root->right", NumberSchema),
     };
     const reply: Record<Name, Edge> = {
-      left: graph.Edge.message("left->root"),
-      right: graph.Edge.message("right->root"),
+      left: graph.Edge.message("left->root", NumberSchema),
+      right: graph.Edge.message("right->root", NumberSchema),
     };
     const received: Record<Name, number[]> = { left: [], right: [] };
     const closed = { root: false, left: false, right: false };
     const rootId = graph.NodeId.create("root");
-    const root = new graph.nodes.Deterministic<number, string>(
-      async function* () {
-        try {
-          let view = yield [];
-          while (true) {
-            for (const name of names)
-              received[name].push(...graph.from(view, reply[name]));
-            if (received.left.length === 2 && received.right.length === 2)
-              return "root-done";
-            view = yield [];
-          }
-        } finally {
-          closed.root = true;
+    const root = new graph.nodes.Deterministic<N, string>(async function* () {
+      try {
+        let view = yield [];
+        while (true) {
+          for (const name of names)
+            received[name].push(...graph.from(view, reply[name]));
+          if (received.left.length === 2 && received.right.length === 2)
+            return "root-done";
+          view = yield [];
         }
-      },
-      LockPolicy,
-    );
+      } finally {
+        closed.root = true;
+      }
+    }, LockPolicy);
     const source = closedSource();
-    const final = graph.Edge.value<number, string>("root->$sink");
-    const sink: graph.nodes.Sink<number, string> = new graph.nodes.Sink<
-      number,
-      string
-    >(
-      async function* (): graph.NodeGenerator<number, string> {
+    const final = graph.Edge.value("root->$sink", StringSchema);
+    const sink: graph.nodes.Sink<N, string> = new graph.nodes.Sink<N, string>(
+      async function* (): graph.NodeGenerator<N, string> {
         yield [];
         const result = execution.graph.result(rootId);
         assert.ok(O.isSome(result));
@@ -189,6 +196,7 @@ describe("graph.JuncoGraph.spawn", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
         trigger: trigger.TriggerRule.when(final),
       },
     );
@@ -207,20 +215,17 @@ describe("graph.JuncoGraph.spawn", () => {
       (name) => ({
         id: graph.NodeId.create(name),
         trigger: trigger.TriggerRule.when(request[name]),
-        state: new graph.nodes.Deterministic<number, string>(
-          async function* () {
-            try {
-              let view = yield [];
-              while (true)
-                view = yield graph
-                  .from(view, request[name])
-                  .map((value) => graph.Message.create(reply[name], value + 1));
-            } finally {
-              closed[name] = true;
-            }
-          },
-          LockPolicy,
-        ),
+        state: new graph.nodes.Deterministic<N, string>(async function* () {
+          try {
+            let view = yield [];
+            while (true)
+              view = yield graph
+                .from(view, request[name])
+                .map((value) => graph.Message.create(reply[name], value + 1));
+          } finally {
+            closed[name] = true;
+          }
+        }, LockPolicy),
       }),
       quiet,
     );
@@ -253,20 +258,14 @@ describe("graph.JuncoGraph.spawn", () => {
 
   test("no inputs leaves the root and its real sink", async () => {
     const calls: string[] = [];
-    const root = new graph.nodes.Deterministic<number, string>(
-      async function* () {
-        yield [];
-        return "solo";
-      },
-      LockPolicy,
-    );
+    const root = new graph.nodes.Deterministic<N, string>(async function* () {
+      yield [];
+      return "solo";
+    }, LockPolicy);
     const source = closedSource();
-    const final = graph.Edge.value<number, string>("0->$sink");
-    const sink: graph.nodes.Sink<number, string> = new graph.nodes.Sink<
-      number,
-      string
-    >(
-      async function* (): graph.NodeGenerator<number, string> {
+    const final = graph.Edge.value("0->$sink", StringSchema);
+    const sink: graph.nodes.Sink<N, string> = new graph.nodes.Sink<N, string>(
+      async function* (): graph.NodeGenerator<N, string> {
         yield [];
         const result = execution.graph.result(graph.NodeId.create("0"));
         assert.ok(O.isSome(result));
@@ -274,6 +273,7 @@ describe("graph.JuncoGraph.spawn", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
         trigger: trigger.TriggerRule.when(final),
       },
     );
@@ -312,6 +312,45 @@ describe("graph.JuncoGraph.spawn", () => {
     }
   });
 
+  test("an explicit messageSchema types the spawned edges instead of the source's", async () => {
+    const source = closedSource();
+    const sink = new graph.nodes.Sink<N, string>(
+      async function* () {
+        yield [];
+        return "unused";
+      },
+      {
+        id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
+        trigger: trigger.TriggerRule.never(),
+      },
+    );
+    const execution = graph.JuncoGraph.spawn(
+      source,
+      sink,
+      { trigger: trigger.TriggerRule.never(), state: idle(new Set()) },
+      ["child"],
+      () => ({ trigger: trigger.TriggerRule.never(), state: idle(new Set()) }),
+      quiet,
+      undefined,
+      undefined,
+      Type.Number({ minimum: 5 }),
+    );
+    const g = execution.graph;
+    try {
+      const down = linkOf(linksOf(g), "0->1");
+      g.emit(graph.NodeId.create("0"), graph.Message.create(down.edge, 7));
+      assert.throws(
+        () =>
+          g.emit(graph.NodeId.create("0"), graph.Message.create(down.edge, 3)),
+        /Invalid payload for message edge "0->1"/,
+      );
+      assert.deepEqual([...down.queue], [7]);
+    } finally {
+      await g.close();
+    }
+  });
+
   test("a factory error escapes as-is and unpublished ports remain reusable", async () => {
     const failure = new Error("spawn failed");
     const visited: string[] = [];
@@ -319,12 +358,9 @@ describe("graph.JuncoGraph.spawn", () => {
     const root = idle(started);
     const created: Member[] = [];
     const source = closedSource();
-    const final = graph.Edge.value<number, string>("0->$sink");
-    const sink: graph.nodes.Sink<number, string> = new graph.nodes.Sink<
-      number,
-      string
-    >(
-      async function* (): graph.NodeGenerator<number, string> {
+    const final = graph.Edge.value("0->$sink", StringSchema);
+    const sink: graph.nodes.Sink<N, string> = new graph.nodes.Sink<N, string>(
+      async function* (): graph.NodeGenerator<N, string> {
         yield [];
         const result = retry.graph.result(graph.NodeId.create("0"));
         assert.ok(O.isSome(result));
@@ -332,6 +368,7 @@ describe("graph.JuncoGraph.spawn", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
         trigger: trigger.TriggerRule.when(final),
       },
     );
@@ -384,12 +421,9 @@ describe("graph.JuncoGraph.spawn", () => {
     const root = idle(new Set());
     const created: Member[] = [];
     const source = closedSource();
-    const final = graph.Edge.value<number, string>("root->$sink");
-    const sink: graph.nodes.Sink<number, string> = new graph.nodes.Sink<
-      number,
-      string
-    >(
-      async function* (): graph.NodeGenerator<number, string> {
+    const final = graph.Edge.value("root->$sink", StringSchema);
+    const sink: graph.nodes.Sink<N, string> = new graph.nodes.Sink<N, string>(
+      async function* (): graph.NodeGenerator<N, string> {
         yield [];
         const result = retry.graph.result(rootId);
         assert.ok(O.isSome(result));
@@ -397,6 +431,7 @@ describe("graph.JuncoGraph.spawn", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
+        schema: NumberSchema,
         trigger: trigger.TriggerRule.when(final),
       },
     );

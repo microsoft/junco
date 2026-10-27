@@ -1,6 +1,20 @@
+import type { AgentTool, PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { schedules } from "junco-agency";
+import type { Agentic, agent, JuncoGraph, schedules } from "junco-agency";
+import type { TSchema } from "typebox";
+
+/** A native member as YAML graphs host it: runtime-loaded inbox schemas and unknown parent values. */
+export type YamlAgent = agent.JuncoAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
+
+/** A workflow as `JuncoGraph.fromYaml` builds it: runtime-loaded edge schemas and unknown results. */
+export type YamlExecution = schedules.SchedulerContext<
+  Agentic<TSchema, unknown>,
+  TSchema,
+  unknown,
+  schedules.AgencyNodeMetadata,
+  JuncoGraph<TSchema, unknown>
+>;
 
 /** A CLI-scoped cancellation signal; importing examples installs no signal handler. */
 export function ctrlC(): { readonly signal: AbortSignal; [Symbol.dispose](): void } {

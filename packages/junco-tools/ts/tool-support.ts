@@ -185,4 +185,17 @@ export function checkToolInput<S extends TSchema>(
   );
 }
 
+/** `output` typed by `schema`, or an `Invalid <name> output` error naming the first violation. */
+export function checkToolOutput<T extends TSchema>(
+  name: string,
+  schema: T,
+  output: unknown,
+): Static<T> {
+  if (Value.Check(schema, output)) return output;
+  const [error] = Value.Errors(schema, output);
+  throw new Error(
+    `Invalid ${name} output${error ? `: ${error.instancePath} ${error.message}` : ""}`,
+  );
+}
+
 export { DEFAULT_MAX_BYTES, truncateHead, truncateLine };

@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 /// <reference lib="es2024.promise" />
 
 import { test } from "bun:test";
@@ -37,6 +38,8 @@ import {
   userTexts,
 } from "./support.ts";
 
+const StringSchema = Type.String();
+
 type Script<C> =
   | ((request: SchedulerRequest<C>, index: number) => Plan)
   | readonly FauxResponseStep[];
@@ -61,9 +64,12 @@ function newScheduler<C = never>(
 
 const id = NodeId.create;
 const makeGraph = () =>
-  new DataflowGraph<void, string, string, unknown>(Width.create(1), UNBOUNDED);
+  new DataflowGraph<void, typeof StringSchema, string, unknown>(
+    Width.create(1),
+    UNBOUNDED,
+  );
 const twoStep = (log: string[], result: string) =>
-  async function* (): NodeGenerator<string, string> {
+  async function* (): NodeGenerator<typeof StringSchema, string> {
     log.push("prime");
     yield [];
     log.push("resume");
@@ -266,7 +272,7 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   const requests: Context[] = [];
   const graph = new DataflowGraph<
     Readonly<{ secret: string }>,
-    string,
+    typeof StringSchema,
     string,
     never
   >(Width.create(1), UNBOUNDED);
@@ -282,7 +288,7 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   const described: string[] = [];
   const describeNode = (
     name: ReturnType<typeof id>,
-    candidate: NodeAvailability<string, string>,
+    candidate: NodeAvailability<typeof StringSchema, string>,
   ) => {
     described.push(name);
     return name === "worker"
@@ -302,8 +308,11 @@ test("wire snapshots whitelist native fields and only available owned metadata",
       trigger: name === "dormant" ? TriggerRule.never() : TriggerRule.always(),
       step: twoStep([], name),
     });
-  const queued = Edge.message<string, string>("private-queue");
-  const value = Edge.value<string, string>("private-value");
+  const queued = Edge.message<typeof StringSchema, string>(
+    "private-queue",
+    StringSchema,
+  );
+  const value = Edge.value("private-value", StringSchema);
   graph.addEdge(id("dormant"), id("worker"), queued);
   graph.addEdge(finished, id("worker"), value);
   graph.emit(id("dormant"), { id: queued.id, payload: PAYLOAD });
@@ -636,7 +645,7 @@ test("defined scalar metadata survives wire encoding and finite capacity stays n
       requests.push(snapshot);
       return toolTurn(scheduleCall(runAvailable(snapshot).waves, "scalar"));
     });
-    const graph = new DataflowGraph<void, string, string, never>(
+    const graph = new DataflowGraph<void, typeof StringSchema, string, never>(
       Width.create(1),
       Width.create(1),
     );
@@ -653,7 +662,7 @@ test("defined scalar metadata survives wire encoding and finite capacity stays n
 test("the Pi context preserves fixed-size FIFO reads without speculative matrix execution", async () => {
   const { scheduler } = newScheduler();
   const graph = makeGraph();
-  const flow = Edge.message<string, string>("flow");
+  const flow = Edge.message<typeof StringSchema, string>("flow", StringSchema);
   const batches: (readonly string[])[] = [];
   graph.addNode({
     id: id("source"),
@@ -712,8 +721,14 @@ for (const mode of ["all", "any"] as const)
   test(`the Pi context preserves ${mode} trigger input semantics`, async () => {
     const { scheduler } = newScheduler();
     const graph = makeGraph();
-    const left = Edge.message<string, string>("left");
-    const right = Edge.message<string, string>("right");
+    const left = Edge.message<typeof StringSchema, string>(
+      "left",
+      StringSchema,
+    );
+    const right = Edge.message<typeof StringSchema, string>(
+      "right",
+      StringSchema,
+    );
     const batches: string[][] = [];
     const trigger =
       mode === "all"

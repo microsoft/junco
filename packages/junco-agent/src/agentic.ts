@@ -16,6 +16,8 @@ import type {
   Api,
   AssistantMessage,
   ImageContent,
+  JsonObject,
+  JsonValue,
   Model,
   Usage,
 } from "@earendil-works/pi-ai";
@@ -26,12 +28,12 @@ import type {
   ProfileRecorder,
   ToolCollection,
 } from "junco-tools";
+import { type TSchema, Type } from "typebox";
 import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
 
 /**
  * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
- * its model's `recv`; it never dispatches them as native commands. Task subagent reports use
- * `followUp` (completed) and `error` (failed) on their private return edges.
+ * its model's `recv`; it never dispatches them as native commands.
  */
 export type AgenticInput =
   | {
@@ -40,6 +42,159 @@ export type AgenticInput =
       readonly images?: ImageContent[];
     }
   | { readonly kind: "appendMessage"; readonly message: AgentMessage };
+
+const ImageContentSchema = Type.Object({
+  type: Type.Literal("image"),
+  data: Type.String(),
+  mimeType: Type.String(),
+});
+
+/**
+ * Runtime schema of {@link AgenticInput}. Pi's `AgentMessage` is declaration-merge extensible
+ * and has no runtime schema, so an appended message is checked as an object with a string `role`.
+ * Structural extras are allowed throughout.
+ */
+export const AgenticInputSchema = Type.Unsafe<AgenticInput>(
+  Type.Union([
+    Type.Object({
+      kind: Type.Union([
+        Type.Literal("prompt"),
+        Type.Literal("steer"),
+        Type.Literal("followUp"),
+        Type.Literal("nextTurn"),
+        Type.Literal("error"),
+      ]),
+      text: Type.String(),
+      images: Type.Optional(Type.Array(ImageContentSchema)),
+    }),
+    Type.Object({
+      kind: Type.Literal("appendMessage"),
+      message: Type.Object({ role: Type.String() }),
+    }),
+  ]),
+);
+
+// ponytail: Pi's JSON values are checked one level deep; recursive TypeBox `Cyclic` refs collide
+// across embedded resources in 1.3.34. Add a full JSON walk if nested non-JSON data matters.
+const JsonObjectSchema = Type.Unsafe<JsonObject>(Type.Object({}));
+const JsonValueSchema = Type.Unsafe<JsonValue>(
+  Type.Union([
+    Type.Null(),
+    Type.Boolean(),
+    Type.Number(),
+    Type.String(),
+    Type.Array(Type.Unknown()),
+    JsonObjectSchema,
+  ]),
+);
+
+/**
+ * Runtime schema of Pi's native {@link AssistantMessage}: its content, usage/cost, diagnostics and
+ * deferred handle, with required fields, literal alternatives and optional fields. Structural
+ * extras are allowed.
+ */
+export const AssistantMessageSchema = Type.Unsafe<AssistantMessage>(
+  Type.Object({
+    role: Type.Literal("assistant"),
+    content: Type.Array(
+      Type.Union([
+        Type.Object({
+          type: Type.Literal("text"),
+          text: Type.String(),
+          textSignature: Type.Optional(Type.String()),
+        }),
+        Type.Object({
+          type: Type.Literal("thinking"),
+          thinking: Type.String(),
+          thinkingSignature: Type.Optional(Type.String()),
+          redacted: Type.Optional(Type.Boolean()),
+        }),
+        Type.Object({
+          type: Type.Literal("toolCall"),
+          id: Type.String(),
+          name: Type.String(),
+          arguments: JsonObjectSchema,
+          thoughtSignature: Type.Optional(Type.String()),
+          namespace: Type.Optional(Type.String()),
+        }),
+      ]),
+    ),
+    api: Type.String(),
+    provider: Type.String(),
+    model: Type.String(),
+    responseModel: Type.Optional(Type.String()),
+    responseId: Type.Optional(Type.String()),
+    providerThinkingLevel: Type.Optional(Type.String()),
+    thinkingLevel: Type.Optional(
+      Type.Union([
+        Type.Literal("off"),
+        Type.Literal("minimal"),
+        Type.Literal("low"),
+        Type.Literal("medium"),
+        Type.Literal("high"),
+        Type.Literal("xhigh"),
+        Type.Literal("max"),
+      ]),
+    ),
+    diagnostics: Type.Optional(
+      Type.Array(
+        Type.Object({
+          type: Type.String(),
+          timestamp: Type.Number(),
+          error: Type.Optional(
+            Type.Object({
+              name: Type.Optional(Type.String()),
+              message: Type.String(),
+              stack: Type.Optional(Type.String()),
+              code: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+            }),
+          ),
+          details: Type.Optional(JsonObjectSchema),
+        }),
+      ),
+    ),
+    usage: Type.Object({
+      input: Type.Number(),
+      output: Type.Number(),
+      cacheRead: Type.Number(),
+      cacheWrite: Type.Number(),
+      cacheWrite1h: Type.Optional(Type.Number()),
+      reasoning: Type.Optional(Type.Number()),
+      totalTokens: Type.Number(),
+      cost: Type.Object({
+        input: Type.Number(),
+        output: Type.Number(),
+        cacheRead: Type.Number(),
+        cacheWrite: Type.Number(),
+        total: Type.Number(),
+      }),
+    }),
+    stopReason: Type.Union([
+      Type.Literal("pending"),
+      Type.Literal("stop"),
+      Type.Literal("length"),
+      Type.Literal("toolUse"),
+      Type.Literal("error"),
+      Type.Literal("aborted"),
+      Type.Literal("deferred"),
+    ]),
+    deferred: Type.Optional(
+      Type.Object({
+        provider: Type.String(),
+        modelId: Type.String(),
+        api: Type.String(),
+        id: Type.String(),
+        expiresAt: Type.Optional(Type.Number()),
+        pollAfterMs: Type.Optional(Type.Number()),
+        data: Type.Optional(JsonValueSchema),
+      }),
+    ),
+    errorMessage: Type.Optional(Type.String()),
+    rawStopReason: Type.Optional(Type.String()),
+    endTurn: Type.Optional(Type.Boolean()),
+    timestamp: Type.Number(),
+  }),
+);
 
 /**
  * Lifecycle of an {@link Agentic}, computed from all of its records rather than from the last
@@ -89,11 +244,9 @@ export interface Agentic<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> extends AsyncGenerator<
-      AgenticStep,
-      void,
-      ParentView<AgenticInput, AssistantMessage> | undefined
-    >,
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> extends AsyncGenerator<AgenticStep, void, ParentView<N, V> | undefined>,
     ComplainToolHost {
   readonly status: AgenticStatus;
   readonly events: AgentHarness<undefined>["events"];
@@ -108,7 +261,7 @@ export interface Agentic<
    * graph view and returns the prompt text; busy unless the agent is idle with no queued demand.
    */
   stagePrompt(
-    prompt: NonNullable<AgenticOptions<S, P, T>["prompt"]>,
+    prompt: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>,
     options?: { images?: ImageContent[] },
   ): void;
   skill(
@@ -180,7 +333,8 @@ export type TokenMonitorConfig = {
   readonly costThreshold?: number;
   /** Must not throw: a throw is isolated by Pi and surfaces only as a `handler_error` event. */
   readonly onThreshold: (
-    agent: JuncoAgent,
+    // biome-ignore lint/suspicious/noExplicitAny: identity-only erasure of the agent's input domains.
+    agent: JuncoAgent<Skill, PromptTemplate, AgentTool, any, any>,
     totals: Usage,
     delta: { readonly tokens: number; readonly cost: number },
   ) => void;
@@ -194,15 +348,15 @@ export type AgenticOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
 > = Omit<
   AgentHarnessOptions<undefined>,
   "tools" | "resources" | "toolExecution"
 > & {
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
-  readonly prompt?:
-    | string
-    | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string);
+  readonly prompt?: string | ((inputs: ParentView<N, V>) => string);
   readonly images?: ImageContent[];
   /**
    * Borrowed collection selecting the agent's authorization policy and native lifetime: the agent
@@ -220,7 +374,7 @@ export type AgenticOptions<
    * places the agent under that graph's view of the same session.
    */
   readonly recorder?: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   >;
   /** This agent's node ID under `recorder`; default its own `nodeId`. */
   readonly recorderNodeId?: string;
@@ -258,9 +412,11 @@ export function validateActiveTools(
 }
 
 /** A staged prompt's text: a function reads, without draining, the graph view of its `next`. */
-export function resolveStagedPrompt(
-  prompt: NonNullable<AgenticOptions["prompt"]>,
-  inputs: ParentView<AgenticInput, AssistantMessage> | undefined,
+export function resolveStagedPrompt<N extends TSchema, V>(
+  prompt: NonNullable<
+    AgenticOptions<Skill, PromptTemplate, AgentTool, N, V>["prompt"]
+  >,
+  inputs: ParentView<N, V> | undefined,
 ): string {
   if (typeof prompt === "string") return prompt;
   if (inputs === undefined)

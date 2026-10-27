@@ -8,15 +8,31 @@ import {
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { InfoTool, RecvTool, SendTool } from "../dist/messaging.js";
 
 // Native-free: only dist/messaging.js plus the engine for real send admission.
 
-/** A retained inbox shaped like AgentDriver's: ordered per-edge batches and value cells. */
+const route = ([id, , schema]) => [EdgeId.create(id), schema];
+
+/**
+ * A retained inbox shaped like AgentDriver's: ordered per-edge batches and value cells, each
+ * `[id, payloads | value, schema]`, with the recv output schema of those routes.
+ */
 function inbox(messages = [], values = []) {
   const host = {
     consumed: 0,
-    view: { messages: new Map(messages), values: new Map(values) },
+    view: {
+      messages: new Map(
+        messages.map(([id, payloads]) => [EdgeId.create(id), payloads]),
+      ),
+      values: new Map(values.map(([id, value]) => [EdgeId.create(id), value])),
+    },
+    recvOutputSchema: RecvTool.outputSchemaFor(
+      messages.map(route),
+      values.map(route),
+    ),
     consume() {
       host.consumed++;
       host.view.messages.clear();
@@ -28,16 +44,22 @@ function inbox(messages = [], values = []) {
 
 const call = (tool, input = {}, signal) =>
   tool.execute("call-1", input, signal);
+const never = () => new AbortController().signal;
+
+/** A schema whose payload sits behind a local `$defs` entry named `P`, scoped by a real edge. */
+const scoped = (id, inner) =>
+  Edge.message(id, { $defs: { P: inner }, $ref: "#/$defs/P" }).schema;
 
 test("recv flattens per-edge FIFO messages and value envelopes, then drains", async () => {
+  const parent = { text: "parent" };
   const host = inbox(
     [
-      [EdgeId.create("b"), ["b1", "b2"]],
-      [EdgeId.create("a"), ["a1"]],
+      ["b", ["b1", "b2"], Type.String()],
+      ["a", ["a1"], Type.String()],
     ],
     [
-      [EdgeId.create("v"), { text: "parent" }],
-      [EdgeId.create("u"), undefined],
+      ["v", parent, Type.Object({ text: Type.String() })],
+      ["u", undefined, Type.Unknown()],
     ],
   );
   const tool = new RecvTool(host);
@@ -53,10 +75,13 @@ test("recv flattens per-edge FIFO messages and value envelopes, then drains", as
       { id: "u", payload: undefined },
     ],
   });
-  assert.deepEqual(JSON.parse(first.content[0].text), {
+  assert.equal(first.details.values[0].payload, parent);
+  const json = {
     messages: first.details.messages,
     values: [{ id: "v", payload: { text: "parent" } }, { id: "u" }],
-  });
+  };
+  assert.deepEqual(JSON.parse(first.content[0].text), json);
+  assert.deepEqual(first.structuredContent, json);
   const second = await call(tool);
   assert.equal(second.content[0].text, '{"messages":[],"values":[]}');
   assert.equal(host.consumed, 2);
@@ -66,25 +91,134 @@ test("recv leaves the inbox intact when rendering, cancellation, validation or h
   const cyclic = {};
   cyclic.self = cyclic;
   for (const payload of [cyclic, 1n]) {
-    const host = inbox([[EdgeId.create("m"), [payload]]]);
+    const host = inbox([["m", [payload], Type.Unknown()]]);
     await assert.rejects(call(new RecvTool(host)), TypeError);
     assert.equal(host.consumed, 0);
     assert.equal(host.view.messages.get("m")[0], payload);
   }
 
-  const host = inbox([[EdgeId.create("m"), ["kept"]]]);
+  const host = inbox([["m", ["kept"], Type.String()]]);
   const aborted = AbortSignal.abort(new Error("stop"));
   await assert.rejects(call(new RecvTool(host), {}, aborted), /stop/);
   await assert.rejects(
     call(new RecvTool(host), { extra: 1 }),
     /^Error: Invalid recv input/,
   );
-  await assert.rejects(call(new RecvTool()));
+  await assert.rejects(call(new RecvTool()), /requires a JuncoGraph host/);
   assert.equal(host.consumed, 0);
   assert.deepEqual(host.view.messages.get("m"), ["kept"]);
 });
 
-function wiredGraph() {
+test("recv correlates each message and value route with its own schema and keeps a mismatch unconsumed", async () => {
+  const routes = (n, s, vn, vs) => [
+    [
+      ["n", [n], Type.Number()],
+      ["s", [s], Type.String()],
+    ],
+    [
+      ["vn", vn, Type.Number()],
+      ["vs", vs, Type.String()],
+    ],
+  ];
+  const ok = inbox(...routes(7, "7", 8, "8"));
+  const result = await call(new RecvTool(ok));
+  assert.deepEqual(result.structuredContent, {
+    messages: [
+      { id: "n", payload: 7 },
+      { id: "s", payload: "7" },
+    ],
+    values: [
+      { id: "vn", payload: 8 },
+      { id: "vs", payload: "8" },
+    ],
+  });
+  assert.equal(ok.consumed, 1);
+
+  for (const swapped of [
+    routes("7", "7", 8, "8"),
+    routes(7, 7, 8, "8"),
+    routes(7, "7", "8", "8"),
+    routes(7, "7", 8, 8),
+  ]) {
+    const host = inbox(...swapped);
+    await assert.rejects(
+      call(new RecvTool(host)),
+      /^Error: Invalid recv output/,
+    );
+    assert.equal(host.consumed, 0);
+    assert.equal(host.view.messages.size, 2);
+    assert.equal(host.view.values.size, 2);
+  }
+});
+
+test("recv omits an undefined payload only where its route's schema admits undefined", async () => {
+  const optional = inbox([], [["u", undefined, Type.Unknown()]]);
+  const result = await call(new RecvTool(optional));
+  assert.deepEqual(result.structuredContent, {
+    messages: [],
+    values: [{ id: "u" }],
+  });
+
+  const required = inbox([], [["n", undefined, Type.Number()]]);
+  await assert.rejects(
+    call(new RecvTool(required)),
+    /^Error: Invalid recv output/,
+  );
+  assert.equal(required.consumed, 0);
+  assert.equal(
+    Value.Check(
+      RecvTool.outputSchemaFor([], [[EdgeId.create("n"), Type.Number()]]),
+      {
+        messages: [],
+        values: [{ id: "n" }],
+      },
+    ),
+    false,
+  );
+});
+
+test("unhosted tools announce no routes and still refuse to run", async () => {
+  const send = new SendTool();
+  for (const input of [{ id: "a", payload: 1 }, {}])
+    assert.equal(Value.Check(send.parameters, input), false);
+  assert.equal(SendTool.parametersFor([]), send.parameters);
+  await assert.rejects(
+    call(send, { id: "a", payload: 1 }),
+    /send requires a JuncoGraph host/,
+  );
+
+  const recv = new RecvTool();
+  const empty = { messages: [], values: [] };
+  assert.equal(Value.Check(recv.outputSchema, empty), true);
+  assert.equal(
+    Value.Check(recv.outputSchema, {
+      messages: [{ id: "a", payload: 1 }],
+      values: [],
+    }),
+    false,
+  );
+  assert.deepEqual(recv.outputSchema, RecvTool.outputSchemaFor([], []));
+  assert.equal(recv.description, RecvTool.describe(recv.outputSchema));
+});
+
+test("hosted tools expose their host's schemas and recv describes its output", () => {
+  const sendParameters = SendTool.parametersFor([
+    [EdgeId.create("n"), Type.Number()],
+  ]);
+  assert.equal(
+    new SendTool({ sendParameters, send() {} }).parameters,
+    sendParameters,
+  );
+  const host = inbox([["n", [], Type.Number()]]);
+  const recv = new RecvTool(host);
+  assert.equal(recv.outputSchema, host.recvOutputSchema);
+  assert.equal(
+    recv.description,
+    `Consumes messages and parent values retained for the current graph node. Returns JSON matching: ${JSON.stringify(host.recvOutputSchema)}`,
+  );
+});
+
+function wiredGraph(routes = [["a->b", Type.Unknown()]]) {
   // Admission only: the passive graph is never driven.
   const graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const step = async function* () {
@@ -92,11 +226,18 @@ function wiredGraph() {
   };
   const a = graph.addNode({ id: NodeId.create("a"), state: undefined, step });
   const b = graph.addNode({ id: NodeId.create("b"), state: undefined, step });
-  const out = Edge.message("a->b");
-  graph.addEdge(a, b, out);
-  graph.addEdge(a, b, Edge.value("a=>b"));
-  graph.addEdge(b, a, Edge.message("b->a"));
-  return { graph, out, host: { send: (message) => graph.emit(a, message) } };
+  const edges = routes.map(([id, schema]) => Edge.message(id, schema));
+  for (const edge of edges) graph.addEdge(a, b, edge);
+  const value = Edge.value("a=>b", Type.Number());
+  graph.addEdge(a, b, value);
+  graph.addEdge(b, a, Edge.message("b->a", Type.Number()));
+  const host = (sent = edges) => ({
+    sendParameters: SendTool.parametersFor(
+      sent.map((edge) => [edge.id, edge.schema]),
+    ),
+    send: (message) => graph.emit(a, message),
+  });
+  return { graph, edges, value, out: edges[0], host: host(), hostFor: host };
 }
 
 test("send admits one message on a real outgoing message edge, keeping the payload reference", async () => {
@@ -109,12 +250,38 @@ test("send admits one message on a real outgoing message edge, keeping the paylo
   assert.equal(out.transport.left[0], payload);
 });
 
-test("send propagates admission errors for unwired, incoming-only and value edges", async () => {
-  const { out, host } = wiredGraph();
+test("send correlates each route's ID with its schema", async () => {
+  const { edges, host } = wiredGraph([
+    ["n", Type.Number()],
+    ["s", Type.String()],
+  ]);
   const tool = new SendTool(host);
-  for (const id of ["nowhere", "b->a"])
-    await assert.rejects(call(tool, { id, payload: 1 }), /unwired edge/);
-  await assert.rejects(call(tool, { id: "a=>b", payload: 1 }), /value edge/);
+  await call(tool, { id: "n", payload: 7 });
+  await call(tool, { id: "s", payload: "7" });
+  for (const input of [
+    { id: "n", payload: "7" },
+    { id: "s", payload: 7 },
+  ])
+    await assert.rejects(call(tool, input), /^Error: Invalid send input/);
+  assert.deepEqual(
+    edges.map((edge) => edge.transport.left),
+    [[7], ["7"]],
+  );
+});
+
+test("send routes cover only outgoing message edges; the engine still guards a wider host", async () => {
+  const { out, value, host, hostFor } = wiredGraph();
+  const tool = new SendTool(host);
+  for (const id of ["nowhere", "b->a", "a=>b"])
+    await assert.rejects(
+      call(tool, { id, payload: 1 }),
+      /^Error: Invalid send input/,
+    );
+  // A host announcing the value edge as a route still meets the engine's routing check.
+  await assert.rejects(
+    call(new SendTool(hostFor([out, value])), { id: "a=>b", payload: 1 }),
+    /value edge/,
+  );
   assert.equal(out.transport.left.length, 0);
 });
 
@@ -134,6 +301,73 @@ test("send rejects invalid, unhosted and cancelled calls without emitting", asyn
     { name: "AbortError" },
   );
   assert.equal(out.transport.left.length, 0);
+});
+
+test("identically named local $defs stay isolated per edge through send and recv", async () => {
+  const { edges, host } = wiredGraph([
+    ["n", { $defs: { P: Type.Number() }, $ref: "#/$defs/P" }],
+    ["s", { $defs: { P: Type.String() }, $ref: "#/$defs/P" }],
+  ]);
+  const send = new SendTool(host);
+  await call(send, { id: "n", payload: 7 });
+  await call(send, { id: "s", payload: "7" });
+  for (const input of [
+    { id: "n", payload: "7" },
+    { id: "s", payload: 7 },
+  ])
+    await assert.rejects(call(send, input), /^Error: Invalid send input/);
+  assert.deepEqual(
+    edges.map((edge) => edge.transport.left),
+    [[7], ["7"]],
+  );
+
+  const n = scoped("n", Type.Number());
+  const s = scoped("s", Type.String());
+  const good = inbox([
+    ["n", [7], n],
+    ["s", ["7"], s],
+  ]);
+  await call(new RecvTool(good));
+  assert.equal(good.consumed, 1);
+  const crossed = inbox([
+    ["n", ["7"], n],
+    ["s", [7], s],
+  ]);
+  await assert.rejects(
+    call(new RecvTool(crossed)),
+    /^Error: Invalid recv output/,
+  );
+  assert.equal(crossed.consumed, 0);
+});
+
+test("invoke validates against the supplied host's schemas, not the construction host's", async () => {
+  const numeric = wiredGraph([["e", Type.Number()]]);
+  const text = wiredGraph([["e", Type.String()]]);
+  const send = new SendTool(numeric.host);
+  await assert.rejects(
+    call(send, { id: "e", payload: "7" }),
+    /Invalid send input/,
+  );
+  await SendTool.invoke(
+    send,
+    text.host,
+    "c",
+    { id: "e", payload: "7" },
+    never(),
+  );
+  await assert.rejects(
+    SendTool.invoke(send, text.host, "c", { id: "e", payload: 7 }, never()),
+    /Invalid send input/,
+  );
+  assert.deepEqual(numeric.out.transport.left, []);
+  assert.deepEqual(text.out.transport.left, ["7"]);
+
+  const recv = new RecvTool(inbox([["e", ["7"], Type.Number()]]));
+  const host = inbox([["e", ["7"], Type.String()]]);
+  const result = await RecvTool.invoke(recv, host, "c", {}, never());
+  assert.deepEqual(result.details.messages, [{ id: "e", payload: "7" }]);
+  assert.equal(host.consumed, 1);
+  await assert.rejects(call(recv), /Invalid recv output/);
 });
 
 test("info rejects model-supplied identity and absent hosts, and preserves host errors", async () => {
@@ -171,33 +405,29 @@ test("info rejects model-supplied identity and absent hosts, and preserves host 
 });
 
 test("a copied tool cannot acquire graph authority through companion invoke", async () => {
-  const host = inbox([[EdgeId.create("m"), ["kept"]]]);
+  const host = inbox([["m", ["kept"], Type.String()]]);
   const recv = new RecvTool();
   assert.equal(RecvTool.is(recv), true);
   const copy = { ...recv };
   assert.equal(RecvTool.is(copy), false);
   await assert.rejects(
-    RecvTool.invoke(copy, host, "c", {}, new AbortController().signal),
+    RecvTool.invoke(copy, host, "c", {}, never()),
     TypeError,
   );
   assert.equal(host.consumed, 0);
-  const result = await RecvTool.invoke(
-    recv,
-    host,
-    "c",
-    {},
-    new AbortController().signal,
-  );
+  const result = await RecvTool.invoke(recv, host, "c", {}, never());
   assert.deepEqual(result.details.messages, [{ id: "m", payload: "kept" }]);
 
   const { out, host: sendHost } = wiredGraph();
+  const send = new SendTool();
+  assert.equal(SendTool.is({ ...send }), false);
   await assert.rejects(
     SendTool.invoke(
-      { ...new SendTool() },
+      { ...send },
       sendHost,
       "c",
       { id: "a->b", payload: 1 },
-      new AbortController().signal,
+      never(),
     ),
     TypeError,
   );
@@ -208,7 +438,7 @@ test("a copied tool cannot acquire graph authority through companion invoke", as
       { info: () => assert.fail("host reached") },
       "c",
       {},
-      new AbortController().signal,
+      never(),
     ),
     TypeError,
   );
@@ -245,6 +475,9 @@ test("messaging tools count each send, recv and info call once, direct or invoke
   const recorder = profileRecorder();
   const sent = [];
   const sendHost = {
+    sendParameters: SendTool.parametersFor(
+      ["ok", "missing"].map((id) => [EdgeId.create(id), Type.Number()]),
+    ),
     send(message) {
       if (message.id !== EdgeId.create("ok")) throw new Error("no such route");
       sent.push(message);
@@ -278,8 +511,8 @@ test("messaging tools count each send, recv and info call once, direct or invoke
 
   const recvEvents = () => recorder.events.filter((e) => e.tool === "recv");
   const host = inbox(
-    [[EdgeId.create("a"), ["a1", "a2"]]],
-    [[EdgeId.create("v"), undefined]],
+    [["a", ["a1", "a2"], Type.String()]],
+    [["v", undefined, Type.Unknown()]],
   );
   const recv = new RecvTool(host, () => recorder);
   await call(recv);

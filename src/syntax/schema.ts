@@ -1,4 +1,4 @@
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 
 const strict = { additionalProperties: false } as const;
 export const BUILTIN_TOOL_NAMES = [
@@ -24,6 +24,10 @@ const edge = Type.Object(
       Type.Union([Type.Literal("value"), Type.Literal("message")]),
     ),
     id: Type.Optional(Type.String()),
+    // A JSON Schema mapping; `parse` validates its contents (Draft 2020-12, local refs only).
+    schema: Type.Unsafe<TSchema>(Type.Object({})),
+    // Record each published value under the recorder's `probe` resource; numeric types only.
+    probe: Type.Optional(Type.Boolean()),
   },
   strict,
 );

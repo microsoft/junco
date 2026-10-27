@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { DummyTracer, type NodeIdType } from "dataflow-engine";
 import { LockPolicy } from "junco-tools";
+import { AgenticInputSchema } from "../src/agentic.ts";
 import {
   type AgenticInput,
   agent as agentApi,
@@ -93,10 +94,11 @@ function wire(
   id?: NodeIdType,
   delivered: AgenticInput = input,
 ) {
-  const edge = graph.Edge.message<AgenticInput, AssistantMessage>(
+  const edge = graph.Edge.message<typeof AgenticInputSchema, AssistantMessage>(
     "source->worker",
+    AgenticInputSchema,
   );
-  const source = new Deterministic<AgenticInput, AssistantMessage>(
+  const source = new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
     async function* () {
       yield [graph.Message.create(edge, delivered)];
       return fauxAssistantMessage("seeded");
@@ -187,8 +189,7 @@ describe("complaints through real graphs", () => {
     const second = await worker("second");
     const { execution: firstGraphContext, ports: firstGraphPorts } = newGraph();
     const firstGraph = firstGraphContext.graph;
-    const { execution: secondGraphContext, ports: secondGraphPorts } =
-      newGraph();
+    const { execution: secondGraphContext } = newGraph();
     const secondGraph = secondGraphContext.graph;
     assert.equal(first.issueLog, tools.issueLog);
     assert.equal(second.issueLog, tools.issueLog);
@@ -387,12 +388,8 @@ describe("direct Agentic.complain", () => {
 
     const nodeId = graph.NodeId.create("supplied-node");
     assert.notEqual(nodeId, real.nodeId);
-    const edgeId = graph.Edge.message<AgenticInput, AssistantMessage>(
-      "edge",
-    ).id;
-    const lateId = graph.Edge.message<AgenticInput, AssistantMessage>(
-      "late",
-    ).id;
+    const edgeId = graph.Edge.message("edge", AgenticInputSchema).id;
+    const lateId = graph.Edge.message("late", AgenticInputSchema).id;
     const messages = [{ id: edgeId, payload: input }];
     const original = {
       role: "user" as const,
@@ -404,7 +401,7 @@ describe("direct Agentic.complain", () => {
     const observer = new RecordingTracer();
     const before = tools.issueLog.length;
 
-    const returned: void[] = [
+    const returned = [
       protocols[0]!.complain(
         { nodeId, messages, prompt, complaint: "real direct" },
         observer,

@@ -13,15 +13,15 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { JuncoAgentError } from "junco-agent";
+import { type AgenticInputSchema, JuncoAgentError } from "junco-agent";
 import {
   EmptyPolicy,
   LockPolicy,
   type Policy,
   type ToolCollection,
 } from "junco-tools";
+import { type TNumber, type TSchema, type TString, Type } from "typebox";
 import {
-  type AgenticInput,
   Deterministic,
   graph as graphApi,
   JuncoGraph,
@@ -76,13 +76,13 @@ const cancelledBy = (error: unknown, reason: unknown): boolean =>
   error === reason ||
   (error instanceof DataflowNodeError && error.cause === reason);
 
-const unresolved = <N, T>(edge: Edge<N, T>): boolean =>
+const unresolved = <N extends TSchema, T>(edge: Edge<N, T>): boolean =>
   E.isRight(edge.transport) && O.isNone(edge.transport.right);
 
 /** A coroutine consumer recording whether the engine ever primed it. */
 function consumer<T>(result: T) {
   const state = { ran: false };
-  const coroutine = new Deterministic<string, T>(async function* () {
+  const coroutine = new Deterministic<TString, T>(async function* () {
     state.ran = true;
     yield [];
     return result;
@@ -97,7 +97,7 @@ function consumer<T>(result: T) {
 
 describe("abort", () => {
   test("joins a gated finally, cleans up once and starts no downstream work", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -110,12 +110,14 @@ describe("abort", () => {
       graph: graph,
       scheduler: schedules.parallel(),
     });
-    const result = Edge.value<string, string>("waiting-result");
+    const result = Edge.value("waiting-result", Type.String());
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let cleaned = 0;
-    const waiting = new Deterministic<string, string>(async function* (signal) {
+    const waiting = new Deterministic<TString, string>(async function* (
+      signal,
+    ) {
       yield [];
       entered.resolve();
       try {
@@ -166,7 +168,7 @@ describe("abort", () => {
   });
 
   test("preserves an unrelated cleanup error, which a later close does not report again", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -181,7 +183,9 @@ describe("abort", () => {
     });
     const entered = Promise.withResolvers<void>();
     const unrelated = new Error("cleanup failed");
-    const failing = new Deterministic<string, string>(async function* (signal) {
+    const failing = new Deterministic<TString, string>(async function* (
+      signal,
+    ) {
       yield [];
       entered.resolve();
       try {
@@ -214,7 +218,7 @@ describe("abort", () => {
   });
 
   test("a run failure already delivered to its drive is not reported again by close", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -229,7 +233,7 @@ describe("abort", () => {
     });
     const broken = new Error("body failed");
     let cleaned = 0;
-    const failing = new Deterministic<string, string>(async function* () {
+    const failing = new Deterministic<TString, string>(async function* () {
       try {
         yield [];
         throw broken;
@@ -261,7 +265,7 @@ describe("abort", () => {
 });
 
 test("caller cancellation interrupts nested work and joins its cleanup", async () => {
-  const parentPorts = terminalPorts<string, string>();
+  const parentPorts = terminalPorts(Type.String(), Type.String());
   const parent = new JuncoGraph(
     parentPorts.source,
     parentPorts.sink,
@@ -274,7 +278,7 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
     graph: parent,
     scheduler: schedules.parallel(),
   });
-  const childPorts = terminalPorts<string, string>();
+  const childPorts = terminalPorts(Type.String(), Type.String());
   const child = new JuncoGraph(
     childPorts.source,
     childPorts.sink,
@@ -293,7 +297,7 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
   const cleaning = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   let cleaned = false;
-  const worker = new Deterministic<string, string>(async function* (signal) {
+  const worker = new Deterministic<TString, string>(async function* (signal) {
     yield [];
     entered.resolve();
     try {
@@ -346,7 +350,7 @@ test("caller cancellation interrupts nested work and joins its cleanup", async (
 
 describe("close", () => {
   test("drains suspended and waiting coroutines without routing cleanup output or publishing results", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -359,15 +363,21 @@ describe("close", () => {
       graph: graph,
       scheduler: schedules.parallel(),
     });
-    const input = Edge.message<string, string>("input");
-    const suspendedCleanup = Edge.message<string, string>("suspended-cleanup");
-    const waitingCleanup = Edge.message<string, string>("waiting-cleanup");
+    const input = Edge.message<TString, string>("input", Type.String());
+    const suspendedCleanup = Edge.message<TString, string>(
+      "suspended-cleanup",
+      Type.String(),
+    );
+    const waitingCleanup = Edge.message<TString, string>(
+      "waiting-cleanup",
+      Type.String(),
+    );
     const suspendedReady = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const cleaned = { suspended: 0, waiting: 0 };
-    const suspended = new Deterministic<string, string>(async function* () {
+    const suspended = new Deterministic<TString, string>(async function* () {
       yield [];
       try {
         suspendedReady.resolve();
@@ -378,7 +388,9 @@ describe("close", () => {
       }
       return "suspended result";
     }, LockPolicy);
-    const waiting = new Deterministic<string, string>(async function* (signal) {
+    const waiting = new Deterministic<TString, string>(async function* (
+      signal,
+    ) {
       yield [];
       entered.resolve();
       try {
@@ -454,7 +466,7 @@ describe("close", () => {
   });
 
   test("a finally error rejects close without preventing a sibling agent's close", async () => {
-    const graphPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const graphPorts = terminalPorts();
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -468,17 +480,17 @@ describe("close", () => {
       scheduler: schedules.parallel(),
     });
     const failure = new Error("finally failed");
-    const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
-      async function* () {
-        try {
-          yield [];
-        } finally {
-          // biome-ignore lint/correctness/noUnsafeFinally: the case under test is a throwing finally block.
-          throw failure;
-        }
-      },
-      LockPolicy,
-    );
+    const coroutine = new Deterministic<
+      typeof AgenticInputSchema,
+      AssistantMessage
+    >(async function* () {
+      try {
+        yield [];
+      } finally {
+        // biome-ignore lint/correctness/noUnsafeFinally: the case under test is a throwing finally block.
+        throw failure;
+      }
+    }, LockPolicy);
     const sibling = new MockAgent({ runs: [] });
     const coroutineId = graph.addNode({
       trigger: TriggerRule.always(),
@@ -511,7 +523,7 @@ describe("close", () => {
   });
 
   test("close during a pending abort keeps the abort reason as cancellation, not failure", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -528,7 +540,9 @@ describe("close", () => {
     const cleanupStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let cleaned = 0;
-    const waiting = new Deterministic<string, string>(async function* (signal) {
+    const waiting = new Deterministic<TString, string>(async function* (
+      signal,
+    ) {
       yield [];
       entered.resolve();
       try {
@@ -579,7 +593,7 @@ describe("close", () => {
   test("graph close joins a shared coroutine's async disposal hook", async () => {
     const external = Promise.withResolvers<void>();
     const counts = { disposals: 0, cleanup: 0, external: 0 };
-    class Owned extends Deterministic<string, string> {
+    class Owned extends Deterministic<TString, string> {
       override async [Symbol.asyncDispose](): Promise<void> {
         counts.disposals++;
         await super[Symbol.asyncDispose]();
@@ -595,7 +609,7 @@ describe("close", () => {
       }
       return "never published";
     }, LockPolicy);
-    const childPorts = terminalPorts<string, string>();
+    const childPorts = terminalPorts(Type.String(), Type.String());
     const child = new JuncoGraph(
       childPorts.source,
       childPorts.sink,
@@ -612,7 +626,7 @@ describe("close", () => {
       trigger: TriggerRule.always(),
       state: coroutine,
     });
-    const parentPorts = terminalPorts<string, string>();
+    const parentPorts = terminalPorts(Type.String(), Type.String());
     const parent = new JuncoGraph(
       parentPorts.source,
       parentPorts.sink,
@@ -621,10 +635,6 @@ describe("close", () => {
       quiet,
       LockPolicy,
     );
-    const parentContext = schedules.context({
-      graph: parent,
-      scheduler: schedules.parallel(),
-    });
     parent.addNode({
       trigger: TriggerRule.always(),
       is_available: () => false,
@@ -670,7 +680,7 @@ describe("close", () => {
 
 describe("single consumer", () => {
   test("a second registration fails on activation without resolving its value edge", async () => {
-    const firstPorts = terminalPorts<string, string>();
+    const firstPorts = terminalPorts(Type.String(), Type.String());
     const first = new JuncoGraph(
       firstPorts.source,
       firstPorts.sink,
@@ -684,7 +694,7 @@ describe("single consumer", () => {
       scheduler: schedules.parallel(),
     });
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-    const shared = new Deterministic<string, string>(async function* () {
+    const shared = new Deterministic<TString, string>(async function* () {
       return "first";
     }, LockPolicy);
     const firstId = first.addNode({
@@ -695,7 +705,7 @@ describe("single consumer", () => {
     await firstContext.run();
     assert.deepEqual(first.result(firstId), O.some("first"));
 
-    const secondPorts = terminalPorts<string, string>();
+    const secondPorts = terminalPorts(Type.String(), Type.String());
 
     const second = new JuncoGraph(
       secondPorts.source,
@@ -710,7 +720,7 @@ describe("single consumer", () => {
       graph: second,
       scheduler: schedules.parallel(),
     });
-    const value = Edge.value<string, string>("shared-result");
+    const value = Edge.value("shared-result", Type.String());
     const downstream = consumer("downstream");
     const againId = second.addNode({
       trigger: TriggerRule.always(),
@@ -741,7 +751,7 @@ describe("single consumer", () => {
   });
 
   test("a coroutine closed before priming fails on activation without resolving its value edge", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -754,10 +764,10 @@ describe("single consumer", () => {
       graph: graph,
       scheduler: schedules.parallel(),
     });
-    const value = Edge.value<string, string>("closed-result");
+    const value = Edge.value("closed-result", Type.String());
     let bodyRan = false;
     // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
-    const closed = new Deterministic<string, string>(async function* () {
+    const closed = new Deterministic<TString, string>(async function* () {
       bodyRan = true;
       return "never";
     }, LockPolicy);
@@ -791,7 +801,10 @@ describe("single consumer", () => {
   });
 
   test("a body genuinely returning undefined resolves its value edge", async () => {
-    const graphPorts = terminalPorts<string, string | undefined>();
+    const graphPorts = terminalPorts(
+      Type.String(),
+      Type.Union([Type.String(), Type.Undefined()]),
+    );
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -804,8 +817,11 @@ describe("single consumer", () => {
       graph: graph,
       scheduler: schedules.parallel(),
     });
-    const value = Edge.value<string, string | undefined>("undefined-result");
-    const source = new Deterministic<string, string | undefined>(
+    const value = Edge.value(
+      "undefined-result",
+      Type.Union([Type.String(), Type.Undefined()]),
+    );
+    const source = new Deterministic<TString, string | undefined>(
       // biome-ignore lint/correctness/useYield: a coroutine that completes without yielding.
       async function* () {
         return undefined;
@@ -815,7 +831,7 @@ describe("single consumer", () => {
     let observed:
       | { readonly has: boolean; readonly value: string | undefined }
       | undefined;
-    const dependent = new Deterministic<string, string | undefined>(
+    const dependent = new Deterministic<TString, string | undefined>(
       async function* () {
         const view = yield [];
         observed = {
@@ -855,7 +871,7 @@ describe("single consumer", () => {
 describe("direct protocol", () => {
   test("return completes with the forced value, cleans up once and refuses later advances", async () => {
     let cleaned = 0;
-    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+    const coroutine = new graphApi.nodes.Deterministic<TNumber, string>(
       async function* () {
         try {
           yield [];
@@ -885,7 +901,7 @@ describe("direct protocol", () => {
     const sentinel = new Error("injected");
     let caught: unknown;
     let cleaned = 0;
-    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+    const coroutine = new graphApi.nodes.Deterministic<TNumber, string>(
       async function* () {
         try {
           yield [];
@@ -911,9 +927,9 @@ describe("direct protocol", () => {
   });
 
   test("for await consumes every emitted batch and completes cleanup", async () => {
-    const edge = Edge.message<number, string>("numbers");
+    const edge = Edge.message<TNumber, string>("numbers", Type.Number());
     let cleaned = 0;
-    const coroutine = new graphApi.nodes.Deterministic<number, string>(
+    const coroutine = new graphApi.nodes.Deterministic<TNumber, string>(
       async function* () {
         try {
           yield [Message.create(edge, 1)];
@@ -963,7 +979,7 @@ describe("policy and borrowed collections", () => {
     };
     const empty = countedCollection(EmptyPolicy, []);
     assert.throws(
-      () => new Deterministic<string, string>(body, LockPolicy, empty),
+      () => new Deterministic<TString, string>(body, LockPolicy, empty),
       TypeError,
     );
     assert.throws(() => {
@@ -992,7 +1008,7 @@ describe("policy and borrowed collections", () => {
   });
 
   test("addNode takes a managed state's policy and rejects any supplied one; an explicit step must match its state", async () => {
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -1001,15 +1017,11 @@ describe("policy and borrowed collections", () => {
       quiet,
       LockPolicy,
     );
-    const graphContext = schedules.context({
-      graph: graph,
-      scheduler: schedules.parallel(),
-    });
-    const coroutine = new Deterministic<string, string>(async function* () {
+    const coroutine = new Deterministic<TString, string>(async function* () {
       yield [];
       return "x";
     }, LockPolicy);
-    const childPorts = terminalPorts<string, string>();
+    const childPorts = terminalPorts(Type.String(), Type.String());
     const child = new JuncoGraph(
       childPorts.source,
       childPorts.sink,
@@ -1024,7 +1036,7 @@ describe("policy and borrowed collections", () => {
     });
     const childId = child.addNode({
       trigger: TriggerRule.always(),
-      state: new Deterministic<string, string>(async function* () {
+      state: new Deterministic<TString, string>(async function* () {
         yield [];
         return "y";
       }, EmptyPolicy),
@@ -1085,7 +1097,7 @@ describe("policy and borrowed collections", () => {
       state: childContext,
     });
     graphPorts.connect(graph, nested);
-    const agentsPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const agentsPorts = terminalPorts();
     const agents = new JuncoGraph(
       agentsPorts.source,
       agentsPorts.sink,
@@ -1094,10 +1106,6 @@ describe("policy and borrowed collections", () => {
       quiet,
       LockPolicy,
     );
-    const agentsContext = schedules.context({
-      graph: agents,
-      scheduler: schedules.parallel(),
-    });
     const agentId = agents.addNode({
       state: new MockAgent({ runs: [] }),
       policy: EmptyPolicy,
@@ -1117,7 +1125,7 @@ describe("policy and borrowed collections", () => {
         closes++;
       }
     }, EmptyPolicy);
-    const childPorts = terminalPorts<never, number>();
+    const childPorts = terminalPorts(Type.Never(), Type.Number());
     const child = new JuncoGraph(
       childPorts.source,
       childPorts.sink,
@@ -1132,7 +1140,7 @@ describe("policy and borrowed collections", () => {
     });
     const answer = child.addNode({ state, trigger: TriggerRule.always() });
     childPorts.connect(child, answer);
-    const parentPorts = terminalPorts<never, number>();
+    const parentPorts = terminalPorts(Type.Never(), Type.Number());
     const parent = new JuncoGraph(
       parentPorts.source,
       parentPorts.sink,
@@ -1163,7 +1171,7 @@ describe("policy and borrowed collections", () => {
     const events: string[] = [];
     const collection = countedCollection(EmptyPolicy, events);
     let seen: unknown;
-    const coroutine = new Deterministic<string, string>(
+    const coroutine = new Deterministic<TString, string>(
       async function* (_signal, borrowed) {
         seen = borrowed;
         try {
@@ -1188,7 +1196,7 @@ describe("policy and borrowed collections", () => {
   test("graph close settles members before releasing every visited graph's lease; abort releases none", async () => {
     const events: string[] = [];
     const collection = countedCollection(LockPolicy, events);
-    const rootPorts = terminalPorts<string, string>();
+    const rootPorts = terminalPorts(Type.String(), Type.String());
     const root = new JuncoGraph(
       rootPorts.source,
       rootPorts.sink,
@@ -1198,11 +1206,7 @@ describe("policy and borrowed collections", () => {
       LockPolicy,
       collection,
     );
-    const rootContext = schedules.context({
-      graph: root,
-      scheduler: schedules.parallel(),
-    });
-    const childPorts = terminalPorts<string, string>();
+    const childPorts = terminalPorts(Type.String(), Type.String());
     const child = new JuncoGraph(
       childPorts.source,
       childPorts.sink,
@@ -1216,7 +1220,7 @@ describe("policy and borrowed collections", () => {
       graph: child,
       scheduler: schedules.parallel(),
     });
-    const coroutine = new Deterministic<string, string>(
+    const coroutine = new Deterministic<TString, string>(
       async function* () {
         try {
           yield [];

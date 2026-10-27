@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -17,19 +18,30 @@ import {
   Width,
 } from "../src/index.ts";
 
-type WordMsg = { readonly kind: "word"; readonly word: string };
-type CountMsg = {
-  readonly kind: "count";
-  readonly word: string;
-  readonly count: number;
-};
-type Msg = WordMsg | CountMsg;
+const WordMsgSchema = Type.Object({
+  kind: Type.Literal("word"),
+  word: Type.String(),
+});
+const CountMsgSchema = Type.Object({
+  kind: Type.Literal("count"),
+  word: Type.String(),
+  count: Type.Number(),
+});
+const MsgSchema = Type.Union([WordMsgSchema, CountMsgSchema]);
+type WordMsg = Static<typeof WordMsgSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: custom-ptransform reusable count helper", async () => {
-  const wordsForCount1Edge = Edge.message<Msg, string>("wordsForCount1");
-  const wordsForCount2Edge = Edge.message<Msg, string>("wordsForCount2");
-  const count1OutEdge = Edge.message<Msg, string>("count1Out");
-  const count2OutEdge = Edge.message<Msg, string>("count2Out");
+  const wordsForCount1Edge = Edge.message<Msg, string>(
+    "wordsForCount1",
+    MsgSchema,
+  );
+  const wordsForCount2Edge = Edge.message<Msg, string>(
+    "wordsForCount2",
+    MsgSchema,
+  );
+  const count1OutEdge = Edge.message<Msg, string>("count1Out", MsgSchema);
+  const count2OutEdge = Edge.message<Msg, string>("count2Out", MsgSchema);
 
   const inputWords = ["apple", "banana", "apple", "cherry", "apple", "banana"];
   const counts1: [string, number][] = [];

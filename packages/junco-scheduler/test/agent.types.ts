@@ -7,6 +7,7 @@ import {
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
+import { type TSchema, Type } from "typebox";
 import { type PiOptions, pi, type SchedulerRequest } from "../src/agent.ts";
 import {
   agent,
@@ -16,6 +17,9 @@ import {
   type Snapshot,
 } from "../src/index.ts";
 
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+
 export function universalModelPolicy(options: PiOptions) {
   const scheduler = pi(options);
   const numeric = new DataflowGraph<
@@ -24,10 +28,12 @@ export function universalModelPolicy(options: PiOptions) {
     string,
     Error
   >(Width.create(1), UNBOUNDED);
-  const textual = new DataflowGraph<boolean, string, number, never>(
-    Width.create(1),
-    UNBOUNDED,
-  );
+  const textual = new DataflowGraph<
+    boolean,
+    typeof StringSchema,
+    number,
+    never
+  >(Width.create(1), UNBOUNDED);
   const first = context({
     graph: numeric,
     scheduler,
@@ -51,7 +57,8 @@ export function universalModelPolicy(options: PiOptions) {
     string,
     { priority: number }
   > = scheduler;
-  const secondPolicy: Scheduler<boolean, string, number, boolean> = scheduler;
+  const secondPolicy: Scheduler<boolean, typeof StringSchema, number, boolean> =
+    scheduler;
   // @ts-expect-error Model policies are not resources, iterators or sessions.
   scheduler.return();
   // @ts-expect-error A policy does not own or configure a graph.
@@ -63,7 +70,9 @@ export function universalModelPolicy(options: PiOptions) {
 
 /** The same generic callback preserves caller C all the way to the wire request. */
 export function genericOracle() {
-  async function invoke<S, N, T, C>(snapshot: Snapshot<S, N, T, C>) {
+  async function invoke<S, N extends TSchema, T, C>(
+    snapshot: Snapshot<S, N, T, C>,
+  ) {
     const contextPairs: (readonly [NodeIdType, C])[] = [];
     for (const [id, metadata] of snapshot.context)
       contextPairs.push([id, metadata]);
@@ -80,8 +89,10 @@ export function genericOracle() {
     return metadata === undefined ? [] : [request.nodes.map((node) => node.id)];
   }
   const scheduler = agent(invoke);
-  const a: Scheduler<number, string, boolean, { label: string }> = scheduler;
-  const b: Scheduler<string, number, { result: string }, false> = scheduler;
+  const a: Scheduler<number, typeof StringSchema, boolean, { label: string }> =
+    scheduler;
+  const b: Scheduler<string, typeof NumberSchema, { result: string }, false> =
+    scheduler;
   return [a, b];
 }
 

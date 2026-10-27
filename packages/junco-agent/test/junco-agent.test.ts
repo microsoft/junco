@@ -12,25 +12,40 @@ import {
   type Session,
 } from "@earendil-works/pi-agent-core";
 import {
+  type Api,
   type AssistantMessage,
   type Context,
+  createAssistantMessageEventStream,
   createModels,
+  createProvider,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  getCurrentTools,
   type ImageContent,
   InMemoryCredentialStore,
+  type Model,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import {
+  EdgeId,
+  isUsageLimitError,
+  runWithUsageBudgets,
+  UsageBudget,
+  type UsageLimitError,
+} from "dataflow-engine";
 import {
   issueLog,
   type ProfileEvent,
   type ProfileRecorder,
   profileContexts,
+  RecvTool,
+  SendTool,
   YieldTool,
 } from "junco-tools";
-import { MARSH_POLICY_DENIED } from "junco-tools/errors";
-import { Type } from "typebox";
+import { errorGraph, MARSH_POLICY_DENIED } from "junco-tools/errors";
+import { type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 import { userTexts } from "../../../test/deterministic-support.ts";
 import {
   fauxRuntime,
@@ -39,7 +54,9 @@ import {
   toolTurn,
 } from "../../../test/support.ts";
 import {
+  AgenticInputSchema,
   type AgenticStep,
+  AssistantMessageSchema,
   JuncoAgent,
   JuncoAgentError,
   SYSTEM_INSTRUCTION,
@@ -196,6 +213,132 @@ test("a callback prompt runs once on demand with the supplied view and static im
     assert.equal(faux.state.callCount, 1);
   } finally {
     await agent.return();
+  }
+});
+
+test("AgenticInputSchema and AssistantMessageSchema check the native payloads they describe", async () => {
+  for (const input of [
+    { kind: "prompt", text: "hi" },
+    {
+      kind: "error",
+      text: "x",
+      images: [{ type: "image", data: "d", mimeType: "image/png" }],
+    },
+    { kind: "appendMessage", message: { role: "custom", extra: 1 } },
+  ])
+    assert.equal(Value.Check(AgenticInputSchema, input), true);
+  for (const input of [
+    7,
+    { kind: "prompt" },
+    { kind: "nope", text: "x" },
+    {
+      kind: "steer",
+      text: "x",
+      images: [{ type: "file", data: "d", mimeType: "m" }],
+    },
+    { kind: "appendMessage", message: { content: "no role" } },
+  ])
+    assert.equal(Value.Check(AgenticInputSchema, input), false);
+  const { agent } = await newAgent([fauxAssistantMessage("native")]);
+  try {
+    const message = await agent.prompt("go");
+    assert.equal(Value.Check(AssistantMessageSchema, message), true);
+    assert.equal(
+      Value.Check(AssistantMessageSchema, { ...message, stopReason: "done" }),
+      false,
+    );
+    const { usage: _usage, ...withoutUsage } = message;
+    assert.equal(Value.Check(AssistantMessageSchema, withoutUsage), false);
+  } finally {
+    await agent.return();
+  }
+});
+
+test("shared send/recv tools advertise each bound activation's live edge schemas", async () => {
+  const send = new SendTool();
+  const recv = new RecvTool();
+  const unboundParameters = send.parameters;
+  const unboundDescription = recv.description;
+  const requests: { send: unknown; recv: unknown }[] = [];
+  const capture = (context: Context) => {
+    const tools = getCurrentTools(context.messages);
+    requests.push({
+      send: tools.find(({ name }) => name === "send")?.parameters,
+      recv: tools.find(({ name }) => name === "recv")?.description,
+    });
+    return fauxAssistantMessage("done");
+  };
+  const route = (id: string, schema: TSchema) =>
+    [EdgeId.create(id), schema] as const;
+  let outbound = route("numbers", Type.Number());
+  const numeric = {
+    view: { messages: new Map(), values: new Map() },
+    get sendParameters() {
+      return SendTool.parametersFor([outbound]);
+    },
+    recvOutputSchema: RecvTool.outputSchemaFor(
+      [route("numbers-in", Type.Number())],
+      [],
+    ),
+    consume() {},
+    send() {},
+    info: () => ({ children: [], parents: [] }),
+  };
+  const text = {
+    ...numeric,
+    sendParameters: SendTool.parametersFor([route("texts", Type.String())]),
+    recvOutputSchema: RecvTool.outputSchemaFor(
+      [],
+      [route("texts-in", Type.String())],
+    ),
+  };
+  const a = await newAgent([capture, capture], { tools: [send, recv] });
+  const b = await newAgent([capture, capture], { tools: [send, recv] });
+  try {
+    await a.agent.runWithNodeContext({ messaging: numeric }, () =>
+      a.agent.prompt("first"),
+    );
+    await b.agent.runWithNodeContext({ messaging: text }, () =>
+      b.agent.prompt("second"),
+    );
+    // A route added after an activation is visible to the next request without reinstalling tools.
+    outbound = route("later", Type.Boolean());
+    await a.agent.runWithNodeContext({ messaging: numeric }, () =>
+      a.agent.prompt("third"),
+    );
+    await b.agent.prompt("unbound");
+    const checks = (schema: unknown, id: string, payloads: unknown[]) =>
+      payloads.map((payload) =>
+        Value.Check(schema as TSchema, { id, payload }),
+      );
+    assert.deepEqual(checks(requests[0]?.send, "numbers", [7, "7"]), [
+      true,
+      false,
+    ]);
+    assert.deepEqual(checks(requests[1]?.send, "texts", [7, "7"]), [
+      false,
+      true,
+    ]);
+    assert.deepEqual(checks(requests[2]?.send, "later", [true, 7]), [
+      true,
+      false,
+    ]);
+    assert.deepEqual(checks(requests[2]?.send, "numbers", [7]), [false]);
+    assert.deepEqual(requests[3]?.send, unboundParameters);
+    assert.equal(
+      requests[0]?.recv,
+      RecvTool.describe(numeric.recvOutputSchema),
+    );
+    assert.equal(requests[1]?.recv, RecvTool.describe(text.recvOutputSchema));
+    assert.equal(requests[3]?.recv, unboundDescription);
+    // The shared originals keep their own schemas and identities.
+    assert.equal(send.parameters, unboundParameters);
+    assert.equal(recv.description, unboundDescription);
+    assert.ok(a.agent.getTools().includes(send));
+    assert.ok(b.agent.getActiveTools().includes(recv));
+  } finally {
+    await a.agent.return();
+    await b.agent.return();
   }
 });
 
@@ -2627,6 +2770,7 @@ const HANDOFF = { category: "agent", tool: "yield", operation: "handoff" };
 const labelled = (event: ProfileEvent<string>, labels: Labels) =>
   event.kind !== "usage" &&
   event.kind !== "resource" &&
+  event.kind !== "probe" &&
   event.category === labels.category &&
   event.tool === labels.tool &&
   event.operation === labels.operation;
@@ -2937,6 +3081,497 @@ test(
     } finally {
       await Promise.all([agent.return(), bare.return()]);
     }
+  },
+  TIMEOUT,
+);
+
+// Usage limits -----------------------------------------------------------------------------------
+
+const usageOf = (totalTokens: number) => ({
+  input: totalTokens,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+});
+
+/**
+ * Models whose one model answers request k with `steps[k]`, settled at once with exactly its
+ * token count; faux recomputes usage from the prompt, which no exact threshold survives.
+ */
+function fixedUsage(steps: readonly (readonly [AssistantMessage, number])[]) {
+  const pending = [...steps];
+  const state = { requests: 0 };
+  const model: Model<Api> = {
+    ...fauxProvider().getModel(),
+    provider: "fixed",
+    api: "fixed",
+  };
+  const respond = (requestModel: Model<Api>) => {
+    state.requests++;
+    const step = pending.shift();
+    if (step === undefined) throw new Error("No fixed response queued");
+    const settled: AssistantMessage = {
+      ...step[0],
+      api: requestModel.api,
+      provider: requestModel.provider,
+      model: requestModel.id,
+      usage: usageOf(step[1]),
+    };
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => {
+      stream.push({ type: "start", partial: settled });
+      if (settled.stopReason === "error")
+        stream.push({ type: "error", reason: "error", error: settled });
+      else
+        stream.push({
+          type: "done",
+          reason: settled.stopReason as "stop" | "toolUse",
+          message: settled,
+        });
+      stream.end(settled);
+    });
+    return stream;
+  };
+  const models = createModels();
+  models.setProvider(
+    createProvider({
+      id: "fixed",
+      auth: {
+        apiKey: { name: "Fixed", resolve: async () => ({ auth: {} }) },
+      },
+      models: [model],
+      api: { stream: respond, streamSimple: respond },
+    }),
+  );
+  return { models, model, state, pending };
+}
+
+async function fixedAgent(
+  steps: readonly (readonly [AssistantMessage, number])[],
+  options: Partial<Parameters<typeof JuncoAgent.fromResolved>[0]> = {},
+) {
+  const fixed = fixedUsage(steps);
+  const repo = new MemorySessionRepo();
+  const session = await repo.create({}, BACKGROUND_CONTEXT);
+  const agent = await JuncoAgent.fromResolved({
+    session,
+    models: fixed.models,
+    model: fixed.model,
+    systemPrompt: "sys",
+    ...options,
+  });
+  return { ...fixed, agent, repo, session };
+}
+
+/** `work` inside graph node `node` whose activation holds `budgets`. */
+const within = <R>(budgets: readonly UsageBudget[], work: () => R): R =>
+  runWithUsageBudgets(budgets, "node", work);
+
+async function usageFailure(work: Promise<unknown>): Promise<UsageLimitError> {
+  const error = await work.then(
+    () => assert.fail("expected a usage limit failure"),
+    (failure: unknown) => failure,
+  );
+  assert.ok(isUsageLimitError(error), String(error));
+  return error;
+}
+
+test(
+  "usage limits: a denied tool call stops the run before any later effect or provider request",
+  async () => {
+    const counted = countingTool("mock_tool");
+    const { agent, faux } = await newAgent(
+      [
+        toolTurn(
+          fauxToolCall("mock_tool", {}, { id: "a" }),
+          fauxToolCall("mock_tool", {}, { id: "b" }),
+          fauxToolCall("mock_tool", {}, { id: "c" }),
+        ),
+        fauxAssistantMessage("after the limit"),
+      ],
+      { tools: [counted.tool] },
+    );
+    try {
+      const budget = new UsageBudget("evaluation", { tools: 1 });
+      const error = await usageFailure(
+        within([budget], () => agent.prompt("go")),
+      );
+      assert.equal(counted.state.executions, 1);
+      assert.equal(budget.usedTools, 1);
+      assert.equal(faux.state.callCount, 1);
+      assert.deepEqual(
+        { ...error.details },
+        {
+          resource: "tools",
+          scope: "evaluation",
+          limit: 1,
+          used: 1,
+          requested: 1,
+          attempted: 2,
+          exceededBy: 1,
+          nodePath: ["node"],
+        },
+      );
+      // The harness is not faulted: a later unbudgeted run settles normally.
+      assert.equal((await agent.prompt("again")).stopReason, "stop");
+      assert.equal(counted.state.executions, 1);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: source-owned yield counts like any tool and the iterator fails with the typed error",
+  async () => {
+    const counted = countingTool("mock_tool");
+    const { agent, faux } = await newAgent(
+      [
+        toolTurn(
+          yieldCall("pause", "y1"),
+          fauxToolCall("mock_tool", {}, { id: "a" }),
+        ),
+        fauxAssistantMessage("unreached"),
+      ],
+      { tools: [new YieldTool(), counted.tool], prompt: "go" },
+    );
+    try {
+      const budget = new UsageBudget("evaluation", { tools: 1 });
+      const failed = step(await within([budget], () => agent.next()));
+      assert.equal(failed.kind, "failed");
+      if (failed.kind !== "failed") return;
+      assert.ok(isUsageLimitError(failed.error));
+      assert.equal(failed.error.details.used, 1);
+      assert.equal(counted.state.executions, 0);
+      assert.equal(faux.state.callCount, 1);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: failed admitted calls count; unavailable and schema-rejected calls do not",
+  async () => {
+    let failures = 0;
+    const failing: AgentTool = {
+      name: "failing",
+      label: "failing",
+      description: "always fails",
+      parameters: Type.Object({}),
+      execute: async () => {
+        failures++;
+        throw new Error("boom");
+      },
+    };
+    const strict = countingTool("strict");
+    strict.tool.parameters = Type.Object({ n: Type.Number() });
+    const { agent } = await newAgent(
+      [
+        toolTurn(
+          fauxToolCall("missing", {}, { id: "m" }),
+          fauxToolCall("strict", { n: "not a number" }, { id: "s1" }),
+          fauxToolCall("failing", {}, { id: "f" }),
+          fauxToolCall("strict", { n: 1 }, { id: "s2" }),
+        ),
+        fauxAssistantMessage("unreached"),
+      ],
+      { tools: [failing, strict.tool] },
+    );
+    try {
+      const budget = new UsageBudget("evaluation", { tools: 1 });
+      const error = await usageFailure(
+        within([budget], () => agent.prompt("go")),
+      );
+      assert.equal(failures, 1);
+      assert.equal(strict.state.executions, 0);
+      assert.equal(budget.usedTools, 1);
+      assert.equal(error.details.attempted, 2);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: token caps deny requests at zero, stop tool effects after an overrun, and admit an exact final response",
+  async () => {
+    const zero = await fixedAgent([[fauxAssistantMessage("unreached"), 1]]);
+    try {
+      const error = await usageFailure(
+        within([new UsageBudget("evaluation", { tokens: 0 })], () =>
+          zero.agent.prompt("go"),
+        ),
+      );
+      assert.equal(error.details.requested, 0);
+      assert.equal(zero.state.requests, 0);
+    } finally {
+      await zero.agent.return();
+    }
+
+    const counted = countingTool("mock_tool");
+    const over = await fixedAgent(
+      [
+        [toolTurn(fauxToolCall("mock_tool", {}, { id: "a" })), 12],
+        [fauxAssistantMessage("unreached"), 1],
+      ],
+      { tools: [counted.tool] },
+    );
+    try {
+      const budget = new UsageBudget("evaluation", { tokens: 10, tools: 5 });
+      const error = await usageFailure(
+        within([budget], () => over.agent.prompt("go")),
+      );
+      assert.deepEqual(
+        { ...error.details },
+        {
+          resource: "tokens",
+          scope: "evaluation",
+          limit: 10,
+          used: 0,
+          requested: 12,
+          attempted: 12,
+          exceededBy: 2,
+          nodePath: ["node"],
+        },
+      );
+      // Cancelled by the native effect gate before any executor: no tool counts.
+      assert.equal(counted.state.executions, 0);
+      assert.equal(budget.usedTools, 0);
+      assert.equal(over.state.requests, 1);
+    } finally {
+      await over.agent.return();
+    }
+
+    const exact = await fixedAgent([
+      [fauxAssistantMessage("exact"), 10],
+      [fauxAssistantMessage("over"), 11],
+    ]);
+    try {
+      const budget = new UsageBudget("evaluation", { tokens: 10 });
+      assert.equal(
+        (await within([budget], () => exact.agent.prompt("go"))).stopReason,
+        "stop",
+      );
+      const denied = await usageFailure(
+        within([budget], () => exact.agent.prompt("again")),
+      );
+      assert.equal(denied.details.attempted, 10);
+      assert.equal(exact.state.requests, 1);
+      // Over the cap, even a final response fails its run.
+      const final = await usageFailure(
+        within([new UsageBudget("evaluation", { tokens: 10 })], () =>
+          exact.agent.prompt("third"),
+        ),
+      );
+      assert.equal(final.details.exceededBy, 1);
+    } finally {
+      await exact.agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: each committed row charges once, retries and restored history included",
+  async () => {
+    const first = await fixedAgent(
+      [
+        [
+          fauxAssistantMessage("", {
+            stopReason: "error",
+            errorMessage: "overloaded",
+          }),
+          3,
+        ],
+        [fauxAssistantMessage("done"), 4],
+        [fauxAssistantMessage("unbudgeted"), 6],
+      ],
+      { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+    );
+    const budget = new UsageBudget("evaluation", { tokens: 100 });
+    try {
+      assert.equal(
+        (await within([budget], () => first.agent.prompt("go"))).stopReason,
+        "stop",
+      );
+      assert.equal(first.state.requests, 2);
+      assert.equal(budget.usedTokens, 7);
+      // The binding ended with its operation: a later unbudgeted run charges nothing here.
+      await first.agent.prompt("free");
+      assert.equal(budget.usedTokens, 7);
+    } finally {
+      await first.agent.return();
+    }
+    const reopened = await first.repo.open(
+      first.session.metadata,
+      BACKGROUND_CONTEXT,
+    );
+    const restored = fixedUsage([[fauxAssistantMessage("restored"), 5]]);
+    const agent = await JuncoAgent.fromResolved({
+      session: reopened,
+      models: restored.models,
+      model: restored.model,
+      systemPrompt: "sys",
+    });
+    try {
+      const fresh = new UsageBudget("evaluation", { tokens: 6 });
+      await within([fresh], () => agent.prompt("after restore"));
+      assert.equal(fresh.usedTokens, 5);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: a resumed run charges its new activation, tool-reported usage included",
+  async () => {
+    const report: AgentTool = {
+      name: "report",
+      label: "report",
+      description: "reports its own usage",
+      parameters: Type.Object({}),
+      execute: async () => ({
+        content: [{ type: "text", text: "reported" }],
+        details: undefined,
+        usage: usageOf(7),
+      }),
+    };
+    const { agent } = await fixedAgent(
+      [
+        [toolTurn(yieldCall("pause", "y1")), 5],
+        [toolTurn(fauxToolCall("report", {}, { id: "r1" })), 6],
+        [fauxAssistantMessage("done"), 4],
+      ],
+      { tools: [new YieldTool(), report], prompt: "go" },
+    );
+    try {
+      const activation = (budget: UsageBudget) =>
+        within([budget], () =>
+          agent.runWithNodeContext({}, () => agent.next()),
+        );
+      const first = new UsageBudget("activation", { tokens: 100, tools: 1 });
+      const second = new UsageBudget("activation", { tokens: 100, tools: 1 });
+      assert.equal(step(await activation(first)).kind, "yield");
+      assert.equal(settledText(await activation(second)), "done");
+      assert.deepEqual([first.usedTokens, first.usedTools], [5, 1]);
+      assert.deepEqual([second.usedTokens, second.usedTools], [6 + 7 + 4, 1]);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: explicit and automatic compaction and navigation summaries charge their caller",
+  async () => {
+    const explicit = await fixedAgent(
+      [
+        [fauxAssistantMessage("summary"), 9],
+        [fauxAssistantMessage("second summary"), 9],
+      ],
+      { compaction: COMPACTION },
+    );
+    try {
+      await seedLargeHistory(explicit.agent);
+      await usageFailure(
+        within([new UsageBudget("evaluation", { tokens: 0 })], () =>
+          explicit.agent.compact(),
+        ),
+      );
+      assert.equal(explicit.state.requests, 0);
+      const budget = new UsageBudget("evaluation", { tokens: 100 });
+      await within([budget], () => explicit.agent.compact());
+      assert.ok(explicit.state.requests > 0);
+      assert.equal(budget.usedTokens, 9 * explicit.state.requests);
+    } finally {
+      await explicit.agent.return();
+    }
+
+    const counted = countingTool("mock_tool");
+    const automatic = await fixedAgent(
+      [
+        [toolTurn(fauxToolCall("mock_tool", {}, { id: "a" })), 127_500],
+        [fauxAssistantMessage("summary"), 9],
+        [fauxAssistantMessage("done"), 4],
+      ],
+      {
+        tools: [counted.tool],
+        compaction: { ...COMPACTION, enabled: true },
+      },
+    );
+    let compactions = 0;
+    automatic.agent.events.on("compaction_start", () => {
+      compactions++;
+    });
+    try {
+      const budget = new UsageBudget("evaluation", { tokens: 200_000 });
+      await within([budget], () => automatic.agent.prompt("go"));
+      assert.equal(compactions, 1);
+      assert.equal(automatic.state.requests, 3);
+      assert.equal(budget.usedTokens, 127_500 + 9 + 4);
+    } finally {
+      await automatic.agent.return();
+    }
+
+    const navigated = await fixedAgent([
+      [fauxAssistantMessage("first"), 2],
+      [fauxAssistantMessage("branch summary"), 3],
+    ]);
+    const ids: string[] = [];
+    navigated.agent.events.on("entry_added", ({ entry }) => {
+      ids.push(entry.id);
+    });
+    try {
+      await navigated.agent.prompt("go");
+      const budget = new UsageBudget("evaluation", { tokens: 100 });
+      const result = await within([budget], () =>
+        navigated.agent.navigateTree(ids[0]!, { summarize: true }),
+      );
+      assert.ok(result.ok);
+      assert.equal(budget.usedTokens, 3);
+    } finally {
+      await navigated.agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "usage limits: closing during a budget stop settles without hanging",
+  async () => {
+    const counted = countingTool("mock_tool");
+    const { agent } = await fixedAgent(
+      [[toolTurn(fauxToolCall("mock_tool", {}, { id: "a" })), 12]],
+      { tools: [counted.tool] },
+    );
+    let closing: Promise<unknown> | undefined;
+    agent.events.on("usage", () => {
+      closing ??= agent.return();
+    });
+    const failure: unknown = await within(
+      [new UsageBudget("evaluation", { tokens: 10 })],
+      () => agent.prompt("go"),
+    ).then(
+      () => assert.fail("expected the run to fail"),
+      (error: unknown) => error,
+    );
+    await closing;
+    assert.ok(
+      [...errorGraph(failure)].some(
+        (value) => isUsageLimitError(value) || isCode("closed")(value),
+      ),
+      String(failure),
+    );
+    assert.equal(counted.state.executions, 0);
   },
   TIMEOUT,
 );

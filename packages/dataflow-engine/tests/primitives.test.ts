@@ -1,7 +1,10 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import type { EdgeIdType, ParentView } from "../src/index.ts";
 import { Edge, from, Queue } from "../src/index.ts";
+
+const NumberSchema = Type.Number();
 
 test("Queue wraps its backing array: pushes and consumption mutate that store", () => {
   const backing = [1, 2];
@@ -23,9 +26,15 @@ test("Queue.empty results are independent stores", () => {
 });
 
 test("from returns a present edge's batch and an empty batch for an absent edge", () => {
-  const present = Edge.message<number, string>("present");
-  const absent = Edge.message<number, string>("absent");
-  const view: ParentView<number, string> = {
+  const present = Edge.message<typeof NumberSchema, string>(
+    "present",
+    NumberSchema,
+  );
+  const absent = Edge.message<typeof NumberSchema, string>(
+    "absent",
+    NumberSchema,
+  );
+  const view: ParentView<typeof NumberSchema, string> = {
     messages: new Map<EdgeIdType, readonly number[]>([[present.id, [7, 9]]]),
     values: new Map<EdgeIdType, string>(),
   };

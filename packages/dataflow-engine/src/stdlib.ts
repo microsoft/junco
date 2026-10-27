@@ -1,6 +1,7 @@
 import * as E from "fp-ts/lib/Either.js";
+import { type Static, type TArray, type TSchema, Type } from "typebox";
 import { EmitOnce, from } from "./builders.js";
-import type { Edge } from "./edges.js";
+import { checkPayload, type Edge } from "./edges.js";
 import { DataflowDefinitionError } from "./errors.js";
 import type { NodeId } from "./identity.js";
 import type {
@@ -28,12 +29,12 @@ type ConstNodeOptions<S, T> = Pick<
  * view, so both are typed loosely enough to register into any graph whose state and payload types
  * admit `S` and `N`, rather than pinning the graph to the inferred ones. It has no failure hook.
  */
-type ConstNodeSpec<S, N, T> = Omit<
+type ConstNodeSpec<S, N extends TSchema, T> = Omit<
   NodeSpec<S, N, T>,
   "step" | "is_available" | "on_error"
 > & {
   readonly step: () => NodeGenerator<N, T>;
-  readonly is_available?: AvailabilityFn<unknown, unknown>;
+  readonly is_available?: AvailabilityFn<TSchema, unknown>;
 };
 
 /**
@@ -56,37 +57,37 @@ type ConstNodeSpec<S, N, T> = Omit<
  *
  * @example
  * ```ts
- * const a = Edge.message<number, string>("a");
- * const b = Edge.message<number, string>("b");
+ * const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+ * const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
  * const source = graph.addNode(
  *   new ConstFanout(7, [a, b], { state: undefined, ret: "source done" }),
  * );
  * graph.addEdge(source, left, a).addEdge(source, right, b);
  * ```
  */
-export class ConstFanout<S, N, T>
+export class ConstFanout<S, N extends TSchema, T>
   extends EmitOnce<S, N, T>
   implements ConstNodeSpec<S, N, T>
 {
-  declare readonly is_available?: AvailabilityFn<unknown, unknown>;
+  declare readonly is_available?: AvailabilityFn<TSchema, unknown>;
   declare readonly on_error?: never;
 
   constructor(
-    payload: N,
+    payload: Static<N>,
     outputs: readonly Edge<N, T>[],
     options: ConstNodeOptions<S, T>,
   ) {
     const { ret, ...registration } = options;
     const capturedOutputs = [...outputs];
     for (let i = 0; i < capturedOutputs.length; i++) {
-      const edge = capturedOutputs[i]!;
+      const edge = capturedOutputs[i];
       if (E.isRight(edge.transport)) {
         throw new DataflowDefinitionError(
           `ConstFanout output edge "${edge.id}" must be a message edge`,
         );
       }
       for (let j = 0; j < i; j++) {
-        if (capturedOutputs[j]!.id === edge.id) {
+        if (capturedOutputs[j].id === edge.id) {
           throw new DataflowDefinitionError(
             `ConstFanout received edge "${edge.id}" twice`,
           );
@@ -105,8 +106,9 @@ export class ConstFanout<S, N, T>
  * A complete collector spec that waits until every edge in `inputs` has delivered its constant,
  * sends them as ONE list message on `output`, then finishes with `options.ret`.
  *
- * Each input carries one constant `C`; the output carries the list `C[]`. The graph's message type
- * must therefore admit both, e.g. `DataflowGraph<void, number | number[], string, never>`, and
+ * Each input carries one constant `Static<C>`; the output carries the list `Static<C>[]`, admitted
+ * by `TArray<C>`. The graph's message schema must therefore admit both, e.g.
+ * `DataflowGraph<void, typeof NumberSchema | TArray<typeof NumberSchema>, string, never>`, and
  * may include unrelated variants besides. Register the constructed spec with `graph.addNode`, then
  * wire every input and the output with `graph.addEdge` as usual.
  *
@@ -129,9 +131,9 @@ export class ConstFanout<S, N, T>
  *
  * @example
  * ```ts
- * const a = Edge.message<number, string>("a");
- * const b = Edge.message<number, string>("b");
- * const list = Edge.message<number[], string>("list");
+ * const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+ * const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
+ * const list = Edge.message("list", Type.Array(NumberSchema));
  * const join = graph.addNode(
  *   new ConstFanin([b, a], list, { state: undefined, ret: "fanin done" }),
  * );
@@ -139,17 +141,19 @@ export class ConstFanout<S, N, T>
  * // `sink` receives one message: [constant from b, constant from a].
  * ```
  */
-export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T> {
+export class ConstFanin<S, C extends TSchema, T>
+  implements ConstNodeSpec<S, C | TArray<C>, T>
+{
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly state: S;
-  readonly trigger: TriggerRule<C | C[], T>;
-  readonly is_available: AvailabilityFn<unknown, unknown>;
-  readonly step: () => NodeGenerator<C | C[], T>;
+  readonly trigger: TriggerRule<C | TArray<C>, T>;
+  readonly is_available: AvailabilityFn<TSchema, unknown>;
+  readonly step: () => NodeGenerator<C | TArray<C>, T>;
 
   constructor(
     inputs: readonly Edge<C, T>[],
-    output: Edge<C[], T>,
+    output: Edge<TArray<C>, T>,
     options: ConstNodeOptions<S, T>,
   ) {
     const { ret, ...registration } = options;
@@ -168,39 +172,36 @@ export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T> {
     }
     const trigger =
       capturedInputs.length === 0
-        ? TriggerRule.always<C | C[], T>()
+        ? TriggerRule.always<C | TArray<C>, T>()
         : TriggerRule.anyOf(...capturedInputs.map(TriggerEntry.on));
     // Once the list is out, stay available so the final return runs after the inputs have drained.
     let emitted = false;
 
-    async function* step(): NodeGenerator<C | C[], T> {
+    async function* step(): NodeGenerator<C | TArray<C>, T> {
       let view = yield [];
-      const chunks: (Array<readonly C[]> | undefined)[] = [];
+      const chunks = capturedInputs.map((): Array<readonly Static<C>[]> => []);
       let remaining = capturedInputs.length;
       while (true) {
         for (let i = 0; i < capturedInputs.length; i++) {
           // The edge's declared `Edge<C, T>` contract narrows the graph-wide view.
-          const batch = from(view, capturedInputs[i]!) as readonly C[];
+          const batch = from(view, capturedInputs[i]);
           if (batch.length === 0) continue;
           const inputChunks = chunks[i];
-          if (inputChunks === undefined) {
-            chunks[i] = [batch];
-            remaining--;
-          } else {
-            inputChunks.push(batch);
-          }
+          if (inputChunks.length === 0) remaining--;
+          inputChunks.push(batch);
         }
         if (remaining === 0) break;
         view = yield [];
       }
-      const collected: C[] = [];
+      const collected: Static<C>[] = [];
       for (const inputChunks of chunks) {
-        for (const batch of inputChunks!) {
+        for (const batch of inputChunks) {
           for (const payload of batch) collected.push(payload);
         }
       }
       emitted = true;
-      yield [Message.create(output, collected)];
+      // `TArray<C>` admits exactly an array of `Static<C>`; TypeScript cannot unfold the generic.
+      yield [Message.create(output, collected as Static<TArray<C>>)];
       return ret;
     }
 
@@ -211,11 +212,26 @@ export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T> {
   }
 }
 
-/** Externally queued native ingress; one detached delivery per selected activation. */
-export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
+/** Reject a port constructed without a runtime schema. */
+function requireSchema(port: "Source" | "Sink", id: NodeId, schema: unknown) {
+  if (!Type.IsSchema(schema))
+    throw new DataflowDefinitionError(
+      `${port} "${id}" requires a TypeBox schema`,
+    );
+}
+
+/**
+ * Externally queued native ingress; one detached delivery per selected activation. Every enqueued
+ * message must satisfy `schema`, the port's admission domain; routing onto a real edge still checks
+ * that edge's own schema.
+ */
+export class Source<N extends TSchema, T>
+  implements NodeSpec<Source<N, T>, N, T>
+{
   readonly id: NodeId;
   readonly description?: string;
   readonly profiles?: Profiles<never>;
+  readonly schema: N;
   readonly state = this;
   readonly trigger = TriggerRule.always<N, T>();
   readonly is_available = () => this.#pending.length > 0;
@@ -227,9 +243,12 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
     route: (view: ParentView<N, T>) => Message<N>[],
     options: Pick<NodeOptions<N, T>, "description" | "profiles"> & {
       readonly id: NodeId;
+      readonly schema: N;
     },
   ) {
+    requireSchema("Source", options.id, options.schema);
     this.id = options.id;
+    this.schema = options.schema;
     if (options.profiles !== undefined) this.profiles = options.profiles;
     if (options.description !== undefined)
       this.description = options.description;
@@ -249,13 +268,23 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
     return this.#revision;
   }
 
+  /**
+   * Queue one detached delivery. Atomic: a payload outside `schema` rejects the whole view before
+   * anything is queued.
+   *
+   * @throws {DataflowDefinitionError} when any message fails `schema`.
+   */
   enqueue(view: ParentView<N, T>): void {
     const detached = snapshotView(view);
     let nonempty = false;
     for (const id of detached.messages.keys())
-      if ((detached.messages.get(id)?.length ?? 0) > 0) {
+      for (const payload of detached.messages.get(id) ?? []) {
+        checkPayload(
+          this.schema,
+          payload,
+          `Invalid payload for Source "${this.id}" on edge "${id}"`,
+        );
         nonempty = true;
-        break;
       }
     if (!nonempty)
       for (const _id of detached.values.keys()) {
@@ -272,11 +301,15 @@ export class Source<N, T> implements NodeSpec<Source<N, T>, N, T> {
   }
 }
 
-/** Native egress: yielded and explicitly sent messages await acknowledged external delivery. */
-export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
+/**
+ * Native egress: yielded and explicitly sent messages await acknowledged external delivery. Every
+ * staged message must satisfy `schema`; the eventual destination edge checks its own schema again.
+ */
+export class Sink<N extends TSchema, T> implements NodeSpec<Sink<N, T>, N, T> {
   readonly id: NodeId;
   readonly description?: string;
   readonly profiles?: Profiles<never>;
+  readonly schema: N;
   readonly state = this;
   readonly trigger: TriggerRule<N, T>;
   readonly is_available?: AvailabilityFn<N, T>;
@@ -285,9 +318,14 @@ export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
 
   constructor(
     body: (sink: Sink<N, T>) => NodeGenerator<N, T>,
-    options: Omit<NodeOptions<N, T>, "id"> & { readonly id: NodeId },
+    options: Omit<NodeOptions<N, T>, "id"> & {
+      readonly id: NodeId;
+      readonly schema: N;
+    },
   ) {
+    requireSchema("Sink", options.id, options.schema);
     this.id = options.id;
+    this.schema = options.schema;
     if (options.profiles !== undefined) this.profiles = options.profiles;
     this.trigger = options.trigger;
     if (options.description !== undefined)
@@ -307,13 +345,19 @@ export class Sink<N, T> implements NodeSpec<Sink<N, T>, N, T> {
     };
   }
 
+  /** @throws {DataflowDefinitionError} when the payload fails `schema`; nothing is staged. */
   send(message: Message<N>): void {
+    checkPayload(
+      this.schema,
+      message.payload,
+      `Invalid payload for Sink "${this.id}" on edge "${message.id}"`,
+    );
     this.#outbox.push(message);
   }
 
   drain(deliver: (message: Message<N>) => void): void {
     while (this.#outbox.length > 0) {
-      deliver(this.#outbox[0]!);
+      deliver(this.#outbox[0]);
       this.#outbox.shift();
     }
   }

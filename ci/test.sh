@@ -26,10 +26,11 @@ step "rust-graph: unit and integration tests"
 step "Build dataflow-engine"
 (cd packages/dataflow-engine && bun run build)
 
-step "Build and test junco-tools (CopyTree and btrfs lanes)"
+step "Build, typecheck and test junco-tools (CopyTree and btrfs lanes)"
 (
   cd packages/junco-tools
   bun run build
+  bun run typecheck
   bun run build:native:test
   bun run test
   bun run test:btrfs
