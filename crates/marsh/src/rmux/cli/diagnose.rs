@@ -432,7 +432,10 @@ fn redact_path_against(path: &Path, homes: &[PathBuf]) -> String {
 
 /// The nonempty HOME prefix diagnose output must redact.
 fn home_prefixes() -> Vec<PathBuf> {
-    nonempty_env_os("HOME").map(PathBuf::from).into_iter().collect()
+    nonempty_env_os("HOME")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect()
 }
 
 /// Joins terminal feature names for human output, printing `none` when there are none.

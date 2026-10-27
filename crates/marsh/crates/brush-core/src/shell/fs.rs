@@ -159,8 +159,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             let candidate_path = one_dir.join(candidate_name.as_ref());
             // Probe the absolute form (a relative `PATH` entry names a directory relative to the
             // shell's working directory), but return the candidate as found.
-            if hostfs::executable(self.execution_observer(), &self.absolute_path(&candidate_path))
-            {
+            if hostfs::executable(
+                self.execution_observer(),
+                &self.absolute_path(&candidate_path),
+            ) {
                 return Some(candidate_path);
             }
         }

@@ -1547,6 +1547,8 @@ process.stderr.write("NODE_BOUNDARY_OK");
 }
 
 const main = async () => {
+  // .junco/ is gitignored scratch space: absent in a clean checkout.
+  await mkdir(join(ROOT, ".junco"), { recursive: true });
   const root = await mkdtemp(join(ROOT, ".junco", "profile-optimizer-check-"));
   let ok = false;
   try {

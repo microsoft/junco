@@ -66,6 +66,7 @@ import {
 } from "./node-policy.js";
 import { build, type FromYamlOptions } from "./syntax/build.js";
 import { parse } from "./syntax/parse.js";
+import type { JuncoDocument } from "./syntax/schema.js";
 import { TuiTracer } from "./tui-tracer.js";
 
 type NestedContext<N extends TSchema, T> = SchedulerContext<
@@ -420,12 +421,28 @@ export class JuncoGraph<
       JuncoGraph<TSchema, unknown>
     >
   > {
-    await using prepared = new AsyncDisposableStack();
-    for (const instance of new Set(Object.values(config.agents ?? {})))
-      prepared.use(instance);
     const { params, sourceName, ...options } = config;
-    const doc = parse(source, { params, sourceName });
-    prepared.move();
+    let doc: JuncoDocument;
+    try {
+      doc = parse(source, { params, sourceName });
+    } catch (error) {
+      // Explicit release, last first: Node 22 has no AsyncDisposableStack or SuppressedError.
+      const failures: unknown[] = [];
+      const agents = [...new Set(Object.values(config.agents ?? {}))];
+      for (const instance of agents.reverse()) {
+        try {
+          await instance[Symbol.asyncDispose]();
+        } catch (failure) {
+          failures.push(failure);
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(
+          [error, ...failures],
+          "YAML parsing failed and agent cleanup failed",
+        );
+      throw error;
+    }
     return build(doc, options);
   }
 

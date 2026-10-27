@@ -20,8 +20,8 @@ test-fs = ["marsh-core/testing"]
 [dependencies]
 napi = { version = "=3.13.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
 napi-derive = "=3.6.9"
-marsh-core = { git = "https://github.com/junco-org/marsh.git", rev = "1f2b85cea55e2ebf9670fa627d82e3b20ea55954" }
-marsh-btrfs = { git = "https://github.com/junco-org/marsh.git", rev = "1f2b85cea55e2ebf9670fa627d82e3b20ea55954" }
+marsh-core = { path = "../../crates/marsh/crates/marsh-core" }
+marsh-btrfs = { path = "../../crates/marsh/crates/marsh-btrfs" }
 brush-core = "=0.5.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
@@ -55,5 +55,5 @@ libc = "0.2"
 napi-build = "=2.5.0"
 
 [patch.crates-io]
-brush-core = { git = "https://github.com/junco-org/marsh.git", rev = "1f2b85cea55e2ebf9670fa627d82e3b20ea55954" }
-brush-interactive = { git = "https://github.com/junco-org/marsh.git", rev = "1f2b85cea55e2ebf9670fa627d82e3b20ea55954" }
+brush-core = { path = "../../crates/marsh/crates/brush-core" }
+brush-interactive = { path = "../../crates/marsh/crates/brush-interactive" }

@@ -14,7 +14,7 @@ natively. Every `rmux` pane, `-c` command and `run-shell` helper is always manag
 
 Shells over the same canonical source share one authority. A managed command executes once:
 conflicting newer data returns `Stale`, never an automatic replay. Supported managed changes reach
-the source only when the complete [junco-policy](https://github.com/junco-org/junco-policy) batch
+the source only when the complete [junco-policy](../junco-policy) batch
 is granted.
 
 The interfaces are `marsh::Shell`, the `rmux` executable, and `marsh::rmux::RmuxFrontend`.
@@ -171,9 +171,10 @@ lease. `run_interactively(UIOptions)` owns prompts, line editing, completion, hi
 the blocking editor requires a multi-thread runtime. Noninteractive methods also support a
 current-thread runtime.
 
-`Shell::principal()` returns junco-policy's `Principal`, used unchanged for live authorization,
-durable grants and retained-handle identity. Display names never select ownership. There is no
-separate Marsh principal type, compatibility namespace or caller-supplied principal.
+`Shell::principal()` returns Marsh's owned `Principal`, used unchanged for live authorization,
+durable grants and retained-handle identity. Display names never select ownership, and there is no
+caller-supplied principal. Policies evaluate borrowed `PolicyEvent`/`PolicyHistory` views of
+Marsh's owned `Event`s; observers, denials and durable history keep the owned values.
 
 ### Sandbox routing
 

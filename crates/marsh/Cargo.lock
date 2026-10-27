@@ -1195,6 +1195,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "frunk_core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bd3c9ba2e323e8b19e77f15873f60974a7d82f89b80e50c53be44b8b92927c1"
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1374,6 +1380,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashconsing"
@@ -1739,11 +1750,12 @@ dependencies = [
 [[package]]
 name = "junco-policy"
 version = "0.1.0"
-source = "git+https://github.com/junco-org/junco-policy.git?rev=8d3150b7ce657dbb53de23b6f74095711ad78e07#8d3150b7ce657dbb53de23b6f74095711ad78e07"
 dependencies = [
  "bumpalo",
+ "frunk_core",
  "hashbrown 0.16.1",
  "hashconsing",
+ "lru 0.18.4",
  "smallbitvec",
  "smallvec",
  "string-interner",
@@ -1941,6 +1953,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "lurk-cli"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1971,7 +1992,6 @@ dependencies = [
  "getrandom 0.3.4",
  "git2",
  "hex",
- "junco-policy",
  "libc",
  "marsh-btrfs",
  "marsh-core",
@@ -2663,7 +2683,7 @@ dependencies = [
  "indoc",
  "instability",
  "itertools 0.13.0",
- "lru",
+ "lru 0.12.5",
  "paste",
  "strum 0.26.3",
  "unicode-segmentation",

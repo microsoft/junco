@@ -96,7 +96,12 @@ impl Rings {
                     None => slot,
                 };
                 let mut opcode = [0];
-                read_into(tid, entries + u64::from(index) * layout.entry_size, &mut opcode).ok()?;
+                read_into(
+                    tid,
+                    entries + u64::from(index) * layout.entry_size,
+                    &mut opcode,
+                )
+                .ok()?;
                 Some(opcode[0])
             })
             .collect()

@@ -99,7 +99,10 @@ fn spawned_commands_are_traced_attributed_and_reaped_in_process() {
     let scope = fixture.service.scope(run).unwrap();
     let file = fixture.path("traced.txt");
     let (child, events) = fixture
-        .spawn(&scope, &format!("printf traced > '{}'; /bin/true", file.display()))
+        .spawn(
+            &scope,
+            &format!("printf traced > '{}'; /bin/true", file.display()),
+        )
         .unwrap();
     assert!(exited(&events).success());
     fixture.service.quiesce(run).unwrap();
@@ -260,7 +263,9 @@ fn failed_launches_and_unscoped_spawns_leave_nothing_running() {
     assert!(unscoped.is_err());
     let unresolved = {
         let _guard = scope.enter();
-        fixture.service.spawn(Command::new("true"), Box::new(|_| {}))
+        fixture
+            .service
+            .spawn(Command::new("true"), Box::new(|_| {}))
     };
     assert_eq!(
         unresolved.err().map(|error| error.kind()),

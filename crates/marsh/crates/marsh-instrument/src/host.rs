@@ -71,7 +71,11 @@ pub enum HostCall<'a> {
 }
 
 /// Builds the records of one host access for thread `tid`.
-pub(crate) fn records(call: HostCall<'_>, tid: Pid, sequence: &Sequence) -> io::Result<Vec<Syscall>> {
+pub(crate) fn records(
+    call: HostCall<'_>,
+    tid: Pid,
+    sequence: &Sequence,
+) -> io::Result<Vec<Syscall>> {
     match call {
         HostCall::Descriptor { fd } => reused(fd, tid, sequence),
         HostCall::Open { path, result } => opened(absolute(path)?, result, tid, sequence, true),
@@ -85,7 +89,12 @@ pub(crate) fn records(call: HostCall<'_>, tid: Pid, sequence: &Sequence) -> io::
                 tid,
                 sequence,
                 Sysno::newfstatat,
-                vec![at_cwd(), SyscallArg::Addr(0), SyscallArg::Addr(0), int(flags)],
+                vec![
+                    at_cwd(),
+                    SyscallArg::Addr(0),
+                    SyscallArg::Addr(0),
+                    int(flags),
+                ],
                 errno.map_or(RetCode::Ok(0), RetCode::Err),
                 vec![(1, absolute(path)?)],
                 vec![(0, None)],

@@ -1781,7 +1781,14 @@ async fn await_pane_pipe(host: &Host, expected: &str) {
     poll(async || {
         let shown = host
             .run_cli(
-                &["-N", "display-message", "-p", "-t", PIPE_TARGET, "#{pane_pipe}"],
+                &[
+                    "-N",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    PIPE_TARGET,
+                    "#{pane_pipe}",
+                ],
                 b"",
             )
             .await;
@@ -1915,7 +1922,8 @@ async fn pipe_pane_close_forces_an_uncooperative_command() {
 
     let closed = close_pipe(&host).await;
     assert_ne!(
-        closed.code, 0,
+        closed.code,
+        0,
         "a forced close is reported as a failure: {}",
         String::from_utf8_lossy(&closed.stdout)
     );
@@ -1982,7 +1990,8 @@ async fn forced_stop_still_discards_pipe_publication() {
         close.await
     };
     assert_ne!(
-        closed.code, 0,
+        closed.code,
+        0,
         "a discarded close is reported as a failure: {}",
         String::from_utf8_lossy(&closed.stdout)
     );

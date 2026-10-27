@@ -9,7 +9,7 @@ ARG RUST_VERSION=1.95.0
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     build-essential pkg-config clang libclang-dev llvm-dev libbtrfsutil-dev zlib1g-dev \
-    btrfs-progs ca-certificates curl git mount util-linux unzip xz-utils \
+    btrfs-progs ca-certificates curl git mount python3 util-linux unzip xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \

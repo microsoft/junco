@@ -12,7 +12,7 @@ Requirements:
 
 - Linux x86-64 with glibc; Node.js **22.19.0 or newer** and Bun **1.4.2**.
 - Rust **1.95.0**, selected by `rust-toolchain.toml`.
-- This package lives in the junco-agency Bun workspace at `packages/junco-tools`. Cargo fetches `marsh-core`, `marsh-btrfs` and the patched `brush-core`/`brush-interactive` from the revision pinned in `Cargo.toml` of the public [`junco-org/marsh`](https://github.com/junco-org/marsh) repository (which takes `junco-policy` from [`junco-org/junco-policy`](https://github.com/junco-org/junco-policy)), and the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision from the public `can1357/oh-my-pi` repository: HTTPS access to GitHub, or those revisions already in the Cargo cache. No sibling checkout or SSH key is needed.
+- This package lives in the junco Bun workspace at `packages/junco-tools`. Cargo builds `marsh-core`, `marsh-btrfs` and the patched `brush-core`/`brush-interactive` from the monorepo's `crates/marsh` (which takes `junco-policy` from `crates/junco-policy`), and fetches the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision from the public `can1357/oh-my-pi` repository: HTTPS access to GitHub, or that revision already in the Cargo cache. No sibling checkout or SSH key is needed.
 - Native build libraries. On Ubuntu 24.04:
 
 ```sh
@@ -41,7 +41,7 @@ cd packages/junco-tools
 bun run build
 ```
 
-The root `bun install` already runs `bun run build:native` through the workspace's `postinstall` when the launcher's Rust toolchain is installed (`$CARGO_HOME/bin/cargo`, by default the isolated home above); otherwise it skips the addon with a notice. `build:native` first runs `cargo update -p marsh-core -p junco-policy`, preserving the marsh revision pinned in `Cargo.toml` while refreshing junco-policy, then builds locked; it may leave `Cargo.lock` modified.
+The root `bun install` already runs `bun run build:native` through the workspace's `postinstall` when the launcher's Rust toolchain is installed (`$CARGO_HOME/bin/cargo`, by default the isolated home above); otherwise it skips the addon with a notice. `build:native` builds locked and leaves `Cargo.lock` unchanged.
 
 `bun run build` generates the production addon in `native/`, then compiles TypeScript into `dist/` with declarations. Node consumers and the Pi extension path below load `dist/`; Bun resolves the package's `bun` exports to the TypeScript sources in `ts/`, so Bun imports and source bundles need no `dist/`. The addon is loaded lazily through `junco-tools/native`: creating a `ToolCollection` without an injected `native` module, or running native-backed operations, needs `native/`, while importing the package or creating explicit-only tools such as `new YieldTool()` does not. The workspace links this directory into its consumers; the private package's `files` list ships only runtime artifacts and documentation in a packed tarball, not the test addon under `target/native-test/`; build and load that from this package for policy tests.
 

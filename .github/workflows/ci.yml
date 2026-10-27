@@ -295,7 +295,7 @@ jobs:
 
   # Native tools, agent, full scheduler and agency integration, including junco-tools' btrfs lane:
   # ci/test.sh runs inside ci/Dockerfile's container, whose project root is a fresh btrfs mount.
-  # Cargo fetches marsh and junco-policy from GitHub.
+  # Cargo builds marsh and junco-policy from this checkout's crates/.
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
