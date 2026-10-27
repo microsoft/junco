@@ -437,7 +437,10 @@ async fn read_tools_finish_before_overlapping_writers() {
                 .await
                 .unwrap(),
         );
-        let mut queued = launch(&queued_shell, format!("printf queued > {}", witness.display()));
+        let mut queued = launch(
+            &queued_shell,
+            format!("printf queued > {}", witness.display()),
+        );
         stays_queued(&mut queued, &witness).await;
 
         let read_shell = seed
@@ -467,7 +470,10 @@ async fn read_tools_finish_before_overlapping_writers() {
         let (physical, bytes) = observed.expect("read finishes before bash exits").unwrap();
         assert_eq!(physical, seed.source.join("src/a.txt"));
         assert_eq!(bytes, expected);
-        assert!(writer_held && queued_held, "both writers were held during the read");
+        assert!(
+            writer_held && queued_held,
+            "both writers were held during the read"
+        );
         assert!(witness_absent, "the queued writer did not run");
         writer_result.unwrap();
         queued_result.unwrap();
@@ -1187,7 +1193,10 @@ async fn cold_start_recovery_waits_for_overlapping_direct_work() {
             .await
             .expect("read completes after recovery"),
     };
-    assert!(waited_for_recovery, "source reads cannot bypass pending recovery");
+    assert!(
+        waited_for_recovery,
+        "source reads cannot bypass pending recovery"
+    );
     assert_eq!(observed.expect("read task").expect("read tool"), b"final");
     assert_eq!(host(&repository.join("copy")).unwrap(), b"final");
     read_shell.close(false).await.unwrap();

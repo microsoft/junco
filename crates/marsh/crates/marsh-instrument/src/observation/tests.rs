@@ -534,10 +534,18 @@ fn held_stops() {
     .unwrap();
     assert!(held.is_empty());
     for (child, at) in &released {
-        let held_at = trace.0.iter().find(|delivery| delivery.tid == *child).unwrap();
-        assert!(trace.0.iter().filter(|delivery| delivery.tid == *child).all(
-            |delivery| delivery.sequence == held_at.sequence || delivery.sequence > *at
-        ));
+        let held_at = trace
+            .0
+            .iter()
+            .find(|delivery| delivery.tid == *child)
+            .unwrap();
+        assert!(
+            trace
+                .0
+                .iter()
+                .filter(|delivery| delivery.tid == *child)
+                .all(|delivery| delivery.sequence == held_at.sequence || delivery.sequence > *at)
+        );
     }
 
     // A creator killed while its child is held can never release it: the observation fails

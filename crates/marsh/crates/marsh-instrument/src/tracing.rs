@@ -578,7 +578,9 @@ impl Tracing {
             observer.abandon(|tid, status| {
                 lock(&self.state).threads.remove(&tid);
                 if tid == root {
-                    events(ChildEvent::Exited(std::process::ExitStatus::from_raw(status)));
+                    events(ChildEvent::Exited(std::process::ExitStatus::from_raw(
+                        status,
+                    )));
                 }
             });
             self.progress.notify_all();
@@ -740,7 +742,8 @@ impl Tracing {
 
     /// Pins a stopped task's process identity once, killing it when its run was cancelled.
     fn lease(state: &mut State, tid: Pid) -> io::Result<()> {
-        let cancelled = state.cancelled(state.threads.get(&tid).and_then(|thread| thread.inherited));
+        let cancelled =
+            state.cancelled(state.threads.get(&tid).and_then(|thread| thread.inherited));
         let thread = state.threads.entry(tid).or_default();
         if thread.process.is_none()
             && let Some(group) = proc_field::<i32>(format!("/proc/{tid}/status"), "Tgid:")
@@ -866,13 +869,8 @@ fn handshake(request: RawFd, release: RawFd) -> io::Result<()> {
     let mut written = 0;
     while written < pid.len() {
         // SAFETY: the buffer is live for the stated length; the descriptor was inherited open.
-        let count = unsafe {
-            libc::write(
-                request,
-                pid[written..].as_ptr().cast(),
-                pid.len() - written,
-            )
-        };
+        let count =
+            unsafe { libc::write(request, pid[written..].as_ptr().cast(), pid.len() - written) };
         match usize::try_from(count) {
             Ok(count) => written += count,
             Err(_) if Errno::last() == Errno::EINTR => {}
@@ -903,7 +901,9 @@ const fn ended(status: i32) -> bool {
 fn report(events: &mut dyn FnMut(ChildEvent), status: i32) -> io::Result<()> {
     match WaitStatus::from_raw(Pid::from_raw(0), status)? {
         WaitStatus::Exited(..) | WaitStatus::Signaled(..) => {
-            events(ChildEvent::Exited(std::process::ExitStatus::from_raw(status)));
+            events(ChildEvent::Exited(std::process::ExitStatus::from_raw(
+                status,
+            )));
         }
         WaitStatus::PtraceEvent(_, signal, code)
             if code == Event::PTRACE_EVENT_STOP as i32

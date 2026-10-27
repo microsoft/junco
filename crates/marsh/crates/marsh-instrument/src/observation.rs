@@ -158,7 +158,11 @@ impl Observer {
             let mut status = 0;
             // SAFETY: status points to one writable integer; the pid is this thread's tracee.
             let waited = unsafe {
-                libc::waitpid(pid.as_raw(), &raw mut status, libc::__WALL | libc::__WNOTHREAD)
+                libc::waitpid(
+                    pid.as_raw(),
+                    &raw mut status,
+                    libc::__WALL | libc::__WNOTHREAD,
+                )
             };
             if waited < 0 {
                 match Errno::last() {
@@ -557,8 +561,7 @@ fn wait_any() -> io::Result<Option<(Pid, i32)>> {
         let mut status = 0;
         // SAFETY: status points to one writable integer. `__WNOTHREAD` confines the wait to this
         // tracer thread's own tracees; the host's other children are never touched.
-        let tid =
-            unsafe { libc::waitpid(-1, &raw mut status, libc::__WALL | libc::__WNOTHREAD) };
+        let tid = unsafe { libc::waitpid(-1, &raw mut status, libc::__WALL | libc::__WNOTHREAD) };
         if tid > 0 {
             return Ok(Some((Pid::from_raw(tid), status)));
         }

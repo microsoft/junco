@@ -46,7 +46,11 @@ async fn complete_bad_wal_records_reject_startup_intact() {
 async fn shell_policy_selects_authorization_per_shell() {
     let fixture = Fixture::new();
     let owner = fixture.shell().await;
-    accepted(&owner, "cat src/a.txt > /dev/null; printf owned > src/a.txt").await;
+    accepted(
+        &owner,
+        "cat src/a.txt > /dev/null; printf owned > src/a.txt",
+    )
+    .await;
     let thief = fixture.shell().await;
     refused(&thief, "printf stolen > src/a.txt").await;
     assert_eq!(fixture.read("src/a.txt"), "owned");

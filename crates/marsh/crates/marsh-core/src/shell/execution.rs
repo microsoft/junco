@@ -100,11 +100,7 @@ impl MarshExecutor {
     }
 }
 impl ExternalCommandSpawner for MarshExecutor {
-    fn spawn(
-        &self,
-        command: std::process::Command,
-        kill_on_drop: bool,
-    ) -> std::io::Result<Child> {
+    fn spawn(&self, command: std::process::Command, kill_on_drop: bool) -> std::io::Result<Child> {
         let context = self.context().map_err(std::io::Error::other)?;
         let _guard = context.enter().map_err(std::io::Error::other)?;
         let Backend::Managed { tracing, .. } = &context.run.backend else {
@@ -968,7 +964,10 @@ impl BuiltinContext {
             for directory in missing.into_iter().rev() {
                 self.report(HostCall::CreateDir {
                     path: directory,
-                    errno: std::fs::symlink_metadata(directory).err().as_ref().map(errno),
+                    errno: std::fs::symlink_metadata(directory)
+                        .err()
+                        .as_ref()
+                        .map(errno),
                 });
             }
             created
@@ -1326,7 +1325,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn finished_producers_are_not_cancelled_while_their_ends_are_proven() {
         let run = direct_run();
-        run.finish().await.expect("a run with no producers finishes");
+        run.finish()
+            .await
+            .expect("a run with no producers finishes");
         let watch = tokio::spawn({
             let run = Arc::clone(&run);
             async move { run.terminate_within(GRACE, GRACE).await }
