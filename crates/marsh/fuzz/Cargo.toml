@@ -1,0 +1,44 @@
+# Vendored from https://github.com/reubeno/brush fuzz; local changes: path dependencies became
+# crates.io requirements (brush-core is redirected by the root's [patch.crates-io]), and the
+# fuzz_highlight target was dropped — it needs a highlighting API that is not in a release.
+[package]
+name = "brush-fuzz"
+description = "Fuzz tests for brush"
+publish = false
+version = "0.2.2"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Application tier; see docs/reference/msrv-policy.md.
+rust-version = "1.95.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.102"
+assert_cmd = "2.2.0"
+libfuzzer-sys = "0.4"
+tokio = { version = "1.52.3", features = ["rt"] }
+
+brush-core = "^0.5.0"
+brush-parser = { version = "^0.4.0", features = ["arbitrary"] }
+
+[[bin]]
+name = "fuzz_parse"
+path = "fuzz_targets/fuzz_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_arithmetic"
+path = "fuzz_targets/fuzz_arithmetic.rs"
+test = false
+doc = false
+bench = false
+

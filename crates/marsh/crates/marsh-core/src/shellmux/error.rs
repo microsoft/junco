@@ -1,0 +1,98 @@
+//! Mux admission, terminal and lifecycle failures. Command verdicts are ordinary Shell errors.
+
+use std::sync::Arc;
+
+use crate::ShellError;
+use crate::shellmux::ids::ShellId;
+
+/// Infrastructure failure raised by the mux.
+#[derive(Debug, thiserror::Error)]
+pub enum MuxError {
+    /// The shell layer failed: seed discovery, the lease, a snapshot, a publication, the shell
+    /// itself.
+    #[error(transparent)]
+    Marsh(#[from] ShellError),
+    /// A job name a live job already holds.
+    #[error("{} already exists", .0.reference())]
+    JobExists(ShellId),
+    /// A job name nothing in the table answers to.
+    #[error("no such job: {}", .0.reference())]
+    NoSuchJob(ShellId),
+    /// A command was submitted to a job that is already running one.
+    #[error("{} is already running a command", .0.reference())]
+    JobBusy(ShellId),
+    /// A command was submitted to a job an accepted stop has already closed.
+    #[error("{} is closing", .0.reference())]
+    JobClosing(ShellId),
+    /// A terminal geometry with a zero dimension, which no job could be given.
+    #[error("invalid terminal size: {rows}x{cols}")]
+    InvalidTerminalSize {
+        /// Requested height in character cells.
+        rows: u16,
+        /// Requested width in character cells.
+        cols: u16,
+    },
+    /// A forcibly stopped job's processes could not be signalled.
+    #[error("could not terminate job {}: {source}", .job.reference())]
+    JobTermination {
+        /// The job whose processes outlived the kill.
+        job: ShellId,
+        /// Why the kill failed.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The shell this object names has closed, and the name may since have been reused.
+    ///
+    /// Distinct from [`Self::NoSuchJob`], which is a name nothing answers to: this one says the
+    /// *instance* is gone. A [`Shell`](crate::shellmux::Shell) that outlived its generation can
+    /// never reach the shell that took its name, because it owns its own live state and resolves
+    /// no name at all.
+    #[error("{} has closed", .0.reference())]
+    StaleJob(ShellId),
+    /// The job exists but its terminal, pipes or shell are not open yet.
+    #[error("{} is still opening", .0.reference())]
+    JobNotReady(ShellId),
+    /// A terminal-only operation was asked of a pipe job.
+    ///
+    /// Resizing, selecting and leasing an idle terminal all need a terminal. A pipe job has none,
+    /// and inventing one would be a lie a caller could act on.
+    #[error("{} is not a terminal job", .0.reference())]
+    NotTerminal(ShellId),
+    /// A pipe-only operation was asked of a terminal job.
+    ///
+    /// Closing standard input is the one that matters: a pseudoterminal has no half-close, and
+    /// faking one with an end-of-transmission character would be a keystroke, not an end of file.
+    #[error("{} is not a piped job", .0.reference())]
+    NotPiped(ShellId),
+    /// Standard input was written after it had been closed.
+    #[error("{}'s input is closed", .0.reference())]
+    InputClosed(ShellId),
+    /// A second idle-terminal lease was asked for while one was outstanding, or the job is busy.
+    #[error("{}'s terminal is already leased or running a command", .0.reference())]
+    TerminalBusy(ShellId),
+    /// The mux is shutting down and admits no new work.
+    #[error("the shell multiplexer is shutting down")]
+    ShuttingDown,
+    /// A failure that had to be observed in more than one place.
+    ///
+    /// A job whose construction fails reports that failure to its caller, to the receipt of the
+    /// command it was opened for, and in its own [`JobEnd`](crate::shellmux::JobEnd). Neither
+    /// [`MuxError`] nor the errors it wraps are cloneable, and flattening them to a string at that
+    /// point would throw away the source chain every one of those readers may want.
+    #[error(transparent)]
+    Shared(Arc<Self>),
+    /// Filesystem or terminal I/O failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// A task the mux owns panicked or was cancelled.
+    #[error("background task failed: {0}")]
+    Task(String),
+}
+
+impl From<brush_core::Error> for MuxError {
+    /// A shell failure travels as the shell layer's own error, so a caller matching on
+    /// [`MuxError::Marsh`] sees every shell failure in one place.
+    fn from(error: brush_core::Error) -> Self {
+        Self::Marsh(ShellError::from(error))
+    }
+}

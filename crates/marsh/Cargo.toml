@@ -1,0 +1,191 @@
+[package]
+name = "marsh"
+description = "brush, running inside a btrfs snapshot with policy-gated WAL publication and command instrumentation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+# `rmux` is the program this package is: the terminal multiplexer whose panes, popups and
+# workload helpers are marsh shells. `cargo run -p marsh` must be it, not a stray example.
+default-run = "rmux"
+
+[lib]
+bench = false
+
+# The full rmux CLI. `src/rmux/main.rs` is its own crate root, so the application glue ported
+# from upstream keeps resolving `crate::cli`, `crate::cli_args`, ... without a second copy of
+# those modules inside the library.
+[[bin]]
+name = "rmux"
+path = "src/rmux/main.rs"
+bench = false
+
+[features]
+default = ["web"]
+web = ["rmux-server/web"]
+perf-instrument = ["rmux-server/perf-instrument"]
+
+[dependencies]
+marsh-core = { path = "crates/marsh-core" }
+marsh-lib = { path = "crates/marsh-lib", default-features = false }
+marsh-instrument = { path = "crates/marsh-instrument" }
+
+# The server is the one rmux crate that is local: its pane, popup and workload backends are
+# marsh's. Everything else is upstream at the pinned commit.
+rmux-server = { version = "=0.10.0", default-features = false }
+rmux-client.workspace = true
+rmux-core.workspace = true
+rmux-os.workspace = true
+rmux-proto.workspace = true
+rmux-sdk.workspace = true
+
+# The public host constructor takes a `brush_core::env::ShellEnvironment`, and the CLI quotes
+# workload argv with brush's escaping rather than a second quoting implementation.
+brush-core.workspace = true
+
+# The application's own libraries, kept at upstream's feature selection so the CLI's QR,
+# ratatui and JSON code paths behave identically.
+chrono = { version = "0.4.42", default-features = false, features = ["std"] }
+clap = { version = "4.6.0", features = ["derive"] }
+libc = "0.2"
+# The OS random generator every managed pane's session nonce comes from: the `-c` and Claude
+# paths allocate one per invocation, so it must not need a spare file descriptor.
+getrandom = "0.3"
+qrcode = { version = "0.14", default-features = false }
+ratatui = { version = "=0.29.0", default-features = false }
+serde_json = "1.0.149"
+tokio = { version = "1.52.3", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[dev-dependencies]
+marsh-core = { path = "crates/marsh-core", features = ["testing"] }
+rmux-server = { version = "=0.10.0", default-features = false, features = ["testing"] }
+brush-core.workspace = true
+brush-builtins.workspace = true
+marsh-btrfs = { path = "crates/marsh-btrfs", features = ["fake"] }
+marsh-wal = { path = "crates/marsh-wal" }
+# Routing predicates that query a source's shared authority name its events directly.
+junco-policy = { git = "https://github.com/junco-org/junco-policy.git", rev = "8d3150b7ce657dbb53de23b6f74095711ad78e07" }
+# The WAL smoke's own transaction metadata derives its serde implementations.
+serde = { version = "1", features = ["derive"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+tempfile = "3.27.0"
+hex = "0.4"
+serial_test = "3"
+sha1 = "0.10"
+tokio = { version = "1.52.3", features = ["macros", "process", "rt", "sync", "time"] }
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "3"
+members = ["crates/*", "fuzz"]
+
+[workspace.package]
+authors = ["reuben olinsky"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/junco-org/marsh"
+rust-version = "1.95.0"
+
+[workspace.dependencies]
+brush-core = "0.5.0"
+brush-builtins = "0.2.0"
+
+# Unmodified crates.io library. marsh-instrument supplies host observation and file identity
+# through its own wrapper around lurk's public types, argument tables and filters.
+lurk-cli = "=0.3.14"
+syscalls = { version = "=0.8.1", features = ["full"] }
+
+# Every rmux library except the server comes from upstream, pinned to the exact commit the
+# vendored server was copied from. The server itself is local — its pane, popup and workload
+# backends are marsh's — and is selected through `[patch.crates-io]` so that both this package
+# and the Git-sourced rmux libraries resolve to the same single instance.
+rmux-core = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-client = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-ipc = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-os = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-proto = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-pty = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-sdk = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+rmux-web-crypto = { version = "=0.10.0", git = "https://github.com/Helvesec/rmux", rev = "1f4571e74f36be0c033c6294d1616c7d3a6fbda1" }
+
+# brush-core carries changes that are not released: the ExternalCommandSpawner seam
+# (https://github.com/reubeno/brush/pull/1382), which MarshExecutor is an implementation of, a
+# public accessor for a shell's spawner, the pipeline's process group carried into a builtin's
+# ExecutionContext, and a generic ExecutionObserver that scopes builtins and scheduled work.
+# crates/brush-core is crates.io's 0.5.0 plus those; crates/brush-interactive is crates.io's 0.4.0
+# plus a caller-owned completion callback for the basic editor. Every other brush crate is stock.
+[patch.crates-io]
+brush-core = { path = "crates/brush-core" }
+brush-interactive = { path = "crates/brush-interactive" }
+rmux-server = { path = "crates/rmux-server" }
+
+[workspace.lints.rust]
+warnings = { level = "deny" }
+future_incompatible = { level = "deny" }
+missing_docs = { level = "deny" }
+nonstandard_style = { level = "deny" }
+rust_2018_idioms = { level = "deny", priority = -1 }
+unnameable_types = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_attributes = "deny"
+unused_lifetimes = "deny"
+unused_macro_rules = "deny"
+# For now we allow unknown lints so we can opt into warnings that don't exist on the
+# oldest toolchain we need to support.
+unknown_lints = { level = "allow", priority = -100 }
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+
+# Denied rules
+expect_used = "deny"
+format_push_string = "deny"
+multiple_unsafe_ops_per_block = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+string_lit_chars_any = "deny"
+string_slice = "deny"
+tests_outside_test_module = "deny"
+todo = "deny"
+unwrap_in_result = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+
+# Allowed rules
+bool_to_int_with_if = "allow"
+cognitive_complexity = "allow"
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+if_not_else = "allow"
+if_same_then_else = "allow"
+match_same_arms = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+multiple_crate_versions = "allow"
+option_if_let_else = "allow"
+redundant_closure_for_method_calls = "allow"
+redundant_else = "allow"
+redundant_pub_crate = "allow"
+result_large_err = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
