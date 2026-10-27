@@ -18,13 +18,16 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "junco-profile-optimizer": "./dist/optimizer-cli.js"
+  },
   "files": [
     "dist",
     "src",
     "README.md"
   ],
   "scripts": {
-    "build": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && bun build ./src/optimizer-cli.ts --root ./src --outdir ./dist --target bun --format esm --packages external --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
     "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/mixed/mixed.ts ./examples/oss-committee/oss-committee.ts ./examples/mcp/mcp.ts ./examples/yak-shaver/yak-shaver.ts ./examples/verus/verus.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
@@ -41,6 +44,7 @@
     "smoke:tui": "bun run test/tui-tracer.fixture.ts",
     "smoke:workflows": "node --experimental-strip-types ./test/workflows.fixture.ts",
     "smoke:workflows:bun": "bun run ./test/workflows.fixture.ts",
+    "smoke:profile-optimizer": "bun run ./test/profile-optimizer.fixture.ts",
     "postinstall": "if [ -x \"${CARGO_HOME:-$HOME/.local/share/junco-tools/cargo}/bin/cargo\" ]; then cd packages/junco-tools && bun run build:native; else echo 'postinstall: no Rust toolchain for junco-tools (see packages/junco-tools/README.md); skipped its native addon' >&2; fi"
   },
   "dependencies": {

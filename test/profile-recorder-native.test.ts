@@ -35,10 +35,10 @@ const copyTree = {
   NativeMux: { open: native.NativeMux.openCopyTree.bind(native.NativeMux) },
 } as unknown as NativeModule;
 
-const UNAVAILABLE = "cgroup resource control unavailable";
 // Touched memory held for one second: real pipeline memory, sampled every 100 ms.
+// The size prints only after the workload completes.
 const PROGRAM =
-  "import sys, time\ndata = bytearray(int(sys.argv[1]) * 1024 * 1024)\nfor i in range(0, len(data), 4096):\n    data[i] = 1\ntime.sleep(1)\n";
+  "import sys, time\ndata = bytearray(int(sys.argv[1]) * 1024 * 1024)\nfor i in range(0, len(data), 4096):\n    data[i] = 1\ntime.sleep(1)\nprint(len(data))\n";
 const COMMAND = `/usr/bin/python3 -c '${PROGRAM}' 4`;
 
 const PROMPT = {
@@ -71,7 +71,7 @@ const DOCUMENT = {
   },
 };
 
-type Run = { readonly bash: string; readonly tokens: number };
+type Run = { readonly tokens: number };
 
 /** Run the real Start~>Worker->$sink graph once, attributing everything to `recorder`. */
 async function runRecorded(
@@ -80,11 +80,11 @@ async function runRecorded(
   >,
   seed: string,
 ): Promise<Run> {
-  let bash = "";
+  let bashResult: AgentMessage | undefined;
   let tokens = 0;
   const lastResult: FauxResponseFactory = (context) => {
     const last = context.messages.at(-1) as AgentMessage | undefined;
-    if (last?.role === "toolResult") bash = contentText(last.content);
+    if (last?.role === "toolResult") bashResult = last;
     return fauxAssistantMessage("done");
   };
   const collection = await ToolCollection.create(seed, {
@@ -134,7 +134,15 @@ async function runRecorded(
   } finally {
     await collection.close();
   }
-  return { bash, tokens };
+  assert.ok(
+    bashResult?.role === "toolResult",
+    "expected measured bash tool result",
+  );
+  assert.equal(bashResult.toolName, "bash");
+  // The agent harness reports any resolved tool call with isError: false, so
+  // require the workload's own completion output; failures append an exit status.
+  assert.equal(contentText(bashResult.content), `${4 * 1024 * 1024}\n`);
+  return { tokens };
 }
 
 async function seeded(prefix: string) {
@@ -152,10 +160,6 @@ test("JsonlRecorder records real Worker pipeline memory and committed tokens", a
   try {
     try {
       const run = await runRecorded(recorder, seed);
-      if (run.bash.includes(UNAVAILABLE)) {
-        console.log("skipping: cgroup delegation unavailable");
-        return;
-      }
       await recorder.flush();
       const samples = parseSamples(await readFile(path, "utf8"));
       const workers = samples.filter((sample) => sample.node === "Worker");
@@ -251,10 +255,6 @@ test("GrafanaRecorder exports the same real Worker run over Live push", async ()
     });
     try {
       const run = await runRecorded(recorder, seed);
-      if (run.bash.includes(UNAVAILABLE)) {
-        console.log("skipping: cgroup delegation unavailable");
-        return;
-      }
       await recorder.flush();
       const lines = parseLines(pushes.at(-1)!);
       const worker = lines.find(
@@ -361,12 +361,7 @@ test("graph resources reach bash as cgroup pid limits", async () => {
         undefined,
       );
       const text = contentText(first.content);
-      if (text.includes(UNAVAILABLE)) {
-        assert.equal(first.isError, true);
-        assert.doesNotMatch(text, /^\d+$/m);
-        console.log("skipping: cgroup delegation unavailable");
-        return;
-      }
+      assert.ok(!first.isError, text);
       assert.equal(text, "8\n");
     } finally {
       await limited.graph.close();

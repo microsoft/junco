@@ -53,6 +53,7 @@ step "Build dataflow-engine-opik and dataflow-profile"
 step "Build and test junco-agency"
 bun run build
 bun run typecheck
+bun run smoke:profile-optimizer
 bun run test:coverage
 bun run smoke
 bun run test:integration
