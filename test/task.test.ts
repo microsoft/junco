@@ -6,6 +6,8 @@ import {
   type AgentTool,
   BACKGROUND_CONTEXT,
   MemorySessionRepo,
+  type PromptTemplate,
+  type Skill,
 } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
@@ -21,9 +23,13 @@ import {
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import { LockPolicy, type TaskToolDetails } from "junco-tools";
-import { Type } from "typebox";
+import { errorGraph } from "junco-tools/errors";
+import { type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 import {
   type AgenticInput,
+  AgenticInputSchema,
+  AssistantMessageSchema,
   agent as agentApi,
   Deterministic,
   graph,
@@ -33,28 +39,18 @@ import {
   tracer,
   trigger,
 } from "../src/index.ts";
-import { registeredNodeContexts } from "../src/node-policy.ts";
 import {
   assistant,
   terminalPorts,
   userTexts,
 } from "./deterministic-support.ts";
-import { type AgencyContext, toolTurn, waitingTool } from "./support.ts";
+import { toolTurn, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
-// `task` call expands the caller's node into a Spawn graph whose workers report back through queues.
+// `task` call runs fresh subagents natively in the background while the caller's node stays itself.
 
 type Agent = agentApi.JuncoAgent;
-type Report = {
-  id: string;
-  name?: string;
-  attempt: number;
-  status: string;
-  output: string;
-  stopReason: string;
-  error?: string;
-  decisionRequired?: true;
-};
+type Chat = typeof AgenticInputSchema;
 
 const quiet = new tracer.DummyTracer();
 
@@ -82,48 +78,73 @@ function registry(...names: string[]) {
     assert.ok(provider, `faux provider ${name}`);
     return provider;
   };
+  /** The task-schema identity of `name`'s model. */
+  const model = (name: string) => ({
+    provider: name,
+    modelId: faux(name).getModel().id,
+  });
   return {
     models,
     script: (name: string, responses: readonly FauxResponseStep[]) =>
       faux(name).setResponses([...responses]),
-    /** The task-schema identity of `name`'s model. */
-    model: (name: string) => ({
-      provider: name,
-      modelId: faux(name).getModel().id,
-    }),
+    model,
     calls: (name: string) => faux(name).state.callCount,
+    /** An agent on `provider`'s model with `tools`, returned after the test. */
+    async agent(
+      provider: string,
+      tools: AgentTool[],
+      contract?: (edgeId: graph.EdgeIdType) => toolsApi.Contract,
+      recorder?: toolsApi.ProfileRecorder<string>,
+    ): Promise<Agent> {
+      const resolved = models.getModels(provider)[0];
+      assert.ok(resolved);
+      const agent = await agentApi.JuncoAgent.fromResolved({
+        session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+        models,
+        model: resolved,
+        systemPrompt: "sys",
+        ...(recorder === undefined ? {} : { recorder }),
+        tools,
+        ...(contract === undefined ? {} : { contract }),
+      });
+      closers.push(() => agent.return());
+      return agent;
+    },
+    /**
+     * Scripts `name`'s worker: its first `failures` attempts stop natively with an error and
+     * partial output, later ones report `<name>-report`.
+     */
+    worker(name: string, failures = 0, prompts: string[] = []): string[] {
+      faux(name).setResponses(
+        Array.from(
+          { length: failures + 2 },
+          (_, index) => (context: Context) => {
+            prompts.push(userTexts(context.messages)[0] ?? "");
+            return index < failures
+              ? fauxAssistantMessage(`${name} partial ${index + 1}`, {
+                  stopReason: "error",
+                  errorMessage: `${name} boom ${index + 1}`,
+                })
+              : fauxAssistantMessage(`${name}-report`);
+          },
+        ),
+      );
+      return prompts;
+    },
+    /** A task on `name`'s model with no tools. */
+    task: (name: string): toolsApi.TaskInput["tasks"][number] => ({
+      name,
+      task: `do ${name}`,
+      model: model(name),
+      tools: [],
+    }),
   };
 }
-
-async function newCaller(
-  models: ReturnType<typeof registry>["models"],
-  provider: string,
-  tools: AgentTool[],
-  contract?: (edgeId: graph.EdgeIdType) => toolsApi.Contract,
-  recorder?: toolsApi.ProfileRecorder<string>,
-): Promise<Agent> {
-  const model = models.getModels(provider)[0];
-  assert.ok(model);
-  const agent = await agentApi.JuncoAgent.fromResolved({
-    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
-    models,
-    model,
-    systemPrompt: "sys",
-    ...(recorder === undefined ? {} : { recorder }),
-    tools,
-    ...(contract === undefined ? {} : { contract }),
-  });
-  closers.push(() => agent.return());
-  return agent;
-}
-
-/** Observes each real child `parent.createSubagents` returned, before the caller receives it. */
-type ChildObserver = (parent: Agent, child: Agent, index: number) => void;
 
 /** Records every agent `caller.createSubagents` returns, recursively for descendants. */
 function trackSubagents(
   caller: Agent,
-  observe?: ChildObserver,
+  observe?: (parent: Agent, child: Agent, index: number) => void,
   created: Agent[] = [],
 ): Agent[] {
   caller.setSubagentObserver({
@@ -169,69 +190,14 @@ const explode = (child: Agent, message: string) =>
     if (operation === "run") throw new Error(message);
   });
 
-/** A tool whose calls block until `release()`; `started` resolves on the first call. */
-function holdTool(name = "hold") {
-  const started = Promise.withResolvers<void>();
-  const released = Promise.withResolvers<void>();
-  const tool: AgentTool = {
-    name,
-    label: name,
-    description: "waits",
-    parameters: Type.Object({}),
-    execute: async () => {
-      started.resolve();
-      await released.promise;
-      return { content: [{ type: "text", text: "held" }], details: undefined };
-    },
-  };
-  return {
-    tool,
-    started: started.promise,
-    release: () => released.resolve(),
-  };
-}
-
 const textOf = (message: AgentMessage): string =>
   "content" in message ? contentText(message.content) : "";
 
 /** Every task report among `context`'s user messages, parsed. */
-const reportsIn = (context: Context): Report[] =>
+const reportsIn = (context: Context): agentApi.TaskResult[] =>
   userTexts(context.messages)
     .filter((text) => text.startsWith('{"type":"task_result"'))
-    .map((text): Report => JSON.parse(text));
-
-/** A task report as it was queued for the caller's root: its input kind and its parsed report. */
-type QueuedReport = { kind: AgenticInput["kind"]; report: Report };
-
-/**
- * Drives `outer` window by window until nothing is available, snapshotting every task report
- * queued for the expanded `id`'s root before the next window consumes it.
- */
-async function driveObservingReports(
-  execution: AgencyContext,
-  id = graph.NodeId.create("caller"),
-): Promise<QueuedReport[]> {
-  const outer = execution.graph;
-  const queued: QueuedReport[] = [];
-  // A report may stay queued across windows; record each queued input once.
-  const seen = new Set<AgenticInput>();
-  while (outer.available().size > 0) {
-    await execution.step();
-    const state = outer.getNode(id)?.state;
-    if (!(state instanceof JuncoGraph)) continue;
-    const messages = state.available().get(graph.NodeId.create("root"))
-      ?.view.messages;
-    for (const edge of messages?.keys() ?? []) {
-      for (const input of messages?.get(edge) ?? []) {
-        if (seen.has(input)) continue;
-        seen.add(input);
-        if ("text" in input && input.text.startsWith('{"type":"task_result"'))
-          queued.push({ kind: input.kind, report: JSON.parse(input.text) });
-      }
-    }
-  }
-  return queued;
-}
+    .map((text): agentApi.TaskResult => JSON.parse(text));
 
 /** The latest tool result in `context`. */
 function lastToolResult(context: Context) {
@@ -285,36 +251,15 @@ function callerNode(caller: Agent, prompt = "Start") {
   };
 }
 
+/** The caller graph's execution, and its terminal ports to `connect` to its result node. */
 function taskExecution(
-  observer: tracer.DataflowTracer,
+  observer: tracer.DataflowTracer = quiet,
   recorder?: toolsApi.ProfileRecorder<string>,
-): AgencyContext {
-  const source = new graph.nodes.Source<AgenticInput, AssistantMessage>(
-    () => {
-      throw new graph.DataflowDefinitionError(
-        "Task fixture does not accept external input",
-      );
-    },
-    { id: graph.NodeId.create("$source") },
-  );
-  const edge = graph.Edge.value<AgenticInput, AssistantMessage>(
-    "caller->$sink",
-  );
-  const sink = new graph.nodes.Sink<AgenticInput, AssistantMessage>(
-    async function* () {
-      const view = yield [];
-      const result = view.values.get(edge.id);
-      assert.ok(result);
-      return result;
-    },
-    {
-      id: graph.NodeId.create("$sink"),
-      trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(edge)),
-    },
-  );
+) {
+  const ports = terminalPorts();
   const work = new JuncoGraph(
-    source,
-    sink,
+    ports.source,
+    ports.sink,
     graph.Width.create(1),
     graph.UNBOUNDED,
     observer,
@@ -322,35 +267,14 @@ function taskExecution(
     undefined,
     recorder,
   );
-  return schedules.context({ graph: work, scheduler: schedules.parallel() });
+  return {
+    execution: schedules.context({
+      graph: work,
+      scheduler: schedules.parallel(),
+    }),
+    ports,
+  };
 }
-
-function wireOutput(work: JuncoGraph, id: graph.NodeIdType): void {
-  work.addEdge(id, work.sink.id, graph.Edge.value("caller->$sink"));
-}
-
-/** The expanded node's inner graph. */
-function innerOf(
-  outer: JuncoGraph,
-  id = graph.NodeId.create("caller"),
-): JuncoGraph {
-  const state = outer.getNode(id)?.state;
-  assert.ok(state instanceof JuncoGraph, "the node's state is its Spawn graph");
-  return state;
-}
-
-function linksOf(g: JuncoGraph): string[] {
-  const links: string[] = [];
-  g.forEachLink((from, to) => links.push(`${from}->${to}`));
-  return links.sort();
-}
-
-const pairedLinks = (ids: readonly string[]) =>
-  [
-    "$source->root",
-    "root->$sink",
-    ...ids.flatMap((id) => [`root->${id}`, `${id}->root`]),
-  ].sort();
 
 /** The ids of every batch-completion marker among `context`'s user messages. */
 const markersIn = (context: Context): string[][] =>
@@ -380,7 +304,7 @@ const decision = (
  * else answers `waiting for researchers`.
  */
 function answering(
-  decide: ((report: Report) => ToolCall[]) | undefined,
+  decide: ((report: agentApi.TaskResult) => ToolCall[]) | undefined,
   finish: (context: Context) => AssistantMessage,
 ): FauxResponseStep[] {
   const asked = new Set<string>();
@@ -399,200 +323,168 @@ function answering(
   return Array.from({ length: 16 }, () => step);
 }
 
-/** A one-turn worker answer: a native error stop, or a completed `<name>-report`. */
-const outcome = (name: string, failed: boolean, attempt: number) =>
-  failed
-    ? fauxAssistantMessage(`${name} partial ${attempt}`, {
-        stopReason: "error",
-        errorMessage: `${name} boom ${attempt}`,
-      })
-    : fauxAssistantMessage(`${name}-report`);
-
-/** Scripts `name`'s worker: its first `failures` attempts stop with an error, later ones report. */
-function worker(
-  r: ReturnType<typeof registry>,
-  name: string,
-  failures = 0,
-  prompts: string[] = [],
-): string[] {
-  r.script(
-    name,
-    Array.from({ length: failures + 2 }, (_, index) => (context: Context) => {
-      prompts.push(userTexts(context.messages)[0] ?? "");
-      return outcome(name, index < failures, index + 1);
-    }),
-  );
-  return prompts;
-}
-
-/** A task on `name`'s model with no tools. */
-const taskOn = (r: ReturnType<typeof registry>, name: string) => ({
-  name,
-  task: `do ${name}`,
-  model: r.model(name),
-  tools: [],
-});
-
 /** A caller whose first turn launches `names`' tasks under `policy`, then answers with `turns`. */
 async function failingCaller(
   r: ReturnType<typeof registry>,
   names: string[],
   policy: agentApi.TaskFailurePolicy,
   turns: FauxResponseStep[],
+  recorder?: toolsApi.ProfileRecorder<string>,
 ) {
   r.script("caller", [
-    toolTurn(taskCall(names.map((name) => taskOn(r, name)))),
+    toolTurn(taskCall(names.map((name) => r.task(name)))),
     ...turns,
   ]);
-  const caller = await newCaller(r.models, "caller", [new toolsApi.TaskTool()]);
+  const caller = await r.agent(
+    "caller",
+    [new toolsApi.TaskTool()],
+    undefined,
+    recorder,
+  );
   caller.setTaskFailurePolicy(policy);
-  const execution = taskExecution(quiet);
+  const { execution, ports } = taskExecution(quiet, recorder);
   const outer = execution.graph;
   closers.push(() => outer.close());
   const id = outer.addNode(callerNode(caller));
-  wireOutput(outer, id);
+  ports.connect(outer, id);
   return { caller, outer, execution, id };
 }
 
-/** The node ids under the expanded caller's Spawn root, in registration order. */
-function taskNodes(outer: JuncoGraph): string[] {
-  const ids: string[] = [];
-  innerOf(outer).forEachNode((child) => {
-    if (child !== "root" && child !== "$source" && child !== "$sink")
-      ids.push(child);
+/** Identities of every member (id, node, state, step, trigger) and link of `work`, in order. */
+function geometryOf<N extends TSchema, T>(work: JuncoGraph<N, T>): unknown[] {
+  const parts: unknown[] = [];
+  work.forEachNode((id, node) =>
+    parts.push(id, node, node.state, node.step, node.trigger),
+  );
+  work.forEachLink((from, to, edge) => parts.push(from, to, edge));
+  return parts;
+}
+
+/** Asserts `work` still holds exactly the members and links `before` captured, by identity. */
+function assertGeometry<N extends TSchema, T>(
+  work: JuncoGraph<N, T>,
+  before: unknown[],
+): void {
+  const after = geometryOf(work);
+  assert.equal(after.length, before.length, "no node or edge was added");
+  for (const [index, part] of after.entries())
+    assert.equal(part, before[index], "graph geometry is unchanged");
+}
+
+/** Every main-lane native run `agent` starts from now on. */
+function mainRuns(agent: Agent): Set<string> {
+  const ids = new Set<string>();
+  agent.events.on("run_start", ({ lane, runId }) => {
+    if (lane === "main") ids.add(runId);
   });
   return ids;
 }
 
-/** `error` and everything reachable through `cause` and `AggregateError.errors`. */
-function causesOf(error: unknown): unknown[] {
-  const seen = new Set<unknown>();
-  const pending = [error];
-  while (pending.length > 0) {
-    const value = pending.pop();
-    if (seen.has(value)) continue;
-    seen.add(value);
-    if (value instanceof AggregateError) pending.push(...value.errors);
-    if (value instanceof Error && "cause" in value) pending.push(value.cause);
-  }
-  return [...seen];
+/** Handle ids of the task tool result for `callId` (the launch, by default) in `context`. */
+function handleIdsOf(context: Context, callId = "task-call"): string[] {
+  const result = toolResultsIn(context).get(callId);
+  assert.ok(result && !result.isError, `task call ${callId} admitted`);
+  const details = result.details as TaskToolDetails;
+  return details.tasks.map(({ id }) => id);
 }
 
-describe("task tool through a graph-driven agent", () => {
-  test("failed promoted work preserves accepted sends and orders delivery failures", async () => {
-    for (const failDelivery of [false, true]) {
-      const r = registry("caller", "worker");
-      const outbound = graph.Edge.message<AgenticInput, AssistantMessage>(
-        "accepted",
-      );
-      const workError = new Error("work failed after accepting send");
-      const deliveryError = new Error("delivery failed");
-      const accepted = Promise.withResolvers<void>();
-      r.script("worker", [fauxAssistantMessage("worker-result")]);
-      r.script("caller", [
-        toolTurn(taskCall([taskOn(r, "worker")])),
-        toolTurn(yieldCall("promote before sending")),
-        toolTurn(
-          fauxToolCall(
-            "send",
-            {
-              id: outbound.id,
-              payload: { kind: "followUp", text: "accepted" },
-            },
-            { id: "accepted-send" },
-          ),
+/** `caller.getTaskResults()` matches exactly the genuine reports in `context`, in delivery order. */
+function assertDelivered(caller: Agent, context: Context): void {
+  assert.deepEqual(
+    caller
+      .getTaskResults()
+      .map(({ id, attempt, status }) => [id, attempt, status]),
+    reportsIn(context).map(({ id, attempt, status }) => [id, attempt, status]),
+  );
+}
+
+describe("native tasks on a graph-driven caller", () => {
+  test("a caller's accepted send stays queued when its run later fails on an undecided task failure", async () => {
+    const r = registry("caller", "worker");
+    const outbound = graph.Edge.message<Chat, AssistantMessage>(
+      "accepted",
+      AgenticInputSchema,
+    );
+    let failedContext: Context | undefined;
+    r.worker("worker", 1);
+    r.script("caller", [
+      toolTurn(taskCall([r.task("worker")])),
+      toolTurn(
+        fauxToolCall(
+          "send",
+          {
+            id: outbound.id,
+            payload: { kind: "followUp", text: "accepted" },
+          },
+          { id: "accepted-send" },
         ),
-        fauxAssistantMessage("unreachable"),
-      ]);
-      const caller = await newCaller(r.models, "caller", [
-        new toolsApi.TaskTool(),
-        new toolsApi.YieldTool(),
-        new toolsApi.SendTool(),
-      ]);
-      caller.hooks.on("after_tool", ({ toolCallId }) => {
-        if (toolCallId === "accepted-send") accepted.resolve();
-        return undefined;
-      });
-      const execution = taskExecution(quiet);
-      const outer = execution.graph;
-      closers.push(() => outer.close());
-      const id = outer.addNode(callerNode(caller));
-      wireOutput(outer, id);
-      const receiver = outer.addNode({
-        id: graph.NodeId.create("receiver"),
-        trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(outbound)),
-        contract: () => ({ expect: "accepted sends" }),
-        state: new Deterministic<AgenticInput, AssistantMessage>(
-          async function* () {
-            yield [];
-            return fauxAssistantMessage("receiver");
-          },
-          LockPolicy,
-        ),
-      });
-      outer.addEdge(id, receiver, outbound);
-      if (failDelivery) {
-        const node = outer.getNode(id)!;
-        const registration = registeredNodeContexts.get(node)!;
-        registeredNodeContexts.set(node, {
-          ...registration,
-          get signal() {
-            return outer.signal;
-          },
-          send: () => {
-            throw deliveryError;
-          },
-        });
-      }
-      while (!(outer.getNode(id)?.state instanceof JuncoGraph))
-        await execution.step();
-      const failing = new Deterministic<AgenticInput, AssistantMessage>(
-        async function* () {
-          await accepted.promise;
-          throw workError;
-        },
-        LockPolicy,
-      );
-      innerOf(outer).addNode({
-        id: graph.NodeId.create("$failure"),
-        trigger: trigger.TriggerRule.always(),
-        policy: LockPolicy,
-        state: failing,
-        step: failing.step,
-      });
-      const failure = await execution.run().then(
-        () => assert.fail("work must fail"),
-        (error: unknown) => error,
-      );
-      assert.ok(causesOf(failure).includes(workError));
-      const pending: string[] = [];
-      innerOf(outer).sink.drain(({ payload }) => {
-        if ("text" in payload) pending.push(payload.text);
-      });
-      if (failDelivery) {
-        const aggregate = causesOf(failure).find(
-          (cause) =>
-            cause instanceof AggregateError &&
-            cause.message === "Task graph execution and sink delivery failed",
-        );
-        assert.ok(aggregate instanceof AggregateError);
-        assert.ok(causesOf(aggregate.errors[0]).includes(workError));
-        assert.equal(aggregate.errors[1], deliveryError);
-        assert.deepEqual(pending, ["accepted"]);
-      } else {
-        assert.deepEqual(pending, []);
-        assert.deepEqual(
-          outer.observe().inputs.get(receiver)?.messages.get(outbound.id),
-          [{ kind: "followUp", text: "accepted" }],
-        );
-      }
-    }
+      ),
+      // The caller ends without deciding the failed worker's report.
+      ...Array.from({ length: 4 }, () => (context: Context) => {
+        failedContext = context;
+        return fauxAssistantMessage("done without deciding");
+      }),
+    ]);
+    const caller = await r.agent("caller", [
+      new toolsApi.TaskTool(),
+      new toolsApi.SendTool(),
+    ]);
+    const { execution, ports } = taskExecution();
+    const outer = execution.graph;
+    closers.push(() => outer.close());
+    const id = outer.addNode(callerNode(caller));
+    ports.connect(outer, id);
+    const receiver = outer.addNode({
+      id: graph.NodeId.create("receiver"),
+      trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(outbound)),
+      contract: () => ({ expect: "accepted sends" }),
+      state: new Deterministic<Chat, AssistantMessage>(async function* () {
+        yield [];
+        return fauxAssistantMessage("receiver");
+      }, LockPolicy),
+    });
+    outer.addEdge(id, receiver, outbound);
+    const geometry = geometryOf(outer);
+
+    const failure = await execution.run().then(
+      () => assert.fail("the caller's run must fail"),
+      (error: unknown) => error,
+    );
+    assert.ok(failedContext);
+    const [failed] = reportsIn(failedContext);
+    assert.ok(failed?.decisionRequired, "the failure was delivered");
+    assert.deepEqual(handleIdsOf(failedContext), [failed.id]);
+    assert.ok(
+      [...errorGraph(failure)].some(
+        (cause) =>
+          cause instanceof agentApi.JuncoAgentError &&
+          cause.message === `Task failure decisions required: ${failed.id}`,
+      ),
+      "the undecided task failure fails the caller's run",
+    );
+    assert.equal(
+      toolResultsIn(failedContext).get("accepted-send")?.isError,
+      false,
+    );
+    assert.deepEqual(
+      outer.observe().inputs.get(receiver)?.messages.get(outbound.id) ?? [],
+      [{ kind: "followUp", text: "accepted" }],
+      "an accepted send stays queued on the real edge",
+    );
+    assert.equal(outer.getNode(id)?.state, caller);
+    assertGeometry(outer, geometry);
   });
-  test("workers run under a Spawn root while the caller continues; their reports finish the original node", async () => {
-    const hold = holdTool();
+
+  test("workers start immediately while the caller keeps working in its one native run; their reports finish the original node", async () => {
+    const hold = waitingTool("hold");
     const r = registry("caller", "alpha", "beta");
-    const seen: { handles?: TaskToolDetails["tasks"]; reports?: Report[] } = {};
+    const seen: {
+      handles?: TaskToolDetails["tasks"];
+      reports?: agentApi.TaskResult[];
+    } = {};
     const order: string[] = [];
+    const interim = Promise.withResolvers<void>();
+    const betaSeen = Promise.withResolvers<void>();
     r.script("caller", [
       toolTurn(
         taskCall([
@@ -608,12 +500,18 @@ describe("task tool through a graph-driven agent", () => {
       (context) => {
         seen.handles = handlesIn(context);
         order.push("caller-interim");
+        interim.resolve();
         return fauxAssistantMessage("interim: waiting for workers");
       },
-      (context) => {
-        seen.reports = reportsIn(context);
+      ...Array.from({ length: 4 }, () => (context: Context) => {
+        const reports = reportsIn(context);
+        if (markersIn(context).length === 0) {
+          if (reports.some(({ name }) => name === "beta")) betaSeen.resolve();
+          return fauxAssistantMessage("waiting for alpha");
+        }
+        seen.reports = reports;
         return fauxAssistantMessage("combined: alpha-report + beta-report");
-      },
+      }),
     ]);
     const workerContexts: Context[] = [];
     r.script("alpha", [
@@ -632,30 +530,22 @@ describe("task tool through a graph-driven agent", () => {
         return fauxAssistantMessage("beta-report");
       },
     ]);
-    const caller = await newCaller(r.models, "caller", [
+    const caller = await r.agent("caller", [
       new toolsApi.TaskTool(),
       hold.tool,
     ]);
-    const runIds = new Set<string>();
-    caller.events.on("run_start", ({ lane, runId }) => {
-      if (lane === "main") runIds.add(runId);
-    });
+    const created = trackSubagents(caller);
+    const runIds = mainRuns(caller);
 
     const activations: { graph: object; id: graph.NodeIdType }[] = [];
-    const completions: { graph: object; id: graph.NodeIdType }[] = [];
     const observer: tracer.DataflowTracer = {
-      startRun<S, N, T, EH>(
+      startRun<S, N extends TSchema, T, EH>(
         traced: graph.DataflowGraph<S, N, T, EH>,
       ): tracer.DataflowRunTrace<N, T> {
         return {
           startNode(id) {
             activations.push({ graph: traced, id });
-            return {
-              end(step) {
-                if (step.done) completions.push({ graph: traced, id });
-              },
-              fail() {},
-            };
+            return { end() {}, fail() {} };
           },
           end() {},
           fail() {},
@@ -664,27 +554,25 @@ describe("task tool through a graph-driven agent", () => {
       complain() {},
       async flush() {},
     };
-    const execution = taskExecution(observer);
+    const { execution, ports } = taskExecution(observer);
     const outer = execution.graph;
     const id = outer.addNode(callerNode(caller, "Start the workers"));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
     closers.push(() => outer.close());
     const node = outer.getNode(id);
+    const geometry = geometryOf(outer);
     const running = execution.run();
 
-    await hold.started;
-    assert.deepEqual(
-      order,
-      ["caller-interim"],
-      "the caller answered while alpha is held",
-    );
+    // alpha is blocked in its tool while the caller answers and receives beta's fast report.
+    await Promise.all([hold.started, interim.promise, betaSeen.promise]);
+    assert.deepEqual(order, ["caller-interim"], "alpha is still held");
     assert.ok(
       O.isNone(outer.result(id)),
       "an interim answer is not the node's result",
     );
     assert.equal(outer.getNode(id), node, "the node itself is unchanged");
-    const inner = innerOf(outer);
-    assert.equal(inner.getNode(graph.NodeId.create("root"))?.state, caller);
+    assert.equal(node?.state, caller);
+    assertGeometry(outer, geometry);
     const handles = seen.handles ?? [];
     assert.deepEqual(
       handles.map(({ name }) => name),
@@ -692,8 +580,8 @@ describe("task tool through a graph-driven agent", () => {
     );
     const childIds = handles.map(({ id }) => id);
     assert.equal(new Set(childIds).size, 2);
-    assert.deepEqual(linksOf(inner), pairedLinks(childIds));
-    assert.equal(runIds.size, 1, "the handoff kept the caller's one run");
+    assert.equal(created.length, 2, "both workers were acquired");
+    assert.equal(runIds.size, 1);
 
     hold.release();
     const results = await running;
@@ -711,11 +599,16 @@ describe("task tool through a graph-driven agent", () => {
         status,
       ]),
       [
-        [childIds[0], "alpha", "alpha-report", "completed"],
         [childIds[1], "beta", "beta-report", "completed"],
+        [childIds[0], "alpha", "alpha-report", "completed"],
       ],
+      "the fast report arrived first, each once",
     );
-    assert.equal(runIds.size, 2, "one more caller run processed the reports");
+    assert.equal(
+      runIds.size,
+      1,
+      "the caller's one native run took the reports",
+    );
     for (const context of workerContexts) {
       assert.equal(
         userTexts(context.messages).some((text) =>
@@ -729,39 +622,217 @@ describe("task tool through a graph-driven agent", () => {
       workerContexts.map((context) => userTexts(context.messages)[0]).sort(),
       [childPrompt("do alpha"), childPrompt("do beta")],
     );
-    for (const child of childIds) {
-      const member = inner.getNode(graph.NodeId.create(child));
+    for (const child of childIds)
       assert.ok(child.startsWith("task-"), "the worker has its real task ID");
-      assert.ok(
-        activations.some(
-          (event) => event.graph === inner && event.id === child,
-        ),
-        `the promoted graph observed activation of ${child}`,
-      );
-      assert.ok(
-        completions.some(
-          (event) => event.graph === inner && event.id === child,
-        ),
-        `the promoted graph observed completion of ${child}`,
-      );
-      assert.ok(member && member.state !== caller);
-      assert.ok(O.isSome(inner.result(graph.NodeId.create(child))));
+    const members = new Set<string>();
+    outer.forEachNode((member) => members.add(member));
+    for (const event of activations) {
+      assert.equal(event.graph, outer, "only the outer graph activates nodes");
+      assert.ok(members.has(event.id), `${event.id} is a real graph member`);
     }
+    assert.equal(outer.getNode(id), node);
+    assertGeometry(outer, geometry);
   });
 
-  test("external edges keep their contract: recv postponed across Yield, values once, messages in order, info/send pinned to the original node, only the final result downstream", async () => {
+  test("a numeric outer agent keeps its numeric sibling routes while task traffic stays chat", async () => {
+    const NumberSchema = Type.Number();
+    // Graph ports are chat, the caller's own sibling routes numeric.
+    type N = typeof NumberSchema | Chat;
+    type T = number | AssistantMessage;
+    type Received = {
+      messages: { id: string; payload: unknown }[];
+      values: { id: string; payload: unknown }[];
+    };
+    const r = registry("caller", "a", "b");
+    r.worker("a", 1);
+    r.worker("b");
+    const inbound = graph.Edge.message("producer->caller", NumberSchema);
+    const parentValue = graph.Edge.value("producer=>caller", NumberSchema);
+    const outbound = graph.Edge.message("caller->consumer", NumberSchema);
+    const result = graph.Edge.value("caller->$sink", AssistantMessageSchema);
+    let call = 0;
+    const tool = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
+      toolTurn(fauxToolCall(name, args, { id: `${name}-${++call}` }));
+    const received = (context: Context): Received[] =>
+      context.messages.flatMap((message) =>
+        message.role === "toolResult" && message.toolName === "recv"
+          ? [JSON.parse(contentText(message.content)) as Received]
+          : [],
+      );
+    let finalContext: Context | undefined;
+    const step = (context: Context) => {
+      finalContext = context;
+      const inbox = received(context);
+      const messages = inbox.flatMap(({ messages }) => messages);
+      const values = inbox.flatMap(({ values }) => values);
+      if (messages.length === 0 || values.length === 0)
+        return lastToolResult(context).toolName === "recv"
+          ? tool("yield", { reason: "wait for numbers" })
+          : tool("recv", {});
+      const results = toolResultsIn(context);
+      if (![...results.values()].some(({ toolName }) => toolName === "send"))
+        return tool("send", { id: outbound.id, payload: 42 });
+      if (!results.has("task-later"))
+        return toolTurn(taskCall([r.task("b")], "task-later"));
+      return markersIn(context).length >= 2
+        ? fauxAssistantMessage("numeric done")
+        : fauxAssistantMessage("waiting for researchers");
+    };
+    r.script("caller", [
+      toolTurn(taskCall([r.task("a")])),
+      ...Array.from({ length: 40 }, () => step),
+    ]);
+    const model = r.models.getModels("caller")[0];
+    assert.ok(model);
+    const tools: AgentTool[] = [
+      new toolsApi.TaskTool(),
+      new toolsApi.YieldTool(),
+      new toolsApi.RecvTool(),
+      new toolsApi.SendTool(),
+    ];
+    const caller = await agentApi.JuncoAgent.fromResolved<
+      Skill,
+      PromptTemplate,
+      AgentTool,
+      N,
+      T
+    >({
+      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+      models: r.models,
+      model,
+      systemPrompt: "sys",
+      tools,
+    });
+    closers.push(() => caller.return());
+    caller.setTaskFailurePolicy({ retries: 1 });
+    caller.stagePrompt("Start");
+    const created = trackSubagents(caller);
+
+    const source = new graph.nodes.Source<N, T>(
+      () => {
+        throw new graph.DataflowDefinitionError("No external input");
+      },
+      { id: graph.NodeId.create("$source"), schema: AgenticInputSchema },
+    );
+    const sink = new graph.nodes.Sink<N, T>(
+      async function* () {
+        const view = yield [];
+        const value = view.values.get(result.id);
+        assert.ok(value !== undefined);
+        return value;
+      },
+      {
+        id: graph.NodeId.create("$sink"),
+        schema: AgenticInputSchema,
+        trigger: trigger.TriggerRule.when(result),
+      },
+    );
+    const outer = new JuncoGraph(
+      source,
+      sink,
+      graph.Width.create(1),
+      graph.UNBOUNDED,
+      quiet,
+      LockPolicy,
+    );
+    closers.push(() => outer.close());
+    const execution = schedules.context({
+      graph: outer,
+      scheduler: schedules.parallel(),
+    });
+    const callerId = outer.addNode({
+      id: graph.NodeId.create("caller"),
+      trigger: trigger.TriggerRule.always(),
+      policy: LockPolicy,
+      state: caller,
+    });
+    const producerId = outer.addNode({
+      id: graph.NodeId.create("producer"),
+      trigger: trigger.TriggerRule.always(),
+      state: new Deterministic<N, T>(async function* () {
+        yield [graph.Message.create(inbound, 7)];
+        return 3;
+      }, LockPolicy),
+    });
+    const consumed: number[] = [];
+    const consumerId = outer.addNode({
+      id: graph.NodeId.create("consumer"),
+      trigger: trigger.TriggerRule.when(outbound),
+      contract: () => ({ expect: "numbers" }),
+      state: new Deterministic<N, T>(async function* () {
+        const view = yield [];
+        consumed.push(...graph.from(view, outbound));
+        return consumed.length;
+      }, LockPolicy),
+    });
+    outer
+      .addEdge(producerId, callerId, inbound)
+      .addEdge(producerId, callerId, parentValue)
+      .addEdge(callerId, consumerId, outbound)
+      .addEdge(callerId, sink.id, result);
+    const node = outer.getNode(callerId);
+    const geometry = geometryOf(outer);
+
+    const results = await execution.run();
+    const final = results.get(callerId);
+    assert.ok(Value.Check(AssistantMessageSchema, final));
+    assert.equal(contentText(final.content), "numeric done");
+    // The outbound number reached its real edge while tasks ran.
+    assert.deepEqual(consumed, [42]);
+    // Numeric messages and parent values reached the retained inbox; task reports never did.
+    const context = finalContext;
+    assert.ok(context);
+    const inbox = received(context);
+    assert.deepEqual(
+      inbox.flatMap(({ messages }) => messages),
+      [{ id: inbound.id, payload: 7 }],
+    );
+    assert.deepEqual(
+      inbox.flatMap(({ values }) => values),
+      [{ id: parentValue.id, payload: 3 }],
+    );
+    // Both batches resolved as chat reports: the retried `a` and the later `b`.
+    assert.equal(markersIn(context).length, 2);
+    assert.deepEqual(
+      reportsIn(context)
+        .map(({ name, attempt, status }) => [name, attempt, status])
+        .sort(),
+      [
+        ["a", 2, "completed"],
+        ["b", 1, "completed"],
+      ],
+    );
+    assert.equal(created.length, 3, "initial, retried and later children");
+    assert.equal(outer.getNode(callerId), node);
+    assert.equal(node?.state, caller);
+    assertGeometry(outer, geometry);
+  });
+
+  test("external edges keep their contract: recv postponed across Yield, values once, messages in order, info/send on the original node, only the final result downstream", async () => {
     const r = registry("caller", "alpha", "beta");
-    type Edge = graph.Edge<AgenticInput, AssistantMessage>;
+    type Edge = graph.Edge<Chat, AssistantMessage>;
     type Route = { id: string; edgeId: string; kind: string; expect: string };
     type Info = { parents: Route[]; children: Route[] };
     type Received = {
       messages: { id: string; payload: AgenticInput }[];
       values: { id: string; payload: AssistantMessage }[];
     };
-    const sourceEdge: Edge = graph.Edge.value("source=>caller");
-    const notesEdge: Edge = graph.Edge.message("$source->root");
-    const outboundEdge: Edge = graph.Edge.message("root->$sink");
-    const resultEdge: Edge = graph.Edge.value("caller=>down");
+    const sourceEdge: Edge = graph.Edge.value(
+      "source=>caller",
+      AssistantMessageSchema,
+    );
+    const notesEdge: Edge = graph.Edge.message(
+      "notes->caller",
+      AgenticInputSchema,
+    );
+    const outboundEdge: Edge = graph.Edge.message(
+      "caller->down",
+      AgenticInputSchema,
+    );
+    const resultEdge: Edge = graph.Edge.value(
+      "caller=>down",
+      AssistantMessageSchema,
+    );
     const expects: Record<string, string> = {
       [sourceEdge.id]: "caller takes the upstream value",
       [notesEdge.id]: "caller takes ordered notes",
@@ -787,7 +858,7 @@ describe("task tool through a graph-driven agent", () => {
     let alphaStarted = false;
     let finalContext: Context | undefined;
     const callerInfos: Info[] = [];
-    const childInfos: Info[] = [];
+    const childInfoErrors: boolean[] = [];
     const turn = (context: Context): AssistantMessage => {
       const tasks = context.messages.filter(
         (message) =>
@@ -818,7 +889,7 @@ describe("task tool through a graph-driven agent", () => {
             : fauxToolCall("recv", {}, { id: `recv-${received.length}` }),
         );
       }
-      // A later admission joins the already promoted Spawn graph.
+      // A later admission while the first batch may still run.
       if (tasks === 1)
         return toolTurn(
           taskCall(
@@ -866,7 +937,7 @@ describe("task tool through a graph-driven agent", () => {
     r.script(
       "caller",
       // Five individually delivered notes add six recv/yield turns; rejected sends add two.
-      Array.from({ length: 24 + 6 + 2 }, () => turn),
+      Array.from({ length: 40 }, () => turn),
     );
     r.script("alpha", [
       () => {
@@ -874,14 +945,13 @@ describe("task tool through a graph-driven agent", () => {
         return toolTurn(fauxToolCall("info", {}, { id: "alpha-info" }));
       },
       (context) => {
-        childInfos.push(...results<Info>(context, "info"));
+        childInfoErrors.push(lastToolResult(context).isError);
         return toolTurn(yieldCall("alpha pause"));
       },
       fauxAssistantMessage("alpha-report"),
     ]);
     r.script("beta", [fauxAssistantMessage("beta-report")]);
-    const caller = await newCaller(
-      r.models,
+    const caller = await r.agent(
       "caller",
       [
         new toolsApi.TaskTool(),
@@ -896,60 +966,30 @@ describe("task tool through a graph-driven agent", () => {
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;
 
-    const sourceColumns: graph.NodeIdType[][] = [];
-    const observer: tracer.DataflowTracer = {
-      startRun<S, N, T, EH>(
-        work: graph.DataflowGraph<S, N, T, EH>,
-      ): tracer.DataflowRunTrace<N, T> {
-        const started: graph.NodeIdType[] = [];
-        return {
-          startNode(id) {
-            started.push(id);
-            return { end() {}, fail() {} };
-          },
-          end() {
-            if (
-              work.getNode(graph.NodeId.create("root")) !== undefined &&
-              started.includes(graph.NodeId.create("$source"))
-            )
-              sourceColumns.push(started);
-          },
-          fail() {},
-        };
-      },
-      complain() {},
-      async flush() {},
-    };
-    const execution = taskExecution(observer);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const sourceId = outer.addNode({
       trigger: trigger.TriggerRule.always(),
-      state: new Deterministic<AgenticInput, AssistantMessage>(
-        async function* () {
-          yield [];
-          return upstreamValue;
-        },
-        LockPolicy,
-      ),
+      state: new Deterministic<Chat, AssistantMessage>(async function* () {
+        yield [];
+        return upstreamValue;
+      }, LockPolicy),
     });
     const notesId = outer.addNode({
-      // Emits once the worker is running, while the caller's node is expanded and suspended.
+      // Emits once the worker is running, while the caller is suspended or working.
       trigger: trigger.TriggerRule.always(),
       is_available: () => alphaStarted,
-      state: new Deterministic<AgenticInput, AssistantMessage>(
-        async function* () {
-          for (let n = 1; n <= 5; n++)
-            yield [
-              {
-                id: notesEdge.id,
-                payload: { kind: "followUp", text: `note-${n}` },
-              },
-            ];
-          return fauxAssistantMessage("notes done");
-        },
-        LockPolicy,
-      ),
+      state: new Deterministic<Chat, AssistantMessage>(async function* () {
+        for (let n = 1; n <= 5; n++)
+          yield [
+            {
+              id: notesEdge.id,
+              payload: { kind: "followUp", text: `note-${n}` },
+            },
+          ];
+        return fauxAssistantMessage("notes done");
+      }, LockPolicy),
     });
     caller.stagePrompt("Start");
     const callerId = outer.addNode({
@@ -967,44 +1007,37 @@ describe("task tool through a graph-driven agent", () => {
         trigger.TriggerEntry.on(resultEdge),
       ),
       contract,
-      state: new Deterministic<AgenticInput, AssistantMessage>(
-        async function* () {
-          let view = yield [];
-          while (true) {
-            for (const input of view.messages.get(outboundEdge.id) ?? [])
-              if (input.kind === "followUp") received.push(input.text);
-            const value = view.values.get(resultEdge.id);
-            if (value !== undefined) {
-              downstreamValue = value;
-              return value;
-            }
-            view = yield [];
+      state: new Deterministic<Chat, AssistantMessage>(async function* () {
+        let view = yield [];
+        while (true) {
+          for (const input of view.messages.get(outboundEdge.id) ?? [])
+            if (input.kind === "followUp") received.push(input.text);
+          const value = view.values.get(resultEdge.id);
+          if (value !== undefined) {
+            downstreamValue = value;
+            return value;
           }
-        },
-        LockPolicy,
-      ),
+          view = yield [];
+        }
+      }, LockPolicy),
     });
-    wireOutput(outer, downId);
+    ports.connect(outer, downId);
     outer
       .addEdge(sourceId, callerId, sourceEdge)
       .addEdge(notesId, callerId, notesEdge)
       .addEdge(callerId, downId, outboundEdge)
       .addEdge(callerId, downId, resultEdge);
     const node = outer.getNode(callerId);
-    const links = linksOf(outer);
+    const geometry = geometryOf(outer);
 
     const results_ = await execution.run();
     const final = results_.get(callerId);
     assert.ok(final);
     assert.equal(contentText(final.content), "final answer");
     assert.equal(results_.get(outer.sink.id), final);
-    const promoted = innerOf(outer, callerId);
-    assert.equal(promoted.result(promoted.sink.id)._tag, "Some");
-    const innerFinal = promoted.result(promoted.sink.id);
-    assert.ok(O.isSome(innerFinal));
-    assert.equal(innerFinal.value, final);
     assert.equal(outer.getNode(callerId), node);
-    assert.deepEqual(linksOf(outer), links, "external edges are unchanged");
+    assert.equal(node?.state, caller);
+    assertGeometry(outer, geometry);
     assert.ok(finalContext);
 
     // Postponed recv: every retained note once, in FIFO order, and the stale value exactly once.
@@ -1046,7 +1079,7 @@ describe("task tool through a graph-driven agent", () => {
       ["alpha-report", "beta-report"],
     );
 
-    // The promoted caller, before and after a later admission, still reports its outer node.
+    // The caller, before and after a later admission, reports its outer node's routes.
     const route = (id: string, edge: Edge, kind: string) => ({
       id,
       edgeId: edge.id,
@@ -1073,16 +1106,8 @@ describe("task tool through a graph-driven agent", () => {
         },
         outerInfo,
       );
-    // The child shares the caller's info carrier yet reports its own inner-graph registration.
-    const [childInfo] = childInfos;
-    assert.ok(childInfo);
-    for (const entry of [...childInfo.parents, ...childInfo.children]) {
-      assert.equal(entry.id, "root");
-      assert.equal(entry.kind, "message");
-      assert.ok(entry.expect.length > 0);
-    }
-    assert.equal(childInfo.parents.length, 1);
-    assert.equal(childInfo.children.length, 1);
+    // A child never inherits the caller's graph routes.
+    assert.deepEqual(childInfoErrors, [true]);
 
     assert.deepEqual(
       received,
@@ -1094,37 +1119,26 @@ describe("task tool through a graph-driven agent", () => {
       final,
       "only the final caller result reaches downstream",
     );
-    assert.equal(
-      sourceColumns.length,
-      5,
-      "each consecutive external delivery runs its Source once",
-    );
-    for (const column of sourceColumns) {
-      assert.ok(
-        column.includes(graph.NodeId.create("root")),
-        "queued ingress cannot starve the root",
-      );
-      assert.ok(
-        column.indexOf(graph.NodeId.create("$source")) <
-          column.indexOf(graph.NodeId.create("root")),
-        "routing precedes the same-column root activation",
-      );
-    }
   });
 
-  test("calls in one batch and a later call add ordered siblings under one root", async () => {
+  test("calls in one batch and a later call return ordered handles; each report reaches the caller once", async () => {
     const r = registry("caller", "worker");
     const contexts: Context[] = [];
-    r.script("caller", [
-      toolTurn(
-        taskCall(
-          [{ name: "alpha", task: "a", model: r.model("worker") }],
-          "t1",
-        ),
-        taskCall([{ name: "beta", task: "b", model: r.model("worker") }], "t2"),
-      ),
-      fauxAssistantMessage("interim"),
-      (context) => {
+    const step = (context: Context) => {
+      const results = toolResultsIn(context);
+      if (!results.has("t1"))
+        return toolTurn(
+          taskCall(
+            [{ name: "alpha", task: "a", model: r.model("worker") }],
+            "t1",
+          ),
+          taskCall(
+            [{ name: "beta", task: "b", model: r.model("worker") }],
+            "t2",
+          ),
+        );
+      const markers = markersIn(context).length;
+      if (markers === 2 && !results.has("t3")) {
         contexts.push(context);
         return toolTurn(
           taskCall(
@@ -1132,61 +1146,88 @@ describe("task tool through a graph-driven agent", () => {
             "t3",
           ),
         );
-      },
-      fauxAssistantMessage("interim 2"),
-      (context) => {
+      }
+      if (markers === 3) {
         contexts.push(context);
         return fauxAssistantMessage("final");
-      },
-    ]);
-    r.script("worker", [
-      (context) =>
-        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
-      (context) =>
-        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
-      (context) =>
-        fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`),
-    ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const execution = taskExecution(quiet);
+      }
+      return fauxAssistantMessage("interim");
+    };
+    r.script(
+      "caller",
+      Array.from({ length: 12 }, () => step),
+    );
+    const report = (context: Context) =>
+      fauxAssistantMessage(`${userTexts(context.messages)[0]}-report`);
+    r.script("worker", [report, report, report]);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    const created = trackSubagents(caller);
+    const runIds = mainRuns(caller);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
+    const geometry = geometryOf(outer);
 
     const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
-    const inner = innerOf(outer);
-    const children: string[] = [];
-    inner.forEachNode((child, member) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink")
-        children.push(member.description ?? "");
-    });
-    assert.deepEqual(children, ["alpha", "beta", "gamma"]);
-    const ids: string[] = [];
-    inner.forEachNode((child) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink")
-        ids.push(child);
-    });
-    assert.deepEqual(linksOf(inner), pairedLinks(ids));
+    assert.equal(contexts.length, 2);
+    const [first, last] = contexts as [Context, Context];
+    const [alpha] = handleIdsOf(last, "t1");
+    const [beta] = handleIdsOf(last, "t2");
+    const [gamma] = handleIdsOf(last, "t3");
+    assert.ok(alpha && beta && gamma);
+    assert.equal(new Set([alpha, beta, gamma]).size, 3);
+    assert.equal(created.length, 3, "one child per task");
+    const byName = (reports: agentApi.TaskResult[]) =>
+      reports
+        .map(({ id, name, output }) => [name, id, output])
+        .sort(([a], [b]) => String(a).localeCompare(String(b)));
+    assert.deepEqual(byName(reportsIn(first)), [
+      ["alpha", alpha, `${childPrompt("a")}-report`],
+      ["beta", beta, `${childPrompt("b")}-report`],
+    ]);
     assert.deepEqual(
-      reportsIn(contexts[0]!).map(({ name, output }) => [name, output]),
+      markersIn(first)
+        .map((ids) => ids.join())
+        .sort(),
+      [alpha, beta].sort(),
+      "one marker per one-task batch",
+    );
+    assert.deepEqual(
+      byName(reportsIn(last)),
       [
-        ["alpha", `${childPrompt("a")}-report`],
-        ["beta", `${childPrompt("b")}-report`],
+        ["alpha", alpha, `${childPrompt("a")}-report`],
+        ["beta", beta, `${childPrompt("b")}-report`],
+        ["gamma", gamma, `${childPrompt("c")}-report`],
       ],
+      "the later report arrived, earlier reports kept once",
     );
+    assert.deepEqual(markersIn(last).at(-1), [gamma]);
     assert.deepEqual(
-      reportsIn(contexts[1]!).map(({ name }) => name),
-      ["alpha", "beta", "gamma"],
-      "the new sibling's return queue was drained, earlier reports kept once",
+      caller
+        .getTaskResults()
+        .map(({ id }) => id)
+        .sort(),
+      [alpha, beta, gamma].sort(),
     );
+    assert.equal(runIds.size, 1);
+    assert.equal(outer.getNode(id)?.state, caller);
+    assertGeometry(outer, geometry);
   });
 
-  test("a subagent's own task call nests its node; the grandchild's report reaches the original caller", async () => {
+  test("a subagent's own task call runs its grandchild natively; the grandchild's report reaches the original caller", async () => {
     const r = registry("caller", "alpha", "grand");
+    const combined = (prefix: string, interim: string) =>
+      Array.from({ length: 4 }, () => (context: Context) => {
+        const reports = reportsIn(context);
+        return reports.length === 0
+          ? fauxAssistantMessage(interim)
+          : fauxAssistantMessage(
+              `${prefix}${reports.map(({ output }) => output).join(",")}`,
+            );
+      });
     r.script("caller", [
       toolTurn(
         taskCall([
@@ -1198,13 +1239,7 @@ describe("task tool through a graph-driven agent", () => {
           },
         ]),
       ),
-      fauxAssistantMessage("caller interim"),
-      (context) =>
-        fauxAssistantMessage(
-          `combined: ${reportsIn(context)
-            .map(({ output }) => output)
-            .join(",")}`,
-        ),
+      ...combined("combined: ", "caller interim"),
     ]);
     r.script("alpha", [
       toolTurn(
@@ -1212,52 +1247,51 @@ describe("task tool through a graph-driven agent", () => {
           { name: "grand", task: "leaf work", model: r.model("grand") },
         ]),
       ),
-      fauxAssistantMessage("alpha interim"),
-      (context) =>
-        fauxAssistantMessage(
-          `alpha saw ${reportsIn(context)
-            .map(({ output }) => output)
-            .join(",")}`,
-        ),
+      ...combined("alpha saw ", "alpha interim"),
     ]);
     r.script("grand", [fauxAssistantMessage("grand-report")]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const created = trackSubagents(caller);
-    const execution = taskExecution(quiet);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    const parents: [Agent, Agent][] = [];
+    const created = trackSubagents(caller, (parent, child) =>
+      parents.push([parent, child]),
+    );
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
+    const geometry = geometryOf(outer);
 
     const results = await execution.run();
     assert.equal(
       contentText(results.get(id)?.content ?? []),
       "combined: alpha saw grand-report",
     );
-    const inner = innerOf(outer);
-    const nested: JuncoGraph[] = [];
-    inner.forEachNode((child, member) => {
-      if (child !== "root" && member.state instanceof JuncoGraph)
-        nested.push(member.state);
-    });
-    assert.equal(nested.length, 1, "one nested child scope");
     const [alpha, grand] = created;
     assert.ok(alpha && grand);
-    assert.equal(nested[0]!.getNode(graph.NodeId.create("root"))?.state, alpha);
-    let grandFound = false;
-    nested[0]!.forEachNode((child, member) => {
-      if (child !== "root" && child !== "$source" && child !== "$sink")
-        grandFound = member.state === grand;
-    });
-    assert.ok(grandFound);
+    assert.equal(created.length, 2);
+    assert.deepEqual(
+      parents,
+      [
+        [caller, alpha],
+        [alpha, grand],
+      ],
+      "the child acquired its own grandchild",
+    );
     assert.equal(r.calls("grand"), 1);
+    assert.equal(outer.getNode(id)?.state, caller);
+    assertGeometry(outer, geometry);
   });
 
-  test("a terminating hook, and a report queued while settlement is already pending, are processed once in the same session", async () => {
+  test("a terminating hook, and reports queued while settlement is already pending, are processed once in the same native run", async () => {
     const r = registry("caller", "worker");
     const seen: Context[] = [];
+    const step = (context: Context) => {
+      seen.push(context);
+      return markersIn(context).length === 2
+        ? fauxAssistantMessage("final")
+        : fauxAssistantMessage("after alpha");
+    };
     r.script("caller", [
       toolTurn(
         taskCall(
@@ -1272,20 +1306,13 @@ describe("task tool through a graph-driven agent", () => {
           "t2",
         ),
       ),
-      (context) => {
-        seen.push(context);
-        return fauxAssistantMessage("after alpha");
-      },
-      (context) => {
-        seen.push(context);
-        return fauxAssistantMessage("final");
-      },
+      ...Array.from({ length: 4 }, () => step),
     ]);
     r.script("worker", [
       fauxAssistantMessage("a-report"),
       fauxAssistantMessage("c-report"),
     ]);
-    const caller = await newCaller(r.models, "caller", [
+    const caller = await r.agent("caller", [
       new toolsApi.TaskTool(),
       new toolsApi.YieldTool(),
     ]);
@@ -1294,26 +1321,39 @@ describe("task tool through a graph-driven agent", () => {
         ? { terminate: true, content: [{ type: "text", text: "rewritten" }] }
         : undefined,
     );
-    const execution = taskExecution(quiet);
+    const runIds = mainRuns(caller);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
+    const geometry = geometryOf(outer);
 
     const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
-    assert.equal(seen.length, 2);
-    assert.deepEqual(
-      seen.map((context) => reportsIn(context).map(({ output }) => output)),
-      [["a-report"], ["a-report", "c-report"]],
-    );
+    const last = seen.at(-1);
+    assert.ok(last);
     assert.equal(
-      innerOf(outer).getNode(graph.NodeId.create("root"))?.state,
-      caller,
+      contentText(toolResultsIn(last).get("t2")?.content ?? []),
+      "rewritten",
+      "the terminating hook's rewrite was kept",
     );
+    assert.deepEqual(
+      reportsIn(last)
+        .map(({ output }) => output)
+        .sort(),
+      ["a-report", "c-report"],
+      "each report entered the context once",
+    );
+    assert.equal(r.calls("worker"), 2);
+    assert.equal(runIds.size, 1);
+    assert.equal(outer.getNode(id)?.state, caller);
+    assertGeometry(outer, geometry);
   });
+});
 
-  test("an invalid batch fails as an ordinary tool error before any child or graph change", async () => {
+describe("native task lifecycle and complaints", () => {
+  test("an invalid batch fails as an ordinary tool error before any child is acquired, leaving the caller's node unchanged", async () => {
     const r = registry("caller", "worker");
     const errors: string[] = [];
     r.script("caller", [
@@ -1337,15 +1377,13 @@ describe("task tool through a graph-driven agent", () => {
         return fauxAssistantMessage("no tasks");
       },
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
     const created = trackSubagents(caller);
-    const execution = taskExecution(quiet);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
 
     const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "no tasks");
@@ -1357,43 +1395,58 @@ describe("task tool through a graph-driven agent", () => {
     assert.match(errors[1]!, /Unknown active tool: missing/);
   });
 
-  test("an abort after acquisition and before publication closes the acquired children and keeps the caller's node", async () => {
+  test("an abort after acquisition and before admission closes the acquired children, admits nothing and keeps the caller's node", async () => {
     const r = registry("caller", "worker");
     r.script("caller", [
-      toolTurn(taskCall([{ task: "a" }, { task: "b" }], "t1")),
+      toolTurn(
+        taskCall(
+          [
+            { task: "a", model: r.model("worker") },
+            { task: "b", model: r.model("worker") },
+          ],
+          "t1",
+        ),
+      ),
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const created = trackSubagents(caller);
-    caller.hooks.on("after_tool", ({ toolCallId }) => {
-      // The batch was admitted; abort before the node can publish it.
-      if (toolCallId === "t1") void caller.abort();
-      return undefined;
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    let aborting: Promise<unknown> | undefined;
+    const children = childrenOf(caller, (_provider, _child, nth) => {
+      // Both children exist; the batch is still being prepared, so nothing is admitted yet.
+      if (nth === 2) aborting = caller.abort();
     });
-    const execution = taskExecution(quiet);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
+    const node = outer.getNode(id);
 
-    await assert.rejects(execution.run());
-    assert.equal(created.length, 2);
-    for (const child of created) assert.equal(child.status, "closed");
-    assert.equal(outer.getNode(id)?.state, caller, "nothing was published");
-    assert.equal(r.calls("worker"), 0);
+    // The aborted native run settles as it does; what matters is that nothing was admitted.
+    await execution.run().catch(() => undefined);
+    assert.ok(aborting);
+    await aborting;
+    assert.equal(children("worker").length, 2);
+    for (const child of children("worker"))
+      assert.equal(child.status, "closed");
+    assert.equal(outer.getNode(id), node, "the caller's node is unchanged");
+    assert.equal(node?.state, caller);
+    assert.equal(r.calls("worker"), 0, "no child ever started");
+    assert.deepEqual(caller.getTaskResults(), []);
+    assert.notEqual(
+      caller.status,
+      "closed",
+      "the aborted caller stays reusable",
+    );
   });
 
   test("closing the graph during acquisition creates no children", async () => {
     const r = registry("caller");
     r.script("caller", [toolTurn(taskCall([{ task: "a" }], "t1"))]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const execution = taskExecution(quiet);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
     let closing: Promise<unknown> | undefined;
     const acquired: Agent[] = [];
     caller.setSubagentObserver({
@@ -1415,45 +1468,56 @@ describe("task tool through a graph-driven agent", () => {
     );
   });
 
-  test("closing the graph after publication closes the caller and every worker", async () => {
-    const hold = holdTool();
-    const r = registry("caller", "worker");
+  test("closing the graph while children run closes the caller and every running child, with no late reports", async () => {
+    const holdA = waitingTool("holdA");
+    const holdB = waitingTool("holdB");
+    const r = registry("caller", "wa", "wb");
     r.script("caller", [
       toolTurn(
         taskCall([
-          { task: "a", model: r.model("worker"), tools: ["hold"] },
-          { task: "b", model: r.model("worker"), tools: [] },
+          { task: "a", model: r.model("wa"), tools: ["holdA"] },
+          { task: "b", model: r.model("wb"), tools: ["holdB"] },
         ]),
       ),
       fauxAssistantMessage("interim"),
     ]);
-    r.script("worker", [
-      toolTurn(fauxToolCall("hold", {}, { id: "h" })),
-      fauxAssistantMessage("b-report"),
+    r.script("wa", [
+      toolTurn(fauxToolCall("holdA", {}, { id: "ha" })),
       fauxAssistantMessage("a-report"),
     ]);
-    const caller = await newCaller(r.models, "caller", [
+    r.script("wb", [
+      toolTurn(fauxToolCall("holdB", {}, { id: "hb" })),
+      fauxAssistantMessage("b-report"),
+    ]);
+    const caller = await r.agent("caller", [
       new toolsApi.TaskTool(),
-      hold.tool,
+      holdA.tool,
+      holdB.tool,
     ]);
     const created = trackSubagents(caller);
-    const execution = taskExecution(quiet);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
+    const node = outer.getNode(id);
     const running = execution.run();
-    await hold.started;
-    assert.ok(outer.getNode(id)?.state instanceof JuncoGraph);
+    await Promise.all([holdA.started, holdB.started]);
+    assert.equal(outer.getNode(id), node);
+    assert.equal(node?.state, caller, "the caller's node never changed");
     const closing = outer.close();
-    hold.release();
+    holdA.release();
+    holdB.release();
     await assert.rejects(running);
     await closing;
     assert.equal(caller.status, "closed");
     assert.equal(created.length, 2);
     for (const child of created) assert.equal(child.status, "closed");
+    assert.equal(r.calls("wa"), 1, "no child answered after the close");
+    assert.equal(r.calls("wb"), 1);
+    assert.deepEqual(caller.getTaskResults(), [], "no late report arrived");
   });
 
-  test("a caller-owned promoted agent survives its round's close, which closes every worker, and runs again in a fresh round", async () => {
+  test("a caller-owned agent survives its round's close, which closes every child, and runs again in a fresh round with fresh task results", async () => {
     const r = registry("caller", "worker");
     r.script("caller", [
       toolTurn(taskCall([{ task: "a", model: r.model("worker") }])),
@@ -1462,13 +1526,11 @@ describe("task tool through a graph-driven agent", () => {
       fauxAssistantMessage("round 2 final"),
     ]);
     r.script("worker", [fauxAssistantMessage("a-report")]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
     const created = trackSubagents(caller);
     const round = async (prompt: string) => {
       const execution = await JuncoGraph.fromYaml(
-        `graph:\n  nodes:\n    caller:\n      prompt: ${prompt}\n  edges:\n    - from: caller\n      to: $sink\n`,
+        `graph:\n  nodes:\n    caller:\n      prompt: ${prompt}\n  edges:\n    - from: caller\n      to: $sink\n      schema:\n        type: object\n        required: [role, content]\n`,
         {
           cwd: process.cwd(),
           scheduler: () => schedules.parallel(),
@@ -1479,19 +1541,31 @@ describe("task tool through a graph-driven agent", () => {
       );
       try {
         const results = await execution.run();
-        return contentText(
-          results.get(graph.NodeId.create("caller"))?.content ?? [],
-        );
+        const result = results.get(graph.NodeId.create("caller"));
+        assert.ok(Value.Check(AssistantMessageSchema, result));
+        return {
+          text: contentText(result.content),
+          tasks: caller
+            .getTaskResults()
+            .map(({ status, output }) => `${status}:${output}`),
+        };
       } finally {
         await execution.graph.close();
       }
     };
 
-    assert.equal(await round("Start"), "round 1 final");
+    assert.deepEqual(await round("Start"), {
+      text: "round 1 final",
+      tasks: ["completed:a-report"],
+    });
     assert.equal(created.length, 1);
     assert.equal(created[0]!.status, "closed");
     assert.notEqual(caller.status, "closed");
-    assert.equal(await round("Again"), "round 2 final");
+    assert.deepEqual(
+      await round("Again"),
+      { text: "round 2 final", tasks: [] },
+      "the new round starts with fresh task results",
+    );
     assert.equal(created.length, 1);
     assert.notEqual(caller.status, "closed");
   });
@@ -1515,19 +1589,20 @@ describe("task tool through a graph-driven agent", () => {
         errorMessage: "boom",
       }),
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const execution = taskExecution(quiet);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
 
-    const queued = await driveObservingReports(execution);
-    const final = outer.result(id);
-    assert.ok(O.isSome(final), "the caller's original node finished");
-    assert.equal(contentText(final.value.content), "final");
+    const results = await execution.run();
+    assert.equal(
+      outer.getNode(id)?.state,
+      caller,
+      "the caller's node never changed",
+    );
+    assert.equal(contentText(results.get(id)?.content ?? []), "final");
     assert.ok(finalContext);
     const reports = reportsIn(finalContext);
     assert.equal(reports.length, 1);
@@ -1539,21 +1614,16 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(report?.error, "boom");
     assert.equal(report?.output, "partial output");
     assert.deepEqual(
-      queued.map(({ kind, report }) => [kind, report.id, report.status]),
-      [["error", report?.id, "failed"]],
+      caller
+        .getTaskResults()
+        .map((result) => ({ type: "task_result", ...result })),
+      [report],
+      "the delivered failure is the caller's one task result",
     );
     const ignored = toolResultsIn(finalContext).get("ignore-w");
     assert.equal(ignored?.isError, false);
     assert.equal(textOf(ignored!), `Ignored task ${report?.id}.`);
     assert.deepEqual(markersIn(finalContext), [[report?.id]]);
-    const value = innerOf(outer).result(graph.NodeId.create(report?.id ?? ""));
-    assert.ok(
-      O.isSome(value),
-      "a genuine error stop keeps its assistant result",
-    );
-    assert.equal(contentText(value.value.content), "partial output");
-    assert.equal(value.value.stopReason, "error");
-    assert.equal(value.value.errorMessage, "boom");
   });
 
   test("an ignored thrown worker failure is consumed internally; only its sibling's report and the completion marker reach the caller", async () => {
@@ -1579,9 +1649,7 @@ describe("task tool through a graph-driven agent", () => {
     ]);
     r.script("bad", [fauxAssistantMessage("must not run")]);
     r.script("good", [fauxAssistantMessage("good-report")]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
     caller.setTaskFailurePolicy("ignore");
     let bad: Agent | undefined;
     trackSubagents(caller, (parent, child, index) => {
@@ -1589,16 +1657,19 @@ describe("task tool through a graph-driven agent", () => {
       bad = child;
       explode(child, "worker exploded");
     });
-    const execution = taskExecution(quiet);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
 
-    const queued = await driveObservingReports(execution);
-    const final = outer.result(id);
-    assert.ok(O.isSome(final), "the caller's original node finished");
-    assert.equal(contentText(final.value.content), "handled both");
+    const results = await execution.run();
+    assert.equal(
+      outer.getNode(id)?.state,
+      caller,
+      "the caller's node never changed",
+    );
+    assert.equal(contentText(results.get(id)?.content ?? []), "handled both");
     assert.deepEqual(
       handles.map(({ name }) => name),
       ["bad", "good"],
@@ -1611,25 +1682,20 @@ describe("task tool through a graph-driven agent", () => {
       "the failed worker never reached its model",
     );
 
-    for (const handle of [badId, goodId])
-      assert.equal(
-        queued.filter(({ report }) => report.id === handle).length,
-        1,
-        `one queued report for ${handle}`,
-      );
-    assert.equal(queued.length, 2);
-    const failed = queued.find(({ report }) => report.id === badId)!;
-    assert.equal(failed.kind, "error");
-    assert.equal(failed.report.name, "bad");
-    assert.equal(failed.report.status, "failed");
-    assert.equal(failed.report.output, "");
-    assert.equal(failed.report.stopReason, "error");
-    assert.match(failed.report.error ?? "", /worker exploded/);
-    const completed = queued.find(({ report }) => report.id === goodId)!;
-    assert.equal(completed.kind, "followUp");
-    assert.equal(completed.report.name, "good");
-    assert.equal(completed.report.status, "completed");
-    assert.equal(completed.report.output, "good-report");
+    assert.deepEqual(
+      caller.getTaskResults(),
+      [
+        {
+          id: goodId,
+          name: "good",
+          attempt: 1,
+          status: "completed",
+          output: "good-report",
+          stopReason: "stop",
+        },
+      ],
+      "only the sibling's completion was delivered",
+    );
 
     assert.ok(finalContext);
     assert.deepEqual(
@@ -1639,25 +1705,12 @@ describe("task tool through a graph-driven agent", () => {
     );
     assert.deepEqual(markersIn(finalContext), [[badId, goodId]]);
 
-    const inner = innerOf(outer);
-    const badNode = inner.getNode(graph.NodeId.create(badId));
     assert.ok(bad);
-    assert.equal(badNode?.state, bad);
-    assert.equal(badNode?.status, "done");
-    assert.ok(
-      O.isNone(inner.result(graph.NodeId.create(badId))),
-      "no invented value",
-    );
-    assert.equal(bad.status, "closed");
-    const goodValue = inner.result(graph.NodeId.create(goodId));
-    assert.ok(O.isSome(goodValue));
-    assert.equal(contentText(goodValue.value.content), "good-report");
-    await outer.close();
+    assert.equal(bad.status, "closed", "the failed child was closed");
   });
 
-  test("an ignored failed expanded task cancels its blocked descendants and is consumed once by its parent", async () => {
+  test("an ignored failed task cancels its blocked grandchildren and is consumed once by the caller", async () => {
     const waiting = waitingTool("wait", { endOnAbort: true });
-    let rootFailing = false;
     const r = registry("caller", "child", "fast", "slow");
     let handles: TaskToolDetails["tasks"] = [];
     let finalContext: Context | undefined;
@@ -1668,7 +1721,7 @@ describe("task tool through a graph-driven agent", () => {
             name: "child",
             task: "delegate",
             model: r.model("child"),
-            tools: ["task", "yield", "wait"],
+            tools: ["task", "wait"],
           },
         ]),
       ),
@@ -1694,105 +1747,71 @@ describe("task tool through a graph-driven agent", () => {
             name: "slow",
             task: "slow work",
             model: r.model("slow"),
-            tools: ["yield", "wait"],
+            tools: ["wait"],
           },
         ]),
       ),
-      fauxAssistantMessage("child interim"),
+      // The child's run fails while its slow grandchild is blocked.
+      async () => {
+        await waiting.started;
+        return fauxAssistantMessage("child partial", {
+          stopReason: "error",
+          errorMessage: "nested worker exploded",
+        });
+      },
       fauxAssistantMessage("child must not answer"),
     ]);
     r.script("fast", [fauxAssistantMessage("fast-report")]);
-    r.script(
-      "slow",
-      Array.from(
-        { length: 16 },
-        (_, turn) => () =>
-          toolTurn(
-            yieldCall(
-              "wait for the root's failing drive",
-              `slow-yield-${turn}`,
-            ),
-          ),
-      ),
-    );
-    const caller = await newCaller(r.models, "caller", [
+    r.script("slow", [
+      toolTurn(fauxToolCall("wait", {}, { id: "slow-wait" })),
+      fauxAssistantMessage("slow must not answer"),
+    ]);
+    const caller = await r.agent("caller", [
       new toolsApi.TaskTool(),
-      new toolsApi.YieldTool(),
       waiting.tool,
     ]);
     caller.setTaskFailurePolicy("ignore");
-    const created = trackSubagents(caller, (parent, child, index) => {
-      if (parent !== caller) {
-        if (index === 1)
-          child.hooks.on("after_tool", async ({ toolName }, context) => {
-            if (toolName === "yield" && rootFailing)
-              await waiting.tool.execute(
-                "slow-live-wait",
-                {},
-                context.abortSignal,
-              );
-            return undefined;
-          });
-        return;
-      }
-      let runs = 0;
-      child.hooks.on("before_drive", async ({ operation }) => {
-        if (operation !== "run" || ++runs !== 2) return;
-        // The slow grandchild is blocked in the same column when the child's root fails.
-        rootFailing = true;
-        await waiting.started;
-        throw new Error("nested worker exploded");
-      });
-    });
-    const execution = taskExecution(quiet);
+    const created = trackSubagents(caller);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
 
-    const queued = await driveObservingReports(execution);
+    const results = await execution.run();
     await waiting.aborted;
-    const final = outer.result(id);
-    assert.ok(O.isSome(final), "the caller's original node finished");
-    assert.equal(contentText(final.value.content), "caller handled");
+    assert.equal(
+      outer.getNode(id)?.state,
+      caller,
+      "the caller's node never changed",
+    );
+    assert.equal(contentText(results.get(id)?.content ?? []), "caller handled");
     const [childHandle] = handles;
     assert.ok(childHandle && handles.length === 1);
     assert.equal(childHandle.name, "child");
 
-    assert.equal(
-      queued.length,
-      1,
-      "only the child's report was queued for the caller",
-    );
-    const [{ kind, report }] = queued as [QueuedReport];
-    assert.equal(kind, "error");
-    assert.equal(report.id, childHandle.id);
-    assert.equal(report.name, "child");
-    assert.equal(report.status, "failed");
-    assert.equal(report.output, "");
-    assert.equal(report.stopReason, "error");
-    assert.match(report.error ?? "", /nested worker exploded/);
+    assert.deepEqual(caller.getTaskResults(), [], "the failure was ignored");
     assert.ok(finalContext);
-    assert.deepEqual(reportsIn(finalContext), [], "the failure was ignored");
+    assert.deepEqual(
+      reportsIn(finalContext),
+      [],
+      "no report reached the caller",
+    );
     assert.deepEqual(markersIn(finalContext), [[childHandle.id]]);
 
     assert.equal(created.length, 3, "the child and both grandchildren");
     for (const agent of created) assert.equal(agent.status, "closed");
-    const inner = innerOf(outer);
-    const childNode = inner.getNode(graph.NodeId.create(childHandle.id));
-    assert.ok(childNode?.state instanceof JuncoGraph, "the task had expanded");
-    assert.equal(childNode.status, "done");
-    assert.ok(O.isNone(inner.result(graph.NodeId.create(childHandle.id))));
-    await outer.close();
-  }, 5_000);
+    assert.equal(r.calls("child"), 2, "the failed child never answered again");
+    assert.equal(r.calls("slow"), 1, "the blocked grandchild was cancelled");
+  });
 
-  test("complaints follow the caller into its Spawn root and children keep their own task ids", async () => {
+  test("complaints keep naming the caller's node with its business messages while children keep their own task ids", async () => {
     const r = registry("caller", "worker");
     const complain = (complaint: string, id: string) =>
       toolTurn(fauxToolCall("complain", { complaint }, { id }));
     const seen: { handles?: TaskToolDetails["tasks"] } = {};
     r.script("caller", [
-      complain("before expansion", "c1"),
+      complain("before launch", "c1"),
       toolTurn(
         taskCall([
           { name: "w", task: "do w", model: r.model("worker"), tools: [] },
@@ -1800,7 +1819,7 @@ describe("task tool through a graph-driven agent", () => {
       ),
       (context) => {
         seen.handles = handlesIn(context);
-        return complain("after expansion", "c2");
+        return complain("after launch", "c2");
       },
       fauxAssistantMessage("interim"),
       complain("with reports", "c3"),
@@ -1810,15 +1829,13 @@ describe("task tool through a graph-driven agent", () => {
       complain("child blocked", "w1"),
       fauxAssistantMessage("worker-report"),
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
-    const execution = taskExecution(quiet);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const before = toolsApi.issueLog.length;
     const id = outer.addNode(callerNode(caller, "Start"));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
     const results = await execution.run();
     assert.equal(contentText(results.get(id)!.content), "combined");
 
@@ -1827,28 +1844,35 @@ describe("task tool through a graph-driven agent", () => {
     const issues = toolsApi.issueLog.snapshot().slice(before);
     const byText = new Map(issues.map((issue) => [issue.complaint, issue]));
     assert.equal(issues.length, 4);
-    assert.equal(byText.get("before expansion")?.nodeId, id);
-    assert.deepEqual(byText.get("before expansion")?.messages, []);
-    // Task admission no longer pauses: the same run complains before its node is promoted.
-    assert.equal(byText.get("after expansion")?.nodeId, id);
-    assert.deepEqual(byText.get("after expansion")?.messages, []);
+    assert.equal(byText.get("before launch")?.nodeId, id);
+    assert.deepEqual(byText.get("before launch")?.messages, []);
+    // Task admission never changes the caller's node: every caller complaint names it.
+    assert.equal(byText.get("after launch")?.nodeId, id);
+    assert.deepEqual(byText.get("after launch")?.messages, []);
     const reports = byText.get("with reports");
-    assert.equal(reports?.nodeId, "root");
+    assert.equal(reports?.nodeId, id);
     assert.deepEqual(
-      reports?.messages.map((message) => message.id),
-      [`${child.id}->root`],
+      reports?.messages,
+      [],
+      "reports are not business messages",
     );
-    const payload = reports?.messages[0]?.payload as AgenticInput | undefined;
-    assert.ok(payload?.kind === "followUp");
-    assert.deepEqual(JSON.parse(payload.text), {
-      type: "task_result",
-      id: child.id,
-      name: "w",
-      attempt: 1,
-      status: "completed",
-      output: "worker-report",
-      stopReason: "stop",
-    });
+    const delivered = reports?.prompt.messages.flatMap((message) =>
+      message.role === "user" &&
+      textOf(message).startsWith('{"type":"task_result"')
+        ? [JSON.parse(textOf(message))]
+        : [],
+    );
+    assert.deepEqual(delivered, [
+      {
+        type: "task_result",
+        id: child.id,
+        name: "w",
+        attempt: 1,
+        status: "completed",
+        output: "worker-report",
+        stopReason: "stop",
+      },
+    ]);
     const childIssue = byText.get("child blocked");
     assert.equal(childIssue?.nodeId, child.id);
     // The child starts from its bound task prompt, not a delivered message.
@@ -1860,10 +1884,12 @@ describe("task tool through a graph-driven agent", () => {
       ),
     );
   }, 5_000);
+});
 
+describe("native task failure policies", () => {
   test("an assigned batch launches its stored assignments from task({}) once; a rejected admission can be retried", async () => {
     const r = registry("caller", "a", "b");
-    const prompts = { a: worker(r, "a"), b: worker(r, "b") };
+    const prompts = { a: r.worker("a"), b: r.worker("b") };
     let finalContext: Context | undefined;
     const launch = (id: string) => fauxToolCall("task", {}, { id });
     r.script("caller", [
@@ -1873,12 +1899,10 @@ describe("task tool through a graph-driven agent", () => {
         return fauxAssistantMessage("final");
       }),
     ]);
-    const caller = await newCaller(r.models, "caller", [
-      new toolsApi.TaskTool(),
-    ]);
+    const caller = await r.agent("caller", [new toolsApi.TaskTool()]);
     const batch = {
       context: "Original context.",
-      tasks: [taskOn(r, "a"), taskOn(r, "b")],
+      tasks: [r.task("a"), r.task("b")],
     };
     await caller.setTaskBatch(batch);
     batch.context = "tampered";
@@ -1888,11 +1912,11 @@ describe("task tool through a graph-driven agent", () => {
     const children = childrenOf(caller, undefined, () => {
       if (++acquisitions === 1) throw new Error("admission rejected");
     });
-    const execution = taskExecution(quiet);
+    const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
     const id = outer.addNode(callerNode(caller));
-    wireOutput(outer, id);
+    ports.connect(outer, id);
 
     const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "final");
@@ -1918,20 +1942,24 @@ describe("task tool through a graph-driven agent", () => {
       a: ["Original context.\n\ndo a"],
       b: ["Original context.\n\ndo b"],
     });
+    assert.equal(outer.getNode(id)?.state, caller);
     assert.deepEqual(
-      taskNodes(outer),
-      handles.map(({ id }) => id),
+      caller
+        .getTaskResults()
+        .map(({ id }) => id)
+        .sort(),
+      handles.map(({ id }) => id).sort(),
     );
     assert.deepEqual(markersIn(finalContext), [handles.map(({ id }) => id)]);
   });
 
   test("ignore: failed attempts are closed and dropped; the caller answers from the success after one marker", async () => {
     const r = registry("caller", "a", "b", "c");
-    worker(r, "a");
-    worker(r, "b", 1);
-    worker(r, "c");
+    r.worker("a");
+    r.worker("b", 1);
+    r.worker("c");
     let finalContext: Context | undefined;
-    const { caller, outer, execution, id } = await failingCaller(
+    const { caller, execution, id } = await failingCaller(
       r,
       ["a", "b", "c"],
       "ignore",
@@ -1955,7 +1983,8 @@ describe("task tool through a graph-driven agent", () => {
       reportsIn(finalContext).map(({ name, status }) => [name, status]),
       [["c", "completed"]],
     );
-    assert.deepEqual(markersIn(finalContext), [taskNodes(outer)]);
+    assert.deepEqual(markersIn(finalContext), [handleIdsOf(finalContext)]);
+    assertDelivered(caller, finalContext);
     assert.equal(r.calls("a"), 0, "the thrown failure never reached its model");
     assert.equal(r.calls("b"), 1);
     for (const name of ["a", "b", "c"]) assert.equal(children(name).length, 1);
@@ -1963,13 +1992,13 @@ describe("task tool through a graph-driven agent", () => {
       assert.equal(children(name)[0]?.status, "closed");
   });
 
-  test("ignore: when every task fails, the marker wakes the settled caller for a fresh final answer", async () => {
+  test("ignore: when every task fails, the caller answers after the marker in the same native run", async () => {
     const r = registry("caller", "a", "b", "c");
-    worker(r, "a");
-    worker(r, "b", 1);
-    worker(r, "c", 1);
+    r.worker("a");
+    r.worker("b", 1);
+    r.worker("c", 1);
     let finalContext: Context | undefined;
-    const { caller, outer, execution, id } = await failingCaller(
+    const { caller, execution, id } = await failingCaller(
       r,
       ["a", "b", "c"],
       "ignore",
@@ -1981,7 +2010,7 @@ describe("task tool through a graph-driven agent", () => {
     childrenOf(caller, (provider, child) => {
       if (provider === "a") explode(child, "a exploded");
     });
-
+    const runs = mainRuns(caller);
     const results = await execution.run();
     assert.equal(contentText(results.get(id)?.content ?? []), "fresh final");
     assert.ok(finalContext);
@@ -1994,15 +2023,22 @@ describe("task tool through a graph-driven agent", () => {
       "the caller answered before the marker",
     );
     assert.deepEqual(reportsIn(finalContext), []);
-    assert.deepEqual(markersIn(finalContext), [taskNodes(outer)]);
+    assert.deepEqual(markersIn(finalContext), [handleIdsOf(finalContext)]);
+    assert.match(
+      userTexts(finalContext.messages).at(-1) ?? "",
+      /^\{"type":"task_batch_complete"/,
+      "the final answer follows the marker",
+    );
+    assert.deepEqual(caller.getTaskResults(), []);
+    assert.equal(runs.size, 1, "one native caller run");
   });
 
   test("{ retries: 2 }: a task failing twice reruns with its pinned prompt and model while its sibling runs once", async () => {
     const r = registry("caller", "a", "b");
-    const prompts = worker(r, "a", 2);
-    worker(r, "b");
+    const prompts = r.worker("a", 2);
+    r.worker("b");
     let finalContext: Context | undefined;
-    const { caller, outer, execution } = await failingCaller(
+    const { caller, execution } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 2 },
@@ -2020,12 +2056,7 @@ describe("task tool through a graph-driven agent", () => {
     assert.ok(finalContext);
     const [a, b] = markersIn(finalContext)[0] ?? [];
     assert.ok(a && b);
-    assert.deepEqual(taskNodes(outer), [
-      a,
-      b,
-      `${a}:attempt:2`,
-      `${a}:attempt:3`,
-    ]);
+    assert.deepEqual(handleIdsOf(finalContext), [a, b]);
     assert.equal(children("a").length, 3);
     assert.equal(children("b").length, 1);
     assert.equal(r.calls("a"), 3);
@@ -2045,15 +2076,16 @@ describe("task tool through a graph-driven agent", () => {
       [[[3, "completed"]], [[1, "completed"]]],
     );
     assert.equal(markersIn(finalContext).length, 1);
+    assertDelivered(caller, finalContext);
   });
 
   test("{ retries: 2 }: after exhaustion every failure asks; an explicit retry does not reset the budget", async () => {
     const r = registry("caller", "a", "b");
-    worker(r, "a", 4);
-    worker(r, "b");
+    r.worker("a", 4);
+    r.worker("b");
     const questions: number[] = [];
     let finalContext: Context | undefined;
-    const { caller, outer, execution } = await failingCaller(
+    const { caller, execution } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 2 },
@@ -2106,11 +2138,11 @@ describe("task tool through a graph-driven agent", () => {
 
   test("{ retries: 0 }: the first failure asks; invalid decisions change nothing and a retry reuses the logical id", async () => {
     const r = registry("caller", "a", "b");
-    worker(r, "a", 1);
-    worker(r, "b");
+    r.worker("a", 1);
+    r.worker("b");
     let finalContext: Context | undefined;
     let probed = false;
-    const { caller, outer, execution, id } = await failingCaller(
+    const { caller, execution, id } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 0 },
@@ -2149,7 +2181,7 @@ describe("task tool through a graph-driven agent", () => {
     ]);
     assert.equal(children("a").length, 2);
     assert.equal(children("b").length, 1);
-    assert.deepEqual(taskNodes(outer), [a, b, `${a}:attempt:2`]);
+    assert.deepEqual(handleIdsOf(finalContext), [a, b]);
     assert.deepEqual(
       reportsIn(finalContext)
         .filter((report) => report.id === a)
@@ -2164,12 +2196,13 @@ describe("task tool through a graph-driven agent", () => {
       ],
     );
     assert.equal(markersIn(finalContext).length, 1);
+    assertDelivered(caller, finalContext);
   });
 
   test("a caller that settles with a consumed, undecided failure question fails its graph", async () => {
     const r = registry("caller", "a");
-    worker(r, "a", 1);
-    const { caller, outer, execution } = await failingCaller(
+    r.worker("a", 1);
+    const { caller, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 0 },
@@ -2181,7 +2214,7 @@ describe("task tool through a graph-driven agent", () => {
       (error: unknown) => error,
     );
     assert.ok(
-      causesOf(failure).some(
+      [...errorGraph(failure)].some(
         (cause) =>
           cause instanceof agentApi.JuncoAgentError &&
           /^Task failure decisions required: task-/.test(cause.message),
@@ -2192,10 +2225,10 @@ describe("task tool through a graph-driven agent", () => {
     // A refused explicit retry restores the pending decision; settling without one still fails.
     {
       const r = registry("caller", "a");
-      worker(r, "a", 1);
+      r.worker("a", 1);
       let acquisitions = 0;
       let rejections = 0;
-      const { caller, outer, execution } = await failingCaller(
+      const { caller, execution } = await failingCaller(
         r,
         ["a"],
         { retries: 0 },
@@ -2215,7 +2248,7 @@ describe("task tool through a graph-driven agent", () => {
       );
       assert.equal(rejections, 1);
       assert.ok(
-        causesOf(failure).some(
+        [...errorGraph(failure)].some(
           (cause) =>
             cause instanceof agentApi.JuncoAgentError &&
             cause.code === "invalid_state" &&
@@ -2228,12 +2261,12 @@ describe("task tool through a graph-driven agent", () => {
 
   test("a rejected retry allocation consumes a retry and creates no attempt; exhaustion asks the caller", async () => {
     const r = registry("caller", "a");
-    worker(r, "a", 1);
+    r.worker("a", 1);
     let acquisitions = 0;
     let rejections = 0;
-    const questions: Report[] = [];
+    const questions: agentApi.TaskResult[] = [];
     let finalContext: Context | undefined;
-    const { caller, outer, execution } = await failingCaller(
+    const { caller, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 1 },
@@ -2274,15 +2307,68 @@ describe("task tool through a graph-driven agent", () => {
     assert.match(textOf(tools.get("retry")!), /no capacity/);
     assert.equal(tools.get("ignore")?.isError, false);
     assert.equal(children("a").length, 1);
-    assert.deepEqual(taskNodes(outer), [questions[0]?.id]);
+    assert.deepEqual(handleIdsOf(finalContext), [questions[0]?.id]);
     assert.equal(markersIn(finalContext).length, 1);
+    assertDelivered(caller, finalContext);
+  });
+
+  test("a refused retry's thrown value replaces the worker error and is reported once, even undefined or cyclic", async () => {
+    const leaf = new Error("leaf");
+    const outer = new AggregateError([leaf, leaf], "outer");
+    outer.cause = outer;
+    for (const [fault, expected] of [
+      [undefined, "undefined"],
+      [outer, "AggregateError: outer\nError: leaf"],
+    ] as const) {
+      const r = registry("caller", "a");
+      r.worker("a", 1);
+      const questions: agentApi.TaskResult[] = [];
+      let finalContext: Context | undefined;
+      const { caller, execution, id } = await failingCaller(
+        r,
+        ["a"],
+        { retries: 1 },
+        answering(
+          (report) => {
+            questions.push(report);
+            return [decision("ignore", report, "ignore")];
+          },
+          (context) => {
+            finalContext = context;
+            return fauxAssistantMessage("final");
+          },
+        ),
+      );
+      // The launch acquires; the automatic retry's acquisition throws the raw value.
+      let acquisitions = 0;
+      const children = childrenOf(caller, undefined, () => {
+        if (++acquisitions > 1) throw fault;
+      });
+
+      const results = await execution.run();
+      assert.equal(contentText(results.get(id)?.content ?? []), "final");
+      assert.ok(finalContext);
+      assert.equal(acquisitions, 2);
+      assert.deepEqual(
+        questions.map(({ attempt, status, error, decisionRequired }) => [
+          attempt,
+          status,
+          error,
+          decisionRequired,
+        ]),
+        [[1, "failed", expected, true]],
+      );
+      assert.equal(reportsIn(finalContext).length, 1);
+      assert.deepEqual(markersIn(finalContext), [handleIdsOf(finalContext)]);
+      assert.equal(children("a").length, 1);
+    }
   });
 
   test("a failed attempt whose teardown fails fails the graph and starts no replacement, even under ignore", async () => {
     for (const policy of ["ignore", { retries: 1 }] as const) {
       const r = registry("caller", "a");
-      worker(r, "a", 1);
-      const { caller, outer, execution } = await failingCaller(
+      r.worker("a", 1);
+      const { caller, execution } = await failingCaller(
         r,
         ["a"],
         policy,
@@ -2310,7 +2396,7 @@ describe("task tool through a graph-driven agent", () => {
           () => assert.fail("the graph failed"),
           (error: unknown) => error,
         );
-        const causes = causesOf(failure);
+        const causes = [...errorGraph(failure)];
         assert.ok(
           causes.some(
             (cause) =>
@@ -2326,14 +2412,17 @@ describe("task tool through a graph-driven agent", () => {
     }
   });
 
-  test("closing the graph while a failure retires propagates cancellation without retrying", async () => {
+  test("closing the graph while a failed attempt retires closes it without retrying or reporting", async () => {
     const r = registry("caller", "a");
     let closing: Promise<unknown> | undefined;
     let outerGraph: JuncoGraph | undefined;
     r.script("a", [
       () => {
         closing = outerGraph?.close();
-        return outcome("a", true, 1);
+        return fauxAssistantMessage("a partial 1", {
+          stopReason: "error",
+          errorMessage: "a boom 1",
+        });
       },
       fauxAssistantMessage("must not run"),
     ]);
@@ -2354,12 +2443,14 @@ describe("task tool through a graph-driven agent", () => {
     assert.equal(children("a").length, 1);
     assert.equal(children("a")[0]?.status, "closed");
     assert.equal(caller.status, "closed");
+    assert.deepEqual(caller.getTaskResults(), []);
   });
 
-  test("an abort after a retry is allocated and before publication closes the new attempt", async () => {
+  test("an abort while a retry is acquired closes the new attempt before it starts", async () => {
     const r = registry("caller", "a");
-    worker(r, "a", 1);
-    const { caller, outer, execution } = await failingCaller(
+    r.worker("a", 1);
+    let aborted: Promise<unknown> | undefined;
+    const { caller, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 0 },
@@ -2368,15 +2459,22 @@ describe("task tool through a graph-driven agent", () => {
         () => assert.fail("no marker"),
       ),
     );
-    caller.hooks.on("after_tool", ({ toolCallId }) => {
-      if (toolCallId === "retry") void caller.abort();
-      return undefined;
+    // The retry's child exists but has not started when its caller aborts.
+    const children = childrenOf(caller, (_provider, _child, nth) => {
+      if (nth === 2) aborted = caller.abort();
     });
-    const children = childrenOf(caller);
-    await assert.rejects(execution.run());
+    // The aborted native run settles (or fails) on its own terms; the tasks are what matter here.
+    await execution.run().catch(() => {});
+    await aborted;
+    assert.notEqual(
+      caller.status,
+      "closed",
+      "an aborted caller stays reusable",
+    );
     assert.equal(children("a").length, 2, "the retry was allocated");
     for (const child of children("a")) assert.equal(child.status, "closed");
     assert.equal(r.calls("a"), 1, "the retry never ran");
+    assert.deepEqual(caller.getTaskResults(), []);
   });
 });
 
@@ -2385,34 +2483,27 @@ type Recorded = {
   readonly event: toolsApi.ProfileEvent<string>;
 };
 
-/** A session recording every event with its context path; contexts are interned frozen views. */
-function testRecorder(session: object = {}) {
+/** A root recorder keeping every event with its context path; contexts come from the shared utility. */
+function testRecorder() {
   const events: Recorded[] = [];
-  const views = new Map<string, toolsApi.ProfileRecorder<string>>();
-  const view = (path: string): toolsApi.ProfileRecorder<string> => {
-    const known = views.get(path);
-    if (known !== undefined) return known;
-    const created: toolsApi.ProfileRecorder<string> = Object.freeze({
-      root: session,
-      path,
-      add_context: (id: string) =>
-        id === ""
-          ? created
-          : view(
-              path === ""
-                ? toolsApi.profilePath([id])
-                : `${path}::${toolsApi.profilePath([id])}`,
-            ),
-      record: (event: toolsApi.ProfileEvent<string>) => {
-        events.push({ path, event });
-      },
-      flush: async () => {},
-      close: async () => {},
-    });
-    views.set(path, created);
-    return created;
-  };
-  return { recorder: view(""), events };
+  const recorder: toolsApi.ProfileRecorder<string> = Object.freeze({
+    get root() {
+      return recorder;
+    },
+    path: "",
+    add_context: (id: string) => contexts.add([], id),
+    record: (event: toolsApi.ProfileEvent<string>) => {
+      events.push({ path: "", event });
+    },
+    flush: async () => {},
+    close: async () => {},
+  });
+  const contexts = toolsApi.profileContexts(
+    recorder,
+    (_ids, path, event) => events.push({ path, event }),
+    () => {},
+  );
+  return { recorder, events };
 }
 
 /** Summed counters of `operation`'s metrics at `path`, and its latest gauges. */
@@ -2443,44 +2534,20 @@ const graphPaths = (events: readonly Recorded[]) =>
     events.flatMap(({ path, event }) =>
       event.kind !== "usage" &&
       event.kind !== "resource" &&
+      event.kind !== "probe" &&
       event.category === "graph"
         ? [path]
         : [],
     ),
   );
 
-describe("task promotion under a recorder", () => {
-  async function recordedCaller(
-    r: ReturnType<typeof registry>,
-    names: string[],
-    policy: agentApi.TaskFailurePolicy,
-    turns: FauxResponseStep[],
-  ) {
-    const { recorder, events } = testRecorder();
-    r.script("caller", [
-      toolTurn(taskCall(names.map((name) => taskOn(r, name)))),
-      ...turns,
-    ]);
-    const caller = await newCaller(
-      r.models,
-      "caller",
-      [new toolsApi.TaskTool()],
-      undefined,
-      recorder,
-    );
-    caller.setTaskFailurePolicy(policy);
-    const execution = taskExecution(quiet, recorder);
-    const outer = execution.graph;
-    closers.push(() => outer.close());
-    wireOutput(outer, outer.addNode(callerNode(caller)));
-    return { caller, outer, execution, events };
-  }
-
-  test("retries record caller, caller::root, sibling task and attempt paths and lifecycle counts", async () => {
+describe("native tasks under a recorder", () => {
+  test("retries record lifecycle at caller and attempts at attempt paths, with only real graph paths", async () => {
     const r = registry("caller", "a", "b");
-    worker(r, "a", 2);
-    worker(r, "b");
-    const { caller, outer, execution, events } = await recordedCaller(
+    r.worker("a", 2);
+    r.worker("b");
+    const { recorder, events } = testRecorder();
+    const { caller, execution } = await failingCaller(
       r,
       ["a", "b"],
       { retries: 2 },
@@ -2488,27 +2555,29 @@ describe("task promotion under a recorder", () => {
         () => assert.fail("no failure question"),
         () => fauxAssistantMessage("final"),
       ),
+      recorder,
     );
 
     await execution.run();
-    const [a, b] = taskNodes(outer);
-    assert.ok(a && b);
+    const results = caller.getTaskResults();
+    const a = results.find((result) => result.attempt === 3)?.id;
+    const b = results.find((result) => result.attempt === 1)?.id;
+    assert.ok(a && b && a !== b);
     const escaped = (id: string) => `caller::${toolsApi.profilePath([id])}`;
+    assert.deepEqual(graphPaths(events), new Set(["", "caller", "$sink"]));
+    assert.equal(escaped(`${a}:attempt:2`), `caller::${a}%3Aattempt%3A2`);
+    const attemptPaths = new Set(
+      events.flatMap(({ path }) => (path.startsWith("caller::") ? [path] : [])),
+    );
     assert.deepEqual(
-      graphPaths(events),
+      attemptPaths,
       new Set([
-        "",
-        "caller",
-        "$sink",
-        "caller::root",
-        "caller::$sink",
         escaped(a),
         escaped(b),
         escaped(`${a}:attempt:2`),
         escaped(`${a}:attempt:3`),
       ]),
     );
-    assert.equal(escaped(`${a}:attempt:2`), `caller::${a}%3Aattempt%3A2`);
     const { counters, gauges } = metricsAt(events, "caller", "lifecycle");
     assert.deepEqual(counters, {
       batches_admitted: 1,
@@ -2521,30 +2590,30 @@ describe("task promotion under a recorder", () => {
       batches_completed: 1,
     });
     assert.deepEqual(gauges, { tasks_outstanding: 0 });
-    // The caller's node names its agent until promotion; then its Spawn root does.
-    const activations = (path: string) =>
-      events.flatMap(({ path: at, event }) =>
-        at === path && event.kind === "start" && event.activation
-          ? [event.activation]
-          : [],
-      );
-    assert.equal(activations("caller")[0]?.agent, caller);
-    assert.equal(activations("caller")[0]?.owner, caller.owner);
-    assert.equal(activations("caller").at(-1)?.agent, undefined);
-    assert.ok(activations("caller::root").length > 0);
-    for (const activation of activations("caller::root"))
+    // The caller's node names its agent on every activation.
+    const activations = events.flatMap(({ path: at, event }) =>
+      at === "caller" && event.kind === "start" && event.activation
+        ? [event.activation]
+        : [],
+    );
+    assert.ok(activations.length > 0);
+    for (const activation of activations) {
       assert.equal(activation.agent, caller);
+      assert.equal(activation.owner, caller.owner);
+    }
   });
 
   test("ignore resolves a failed task once", async () => {
     const r = registry("caller", "a", "b");
-    worker(r, "a", 1);
-    worker(r, "b");
-    const { execution, events } = await recordedCaller(
+    r.worker("a", 1);
+    r.worker("b");
+    const { recorder, events } = testRecorder();
+    const { execution } = await failingCaller(
       r,
       ["a", "b"],
       "ignore",
       answering(undefined, () => fauxAssistantMessage("final")),
+      recorder,
     );
 
     await execution.run();
@@ -2562,9 +2631,10 @@ describe("task promotion under a recorder", () => {
 
   test("a rejected retry allocation adds no attempt", async () => {
     const r = registry("caller", "a");
-    worker(r, "a", 1);
+    r.worker("a", 1);
     let acquisitions = 0;
-    const { execution, events } = await recordedCaller(
+    const { recorder, events } = testRecorder();
+    const { caller, execution } = await failingCaller(
       r,
       ["a"],
       { retries: 1 },
@@ -2572,9 +2642,8 @@ describe("task promotion under a recorder", () => {
         (report) => [decision("ignore", report, "ignore")],
         () => fauxAssistantMessage("final"),
       ),
+      recorder,
     );
-    const caller = execution.graph.getNode(graph.NodeId.create("caller"))
-      ?.state as unknown as Agent;
     childrenOf(caller, undefined, () => {
       if (++acquisitions > 1) throw new Error("no capacity");
     });
@@ -2600,7 +2669,9 @@ describe("graph recorder bridge", () => {
   ) {
     const level = (
       view:
-        | toolsApi.ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | toolsApi.ProfileRecorder<
+            "memory" | "tokens" | "edits" | "operations" | "probe"
+          >
         | undefined,
       id: string,
       member: (g: JuncoGraph) => graph.NodeIdType,
@@ -2628,7 +2699,7 @@ describe("graph recorder bridge", () => {
           inner.addNode({
             id: graph.NodeId.create("NodeId_f"),
             trigger: trigger.TriggerRule.always(),
-            state: new Deterministic<AgenticInput, AssistantMessage>(
+            state: new Deterministic<Chat, AssistantMessage>(
               async function* () {
                 yield [];
                 return assistant("f");

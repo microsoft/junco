@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -18,24 +19,42 @@ import {
   Width,
 } from "../src/index.ts";
 
-type SourceLine = { readonly kind: "line"; readonly text: string };
-type CharCount = { readonly kind: "chars"; readonly length: number };
-type WordMsg = { readonly kind: "word"; readonly word: string };
-type Pair = {
-  readonly kind: "pair";
-  readonly word: string;
-  readonly count: number;
-};
-type Msg = SourceLine | CharCount | WordMsg | Pair;
+const SourceLineSchema = Type.Object({
+  kind: Type.Literal("line"),
+  text: Type.String(),
+});
+const CharCountSchema = Type.Object({
+  kind: Type.Literal("chars"),
+  length: Type.Number(),
+});
+const WordMsgSchema = Type.Object({
+  kind: Type.Literal("word"),
+  word: Type.String(),
+});
+const PairSchema = Type.Object({
+  kind: Type.Literal("pair"),
+  word: Type.String(),
+  count: Type.Number(),
+});
+const MsgSchema = Type.Union([
+  SourceLineSchema,
+  CharCountSchema,
+  WordMsgSchema,
+  PairSchema,
+]);
+type SourceLine = Static<typeof SourceLineSchema>;
+type CharCount = Static<typeof CharCountSchema>;
+type WordMsg = Static<typeof WordMsgSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: multiple output pardo split lines to words", async () => {
-  const linesEdge = Edge.message<Msg, string>("lines");
-  const charCountEdge = Edge.message<Msg, string>("charCount");
-  const shortWordsEdge = Edge.message<Msg, string>("shortWords");
-  const longWordsEdge = Edge.message<Msg, string>("longWords");
-  const charSumEdge = Edge.message<Msg, string>("charSum");
-  const shortCountsEdge = Edge.message<Msg, string>("shortCounts");
-  const longCountsEdge = Edge.message<Msg, string>("longCounts");
+  const linesEdge = Edge.message<Msg, string>("lines", MsgSchema);
+  const charCountEdge = Edge.message<Msg, string>("charCount", MsgSchema);
+  const shortWordsEdge = Edge.message<Msg, string>("shortWords", MsgSchema);
+  const longWordsEdge = Edge.message<Msg, string>("longWords", MsgSchema);
+  const charSumEdge = Edge.message<Msg, string>("charSum", MsgSchema);
+  const shortCountsEdge = Edge.message<Msg, string>("shortCounts", MsgSchema);
+  const longCountsEdge = Edge.message<Msg, string>("longCounts", MsgSchema);
 
   const inputLines = ["A whole new world", "A new fantastic point of view"];
   const shortCounts: [string, number][] = [];

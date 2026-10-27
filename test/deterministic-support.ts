@@ -16,7 +16,6 @@ import {
 import * as O from "fp-ts/lib/Option.js";
 import {
   type Agentic,
-  type AgenticInput,
   JuncoGraph,
   type MockFrame,
   type MockRequest,
@@ -24,7 +23,11 @@ import {
   type MockTerminal,
   schedules,
 } from "junco-agency";
-import type { AgenticYieldReason } from "junco-agent";
+import {
+  AgenticInputSchema,
+  type AgenticYieldReason,
+  AssistantMessageSchema,
+} from "junco-agent";
 import {
   context as nativeContext,
   parallel,
@@ -32,6 +35,7 @@ import {
   type Scheduler,
 } from "junco-scheduler";
 import { LockPolicy } from "junco-tools";
+import type { Static, TSchema } from "typebox";
 import { queued } from "../packages/dataflow-engine/tests/support.ts";
 import { userTexts } from "../packages/junco-scheduler/test/support.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
@@ -49,8 +53,8 @@ const quiet = new DummyTracer();
 export function policy<C>(
   strategy: Strategy,
 ): Scheduler<
-  Agentic<AgenticInput, AssistantMessage>,
-  AgenticInput,
+  Agentic<typeof AgenticInputSchema, AssistantMessage>,
+  typeof AgenticInputSchema,
   AssistantMessage,
   C
 > {
@@ -70,8 +74,8 @@ function bounds(
 
 /** Native trigger reads intentionally differ from the agency bridge's retained-value reads. */
 export function plainContext(
-  source: Source<AgenticInput, AssistantMessage>,
-  sink: Sink<AgenticInput, AssistantMessage>,
+  source: Source<typeof AgenticInputSchema, AssistantMessage>,
+  sink: Sink<typeof AgenticInputSchema, AssistantMessage>,
   strategy: Strategy,
 ) {
   const [window, threads] = bounds(strategy, undefined);
@@ -88,8 +92,8 @@ export function plainContext(
 
 /** Agency live reads prevent a retained result from starving newer messages. */
 export function policyContext(
-  source: Source<AgenticInput, AssistantMessage>,
-  sink: Sink<AgenticInput, AssistantMessage>,
+  source: Source<typeof AgenticInputSchema, AssistantMessage>,
+  sink: Sink<typeof AgenticInputSchema, AssistantMessage>,
   strategy: Strategy,
   { threads }: { readonly threads?: WidthType } = {},
 ) {
@@ -102,8 +106,15 @@ export function policyContext(
 }
 
 /** Fresh closed ingress and a sink explicitly wired to the fixture's chosen terminal work. */
-export function terminalPorts<N = AgenticInput, T = AssistantMessage>() {
-  const edge = Edge.value<N, T>("terminal->$sink");
+export function terminalPorts<
+  N extends TSchema = typeof AgenticInputSchema,
+  R extends TSchema = typeof AssistantMessageSchema,
+>(
+  messageSchema: N = AgenticInputSchema as TSchema as N,
+  resultSchema: R = AssistantMessageSchema as TSchema as R,
+) {
+  type T = Static<R>;
+  const edge = Edge.value("terminal->$sink", resultSchema);
   let result: (() => O.Option<T>) | undefined;
   const source = new Source<N, T>(
     () => {
@@ -111,7 +122,7 @@ export function terminalPorts<N = AgenticInput, T = AssistantMessage>() {
         "Fixture does not accept external input",
       );
     },
-    { id: NodeId.create("$source") },
+    { id: NodeId.create("$source"), schema: messageSchema },
   );
   const sink = new Sink<N, T>(
     async function* () {
@@ -121,7 +132,11 @@ export function terminalPorts<N = AgenticInput, T = AssistantMessage>() {
         throw new Error("Fixture terminal work did not produce a result");
       return retained.value;
     },
-    { id: NodeId.create("$sink"), trigger: TriggerRule.when(edge) },
+    {
+      id: NodeId.create("$sink"),
+      schema: messageSchema,
+      trigger: TriggerRule.when(edge),
+    },
   );
   return {
     source,

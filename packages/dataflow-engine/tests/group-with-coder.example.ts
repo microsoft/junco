@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -22,23 +23,29 @@ class Player {
   constructor(readonly name: string) {}
 }
 
-type Line = { readonly kind: "line"; readonly text: string };
-type Pair = {
-  readonly kind: "pair";
-  readonly player: Player;
-  readonly score: number;
-};
-type Total = {
-  readonly kind: "total";
-  readonly playerName: string;
-  readonly total: number;
-};
-type Msg = Line | Pair | Total;
+const LineSchema = Type.Object({
+  kind: Type.Literal("line"),
+  text: Type.String(),
+});
+const PairSchema = Type.Object({
+  kind: Type.Literal("pair"),
+  player: Type.Unsafe<Player>(Type.Object({ name: Type.String() })),
+  score: Type.Number(),
+});
+const TotalSchema = Type.Object({
+  kind: Type.Literal("total"),
+  playerName: Type.String(),
+  total: Type.Number(),
+});
+const MsgSchema = Type.Union([LineSchema, PairSchema, TotalSchema]);
+type Line = Static<typeof LineSchema>;
+type Pair = Static<typeof PairSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: group with coder — parse and sum by player name", async () => {
-  const linesEdge = Edge.message<Msg, string>("lines");
-  const pairsEdge = Edge.message<Msg, string>("pairs");
-  const totalsEdge = Edge.message<Msg, string>("totals");
+  const linesEdge = Edge.message<Msg, string>("lines", MsgSchema);
+  const pairsEdge = Edge.message<Msg, string>("pairs", MsgSchema);
+  const totalsEdge = Edge.message<Msg, string>("totals", MsgSchema);
 
   const inputLines = ["Alice,10", "Bob,5", "Alice,20", "Bob,15", "Alice,3"];
   const results: [string, number][] = [];

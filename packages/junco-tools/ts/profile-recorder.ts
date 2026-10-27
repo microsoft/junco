@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { TruncationResult } from "@earendil-works/pi-coding-agent";
+import { admitToolCall } from "dataflow-engine";
 import type { NativeResourceEvent } from "../native/index.js";
 
 /**
@@ -66,6 +67,14 @@ export type ProfileEvent<R extends string> =
       readonly source: object;
       readonly event: NativeResourceEvent;
     }
+  | {
+      readonly resource: R & "probe";
+      readonly kind: "probe";
+      /** The probed edge's ID within the recording graph. */
+      readonly edgeId: string;
+      /** One value published on that edge. */
+      readonly value: number;
+    }
   | ({ readonly kind: "start" } & ProfileOperation<R>)
   | ({
       readonly kind: "finish";
@@ -129,14 +138,14 @@ export function profileContexts(
 // invocation masks an enclosing one.
 const invocation = new AsyncLocalStorage<{
   readonly recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
 }>();
 
 /** Runs `work` with `recorder` as the invocation recorder every nested {@link captureRecorder} sees. */
 export function runWithRecorder<T>(
   recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined,
   work: () => T,
 ): T {
@@ -148,7 +157,7 @@ export function runWithRecorder<T>(
  * else none. Capture once before awaiting; native callbacks never use this.
  */
 export function captureRecorder<
-  R extends "memory" | "tokens" | "edits" | "operations",
+  R extends "memory" | "tokens" | "edits" | "operations" | "probe",
 >(
   recorder?: ProfileRecorder<R> | (() => ProfileRecorder<R> | undefined),
 ): ProfileRecorder<R> | undefined {
@@ -260,9 +269,11 @@ export function recordToolResult<R extends string>(
 }
 
 /**
- * One exactly-once tool call boundary: start, then output sizes, `metrics(result)` and the
- * terminal outcome. A rejection under an aborted `signal` is cancelled, any other an error.
- * Without a recorder `execute` runs alone.
+ * One exactly-once tool call boundary: admission against the current usage budgets, then start,
+ * output sizes, `metrics(result)` and the terminal outcome. A denied call rejects with a
+ * `UsageLimitError` before `execute` or any record; an admitted one counts even if it fails. A
+ * rejection under an aborted `signal` is cancelled, any other an error. Without a recorder
+ * `execute` runs alone.
  */
 export async function profileToolCall<R extends string, T>(
   recorder: ProfileRecorder<R> | undefined,
@@ -271,6 +282,7 @@ export async function profileToolCall<R extends string, T>(
   execute: () => Promise<AgentToolResult<T>>,
   metrics?: (result: AgentToolResult<T>) => ProfileMetrics | undefined,
 ): Promise<AgentToolResult<T>> {
+  admitToolCall();
   const finish = beginOperation(recorder, operation);
   if (finish === undefined) return execute();
   let result: AgentToolResult<T>;

@@ -4,17 +4,49 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   type Context,
+  contentText,
   type FauxResponseStep,
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { DataflowNodeError, DummyTracer, NodeId } from "dataflow-engine";
+import {
+  type DataflowGraph,
+  DataflowNodeError,
+  type DataflowRunTrace,
+  DummyTracer,
+  EdgeId,
+  NodeId,
+} from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
-import { Deterministic } from "../src/index.ts";
+import type { YamlAgent } from "../examples/support.ts";
+import { AssistantMessageSchema, Deterministic, syntax } from "../src/index.ts";
 import type { AgentSpec } from "../src/syntax/build.ts";
 import { nativeOptions } from "./support.ts";
+
+/** Records every raw message Reviewer is activated with on the nested graph's `Ralph~>Reviewer`. */
+class ReviewerInbox extends DummyTracer {
+  readonly received: unknown[] = [];
+
+  override startRun<S, N extends TSchema, T, EH>(
+    graph: DataflowGraph<S, N, T, EH>,
+  ): DataflowRunTrace<N, T> {
+    const run = super.startRun(graph);
+    return {
+      ...run,
+      startNode: (id, phase, inputs) => {
+        if (String(id) === "Reviewer")
+          this.received.push(
+            ...(inputs?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? []),
+          );
+        return run.startNode(id, phase, inputs);
+      },
+    };
+  }
+}
 
 type Role = "Ralph" | "Direct" | "Reviewer";
 
@@ -84,7 +116,7 @@ async function mixedWorkflow(
     },
   ];
 
-  const agents: JuncoAgent[] = [];
+  const agents: YamlAgent[] = [];
   const createAgent = async (spec: AgentSpec) => {
     const responses =
       spec.node === "Ralph"
@@ -97,7 +129,7 @@ async function mixedWorkflow(
               ),
             ];
     const { options } = await nativeOptions(responses);
-    const created = await JuncoAgent.fromResolved({
+    const created: YamlAgent = await JuncoAgent.fromResolved({
       ...options,
       systemPrompt: spec.systemPrompt,
       tools: spec.tools as AgentTool[],
@@ -105,9 +137,10 @@ async function mixedWorkflow(
     agents.push(created);
     return created;
   };
+  const inbox = new ReviewerInbox();
   try {
     const { execution, reviewerId } = await MixedGraph.create({
-      tracer: new DummyTracer(),
+      tracer: inbox,
       createAgent,
     });
     return {
@@ -115,6 +148,7 @@ async function mixedWorkflow(
       reviewerId,
       agents,
       prompts,
+      inbox,
       async [Symbol.asyncDispose]() {
         await execution.graph.close();
       },
@@ -143,12 +177,12 @@ async function stepUntil(
 const ralphId = NodeId.create("Ralph");
 
 test("Ralph runs two full-assignment rounds and only its final draft is reviewed", async () => {
-  let agents: readonly JuncoAgent[];
+  let agents: readonly YamlAgent[];
   let goalsSource: unknown;
   {
     await using flow = await mixedWorkflow();
     agents = flow.agents;
-    const { execution, reviewerId, prompts } = flow;
+    const { execution, reviewerId, prompts, inbox } = flow;
     const graph = execution.graph;
     goalsSource = graph.getNode(NodeId.create("Goals"))?.state;
 
@@ -158,9 +192,15 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.ok(O.isNone(graph.result(reviewerId)));
 
     const results = await execution.run();
-    const selected = results.get(reviewerId);
-    assert.ok(selected?.content[0]?.type === "text");
-    assert.equal(selected.content[0].text, "Ralph: clearer coverage.");
+    assert.equal(
+      syntax.finalText(results.get(reviewerId), "Reviewer"),
+      "Ralph: clearer coverage.",
+    );
+    // The nested graph's sink forwards Ralph's raw final assistant result, not a prompt wrapper.
+    assert.equal(inbox.received.length, 1);
+    const [draft] = inbox.received;
+    assert.ok(Value.Check(AssistantMessageSchema, draft));
+    assert.equal(contentText(draft.content), "draft-2");
     assert.equal(prompts.Ralph.length, 2);
     assert.equal(prompts.Ralph[0], goalsPrompt);
     assert.ok(prompts.Ralph[1]!.includes(goalsPrompt));
@@ -184,14 +224,21 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
   assert.ok(goalsSource instanceof Deterministic && goalsSource.signal.aborted);
 }, 5_000);
 
-test("a failed second Ralph round rejects the graph and never reaches the Reviewer", async () => {
+test("a failed second Ralph round forwards its raw abnormal draft, which the Reviewer rejects before any request", async () => {
   await using flow = await mixedWorkflow(true);
-  const { execution, reviewerId, prompts } = flow;
+  const { execution, reviewerId, prompts, inbox } = flow;
   const graph = execution.graph;
 
-  await assert.rejects(() => execution.run());
+  const failure = await execution.run().then(
+    () => assert.fail("graph should reject"),
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DataflowNodeError);
+  assert.equal(failure.nodeId, reviewerId);
   assert.equal(prompts.Ralph.length, 2);
-  assert.ok(O.isNone(graph.result(ralphId)));
+  const [draft] = inbox.received;
+  assert.ok(Value.Check(AssistantMessageSchema, draft));
+  assert.equal(draft.stopReason, "error");
   assert.ok(O.isNone(graph.result(reviewerId)));
   assert.equal(prompts.Reviewer.length, 0);
 }, 5_000);

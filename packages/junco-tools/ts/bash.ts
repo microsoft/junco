@@ -40,7 +40,7 @@ export const BashTool = {
     recorder?:
       | ProfileRecorder<"memory">
       | (() => ProfileRecorder<"memory"> | undefined),
-  ): AgentTool<any> {
+  ): AgentTool {
     // Guards JavaScript callers the type cannot.
     if (options?.operations === undefined) {
       throw new TypeError("BashTool.create: options.operations is required");

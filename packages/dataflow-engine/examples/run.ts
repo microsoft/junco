@@ -40,7 +40,7 @@ const commands = cookbook
   ? [["bun", "--no-install", "test", ...built.cookbook]]
   : (name === undefined
       ? built.standalone
-      : [built.standalone[standaloneNames.indexOf(name)]!]
+      : [built.standalone[standaloneNames.indexOf(name)]]
     ).map((program) => ["bun", "--no-install", program]);
 
 for (const command of commands) {

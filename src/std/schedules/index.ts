@@ -17,6 +17,7 @@ export {
   type Decision,
   drain,
   highest,
+  type LimitOptions,
   limit,
   lowest,
   MODEL_STRENGTHS,
@@ -32,6 +33,7 @@ export {
   select,
   separate,
   strength,
+  type UsageLimitScope,
 } from "junco-scheduler";
 export {
   type PiOptions,

@@ -237,7 +237,7 @@ test("validates options without contacting Grafana", async () => {
   assert.equal(fake.seen.length, 0);
 });
 
-test("provisions the Live dashboard with the seven panels and three tables", async () => {
+test("provisions the Live dashboard with the eight panels and three tables", async () => {
   const fake = await fakeGrafana();
   const recorder = await open(fake);
   assert.match(recorder.streamId, /^junco_[0-9a-f]{32}$/);
@@ -269,7 +269,7 @@ test("provisions the Live dashboard with the seven panels and three tables", asy
   const panels = new Map<string, typeof spec>(
     spec.panels.map((panel: typeof spec) => [panel.title, panel]),
   );
-  assert.equal(panels.size, 10);
+  assert.equal(panels.size, 11);
   for (const [title, type, measurement, field, unit, gridPos] of [
     [
       "Total memory",
@@ -355,14 +355,35 @@ test("provisions the Live dashboard with the seven panels and three tables", asy
     if (unit === "bytes")
       assert.equal(panel.fieldConfig.defaults.noValue, "No measured pipelines");
   }
+  const probes = panels.get("Edge probes");
+  assert.ok(probes);
+  assert.equal(probes.type, "timeseries");
+  assert.deepEqual(probes.datasource, grafana);
+  assert.deepEqual(probes.gridPos, { x: 0, y: 20, w: 24, h: 8 });
+  assert.equal(probes.fieldConfig.defaults.unit, undefined);
+  assert.equal(
+    probes.fieldConfig.defaults.displayName,
+    `\${__field.labels.node} \${__field.labels.edge_id}`,
+  );
+  assert.equal(probes.transformations, undefined);
+  assert.ok(probes.description.length > 0);
+  assert.deepEqual(probes.targets, [
+    {
+      refId: "A",
+      datasource: grafana,
+      queryType: "measurements",
+      channel: `stream/\${stream}/junco_probe`,
+      filter: { fields: ["time", "value"] },
+    },
+  ]);
   for (const [title, measurements, gridPos] of [
-    ["Tool and execution metrics", ["junco_operation"], [0, 20, 24, 12]],
+    ["Tool and execution metrics", ["junco_operation"], [0, 28, 24, 12]],
     [
       "Resource and token details",
       ["junco_node", "junco_total"],
-      [0, 32, 24, 10],
+      [0, 40, 24, 10],
     ],
-    ["Graph context totals", ["junco_context"], [0, 42, 24, 10]],
+    ["Graph context totals", ["junco_context"], [0, 50, 24, 10]],
   ] as const) {
     const panel = panels.get(title);
     assert.ok(panel, title);
@@ -390,6 +411,19 @@ test("provisions the Live dashboard with the seven panels and three tables", asy
       })),
     );
   }
+  type Grid = { x: number; y: number; w: number; h: number };
+  const grids: [string, Grid][] = spec.panels.map(
+    (panel: { title: string; gridPos: Grid }) => [panel.title, panel.gridPos],
+  );
+  for (const [i, [a, p]] of grids.entries())
+    for (const [b, q] of grids.slice(i + 1))
+      assert.ok(
+        p.x + p.w <= q.x ||
+          q.x + q.w <= p.x ||
+          p.y + p.h <= q.y ||
+          q.y + q.h <= p.y,
+        `${a} overlaps ${b}`,
+      );
   await recorder.close();
 });
 
@@ -476,7 +510,7 @@ test("resources roll up through nested contexts without double counting", async 
   const fake = await fakeGrafana();
   const recorder = await open(fake);
   const outer: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   > = recorder.add_context("nodeId1");
   const inner = outer.add_context("nodeId2");
   const full = inner.add_context("NodeId_f");
@@ -988,4 +1022,98 @@ test("an oversized snapshot is rejected rather than truncated", async () => {
   await assert.rejects(recorder.flush(), /snapshot exceeds 500 KiB/);
   assert.equal(fake.pushes().length, 0);
   await assert.rejects(recorder.close(), /snapshot exceeds 500 KiB/);
+});
+
+const probe = (edgeId: string, value: number) =>
+  ({ resource: "probe", kind: "probe", edgeId, value }) as const;
+
+test("each probe is pushed alone, once, before the snapshot, at its receipt time", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake);
+  const view = recorder.add_context("a b").add_context("c,d");
+  const values = [1.25, -2, -2, 0];
+  const now = spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+  try {
+    for (const value of values) view.record(probe("x=y z", value));
+  } finally {
+    now.mockRestore();
+  }
+  await recorder.flush();
+  // Same-millisecond points of one series survive only in separate pushes.
+  const pushes = fake.pushes().map((push) => parse(push.body));
+  assert.equal(pushes.length, values.length + 1);
+  assert.deepEqual(
+    pushes.slice(0, values.length),
+    values.map((value) => [
+      {
+        measurement: "junco_probe",
+        tags: { node: "a b::c,d", edge_id: "x=y z" },
+        fields: { value },
+        time: "1700000000000000000",
+      },
+    ]),
+  );
+  assert.ok(pushes.at(-1)?.every((line) => line.measurement !== "junco_probe"));
+  await recorder.flush();
+  assert.equal(fake.pushes().length, values.length + 2);
+  assert.ok(lastPush(fake).every((line) => line.measurement !== "junco_probe"));
+  await recorder.close();
+});
+
+test("invalid probe values latch without producing a line", async () => {
+  for (const value of [
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ]) {
+    const fake = await fakeGrafana();
+    const recorder = await open(fake);
+    recorder.record(probe("e", value));
+    recorder.record(probe("e", 3));
+    await assert.rejects(
+      recorder.flush(),
+      /GrafanaRecorder: invalid probe value/,
+    );
+    assert.deepEqual(
+      fake
+        .pushes()
+        .flatMap((push) => parse(push.body))
+        .filter((line) => line.measurement === "junco_probe")
+        .map((line) => line.fields),
+      [{ value: 3 }],
+    );
+    await assert.rejects(recorder.close(), /invalid probe value/);
+  }
+});
+
+test("a probe point over 500 KiB is rejected rather than pushed", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake);
+  recorder.record(probe("e".repeat(500 * 1024), 1));
+  await assert.rejects(recorder.flush(), /probe exceeds 500 KiB/);
+  assert.equal(fake.pushes().length, 0);
+  await assert.rejects(recorder.close(), /probe exceeds 500 KiB/);
+});
+
+test("a failed probe push stops every later probe and snapshot push", async () => {
+  const fake = await fakeGrafana((request, res) => {
+    if (!request.path.startsWith("/api/live/push/")) return false;
+    if (request.body.includes("value=2 ")) send(res, 500);
+    else send(res, 200);
+    return true;
+  });
+  const recorder = await open(fake);
+  for (const value of [1, 2, 3]) recorder.record(probe("e", value));
+  const error = await recorder.flush().then(
+    () => assert.fail("flushed"),
+    (error: Error) => error,
+  );
+  assert.match(error.message, /live push failed with status 500/);
+  recorder.record(probe("e", 4));
+  await assert.rejects(recorder.flush(), (thrown) => thrown === error);
+  assert.deepEqual(
+    fake.pushes().map((push) => parse(push.body)[0]?.fields),
+    [{ value: 1 }, { value: 2 }],
+  );
+  await assert.rejects(recorder.close(), (thrown) => thrown === error);
 });

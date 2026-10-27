@@ -10,6 +10,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import type { YamlAgent } from "../examples/support.ts";
 import {
   type CandidateLane,
   type CandidateWork,
@@ -490,7 +491,7 @@ export async function scriptedLane(
     fauxAssistantMessage("verdict recorded"),
   ]);
   const read = sourceTool(sources);
-  const proposer = await agentApi.JuncoAgent.fromResolved({
+  const proposer: YamlAgent = await agentApi.JuncoAgent.fromResolved({
     ...proposerOptions.options,
     systemPrompt: "analyst",
     tools: [
@@ -504,7 +505,7 @@ export async function scriptedLane(
       proposal.tool,
     ],
   });
-  const judge = await agentApi.JuncoAgent.fromResolved({
+  const judge: YamlAgent = await agentApi.JuncoAgent.fromResolved({
     ...judgeOptions.options,
     systemPrompt: "judge",
     tools: [read, new toolsApi.RecvTool(), verdict.tool],

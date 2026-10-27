@@ -1,8 +1,8 @@
-/** One test-owned release: a connection's close, an agent's return, a graph's close. */
-export type NativeRelease = () => void | Promise<unknown>;
-
-/** Registers a release; the returned function retires that registration once it is done. */
-export type DeferNativeRelease = (release: NativeRelease) => () => void;
+/**
+ * Registers a test-owned release (a connection's close, an agent's return, a graph's close);
+ * the returned function retires that registration once it is done.
+ */
+export type DeferNativeRelease = <R>(release: () => R) => () => void;
 
 /**
  * Runs `body`, then attempts every still-registered release in reverse registration order,
@@ -16,9 +16,14 @@ export type DeferNativeRelease = (release: NativeRelease) => () => void;
 export async function withNativeCleanup<T>(
   body: (defer: DeferNativeRelease) => Promise<T>,
 ): Promise<T> {
-  const entries: { release: NativeRelease; active: boolean }[] = [];
+  const entries: { release: () => Promise<void>; active: boolean }[] = [];
   const defer: DeferNativeRelease = (release) => {
-    const entry = { release, active: true };
+    const entry = {
+      release: async () => {
+        await release();
+      },
+      active: true,
+    };
     entries.push(entry);
     return () => {
       entry.active = false;

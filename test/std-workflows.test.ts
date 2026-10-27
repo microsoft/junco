@@ -1,6 +1,10 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type {
+  AgentTool,
+  PromptTemplate,
+  Skill,
+} from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   contentText,
@@ -10,6 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import {
+  AssistantMessageSchema,
   agent as agentApi,
   graph,
   JuncoGraph,
@@ -17,11 +22,18 @@ import {
   tracer,
   workflows,
 } from "junco-agency";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { nativeOptions } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 const revision = (previous: string) =>
   `${assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
+/** The text of a retained YAML result, which must be an assistant message. */
+function textOf(result: unknown): string {
+  assert.ok(Value.Check(AssistantMessageSchema, result));
+  return contentText(result.content);
+}
 
 async function ralphWorkflow(
   rounds: number,
@@ -45,7 +57,9 @@ async function ralphWorkflow(
         },
     ),
   );
-  let agent: agentApi.JuncoAgent | undefined;
+  let agent:
+    | agentApi.JuncoAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>
+    | undefined;
   try {
     const execution = await JuncoGraph.fromYaml(workflows.ralph, {
       cwd: process.cwd(),
@@ -92,8 +106,7 @@ test("three rounds revise in one session and only the last draft is the result",
       revision("draft-2"),
     ]);
     const final = results.get(graph.NodeId.create("Ralph"));
-    assert.ok(final);
-    assert.equal(contentText(final.content), "draft-3");
+    assert.equal(textOf(final), "draft-3");
     assert.equal(results.get(execution.graph.sink.id), final);
     await execution.run();
     assert.deepEqual(prompts, [
@@ -112,10 +125,7 @@ test("rounds: 1 asks once", async () => {
   try {
     const results = await execution.run();
     assert.deepEqual(prompts, [assignment]);
-    assert.equal(
-      contentText(results.get(execution.graph.sink.id)!.content),
-      "draft-1",
-    );
+    assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-1");
   } finally {
     await execution.graph.close();
   }
@@ -135,10 +145,7 @@ test("a native yield resumes within a round and never counts as one", async () =
   try {
     const results = await execution.run();
     assert.deepEqual(prompts, [assignment, revision("draft-1")]);
-    assert.equal(
-      contentText(results.get(execution.graph.sink.id)!.content),
-      "draft-2",
-    );
+    assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-2");
   } finally {
     await execution.graph.close();
   }

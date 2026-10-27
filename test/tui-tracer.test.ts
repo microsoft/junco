@@ -630,7 +630,7 @@ for (const [flag, level, marker] of [
 }
 
 test(
-  "task promotion preserves the parent scene and observes the actual task NodeId",
+  "native tasks preserve the parent scene and trace reports through the caller",
   async () => {
     await withPty(
       ["--tasks"],
@@ -639,109 +639,52 @@ test(
         const active = await pty.screen(
           (screen) =>
             graphText(screen).includes("caller") &&
-            graphText(screen).includes("terminal->$sink") &&
-            screen.rows[0]!.includes("task-"),
-          "parent scene retained while the promoted child runs",
-        );
-        const task = active.rows[0]!.match(/\[(g\d+):(task-[^\]]+)\]/u);
-        const taskScope = task?.[1];
-        const taskId = task?.[2];
-        assert.ok(
-          taskScope && taskId,
-          "active title identifies the actual promoted task and scope",
-        );
-        let childScene = active;
-        while (
-          !occurrences(childScene, taskId, 1, 11).some(
-            ({ cell }) => cell.color !== "default",
-          )
-        ) {
-          const previous = graphText(childScene);
-          await pty.input("\x1b[6~");
-          childScene = await pty.screen(
-            (screen) => graphText(screen) !== previous,
-            "panning toward the actual promoted task node",
-          );
-        }
-        assert.equal(
-          occurrences(childScene, taskId, 1, 11).filter(
-            ({ cell }) => cell.color !== "default",
-          ).length,
-          1,
-          "one identity-colored task node, independent of edge labels",
-        );
-        await pty.input("\x1b[H");
-        await pty.screen(
-          (screen) => graphText(screen) === graphText(active),
-          "panning back retains the parent geometry",
+            graphText(screen).includes("terminal->$sink"),
+          "parent scene retained while the task runs",
         );
         pty.command("worker");
         const complete = await pty.phase("tasks-complete");
-        assert.equal(complete.childId, taskId);
+        const taskId = complete.childId;
+        assert.ok(taskId?.startsWith("task-"));
         await pty.phase("awaiting-dismissal");
         const finalized = await pty.screen(
           (screen) =>
             screen.rows[0]?.includes("complete") === true &&
             !screen.rows[0]!.includes("active:") &&
             graphText(screen) === graphText(active),
-          "completed promoted-agent scene retains the parent geometry",
+          "completed scene retains the parent geometry",
         );
-        const wrapperText = nodeTraces(finalized, "[g1:caller]");
-        assert.ok(
-          wrapperText.includes("return"),
-          "the parent wrapper publishes its native return",
-        );
-        assert.equal(
-          wrapperText.replace(/\s+/gu, "").split("combined:workerdone").length -
-            1,
-          0,
-          "the wrapper return does not replay the inner root's streamed message",
-        );
+        assert.ok(!graphText(finalized).includes("task-"));
         await pty.input("\t");
-        let tracePage = finalized;
-        const revealMessage = async (
-          node: string,
-          message: string,
-        ): Promise<Screen> => {
-          const previous = traces(tracePage);
-          await pty.input("\x1b[H");
-          tracePage = await pty.screen(
-            (screen) => traces(screen) !== previous,
-            "trace history at Home",
+        await pty.input("\x1b[H");
+        let page = await pty.screen(
+          (screen) =>
+            screen.rows.some((row) => row.includes("home/end scroll")),
+          "focused trace history",
+        );
+        let seen = "";
+        const expected = [
+          taskId!,
+          '"type":"task_result"',
+          '"output":"workerdone"',
+          "assistant:combined:workerdone",
+        ];
+        for (;;) {
+          const before = traces(page);
+          seen += before.replace(/[\s│]+/gu, "");
+          if (expected.every((text) => seen.includes(text))) break;
+          await pty.input("\x1b[6~");
+          page = await pty.screen(
+            (screen) => traces(screen) !== before,
+            "paging caller traces for handle, report and final answer",
           );
-          const expected = message.replace(/\s+/gu, "");
-          while (
-            !nodeTraces(tracePage, node).replace(/\s+/gu, "").includes(expected)
-          ) {
-            const before = traces(tracePage);
-            await pty.input("\x1b[6~");
-            tracePage = await pty.screen(
-              (screen) => traces(screen) !== before,
-              `panning to ${node}'s retained message`,
-            );
-          }
-          return tracePage;
-        };
-        const rootMessage = await revealMessage(
-          `[${taskScope}:root]`,
-          "assistant: combined: worker done",
-        );
+        }
         assert.equal(
-          nodeTraces(rootMessage, `[${taskScope}:root]`)
-            .replace(/\s+/gu, "")
-            .split("combined:workerdone").length - 1,
+          traces(page)
+            .replace(/[\s│]+/gu, "")
+            .split("assistant:combined:workerdone").length - 1,
           1,
-          "promotion finalizes the actual root's streamed assistant message once",
-        );
-        const workerMessage = await revealMessage(
-          `[${taskScope}:${taskId}]`,
-          "assistant: worker done",
-        );
-        assert.ok(
-          occurrences(workerMessage, `${taskId}]`, 13, 29).some(
-            ({ cell }) => cell.color !== "default",
-          ),
-          "worker text retains its actual scoped task identity",
+          "one final caller output",
         );
         assert.equal(pty.exited, false);
         await pty.input("q");
@@ -1072,12 +1015,13 @@ const addons = Object.keys(require.cache).filter((path) => path.endsWith(".node"
 // Loading-boundary test: static root import would execute before the captured baselines.
 const { JuncoGraph, Deterministic, tracer, graph, trigger, schedules } = await import("junco-agency");
 import { LockPolicy } from "junco-tools";
+import { Type } from "typebox";
 assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal)), listeners);
 assert.deepEqual(Object.keys(require.cache).filter((path) => path.endsWith(".node")), addons);
 assert.ok(tracer.TuiTracer.shared() instanceof tracer.DummyTracer);
-const resultEdge = graph.Edge.value("quiet->$sink");
-const source = new graph.nodes.Source(() => { throw new graph.DataflowDefinitionError("Portable graph does not accept external input"); }, { id: graph.NodeId.create("$source") });
-const sink = new graph.nodes.Sink(async function* () { yield []; const result = flow.result(graph.NodeId.create("quiet")); if (result._tag !== "Some") throw new Error("quiet result is absent"); return result.value; }, { id: graph.NodeId.create("$sink"), trigger: trigger.TriggerRule.when(resultEdge) });
+const resultEdge = graph.Edge.value("quiet->$sink", Type.String());
+const source = new graph.nodes.Source(() => { throw new graph.DataflowDefinitionError("Portable graph does not accept external input"); }, { id: graph.NodeId.create("$source"), schema: Type.Never() });
+const sink = new graph.nodes.Sink(async function* () { yield []; const result = flow.result(graph.NodeId.create("quiet")); if (result._tag !== "Some") throw new Error("quiet result is absent"); return result.value; }, { id: graph.NodeId.create("$sink"), schema: Type.Never(), trigger: trigger.TriggerRule.when(resultEdge) });
 const flow = new JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, LockPolicy);
 const execution = schedules.context({ graph: flow, scheduler: schedules.parallel() });
 const id = flow.addNode({ id: graph.NodeId.create("quiet"), trigger: trigger.TriggerRule.always(), state: new Deterministic(async function* () { yield []; return "done"; }, LockPolicy) });

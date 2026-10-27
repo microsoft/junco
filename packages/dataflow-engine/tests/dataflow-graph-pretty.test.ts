@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import {
   DataflowGraph,
   Edge,
@@ -11,10 +12,15 @@ import {
   Width,
 } from "../src/index.ts";
 
-type Graph = DataflowGraph<unknown, number, string, never>;
+const NumberSchema = Type.Number();
+
+type Graph = DataflowGraph<unknown, typeof NumberSchema, string, never>;
 
 const newGraph = (): Graph =>
-  new DataflowGraph<unknown, number, string, never>(Width.create(1), UNBOUNDED);
+  new DataflowGraph<unknown, typeof NumberSchema, string, never>(
+    Width.create(1),
+    UNBOUNDED,
+  );
 
 const add = (graph: Graph, id: string, state: unknown = undefined): NodeId =>
   graph.addNode(
@@ -86,8 +92,12 @@ test("renderPretty renders flat topology with escaped labels and transports", ()
 
   const first = add(graph, 'A"#\n');
   const second = add(graph, "B&|");
-  graph.addEdge(first, second, Edge.message<number, string>("m%"));
-  graph.addEdge(first, second, Edge.value<number, string>("v|"));
+  graph.addEdge(
+    first,
+    second,
+    Edge.message<typeof NumberSchema, string>("m%", NumberSchema),
+  );
+  graph.addEdge(first, second, Edge.value("v|", Type.String()));
 
   const edges = [
     ": A#34;#35;#10; -> B#38;#124; m#37; (message)",
@@ -110,20 +120,24 @@ test("renderPretty expands graph-valued nodes as nested subgraphs", () => {
   inner.addEdge(
     add(inner, "A"),
     add(inner, "B"),
-    Edge.message<number, string>("ab"),
+    Edge.message<typeof NumberSchema, string>("ab", NumberSchema),
   );
   const group = newGraph();
   group.addEdge(
     add(group, "A"),
     add(group, "Inner", inner),
-    Edge.value<number, string>("inner"),
+    Edge.value("inner", Type.String()),
   );
   const root = newGraph();
   const source = add(root, "Source");
   const middle = add(root, 'Group"#\n', group);
   const sink = add(root, "Sink");
-  root.addEdge(source, middle, Edge.message<number, string>("in"));
-  root.addEdge(middle, sink, Edge.value<number, string>("out"));
+  root.addEdge(
+    source,
+    middle,
+    Edge.message<typeof NumberSchema, string>("in", NumberSchema),
+  );
+  root.addEdge(middle, sink, Edge.value("out", Type.String()));
 
   const outer = "Group#34;#35;#10;";
   assert.deepEqual(topology(renderPretty(root)), {
@@ -150,13 +164,13 @@ test("renderPretty expands every occurrence of a shared child graph", () => {
   child.addEdge(
     add(child, "A"),
     add(child, "B"),
-    Edge.value<number, string>("ab"),
+    Edge.value("ab", Type.String()),
   );
   const root = newGraph();
   root.addEdge(
     add(root, "Left", child),
     add(root, "Right", child),
-    Edge.message<number, string>("between"),
+    Edge.message<typeof NumberSchema, string>("between", NumberSchema),
   );
 
   assert.deepEqual(topology(renderPretty(root)), {
@@ -181,7 +195,11 @@ test("renderPretty stops at a graph already on the containment path", () => {
   const child = newGraph();
   add(child, "Back", root);
   const node = add(root, "Child", child);
-  root.addEdge(node, node, Edge.message<number, string>("again"));
+  root.addEdge(
+    node,
+    node,
+    Edge.message<typeof NumberSchema, string>("again", NumberSchema),
+  );
 
   assert.deepEqual(topology(renderPretty(root)), {
     nodes: [
@@ -199,8 +217,12 @@ test("renderPretty keeps an empty child graph grouped and reads it live", () => 
   const source = add(root, "Source");
   const empty = add(root, "Empty", child);
   const sink = add(root, "Sink");
-  root.addEdge(source, empty, Edge.message<number, string>("in"));
-  root.addEdge(empty, sink, Edge.value<number, string>("out"));
+  root.addEdge(
+    source,
+    empty,
+    Edge.message<typeof NumberSchema, string>("in", NumberSchema),
+  );
+  root.addEdge(empty, sink, Edge.value("out", Type.String()));
   const edges = [
     ": Source -> Empty in (message)",
     ": Empty -> Sink out (value)",
@@ -219,7 +241,7 @@ test("renderPretty keeps an empty child graph grouped and reads it live", () => 
   child.addEdge(
     add(child, "A"),
     add(child, "B"),
-    Edge.value<number, string>("ab"),
+    Edge.value("ab", Type.String()),
   );
   assert.deepEqual(topology(renderPretty(root)), {
     nodes: [

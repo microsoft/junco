@@ -48,7 +48,9 @@ export interface ToolCollectionOptions {
    * `runWithRecorder`), and the mux its resource events, enabling monitoring (see
    * `ShellMuxLease.create`).
    */
-  recorder?: ProfileRecorder<"memory" | "tokens" | "edits" | "operations">;
+  recorder?: ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations" | "probe"
+  >;
 }
 
 /**
@@ -60,7 +62,7 @@ export interface ToolCollectionOptions {
 export interface ToolBinding {
   /** Policy owner id of this binding's calls and commands (`NativeResourceEvent.owner`). */
   readonly owner: string;
-  readonly tools: ReadonlyMap<AgentTool<any>, AgentTool<any>>;
+  readonly tools: ReadonlyMap<AgentTool, AgentTool>;
   close(): Promise<void>;
 }
 
@@ -69,12 +71,14 @@ type BuildTools = (
   mux: NativeMux,
   operations: NonNullable<BashToolOptions["operations"]>,
   recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | (() =>
-        | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+        | ProfileRecorder<
+            "memory" | "tokens" | "edits" | "operations" | "probe"
+          >
         | undefined)
     | undefined,
-) => AgentTool<any>[];
+) => AgentTool[];
 
 /**
  * A complete set of junco AgentTools backed by its native engines and its own marsh mux.
@@ -101,7 +105,7 @@ type BuildTools = (
  * invocations and default bash commands, then closes its mux.
  */
 export class ToolCollection {
-  readonly tools: AgentTool<any>[];
+  readonly tools: AgentTool[];
   readonly policy: Policy;
   readonly mux: NativeMux;
   readonly native: NativeModule;
@@ -119,7 +123,7 @@ export class ToolCollection {
   /** The final teardown, once started; fences execution and further leases. */
   #closing: Promise<void> | undefined;
   readonly #recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
 
   private constructor(
@@ -129,7 +133,7 @@ export class ToolCollection {
     operations: ShellMuxOperations | undefined,
     customOperations: NonNullable<BashToolOptions["operations"]> | undefined,
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
       | undefined,
   ) {
     this.policy = lease.policy;
@@ -140,7 +144,10 @@ export class ToolCollection {
     this.#build = build;
     this.#customOperations = customOperations;
     this.#recorder = recorder;
-    const tools = build(mux, customOperations ?? operations!, recorder);
+    const bashOperations = customOperations ?? operations;
+    if (bashOperations === undefined)
+      throw new Error("ToolCollection: bash operations missing");
+    const tools = build(mux, bashOperations, recorder);
     for (const tool of tools) {
       this.#fence(
         tool,
@@ -155,7 +162,7 @@ export class ToolCollection {
 
   /** This collection's view, which its own tools and the default {@link bind} record in. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined {
     return this.#recorder;
   }
@@ -166,14 +173,16 @@ export class ToolCollection {
    * Admitted calls of a tool not accounting its own are recorded as `custom` in `recorder`.
    */
   #fence(
-    tool: AgentTool<any>,
+    tool: AgentTool,
     abort: AbortSignal,
     closed: () => Error | undefined,
     own: Set<Promise<unknown>>,
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
       | (() =>
-          | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+          | ProfileRecorder<
+              "memory" | "tokens" | "edits" | "operations" | "probe"
+            >
           | undefined)
       | undefined,
   ): void {
@@ -312,9 +321,11 @@ export class ToolCollection {
    */
   bind(
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
       | (() =>
-          | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+          | ProfileRecorder<
+              "memory" | "tokens" | "edits" | "operations" | "probe"
+            >
           | undefined)
       | undefined = this.#recorder,
   ): ToolBinding {
@@ -336,12 +347,11 @@ export class ToolCollection {
       ? undefined
       : new ShellMuxOperations({ native: this.native, mux, recorder });
     let closing: Promise<void> | undefined;
-    const bound = this.#build(
-      mux,
-      this.#customOperations ?? operations!,
-      recorder,
-    );
-    const tools = new Map<AgentTool<any>, AgentTool<any>>();
+    const bashOperations = this.#customOperations ?? operations;
+    if (bashOperations === undefined)
+      throw new Error("ToolCollection.bind: bash operations missing");
+    const bound = this.#build(mux, bashOperations, recorder);
+    const tools = new Map<AgentTool, AgentTool>();
     bound.forEach((tool, index) => {
       this.#fence(
         tool,
@@ -353,7 +363,7 @@ export class ToolCollection {
         invocations,
         recorder,
       );
-      tools.set(this.tools[index]!, tool);
+      tools.set(this.tools[index], tool);
     });
     return {
       owner,

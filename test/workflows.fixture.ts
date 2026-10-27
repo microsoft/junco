@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import {
+  AssistantMessageSchema,
   agent as agentApi,
   graph as graphApi,
   JuncoGraph,
@@ -24,6 +25,7 @@ import {
   tracer as tracerApi,
   workflows,
 } from "junco-agency";
+import { Value } from "typebox/value";
 import { userTexts } from "./deterministic-support.ts";
 import { fauxRuntime, scripted } from "./support.ts";
 
@@ -116,16 +118,6 @@ async function assertPublicYieldBoundary(): Promise<void> {
 
 await assertPublicYieldBoundary();
 
-if (typeof Bun === "undefined") {
-  console.log(
-    JSON.stringify({
-      yieldBoundary: true,
-      ralph: "skipped: parse needs Bun.YAML",
-    }),
-  );
-  process.exit(0);
-}
-
 const { models, faux } = await fauxRuntime(
   ["draft-1", "draft-2", "draft-3"].map(recording),
   "ralph-workflow-smoke",
@@ -144,8 +136,8 @@ const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   ...schedules.ralph({ rounds: 3 }),
 });
 const graph = execution.graph;
-const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!
-  .state as agentApi.JuncoAgent;
+const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!.state;
+assert.ok(agent instanceof agentApi.JuncoAgent);
 try {
   graph.source.enqueue({
     messages: new Map([
@@ -169,6 +161,7 @@ try {
   );
   const result = graph.result(graph.sink.id);
   assert.ok(O.isSome(result));
+  assert.ok(Value.Check(AssistantMessageSchema, result.value));
   assert.equal(contentText(result.value.content), "draft-3");
 } finally {
   await graph.close();

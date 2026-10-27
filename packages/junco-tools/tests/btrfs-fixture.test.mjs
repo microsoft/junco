@@ -33,8 +33,8 @@ const PROBE_PRELUDE = [
   WRITE_ALL_BODY,
   `const { readBtrfsFixture } = await import(${JSON.stringify(fixtureModule)});`,
   "const fixture = await readBtrfsFixture();",
-  "if (fs.statfsSync(fixture.seed).type !== 0x9123683e) throw new Error(`not btrfs: ${fixture.seed}`);",
-  "if (fs.readdirSync(fixture.seed).length) throw new Error(`seed is not empty: ${fixture.seed}`);",
+  'if (fs.statfsSync(fixture.seed).type !== 0x9123683e) throw new Error("not btrfs: " + fixture.seed);',
+  'if (fs.readdirSync(fixture.seed).length) throw new Error("seed is not empty: " + fixture.seed);',
 ].join("\n");
 
 const receiptLine = (extra = "{}") =>

@@ -1,16 +1,26 @@
+import type { Static, TSchema } from "typebox";
 import type { Edge } from "./edges.js";
 import type { Identifiable } from "./identifiable.js";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { Profiles, ProfilesOption, ResourceKind } from "./profile.js";
 import type { TriggerRule } from "./trigger.js";
 
-/** A single datum crossing one message edge. */
-export type Message<N> = { readonly id: EdgeId; readonly payload: N };
+/** A single datum crossing one message edge: a raw payload admitted by the edge's schema `N`. */
+export type Message<N extends TSchema> = {
+  readonly id: EdgeId;
+  readonly payload: Static<N>;
+};
 
 /** Construction of {@link Message}s. */
 export const Message = {
-  /** A message bound for `edge`, carrying `payload` by reference. */
-  create: <N, T>(edge: Edge<N, T>, payload: N): Message<N> => ({
+  /**
+   * A message bound for `edge`, carrying `payload` by reference. A cheap constructor: the edge's
+   * schema is enforced when the message is routed, not here.
+   */
+  create: <N extends TSchema, T>(
+    edge: Edge<N, T>,
+    payload: NoInfer<Static<N>>,
+  ): Message<N> => ({
     id: edge.id,
     payload,
   }),
@@ -42,13 +52,13 @@ export type Lookup<K, V> = {
  *   node and shares it by reference into every view that node receives; entries are only ever
  *   added (a resolved `Option` never reverts).
  */
-export type ParentView<N, T> = {
-  readonly messages: Lookup<EdgeId, readonly N[]>;
+export type ParentView<N extends TSchema, T> = {
+  readonly messages: Lookup<EdgeId, readonly Static<N>[]>;
   readonly values: Lookup<EdgeId, T>;
 };
 
 /** The batch `view` delivered: each payload with its edge, in edge then delivery order. */
-export function messagesOf<N>(
+export function messagesOf<N extends TSchema>(
   view: Pick<ParentView<N, unknown>, "messages">,
 ): Message<N>[] {
   const messages: Message<N>[] = [];
@@ -59,9 +69,11 @@ export function messagesOf<N>(
 }
 
 /** Detach native input containers, preserving present-undefined values and opaque identity. */
-export function snapshotView<N, T>(view: ParentView<N, T>): ParentView<N, T> {
+export function snapshotView<N extends TSchema, T>(
+  view: ParentView<N, T>,
+): ParentView<N, T> {
   // ponytail: opaque S/N/T values are borrowed; use immutable application data when historical value snapshots are required
-  const messages = new Map<EdgeId, readonly N[]>();
+  const messages = new Map<EdgeId, readonly Static<N>[]>();
   for (const id of view.messages.keys())
     messages.set(id, Object.freeze([...(view.messages.get(id) ?? [])]));
   const values = new Map<EdgeId, T | undefined>();
@@ -73,7 +85,7 @@ export function snapshotView<N, T>(view: ParentView<N, T>): ParentView<N, T> {
 export type NodeStatus = "ready" | "running" | "done";
 
 /** The generator a node body returns: yields message batches, is resumed with views, returns `T`. */
-export type NodeGenerator<N, T> = AsyncGenerator<
+export type NodeGenerator<N extends TSchema, T> = AsyncGenerator<
   Message<N>[],
   T,
   ParentView<N, T>
@@ -95,7 +107,9 @@ export type NodeGenerator<N, T> = AsyncGenerator<
  *  - Returning `T` marks the node `done`. A node that must run for the whole graph's life simply
  *    never returns (see `StepNode` in `builders.ts`).
  */
-export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
+export type StepFn<S, N extends TSchema, T> = (
+  this: Node<S, N, T>,
+) => NodeGenerator<N, T>;
 
 /**
  * Failure hook of a node whose body threw. Invoked once as `node.on_error(error, signal)` after the
@@ -103,7 +117,7 @@ export type StepFn<S, N, T> = (this: Node<S, N, T>) => NodeGenerator<N, T>;
  * routed like a yield in the same terminal activation; `[]` handles the failure silently. The node
  * records no result and its outbound value edges stay unresolved. A throw rejects the invocation.
  */
-export type ErrorFn<S, N, T> = (
+export type ErrorFn<S, N extends TSchema, T> = (
   this: Node<S, N, T>,
   error: unknown,
   signal: AbortSignal | undefined,
@@ -117,7 +131,7 @@ export type ErrorFn<S, N, T> = (
  * A custom hook may override the trigger in either direction: demand a deeper backlog than one
  * message, or keep an already-started actor resumable after it consumed its triggering input.
  */
-export type AvailabilityFn<N, T> = (
+export type AvailabilityFn<N extends TSchema, T> = (
   view: ParentView<N, T>,
   triggered: boolean,
 ) => boolean;
@@ -127,7 +141,11 @@ export type AvailabilityFn<N, T> = (
  * availability. Omit `id` to get an auto-assigned one; omit `description` when the node needs no
  * prose. `is_available` defaults to the trigger result.
  */
-export type NodeOptions<N, T, K extends ResourceKind = never> = {
+export type NodeOptions<
+  N extends TSchema,
+  T,
+  K extends ResourceKind = never,
+> = {
   readonly id?: NodeId;
   readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
@@ -137,7 +155,7 @@ export type NodeOptions<N, T, K extends ResourceKind = never> = {
 /** A registered graph node: its programmable state, lifecycle, trigger, body and live generator. */
 export type Node<
   S,
-  N,
+  N extends TSchema,
   T,
   K extends ResourceKind = never,
 > = Identifiable<NodeId> &
@@ -152,11 +170,12 @@ export type Node<
   };
 
 /** What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. */
-export type NodeSpec<S, N, T, K extends ResourceKind = never> = NodeOptions<
-  N,
+export type NodeSpec<
+  S,
+  N extends TSchema,
   T,
-  K
-> & {
+  K extends ResourceKind = never,
+> = NodeOptions<N, T, K> & {
   readonly state: S;
   readonly step: StepFn<S, N, T>;
   readonly on_error?: ErrorFn<S, N, T>;

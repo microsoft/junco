@@ -6,7 +6,9 @@ import {
   type NodeAvailability,
   type NodeIdType,
   triggerInputs,
+  type UsageBudget,
 } from "dataflow-engine";
+import type { TSchema } from "typebox";
 import {
   type Decision,
   type NodeModel,
@@ -14,10 +16,11 @@ import {
   type Snapshot,
   validateDecision,
 } from "./scheduler.js";
+import { type UsageLimitDefinition, usageBudgets } from "./usage-limits.js";
 
 export type SchedulerContext<
   S,
-  N,
+  N extends TSchema,
   T,
   C,
   G extends DataflowGraph<S, N, T, never>,
@@ -31,7 +34,7 @@ export type SchedulerContext<
 /** Pair work and policy externally. Construction never observes or registers graph work. */
 export function context<
   S,
-  N,
+  N extends TSchema,
   T,
   C = never,
   G extends DataflowGraph<S, N, T, never> = DataflowGraph<S, N, T, never>,
@@ -59,6 +62,8 @@ export function context<
   const history: Decision[] = [];
   const drive = (repeat: boolean, runOptions?: DataflowRunOptions) =>
     graph.evaluate(async (execute, signal) => {
+      // Evaluation-scoped ledgers live for this one run()/step() invocation.
+      const evaluation = new Map<UsageLimitDefinition, UsageBudget>();
       do {
         signal?.throwIfAborted();
         const candidates = graph.available();
@@ -93,12 +98,14 @@ export function context<
         }
         signal?.throwIfAborted();
         validateDecision(snapshot, decision);
-        const schedule = decision.selected.map(({ nodeId }) => [
-          {
-            id: nodeId,
-            inputs: plans.get(nodeId)!,
-          },
-        ]);
+        const schedule = decision.selected.map(({ nodeId }) => {
+          const plan = plans.get(nodeId);
+          if (plan === undefined)
+            throw new DataflowDefinitionError(
+              `Scheduler: no input plan for node "${nodeId}"`,
+            );
+          return [{ id: nodeId, inputs: plan }];
+        });
         const live = graph.available();
         if (
           graph.observe().version !== snapshot.version ||
@@ -113,16 +120,21 @@ export function context<
         );
         await options.prepare?.(decision.selected, signal);
         await execute(schedule, {
+          usageBudgets: usageBudgets(decision.selected, evaluation),
           resolveInputs: (entry, candidate) => inputs(entry.id, candidate),
           onColumn: (selected) => {
             if (selected.length > 0)
               history.push(
                 Object.freeze({
                   selected: Object.freeze(
-                    selected.map((nodeId) => ({
-                      nodeId,
-                      modelStrength: strengths.get(nodeId)!,
-                    })),
+                    selected.map((nodeId) => {
+                      const modelStrength = strengths.get(nodeId);
+                      if (modelStrength === undefined)
+                        throw new DataflowDefinitionError(
+                          `Scheduler: node "${nodeId}" ran but was not selected`,
+                        );
+                      return { nodeId, modelStrength };
+                    }),
                   ),
                 }),
               );

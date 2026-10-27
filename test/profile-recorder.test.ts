@@ -4,9 +4,17 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+  AgentTool,
+  PromptTemplate,
+  Skill,
+} from "@earendil-works/pi-agent-core";
 import { DataflowNodeError, megabytes } from "dataflow-engine";
 import { fitProfiles, parseSamples } from "dataflow-profile";
 import { JuncoGraph, MockAgent, schedules, tracer } from "junco-agency";
+import { AssistantMessageSchema } from "junco-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import type { AgentSpec } from "../src/syntax/build.ts";
 import { parse } from "../src/syntax/parse.ts";
 import {
@@ -16,6 +24,17 @@ import {
   settle,
   textOf,
 } from "./deterministic-support.ts";
+
+const prompt = {
+  type: "object",
+  required: ["kind", "text"],
+  properties: { kind: { const: "prompt" }, text: { type: "string" } },
+};
+const reply = {
+  type: "object",
+  required: ["role", "content"],
+  properties: { role: { const: "assistant" }, content: { type: "array" } },
+};
 
 const document = () =>
   parse({
@@ -29,8 +48,13 @@ const document = () =>
             source: { routes: { "Start~>Inner": ["$source~>Worker"] } },
             nodes: { Worker: { trigger: "$source~>Worker" } },
             edges: [
-              { from: "$source", to: "Worker", kind: "message" },
-              { from: "Worker", to: "$sink" },
+              {
+                from: "$source",
+                to: "Worker",
+                kind: "message",
+                schema: prompt,
+              },
+              { from: "Worker", to: "$sink", schema: reply },
             ],
           },
         },
@@ -40,15 +64,22 @@ const document = () =>
         },
       },
       edges: [
-        { from: "Start", to: "Inner", kind: "message" },
-        { from: "Inner", to: "Final", kind: "message" },
-        { from: "Final", to: "$sink" },
+        { from: "Start", to: "Inner", kind: "message", schema: prompt },
+        { from: "Inner", to: "Final", kind: "message", schema: reply },
+        { from: "Final", to: "$sink", schema: reply },
       ],
     },
   });
 
+/** YAML agents read runtime-loaded inbox schemas and unknown parent values. */
+const mock = (transcript: ConstructorParameters<typeof MockAgent>[0]) =>
+  new MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>(transcript);
+const text = (value: unknown) => {
+  assert.ok(Value.Check(AssistantMessageSchema, value));
+  return textOf(value);
+};
 const createAgent = async ({ node }: AgentSpec) =>
-  new MockAgent({
+  mock({
     prompt: node === "Worker" ? "work" : undefined,
     runs: [
       run([settle(assistant(node === "Worker" ? "WORKER-OUT" : "FINAL-OUT"))]),
@@ -73,7 +104,7 @@ test("recorded nested activations fit profiles that admit a strict memory schedu
     });
     try {
       const results = await execution.run();
-      assert.equal(textOf(results.get(execution.graph.sink.id)!), "FINAL-OUT");
+      assert.equal(text(results.get(execution.graph.sink.id)), "FINAL-OUT");
       await recorder.flush();
       const samples = parseSamples(readFileSync(path, "utf8"));
       const keys = new Set(samples.map((sample) => sample.node));
@@ -116,7 +147,7 @@ test("recorded nested activations fit profiles that admit a strict memory schedu
       });
       try {
         const results = await fitted.run();
-        assert.equal(textOf(results.get(fitted.graph.sink.id)!), "FINAL-OUT");
+        assert.equal(text(results.get(fitted.graph.sink.id)), "FINAL-OUT");
       } finally {
         await fitted.graph.close();
       }
@@ -141,7 +172,7 @@ test("failed activations are excluded while successful activations survive a fai
       recorder,
       createAgent: async (spec) =>
         spec.node === "Final"
-          ? new MockAgent({ runs: [run([{ step: failed(cause) }])] })
+          ? mock({ runs: [run([{ step: failed(cause) }])] })
           : createAgent(spec),
     });
     try {
@@ -357,3 +388,285 @@ test("JSONL reduction keeps same-path agent activations independent", async () =
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("JSONL samples sum edits and operations events into their activation", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "junco-profile-recorder-operations-"),
+  );
+  try {
+    const path = join(directory, "samples.jsonl");
+    const recorder = new tracer.JsonlRecorder({ path });
+    const view = recorder.add_context("Worker");
+    const graph = {
+      resource: "operations",
+      category: "graph",
+      tool: "",
+      operation: "prime",
+    } as const;
+    const edit = {
+      resource: "edits",
+      category: "edit",
+      tool: "edit",
+      operation: "apply",
+    } as const;
+    const read = {
+      resource: "operations",
+      category: "read",
+      tool: "read",
+      operation: "execute",
+    } as const;
+    const activation = (runId: string): tracer.ProfileActivation => ({
+      runId,
+      firedAt: "2026-10-26T00:00:00.000Z",
+      features: {},
+      agent: undefined,
+      owner: undefined,
+    });
+    const a = activation("a");
+    recorder.add_context("Other").record({ ...read, kind: "start" }); // no live activation there
+    view.record({ ...graph, kind: "start", activation: a });
+    view.record({
+      ...graph,
+      kind: "metrics",
+      activation: a,
+      counters: { input_messages: 2 },
+    });
+    view.record({ ...edit, kind: "start" });
+    view.record({
+      ...edit,
+      kind: "metrics",
+      counters: { output_text_bytes: 3 },
+      gauges: { kept: 1, gone: 1 },
+    });
+    view.record({ ...edit, kind: "finish", outcome: "success", durationMs: 4 });
+    view.record({ ...edit, kind: "start" });
+    view.record({
+      ...edit,
+      kind: "metrics",
+      counters: { output_text_bytes: 4 },
+      gauges: { kept: 2, gone: null },
+    });
+    view.record({
+      ...edit,
+      kind: "finish",
+      outcome: "cancelled",
+      durationMs: 3,
+    });
+    view.record({ ...read, kind: "start" });
+    view.record({ ...read, kind: "finish", outcome: "error", durationMs: 2 });
+    // Other resources are not edits/operations metrics.
+    view.record({ ...read, resource: "memory", kind: "start" });
+    view.record({ ...read, resource: "tokens", kind: "start" });
+    view.record({
+      ...graph,
+      kind: "finish",
+      activation: a,
+      outcome: "success",
+      durationMs: 5,
+    });
+    view.record({ ...read, kind: "start" }); // after the activation: dropped
+
+    // Concurrent same-path activations: only events stamped with an activation are attributed.
+    const [b, c] = [activation("b"), activation("c")];
+    view.record({ ...graph, kind: "start", activation: b });
+    view.record({ ...graph, kind: "start", activation: c });
+    view.record({ ...read, kind: "start" });
+    view.record({
+      ...graph,
+      kind: "finish",
+      activation: b,
+      outcome: "success",
+      durationMs: 1,
+    });
+    view.record({
+      ...graph,
+      kind: "finish",
+      activation: c,
+      outcome: "success",
+      durationMs: 1,
+    });
+    recorder.record({
+      ...graph,
+      operation: "evaluate",
+      kind: "finish",
+      outcome: "success",
+      durationMs: 9,
+    });
+    await recorder.close();
+
+    const row = (
+      labels: { category: string; tool: string; operation: string },
+      values: Record<string, unknown>,
+    ) => ({
+      category: labels.category,
+      tool: labels.tool,
+      operation: labels.operation,
+      calls: 1,
+      success: 0,
+      error: 0,
+      cancelled: 0,
+      durationMs: 0,
+      counters: {},
+      gauges: {},
+      ...values,
+    });
+    const samples = parseSamples(readFileSync(path, "utf8"));
+    assert.deepEqual(
+      samples.map((sample) => [sample.runId, sample.measurement]),
+      [
+        [
+          "a",
+          {
+            operations: [
+              row(graph, {
+                success: 1,
+                durationMs: 5,
+                counters: { input_messages: 2 },
+              }),
+              row(read, { error: 1, durationMs: 2 }),
+            ],
+            edits: [
+              row(edit, {
+                calls: 2,
+                success: 1,
+                cancelled: 1,
+                durationMs: 7,
+                counters: { output_text_bytes: 7 },
+                gauges: { kept: 2 },
+              }),
+            ],
+          },
+        ],
+        ["b", { operations: [row(graph, { success: 1, durationMs: 1 })] }],
+        ["c", { operations: [row(graph, { success: 1, durationMs: 1 })] }],
+      ],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+const probeEvent = (edgeId: string, value: number) =>
+  ({ resource: "probe", kind: "probe", edgeId, value }) as const;
+
+test("JSONL probe events become standalone samples in record order, written once", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "junco-profile-recorder-probe-"),
+  );
+  try {
+    const path = join(directory, "samples.jsonl");
+    const recorder = new tracer.JsonlRecorder({ path });
+    const root = recorder.add_context("root");
+    const child = root.add_context("Child");
+    root.record(probeEvent("A->B", 1.25));
+    child.record(probeEvent("$source~>Echo", -2));
+    root.record(probeEvent("A->B", 0));
+    root.record(probeEvent("A->B", -2));
+    const op = { resource: "operations", category: "graph", tool: "" } as const;
+    const activation = (runId: string): tracer.ProfileActivation => ({
+      runId,
+      firedAt: "2026-10-26T00:00:00.000Z",
+      features: {},
+      agent: undefined,
+      owner: undefined,
+    });
+    // An unrelated failed activation, then an ordinary successful one.
+    const failed = activation("failed");
+    child.record({
+      ...op,
+      kind: "start",
+      operation: "prime",
+      activation: failed,
+    });
+    child.record({
+      ...op,
+      kind: "finish",
+      operation: "prime",
+      activation: failed,
+      outcome: "error",
+      durationMs: 1,
+    });
+    const ok = activation("ok");
+    root.record({ ...op, kind: "start", operation: "prime", activation: ok });
+    root.record({
+      ...op,
+      kind: "finish",
+      operation: "prime",
+      activation: ok,
+      outcome: "success",
+      durationMs: 4,
+    });
+    await recorder.flush();
+    await recorder.flush();
+    await recorder.close();
+    const samples = parseSamples(readFileSync(path, "utf8"));
+    assert.deepEqual(
+      samples.map((sample) => [
+        sample.node,
+        sample.runId,
+        sample.resources,
+        sample.units,
+        sample.features,
+        sample.measurement?.probe,
+      ]),
+      [
+        ["root", undefined, {}, {}, {}, [{ edgeId: "A->B", value: 1.25 }]],
+        [
+          "root/Child",
+          undefined,
+          {},
+          {},
+          {},
+          [{ edgeId: "$source~>Echo", value: -2 }],
+        ],
+        ["root", undefined, {}, {}, {}, [{ edgeId: "A->B", value: 0 }]],
+        ["root", undefined, {}, {}, {}, [{ edgeId: "A->B", value: -2 }]],
+        ["root", "ok", { runtime: 4 }, { runtime: "ms" }, {}, undefined],
+      ],
+    );
+    for (const sample of samples)
+      assert.ok(Number.isFinite(Date.parse(sample.firedAt ?? "")));
+    // Probe samples carry no resource, so they never become profile training rows.
+    const report = (rows: typeof samples) =>
+      fitProfiles(rows, { fittedAt: "2026-10-20" }).report;
+    assert.deepEqual(
+      report(samples),
+      report(samples.filter((sample) => sample.runId !== undefined)),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const value of [
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.NEGATIVE_INFINITY,
+])
+  test(`JSONL latches a ${value} probe value without writing it`, async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "junco-profile-recorder-probe-invalid-"),
+    );
+    try {
+      const path = join(directory, "samples.jsonl");
+      const recorder = new tracer.JsonlRecorder({ path });
+      recorder.record(probeEvent("e", value));
+      recorder.record(probeEvent("e", 1));
+      await assert.rejects(
+        recorder.flush(),
+        /^Error: JsonlRecorder: invalid probe value$/,
+      );
+      await assert.rejects(
+        recorder.close(),
+        /JsonlRecorder: invalid probe value/,
+      );
+      assert.deepEqual(
+        parseSamples(readFileSync(path, "utf8")).map(
+          (sample) => sample.measurement?.probe,
+        ),
+        [[{ edgeId: "e", value: 1 }]],
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });

@@ -83,5 +83,23 @@ export {
   Tokens,
   tokens,
 } from "./units.js";
+export type {
+  UsageContext,
+  UsageLimitDetails,
+  UsageLimitScope,
+  UsageLimits,
+} from "./usage-limits.js";
+export {
+  admitToolCall,
+  assertTokenRequestAllowed,
+  assertUsageAllowed,
+  captureUsageContext,
+  chargeTokenUsage,
+  isUsageLimitError,
+  runWithUsageBudgets,
+  runWithUsageContext,
+  UsageBudget,
+  UsageLimitError,
+} from "./usage-limits.js";
 export type { ValidWidth, Width as WidthType } from "./width.js";
 export { UNBOUNDED, Width } from "./width.js";

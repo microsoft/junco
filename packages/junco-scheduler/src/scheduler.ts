@@ -4,6 +4,8 @@ import {
   type InputSchedule,
   type NodeIdType,
 } from "dataflow-engine";
+import type { TSchema } from "typebox";
+import { copyUsageLimits } from "./usage-limits.js";
 
 export const MODEL_STRENGTHS = ["smol", "low", "med", "high", "xhigh"] as const;
 export type ModelStrengthName = (typeof MODEL_STRENGTHS)[number];
@@ -24,7 +26,11 @@ export const nodeIds = (selected: readonly NodeModel[]): NodeIdType[] =>
   selected.map((entry) => entry.nodeId);
 
 /** Native containers are detached; opaque state, messages, results and metadata are borrowed. */
-export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
+export type Snapshot<S, N extends TSchema, T, C> = DataflowObservation<
+  S,
+  N,
+  T
+> & {
   readonly available: ReadonlySet<NodeIdType>;
   readonly owned: ReadonlySet<NodeIdType>;
   readonly context: ReadonlyMap<NodeIdType, C>;
@@ -34,13 +40,13 @@ export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
   readonly threads: number;
 };
 
-export type Scheduler<S, N, T, C> = (
+export type Scheduler<S, N extends TSchema, T, C> = (
   snapshot: Snapshot<S, N, T, C>,
   signal?: AbortSignal,
 ) => Decision | Promise<Decision>;
 
 /** Internal authority check shared by composition and the context driver. */
-export function validateDecision<S, N, T, C>(
+export function validateDecision<S, N extends TSchema, T, C>(
   snapshot: Snapshot<S, N, T, C>,
   decision: Decision,
 ): void {
@@ -93,7 +99,7 @@ export function validateDecision<S, N, T, C>(
 }
 
 /** Rank only available, owned work; equal ranks use raw JavaScript string order. */
-export function choose<S, N, T, C>(options: {
+export function choose<S, N extends TSchema, T, C>(options: {
   readonly where?: (
     snapshot: Snapshot<S, N, T, C>,
     node: NodeIdType,
@@ -128,7 +134,7 @@ export function choose<S, N, T, C>(options: {
   };
 }
 
-function restrict<S, N, T, C>(
+function restrict<S, N extends TSchema, T, C>(
   snapshot: Snapshot<S, N, T, C>,
   owned: ReadonlySet<NodeIdType>,
 ): Snapshot<S, N, T, C> {
@@ -149,7 +155,7 @@ function restrict<S, N, T, C>(
  * conserve authority; safety does not imply thread feasibility, fairness or progress.
  * Frame/associativity laws require total, deterministic, owned-local callbacks.
  */
-export function separate<S, N, T, C>(
+export function separate<S, N extends TSchema, T, C>(
   leftOwns: (snapshot: Snapshot<S, N, T, C>, node: NodeIdType) => boolean,
   left: Scheduler<S, N, T, C>,
   right: Scheduler<S, N, T, C>,
@@ -187,7 +193,7 @@ export function separate<S, N, T, C>(
 }
 
 /** Override the strength of every node `inner` selects; `assign` names the rung per node. */
-export function strength<S, N, T, C>(
+export function strength<S, N extends TSchema, T, C>(
   assign: (
     snapshot: Snapshot<S, N, T, C>,
     nodeId: NodeIdType,
@@ -197,21 +203,25 @@ export function strength<S, N, T, C>(
   return async (snapshot, signal) => {
     const decision = await inner(snapshot, signal);
     return {
-      selected: decision.selected.map(({ nodeId }) => {
+      selected: decision.selected.map((entry) => {
+        const { nodeId } = entry;
         const name = assign(snapshot, nodeId);
         const index = MODEL_STRENGTHS.indexOf(name);
         if (index < 0)
           throw new DataflowDefinitionError(
             `strength: unknown model strength "${name}" for node "${nodeId}"`,
           );
-        return { nodeId, modelStrength: index as ModelStrength };
+        return copyUsageLimits(entry, {
+          nodeId,
+          modelStrength: index as ModelStrength,
+        });
       }),
     };
   };
 }
 
 /** Normalize this invocation's first applicable speculative wave; retain no future plan. */
-export function agent<S, N, T, C>(
+export function agent<S, N extends TSchema, T, C>(
   invoke: (
     snapshot: Snapshot<S, N, T, C>,
     signal?: AbortSignal,

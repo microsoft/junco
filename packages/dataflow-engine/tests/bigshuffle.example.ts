@@ -5,6 +5,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -18,21 +19,41 @@ import {
   Width,
 } from "../src/index.ts";
 
-type Line = { readonly kind: "line"; readonly text: string };
-type KV = { readonly kind: "kv"; readonly key: string; readonly value: string };
-type LenMsg = { readonly kind: "len"; readonly total: number };
-type Msg = Line | KV | LenMsg;
+const LineSchema = Type.Object({
+  kind: Type.Literal("line"),
+  text: Type.String(),
+});
+const KVSchema = Type.Object({
+  kind: Type.Literal("kv"),
+  key: Type.String(),
+  value: Type.String(),
+});
+const LenMsgSchema = Type.Object({
+  kind: Type.Literal("len"),
+  total: Type.Number(),
+});
+const MsgSchema = Type.Union([LineSchema, KVSchema, LenMsgSchema]);
+type Line = Static<typeof LineSchema>;
+type KV = Static<typeof KVSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: bigshuffle with input and output checksums", async () => {
-  const linesForMainEdge = Edge.message<Msg, string>("linesForMain");
-  const linesForInputCsumEdge = Edge.message<Msg, string>("linesForInputCsum");
-  const kvEdge = Edge.message<Msg, string>("kv");
-  const formattedForSinkEdge = Edge.message<Msg, string>("formattedForSink");
+  const linesForMainEdge = Edge.message<Msg, string>("linesForMain", MsgSchema);
+  const linesForInputCsumEdge = Edge.message<Msg, string>(
+    "linesForInputCsum",
+    MsgSchema,
+  );
+  const kvEdge = Edge.message<Msg, string>("kv", MsgSchema);
+  const formattedForSinkEdge = Edge.message<Msg, string>(
+    "formattedForSink",
+    MsgSchema,
+  );
   const formattedForOutputCsumEdge = Edge.message<Msg, string>(
     "formattedForOutputCsum",
+    MsgSchema,
   );
-  const inputCsumEdge = Edge.message<Msg, string>("inputCsum");
-  const outputCsumEdge = Edge.message<Msg, string>("outputCsum");
+  const inputCsumEdge = Edge.message<Msg, string>("inputCsum", MsgSchema);
+  const outputCsumEdge = Edge.message<Msg, string>("outputCsum", MsgSchema);
 
   const inputLines = [
     "AAAAAAAAAAvalue-1a",

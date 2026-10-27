@@ -5,6 +5,7 @@
     "": {
       "name": "junco-agency",
       "dependencies": {
+        "@babel/code-frame": "8.0.6",
         "@earendil-works/pi-agent-core": "0.99.2",
         "@earendil-works/pi-ai": "0.99.2",
         "@earendil-works/pi-coding-agent": "0.99.2",
@@ -19,6 +20,7 @@
         "mermaid-ascii": "1.0.0",
         "ngraph.graph": "^20.1.2",
         "typebox": "1.3.34",
+        "yaml": "2.9.0",
       },
       "devDependencies": {
         "@biomejs/biome": "2.5.15",
@@ -38,6 +40,7 @@
         "ngraph.graph": "^20.1.2",
         "prettier-printer": "^1.1.4",
         "type-fest": "^5.10.0",
+        "typebox": "1.3.34",
       },
       "devDependencies": {
         "@biomejs/biome": "2.5.15",
@@ -51,6 +54,9 @@
     "packages/dataflow-engine-opik": {
       "name": "dataflow-engine-opik",
       "version": "0.1.0",
+      "dependencies": {
+        "typebox": "1.3.34",
+      },
       "devDependencies": {
         "@types/bun": "1.4.2",
         "@types/node": "26.6.3",
@@ -106,10 +112,10 @@
         "dataflow-engine": "workspace:*",
         "junco-mcp": "workspace:*",
         "junco-tools": "workspace:*",
+        "typebox": "1.3.34",
       },
       "devDependencies": {
         "@types/node": "26.6.3",
-        "typebox": "1.3.34",
         "typescript": "7.0.2",
       },
     },
@@ -131,24 +137,24 @@
     "packages/junco-scheduler": {
       "name": "junco-scheduler",
       "version": "0.1.0",
+      "dependencies": {
+        "typebox": "1.3.34",
+      },
       "devDependencies": {
         "@earendil-works/pi-ai": "0.99.2",
         "@types/bun": "1.4.2",
         "@types/node": "26.6.3",
         "dataflow-engine": "workspace:*",
         "fast-check": "^4.10.2",
-        "typebox": "1.3.34",
         "typescript": "7.0.2",
       },
       "peerDependencies": {
         "@earendil-works/pi-ai": "0.99.2",
         "dataflow-engine": "^0.1.0",
-        "typebox": "1.3.34",
       },
       "optionalPeers": [
         "@earendil-works/pi-ai",
         "dataflow-engine",
-        "typebox",
       ],
     },
     "packages/junco-tools": {
@@ -240,9 +246,11 @@
 
     "@aws/lambda-invoke-store": ["@aws/lambda-invoke-store@0.3.0", "", {}, "sha512-sl4Bm6yiMNYrZKkqqDFWN0UfnWhlS8ivKxrYl+6t0gCLrqr8y3B2IqZZbFRkfaVVp7C/baApyh71P+LeE1A2sQ=="],
 
+    "@babel/code-frame": ["@babel/code-frame@8.0.6", "", { "dependencies": { "@babel/helper-validator-identifier": "^8.0.6", "js-tokens": "^10.0.0" } }, "sha512-uMHhvmDmwFiLuiozaoRYTZHqMFuu3fem/X9JY78lohAuLoh8LSGGC8JqUzo2cVuBsBxkjMZNk56CE7ock8Xxkw=="],
+
     "@babel/helper-string-parser": ["@babel/helper-string-parser@7.29.7", "", {}, "sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw=="],
 
-    "@babel/helper-validator-identifier": ["@babel/helper-validator-identifier@7.29.7", "", {}, "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg=="],
+    "@babel/helper-validator-identifier": ["@babel/helper-validator-identifier@8.0.6", "", {}, "sha512-HYx0YmuchRxRSpnjvcNffnPS8DCauKNmnumIuHG3jnQAVewRA7kfJGwF13ayEpSZs7s4R/oBH4eppuXcAQd5JQ=="],
 
     "@babel/parser": ["@babel/parser@7.29.9", "", { "dependencies": { "@babel/types": "^7.29.8" }, "bin": "./bin/babel-parser.js" }, "sha512-CjXrNHTnvqBVqHgdBysY3vk2T8tpJHb5/RMeHJBTyVa9xgugCB0CJTx/3oO8RV2QRQP391RWpB7D6hLjm8V9uA=="],
 
@@ -992,6 +1000,8 @@
 
     "jiti": ["jiti@2.7.0", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ=="],
 
+    "js-tokens": ["js-tokens@10.0.0", "", {}, "sha512-lM/UBzQmfJRo9ABXbPWemivdCW8V2G8FHaHdypQaIy523snUjog0W71ayWXTjiR+ixeMyVHN2XcpnTd/liPg/Q=="],
+
     "js-yaml": ["js-yaml@5.4.2", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.mjs" } }, "sha512-m+aqu+LwO1O6sIopafj8HUVl5aawITwZQe/yHpMCKjaWBaA/d07B/QdMb3529REftiU+RMMHL3Vlsw3hON7vWg=="],
 
     "json-bigint": ["json-bigint@1.0.0", "", { "dependencies": { "bignumber.js": "^9.0.0" } }, "sha512-SiPv/8VpZuWbvLSMtTDU8hEfrZWg/mH/nV/b4o0CYbSxu1UIQPLdwKOCIyLQX+VIPO5vrLX3i8qtqFyhdPSUSQ=="],
@@ -1303,6 +1313,8 @@
     "@ai-sdk/provider-utils/undici": ["undici@6.29.0", "", {}, "sha512-R+RODBqp6i2pPflGdq+xIOUkl+RNfGgHwoinecKu/JCuf2uO06cOKoDbI2P7Dn6KcswdKwrczbU6IYJ6K8X+wg=="],
 
     "@aws-sdk/credential-provider-sso/@aws-sdk/token-providers": ["@aws-sdk/token-providers@3.1138.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.1", "@aws-sdk/nested-clients": "^3.997.46", "@aws-sdk/types": "^3.974.6", "@smithy/core": "^3.35.0", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-GpyAr0DD63YOEmYFM6Df+gJuIgC92MMTiBK4FTKfxii5MJ9ge20epR7LyroulscYlG89J+ZB2ivFDPjvfQhzdw=="],
+
+    "@babel/types/@babel/helper-validator-identifier": ["@babel/helper-validator-identifier@7.29.7", "", {}, "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg=="],
 
     "@earendil-works/pi-ai/@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.124.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-cN5O8i9UVxHeOQAzj/XjshWXG8KiibJDw9OGpH2Z/eR3n/RBxdoLxDJOcfqAJWvjaMDFfHTBADU04hWRJVkDyA=="],
 

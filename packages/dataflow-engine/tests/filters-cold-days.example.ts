@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -15,24 +16,34 @@ import {
   Width,
 } from "../src/index.ts";
 
-type Row = {
-  readonly kind: "row";
-  readonly year: number;
-  readonly month: number;
-  readonly day: number;
-  readonly mean_temp: number;
-};
-type Mean = { readonly kind: "mean"; readonly value: number };
-type Msg = Row | Mean;
+const RowSchema = Type.Object({
+  kind: Type.Literal("row"),
+  year: Type.Number(),
+  month: Type.Number(),
+  day: Type.Number(),
+  mean_temp: Type.Number(),
+});
+const MeanSchema = Type.Object({
+  kind: Type.Literal("mean"),
+  value: Type.Number(),
+});
+const MsgSchema = Type.Union([RowSchema, MeanSchema]);
+type Row = Static<typeof RowSchema>;
+type Mean = Static<typeof MeanSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: filters cold days with global mean AND-trigger", async () => {
   const rowsForMonthFilterEdge = Edge.message<Msg, string>(
     "rowsForMonthFilter",
+    MsgSchema,
   );
-  const rowsForMeanEdge = Edge.message<Msg, string>("rowsForMean");
-  const monthFilteredEdge = Edge.message<Msg, string>("monthFiltered");
-  const meanEdge = Edge.message<Msg, string>("mean");
-  const outEdge = Edge.message<Msg, string>("out");
+  const rowsForMeanEdge = Edge.message<Msg, string>("rowsForMean", MsgSchema);
+  const monthFilteredEdge = Edge.message<Msg, string>(
+    "monthFiltered",
+    MsgSchema,
+  );
+  const meanEdge = Edge.message<Msg, string>("mean", MsgSchema);
+  const outEdge = Edge.message<Msg, string>("out", MsgSchema);
 
   const monthFilterValue = 1;
   const inputRows: Row[] = [

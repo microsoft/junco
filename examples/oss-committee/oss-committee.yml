@@ -59,20 +59,65 @@ graph:
     - from: ResearchAssignment
       to: Librarian
       kind: message
+      schema: &prompt
+        type: object
+        required: [kind, text]
+        properties:
+          kind: { enum: [prompt, steer, followUp, nextTurn, error] }
+          text: { type: string }
+          images:
+            type: array
+            items:
+              type: object
+              required: [type, data, mimeType]
+              properties:
+                type: { const: image }
+                data: { type: string }
+                mimeType: { type: string }
     - from: Librarian
       to: DesignAssignment
       kind: message
+      schema: *prompt
     - from: Librarian
       to: DesignAssignment
+      schema: &assistant
+        type: object
+        required: [role, content, stopReason]
+        properties:
+          role: { const: assistant }
+          content:
+            type: array
+            items:
+              anyOf:
+                - type: object
+                  required: [type, text]
+                  properties: { type: { const: text }, text: { type: string } }
+                - type: object
+                  required: [type, thinking]
+                  properties: { type: { const: thinking }, thinking: { type: string } }
+                - type: object
+                  required: [type, id, name, arguments]
+                  properties:
+                    type: { const: toolCall }
+                    id: { type: string }
+                    name: { type: string }
+                    arguments: { type: object }
+          stopReason: { enum: [pending, stop, length, toolUse, error, aborted, deferred] }
+          errorMessage: { type: string }
     - from: DesignAssignment
       to: Architect
       kind: message
+      schema: *prompt
     - from: Librarian
       to: ReviewAssignment
+      schema: *assistant
     - from: Architect
       to: ReviewAssignment
+      schema: *assistant
     - from: ReviewAssignment
       to: Reducer
       kind: message
+      schema: *prompt
     - from: Reducer
       to: $sink
+      schema: *assistant

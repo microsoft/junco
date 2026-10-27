@@ -19,6 +19,7 @@ import { JuncoGraph, schedules, type tools, tracer } from "junco-agency";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
 import { nativeOptions } from "./support.ts";
+import { Constant } from "./syntax-code-nodes.fixture.ts";
 
 // Build the CopyTree test addon with `bun run build:native:test` in packages/junco-tools.
 const native = await import(
@@ -40,6 +41,11 @@ const PROGRAM =
   "import sys, time\ndata = bytearray(int(sys.argv[1]) * 1024 * 1024)\nfor i in range(0, len(data), 4096):\n    data[i] = 1\ntime.sleep(1)\n";
 const COMMAND = `/usr/bin/python3 -c '${PROGRAM}' 4`;
 
+const PROMPT = {
+  type: "object",
+  required: ["kind", "text"],
+  properties: { kind: { const: "prompt" }, text: { type: "string" } },
+};
 const DOCUMENT = {
   graph: {
     nodes: {
@@ -51,8 +57,16 @@ const DOCUMENT = {
       },
     },
     edges: [
-      { from: "Start", to: "Worker", kind: "message" },
-      { from: "Worker", to: "$sink" },
+      { from: "Start", to: "Worker", kind: "message", schema: PROMPT },
+      {
+        from: "Worker",
+        to: "$sink",
+        schema: {
+          type: "object",
+          required: ["role", "content"],
+          properties: { role: { const: "assistant" } },
+        },
+      },
     ],
   },
 };
@@ -61,7 +75,9 @@ type Run = { readonly bash: string; readonly tokens: number };
 
 /** Run the real Start~>Worker->$sink graph once, attributing everything to `recorder`. */
 async function runRecorded(
-  recorder: tools.ProfileRecorder<"memory" | "tokens" | "edits" | "operations">,
+  recorder: tools.ProfileRecorder<
+    "memory" | "tokens" | "edits" | "operations" | "probe"
+  >,
   seed: string,
 ): Promise<Run> {
   let bash = "";
@@ -307,8 +323,19 @@ test("graph resources reach bash as cgroup pid limits", async () => {
         JuncoGraph.fromYaml(
           {
             graph: {
-              nodes: { Start: { kind: "emit", text: "resource probe" } },
-              edges: [{ from: "Start", to: "$sink", kind: "message" }],
+              nodes: {
+                Start: { kind: "emit", text: "resource probe" },
+                Terminal: { kind: "code", trigger: "never" },
+              },
+              edges: [
+                {
+                  from: "Start",
+                  to: "Terminal",
+                  kind: "message",
+                  schema: PROMPT,
+                },
+                { from: "Terminal", to: "$sink", schema: { type: "null" } },
+              ],
             },
           },
           {
@@ -316,6 +343,7 @@ test("graph resources reach bash as cgroup pid limits", async () => {
             collection,
             tracer: new tracer.DummyTracer(),
             scheduler: () => schedules.parallel(),
+            code: { Terminal: Constant(null) },
           },
         ),
     );

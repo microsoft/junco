@@ -19,11 +19,12 @@ import {
   Width,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
+import { type AgenticInputSchema, AssistantMessageSchema } from "junco-agent";
 import { LockPolicy } from "junco-tools";
 import { flushLog, log, redirectLog } from "junco-tools/log";
+import { type TString, Type } from "typebox";
 import { ctrlC } from "../examples/support.ts";
 import {
-  type AgenticInput,
   agent,
   Deterministic,
   JuncoGraph,
@@ -138,7 +139,7 @@ async function missingBinding(before: string, lazy: boolean) {
       const tui = tracer.TuiTracer.shared();
       assert.ok(tui instanceof tracer.TuiTracer);
       const forgetTui = defer(() => tui.close());
-      const graphPorts = terminalPorts<string, string>();
+      const graphPorts = terminalPorts(Type.String(), Type.String());
       const graph = new JuncoGraph(
         graphPorts.source,
         graphPorts.sink,
@@ -155,7 +156,7 @@ async function missingBinding(before: string, lazy: boolean) {
       const id = graph.addNode({
         id: NodeId.create("missing-binding"),
         trigger: TriggerRule.always(),
-        state: new Deterministic<string, string>(async function* () {
+        state: new Deterministic<TString, string>(async function* () {
           yield [];
           return "computed";
         }, LockPolicy),
@@ -322,7 +323,7 @@ async function renderingFailure(before: string) {
   await withNativeCleanup(async (defer) => {
     const tui = await tracer.TuiTracer.create();
     const forgetTui = defer(() => tui.close());
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -346,7 +347,7 @@ async function renderingFailure(before: string) {
     const id = graph.addNode({
       id: NodeId.create("RenderFailure"),
       trigger: TriggerRule.always(),
-      state: new Deterministic<string, string>(async function* () {
+      state: new Deterministic<TString, string>(async function* () {
         yield [];
         return "computed";
       }, LockPolicy),
@@ -399,7 +400,7 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
       Promise.withResolvers<void>(),
     ];
     const roots = gates.map((gate, index) => {
-      const rootPorts = terminalPorts<string, string>();
+      const rootPorts = terminalPorts(Type.String(), Type.String());
       const root = new JuncoGraph(
         rootPorts.source,
         rootPorts.sink,
@@ -416,7 +417,7 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
       root.addNode({
         id: NodeId.create("A"),
         trigger: TriggerRule.always(),
-        state: new Deterministic<string, string>(async function* () {
+        state: new Deterministic<TString, string>(async function* () {
           yield [];
           entered[index]!.resolve();
           await gate.promise;
@@ -443,7 +444,7 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
     gates[1]!.resolve();
     await completion;
     for (const execution of roots) await execution.graph.close();
-    const replacementPorts = terminalPorts<string, string>();
+    const replacementPorts = terminalPorts(Type.String(), Type.String());
     const replacement = new JuncoGraph(
       replacementPorts.source,
       replacementPorts.sink,
@@ -460,7 +461,7 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
     replacement.addNode({
       id: NodeId.create("Replacement"),
       trigger: TriggerRule.always(),
-      state: new Deterministic<string, string>(async function* () {
+      state: new Deterministic<TString, string>(async function* () {
         yield [];
         return "new result";
       }, LockPolicy),
@@ -524,7 +525,7 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
     });
     const forgetCaller = defer(() => caller.return());
     caller.stagePrompt("Start");
-    const outerPorts = terminalPorts<AgenticInput, AssistantMessage>();
+    const outerPorts = terminalPorts();
     const outer = new JuncoGraph(
       outerPorts.source,
       outerPorts.sink,
@@ -546,27 +547,20 @@ async function tasksScenario(tui: tracer.TuiTracer, signal: AbortSignal) {
     });
     forgetCaller();
     outerPorts.connect(outer, id);
+    const node = outer.getNode(id);
     const results = await outerContext.run({ signal });
     assert.equal(
       contentText(results.get(id)!.content),
       "combined: worker done",
     );
-    const inner = outer.getNode(id)?.state;
-    assert.ok(
-      inner instanceof JuncoGraph,
-      "task promotion must retain the real nested graph",
-    );
-    const children: string[] = [];
-    inner.forEachNode((childId) => {
-      if (!["$source", "root", "$sink"].includes(childId))
-        children.push(childId);
-    });
-    assert.equal(children.length, 1);
-    assert.ok(children[0]!.startsWith("task-"));
-    const result = inner.result(NodeId.create(children[0]!));
-    assert.ok(O.isSome(result));
-    assert.equal(contentText(result.value.content), "worker done");
-    phase("tasks-complete", { childId: children[0] });
+    assert.equal(outer.getNode(id), node);
+    assert.equal(node?.state, caller);
+    const [report, ...rest] = caller.getTaskResults();
+    assert.equal(rest.length, 0);
+    assert.ok(report?.id.startsWith("task-"));
+    assert.equal(report.status, "completed");
+    assert.equal(report.output, "worker done");
+    phase("tasks-complete", { childId: report.id });
   });
 }
 
@@ -615,7 +609,7 @@ async function agentsScenario(
       prompt: "Beta",
     });
     const forgetBeta = defer(() => beta.agent.return());
-    const edge = Edge.value<AgenticInput, AssistantMessage>("alpha=>beta");
+    const edge = Edge.value("alpha=>beta", AssistantMessageSchema);
     const a = graph.addNode({
       id: NodeId.create("Alpha"),
       policy: LockPolicy,
@@ -633,11 +627,11 @@ async function agentsScenario(
     graph.addEdge(a, b, edge);
     graphPorts.connect(graph, b);
     if (flags.has("--fail")) {
-      const done = Edge.value<AgenticInput, AssistantMessage>("beta=>failure");
+      const done = Edge.value("beta=>failure", AssistantMessageSchema);
       const fail = graph.addNode({
         id: NodeId.create("Failure"),
         trigger: TriggerRule.when(done),
-        state: new Deterministic<AgenticInput, AssistantMessage>(
+        state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
           async function* () {
             yield [];
             throw failure;
@@ -689,7 +683,7 @@ async function quietTerminal(before: string, dumb: boolean) {
   const selected = tracer.TuiTracer.shared();
   if (dumb) {
     assert.ok(selected instanceof tracer.DummyTracer);
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -707,7 +701,7 @@ async function quietTerminal(before: string, dumb: boolean) {
       const id = graph.addNode({
         id: NodeId.create("quiet"),
         trigger: TriggerRule.always(),
-        state: new Deterministic<string, string>(async function* () {
+        state: new Deterministic<TString, string>(async function* () {
           yield [];
           return "done";
         }, LockPolicy),
@@ -724,7 +718,7 @@ async function quietTerminal(before: string, dumb: boolean) {
     );
   } else {
     assert.ok(selected instanceof tracer.TuiTracer);
-    const graphPorts = terminalPorts<string, string>();
+    const graphPorts = terminalPorts(Type.String(), Type.String());
     const graph = new JuncoGraph(
       graphPorts.source,
       graphPorts.sink,
@@ -733,10 +727,6 @@ async function quietTerminal(before: string, dumb: boolean) {
       undefined,
       LockPolicy,
     );
-    const graphContext = schedules.context({
-      graph: graph,
-      scheduler: schedules.parallel(),
-    });
     assert.equal(modes(), before);
     await graph.close();
     await selected.flush();

@@ -1,4 +1,5 @@
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import type { DataflowTracer } from "../src/index.ts";
 import {
   DataflowGraph,
@@ -13,16 +14,33 @@ import {
 } from "../src/index.ts";
 import { ExampleTracer } from "./tracing.ts";
 
-type SourceLine = { readonly kind: "line"; readonly text: string };
-type CharCount = { readonly kind: "chars"; readonly length: number };
-type WordMsg = { readonly kind: "word"; readonly word: string };
-type Msg = SourceLine | CharCount | WordMsg;
+const SourceLineSchema = Type.Object({
+  kind: Type.Literal("line"),
+  text: Type.String(),
+});
+const CharCountSchema = Type.Object({
+  kind: Type.Literal("chars"),
+  length: Type.Number(),
+});
+const WordMsgSchema = Type.Object({
+  kind: Type.Literal("word"),
+  word: Type.String(),
+});
+const MsgSchema = Type.Union([
+  SourceLineSchema,
+  CharCountSchema,
+  WordMsgSchema,
+]);
+type SourceLine = Static<typeof SourceLineSchema>;
+type CharCount = Static<typeof CharCountSchema>;
+type WordMsg = Static<typeof WordMsgSchema>;
+type Msg = typeof MsgSchema;
 
-const linesEdge = Edge.message<Msg, string>("lines");
-const charCountEdge = Edge.message<Msg, string>("charCount");
-const shortWordsEdge = Edge.message<Msg, string>("shortWords");
-const longWordsEdge = Edge.message<Msg, string>("longWords");
-const charSumEdge = Edge.message<Msg, string>("charSum");
+const linesEdge = Edge.message<Msg, string>("lines", MsgSchema);
+const charCountEdge = Edge.message<Msg, string>("charCount", MsgSchema);
+const shortWordsEdge = Edge.message<Msg, string>("shortWords", MsgSchema);
+const longWordsEdge = Edge.message<Msg, string>("longWords", MsgSchema);
+const charSumEdge = Edge.message<Msg, string>("charSum", MsgSchema);
 
 export async function runWordCount(tracer?: DataflowTracer) {
   const inputLines = ["A whole new world", "A new fantastic point of view"];
@@ -65,7 +83,7 @@ export async function runWordCount(tracer?: DataflowTracer) {
             }),
           );
           for (const match of line.text.matchAll(/[A-Za-z']+/g)) {
-            const word = match[0]!;
+            const word = match[0];
             const targetEdge =
               word.length <= 3 ? shortWordsEdge : longWordsEdge;
             events.push(Message.create(targetEdge, { kind: "word", word }));

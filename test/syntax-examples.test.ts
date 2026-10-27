@@ -2,10 +2,18 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type {
+  AgentTool,
+  PromptTemplate,
+  Skill,
+} from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import { graph, JuncoGraph, MockAgent, schedules, tracer } from "junco-agency";
+import type { TSchema } from "typebox";
 import { Reports } from "../examples/mcp/mcp.ts";
 import { assistant, run, settle } from "./deterministic-support.ts";
+
+type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
 
 const cwd = fileURLToPath(new URL("../", import.meta.url));
 const mcpYamlText = readFileSync(
@@ -16,14 +24,14 @@ const mcpYamlText = readFileSync(
 test("MCP report code publishes the exact dependency result after validating both reports", async () => {
   const research = assistant("research-evidence");
   const dependency = assistant("dependency-evidence");
-  let downstream: MockAgent | undefined;
+  let downstream: YamlMock | undefined;
   const execution = await JuncoGraph.fromYaml(mcpYamlText, {
     cwd,
     scheduler: () => schedules.parallel(),
     tracer: new tracer.DummyTracer(),
     code: { Reports },
     createAgent: async (spec) => {
-      const instance = new MockAgent({
+      const instance: YamlMock = new MockAgent({
         runs: [run([settle(spec.node === "Research" ? research : dependency)])],
       });
       if (spec.node === "Dependencies") downstream = instance;

@@ -1,3 +1,4 @@
+import type { TSchema } from "typebox";
 import type {
   DataflowGraph,
   DataflowRunTrace,
@@ -49,7 +50,7 @@ function capturePayload(value: Record<string, unknown>): Record<string, unknown>
 }
 
 /** Every registered node's current lifecycle status, in graph iteration order. */
-function nodeStatuses<S, N, T, EH>(
+function nodeStatuses<S, N extends TSchema, T, EH>(
   graph: DataflowGraph<S, N, T, EH>,
 ): { id: NodeIdType; status: NodeStatus }[] {
   const nodes: { id: NodeIdType; status: NodeStatus }[] = [];
@@ -60,7 +61,7 @@ function nodeStatuses<S, N, T, EH>(
 }
 
 /** The delivered batch and resolved values of one activation; both empty for a prime. */
-function activationInput<N, T>(
+function activationInput<N extends TSchema, T>(
   inputs: ParentView<N, T> | undefined,
 ): Record<string, unknown> {
   const messages: { id: string; payloads: unknown }[] = [];
@@ -90,7 +91,7 @@ export class OpikTracer implements DataflowTracer {
     this.#name = name;
   }
 
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     const metadata: Record<string, unknown> = { nodes: nodeStatuses(graph) };

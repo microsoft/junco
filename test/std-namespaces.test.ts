@@ -2,12 +2,15 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import { context } from "junco-scheduler";
+import { Type } from "typebox";
 import { graph, schedules, tracer, trigger } from "../src/index.ts";
 
 // The root `graph`, `schedules`, `tracer` and `trigger` namespaces compose into one runnable graph:
 // constant fan-out sources feed an ordered fan-in, a persistent sink and a one-shot marker.
 test("root namespaces compose a fan-out/fan-in graph that runs once to quiescence", async () => {
-  type Payload = number | number[];
+  const NumberSchema = Type.Number();
+  const ListSchema = Type.Array(NumberSchema);
+  type Payload = typeof NumberSchema | typeof ListSchema;
   const observer = new tracer.DummyTracer();
   const g = new graph.DataflowGraph<void, Payload, string, never>(
     graph.Width.create(1),
@@ -15,9 +18,12 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
     observer,
   );
   const execution = context({ graph: g, scheduler: schedules.roundRobin() });
-  const a = graph.Edge.message<number, string>("a");
-  const b = graph.Edge.message<number, string>("b");
-  const list = graph.Edge.message<number[], string>("list");
+  const a = graph.Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const b = graph.Edge.message<typeof NumberSchema, string>("b", NumberSchema);
+  const list = graph.Edge.message<typeof ListSchema, string>(
+    "list",
+    ListSchema,
+  );
 
   const left = g.addNode(
     new graph.nodes.ConstFanout(1, [a], { state: undefined, ret: "left" }),
@@ -31,7 +37,7 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
       ret: "joined",
     }),
   );
-  const seen: Payload[] = [];
+  const seen: number[][] = [];
   const sink = g.addNode(
     new graph.nodes.StepNode<void, Payload, string>(
       (_state, view) => {

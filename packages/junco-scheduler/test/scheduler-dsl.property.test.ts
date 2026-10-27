@@ -11,6 +11,7 @@ import {
   Width,
 } from "dataflow-engine";
 import fc from "fast-check";
+import { Type } from "typebox";
 import {
   agent,
   choose,
@@ -25,11 +26,13 @@ import {
   separate,
 } from "../src/index.ts";
 
+const NumberSchema = Type.Number();
+
 type Id = ReturnType<typeof NodeId.create>;
 type State = Readonly<{ priority: number }>;
 type Metadata = Readonly<{ bias: number }>;
-type View = Snapshot<State, number, string, Metadata>;
-type Policy = Scheduler<State, number, string, Metadata>;
+type View = Snapshot<State, typeof NumberSchema, string, Metadata>;
+type Policy = Scheduler<State, typeof NumberSchema, string, Metadata>;
 type Fixture = {
   ids: Id[];
   priorities: number[];
@@ -391,7 +394,7 @@ test("CSL: atomic decisions follow their denotations", async () => {
       }
       const exhausted = { ...f, owned: [] };
       assert.deepEqual(
-        await agent<State, number, string, Metadata>(async () => {
+        await agent<State, typeof NumberSchema, string, Metadata>(async () => {
           throw new Error("exhausted oracle invoked");
         })(snapshot(exhausted)),
         { selected: [] },
@@ -424,8 +427,8 @@ test("CSL: atomic decisions follow their denotations", async () => {
       async (first, second) => {
         const f = fixed(["a", "b"]);
         let calls = 0;
-        const oracle = agent<State, number, string, Metadata>(async () =>
-          calls++ === 0 ? first : second,
+        const oracle = agent<State, typeof NumberSchema, string, Metadata>(
+          async () => (calls++ === 0 ? first : second),
         );
         const one = await oracle(snapshot(f));
         assert.deepEqual(
@@ -449,7 +452,7 @@ test("CSL: atomic decisions follow their denotations", async () => {
   for (const invalid of [-1, 0.5, NaN, -Infinity])
     await assert.rejects(
       async () =>
-        choose<State, number, string, Metadata>({
+        choose<State, typeof NumberSchema, string, Metadata>({
           rank: () => 0,
           width: () => invalid,
         })(snapshot(fixed(["a"]))),
@@ -458,7 +461,7 @@ test("CSL: atomic decisions follow their denotations", async () => {
   for (const rank of [() => NaN, () => "bad"]) {
     // Deliberately malformed JavaScript callback, not a cast of an invalid payload.
     // @ts-expect-error a scheduler comparator must return a number
-    const invalid: Policy = choose<State, number, string, Metadata>({ rank });
+    const invalid: Policy = choose({ rank });
     await assert.rejects(
       async () => invalid(snapshot(fixed(["a", "b"]))),
       DataflowDefinitionError,
@@ -873,7 +876,7 @@ test("CSL: async composition drains before settling", async () => {
   const failure = new Error("empty authority failure");
   await assert.rejects(
     async () =>
-      separate<State, number, string, Metadata>(
+      separate<State, typeof NumberSchema, string, Metadata>(
         () => false,
         () => {
           throw failure;
@@ -907,7 +910,7 @@ test("CSL: context rejects authority or capacity violations atomically", async (
         Width.create(6),
         Width.create(7),
       ];
-      const graph = new DataflowGraph<void, number, string, never>(
+      const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
         Width.create(1),
         fault === "capacity" ? capacities[ids.length - 2]! : UNBOUNDED,
       );
@@ -923,7 +926,7 @@ test("CSL: context rejects authority or capacity violations atomically", async (
           },
         });
       const right = ids.filter((node) => !left.includes(node));
-      type EnginePolicy = Scheduler<void, number, string, never>;
+      type EnginePolicy = Scheduler<void, typeof NumberSchema, string, never>;
       const faulty: EnginePolicy = separate(
         (_s, node) => left.includes(node),
         fault === "escape"
@@ -934,7 +937,8 @@ test("CSL: context rejects authority or capacity violations atomically", async (
         parallel(),
       );
       let current = faulty;
-      const snapshots: Snapshot<void, number, string, never>[] = [];
+      const snapshots: Snapshot<void, typeof NumberSchema, string, never>[] =
+        [];
       const execution = context({
         graph,
         scheduler: (s, signal) => {

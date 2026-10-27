@@ -20,13 +20,12 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as E from "fp-ts/lib/Either.js";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { type AgenticInput, type agent, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco-agency";
-import { runCli } from "../support.ts";
+import { AgenticInputSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco-agency";
+import { runCli, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -161,7 +160,7 @@ export class ReviewTool {
 // The YAML declares instructions, tools, and graph roles; LADDER supplies scheduler-chosen models.
 
 export type MemberId = "Librarian" | "Architect" | "Reducer";
-export type Members = Readonly<Record<MemberId, agent.JuncoAgent>>;
+export type Members = Readonly<Record<MemberId, YamlAgent>>;
 type SearchCounts = Pick<OssSearchTool, "searches" | "failures">;
 type RoundContext = {
   readonly request: string;
@@ -181,7 +180,7 @@ const designId = graphApi.EdgeId.create("Architect->ReviewAssignment");
 const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
   let published = false;
   return {
-    state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+    state: new Deterministic<TSchema, unknown>(async function* () {
       const { request, feedback } = context;
       const text = `Original request:\n${request}\n\n${feedback === undefined ? "" : `Review feedback:\n${feedback}\n\n`}` +
         (feedback === undefined
@@ -199,13 +198,13 @@ const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, e
 const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
   let published = false;
   return {
-    state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+    state: new Deterministic<TSchema, unknown>(async function* () {
       const inputs = yield [];
       const partial = inputs.messages.get(partialResearchId);
       let report: string;
       if (partial !== undefined) {
         const [snapshot, ...extra] = partial;
-        if (snapshot?.kind !== "prompt" || extra.length > 0)
+        if (!Value.Check(AgenticInputSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
           throw new Error("Librarian must send exactly one partial research prompt");
         report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
       } else {
@@ -233,7 +232,7 @@ const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
 const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edges, policy }) => {
   let published = false;
   return {
-    state: new Deterministic<AgenticInput, AssistantMessage>(async function* () {
+    state: new Deterministic<TSchema, unknown>(async function* () {
       const inputs = yield [];
       const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
       published = true;
@@ -258,7 +257,7 @@ const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
 
 /** One review round's graph and its Reducer node. */
 export interface ReviewRound {
-  execution: ReturnType<typeof schedules.context<AgenticInput, AssistantMessage, graphApi.JuncoGraph>>;
+  execution: YamlExecution;
   reducerId: graphApi.NodeIdType;
 }
 
@@ -300,7 +299,7 @@ export const ReviewRound = {
 // without a verdict.
 
 /** An approved plan must be a complete, titled Markdown answer. */
-export function approvedPlan(message: AssistantMessage | undefined): string {
+export function approvedPlan(message: unknown): string {
   const markdown = syntax.finalText(message, "Reducer");
   if (!markdown.startsWith("# ")) throw new Error("Reducer's approved plan must start with a Markdown title (# )");
   return markdown;
@@ -371,7 +370,7 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
   let plan: string;
   {
     await using resources = new AsyncDisposableStack();
-    const members = {} as Record<MemberId, agent.JuncoAgent>;
+    const members = {} as Record<MemberId, YamlAgent>;
     const specs = await syntax.resolveAgents(document, { cwd: process.cwd(), tools: { search: search.tool, review: review.tool } });
     for (const spec of specs) {
       signal?.throwIfAborted();

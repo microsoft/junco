@@ -9,6 +9,11 @@ export {
   finalText,
   resolveAgents,
 } from "./build.js";
+export {
+  ValidationError,
+  type ValidationErrorOptions,
+  type ValidationLocation,
+} from "./errors.js";
 export { type ParseOptions, parse } from "./parse.js";
 export {
   BUILTIN_TOOL_NAMES,

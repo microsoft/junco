@@ -3,6 +3,7 @@ import * as RA from "fp-ts/lib/ReadonlyArray.js";
 import * as RNEA from "fp-ts/lib/ReadonlyNonEmptyArray.js";
 import * as S from "fp-ts/lib/string.js";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import type { DataflowTracer } from "../src/index.ts";
 import {
   DataflowGraph,
@@ -17,22 +18,25 @@ import {
 } from "../src/index.ts";
 import { ExampleTracer } from "./tracing.ts";
 
-type Pair = {
-  readonly kind: "pair";
-  readonly key: string;
-  readonly value: number;
-};
-type Result = {
-  readonly kind: "result";
-  readonly key: string;
-  readonly value: number;
-};
-type Msg = Pair | Result;
+const PairSchema = Type.Object({
+  kind: Type.Literal("pair"),
+  key: Type.String(),
+  value: Type.Number(),
+});
+const ResultSchema = Type.Object({
+  kind: Type.Literal("result"),
+  key: Type.String(),
+  value: Type.Number(),
+});
+const MsgSchema = Type.Union([PairSchema, ResultSchema]);
+type Pair = Static<typeof PairSchema>;
+type Result = Static<typeof ResultSchema>;
+type Msg = typeof MsgSchema;
 
-const sumInEdge = Edge.message<Msg, string>("sumIn");
-const multiplyInEdge = Edge.message<Msg, string>("multiplyIn");
-const sumOutEdge = Edge.message<Msg, string>("sumOut");
-const multiplyOutEdge = Edge.message<Msg, string>("multiplyOut");
+const sumInEdge = Edge.message<Msg, string>("sumIn", MsgSchema);
+const multiplyInEdge = Edge.message<Msg, string>("multiplyIn", MsgSchema);
+const sumOutEdge = Edge.message<Msg, string>("sumOut", MsgSchema);
+const multiplyOutEdge = Edge.message<Msg, string>("multiplyOut", MsgSchema);
 
 const inputPairs: [string, number][] = [
   ["a", 1],
@@ -89,7 +93,7 @@ export async function runCombinePerKey(tracer?: DataflowTracer) {
           );
           const events: Message<Msg>[] = [];
           for (const key of Object.keys(groups).sort(S.Ord.compare)) {
-            const group = groups[key]!;
+            const group = groups[key];
             events.push(
               Message.create(outputEdge, {
                 kind: "result",

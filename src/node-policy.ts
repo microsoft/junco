@@ -1,9 +1,14 @@
-import type { ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  ModelThinkingLevel,
+  ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import type {
   DataflowTracer,
   EdgeIdType as EdgeId,
   InputSchedule,
   Lookup,
+  Node,
   NodeAvailability,
 } from "dataflow-engine";
 import {
@@ -11,11 +16,7 @@ import {
   messageInputs,
   triggerInputs,
 } from "dataflow-engine";
-import type {
-  AgenticYieldReason,
-  JuncoAgent,
-  JuncoAgentNodeContext,
-} from "junco-agent";
+import type { AgenticYieldReason, JuncoAgentNodeContext } from "junco-agent";
 import {
   MODEL_STRENGTHS,
   type ModelStrength,
@@ -25,9 +26,14 @@ import {
   context as schedulerContext,
 } from "junco-scheduler";
 import type { ProfileRecorder, ToolCollection } from "junco-tools";
-import type { Agentic, AgenticNode } from "./agentic.js";
+import type { TSchema } from "typebox";
+import type {
+  Agentic,
+  AgenticNode,
+  AnyJuncoAgent,
+  AnyMockAgent,
+} from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
-import type { MockAgent } from "./mock-agent.js";
 
 /** One rung: a "provider/model-id" and its reasoning effort (`"off"` when omitted). */
 export type LadderRung = {
@@ -79,7 +85,7 @@ const appliedModels = new WeakMap<object, string>();
 /** What an adapter records about one node body, keyed by that body. */
 export type NodePolicy = {
   /** The prompt agent a prompt-agent body drives. */
-  readonly agent?: JuncoAgent | MockAgent;
+  readonly agent?: AnyJuncoAgent | AnyMockAgent;
   /** Resolved value edges already delivered to the body, with the value delivered; a re-resolved edge is fresh again. */
   readonly seenValues?: Map<EdgeId, unknown>;
   /**
@@ -89,11 +95,6 @@ export type NodePolicy = {
   readonly inputMode?: "all-messages";
   /** Reasons of the agent's latest pause. */
   lastYield?: readonly AgenticYieldReason[];
-  /**
-   * The exact state a failed task's recovery closed and reported; its owning graph's close skips
-   * it rather than rethrowing a teardown failure the caller already received.
-   */
-  closedTaskState?: object;
   /** `"caller"`: graph close aborts and joins this body's agent without disposing it; omitted means graph-owned. */
   agentOwnership?: "graph" | "caller";
 };
@@ -108,20 +109,24 @@ export type AgencyNodeMetadata = Readonly<
 /** Keyed by the generated body, so node state itself stays the original instance. */
 export const nodePolicies = new WeakMap<object, NodePolicy>();
 
-/** What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes. */
-export type NodeRegistration = Pick<
-  NonNullable<JuncoAgentNodeContext["messaging"]>,
-  "send" | "info"
+/**
+ * What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes,
+ * plus messaging tool contracts read live from the node's actual links.
+ */
+export type NodeRegistration<
+  N extends TSchema = TSchema,
+  V = AssistantMessage,
+> = Pick<
+  NonNullable<JuncoAgentNodeContext<N, V>["messaging"]>,
+  "send" | "info" | "sendParameters" | "recvOutputSchema"
 > & {
   readonly tracer: DataflowTracer;
   /** The owning graph's current recorder view, if it records. */
   readonly recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
   /** The owning graph's current signal. */
   readonly signal: AbortSignal;
-  /** Validate the original sender's message route without publishing or consuming anything. */
-  readonly assertSend: (edgeId: EdgeId) => void;
   /** The registered spec's receiver contract, captured because engine nodes drop it. */
   readonly contract?: AgenticNode["contract"];
 };
@@ -130,7 +135,17 @@ export type NodeRegistration = Pick<
  * Each node record's registration, keyed by that registration's own Node record: a reused spec or
  * body registered in several graphs keeps each graph's tracer, routes and contract.
  */
-export const registeredNodeContexts = new WeakMap<object, NodeRegistration>();
+export const registeredNodeContexts = new WeakMap<
+  object,
+  NodeRegistration<TSchema, unknown>
+>();
+
+/** The registration of `node`, with the domains of the graph that registered it. */
+export const registrationOf = <N extends TSchema, V>(
+  node: Node<Agentic<N, V>, N, V>,
+): NodeRegistration<N, V> | undefined =>
+  // Only JuncoGraph<N,V>.addNode stores the registration of its own node records.
+  registeredNodeContexts.get(node) as NodeRegistration<N, V> | undefined;
 
 /**
  * Rejects a missing policy (anything without a `toNative` method), or a collection opened under
@@ -172,7 +187,7 @@ export function unseenValues<T>(
  * satisfied edge that is not an already delivered result, so a permanent result never starves a
  * newer message.
  */
-export function nodeInputs<N, T>(
+export function nodeInputs<N extends TSchema, T>(
   step: object | undefined,
   candidate: NodeAvailability<N, T>,
 ): InputSchedule {
@@ -189,7 +204,11 @@ export function nodeInputs<N, T>(
 }
 
 /** Pair a passive agency graph with policy, sidecar metadata and agency input semantics. */
-export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
+export function context<
+  N extends TSchema,
+  T,
+  G extends JuncoGraph<N, T, never>,
+>(options: {
   readonly scheduler: Scheduler<
     NoInfer<Agentic<N, T>>,
     NoInfer<N>,

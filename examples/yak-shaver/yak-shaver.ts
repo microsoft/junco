@@ -58,14 +58,14 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { OpikTracer } from "dataflow-engine-opik";
 import { agent, Deterministic, graph, JuncoGraph, mcp, schedules, syntax, tools, tracer } from "junco-agency";
 import { Opik } from "opik";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { runCli } from "../support.ts";
+import { runCli, type YamlAgent } from "../support.ts";
 import source from "./yak-shaver.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -1020,7 +1020,7 @@ function proposerPrompt(snapshot: GraftSnapshot, work: CandidateWork, researchTo
     "You propose one generalizing refactor for the candidate below: make it serve more existing code so duplicated code elsewhere disappears, with the minimum necessary change. Line numbers and source refer to the repository as of this admission batch, which already contains every refactor applied earlier in the run.",
     contract,
     `## Phase 1: callers\nFor the candidate and each owned method, call \`${trace}\` with { "symbol": <its qualified name after "#", without ~N suffixes>, "in": "${node.path}", "direction": "in", "depth": 1 } (for the candidate: "${symbol}"). Graft does not resolve full IDs, so match results to the IDs above. Reconcile the deterministic count of ${work.candidate.callerIds.length} distinct callers, then read each caller's source. Report unresolved evidence; do not guess.`,
-    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with \`{}\`. It returns one handle ID per researcher of your ${work.shards.length} assigned read-only researchers (${shards}); their assignments are fixed, they inherit your model and may use only ${researchTools.join(", ")}. Researchers start only when you explicitly yield or finish the current run, so after \`${TASK_TOOL}\` returns call \`yield\` while you wait for their reports. Before every \`yield\`, including repeated waits, first call \`send\` { "id": "summary:${work.rank}", "payload": <one short paragraph: callers reconciled, research in flight, open questions> } to Judge:${work.rank}, your downstream collaborator. Their reports arrive later as messages carrying those IDs; wait (sending a summary before yielding again if needed) until a \`task_batch_complete\` message lists every returned handle ID, which means every researcher finished or was given up. Do not submit \`none\` merely because researchers are still running; keep waiting for that completion message. A failed report marked decisionRequired must first be resolved through \`${TASK_TOOL}\` as its tool description says. A missing, failed, malformed, or incomplete report means that shard is incomplete, not that it found nothing.`,
+    `## Phase 2: research\nCall \`${TASK_TOOL}\` exactly once with \`{}\`. It returns one handle ID per researcher of your ${work.shards.length} assigned read-only researchers (${shards}); their assignments are fixed, they inherit your model and may use only ${researchTools.join(", ")}. Researchers start immediately in the background; after \`${TASK_TOOL}\` returns, call \`yield\` while you wait for their reports. Before every \`yield\`, including repeated waits, first call \`send\` { "id": "summary:${work.rank}", "payload": <one short paragraph: callers reconciled, research in flight, open questions> } to Judge:${work.rank}, your downstream collaborator. Their reports arrive later as messages carrying those IDs; wait (sending a summary before yielding again if needed) until a \`task_batch_complete\` message lists every returned handle ID, which means every researcher finished or was given up. Do not submit \`none\` merely because researchers are still running; keep waiting for that completion message. A failed report marked decisionRequired must first be resolved through \`${TASK_TOOL}\` as its tool description says. A missing, failed, malformed, or incomplete report means that shard is incomplete, not that it found nothing.`,
     [
       `## Phase 3: one result\nMerge compatible findings into at most one cohesive generalization of this candidate and record it with one successful \`${SUBMIT_TOOL}\` call (if it rejects your input, correct it and call again):`,
       `- research: every valid researcher JSON report you actually received, copied verbatim (at most one per shard); never write a record for a researcher that returned none.`,
@@ -1227,8 +1227,8 @@ function checkedOutcomes(batch: readonly CandidateWork[], outcomes: readonly Can
 
 export type CandidateLane = {
   readonly work: CandidateWork;
-  readonly proposer: agent.JuncoAgent;
-  readonly judge: agent.JuncoAgent;
+  readonly proposer: YamlAgent;
+  readonly judge: YamlAgent;
   readonly proposal: ProposalRecorder;
   readonly verdict: VerdictRecorder;
 };
@@ -1268,7 +1268,7 @@ type CandidateAnalysis =
 /** Consume a ready lane's recorders; missing final messages or structured results are protocol errors. */
 function completedAnalysis(
   lane: CandidateGraphLane,
-  results: ReadonlyMap<graph.NodeIdType, AssistantMessage>,
+  results: ReadonlyMap<graph.NodeIdType, unknown>,
 ): CandidateAnalysis {
   const rank = lane.work.rank;
   syntax.finalText(results.get(lane.proposerId), `Proposer:${rank}`);
@@ -1293,11 +1293,21 @@ type FinalizeBatchContext = {
   readonly signal?: AbortSignal;
 };
 
+/** Start every lane with one null control value. */
+const StartBatch: syntax.DeterministicNode = ({ policy, collection }) => ({
+  state: new Deterministic<TSchema, unknown>(async function* () {
+    yield [];
+    return null;
+  }, policy, collection),
+});
+
+const startSchema = Type.Null();
+
 /** Finalize ready lanes in order, publishing each successful application before examining the next. */
 const FinalizeBatch: syntax.DeterministicNode<FinalizeBatchContext> = ({ graph: workflow, policy, collection, context }) => {
   const { lanes, outcomes, apply } = context;
   const last = lanes.reduce((last, lane) => lane.work.rank > last.work.rank ? lane : last);
-  const ready = (lane: CandidateGraphLane, results: ReadonlyMap<graph.NodeIdType, AssistantMessage>): boolean => {
+  const ready = (lane: CandidateGraphLane, results: ReadonlyMap<graph.NodeIdType, unknown>): boolean => {
     if (outcomes.has(lane.work.rank)) return false;
     if (results.get(lane.proposerId) === undefined) return workflow.getNode(lane.proposerId)?.status === "done";
     return lane.proposal.peek()?.kind !== "proposal" || results.has(lane.judgeId) || workflow.getNode(lane.judgeId)?.status === "done";
@@ -1308,7 +1318,7 @@ const FinalizeBatch: syntax.DeterministicNode<FinalizeBatchContext> = ({ graph: 
       const results = workflow.results();
       return lanes.some((lane) => ready(lane, results));
     },
-    state: new Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (nodeSignal) {
+    state: new Deterministic<TSchema, unknown>(async function* (nodeSignal) {
       const signal = context.signal === undefined ? nodeSignal : AbortSignal.any([nodeSignal, context.signal]);
       yield [];
       while (true) {
@@ -1356,35 +1366,40 @@ function laneDocument(lanes: readonly CandidateLane[]): syntax.JuncoDocument {
     throw new Error("Yak shaver needs agent role templates");
   }
   const nodes: syntax.JuncoDocument["graph"]["nodes"] = {
+    StartBatch: { kind: "code", trigger: "always" },
     FinalizeBatch: {
       ...document.graph.nodes.FinalizeBatch!,
       trigger: { any: lanes.flatMap(({ work }) => [`Proposer:${work.rank}->FinalizeBatch`, `Judge:${work.rank}->FinalizeBatch`]) },
     },
   };
+  // Copy the template's edges, schemas included, onto each lane's ranked node and edge ids.
+  const template = document.graph.edges ?? [];
   const edges: NonNullable<syntax.JuncoDocument["graph"]["edges"]> = [];
   for (const { work } of lanes) {
     const proposerId = `Proposer:${work.rank}`;
     const judgeId = `Judge:${work.rank}`;
     const proposal = `proposal:${work.rank}`;
     const summary = `summary:${work.rank}`;
+    const ranked = (node: string) => node === "Proposer" || node === "Judge" ? `${node}:${work.rank}` : node;
+    const start = `start:${work.rank}`;
     nodes[proposerId] = {
       ...proposer,
       description: `Proposes one generalization of ${work.candidate.definition.id} from far-first research.`,
+      trigger: start,
     };
+    edges.push({ from: "StartBatch", to: proposerId, id: start, schema: startSchema });
     nodes[judgeId] = {
       ...judge,
       description: `Independently judges the proposal for ${work.candidate.definition.id}.`,
       trigger: proposal,
       contracts: { [proposal]: judge.contracts!.proposal!, [summary]: judge.contracts!.summary! },
     };
-    edges.push(
-      { from: proposerId, to: judgeId, id: summary, kind: "message" },
-      { from: proposerId, to: judgeId, id: proposal },
-      { from: proposerId, to: "FinalizeBatch" },
-      { from: judgeId, to: "FinalizeBatch" },
-    );
+    for (const edge of template) {
+      if (edge.from === "FinalizeBatch") continue;
+      edges.push({ ...edge, from: ranked(edge.from), to: ranked(edge.to), ...(edge.id === undefined ? {} : { id: `${edge.id}:${work.rank}` }) });
+    }
   }
-  edges.push({ from: "FinalizeBatch", to: "$sink" });
+  edges.push(...template.filter((edge) => edge.from === "FinalizeBatch"));
   return {
     ...document,
     graph: { ...document.graph, nodes, edges },
@@ -1422,11 +1437,11 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     const research = lane.proposer.getActiveTools().map((tool) => tool.name).filter(isResearchTool);
     await lane.proposer.setTaskBatch(researchTasks(snapshot, work, research));
     lane.proposer.setTaskFailurePolicy(options.taskFailurePolicy ?? "ignore");
-    const proposalEdge = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>(`proposal:${work.rank}`);
+    const proposalId = graph.EdgeId.create(`proposal:${work.rank}`);
     lane.proposer.stagePrompt(proposerPrompt(snapshot, work, research));
     const proposerId = graph.NodeId.create(`Proposer:${work.rank}`);
     lane.judge.stagePrompt((inputs) => {
-      syntax.finalText(inputs.values.get(proposalEdge.id), `Proposer:${work.rank}`);
+      syntax.finalText(inputs.values.get(proposalId), `Proposer:${work.rank}`);
       const proposal = lane.proposal.peek();
       if (proposal?.kind !== "proposal") throw new Error(`Judge:${work.rank} received no recorded proposal`);
       return judgePrompt(snapshot, work, proposal);
@@ -1443,7 +1458,7 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     agents,
     context: { lanes: graphLanes, outcomes, apply: options.apply, signal },
     available,
-    code: { FinalizeBatch },
+    code: { StartBatch, FinalizeBatch },
     ...(options.ladder === undefined ? {} : { ladder: options.ladder }),
   };
   // The builder owns every prepared agent from this call onward, including construction failures.

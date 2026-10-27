@@ -20,9 +20,10 @@ import { constants } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
-import { type AgenticInput, agent, graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco-agency";
-import { runCli, verifiedModels } from "../support.ts";
+import { contentText } from "@earendil-works/pi-ai";
+import { graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco-agency";
+import type { TSchema } from "typebox";
+import { runCli, verifiedModels, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./verus.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -36,7 +37,7 @@ export type VerusWorkspace = Readonly<VerusRequest & {
   cargoManifests: readonly string[];
 }>;
 export type VerusRole = "Verifier" | "Reviewer" | "Cleanup";
-type VerusMembers = Readonly<Record<VerusRole, agent.JuncoAgent>>;
+type VerusMembers = Readonly<Record<VerusRole, YamlAgent>>;
 type VerusRoundContext = {
   readonly assignment: string;
   readonly members: VerusMembers;
@@ -47,14 +48,14 @@ type VerusRoundContext = {
 /** Validate the translation and sample diagnostics before the persistent Reviewer starts. */
 const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
   return {
-    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
       const inputs = yield [];
       signal.throwIfAborted();
       const message = inputs.values.get(graph.EdgeId.create("Verifier->PrepareReviewer"));
       const report = syntax.finalText(message, "Verifier");
       context.reviewerBaseline = context.verification.runs();
       context.members.Reviewer.stagePrompt(context.assignment + `Current Verifier report (evidence):\n${report}\n\nInspect the current output and call mcp__verus__lsp_diagnostics yourself this round. Report stronger specifications and smaller proofs, even if verification succeeds.`);
-      return message!;
+      return message;
     }, policy),
   };
 };
@@ -62,7 +63,7 @@ const PrepareReviewer: syntax.DeterministicNode<VerusRoundContext> = ({ policy, 
 /** Cleanup is admitted only after a complete review and fresh Reviewer diagnostics. */
 const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, context }) => {
   return {
-    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
       const inputs = yield [];
       signal.throwIfAborted();
       const message = inputs.values.get(graph.EdgeId.create("Reviewer->PrepareCleanup"));
@@ -71,7 +72,7 @@ const PrepareCleanup: syntax.DeterministicNode<VerusRoundContext> = ({ policy, c
         throw new Error("Reviewer did not obtain Verus MCP diagnostics in this round");
       }
       context.members.Cleanup.stagePrompt(context.assignment + `Current Reviewer report (evidence):\n${report}\n\nSimplify real source/proofs without weakening contracts. Check edits with Verus MCP diagnostics; retain unresolved stronger-spec recommendations for the next Verifier.`);
-      return message!;
+      return message;
     }, policy),
   };
 };
@@ -174,7 +175,7 @@ async function loadVerusMcp(bridgeDir: string): Promise<mcp.JuncoMcpTools> {
 
 type VerusFeedback = Readonly<{ review: string; cleanup: string }>;
 export type VerusRound = Readonly<{
-  execution: ReturnType<typeof schedules.context<AgenticInput, AssistantMessage, graph.JuncoGraph>>;
+  execution: YamlExecution;
   reviewerId: graph.NodeIdType;
   cleanupId: graph.NodeIdType;
 }>;
@@ -241,7 +242,7 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   const models = await verifiedModels(LADDER.med, signal);
   signal?.throwIfAborted();
   // ponytail: default session history stays in memory; pass caller-managed agents to runVerusLoop if long-run memory use matters.
-  const members = {} as Record<VerusRole, agent.JuncoAgent>;
+  const members = {} as Record<VerusRole, YamlAgent>;
   for (const spec of await syntax.resolveAgents(document, { cwd: workspace.outputDir })) {
     signal?.throwIfAborted();
     members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus] }, LADDER, models));

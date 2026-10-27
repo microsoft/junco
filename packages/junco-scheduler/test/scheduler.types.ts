@@ -2,18 +2,22 @@
 import {
   DataflowGraph,
   type EdgeIdType,
+  gigabytes,
   NodeId,
   type NodeIdType,
   type ParentView,
+  tokens,
   triggerInputs,
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
+import { Type } from "typebox";
 import {
   agent,
   choose,
   context,
   type Decision,
+  limit,
   parallel,
   roundRobin,
   type Scheduler,
@@ -22,6 +26,9 @@ import {
   separate,
 } from "../src/index.ts";
 
+const NumberSchema = Type.Number();
+const BooleanSchema = Type.Boolean();
+
 type State = Readonly<{ group: "a" | "b" }>;
 type Metadata = { priority: number };
 type Equal<A, B> =
@@ -29,7 +36,12 @@ type Equal<A, B> =
     ? true
     : false;
 
-class ConcreteGraph extends DataflowGraph<State, number, string, Error> {
+class ConcreteGraph extends DataflowGraph<
+  State,
+  typeof NumberSchema,
+  string,
+  Error
+> {
   concreteOnly(): "concrete" {
     return "concrete";
   }
@@ -106,7 +118,13 @@ export function graphAndHookDetermineAllTypes(
   const preserved: "concrete" = execution.graph.concreteOnly();
   const exact: Equal<
     typeof execution,
-    SchedulerContext<State, number, string, Metadata, ConcreteGraph>
+    SchedulerContext<
+      State,
+      typeof NumberSchema,
+      string,
+      Metadata,
+      ConcreteGraph
+    >
   > = true;
   const values: Promise<ReadonlyMap<NodeIdType, string>> = execution.step();
   // @ts-expect-error the graph has no policy driver
@@ -119,7 +137,7 @@ export function graphAndHookDetermineAllTypes(
 }
 
 export function omittedAndScalarMetadataAreExact() {
-  const graph = new DataflowGraph<State, number, string, never>(
+  const graph = new DataflowGraph<State, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
   );
@@ -150,17 +168,17 @@ export function omittedAndScalarMetadataAreExact() {
   });
   const n: Equal<
     typeof numeric.scheduler,
-    Scheduler<State, number, string, number>
+    Scheduler<State, typeof NumberSchema, string, number>
   > = true;
   const b: Equal<
     typeof boolean.scheduler,
-    Scheduler<State, number, string, boolean>
+    Scheduler<State, typeof NumberSchema, string, boolean>
   > = true;
   const z: Equal<
     typeof nullable.scheduler,
-    Scheduler<State, number, string, null>
+    Scheduler<State, typeof NumberSchema, string, null>
   > = true;
-  const explicit = context<State, number, string, Metadata>({
+  const explicit = context<State, typeof NumberSchema, string, Metadata>({
     graph,
     scheduler: parallel(),
   });
@@ -171,7 +189,7 @@ export function policyCannotWidenGraphOrMetadata() {
   const graph = new ConcreteGraph(Width.create(1), UNBOUNDED);
   const wrongMetadata: Scheduler<
     State,
-    number,
+    typeof NumberSchema,
     string,
     { label: string }
   > = () => ({ selected: [] });
@@ -198,11 +216,11 @@ export function policyCannotWidenGraphOrMetadata() {
 export function universalPoliciesAndExactComposition(id: NodeIdType) {
   const all = parallel();
   const rotation = roundRobin();
-  const one = new DataflowGraph<State, number, string, never>(
+  const one = new DataflowGraph<State, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
   );
-  const two = new DataflowGraph<Date, boolean, number, never>(
+  const two = new DataflowGraph<Date, typeof BooleanSchema, number, never>(
     Width.create(1),
     UNBOUNDED,
   );
@@ -222,15 +240,16 @@ export function universalPoliciesAndExactComposition(id: NodeIdType) {
     describeNode: () => false,
   });
   const d = context({ graph: two, scheduler: rotation });
-  const deterministic: Scheduler<State, number, string, Metadata> = choose({
-    where: (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
-    rank: (snapshot, left, right) =>
-      (snapshot.context.get(left)?.priority ?? 0) -
-      (snapshot.context.get(right)?.priority ?? 0),
-  });
-  const oracle: Scheduler<State, number, string, Metadata> = agent(
+  const deterministic: Scheduler<State, typeof NumberSchema, string, Metadata> =
+    choose({
+      where: (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
+      rank: (snapshot, left, right) =>
+        (snapshot.context.get(left)?.priority ?? 0) -
+        (snapshot.context.get(right)?.priority ?? 0),
+    });
+  const oracle: Scheduler<State, typeof NumberSchema, string, Metadata> = agent(
     async (snapshot, signal) => {
-      const input: ParentView<number, string> | undefined =
+      const input: ParentView<typeof NumberSchema, string> | undefined =
         snapshot.inputs.get(id);
       const metadata: Metadata | undefined = snapshot.context.get(id);
       signal?.throwIfAborted();
@@ -238,15 +257,18 @@ export function universalPoliciesAndExactComposition(id: NodeIdType) {
       return [[id]];
     },
   );
-  const composed: Scheduler<State, number, string, Metadata> = separate(
-    (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
-    deterministic,
-    oracle,
-  );
-  const callback: Scheduler<State, number, string, Metadata> = async (
-    snapshot,
-    signal,
-  ) => await composed(snapshot, signal);
+  const composed: Scheduler<State, typeof NumberSchema, string, Metadata> =
+    separate(
+      (snapshot, node) => snapshot.nodes.get(node)?.state.group === "a",
+      deterministic,
+      oracle,
+    );
+  const callback: Scheduler<
+    State,
+    typeof NumberSchema,
+    string,
+    Metadata
+  > = async (snapshot, signal) => await composed(snapshot, signal);
   // @ts-expect-error raw strings are not native branded selections
   const malformed: Decision = { selected: [{ nodeId: "a", modelStrength: 2 }] };
   const valid: Decision = {
@@ -270,39 +292,67 @@ export function metadataConsumerVariance() {
   });
   const consumer: SchedulerContext<
     State,
-    number,
+    typeof NumberSchema,
     string,
     never,
     ConcreteGraph
   > = owner;
   const retained: Equal<
     typeof owner.scheduler,
-    Scheduler<State, number, string, Metadata>
+    Scheduler<State, typeof NumberSchema, string, Metadata>
   > = true;
   const empty = context({ graph, scheduler: parallel() });
   // @ts-expect-error a no-metadata-only policy cannot consume arbitrary rich metadata
   const reversed: SchedulerContext<
     State,
-    number,
+    typeof NumberSchema,
     string,
     Metadata,
     ConcreteGraph
   > = empty;
   // @ts-expect-error a passive graph is not an execution capability
-  const bare: SchedulerContext<State, number, string, never, ConcreteGraph> =
-    graph;
+  const bare: SchedulerContext<
+    State,
+    typeof NumberSchema,
+    string,
+    never,
+    ConcreteGraph
+  > = graph;
   // @ts-expect-error a context is not native graph state/topology
   const work: ConcreteGraph = owner;
   return [consumer, retained, reversed, bare, work];
 }
 
 export function exactSnapshotContract(
-  snapshot: Snapshot<State, number, string, Metadata>,
+  snapshot: Snapshot<State, typeof NumberSchema, string, Metadata>,
 ) {
-  const typed: Snapshot<State, number, string, Metadata> = snapshot;
+  const typed: Snapshot<State, typeof NumberSchema, string, Metadata> =
+    snapshot;
   // @ts-expect-error all native data parameters and metadata are required
-  const erased: Snapshot<State, number, string> = snapshot;
+  const erased: Snapshot<State, typeof NumberSchema, string> = snapshot;
   // @ts-expect-error scheduler data/metadata parameters are required
   const untyped: Scheduler = () => ({ selected: [] });
   return [typed, erased, untyped];
+}
+
+export function usageLimitOptions(
+  scheduler: Scheduler<State, typeof NumberSchema, string, Metadata>,
+) {
+  limit({ tools: 100 }, scheduler);
+  limit({ tokens: tokens(20_000), scope: "batch" }, scheduler);
+  limit({ tools: 10, tokens: tokens(2_000), scope: "activation" }, scheduler);
+  limit(
+    { memory: gigabytes(4), tokens: tokens(100_000), tools: 500 },
+    limit({ tools: 20, scope: "activation" }, scheduler),
+  );
+  // @ts-expect-error every tool counts together: no per-name quotas
+  limit({ tools: { read: 3 } }, scheduler);
+  // @ts-expect-error unknown scope
+  limit({ tools: 1, scope: "global" }, scheduler);
+  // @ts-expect-error misspelled resource
+  limit({ tool: 1 }, scheduler);
+  // @ts-expect-error tokens take a token quantity
+  limit({ tokens: 100 }, scheduler);
+  // @ts-expect-error tokens take the token dimension
+  limit({ tokens: gigabytes(1) }, scheduler);
 }

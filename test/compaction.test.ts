@@ -20,7 +20,7 @@ import {
 import { JuncoAgentError } from "junco-agent";
 import { LockPolicy } from "junco-tools";
 import {
-  type AgenticInput,
+  AgenticInputSchema,
   type CompactionPolicy,
   Deterministic,
   JuncoGraph,
@@ -135,7 +135,10 @@ async function compactionFixture() {
     a: graph.addNode(node(agents.a, "a")),
     b: graph.addNode(node(agents.b, "b")),
   } as Record<keyof typeof agents, NodeIdType>;
-  const never = Edge.message<AgenticInput, AssistantMessage>("d->c");
+  const never = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    "d->c",
+    AgenticInputSchema,
+  );
   ids.c = graph.addNode({
     id: NodeId.create("c"),
     state: agents.c,
@@ -206,19 +209,23 @@ describe("policy selection", () => {
 describe("policy boundaries", () => {
   test("an empty graph or selection completes without requests", async () => {
     for (const [policy] of POLICIES) {
-      const source = new Source<AgenticInput, AssistantMessage>(
+      const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
         () => {
           throw new DataflowDefinitionError(
             "Empty compaction graph does not accept external input",
           );
         },
-        { id: NodeId.create("$source") },
+        { id: NodeId.create("$source"), schema: AgenticInputSchema },
       );
-      const sink = new Sink<AgenticInput, AssistantMessage>(
+      const sink = new Sink<typeof AgenticInputSchema, AssistantMessage>(
         async function* () {
           throw new Error("Empty compaction graph has no terminal result");
         },
-        { id: NodeId.create("$sink"), trigger: TriggerRule.never() },
+        {
+          id: NodeId.create("$sink"),
+          schema: AgenticInputSchema,
+          trigger: TriggerRule.never(),
+        },
       );
       const execution = plainContext(source, sink, "parallel");
       assert.equal(
@@ -469,7 +476,7 @@ describe("policy boundaries", () => {
      * Adds a nested graph whose full, available member would reject any compaction, and a
      * coroutine, to `graph`.
      */
-    const addSkipped = (graph: JuncoGraph<AgenticInput, AssistantMessage>) => {
+    const addSkipped = (graph: JuncoGraph) => {
       const inner = new Measured({
         prompt: "inner",
         history: seeded(90),
@@ -486,14 +493,14 @@ describe("policy boundaries", () => {
       );
       const child = childContext.graph;
       const innerId = child.addNode(node(inner, "inner"));
-      const coroutine = new Deterministic<AgenticInput, AssistantMessage>(
-        async function* () {
-          started.add(coroutine);
-          yield [];
-          return assistant("coroutine done");
-        },
-        LockPolicy,
-      );
+      const coroutine = new Deterministic<
+        typeof AgenticInputSchema,
+        AssistantMessage
+      >(async function* () {
+        started.add(coroutine);
+        yield [];
+        return assistant("coroutine done");
+      }, LockPolicy);
       childPorts.connect(child, innerId);
       const childId = graph.addNode({
         id: NodeId.create("child"),
@@ -507,7 +514,7 @@ describe("policy boundaries", () => {
       });
       return { inner, child, coroutine, childId, coroutineId };
     };
-    const started = new Set<Deterministic<AgenticInput, AssistantMessage>>();
+    const started = new Set<Deterministic>();
 
     for (const [name, expected] of POLICIES) {
       // Without a compactable direct state, nothing is measured or requested.

@@ -1,3 +1,4 @@
+import type { TSchema } from "typebox";
 import type { EdgeId, NodeId } from "./identity.js";
 import type { ParentView } from "./node.js";
 import type { TriggerRule } from "./trigger.js";
@@ -28,7 +29,7 @@ export type Schedule = readonly (readonly NodeSchedule[])[];
  * the runtime has already admitted: not `done`, trigger evaluated, availability hook passed.
  * These are candidate-local input-planning facts; nothing here reaches any other node.
  */
-export type NodeAvailability<N, T> = {
+export type NodeAvailability<N extends TSchema, T> = {
   /** LIVE, non-destructive view of the node's inbound edges: queues are unconsumed. */
   readonly view: ParentView<N, T>;
   readonly trigger: TriggerRule<N, T>;
@@ -49,7 +50,7 @@ export type NodeAvailability<N, T> = {
  * A partially satisfied `"all"` rule reads NOTHING — atomicity. Reachable only when a custom
  * `is_available` hook reports a node available while its trigger is unsatisfied.
  */
-export const triggerInputs = <N, T>({
+export const triggerInputs = <N extends TSchema, T>({
   trigger,
   satisfied,
 }: NodeAvailability<N, T>): InputSchedule => {
@@ -65,7 +66,7 @@ export const triggerInputs = <N, T>({
 };
 
 /** Read every queued inbound message on activation, independently of which edge triggered it. */
-export const messageInputs = <N, T>({
+export const messageInputs = <N extends TSchema, T>({
   view,
 }: Pick<NodeAvailability<N, T>, "view">): InputSchedule => {
   const inputs = new Map<EdgeId, MessageSchedule>();

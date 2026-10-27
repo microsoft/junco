@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import type { ParentView } from "../src/index.ts";
 import {
   Edge,
@@ -8,14 +9,16 @@ import {
   triggerInputs,
 } from "../src/index.ts";
 
-const EMPTY_VIEW: ParentView<number, string> = {
+const NumberSchema = Type.Number();
+
+const EMPTY_VIEW: ParentView<typeof NumberSchema, string> = {
   messages: new Map(),
   values: new Map(),
 };
 
 test("triggerInputs: `all` reads every rule edge whole, `any` reads only the first satisfied edge", () => {
-  const edgeA = Edge.message<number, string>("a");
-  const edgeB = Edge.message<number, string>("b");
+  const edgeA = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const edgeB = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
   const a = edgeA.id;
   const b = edgeB.id;
   const view = EMPTY_VIEW;

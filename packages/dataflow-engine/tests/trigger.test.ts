@@ -2,6 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
+import { Type } from "typebox";
 import type { EdgeIdType } from "../src/index.ts";
 import {
   DataflowDefinitionError,
@@ -14,28 +15,33 @@ import {
   TriggerRule,
 } from "../src/index.ts";
 
+const NumberSchema = Type.Number();
+
 const NODE = NodeId.create("n");
 
 /** A fresh message edge preloaded with `items`, so each test owns its own queue state. */
 const msgEdge = (
   id: string,
   items: readonly number[] = [],
-): Edge<number, string> => {
-  const edge = Edge.message<number, string>(id);
+): Edge<typeof NumberSchema, string> => {
+  const edge = Edge.message<typeof NumberSchema, string>(id, NumberSchema);
   if (E.isLeft(edge.transport)) edge.transport.left.push(...items);
   return edge;
 };
 
 /** A fresh value edge, resolved to `value` when one is given and left unresolved otherwise. */
-const valEdge = (id: string, value?: string): Edge<number, string> => {
-  const edge = Edge.value<number, string>(id);
+const valEdge = (
+  id: string,
+  value?: string,
+): Edge<typeof NumberSchema, string> => {
+  const edge = Edge.value(id, Type.String());
   if (value !== undefined) edge.transport = E.right(O.some(value));
   return edge;
 };
 
 const inboundOf = (
-  ...edges: readonly Edge<number, string>[]
-): ReadonlyMap<EdgeIdType, Edge<number, string>> =>
+  ...edges: readonly Edge<typeof NumberSchema, string>[]
+): ReadonlyMap<EdgeIdType, Edge<typeof NumberSchema, string>> =>
   new Map(edges.map((edge) => [edge.id, edge]));
 
 test("all: fires only when every entry has something queued", () => {
@@ -46,7 +52,10 @@ test("all: fires only when every entry has something queued", () => {
     const a = msgEdge("a", aItems);
     const b = msgEdge("b", bItems);
     return evaluateTrigger(
-      TriggerRule.allOf<number, string>(TriggerEntry.on(a), TriggerEntry.on(b)),
+      TriggerRule.allOf<typeof NumberSchema, string>(
+        TriggerEntry.on(a),
+        TriggerEntry.on(b),
+      ),
       inboundOf(a, b),
       NODE,
     );
@@ -64,7 +73,10 @@ test("any: fires as soon as one entry has something queued", () => {
     const a = msgEdge("a", aItems);
     const b = msgEdge("b", bItems);
     return evaluateTrigger(
-      TriggerRule.anyOf<number, string>(TriggerEntry.on(a), TriggerEntry.on(b)),
+      TriggerRule.anyOf<typeof NumberSchema, string>(
+        TriggerEntry.on(a),
+        TriggerEntry.on(b),
+      ),
       inboundOf(a, b),
       NODE,
     );
@@ -79,19 +91,35 @@ test("empty rule: all/always fire, any/never do not", () => {
   const b = msgEdge("b");
   const inbound = inboundOf(a, b);
   assert.equal(
-    evaluateTrigger(TriggerRule.always<number, string>(), inbound, NODE),
+    evaluateTrigger(
+      TriggerRule.always<typeof NumberSchema, string>(),
+      inbound,
+      NODE,
+    ),
     true,
   );
   assert.equal(
-    evaluateTrigger(TriggerRule.allOf<number, string>(), inbound, NODE),
+    evaluateTrigger(
+      TriggerRule.allOf<typeof NumberSchema, string>(),
+      inbound,
+      NODE,
+    ),
     true,
   );
   assert.equal(
-    evaluateTrigger(TriggerRule.never<number, string>(), inbound, NODE),
+    evaluateTrigger(
+      TriggerRule.never<typeof NumberSchema, string>(),
+      inbound,
+      NODE,
+    ),
     false,
   );
   assert.equal(
-    evaluateTrigger(TriggerRule.anyOf<number, string>(), inbound, NODE),
+    evaluateTrigger(
+      TriggerRule.anyOf<typeof NumberSchema, string>(),
+      inbound,
+      NODE,
+    ),
     false,
   );
 });
@@ -100,7 +128,7 @@ test("an entry is satisfied at any non-zero queue length, not at zero", () => {
   const fire = (items: readonly number[]): boolean => {
     const a = msgEdge("a", items);
     return evaluateTrigger(
-      TriggerRule.allOf<number, string>(TriggerEntry.on(a)),
+      TriggerRule.allOf<typeof NumberSchema, string>(TriggerEntry.on(a)),
       inboundOf(a),
       NODE,
     );
@@ -114,7 +142,7 @@ test("value edge: unresolved is unsatisfied, resolved is satisfied", () => {
   const check = (value: string | undefined): boolean => {
     const v = valEdge("v", value);
     return evaluateTrigger(
-      TriggerRule.allOf<number, string>(TriggerEntry.on(v)),
+      TriggerRule.allOf<typeof NumberSchema, string>(TriggerEntry.on(v)),
       inboundOf(v),
       NODE,
     );
@@ -133,7 +161,7 @@ test("satisfiedEdges: rule insertion order, satisfied subset only", () => {
     const b = msgEdge("b", bItems);
     const c = msgEdge("c", cItems);
     return satisfiedEdges(
-      TriggerRule.anyOf<number, string>(
+      TriggerRule.anyOf<typeof NumberSchema, string>(
         TriggerEntry.on(c),
         TriggerEntry.on(a),
         TriggerEntry.on(b),
@@ -157,7 +185,7 @@ test("rule key outside the node's inbound set is a definition error", () => {
   assert.throws(
     () =>
       evaluateTrigger(
-        TriggerRule.allOf<number, string>(TriggerEntry.on(b)),
+        TriggerRule.allOf<typeof NumberSchema, string>(TriggerEntry.on(b)),
         inboundOf(a),
         NODE,
       ),
@@ -171,7 +199,7 @@ test("all: a later rule entry outside the inbound set still throws when an earli
   assert.throws(
     () =>
       evaluateTrigger(
-        TriggerRule.allOf<number, string>(
+        TriggerRule.allOf<typeof NumberSchema, string>(
           TriggerEntry.on(a),
           TriggerEntry.on(b),
         ),
@@ -186,12 +214,18 @@ test("a duplicated edge id in one rule is a definition error", () => {
   const a = msgEdge("a");
   assert.throws(
     () =>
-      TriggerRule.allOf<number, string>(TriggerEntry.on(a), TriggerEntry.on(a)),
+      TriggerRule.allOf<typeof NumberSchema, string>(
+        TriggerEntry.on(a),
+        TriggerEntry.on(a),
+      ),
     DataflowDefinitionError,
   );
   assert.throws(
     () =>
-      TriggerRule.anyOf<number, string>(TriggerEntry.on(a), TriggerEntry.on(a)),
+      TriggerRule.anyOf<typeof NumberSchema, string>(
+        TriggerEntry.on(a),
+        TriggerEntry.on(a),
+      ),
     DataflowDefinitionError,
   );
 });

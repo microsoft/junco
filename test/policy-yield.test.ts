@@ -20,7 +20,6 @@ import {
   type NativeModule,
   ShellMuxOperations,
   ToolCollection,
-  type ToolCollectionOptions,
 } from "junco-tools";
 import { policyContext, terminalPorts } from "./deterministic-support.ts";
 import { flushMacrotasks, nativeOptions } from "./support.ts";

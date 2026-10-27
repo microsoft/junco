@@ -24,13 +24,13 @@ import {
 } from "dataflow-engine";
 import {
   type Agentic,
-  type AgenticInput,
   agent as agentApi,
   JuncoGraph,
   schedules,
   tools as toolsApi,
 } from "junco-agency";
 import type {
+  AgenticInputSchema,
   AgenticStep,
   JuncoAgent,
   Agentic as JuncoAgentProtocol,
@@ -50,12 +50,14 @@ import {
 } from "../packages/junco-scheduler/test/support.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
+type Chat = typeof AgenticInputSchema;
+
 export type AgencyContext = SchedulerContext<
-  Agentic<AgenticInput, AssistantMessage>,
-  AgenticInput,
+  Agentic<Chat, AssistantMessage>,
+  Chat,
   AssistantMessage,
   AgencyNodeMetadata,
-  JuncoGraph<AgenticInput, AssistantMessage>
+  JuncoGraph<Chat, AssistantMessage>
 >;
 
 /** A `ModelRuntime` with a saved login for a faux `provider` serving `responses` in order. */
@@ -190,8 +192,8 @@ export type Script =
   | readonly FauxResponseStep[];
 
 export async function agencyGraph(
-  source: Source<AgenticInput, AssistantMessage>,
-  sink: Sink<AgenticInput, AssistantMessage>,
+  source: Source<Chat, AssistantMessage>,
+  sink: Sink<Chat, AssistantMessage>,
   script: Script = runAvailable,
   {
     prompt,

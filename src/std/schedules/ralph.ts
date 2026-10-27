@@ -1,41 +1,29 @@
 // The Ralph round controller for `workflows.ralph`: availability hooks for `syntax`'s
 // `BuildOptions.available`. Ralph runs once per round in the same agent session; only the last
 // round reaches $sink. A native yield resumes the running node without counting as a round.
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import {
-  type AvailabilityFn,
-  type Edge,
-  EdgeId,
-  NodeId,
-} from "dataflow-engine";
+import { EdgeId, NodeId, type ParentView } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import type { JuncoAgent } from "junco-agent";
-import type { AgenticInput } from "../../agentic.js";
+import { AgenticInputSchema, JuncoAgent } from "junco-agent";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import type { JuncoGraph } from "../../junco-graph.js";
-import type { MockAgent } from "../../mock-agent.js";
-import { finalText } from "../../syntax/build.js";
+import { MockAgent } from "../../mock-agent.js";
+import { type BuildOptions, finalText } from "../../syntax/build.js";
 
 export type RalphOptions = {
   /** Full-assignment rounds to run; a positive safe integer, two when omitted. */
   readonly rounds?: number;
 };
 /** Factories keyed by node id, the shape of `syntax.BuildOptions.available`. */
-export type Availability = Readonly<
-  Record<
-    string,
-    (context: {
-      graph: JuncoGraph;
-      edges: ReadonlyMap<string, Edge<AgenticInput, AssistantMessage>>;
-    }) => AvailabilityFn<AgenticInput, AssistantMessage> | undefined
-  >
->;
+export type Availability = NonNullable<BuildOptions["available"]>;
 
 type Progress = {
   completed: number;
-  last: AssistantMessage | undefined;
+  /** Ralph's latest retained result; `finalText` validates it before use. */
+  last: unknown;
   assignment: string | undefined;
 };
-type Prompt = NonNullable<Parameters<JuncoAgent["stagePrompt"]>[0]>;
+type Prompt = (inputs: ParentView<TSchema, unknown>) => string;
 
 const NODE = NodeId.create("Ralph");
 const INPUT = EdgeId.create("$source~>Ralph");
@@ -48,9 +36,9 @@ export function ralph(options: RalphOptions = {}): {
   const rounds = options.rounds ?? 2;
   if (!(Number.isSafeInteger(rounds) && rounds >= 1))
     throw new RangeError("Ralph rounds must be a positive safe integer");
-  const progress = new WeakMap<JuncoGraph, Progress>();
+  const progress = new WeakMap<JuncoGraph<TSchema, unknown>, Progress>();
   /** Every distinct retained result of Ralph completes one round on this graph level. */
-  const track = (graph: JuncoGraph): Progress => {
+  const track = (graph: JuncoGraph<TSchema, unknown>): Progress => {
     let p = progress.get(graph);
     if (p === undefined) {
       p = { completed: 0, last: undefined, assignment: undefined };
@@ -75,11 +63,12 @@ export function ralph(options: RalphOptions = {}): {
       if (
         foreign ||
         batch.length !== 1 ||
-        assignment!.kind !== "prompt" ||
-        (assignment!.images?.length ?? 0) > 0
+        !Value.Check(AgenticInputSchema, assignment) ||
+        assignment.kind !== "prompt" ||
+        (assignment.images?.length ?? 0) > 0
       )
         throw new Error("Ralph requires exactly one prompt assignment");
-      p.assignment = assignment!.text;
+      p.assignment = assignment.text;
       return p.assignment;
     };
   const revision =
@@ -95,11 +84,14 @@ export function ralph(options: RalphOptions = {}): {
       Ralph: ({ graph, edges }) =>
         edges.has(LOOP)
           ? (_view, triggered) => {
-              const node = graph.getNode(NODE)!;
+              const node = graph.getNode(NODE);
+              if (node === undefined) throw new Error("Ralph node missing");
               if (node.status === "running") return true;
               const p = track(graph);
               if (!triggered || p.completed >= rounds) return false;
-              const agent = node.state as JuncoAgent | MockAgent;
+              const agent = node.state;
+              if (!(agent instanceof JuncoAgent || agent instanceof MockAgent))
+                throw new TypeError("Ralph must be an agent node");
               // Only an idle agent is staged, once per round; repeated availability probes are safe.
               if (agent.status === "idle")
                 agent.stagePrompt(p.completed === 0 ? first(p) : revision(p));

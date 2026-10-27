@@ -1,15 +1,11 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import {
-  type AssistantMessage,
-  fauxAssistantMessage,
-} from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Edge, NodeId, TriggerRule } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { JuncoAgentError } from "junco-agent";
+import { AssistantMessageSchema, JuncoAgentError } from "junco-agent";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import type { AgenticInput } from "../src/index.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 import { resultText, terminalPorts } from "./deterministic-support.ts";
 import { agencyGraph, leaf, runAvailable, type Script } from "./support.ts";
@@ -68,7 +64,7 @@ test("speculative unavailable IDs are filtered and reconsidered from a fresh dec
     return { waves: [["producer", "consumer", "$sink"]] };
   });
   const graph = context.graph;
-  const edge = Edge.value<AgenticInput, AssistantMessage>("producer->consumer");
+  const edge = Edge.value("producer->consumer", AssistantMessageSchema);
   const p = graph.addNode({
     id: NodeId.create("producer"),
     description: "producer",
@@ -157,7 +153,7 @@ test("a nested context publishes its sink result after all child decisions", asy
   const ports = terminalPorts();
   const parent = await agencyGraph(ports.source, ports.sink);
   const graph = parent.context.graph;
-  const edge = Edge.value<AgenticInput, AssistantMessage>("child->consumer");
+  const edge = Edge.value("child->consumer", AssistantMessageSchema);
   let childRequestsAtDelivery: number | undefined;
   const consumer = await leaf(
     [

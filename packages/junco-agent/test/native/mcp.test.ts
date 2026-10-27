@@ -27,7 +27,7 @@ import {
   type JuncoMcpConnectOptions,
   JuncoMcpTools,
 } from "junco-mcp";
-import { isTaskTool, LockPolicy, type NativeModule, ToolCollection, TaskTool } from "junco-tools";
+import { LockPolicy, type NativeModule, ToolCollection, TaskTool } from "junco-tools";
 import { errorGraph, isMarshPolicyDenied } from "junco-tools/errors";
 import * as testAddon from "../../../junco-tools/target/native-test/index.js";
 import { JuncoAgent, JuncoAgentError } from "../../src/index.ts";
@@ -505,7 +505,7 @@ test("subagents of a mixed list share ordinary tools and reconnect every definit
       const tools = agent.getTools();
       expect(namesOf(tools)).toEqual(namesOf(parent.getTools()));
       expect(tools).toContain(ordinary.tool);
-      expect(isTaskTool(toolNamed(tools, "task")!)).toBe(true);
+      expect(TaskTool.is(toolNamed(tools, "task")!)).toBe(true);
       const a = await readState(toolNamed(tools, "mcp__a__read_state"));
       const b = await readState(toolNamed(tools, "mcp__b__read_state"));
       expect([a.marker, b.marker]).toEqual(["A", "B"]);

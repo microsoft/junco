@@ -136,7 +136,7 @@ const astEditSchema = Type.Object({
 export const AstGrepTool = {
   create(
     cwd: string,
-    native: NativeModule,
+    _native: NativeModule,
     mux: NativeMux,
     recorder?:
       | ProfileRecorder<"operations">

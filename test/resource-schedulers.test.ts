@@ -1,7 +1,20 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
+  type AgentTool,
+  BACKGROUND_CONTEXT,
+  MemorySessionRepo,
+} from "@earendil-works/pi-agent-core";
+import {
+  type AssistantMessage,
+  createModels,
+  type FauxResponseStep,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import {
+  captureUsageContext,
   DataflowDefinitionError,
   DummyTracer,
   Edge,
@@ -16,22 +29,29 @@ import {
   UNBOUNDED,
   Width,
 } from "dataflow-engine";
-import { JuncoAgentError } from "junco-agent";
-import { LockPolicy } from "junco-tools";
+import {
+  type AgenticInputSchema,
+  AssistantMessageSchema,
+  JuncoAgent,
+  JuncoAgentError,
+} from "junco-agent";
+import { LockPolicy, TaskTool } from "junco-tools";
+import { Type } from "typebox";
 import {
   type Agentic,
-  type AgenticInput,
   Deterministic,
   JuncoGraph,
   MockAgent,
   MockJuncoGraph,
   schedules,
+  graph as std,
 } from "../src/index.ts";
 import { terminalPorts, textOf, yieldsThen } from "./deterministic-support.ts";
+import { toolTurn } from "./support.ts";
 
 type Policy = schedules.Scheduler<
-  Agentic<AgenticInput, AssistantMessage>,
-  AgenticInput,
+  Agentic<typeof AgenticInputSchema, AssistantMessage>,
+  typeof AgenticInputSchema,
   AssistantMessage,
   schedules.AgencyNodeMetadata
 >;
@@ -39,13 +59,16 @@ const member = (
   name: string,
   agent: MockAgent,
   options: Partial<
-    Pick<NodeOptions<AgenticInput, AssistantMessage>, "is_available">
+    Pick<
+      NodeOptions<typeof AgenticInputSchema, AssistantMessage>,
+      "is_available"
+    >
   > = {},
 ) => ({
   id: NodeId.create(name),
   state: agent,
   policy: LockPolicy,
-  trigger: TriggerRule.always<AgenticInput, AssistantMessage>(),
+  trigger: TriggerRule.always<typeof AgenticInputSchema, AssistantMessage>(),
   ...options,
 });
 function recorded(inner: Policy): {
@@ -149,8 +172,8 @@ for (const Graph of [MockJuncoGraph, JuncoGraph]) {
         );
         ports.connect(graph, members[3]!);
         const limited: Policy = schedules.limit<
-          Agentic<AgenticInput, AssistantMessage>,
-          AgenticInput,
+          Agentic<typeof AgenticInputSchema, AssistantMessage>,
+          typeof AgenticInputSchema,
           AssistantMessage,
           schedules.AgencyNodeMetadata
         >({ memory: gigabytes(4) }, schedules.parallel());
@@ -219,9 +242,9 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
       );
     });
     const edges = names.map((name) =>
-      Edge.value<AgenticInput, AssistantMessage>(`${name}->join`),
+      Edge.value(`${name}->join`, AssistantMessageSchema),
     );
-    const join = new Deterministic<AgenticInput, AssistantMessage>(
+    const join = new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
       async function* () {
         const view = yield [];
         for (const edge of edges) {
@@ -246,8 +269,8 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
     ports.connect(graph, joinId);
     const { waves, scheduler } = recorded(
       schedules.choose<
-        Agentic<AgenticInput, AssistantMessage>,
-        AgenticInput,
+        Agentic<typeof AgenticInputSchema, AssistantMessage>,
+        typeof AgenticInputSchema,
         AssistantMessage,
         schedules.AgencyNodeMetadata
       >({ rank: schedules.lowest("tokens"), width: () => 1 }),
@@ -325,5 +348,262 @@ test("agency ladders switch model and thinking before work, only when strength c
     } finally {
       await graph.close();
     }
+  }
+});
+
+// Usage limits on real agents --------------------------------------------------------------------
+
+/** A caller-owned tool counting its executions. */
+function countingTool() {
+  const state = { executions: 0 };
+  const tool: AgentTool = {
+    name: "mock_tool",
+    label: "mock_tool",
+    description: "counts executions",
+    parameters: Type.Object({}),
+    execute: async () => {
+      state.executions++;
+      return { content: [{ type: "text", text: "ok" }], details: undefined };
+    },
+  };
+  return { state, tool };
+}
+
+/** One Models registry; each `name` gets its own scripted faux provider. */
+function providers(scripts: Record<string, readonly FauxResponseStep[]>) {
+  const models = createModels();
+  const faux = Object.fromEntries(
+    Object.entries(scripts).map(([name, responses]) => {
+      const provider = fauxProvider({ api: name, provider: name });
+      provider.setResponses([...responses]);
+      models.setProvider(provider.provider);
+      return [name, provider];
+    }),
+  );
+  return { models, faux };
+}
+
+/** A real agent on `provider`'s model, staged with a prompt. */
+async function placed(
+  models: ReturnType<typeof createModels>,
+  provider: string,
+  tools: AgentTool[],
+) {
+  const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
+  const agent = await JuncoAgent.fromResolved({
+    session,
+    models,
+    model: models.getModels(provider)[0]!,
+    systemPrompt: "sys",
+    tools,
+    prompt: "go",
+  });
+  return { agent, session };
+}
+
+function agencyGraph() {
+  const ports = terminalPorts();
+  const graph = new JuncoGraph(
+    ports.source,
+    ports.sink,
+    Width.create(1),
+    UNBOUNDED,
+    new DummyTracer(),
+    LockPolicy,
+  );
+  return { ports, graph };
+}
+
+const memberOf = (name: string, agent: JuncoAgent) => ({
+  id: NodeId.create(name),
+  trigger: TriggerRule.always<typeof AgenticInputSchema, AssistantMessage>(),
+  policy: LockPolicy,
+  state: agent,
+});
+
+async function usageFailure(work: Promise<unknown>) {
+  const error = await work.then(
+    () => assert.fail("expected a usage limit failure"),
+    (failure: unknown) => failure,
+  );
+  assert.ok(error instanceof std.UsageLimitError, String(error));
+  assert.equal(error.code, "JUNCO_USAGE_LIMIT_EXCEEDED");
+  return error;
+}
+
+test("an outer evaluation budget spans native task subagents and its exhaustion is never retried", async () => {
+  const mock = countingTool();
+  const { models, faux } = providers({
+    caller: [
+      toolTurn(
+        fauxToolCall(
+          "task",
+          {
+            context: "ctx",
+            tasks: [
+              {
+                name: "w",
+                task: "work",
+                model: { provider: "worker", modelId: "faux-1" },
+              },
+            ],
+          },
+          { id: "t1" },
+        ),
+      ),
+      ...Array.from({ length: 8 }, () => fauxAssistantMessage("waiting")),
+    ],
+    worker: [
+      toolTurn(fauxToolCall("mock_tool", {}, { id: "m1" })),
+      toolTurn(fauxToolCall("mock_tool", {}, { id: "m2" })),
+      fauxAssistantMessage("report"),
+      toolTurn(fauxToolCall("mock_tool", {}, { id: "retry" })),
+      fauxAssistantMessage("report"),
+    ],
+  });
+  assert.equal(faux.worker!.getModel().id, "faux-1");
+  const { agent: caller } = await placed(models, "caller", [
+    new TaskTool(),
+    mock.tool,
+  ]);
+  caller.setTaskFailurePolicy({ retries: 2 });
+  let acquired = 0;
+  caller.setSubagentObserver({ acquired: () => acquired++ });
+  const { ports, graph } = agencyGraph();
+  try {
+    ports.connect(graph, graph.addNode(memberOf("caller", caller)));
+    const error = await usageFailure(
+      schedules
+        .context({
+          graph,
+          scheduler: schedules.limit({ tools: 2 }, schedules.parallel()),
+        })
+        .run(),
+    );
+    // The caller's task call and the worker's first call; the second never ran.
+    assert.equal(mock.state.executions, 1);
+    assert.equal(acquired, 1);
+    assert.equal(faux.worker!.state.callCount, 2);
+    const { details } = error;
+    assert.equal(details.resource, "tools");
+    assert.equal(details.scope, "evaluation");
+    assert.equal(details.used, 2);
+    assert.equal(details.nodePath[0], "caller");
+    assert.match(details.nodePath[1] ?? "", /^task-/);
+    assert.deepEqual(JSON.parse(JSON.stringify(error)), {
+      code: "JUNCO_USAGE_LIMIT_EXCEEDED",
+      message: error.message,
+      ...details,
+    });
+  } finally {
+    await graph.close();
+    await caller.return();
+  }
+});
+
+test("nested activation and evaluation limits each count every agent call exactly once", async () => {
+  const mocks = [countingTool(), countingTool(), countingTool()];
+  const call = (id: string) => fauxToolCall("mock_tool", {}, { id });
+  const { models } = providers({
+    a: [toolTurn(call("a1")), fauxAssistantMessage("a")],
+    b: [toolTurn(call("b1")), fauxAssistantMessage("b")],
+    c: [toolTurn(call("c1"), call("c2")), fauxAssistantMessage("c")],
+  });
+  const { ports, graph } = agencyGraph();
+  const agents: JuncoAgent[] = [];
+  try {
+    for (const [index, name] of ["a", "b", "c"].entries()) {
+      const { agent } = await placed(models, name, [mocks[index]!.tool]);
+      agents.push(agent);
+      const id = graph.addNode(memberOf(name, agent));
+      if (name === "c") ports.connect(graph, id);
+    }
+    const error = await usageFailure(
+      schedules
+        .context({
+          graph,
+          scheduler: schedules.limit(
+            { tools: 4 },
+            schedules.limit(
+              { tools: 1, scope: "activation" },
+              schedules.parallel(),
+            ),
+          ),
+        })
+        .run(),
+    );
+    assert.deepEqual(
+      mocks.map(({ state }) => state.executions),
+      [1, 1, 1],
+    );
+    assert.equal(error.details.scope, "activation");
+    assert.deepEqual(error.details.nodePath, ["c"]);
+  } finally {
+    await graph.close();
+    await Promise.all(agents.map((agent) => agent.return()));
+  }
+});
+
+test("admitted parallel requests finish and count; no peer starts new work after the shared failure", async () => {
+  const mocks = [countingTool(), countingTool()];
+  const { models, faux } = providers({
+    a: [
+      toolTurn(fauxToolCall("mock_tool", {}, { id: "a1" })),
+      fauxAssistantMessage("a"),
+    ],
+    b: [
+      toolTurn(fauxToolCall("mock_tool", {}, { id: "b1" })),
+      fauxAssistantMessage("b"),
+    ],
+  });
+  const { ports, graph } = agencyGraph();
+  const members: Awaited<ReturnType<typeof placed>>[] = [];
+  // Both first requests pass admission at zero usage before either commits.
+  const dispatched = Promise.withResolvers<void>();
+  let waiting = 0;
+  let ledger: { readonly usedTokens: number } | undefined;
+  try {
+    for (const [index, name] of ["a", "b"].entries()) {
+      const member = await placed(models, name, [mocks[index]!.tool]);
+      members.push(member);
+      member.agent.hooks.on("before_request", async () => {
+        // Native work runs in its admission context: the activation's ledgers.
+        ledger ??= captureUsageContext()?.budgets[0];
+        if (++waiting === 2) dispatched.resolve();
+        await dispatched.promise;
+        return undefined;
+      });
+      const id = graph.addNode(memberOf(name, member.agent));
+      if (name === "b") ports.connect(graph, id);
+    }
+    const error = await usageFailure(
+      schedules
+        .context({
+          graph,
+          scheduler: schedules.limit(
+            { tokens: tokens(1) },
+            schedules.parallel(),
+          ),
+        })
+        .run(),
+    );
+    assert.equal(error.details.resource, "tokens");
+    assert.deepEqual(
+      mocks.map(({ state }) => state.executions),
+      [0, 0],
+    );
+    assert.deepEqual(
+      [faux.a!.state.callCount, faux.b!.state.callCount],
+      [1, 1],
+    );
+    let committed = 0;
+    for (const { session } of members)
+      committed += (await session.getStats(BACKGROUND_CONTEXT)).usage
+        .totalTokens;
+    assert.ok(ledger !== undefined);
+    assert.equal(ledger.usedTokens, committed);
+  } finally {
+    await graph.close();
+    await Promise.all(members.map(({ agent }) => agent.return()));
   }
 });

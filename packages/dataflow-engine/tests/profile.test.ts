@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { seconds } from "@buge/ts-units/time/index.js";
+import { Type } from "typebox";
 import {
   bytes,
   constantProfile,
@@ -18,13 +19,15 @@ import {
 } from "../src/index.ts";
 import { stubProfile } from "./profile-support.ts";
 
+const NumberSchema = Type.Number();
+
 test("unprofiled nodes expose the shared empty profiles through observations", () => {
-  const graph = new DataflowGraph<void, number, string, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
     UNBOUNDED,
     UNBOUNDED,
   );
   const id = graph.addNode(
-    new StepNode<void, number, string>(() => [], {
+    new StepNode<void, typeof NumberSchema, string>(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
     }),
@@ -37,14 +40,17 @@ test("unprofiled nodes expose the shared empty profiles through observations", (
 });
 
 test("resource keys cannot disguise another profile kind", () => {
-  const graph = new DataflowGraph<void, number, string, never, "memory">(
-    UNBOUNDED,
-    UNBOUNDED,
-  );
+  const graph = new DataflowGraph<
+    void,
+    typeof NumberSchema,
+    string,
+    never,
+    "memory"
+  >(UNBOUNDED, UNBOUNDED);
   assert.throws(
     () =>
       graph.addNode(
-        new StepNode<void, number, string, "memory">(() => [], {
+        new StepNode<void, typeof NumberSchema, string, "memory">(() => [], {
           state: undefined,
           trigger: TriggerRule.always(),
           profiles: { memory: stubProfile("runtime", seconds) as never },
@@ -57,12 +63,15 @@ test("resource keys cannot disguise another profile kind", () => {
 });
 
 test("profile ports must be inbound message edges at evaluation", async () => {
-  const graph = new DataflowGraph<void, number, string, never, "memory">(
-    UNBOUNDED,
-    UNBOUNDED,
-  );
+  const graph = new DataflowGraph<
+    void,
+    typeof NumberSchema,
+    string,
+    never,
+    "memory"
+  >(UNBOUNDED, UNBOUNDED);
   const node = graph.addNode(
-    new StepNode<void, number, string, "memory">(() => [], {
+    new StepNode<void, typeof NumberSchema, string, "memory">(() => [], {
       id: NodeId.create("consumer"),
       state: undefined,
       trigger: TriggerRule.always(),
@@ -78,34 +87,37 @@ test("profile ports must be inbound message edges at evaluation", async () => {
     );
   await rejects();
   const source = graph.addNode(
-    new StepNode<void, number, string, "memory">(() => [], {
+    new StepNode<void, typeof NumberSchema, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
       profiles: { memory: stubProfile("memory", megabytes) },
     }),
   );
-  graph.addEdge(source, node, Edge.value("x"));
+  graph.addEdge(source, node, Edge.value("x", Type.String()));
   await rejects();
   // A distinct consumer demonstrates valid wiring without mutating an existing edge.
-  const valid = new DataflowGraph<void, number, string, never, "memory">(
-    UNBOUNDED,
-    UNBOUNDED,
-  );
+  const valid = new DataflowGraph<
+    void,
+    typeof NumberSchema,
+    string,
+    never,
+    "memory"
+  >(UNBOUNDED, UNBOUNDED);
   const src = valid.addNode(
-    new StepNode<void, number, string, "memory">(() => [], {
+    new StepNode<void, typeof NumberSchema, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
       profiles: { memory: stubProfile("memory", megabytes) },
     }),
   );
   const dst = valid.addNode(
-    new StepNode<void, number, string, "memory">(() => [], {
+    new StepNode<void, typeof NumberSchema, string, "memory">(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
       profiles: { memory: stubProfile("memory", megabytes, ["x"]) },
     }),
   );
-  valid.addEdge(src, dst, Edge.message("x"));
+  valid.addEdge(src, dst, Edge.message("x", NumberSchema));
   await valid.evaluate(() => undefined);
 });
 

@@ -182,11 +182,6 @@ async function state(fixture: Fixture) {
   };
 }
 
-const indexBlob = (fixture: Fixture, path: string) =>
-  fixture.git("ls-files", "--stage", "--", path).split(/\s+/)[1];
-const blobOf = (fixture: Fixture, path: string) =>
-  fixture.git("hash-object", "--no-filters", "--", path).trim();
-
 test("repository baselines and Git-root preflight enforce native and source boundaries", async () => {
   await withRepository(
     { "src/wide.ts": utf16("one\r\ntwo\r\n") },

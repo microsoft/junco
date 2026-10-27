@@ -2,6 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as O from "fp-ts/lib/Option.js";
 import { context, parallel } from "junco-scheduler";
+import { type TSchema, Type } from "typebox";
 import type {
   DataflowRunTrace,
   DataflowTracer,
@@ -29,6 +30,8 @@ import {
   Width,
 } from "../src/index.ts";
 
+const NumberSchema = Type.Number();
+
 type Activation = {
   readonly id: NodeIdType;
   readonly phase: "prime" | "resume";
@@ -48,7 +51,7 @@ type RunRecord = {
   error?: unknown;
 };
 
-const snapshot = <N, T>(view: ParentView<N, T> | undefined) => {
+const snapshot = <N extends TSchema, T>(view: ParentView<N, T> | undefined) => {
   if (view === undefined) return { messages: undefined, values: undefined };
   const messages = new Map<EdgeIdType, readonly unknown[]>();
   for (const key of view.messages.keys())
@@ -62,7 +65,7 @@ const snapshot = <N, T>(view: ParentView<N, T> | undefined) => {
 class RecordingTracer implements DataflowTracer {
   readonly runs: RunRecord[] = [];
 
-  startRun<S, N, T, EH>(
+  startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     const nodes: NodeIdType[] = [];
@@ -103,7 +106,10 @@ class RecordingTracer implements DataflowTracer {
 /** Read `count` off every edge named by the selected node's trigger. */
 const fixedReader =
   (count: MessageSchedule) =>
-  (_id: NodeIdType, { trigger }: NodeAvailability<number, string>) =>
+  (
+    _id: NodeIdType,
+    { trigger }: NodeAvailability<typeof NumberSchema, string>,
+  ) =>
     new Map<EdgeIdType, MessageSchedule>(
       trigger.rule.map((edgeId) => [edgeId, count]),
     );
@@ -120,16 +126,16 @@ const quietly = async (body: () => Promise<void>): Promise<void> => {
 };
 
 test("primes receive no view; resumes receive exactly the scheduler-sized delivered batches", async () => {
-  const feed = Edge.message<number, string>("feed");
+  const feed = Edge.message<typeof NumberSchema, string>("feed", NumberSchema);
   const tracer = new RecordingTracer();
-  const graph = new DataflowGraph<void, number, string, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
     tracer,
   );
   const consumed: number[] = [];
   const src = graph.addNode(
-    new EmitOnce<void, number, string>(
+    new EmitOnce<void, typeof NumberSchema, string>(
       () => [7, 8, 9].map((n) => Message.create(feed, n)),
       "src",
       {
@@ -139,7 +145,7 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
     ),
   );
   const sink = graph.addNode(
-    new StepNode<void, number, string>(
+    new StepNode<void, typeof NumberSchema, string>(
       (_state, view) => {
         consumed.push(...from(view, feed));
         return [];
@@ -210,7 +216,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
       flush: () => Promise.resolve(),
     };
 
-    const ok = new DataflowGraph<void, number, number, Error>(
+    const ok = new DataflowGraph<void, typeof NumberSchema, number, Error>(
       Width.create(1),
       UNBOUNDED,
       throwing,
@@ -219,7 +225,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
       state: undefined,
       trigger: TriggerRule.always(),
       // biome-ignore lint/correctness/useYield: the body must return on its first activation.
-      step: async function* (): NodeGenerator<number, number> {
+      step: async function* (): NodeGenerator<typeof NumberSchema, number> {
         return 42;
       },
     });
@@ -229,7 +235,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
     );
 
     const boom = new Error("boom");
-    const bad = new DataflowGraph<void, number, number, Error>(
+    const bad = new DataflowGraph<void, typeof NumberSchema, number, Error>(
       Width.create(1),
       UNBOUNDED,
       throwing,
@@ -238,7 +244,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
       state: undefined,
       trigger: TriggerRule.always(),
       // biome-ignore lint/correctness/useYield: the body must throw before its first yield.
-      step: async function* (): NodeGenerator<number, number> {
+      step: async function* (): NodeGenerator<typeof NumberSchema, number> {
         throw boom;
       },
     });
@@ -253,7 +259,7 @@ test("a throwing observer can neither replace a node's return nor its failure", 
 
 test("a concurrent failure settles the root only after its column settles, keeping the sibling's result", async () => {
   const tracer = new RecordingTracer();
-  const graph = new DataflowGraph<void, number, string, Error>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, Error>(
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -264,7 +270,7 @@ test("a concurrent failure settles the root only after its column settles, keepi
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the body must throw before its first yield.
-    step: async function* (): NodeGenerator<number, string> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, string> {
       firstFailed.resolve();
       throw new Error("first");
     },
@@ -273,7 +279,7 @@ test("a concurrent failure settles the root only after its column settles, keepi
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the body must return on its first activation.
-    step: async function* (): NodeGenerator<number, string> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, string> {
       await gate.promise;
       return "second";
     },
@@ -312,19 +318,19 @@ test("a concurrent failure settles the root only after its column settles, keepi
 
 test("each run snapshots current topology and resumes from resolved values without restarting sources", async () => {
   const tracer = new RecordingTracer();
-  const graph = new DataflowGraph<void, number, number, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, number, never>(
     Width.create(1),
     UNBOUNDED,
     tracer,
   );
-  const v = Edge.value<number, number>("v");
+  const v = Edge.value("v", NumberSchema);
   let enabled = false;
   const seen: unknown[] = [];
   const src = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the source returns on its first activation.
-    step: async function* (): NodeGenerator<number, number> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, number> {
       return 7;
     },
   });
@@ -332,7 +338,7 @@ test("each run snapshots current topology and resumes from resolved values witho
     state: undefined,
     trigger: TriggerRule.allOf(TriggerEntry.on(v)),
     is_available: (view) => enabled && view.values.has(v.id),
-    step: async function* (): NodeGenerator<number, number> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, number> {
       const view = yield [];
       seen.push(view.values.get(v.id));
       return 8;
@@ -343,7 +349,7 @@ test("each run snapshots current topology and resumes from resolved values witho
   await context({ graph, scheduler: parallel() }).run();
   enabled = true;
   const isolated = graph.addNode(
-    new StepNode<void, number, number>(() => [], {
+    new StepNode<void, typeof NumberSchema, number>(() => [], {
       state: undefined,
       trigger: TriggerRule.never(),
     }),
@@ -378,13 +384,13 @@ test("each run snapshots current topology and resumes from resolved values witho
 
 test("a definition error fails the root trace without inventing activations", async () => {
   const tracer = new RecordingTracer();
-  const graph = new DataflowGraph<void, number, string, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
     tracer,
   );
   graph.addNode(
-    new StepNode<void, number, string>(() => [], {
+    new StepNode<void, typeof NumberSchema, string>(() => [], {
       state: undefined,
       trigger: TriggerRule.always(),
     }),
@@ -407,16 +413,19 @@ test("a definition error fails the root trace without inventing activations", as
 
 test("DummyTracer runs exactly like an untraced graph and never touches payloads", async () => {
   const execute = async (tracer: DataflowTracer | undefined) => {
-    const feed = Edge.message<number, number>("feed");
-    const v = Edge.value<number, number>("v");
-    const graph = new DataflowGraph<void, number, number, never>(
+    const feed = Edge.message<typeof NumberSchema, number>(
+      "feed",
+      NumberSchema,
+    );
+    const v = Edge.value("v", NumberSchema);
+    const graph = new DataflowGraph<void, typeof NumberSchema, number, never>(
       Width.create(1),
       UNBOUNDED,
       tracer,
     );
     const consumed: number[] = [];
     const src = graph.addNode(
-      new EmitOnce<void, number, number>(
+      new EmitOnce<void, typeof NumberSchema, number>(
         () => [Message.create(feed, 1), Message.create(feed, 2)],
         7,
         {
@@ -428,7 +437,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
     const dependent = graph.addNode({
       state: undefined,
       trigger: TriggerRule.allOf(TriggerEntry.on(feed), TriggerEntry.on(v)),
-      step: async function* (): NodeGenerator<number, number> {
+      step: async function* (): NodeGenerator<typeof NumberSchema, number> {
         const view = yield [];
         consumed.push(...from(view, feed));
         return consumed.reduce((sum, n) => sum + n, view.values.get(v.id)!);
@@ -451,17 +460,18 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   );
 
   type Cyclic = { self?: Cyclic };
+  const CyclicSchema = Type.Unsafe<Cyclic>(Type.Object({}));
   const cyclic: Cyclic = {};
   cyclic.self = cyclic;
-  const feed = Edge.message<Cyclic, string>("feed");
-  const graph = new DataflowGraph<void, Cyclic, string, never>(
+  const feed = Edge.message<typeof CyclicSchema, string>("feed", CyclicSchema);
+  const graph = new DataflowGraph<void, typeof CyclicSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
     dummy,
   );
   let received: Cyclic | undefined;
   const src = graph.addNode(
-    new EmitOnce<void, Cyclic, string>(
+    new EmitOnce<void, typeof CyclicSchema, string>(
       () => [Message.create(feed, cyclic)],
       "sent",
       {
@@ -473,7 +483,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   const sink = graph.addNode({
     state: undefined,
     trigger: TriggerRule.when(feed),
-    step: async function* (): NodeGenerator<Cyclic, string> {
+    step: async function* (): NodeGenerator<typeof CyclicSchema, string> {
       const view = yield [];
       received = from(view, feed)[0];
       return "received";
@@ -494,7 +504,7 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
 
 /** A one-node graph whose node returns 42, observed by `tracer`. */
 const answerGraph = (tracer: DataflowTracer) => {
-  const graph = new DataflowGraph<void, number, number, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, number, never>(
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -503,7 +513,7 @@ const answerGraph = (tracer: DataflowTracer) => {
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the body must return on its first activation.
-    step: async function* (): NodeGenerator<number, number> {
+    step: async function* (): NodeGenerator<typeof NumberSchema, number> {
       return 42;
     },
   });
@@ -513,12 +523,12 @@ const answerGraph = (tracer: DataflowTracer) => {
 test("a failing startRun or startNode observer leaves the node's result intact", async () => {
   await quietly(async () => {
     const failingRun = new (class extends RecordingTracer {
-      override startRun<S, N, T, EH>(): DataflowRunTrace<N, T> {
+      override startRun<N extends TSchema, T>(): DataflowRunTrace<N, T> {
         throw new Error("startRun observer");
       }
     })();
     const failingNode = new (class extends RecordingTracer {
-      override startRun<S, N, T, EH>(
+      override startRun<S, N extends TSchema, T, EH>(
         graph: DataflowGraph<S, N, T, EH>,
       ): DataflowRunTrace<N, T> {
         const run = super.startRun(graph);
@@ -544,7 +554,7 @@ test("a failing startRun or startNode observer leaves the node's result intact",
 test("a throwing node fails identically with no tracer and with DummyTracer", async () => {
   const sentinel = new Error("sentinel");
   const execute = async (tracer: DataflowTracer | undefined) => {
-    const graph = new DataflowGraph<void, number, number, Error>(
+    const graph = new DataflowGraph<void, typeof NumberSchema, number, Error>(
       Width.create(1),
       UNBOUNDED,
       tracer,
@@ -552,7 +562,7 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
     const failing = graph.addNode({
       state: undefined,
       trigger: TriggerRule.always(),
-      step: async function* (): NodeGenerator<number, number> {
+      step: async function* (): NodeGenerator<typeof NumberSchema, number> {
         yield [];
         throw sentinel;
       },
@@ -601,9 +611,12 @@ test("run() never flushes the tracer; the caller's explicit flush delivers buffe
 });
 
 test("a handled failure traces one raw activation fail and a normal run end without the failed node", async () => {
-  const notice = Edge.message<number, string>("notice");
+  const notice = Edge.message<typeof NumberSchema, string>(
+    "notice",
+    NumberSchema,
+  );
   const tracer = new RecordingTracer();
-  const graph = new DataflowGraph<void, number, string, never>(
+  const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
     tracer,
@@ -614,7 +627,7 @@ test("a handled failure traces one raw activation fail and a normal run end with
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the body must throw on its first advance.
-    async *step(): NodeGenerator<number, string> {
+    async *step(): NodeGenerator<typeof NumberSchema, string> {
       throw cause;
     },
     on_error: () => [Message.create(notice, 5)],
@@ -622,7 +635,7 @@ test("a handled failure traces one raw activation fail and a normal run end with
   const sink = graph.addNode({
     state: undefined,
     trigger: TriggerRule.when(notice),
-    async *step(): NodeGenerator<number, string> {
+    async *step(): NodeGenerator<typeof NumberSchema, string> {
       const view = yield [];
       consumed.push(...from(view, notice));
       return "sink";

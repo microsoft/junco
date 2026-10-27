@@ -11,6 +11,7 @@ import {
   NodeId,
   type NodeIdType,
 } from "dataflow-engine";
+import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { parallel } from "./parallel.js";
@@ -45,7 +46,7 @@ const INSTRUCTION =
 
 /** One request per current decision, without sessions, resources or graph binding. */
 export function pi(options: PiOptions): ReturnType<typeof parallel> {
-  async function invoke<S, N, T, C>(
+  async function invoke<S, N extends TSchema, T, C>(
     snapshot: Snapshot<S, N, T, C>,
     signal?: AbortSignal,
   ): Promise<readonly (readonly NodeIdType[])[]> {

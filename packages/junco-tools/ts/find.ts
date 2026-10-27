@@ -40,7 +40,7 @@ const FIND = {
 export const FindTool = {
   create(
     cwd: string,
-    native: NativeModule,
+    _native: NativeModule,
     mux: NativeMux,
     recorder?:
       | ProfileRecorder<"operations">

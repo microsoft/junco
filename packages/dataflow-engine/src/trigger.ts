@@ -1,5 +1,6 @@
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
+import type { TSchema } from "typebox";
 import type { Edge } from "./edges.js";
 import { DataflowDefinitionError } from "./errors.js";
 import type { EdgeId, NodeId } from "./identity.js";
@@ -22,7 +23,7 @@ export type TriggerKind = "all" | "any";
  * `TriggerEntry.on(edge)` entries admits only edges whose message and result payloads fit the rule. The brand is
  * covariant, so a rule over narrow payloads serves a graph over a wider payload union.
  */
-export type TriggerRule<N, T> = {
+export type TriggerRule<N extends TSchema, T> = {
   readonly kind: TriggerKind;
   readonly rule: readonly TriggerEntry<N, T>[];
 };
@@ -33,14 +34,14 @@ declare const triggerEntry: unique symbol;
  * One rule entry: an inbound edge id branded, at the type level only, with that edge's message and
  * result payload types. At runtime it is exactly the edge id string.
  */
-export type TriggerEntry<N, T> = EdgeId & {
+export type TriggerEntry<N extends TSchema, T> = EdgeId & {
   readonly [triggerEntry]: readonly [message: N, result: T];
 };
 
 /** Construction of {@link TriggerEntry}s. */
 export const TriggerEntry = {
   /** One rule entry: the inbound edge to watch. */
-  on: <N, T>(edge: Edge<N, T>): TriggerEntry<N, T> =>
+  on: <N extends TSchema, T>(edge: Edge<N, T>): TriggerEntry<N, T> =>
     edge.id as TriggerEntry<N, T>,
 };
 
@@ -56,7 +57,7 @@ const buildRule = <Entry extends EdgeId>(
   entries: readonly Entry[],
 ): readonly Entry[] => {
   for (let i = 0; i < entries.length; i++) {
-    const edgeId = entries[i]!;
+    const edgeId = entries[i];
     if (entries.indexOf(edgeId) !== i) {
       throw new DataflowDefinitionError(
         `${who} received edge "${edgeId}" twice`,
@@ -67,34 +68,34 @@ const buildRule = <Entry extends EdgeId>(
 };
 
 /** Conjunction: fires iff EVERY entry has something to offer. */
-function allOf<const Entries extends readonly TriggerEntry<unknown, unknown>[]>(
+function allOf<const Entries extends readonly TriggerEntry<TSchema, unknown>[]>(
   ...entries: Entries
 ): TriggerRule<
   Entries[number][typeof triggerEntry][0],
   Entries[number][typeof triggerEntry][1]
 >;
-function allOf<N = never, T = never>(
+function allOf<N extends TSchema = never, T = never>(
   ...entries: readonly TriggerEntry<N, T>[]
 ): TriggerRule<N, T>;
 function allOf(
-  ...entries: readonly TriggerEntry<unknown, unknown>[]
-): TriggerRule<unknown, unknown> {
+  ...entries: readonly TriggerEntry<TSchema, unknown>[]
+): TriggerRule<TSchema, unknown> {
   return { kind: "all", rule: buildRule("allOf", entries) };
 }
 
 /** Ordered disjunction: fires on the FIRST satisfied entry. */
-function anyOf<const Entries extends readonly TriggerEntry<unknown, unknown>[]>(
+function anyOf<const Entries extends readonly TriggerEntry<TSchema, unknown>[]>(
   ...entries: Entries
 ): TriggerRule<
   Entries[number][typeof triggerEntry][0],
   Entries[number][typeof triggerEntry][1]
 >;
-function anyOf<N = never, T = never>(
+function anyOf<N extends TSchema = never, T = never>(
   ...entries: readonly TriggerEntry<N, T>[]
 ): TriggerRule<N, T>;
 function anyOf(
-  ...entries: readonly TriggerEntry<unknown, unknown>[]
-): TriggerRule<unknown, unknown> {
+  ...entries: readonly TriggerEntry<TSchema, unknown>[]
+): TriggerRule<TSchema, unknown> {
   return { kind: "any", rule: buildRule("anyOf", entries) };
 }
 
@@ -106,12 +107,14 @@ export const TriggerRule = {
    * The single-edge conjunction: `when(e)` is `allOf(on(e))`. Named because a one-entry `allOf` is
    * by far the most common trigger shape.
    */
-  when: <N, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
+  when: <N extends TSchema, T>(edge: Edge<N, T>): TriggerRule<N, T> =>
     allOf<N, T>(TriggerEntry.on(edge)),
   /** Fires every turn and names no edge — the source trigger. Identical to `allOf()`. */
-  always: <N = never, T = never>(): TriggerRule<N, T> => allOf<N, T>(),
+  always: <N extends TSchema = never, T = never>(): TriggerRule<N, T> =>
+    allOf<N, T>(),
   /** Never fires. Identical to `anyOf()`. */
-  never: <N = never, T = never>(): TriggerRule<N, T> => anyOf<N, T>(),
+  never: <N extends TSchema = never, T = never>(): TriggerRule<N, T> =>
+    anyOf<N, T>(),
 };
 
 /**
@@ -120,7 +123,7 @@ export const TriggerRule = {
  *
  * @throws {DataflowDefinitionError} when `edgeId` is not one of `nodeId`'s inbound edges.
  */
-const isSatisfied = <N, T>(
+const isSatisfied = <N extends TSchema, T>(
   edgeId: EdgeId,
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
   nodeId: NodeId,
@@ -144,7 +147,7 @@ const isSatisfied = <N, T>(
  *
  * @throws {DataflowDefinitionError} when a rule entry is not one of `nodeId`'s inbound edges.
  */
-export const satisfiedEdges = <N, T>(
+export const satisfiedEdges = <N extends TSchema, T>(
   trigger: TriggerRule<N, T>,
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
   nodeId: NodeId,
@@ -157,7 +160,7 @@ export const satisfiedEdges = <N, T>(
 };
 
 /** Whether `trigger` fires when `has(edgeId)` says which entries have something to offer. Never short-circuits. */
-export const fires = <N, T>(
+export const fires = <N extends TSchema, T>(
   trigger: TriggerRule<N, T>,
   has: (edgeId: EdgeId) => boolean,
 ): boolean => {
@@ -175,7 +178,7 @@ export const fires = <N, T>(
  *
  * @throws {DataflowDefinitionError} when a rule entry is not one of `nodeId`'s inbound edges.
  */
-export const evaluateTrigger = <N, T>(
+export const evaluateTrigger = <N extends TSchema, T>(
   trigger: TriggerRule<N, T>,
   inbound: ReadonlyMap<EdgeId, Edge<N, T>>,
   nodeId: NodeId,

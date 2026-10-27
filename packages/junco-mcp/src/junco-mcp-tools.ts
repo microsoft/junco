@@ -297,10 +297,14 @@ export class JuncoMcpTools {
       const calls = new Set<CallRecord>();
       let closing: Promise<void> | undefined;
       for (const tool of tools) {
-        const identity = getJuncoMcpToolIdentity(tool)!;
+        const identity = getJuncoMcpToolIdentity(tool);
         const server = definition.#servers.find(
-          ({ name }) => name === identity.serverName,
-        )!;
+          ({ name }) => name === identity?.serverName,
+        );
+        if (identity === undefined || server === undefined)
+          throw new Error(
+            `JuncoMcpTools: missing identity or server for tool "${tool.name}"`,
+          );
         tool.execute = (toolCallId, params, signal, onUpdate) => {
           if (closing !== undefined) {
             return Promise.reject(new McpConnectionClosedError());
@@ -335,7 +339,7 @@ export class JuncoMcpTools {
                   `JuncoMcpTools: expected one tool "${identity.serverName}/${identity.originalToolName}", found ${matches.length}`,
                 );
               }
-              result = await matches[0]!.execute(
+              result = await matches[0].execute(
                 toolCallId,
                 params,
                 callSignal,
@@ -360,7 +364,9 @@ export class JuncoMcpTools {
             }
             if (failed) throw primary;
             if (callSignal.aborted) throw new McpAbortError();
-            return result!;
+            if (result === undefined)
+              throw new Error("JuncoMcpTools: tool call produced no result");
+            return result;
           })();
           const finish = () => {
             resolve();

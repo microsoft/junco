@@ -1,44 +1,46 @@
 import type { Scheduler } from "junco-scheduler";
 import { choose, context, parallel, roundRobin } from "junco-scheduler";
-import type {
-  EdgeIdType,
-  Message,
-  NodeIdType,
-  ParentView,
-} from "../src/index.ts";
-import { DataflowGraph, Width } from "../src/index.ts";
+import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
+import { checkPayload } from "../src/edges.ts";
+import type { EdgeIdType, NodeIdType, ParentView } from "../src/index.ts";
+import { DataflowGraph, Edge, from, Message, Width } from "../src/index.ts";
+
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+type Num = typeof NumberSchema;
+type Str = typeof StringSchema;
 
 // Exported so `noUnusedLocals` does not report the fixtures as dead. Nothing imports this file; it
 // exists to be compiled.
 
 /** `emit` takes a branded node id and a message of the graph's own wire type. */
 export function emissionKeepsWireTypes(
-  graph: DataflowGraph<void, number, string, never>,
+  graph: DataflowGraph<void, Num, string, never>,
   source: NodeIdType,
-  message: Message<number>,
-  wrong: Message<string>,
+  message: Message<Num>,
+  wrong: Message<Str>,
 ): void {
-  const emitted: void = graph.emit(source, message);
+  const emitted = graph.emit(source, message);
+  exact<typeof emitted, void>(true);
   // @ts-expect-error a raw string is not a node id.
   graph.emit("source", message);
   // @ts-expect-error the payload must match the graph's message type.
   graph.emit(source, wrong);
-  void emitted;
 }
 
 type State = Readonly<{ group: "a" | "b" }>;
 
 /** Observations preserve native payload types without exposing executable or mutable containers. */
 export function observationKeepsNativeTypes(
-  graph: DataflowGraph<State, number, string, Error>,
+  graph: DataflowGraph<State, Num, string, Error>,
   id: NodeIdType,
   edge: EdgeIdType,
 ): void {
   const observation = graph.observe();
   const node = observation.nodes.get(id);
   const state: State | undefined = node?.state;
-  const view: ParentView<number, string> | undefined =
-    observation.inputs.get(id);
+  const view: ParentView<Num, string> | undefined = observation.inputs.get(id);
   const messages: readonly number[] | undefined = view?.messages.get(edge);
   const value: string | undefined = view?.values.get(edge);
   const result: string | undefined = observation.results.get(id);
@@ -78,7 +80,7 @@ export function observationKeepsNativeTypes(
   void [state, view, value, wrongState, wrongMessages, wrongResult];
 }
 
-export class ConcreteGraph extends DataflowGraph<State, number, string, Error> {
+export class ConcreteGraph extends DataflowGraph<State, Num, string, Error> {
   concrete(): "concrete" {
     return "concrete";
   }
@@ -92,7 +94,7 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
     scheduler: choose({
       rank(snapshot, left, right) {
         const state: State | undefined = snapshot.nodes.get(left)?.state;
-        const view: ParentView<number, string> | undefined =
+        const view: ParentView<Num, string> | undefined =
           snapshot.inputs.get(left);
         const result: string | undefined = snapshot.results.get(left);
         const metadata: { priority: number } | undefined =
@@ -100,7 +102,7 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
         // @ts-expect-error native state stays exact.
         const wrongState: string | undefined = snapshot.nodes.get(left)?.state;
         // @ts-expect-error input payloads stay numeric.
-        const wrongView: ParentView<string, string> | undefined =
+        const wrongView: ParentView<Str, string> | undefined =
           snapshot.inputs.get(left);
         // @ts-expect-error retained results stay textual.
         const wrongResult: number | undefined = snapshot.results.get(left);
@@ -156,7 +158,7 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
   };
   const explicitEmpty = context<
     State,
-    number,
+    Num,
     string,
     { priority: number },
     ConcreteGraph
@@ -166,7 +168,7 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
   });
   const wrongData: Scheduler<
     State,
-    string,
+    Str,
     string,
     { priority: number }
   > = () => ({ selected: [] });
@@ -178,7 +180,7 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
   });
   const wrongMetadata: Scheduler<
     State,
-    number,
+    Num,
     string,
     { label: string }
   > = () => ({ selected: [] });
@@ -195,11 +197,11 @@ export function contextKeepsExactDomains(graph: ConcreteGraph): void {
 export function universalPolicyReuse(): void {
   const all = parallel();
   const rotating = roundRobin();
-  const numbers = new DataflowGraph<State, number, string, never>(
+  const numbers = new DataflowGraph<State, Num, string, never>(
     Width.create(1),
     Width.create(1),
   );
-  const text = new DataflowGraph<boolean, string, number, never>(
+  const text = new DataflowGraph<boolean, Str, number, never>(
     Width.create(1),
     Width.create(1),
   );
@@ -211,4 +213,61 @@ export function universalPolicyReuse(): void {
   context({ graph: text, scheduler: all, describeNode: () => false });
   context({ graph: numbers, scheduler: rotating });
   context({ graph: text, scheduler: rotating, describeNode: () => null });
+}
+
+// --- schema-typed messages ------------------------------------------------------------------------
+
+type Equals<A, B> =
+  (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2
+    ? true
+    : false;
+const exact = <A, B>(_proof: Equals<A, B>): void => {};
+
+const numericEdge = Edge.message("numbers", NumberSchema);
+const textEdge = Edge.message("texts", StringSchema);
+const numericValue = Edge.value("result", NumberSchema);
+
+/** Factories keep their exact schema; a value edge contributes only its result type. */
+export function factoriesKeepExactTypes(): void {
+  exact<Static<typeof numericEdge.schema>, number>(true);
+  const branded: Edge<Num, never> = numericEdge;
+  // @ts-expect-error the brand keeps the numeric message domain.
+  const rebranded: Edge<Str, never> = numericEdge;
+  exact<Static<typeof numericValue.schema>, number>(true);
+  const cell = numericValue.transport;
+  if (cell._tag === "Right" && cell.right._tag === "Some")
+    exact<typeof cell.right.value, number>(true);
+  const valueEdge: Edge<never, number> = numericValue;
+  // A value edge carries no message domain, so it joins any message graph.
+  const valueMessages: Edge<Num, number> = numericValue;
+  // @ts-expect-error a numeric value edge does not promise string results.
+  const valueText: Edge<never, string> = numericValue;
+  void [branded, rebranded, valueEdge, valueMessages, valueText];
+}
+
+/** Message.create checks the payload against the edge schema without widening it. */
+export function messageCreateChecksPayload(): void {
+  const message = Message.create(numericEdge, 7);
+  exact<typeof message, Message<Num>>(true);
+  // @ts-expect-error "7" is not a payload of a numeric edge.
+  Message.create(numericEdge, "7");
+  // @ts-expect-error a numeric message does not fit a text schema.
+  const wrong: Message<Str> = message;
+  void wrong;
+}
+
+/** `from` narrows a numeric edge inside a wider graph domain. */
+export function fromNarrows(view: ParentView<Num | Str, string>): void {
+  const numbers = from(view, numericEdge);
+  exact<typeof numbers, readonly number[]>(true);
+  const texts = from(view, textEdge);
+  exact<typeof texts, readonly string[]>(true);
+}
+
+/** TypeBox's predicate and the engine's internal assertion narrow unknown to exactly number. */
+export function checksNarrow(candidate: unknown, other: unknown): void {
+  if (Value.Check(numericEdge.schema, candidate))
+    exact<typeof candidate, number>(true);
+  checkPayload(numericEdge.schema, other, "fixture");
+  exact<typeof other, number>(true);
 }

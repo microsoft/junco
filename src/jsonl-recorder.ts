@@ -14,12 +14,31 @@ export type JsonlRecorderOptions = {
   readonly monitored?: boolean;
 };
 
+/** One activation's `edits`/`operations` events with the same labels, summed. */
+type Operation = {
+  readonly resource: string;
+  readonly category: string;
+  readonly tool: string;
+  readonly operation: string;
+  calls: number;
+  /** Finish counts by {@link ProfileEvent} outcome. */
+  success: number;
+  error: number;
+  cancelled: number;
+  durationMs: number;
+  readonly counters: Record<string, number>;
+  /** Latest values. */
+  readonly gauges: Record<string, number>;
+};
+
 type Activation = {
   readonly node: string;
   readonly activation: ProfileActivation;
   /** The agent's committed token sum at start; undefined for non-agents. */
   readonly tokens0: number | undefined;
   peak: number;
+  /** By JSON-encoded `[resource, category, tool, operation]`. */
+  readonly operations: Map<string, Operation>;
   ended:
     | { readonly runtime: number; readonly tokens: number | undefined }
     | undefined;
@@ -27,7 +46,8 @@ type Activation = {
 
 /**
  * Projects profile events into dataflow-profile JSONL training samples: one per successful graph
- * activation, keyed by its `/`-joined node IDs.
+ * activation, keyed by its `/`-joined node IDs, plus one resource-free `measurement.probe` sample per
+ * probe event.
  */
 export class JsonlRecorder implements ProfileRecorder<string> {
   readonly root: object = this;
@@ -46,7 +66,8 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   // ponytail: late events land on the owner's last activation until it is written; a later one is dropped.
   readonly #latest = new Map<string, Activation>();
   readonly #tokens = new WeakMap<object, number>();
-  #pending: Activation[] = [];
+  /** Ended activations and standalone probe samples, in record order. */
+  #pending: (Activation | Sample)[] = [];
   #writing: Promise<void> = Promise.resolve();
   #failure: unknown;
   #closing: Promise<void> | undefined;
@@ -66,6 +87,22 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   #reduce(ids: readonly string[], event: ProfileEvent<string>): void {
     if (this.#closing !== undefined) return;
     switch (event.kind) {
+      case "probe":
+        if (!Number.isFinite(event.value)) {
+          this.#failure ??= new Error("JsonlRecorder: invalid probe value");
+          return;
+        }
+        this.#pending.push({
+          node: ids.join("/"),
+          features: {},
+          resources: {},
+          units: {},
+          firedAt: new Date().toISOString(),
+          measurement: {
+            probe: [{ edgeId: event.edgeId, value: event.value }],
+          },
+        });
+        return;
       case "usage":
         this.#tokens.set(
           event.source,
@@ -87,23 +124,27 @@ export class JsonlRecorder implements ProfileRecorder<string> {
       }
       case "start": {
         const { activation } = event;
-        if (event.category !== "graph" || activation === undefined) return;
-        const act: Activation = {
-          node: ids.join("/"),
-          activation,
-          tokens0:
-            activation.agent === undefined
-              ? undefined
-              : (this.#tokens.get(activation.agent) ?? 0),
-          peak: 0,
-          ended: undefined,
-        };
-        this.#active.set(activation, act);
-        if (activation.owner !== undefined)
-          this.#live.set(activation.owner, act);
+        if (event.category === "graph" && activation !== undefined) {
+          const act: Activation = {
+            node: ids.join("/"),
+            activation,
+            tokens0:
+              activation.agent === undefined
+                ? undefined
+                : (this.#tokens.get(activation.agent) ?? 0),
+            peak: 0,
+            operations: new Map(),
+            ended: undefined,
+          };
+          this.#active.set(activation, act);
+          if (activation.owner !== undefined)
+            this.#live.set(activation.owner, act);
+        }
+        this.#operation(ids, event);
         return;
       }
       case "finish": {
+        this.#operation(ids, event);
         if (event.category !== "graph") return;
         const { activation } = event;
         if (activation === undefined) {
@@ -129,7 +170,72 @@ export class JsonlRecorder implements ProfileRecorder<string> {
         this.#pending.push(act);
         return;
       }
+      case "metrics":
+        this.#operation(ids, event);
+        return;
     }
+  }
+
+  /** Sums an `edits`/`operations` event into its own activation, else the only live one at its node. */
+  #operation(
+    ids: readonly string[],
+    event: Exclude<
+      ProfileEvent<string>,
+      { kind: "usage" | "resource" | "probe" }
+    >,
+  ): void {
+    const { resource, category, tool, operation } = event;
+    if (resource !== "edits" && resource !== "operations") return;
+    const act =
+      event.activation === undefined
+        ? this.#onlyLive(ids.join("/"))
+        : this.#active.get(event.activation);
+    if (act === undefined) return;
+    const key = JSON.stringify([resource, category, tool, operation]);
+    let op = act.operations.get(key);
+    if (op === undefined) {
+      op = {
+        resource,
+        category,
+        tool,
+        operation,
+        calls: 0,
+        success: 0,
+        error: 0,
+        cancelled: 0,
+        durationMs: 0,
+        counters: {},
+        gauges: {},
+      };
+      act.operations.set(key, op);
+    }
+    switch (event.kind) {
+      case "start":
+        op.calls += 1;
+        return;
+      case "finish":
+        op[event.outcome] += 1;
+        op.durationMs += event.durationMs;
+        return;
+      case "metrics":
+        for (const [field, value] of Object.entries(event.counters ?? {}))
+          op.counters[field] = (op.counters[field] ?? 0) + value;
+        for (const [field, value] of Object.entries(event.gauges ?? {}))
+          if (value === null) delete op.gauges[field];
+          else op.gauges[field] = value;
+        return;
+    }
+  }
+
+  // ponytail: O(live) scan; concurrent same-path activations drop unstamped events, stamp producers with `activation` if that matters.
+  #onlyLive(node: string): Activation | undefined {
+    let found: Activation | undefined;
+    for (const act of this.#active.values())
+      if (act.node === node) {
+        if (found !== undefined) return undefined;
+        found = act;
+      }
+    return found;
   }
 
   #write(): Promise<void> {
@@ -137,11 +243,15 @@ export class JsonlRecorder implements ProfileRecorder<string> {
     this.#pending = [];
     if (batch.length === 0) return this.#writing;
     let lines = "";
-    for (const act of batch) {
-      const owner = act.activation.owner;
-      if (owner !== undefined && this.#latest.get(owner) === act)
+    for (const entry of batch) {
+      if (!("activation" in entry)) {
+        lines += `${JSON.stringify(entry)}\n`;
+        continue;
+      }
+      const owner = entry.activation.owner;
+      if (owner !== undefined && this.#latest.get(owner) === entry)
         this.#latest.delete(owner);
-      const sample = this.#sampleOf(act);
+      const sample = this.#sampleOf(entry);
       const invalid = Object.entries(sample.resources).find(
         ([, value]) => !Number.isFinite(value) || value < 0,
       );
@@ -176,6 +286,12 @@ export class JsonlRecorder implements ProfileRecorder<string> {
       resources.memory = act.peak;
       units.memory = "B";
     }
+    const measurement: Record<string, Omit<Operation, "resource">[]> = {};
+    for (const { resource, ...row } of act.operations.values()) {
+      const rows = measurement[resource] ?? [];
+      rows.push(row);
+      measurement[resource] = rows;
+    }
     return {
       node: act.node,
       features: act.activation.features,
@@ -183,6 +299,7 @@ export class JsonlRecorder implements ProfileRecorder<string> {
       units,
       runId: act.activation.runId,
       firedAt: act.activation.firedAt,
+      ...(act.operations.size === 0 ? {} : { measurement }),
     };
   }
 

@@ -1,13 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import {
-  access,
-  mkdir,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,7 +11,6 @@ import {
 import {
   BashTool,
   isMarshPolicyDenied,
-  LockPolicy,
   ShellMuxOperations,
 } from "../dist/index.js";
 import { NativeMux } from "../target/native-test/index.js";
@@ -54,7 +46,7 @@ test("complete multi-chunk UTF-8 output and final marker precede settlement", {
       principal: "output-owner",
     });
     const tool = BashTool.create(instance.seed, { operations });
-    const expected = "λ🙂".repeat(40000) + "\nFINAL-MARKER-雪\n";
+    const expected = `${"λ🙂".repeat(40000)}\nFINAL-MARKER-雪\n`;
     const producer =
       "const fs = require('node:fs'); const output = Buffer.from('λ🙂'.repeat(40000) + '\\nFINAL-MARKER-雪\\n'); for (let offset = 0; offset < output.length; offset += 4093) fs.writeSync(1, output.subarray(offset, offset + 4093));";
     const updates = [];
@@ -784,6 +776,7 @@ test("each call gets a fresh shell over a durable filesystem", {
       "read-transient",
       {
         command:
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion
           "printf '%s\\n' \"${JUNCO_TEST_TRANSIENT-unset}\"; cat src/durable.txt",
       },
       t.signal,

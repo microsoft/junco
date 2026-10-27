@@ -37,11 +37,18 @@ import type {
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
+  assertTokenRequestAllowed,
+  assertUsageAllowed,
+  captureUsageContext,
+  chargeTokenUsage,
   type DataflowTracer,
   type EdgeIdType,
+  isUsageLimitError,
   NodeId,
   type NodeIdType,
   type ParentView,
+  runWithUsageContext,
+  type UsageContext,
 } from "dataflow-engine";
 import {
   getJuncoMcpToolIdentity,
@@ -59,11 +66,8 @@ import {
   InfoTool,
   type Issue,
   invokeComplainTool,
-  invokeTaskTool,
-  isAssignedTaskTool,
   isComplainTool,
   issueLog,
-  isTaskTool,
   isYieldTool,
   type ProfileOperation,
   type ProfileOutcome,
@@ -83,10 +87,15 @@ import {
   trackPromise,
   YieldTool,
 } from "junco-tools";
-import { disposeThenRethrow, isMarshPolicyDenied } from "junco-tools/errors";
+import {
+  disposeThenRethrow,
+  errorGraph,
+  isMarshPolicyDenied,
+} from "junco-tools/errors";
+import type { TSchema } from "typebox";
 import {
   type Agentic,
-  type AgenticInput,
+  type AgenticInputSchema,
   type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
@@ -95,6 +104,7 @@ import {
   type TokenMonitorConfig,
   validateActiveTools,
 } from "./agentic.js";
+import { TaskScope } from "./tasks.js";
 
 export class JuncoAgentError extends Error {
   constructor(
@@ -128,7 +138,9 @@ export type JuncoAgentResolvedOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> = Omit<AgenticOptions<S, P, T>, "tools"> & {
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> = Omit<AgenticOptions<S, P, T, N, V>, "tools"> & {
   /** Base directory MCP server definitions connect from; default `process.cwd()`. */
   readonly cwd?: string;
   readonly tools?: JuncoAgentTools<T>;
@@ -139,7 +151,12 @@ export type JuncoAgentCreateOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> = Omit<AgenticOptions<S, P, T>, "session" | "models" | "model" | "tools"> & {
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> = Omit<
+  AgenticOptions<S, P, T, N, V>,
+  "session" | "models" | "model" | "tools"
+> & {
   readonly provider: string;
   readonly model: string;
   /** Reuse a Pi runtime; otherwise load Pi's saved login and model configuration. */
@@ -177,26 +194,22 @@ export type TaskResult = {
   readonly decisionRequired?: true;
 };
 
-const NO_TASK_RESULTS: readonly TaskResult[] = [];
-
 /**
  * What one graph activation binds while a {@link JuncoAgent} runs: the node's retained inbox,
- * outgoing routes and topology for recv/send/info, its task host, and complaint attribution.
+ * outgoing routes and topology for recv/send/info, and complaint attribution.
  */
-export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
+export type JuncoAgentNodeContext<N extends TSchema = TSchema, T = unknown> = {
   readonly messaging?: NonNullable<
     ConstructorParameters<typeof RecvTool<N, T>>[0]
   > &
     NonNullable<ConstructorParameters<typeof SendTool<N>>[0]> &
     NonNullable<ConstructorParameters<typeof InfoTool>[0]>;
-  readonly task?: TaskToolHost;
-  readonly taskResults?: readonly TaskResult[];
   /** One line the graph wants in the model's next request about this node's inbox; undefined when nothing needs reading. Read per request, never persisted. */
   readonly briefing?: () => string | undefined;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
   /** The graph's own view of the profiling session; the agent records under its node ID there. */
   readonly recorder?: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations"
+    "memory" | "tokens" | "edits" | "operations" | "probe"
   >;
   /** This activation's final graph node ID; default the agent's own {@link JuncoAgent.nodeId}. */
   readonly recorderNodeId?: string;
@@ -206,7 +219,7 @@ export type JuncoAgentNodeContext<N = unknown, T = unknown> = {
 export type TaskPolicy = (input: TaskInput) => void;
 
 /**
- * What a graph does with a failed task: drop it silently, or run it again up to `retries` more
+ * What an agent does with its failed tasks: drop them silently, or run each again up to `retries` more
  * times and then ask the caller to retry or ignore it. See {@link JuncoAgent.setTaskFailurePolicy}.
  */
 export type TaskFailurePolicy = "ignore" | { readonly retries: number };
@@ -219,7 +232,7 @@ export type SubagentObserver = {
    * Each fresh, unstarted child in batch order, before the caller receives the batch; throwing
    * fails the batch and closes every child it created.
    */
-  readonly acquired?: (child: JuncoAgent, index: number) => void;
+  readonly acquired?: (child: AnyJuncoAgent, index: number) => void;
 };
 
 /** One MCP definition an agent connected: what subagents reconnect, and which wrappers it produced. */
@@ -418,7 +431,32 @@ class RollbackFailure extends Error {
   }
 }
 
-class RunRecord implements AgenticRun {
+/** One native operation's usage enforcement: the context it charges and its first budget failure. */
+type UsageOwner = {
+  readonly operationId: string | undefined;
+  /** The caller's usage context captured at admission, used when no activation is bound. */
+  readonly usage: UsageContext | undefined;
+  /** The first budget failure that stopped this operation. */
+  usageFailure: unknown;
+  /** The one native abort request that failure started; resolves to its failure, never rejects. */
+  usageAbort: Promise<unknown> | undefined;
+};
+
+/** The usage failure `error` holds: a `UsageLimitError`, or a failure latched on one of `usage`'s budgets. */
+export function usageFailureIn(
+  error: unknown,
+  usage: UsageContext | undefined,
+): unknown {
+  for (const value of errorGraph(error))
+    if (
+      isUsageLimitError(value) ||
+      usage?.budgets.some(({ failure }) => failure === value) === true
+    )
+      return value;
+  return undefined;
+}
+
+class RunRecord implements AgenticRun, UsageOwner {
   readonly signal: AbortSignal | undefined;
   readonly cancel: (reason?: unknown) => void;
   readonly context: ReturnType<typeof withCancel>["context"];
@@ -438,8 +476,19 @@ class RunRecord implements AgenticRun {
   promptCaptureError: unknown;
   /** Records this run's one terminal outcome; undefined without a recorder. */
   finish: ((outcome: ProfileOutcome) => void) | undefined;
+  usageFailure: unknown;
+  usageAbort: Promise<unknown> | undefined;
+  /** The tasks this run admitted natively, created by its first task request. */
+  tasks: TaskScope | undefined;
+  /** The first fatal task failure, which stops this run. */
+  taskFailure: { readonly error: unknown } | undefined;
+  /** The one native abort that failure started; resolves to its failure, never rejects. */
+  taskAbort: Promise<unknown> | undefined;
 
-  constructor(readonly kind: AgenticRun["kind"]) {
+  constructor(
+    readonly kind: AgenticRun["kind"],
+    readonly usage: UsageContext | undefined,
+  ) {
     const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
     this.context = context;
     this.cancel = cancel;
@@ -463,11 +512,16 @@ type HeldBoundary = BoundaryBase & {
   };
 };
 type Boundary = (BoundaryBase & { readonly gate?: undefined }) | HeldBoundary;
-type Demand = PromiseWithResolvers<IteratorResult<AgenticStep, void>> & {
+type Demand<N extends TSchema, V> = PromiseWithResolvers<
+  IteratorResult<AgenticStep, void>
+> & {
   acted: boolean;
   /** The graph view this `next` carried, read only by a staged prompt function. */
-  readonly inputs?: ParentView<AgenticInput, AssistantMessage>;
+  readonly inputs?: ParentView<N, V>;
 };
+/** Lifecycle-only storage of agents whose prompt callbacks admit different input domains. */
+// biome-ignore lint/suspicious/noExplicitAny: identity-only erasure of the two input domains.
+type AnyJuncoAgent = JuncoAgent<Skill, PromptTemplate, AgentTool, any, any>;
 const closedError = () => new JuncoAgentError("closed", "JuncoAgent is closed");
 const RUN = {
   resource: "operations",
@@ -511,7 +565,9 @@ export class JuncoAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-> implements Agentic<S, P, T | ComplainTool>
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> implements Agentic<S, P, T | ComplainTool, N, V>
 {
   /**
    * An agent over already resolved options. `tools` may also hold MCP definitions, connected
@@ -522,21 +578,31 @@ export class JuncoAgent<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
     T extends AgentTool = AgentTool,
+    N extends TSchema = typeof AgenticInputSchema,
+    V = AssistantMessage,
   >(
-    options: AgenticOptions<S, P, T> & { readonly cwd?: string },
-  ): Promise<JuncoAgent<S, P, T>>;
+    options: AgenticOptions<S, P, T, N, V> & { readonly cwd?: string },
+  ): Promise<JuncoAgent<S, P, T, N, V>>;
   static fromResolved<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
+    N extends TSchema = typeof AgenticInputSchema,
+    V = AssistantMessage,
   >(
-    options: JuncoAgentResolvedOptions<S, P, AgentTool>,
-  ): Promise<JuncoAgent<S, P, AgentTool>>;
+    options: JuncoAgentResolvedOptions<S, P, AgentTool, N, V>,
+  ): Promise<JuncoAgent<S, P, AgentTool, N, V>>;
   static async fromResolved(
-    options: JuncoAgentResolvedOptions,
-  ): Promise<JuncoAgent> {
+    options: JuncoAgentResolvedOptions<
+      Skill,
+      PromptTemplate,
+      AgentTool,
+      TSchema,
+      unknown
+    >,
+  ): Promise<AnyJuncoAgent> {
     const { cwd, tools, collection, ...native } = options;
     const owned: OwnedResources = { toolCollection: collection };
-    let agent: JuncoAgent;
+    let agent: AnyJuncoAgent;
     try {
       const resolved = await resolveToolSources(
         tools,
@@ -568,16 +634,28 @@ export class JuncoAgent<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
     T extends AgentTool = AgentTool,
+    N extends TSchema = typeof AgenticInputSchema,
+    V = AssistantMessage,
   >(
-    options: JuncoAgentCreateOptions<S, P, T> & { readonly tools: T[] },
-  ): Promise<JuncoAgent<S, P, T>>;
+    options: JuncoAgentCreateOptions<S, P, T, N, V> & { readonly tools: T[] },
+  ): Promise<JuncoAgent<S, P, T, N, V>>;
   static create<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
+    N extends TSchema = typeof AgenticInputSchema,
+    V = AssistantMessage,
   >(
-    options: JuncoAgentCreateOptions<S, P, AgentTool>,
-  ): Promise<JuncoAgent<S, P, AgentTool>>;
-  static async create(options: JuncoAgentCreateOptions): Promise<JuncoAgent> {
+    options: JuncoAgentCreateOptions<S, P, AgentTool, N, V>,
+  ): Promise<JuncoAgent<S, P, AgentTool, N, V>>;
+  static async create(
+    options: JuncoAgentCreateOptions<
+      Skill,
+      PromptTemplate,
+      AgentTool,
+      TSchema,
+      unknown
+    >,
+  ): Promise<AnyJuncoAgent> {
     const {
       provider,
       model: modelId,
@@ -590,7 +668,7 @@ export class JuncoAgent<
     } = options;
     const owned: OwnedResources = { toolCollection: collection };
     let session: Session | undefined = suppliedSession;
-    let agent: JuncoAgent | undefined;
+    let agent: AnyJuncoAgent | undefined;
     try {
       const models =
         suppliedModels ??
@@ -698,7 +776,7 @@ export class JuncoAgent<
     }
   }
 
-  readonly #options: AgenticOptions<S, P, T>;
+  readonly #options: AgenticOptions<S, P, T, N, V>;
   /**
    * The collection selecting this agent's authorization policy and lifetime, borrowed: the agent
    * holds it through its own binding, whose tools act as this agent's one policy owner. Take
@@ -745,14 +823,14 @@ export class JuncoAgent<
   readonly #operations = new Set<Promise<unknown>>();
   readonly #boundaries: Boundary[] = [];
   readonly #held: HeldBoundary[] = [];
-  readonly #demands: Demand[] = [];
+  readonly #demands: Demand<N, V>[] = [];
   /** FIFO of queued compactions; never rejects, so one failure cannot poison later requests. */
   #compactionTail: Promise<void> = Promise.resolve();
   #pendingCompactions = 0;
   #aborting = false;
   #staged:
     | {
-        readonly text: NonNullable<AgenticOptions["prompt"]>;
+        readonly text: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>;
         readonly images?: ImageContent[];
       }
     | undefined;
@@ -763,39 +841,180 @@ export class JuncoAgent<
   #nodeContext: JuncoAgentNodeContext | undefined;
   /** This agent's view of its constructor recorder, used outside graph placements. */
   readonly #ownRecorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
   /** The graph placement {@link runWithNodeContext} binds. */
   #placement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
   /** Where the latest admitted run started. */
   #runPlacement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined;
   /** The bound graph placement, else this agent's own view of its `recorder` option. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined {
     return this.#placement ?? this.#ownRecorder;
   }
   /** Where current work records: the bound placement, else the latest run's, else this agent's own. */
   #currentRecorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations">
+    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
     | undefined {
     return this.#placement ?? this.#runPlacement ?? this.#ownRecorder;
   }
+  /**
+   * The usage context {@link runWithNodeContext} captured for its activation. A box whose
+   * `context` is undefined is bound and empty: it masks the admission context of a run.
+   */
+  #usagePlacement: { readonly context: UsageContext | undefined } | undefined;
+  /** Explicit compactions and navigations in flight, by native operation. */
+  readonly #structural = new Map<string, UsageOwner>();
+  /** The accepted model request whose committed usage is charged now, and the budgets it charges. */
+  #request:
+    | {
+        readonly operationId: string;
+        readonly context: UsageContext | undefined;
+      }
+    | undefined;
+  /** The budgets `owner`'s work charges now: the bound activation's, else its admission's. */
+  #usageOf(owner: UsageOwner): UsageContext | undefined {
+    const placement = this.#usagePlacement;
+    return placement === undefined ? owner.usage : placement.context;
+  }
+  /**
+   * Latch `owner`'s first usage failure and start, never awaiting, its one native abort: callers
+   * run inside Pi tool execution or event delivery, which that abort's commit would wait for.
+   */
+  #failUsage(owner: UsageOwner, error: unknown): void {
+    owner.usageFailure ??= error;
+    if (owner instanceof RunRecord) {
+      owner.stopping = true;
+      this.#suppressGates(owner);
+    }
+    const { operationId } = owner;
+    if (owner.usageAbort !== undefined || operationId === undefined) return;
+    owner.usageAbort = this.#nativeLane
+      .requestAbort(operationId, BACKGROUND_CONTEXT)
+      .then(
+        (result) => (result.ok ? undefined : result.error),
+        (failure: unknown) => failure,
+      );
+  }
+  /** `owner`'s usage failure after its abort settled, first in an aggregate with any distinct `failures`. */
+  async #usageError(
+    owner: UsageOwner,
+    failures: readonly unknown[],
+  ): Promise<unknown> {
+    const usage = owner.usageFailure;
+    const abort = await owner.usageAbort;
+    const distinct = new Set(
+      abort === undefined ? failures : [...failures, abort],
+    );
+    distinct.delete(usage);
+    return distinct.size === 0
+      ? usage
+      : new AggregateError(
+          [usage, ...distinct],
+          "JuncoAgent stopped at a usage limit, and stopping failed",
+          { cause: usage },
+        );
+  }
+  /**
+   * Latch `run`'s first fatal task failure and start, never awaiting, its task cleanup and one
+   * native abort: callers run inside Pi hooks or task work, which that abort's commit may wait for.
+   */
+  #failTask(run: RunRecord, error: unknown): void {
+    if (run.taskFailure !== undefined) return;
+    run.taskFailure = { error };
+    run.stopping = true;
+    this.#suppressGates(run);
+    void run.tasks?.stop(error);
+    const { operationId } = run;
+    if (operationId === undefined) return;
+    run.taskAbort = this.#nativeLane
+      .requestAbort(operationId, BACKGROUND_CONTEXT)
+      .then(
+        // A run that already ended has nothing left to stop.
+        (result) =>
+          result.ok || result.error._tag === "OperationMismatch"
+            ? undefined
+            : result.error,
+        (failure: unknown) => failure,
+      );
+  }
+  /** `run`'s task scope, created by its first native task request. */
+  #taskScope(run: RunRecord): TaskScope {
+    if (run.stopping || this.#closing)
+      throw new JuncoAgentError("invalid_state", "JuncoAgent run is stopping");
+    if (run.tasks === undefined) {
+      run.tasks = new TaskScope(this, this.#nativeLane, (error) =>
+        this.#failTask(run, error),
+      );
+      this.#taskResults = run.tasks.results;
+    }
+    return run.tasks;
+  }
+  /**
+   * Stop and join `run`'s tasks once its native drive ended; then what the run fails with: a
+   * latched task failure outranks the induced native outcome unless a usage failure stopped the
+   * run, and distinct abort and cleanup failures follow. Undefined when it succeeds.
+   */
+  async #joinTasks(
+    run: RunRecord,
+    native: { readonly error: unknown } | undefined,
+  ): Promise<{ readonly error: unknown } | undefined> {
+    const failures: unknown[] = [];
+    try {
+      await run.tasks?.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    let primary = native;
+    if (run.usageFailure === undefined && run.taskFailure !== undefined) {
+      primary = run.taskFailure;
+      const abort = await run.taskAbort;
+      if (abort !== undefined) failures.unshift(abort);
+    }
+    if (primary === undefined)
+      return failures.length === 0
+        ? undefined
+        : {
+            error:
+              failures.length === 1
+                ? failures[0]
+                : new AggregateError(
+                    failures,
+                    "JuncoAgent task cleanup failed",
+                  ),
+          };
+    const known = new Set(errorGraph(primary.error));
+    const distinct = [...new Set(failures)].filter(
+      (error) => !known.has(error),
+    );
+    return distinct.length === 0
+      ? primary
+      : {
+          error: new AggregateError(
+            [primary.error, ...distinct],
+            "JuncoAgent run failed, and stopping its tasks failed",
+            { cause: primary.error },
+          ),
+        };
+  }
   /** Checks each hosted `task` launch before admission; see {@link setTaskPolicy}. */
   #taskPolicy: TaskPolicy | undefined;
-  /** What graphs do with this agent's failed tasks; see {@link setTaskFailurePolicy}. */
+  /** What this agent does with its failed tasks; see {@link setTaskFailurePolicy}. */
   #taskFailurePolicy: TaskFailurePolicy = { retries: 0 };
   /** This agent's assigned batch was admitted: a host admits it at most once. */
   #taskAdmitted = false;
   /** Sees this agent's subagent acquisitions; see {@link setSubagentObserver}. */
   #subagentObserver: SubagentObserver | undefined;
+  /** Task results delivered in the current or latest run. */
+  #taskResults: readonly TaskResult[] = [];
 
   protected constructor(
-    options: AgenticOptions<S, P, T>,
+    options: AgenticOptions<S, P, T, N, V>,
     owned: OwnedResources = {},
   ) {
     if (options.tokenMonitor !== undefined)
@@ -888,16 +1107,74 @@ export class JuncoAgent<
       harness.events.on("run_end", ({ lane, runId }) => {
         if (lane === "main") this.#readyYield(this.#runForOperation(runId));
       });
+      // Task reports count as delivered only when the lane consumes their own queued entry.
+      harness.events.on("message_end", ({ lane, runId, message, entryId }) => {
+        if (
+          lane !== "main" ||
+          message.role !== "user" ||
+          runId === undefined ||
+          entryId === undefined
+        )
+          return;
+        this.#runForOperation(runId)?.tasks?.messageEnded(entryId);
+      });
+      // Pi rereads the inbox after this hook: queued reports renew the run; otherwise it waits
+      // here for unresolved tasks. Never throws (Pi isolates hook failures) nor returns a
+      // follow-up (a later hook may replace it).
+      harness.hooks.on("before_run_end", async ({ lane, runId }, context) => {
+        if (lane !== "main") return undefined;
+        const run = this.#runForOperation(runId);
+        try {
+          await run?.tasks?.beforeRunEnd(context.abortSignal);
+        } catch (error) {
+          if (run !== undefined) this.#failTask(run, error);
+        }
+        return undefined;
+      });
       harness.hooks.on("before_request", async ({ lane, runId }) => {
         if (lane !== "main") return undefined;
         const run = this.#runForOperation(runId);
         this.#readyYield(run);
         if (run?.held !== undefined) await run.held.gate.promise;
+        if (run?.taskFailure !== undefined) {
+          // Its abort's commit makes Pi skip this request.
+          await run.taskAbort;
+          return undefined;
+        }
+        const owner = run ?? this.#structural.get(runId);
+        if (owner === undefined) return undefined;
+        // Read after a held yield resumed: a resumed run charges its new activation.
+        const usage = this.#usageOf(owner);
+        try {
+          if (owner.usageFailure !== undefined) throw owner.usageFailure;
+          runWithUsageContext(usage, () => assertTokenRequestAllowed());
+        } catch (error) {
+          this.#failUsage(owner, error);
+          // Never throw: Pi isolates hook failures. Its commit makes Pi skip this request.
+          await owner.usageAbort;
+          return undefined;
+        }
+        this.#request = { operationId: runId, context: usage };
         return undefined;
+      });
+      // Committed increments only: restored history never replays as a usage event. Neither
+      // throws nor awaits: Pi isolates listener failures, and a joined abort would deadlock.
+      harness.events.on("usage", ({ lane, row }) => {
+        const request = this.#request;
+        if (lane !== "main" || request === undefined) return;
+        try {
+          runWithUsageContext(request.context, () =>
+            chargeTokenUsage(row.usage.totalTokens),
+          );
+        } catch (error) {
+          const owner =
+            this.#runForOperation(request.operationId) ??
+            this.#structural.get(request.operationId);
+          if (owner !== undefined) this.#failUsage(owner, error);
+        }
       });
       if (tokenMonitor !== undefined)
         await this.#monitorUsage(harness, tokenMonitor);
-      // Committed increments only: restored history never replays as a usage event.
       if (this.#ownRecorder !== undefined)
         harness.events.on("usage", ({ row }) => {
           const recorder: ProfileRecorder<"tokens"> | undefined =
@@ -1053,9 +1330,13 @@ export class JuncoAgent<
     });
   }
 
+  /**
+   * One installed adapter per original tool. Genuine messaging tools read their schemas from the
+   * bound activation on every access, so one shared tool serves agents with different edges.
+   */
   #adaptTool(tool: AgentTool): AgentHarnessTool<undefined> {
     const { execute: _execute, prepareArguments, ...fields } = tool;
-    return {
+    const adapter: AgentHarnessTool<undefined> = {
       ...fields,
       ...(prepareArguments === undefined
         ? {}
@@ -1081,14 +1362,23 @@ export class JuncoAgent<
         // This agent's own owner-bound counterpart of a collection tool.
         const selected = this.#owned.binding?.tools.get(tool) ?? tool;
         const recorder = this.#currentRecorder();
+        // Captured before any await: the activation bound now, never a stale ambient context.
+        const usage = this.#usageOf(run);
         const dispatch = async (): Promise<AgentToolResult<unknown>> => {
           try {
             const node = this.#nodeContext;
-            const host = node?.task;
-            if (host !== undefined && isTaskTool(tool)) {
-              const assigned = isAssignedTaskTool(tool);
-              return await invokeTaskTool(
-                tool,
+            if (TaskTool.is(tool)) {
+              // A tool's own explicit host, else this run's native tasks.
+              const host: TaskToolHost =
+                tool.host ??
+                ((_toolCallId, input, admission) =>
+                  this.#taskScope(run).request(input, admission, {
+                    usage,
+                    recorder,
+                    tracer: node?.complaint?.tracer,
+                  }));
+              const assigned = AssignedTaskTool.is(tool);
+              return await tool.invoke(
                 async (toolCallId, input, admission) => {
                   if ("action" in input)
                     return host(toolCallId, input, admission);
@@ -1171,19 +1461,48 @@ export class JuncoAgent<
             throw error;
           }
         };
-        // Source-instrumented tools account their own calls.
-        return runWithRecorder(recorder, () =>
-          recorder === undefined || hasProfileOwner(selected)
-            ? dispatch()
-            : profileToolCall(
-                recorder,
-                this.#toolOperation(tool),
-                signal,
-                dispatch,
-              ),
-        );
+        try {
+          // Every call reaches profileToolCall, the one admission against the usage budgets:
+          // source-instrumented tools through their own wrapper, every other tool through this one.
+          return await runWithUsageContext(usage, () => {
+            assertUsageAllowed();
+            return runWithRecorder(recorder, () =>
+              hasProfileOwner(selected)
+                ? dispatch()
+                : profileToolCall(
+                    recorder,
+                    this.#toolOperation(tool),
+                    signal,
+                    dispatch,
+                  ),
+            );
+          });
+        } catch (error) {
+          const failure = usageFailureIn(error, usage);
+          // Stops the run; Pi still records this call's ordinary tool error.
+          if (failure !== undefined) this.#failUsage(run, failure);
+          throw error;
+        }
       },
     };
+    if (SendTool.is(tool)) {
+      Object.defineProperty(adapter, "parameters", {
+        enumerable: true,
+        get: () =>
+          this.#nodeContext?.messaging?.sendParameters ?? tool.parameters,
+      });
+    } else if (RecvTool.is(tool)) {
+      const outputSchema = () =>
+        this.#nodeContext?.messaging?.recvOutputSchema ?? tool.outputSchema;
+      Object.defineProperties(adapter, {
+        outputSchema: { enumerable: true, get: outputSchema },
+        description: {
+          enumerable: true,
+          get: () => RecvTool.describe(outputSchema()),
+        },
+      });
+    }
+    return adapter;
   }
 
   /** Generic labels of an unmarked registered tool: genuine MCP wrappers, else custom. */
@@ -1233,6 +1552,8 @@ export class JuncoAgent<
 
   #onTurnEnd(event: Extract<HarnessEvent, { type: "turn_end" }>): void {
     if (event.lane !== "main") return;
+    // The turn's model and tool-result usage was charged; its next request rebinds.
+    if (this.#request?.operationId === event.runId) this.#request = undefined;
     this.#currentRecorder()?.record({
       kind: "metrics",
       counters: { turns_completed: 1 },
@@ -1402,7 +1723,7 @@ export class JuncoAgent<
     });
   }
   stagePrompt(
-    prompt: NonNullable<AgenticOptions<S, P, T>["prompt"]>,
+    prompt: NonNullable<AgenticOptions<S, P, T, N, V>["prompt"]>,
     options?: { images?: ImageContent[] },
   ): void {
     if (this.#closing) throw closedError();
@@ -1441,7 +1762,12 @@ export class JuncoAgent<
     return this.#admit(request);
   }
   #admit(request: RunRequest): Promise<AssistantMessage> {
-    const run = new RunRecord(request.kind);
+    // A standalone run charges its caller's budgets; a placed run charges each activation's.
+    const run = new RunRecord(
+      request.kind,
+      this.#usagePlacement === undefined ? captureUsageContext() : undefined,
+    );
+    this.#taskResults = [];
     this.#currentRun = run;
     this.#runPlacement = this.#placement ?? this.#ownRecorder;
     run.finish = beginOperation(this.#runPlacement, RUN);
@@ -1455,7 +1781,25 @@ export class JuncoAgent<
     );
     return settlement;
   }
+  /**
+   * The native run, then its tasks: every exit stops and joins them, so no report outlives it,
+   * and a fatal task failure or required decision fails it before subclass validation.
+   */
   async #driveRun(
+    run: RunRecord,
+    request: RunRequest,
+  ): Promise<AssistantMessage> {
+    let message: AssistantMessage;
+    try {
+      message = await this.#driveNative(run, request);
+    } catch (error) {
+      throw (await this.#joinTasks(run, { error }))?.error;
+    }
+    const failure = await this.#joinTasks(run, undefined);
+    if (failure !== undefined) throw failure.error;
+    return this.validateSettlement?.(run, message) ?? message;
+  }
+  async #driveNative(
     run: RunRecord,
     request: RunRequest,
   ): Promise<AssistantMessage> {
@@ -1464,30 +1808,42 @@ export class JuncoAgent<
       await this.#nativeLane.accept(request, run.context),
     );
     run.operationId = admitted.operationId;
-    if (run.stopping || this.#closing) {
-      // An abort might have seen an idle lane while accept was still pending.
-      const repeat = trackPromise(
-        this.#operations,
-        this.#nativeLane.abort(BACKGROUND_CONTEXT),
-      );
-      const outcome = await repeat;
-      if (!outcome.ok && outcome.error._tag !== "NoActiveOperation")
-        throw outcome.error;
-    }
     let result: Awaited<ReturnType<AgentLane["drive"]>>;
     try {
-      result = await this.#nativeLane.drive(
-        { operationId: admitted.operationId, waitForRetry: true },
-        run.context,
-      );
+      if (run.stopping || this.#closing) {
+        // An abort might have seen an idle lane while accept was still pending.
+        const repeat = trackPromise(
+          this.#operations,
+          this.#nativeLane.abort(BACKGROUND_CONTEXT),
+        );
+        const outcome = await repeat;
+        if (!outcome.ok && outcome.error._tag !== "NoActiveOperation")
+          throw outcome.error;
+      }
+      try {
+        result = await this.#nativeLane.drive(
+          { operationId: admitted.operationId, waitForRetry: true },
+          run.context,
+        );
+      } catch (error) {
+        if (!run.stopping && !this.#closing) throw error;
+        // The caller's cancelled drive waiter does not stop Pi's uncancelled native drive.
+        result = await this.#nativeLane.drive(
+          { operationId: admitted.operationId, waitForRetry: true },
+          BACKGROUND_CONTEXT,
+        );
+      }
     } catch (error) {
-      if (!run.stopping && !this.#closing) throw error;
-      // The caller's cancelled drive waiter does not stop Pi's uncancelled native drive.
-      result = await this.#nativeLane.drive(
-        { operationId: admitted.operationId, waitForRetry: true },
-        BACKGROUND_CONTEXT,
-      );
+      if (run.usageFailure !== undefined)
+        throw await this.#usageError(run, [error]);
+      throw error;
+    } finally {
+      if (this.#request?.operationId === admitted.operationId)
+        this.#request = undefined;
     }
+    // The budget failure is why the run stopped: it outranks the native outcome.
+    if (run.usageFailure !== undefined)
+      throw await this.#usageError(run, result.ok ? [] : [result.error]);
     const outcome = valueOrThrow(result);
     if (outcome.kind === "waiting") {
       if (outcome.reason === "deferred") {
@@ -1512,7 +1868,7 @@ export class JuncoAgent<
         { cause: outcome.outcome.error },
       );
     }
-    return this.validateSettlement?.(run, run.lastMessage) ?? run.lastMessage;
+    return run.lastMessage;
   }
   #settle(run: RunRecord, step: AgenticStep): void {
     this.#readyYield(run);
@@ -1643,12 +1999,14 @@ export class JuncoAgent<
   // Subagents ------------------------------------------------------------------------------------
   /**
    * Run `work` with one graph activation bound: `messaging` serves this agent's recv/send/info
-   * calls, `task` admits its `task` calls, and `complaint` attributes its complaints (each adds the
+   * calls and `complaint` attributes its complaints (each adds the
    * model request it arose in). Outside a binding, complaints use this agent's own {@link nodeId}
    * and no delivered messages, and graph tools fall back to their own hosts. Binding neither
    * prompts nor resumes the agent; it ends when `work` settles. Only one context binds at a time.
+   * The caller's usage budgets bind with it: every model request and tool call while it is bound
+   * charges them, even of a run admitted in an earlier activation.
    */
-  async runWithNodeContext<N, T, R>(
+  async runWithNodeContext<N extends TSchema, T, R>(
     context: JuncoAgentNodeContext<N, T>,
     work: () => Promise<R>,
   ): Promise<R> {
@@ -1664,13 +2022,17 @@ export class JuncoAgent<
     const placement = parent?.add_context(
       context.recorderNodeId ?? this.nodeId,
     );
+    const usage = this.#usagePlacement;
     this.#nodeContext = context;
     this.#placement = placement;
+    // Before `work` can release a held run.
+    this.#usagePlacement = { context: captureUsageContext() };
     try {
       return await work();
     } finally {
       this.#nodeContext = undefined;
       this.#placement = undefined;
+      this.#usagePlacement = usage;
     }
   }
 
@@ -1689,7 +2051,7 @@ export class JuncoAgent<
   }
 
   /**
-   * Check every `task` launch a bound host would admit: `policy` receives the validated, detached
+   * Check every `task` launch this agent would admit: `policy` receives the validated, detached
    * batch and throws to reject it, which the model receives as an ordinary tool error before any
    * subagent exists. Decisions about failed tasks are not launches. `undefined` removes the
    * policy. Subagents never inherit it.
@@ -1717,13 +2079,14 @@ export class JuncoAgent<
       );
     const index = this.#tools.findIndex(({ name }) => name === "task");
     const current = this.#tools[index];
-    if (current === undefined || !isTaskTool(current))
+    if (current === undefined || !TaskTool.is(current))
       return Promise.reject(
         new JuncoAgentError("invalid_state", "Agent has no genuine task tool"),
       );
     let assigned: T;
     try {
-      assigned = new AssignedTaskTool(input) as AgentTool as T;
+      // A context-hosted tool keeps executing through its own explicit host.
+      assigned = new AssignedTaskTool(input, current.host) as AgentTool as T;
     } catch (cause) {
       return Promise.reject(
         new JuncoAgentError(
@@ -1739,7 +2102,7 @@ export class JuncoAgent<
   }
 
   /**
-   * Choose what graphs do with this agent's failed tasks, from its next admission on: `"ignore"`
+   * Choose what this agent does with its failed tasks, from its next admission on: `"ignore"`
    * drops a failure; `{ retries }` reruns it up to that many times and then asks this agent to
    * retry or ignore it. Default `{ retries: 0 }`. Subagents never inherit it.
    */
@@ -1769,13 +2132,16 @@ export class JuncoAgent<
     return policy === "ignore" ? policy : { retries: policy.retries };
   }
 
-  /** Results delivered in this graph run; available to tools during a bound graph activation. */
+  /**
+   * Task results whose reports entered this agent's context in its current or latest run; a new
+   * run or an abort starts empty.
+   */
   getTaskResults(): readonly TaskResult[] {
-    return this.#nodeContext?.taskResults ?? NO_TASK_RESULTS;
+    return this.#taskResults;
   }
 
   /**
-   * Observe every later {@link createSubagents} batch, including graph task admissions and
+   * Observe every later {@link createSubagents} batch, including task admissions and
    * retries: `observer.acquiring` may reject a batch before acquisition, `observer.acquired` sees
    * (and may attach hooks or listeners to) each child before anything runs it. `undefined`
    * removes it. Subagents never inherit it.
@@ -1785,7 +2151,7 @@ export class JuncoAgent<
   }
 
   /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
-  complain<N>(
+  complain<N extends TSchema>(
     issue: Issue<N>,
     tracer?: Pick<DataflowTracer, "complain">,
   ): void {
@@ -1807,10 +2173,13 @@ export class JuncoAgent<
    * child holds its own collection lease. Everything is validated before any child is created; on failure or
    * `signal` abort every created child is closed again.
    */
-  createSubagents(
+  createSubagents<
+    C extends TSchema = typeof AgenticInputSchema,
+    W = AssistantMessage,
+  >(
     options: readonly TaskAgentOptions[],
     signal?: AbortSignal,
-  ): Promise<JuncoAgent<S, P, AgentTool>[]> {
+  ): Promise<JuncoAgent<S, P, AgentTool, C, W>[]> {
     const requests = options.map(({ model, tools }) => ({
       model: model && { provider: model.provider, modelId: model.modelId },
       tools: tools && [...tools],
@@ -1917,7 +2286,7 @@ export class JuncoAgent<
         plans.push({ model, selection });
       }
 
-      const children: JuncoAgent<S, P, AgentTool>[] = [];
+      const children: JuncoAgent<S, P, AgentTool, C, W>[] = [];
       try {
         for (const { model, selection } of plans) {
           live();
@@ -1927,7 +2296,7 @@ export class JuncoAgent<
             toolCollection: this.collection,
           };
           let session: Session | undefined;
-          let child: JuncoAgent<S, P, AgentTool>;
+          let child: JuncoAgent<S, P, AgentTool, C, W>;
           try {
             session = await repo.create({}, BACKGROUND_CONTEXT);
             for (const { source, cwd } of registrations)
@@ -1938,7 +2307,7 @@ export class JuncoAgent<
             const reconnected = owned.mcpSources ?? [];
             const tools = selection.map(({ tool, mcp }) => {
               if (mcp === undefined)
-                return isAssignedTaskTool(tool) ? new TaskTool() : tool;
+                return AssignedTaskTool.is(tool) ? new TaskTool() : tool;
               const { serverName, originalToolName } = mcp.identity;
               const fresh = reconnected[mcp.occurrence].tools.filter(
                 (candidate) => {
@@ -1958,7 +2327,7 @@ export class JuncoAgent<
             });
             const activeToolNames = tools.map((tool) => tool.name);
             validateActiveTools(tools, activeToolNames);
-            child = new JuncoAgent<S, P, AgentTool>(
+            child = new JuncoAgent<S, P, AgentTool, C, W>(
               {
                 session,
                 models,
@@ -2136,10 +2505,14 @@ export class JuncoAgent<
   }
   compact(options?: { customInstructions?: string }): Promise<void> {
     const customInstructions = options?.customInstructions;
+    // The caller's budgets, captured before the queue: the compaction may start much later.
+    const placement = this.#usagePlacement;
+    const usage =
+      placement === undefined ? captureUsageContext() : placement.context;
     return this.#operation(() => {
       this.#pendingCompactions++;
       const job = this.#compactionTail
-        .then(() => this.#compactWhenIdle(customInstructions))
+        .then(() => this.#compactWhenIdle(customInstructions, usage))
         .finally(() => {
           this.#pendingCompactions--;
           this.#pump();
@@ -2153,6 +2526,7 @@ export class JuncoAgent<
   }
   async #compactWhenIdle(
     customInstructions: string | undefined,
+    usage: UsageContext | undefined,
   ): Promise<void> {
     if (this.#closing) throw closedError();
     // Runs admitted before this request finish first; new runs are busy while it is pending.
@@ -2174,7 +2548,10 @@ export class JuncoAgent<
       if (admission.error._tag === "NothingToCompact") return;
       throw admission.error;
     }
-    const result = await this.#driveStructural(admission.value.operationId);
+    const result = await this.#driveStructural(
+      admission.value.operationId,
+      usage,
+    );
     // Close takes precedence over the outcome of an operation it interrupted or raced.
     if (this.#closing) throw closedError();
     const driven = valueOrThrow(result);
@@ -2194,20 +2571,45 @@ export class JuncoAgent<
       );
     }
   }
-  /** Drive an accepted structural operation to its native terminal, repeating close's abort if needed. */
+  /**
+   * Drive an accepted structural operation to its native terminal, repeating close's abort if
+   * needed. Its summary requests charge `usage` unless an activation is bound; a budget failure
+   * stops it and rejects with that failure.
+   */
   async #driveStructural(
     operationId: string,
+    usage: UsageContext | undefined,
   ): Promise<Awaited<ReturnType<AgentLane["drive"]>>> {
-    if (this.#closing) {
-      // Close's native abort might have seen an idle lane while accept was still pending.
-      const repeat = await this.#nativeLane.abort(BACKGROUND_CONTEXT);
-      if (!repeat.ok && repeat.error._tag !== "NoActiveOperation")
-        throw repeat.error;
+    const owner: UsageOwner = {
+      operationId,
+      usage,
+      usageFailure: undefined,
+      usageAbort: undefined,
+    };
+    this.#structural.set(operationId, owner);
+    let result: Awaited<ReturnType<AgentLane["drive"]>>;
+    try {
+      if (this.#closing) {
+        // Close's native abort might have seen an idle lane while accept was still pending.
+        const repeat = await this.#nativeLane.abort(BACKGROUND_CONTEXT);
+        if (!repeat.ok && repeat.error._tag !== "NoActiveOperation")
+          throw repeat.error;
+      }
+      result = await this.#nativeLane.drive(
+        { operationId, waitForRetry: true },
+        BACKGROUND_CONTEXT,
+      );
+    } catch (error) {
+      if (owner.usageFailure !== undefined)
+        throw await this.#usageError(owner, [error]);
+      throw error;
+    } finally {
+      this.#structural.delete(operationId);
+      if (this.#request?.operationId === operationId) this.#request = undefined;
     }
-    return this.#nativeLane.drive(
-      { operationId, waitForRetry: true },
-      BACKGROUND_CONTEXT,
-    );
+    if (owner.usageFailure !== undefined)
+      throw await this.#usageError(owner, result.ok ? [] : [result.error]);
+    return result;
   }
   navigateTree(
     targetId: string,
@@ -2217,6 +2619,9 @@ export class JuncoAgent<
       customInstructions?: string;
     },
   ): Promise<NavigationResult> {
+    const placement = this.#usagePlacement;
+    const usage =
+      placement === undefined ? captureUsageContext() : placement.context;
     return this.#operation(async (): Promise<NavigationResult> => {
       if (this.#pendingCompactions > 0)
         throw new JuncoAgentError("busy", "JuncoAgent compaction is pending");
@@ -2243,7 +2648,10 @@ export class JuncoAgent<
             throw error;
         }
       }
-      const result = await this.#driveStructural(admission.value.operationId);
+      const result = await this.#driveStructural(
+        admission.value.operationId,
+        usage,
+      );
       if (this.#closing) throw closedError();
       if (!result.ok && result.error._tag === "Closed")
         return { ok: false, error: result.error };
@@ -2307,6 +2715,8 @@ export class JuncoAgent<
     this.#aborting = true;
     this.#markStopping();
     const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
+    // Each started before any is awaited; joined in this order.
+    const tasks = this.#currentRun?.tasks?.stop() ?? Promise.resolve();
     const dependents = this.#startDependents("abort");
     this.#cancelRuns();
     const joined = (async () => {
@@ -2344,11 +2754,17 @@ export class JuncoAgent<
         failures.push(error);
       }
       try {
+        await tasks;
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         await dependents;
       } catch (error) {
         failures.push(error);
       }
       while (this.#drives.size > 0) await Promise.allSettled([...this.#drives]);
+      this.#taskResults = [];
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1)
         throw new AggregateError(failures, "JuncoAgent abort failed");
@@ -2367,11 +2783,9 @@ export class JuncoAgent<
   [Symbol.asyncIterator](): this {
     return this;
   }
-  next(
-    inputs?: ParentView<AgenticInput, AssistantMessage>,
-  ): Promise<IteratorResult<AgenticStep, void>> {
+  next(inputs?: ParentView<N, V>): Promise<IteratorResult<AgenticStep, void>> {
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-    const demand: Demand = {
+    const demand: Demand<N, V> = {
       ...Promise.withResolvers<IteratorResult<AgenticStep, void>>(),
       acted: false,
       ...(inputs === undefined ? {} : { inputs }),
@@ -2480,6 +2894,7 @@ export class JuncoAgent<
     this.#staged = undefined;
     this.#markStopping();
     const aborting = this.#nativeLane.abort(BACKGROUND_CONTEXT);
+    const tasks = this.#currentRun?.tasks?.stop() ?? Promise.resolve();
     const dependents = this.#startDependents("close");
     this.#cancelRuns();
     for (const boundary of this.#held.splice(0)) {
@@ -2493,11 +2908,12 @@ export class JuncoAgent<
       this.#endWait(boundary, false);
       boundary.gate.resolve();
     }
-    this.#close = this.#finishClose(aborting, dependents);
+    this.#close = this.#finishClose(aborting, tasks, dependents);
     return this.#close;
   }
   async #finishClose(
     aborting: ReturnType<AgentLane["abort"]>,
+    tasks: Promise<void>,
     dependents: Promise<void>,
   ): Promise<void> {
     const failures: unknown[] = [];
@@ -2505,6 +2921,11 @@ export class JuncoAgent<
       const result = await aborting;
       if (!result.ok && result.error._tag !== "NoActiveOperation")
         throw result.error;
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await tasks;
     } catch (error) {
       failures.push(error);
     }

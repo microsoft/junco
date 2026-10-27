@@ -23,6 +23,7 @@ import {
   Width,
   type WidthType,
 } from "dataflow-engine";
+import { Type } from "typebox";
 import {
   agent,
   choose,
@@ -39,15 +40,18 @@ import {
   strength,
 } from "../src/index.ts";
 
-type Graph = DataflowGraph<void, number, string, never>;
-type Policy = Scheduler<void, number, string, never>;
-type View = Snapshot<void, number, string, never>;
+const NumberSchema = Type.Number();
+const StringSchema = Type.String();
+
+type Graph = DataflowGraph<void, typeof NumberSchema, string, never>;
+type Policy = Scheduler<void, typeof NumberSchema, string, never>;
+type View = Snapshot<void, typeof NumberSchema, string, never>;
 const id = NodeId.create;
 const ids = (names: readonly string[]) => names.map(id);
 const selections = (snapshot: View) =>
   snapshot.history.map((event) => nodeIds(event.selected));
 
-const actor = (ran: string[]): StepFn<void, number, string> =>
+const actor = (ran: string[]): StepFn<void, typeof NumberSchema, string> =>
   async function* (this) {
     while (true) {
       ran.push(this.id);
@@ -99,7 +103,7 @@ function snapshot(
     );
   return Object.freeze({
     nodes,
-    inputs: new Map<NodeIdType, ParentView<number, string>>(),
+    inputs: new Map<NodeIdType, ParentView<typeof NumberSchema, string>>(),
     links: Object.freeze([]),
     results: new Map<NodeIdType, string>(),
     version: 0,
@@ -172,7 +176,7 @@ test("invalid widths and ranks reject before any work", async () => {
   for (const policy of [
     missingWidth,
     textualRank,
-    choose<void, number, string, never>({ rank: () => NaN }),
+    choose<void, typeof NumberSchema, string, never>({ rank: () => NaN }),
   ]) {
     const { execution, ran } = actors(policy, ["a", "b"]);
     await assert.rejects(execution.step(), DataflowDefinitionError);
@@ -663,7 +667,12 @@ test("top-level abstention rejects while a quiescent context does not invoke its
 });
 
 test("context construction is a passive reusable pair with no provider or observation work", () => {
-  class ObservedGraph extends DataflowGraph<void, number, string, never> {
+  class ObservedGraph extends DataflowGraph<
+    void,
+    typeof NumberSchema,
+    string,
+    never
+  > {
     observations = 0;
     override observe() {
       this.observations++;
@@ -673,7 +682,12 @@ test("context construction is a passive reusable pair with no provider or observ
   const graph = new ObservedGraph(Width.create(1), UNBOUNDED);
   let policies = 0;
   let descriptions = 0;
-  const scheduler: Scheduler<void, number, string, number> = () => {
+  const scheduler: Scheduler<
+    void,
+    typeof NumberSchema,
+    string,
+    number
+  > = () => {
     policies++;
     return { selected: [] };
   };
@@ -703,7 +717,7 @@ test("context construction is a passive reusable pair with no provider or observ
 });
 
 test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consume", async () => {
-  const feed = Edge.message<number, string>("feed");
+  const feed = Edge.message<typeof NumberSchema, string>("feed", NumberSchema);
   let target = id("P");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const execution = context({
@@ -715,7 +729,7 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
       ),
   });
   const producer = graph.addNode(
-    new EmitOnce<void, number, string>(
+    new EmitOnce<void, typeof NumberSchema, string>(
       () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)),
       "p",
       { id: id("P"), state: undefined, trigger: TriggerRule.always() },
@@ -723,7 +737,7 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   );
   const batches: number[][] = [];
   const consumer = graph.addNode(
-    new StepNode<void, number, string>(
+    new StepNode<void, typeof NumberSchema, string>(
       (_state, view) => {
         batches.push([...from(view, feed)]);
         return [];
@@ -746,12 +760,12 @@ for (const [name, make] of [
   ["round robin", roundRobin],
 ] as const) {
   test(`${name}: anyOf consumes only the first satisfied edge, leaving its sibling queued`, async () => {
-    const a = Edge.message<number, string>("a");
-    const b = Edge.message<number, string>("b");
+    const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+    const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
     const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
     const execution = context({ graph, scheduler: make() });
     const source = graph.addNode(
-      new EmitOnce<void, number, string>(
+      new EmitOnce<void, typeof NumberSchema, string>(
         () => [Message.create(a, 1), Message.create(b, 2)],
         "p",
         { id: id("P"), state: undefined, trigger: TriggerRule.always() },
@@ -759,7 +773,7 @@ for (const [name, make] of [
     );
     const seen: { a: number[]; b: number[] }[] = [];
     const sink = graph.addNode(
-      new StepNode<void, number, string>(
+      new StepNode<void, typeof NumberSchema, string>(
         (_state, view) => {
           seen.push({ a: [...from(view, a)], b: [...from(view, b)] });
           return [];
@@ -786,8 +800,8 @@ for (const [name, make] of [
 }
 
 test("allOf waits for the atomic join and observations/planning do not consume inputs", async () => {
-  const a = Edge.message<number, string>("a");
-  const b = Edge.message<number, string>("b");
+  const a = Edge.message<typeof NumberSchema, string>("a", NumberSchema);
+  const b = Edge.message<typeof NumberSchema, string>("b", NumberSchema);
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const source = graph.addNode({
     id: id("source"),
@@ -832,7 +846,7 @@ test("allOf waits for the atomic join and observations/planning do not consume i
 });
 
 test("invalid read maps reject the entire column before primes or queue consumption", async () => {
-  const feed = Edge.message<number, string>("feed");
+  const feed = Edge.message<typeof NumberSchema, string>("feed", NumberSchema);
   const captured: View[] = [];
   let invalid = true;
   const { graph, ran } = actors(parallel(), ["a", "b"]);
@@ -919,7 +933,10 @@ for (const mutation of ["addNode", "emit"] as const) {
     const entered = Promise.withResolvers<void>();
     const captured: View[] = [];
     const { graph, ran } = actors(parallel(), ["a", "b"]);
-    const feed = Edge.message<number, string>("feed");
+    const feed = Edge.message<typeof NumberSchema, string>(
+      "feed",
+      NumberSchema,
+    );
     graph.addEdge(id("a"), id("b"), feed);
     const execution = context({
       graph,
@@ -1017,13 +1034,14 @@ test("fresh external metadata is detached independently of native version and fa
     [id("a"), 0],
     [id("b"), 1],
   ]);
-  const captured: Snapshot<void, number, string, number>[] = [];
+  const captured: Snapshot<void, typeof NumberSchema, string, number>[] = [];
   const sentinel = new Error("planning failed");
   let fail = true;
-  const ascending: Scheduler<void, number, string, number> = choose({
-    rank: (view, left, right) =>
-      view.context.get(left)! - view.context.get(right)!,
-  });
+  const ascending: Scheduler<void, typeof NumberSchema, string, number> =
+    choose({
+      rank: (view, left, right) =>
+        view.context.get(left)! - view.context.get(right)!,
+    });
   const execution = context({
     graph,
     describeNode: (node) => priorities.get(node),
@@ -1064,7 +1082,7 @@ test("metadata preserves falsy domains and borrowed opaque identity without free
   type State = { count: number };
   type Metadata = 0 | false | null | "";
   const state: State = { count: 0 };
-  const graph = new DataflowGraph<State, number, string, never>(
+  const graph = new DataflowGraph<State, typeof NumberSchema, string, never>(
     Width.create(1),
     UNBOUNDED,
   );
@@ -1084,7 +1102,7 @@ test("metadata preserves falsy domains and borrowed opaque identity without free
     [id("null"), null],
     [id("empty"), ""],
   ]);
-  const captured: Snapshot<State, number, string, Metadata>[] = [];
+  const captured: Snapshot<State, typeof NumberSchema, string, Metadata>[] = [];
   const execution = context({
     graph,
     describeNode: (node) => metadata.get(node),
@@ -1231,10 +1249,18 @@ test("policies/compositions remain outside native topology, identities and retai
     },
   });
   assert.deepEqual([zero, one], ids(["0", "1"]));
-  graph.addEdge(zero, one, Edge.message<number, string>("shared"));
-  graph.addEdge(one, zero, Edge.value<number, string>("shared"));
-  graph.addEdge(zero, zero, Edge.message<number, string>("self"));
-  graph.addEdge(zero, one, Edge.value<number, string>("parallel"));
+  graph.addEdge(
+    zero,
+    one,
+    Edge.message<typeof NumberSchema, string>("shared", NumberSchema),
+  );
+  graph.addEdge(one, zero, Edge.value("shared", StringSchema));
+  graph.addEdge(
+    zero,
+    zero,
+    Edge.message<typeof NumberSchema, string>("self", NumberSchema),
+  );
+  graph.addEdge(zero, one, Edge.value("parallel", StringSchema));
   const result = await execution.run();
   assert.deepEqual(new Set(result.keys()), new Set(ids(["0", "1"])));
   assert.deepEqual(

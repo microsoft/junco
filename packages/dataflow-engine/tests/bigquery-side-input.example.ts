@@ -1,6 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { context, parallel } from "junco-scheduler";
+import { type Static, Type } from "typebox";
 import { ExampleTracer } from "../examples/tracing.ts";
 import {
   DataflowGraph,
@@ -15,22 +16,28 @@ import {
   Width,
 } from "../src/index.ts";
 
-type StringMsg = { readonly kind: "str"; readonly value: string };
-type GroupMsg = {
-  readonly kind: "group";
-  readonly id: string;
-  readonly corpus: string;
-  readonly word: string;
-};
-type Msg = StringMsg | GroupMsg;
+const StringMsgSchema = Type.Object({
+  kind: Type.Literal("str"),
+  value: Type.String(),
+});
+const GroupMsgSchema = Type.Object({
+  kind: Type.Literal("group"),
+  id: Type.String(),
+  corpus: Type.String(),
+  word: Type.String(),
+});
+const MsgSchema = Type.Union([StringMsgSchema, GroupMsgSchema]);
+type StringMsg = Static<typeof StringMsgSchema>;
+type GroupMsg = Static<typeof GroupMsgSchema>;
+type Msg = typeof MsgSchema;
 
 test("cookbook: bigquery side inputs attach corpus and word", async () => {
-  const groupIdsEdge = Edge.message<Msg, string>("groupIds");
-  const corpusEdge = Edge.message<Msg, string>("corpus");
-  const wordEdge = Edge.message<Msg, string>("word");
-  const ignoreCorpusEdge = Edge.message<Msg, string>("ignoreCorpus");
-  const ignoreWordEdge = Edge.message<Msg, string>("ignoreWord");
-  const resultsEdge = Edge.message<Msg, string>("results");
+  const groupIdsEdge = Edge.message<Msg, string>("groupIds", MsgSchema);
+  const corpusEdge = Edge.message<Msg, string>("corpus", MsgSchema);
+  const wordEdge = Edge.message<Msg, string>("word", MsgSchema);
+  const ignoreCorpusEdge = Edge.message<Msg, string>("ignoreCorpus", MsgSchema);
+  const ignoreWordEdge = Edge.message<Msg, string>("ignoreWord", MsgSchema);
+  const resultsEdge = Edge.message<Msg, string>("results", MsgSchema);
 
   const groupIds = ["A", "B", "C"];
   const corpus = ["corpus1", "corpus2", "corpus3"];
