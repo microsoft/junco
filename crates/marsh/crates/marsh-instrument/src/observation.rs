@@ -74,7 +74,7 @@ pub(crate) struct Sequence(AtomicU64);
 impl Sequence {
     pub(crate) fn next(&self) -> io::Result<u64> {
         self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .map(|previous| previous + 1)

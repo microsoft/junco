@@ -250,7 +250,7 @@ impl PolicyValidator {
     pub(super) fn write(&self) -> Result<RwLockWriteGuard<'_, Authority>, ShellError> {
         let guard = self.authority.write().recover();
         self.revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
                 revision.checked_add(1)
             })
             .map_err(|_| ShellError::infrastructure("policy revision exhaustion"))?;

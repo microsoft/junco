@@ -31,7 +31,7 @@ static IDENTITIES: AtomicU64 = AtomicU64::new(1);
 /// owner a trusted caller shares across shells.
 pub fn fresh_principal() -> Result<Principal, ShellError> {
     let next = IDENTITIES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .map_err(|_| ShellError::infrastructure("shell identity exhaustion"))?;
@@ -734,7 +734,7 @@ impl ExecutionResources {
                 if overlaps(&domain.key, &self.coverage) {
                     domain
                         .epoch
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                             epoch.checked_add(1)
                         })
                         .map_err(|_| ShellError::infrastructure("direct epoch exhaustion"))?;
