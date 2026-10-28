@@ -193,6 +193,7 @@ export class ShellMuxStdioTransport implements McpTransport {
     return promise;
   }
 
+  /** Joins native finalization; a rejected finish aborts its process before close rejects. */
   close(): Promise<void> {
     if (!this.#closeRequested) {
       this.#closeRequested = true;
@@ -402,9 +403,12 @@ export class ShellMuxStdioTransport implements McpTransport {
     }
     try {
       const finishing = child.finish(this.#options.closeTimeoutMs);
-      // Observed here; finalization records its outcome.
-      finishing.catch(() => {});
       this.#finishing = finishing;
+      // Rejection may mean termination was never requested; do not leave the process running.
+      finishing.catch((error: unknown) => {
+        this.#record(toError(error));
+        this.#abort();
+      });
     } catch (error) {
       this.#record(toError(error));
       this.#abort();

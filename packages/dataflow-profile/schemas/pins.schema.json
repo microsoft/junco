@@ -347,6 +347,117 @@
                 }
               },
               "additionalProperties": false
+            },
+            "cost": {
+              "type": "object",
+              "required": [
+                "model",
+                "features"
+              ],
+              "properties": {
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "constant"
+                    },
+                    {
+                      "type": "string",
+                      "const": "linear"
+                    },
+                    {
+                      "type": "string",
+                      "const": "power"
+                    },
+                    {
+                      "type": "string",
+                      "const": "table"
+                    }
+                  ]
+                },
+                "features": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "port",
+                          "measure"
+                        ],
+                        "properties": {
+                          "port": {
+                            "type": "string"
+                          },
+                          "measure": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "bytes"
+                              },
+                              {
+                                "type": "string",
+                                "const": "count"
+                              },
+                              {
+                                "type": "string",
+                                "const": "tokens"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "derived",
+                          "measure",
+                          "ports"
+                        ],
+                        "properties": {
+                          "derived": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "sum"
+                              },
+                              {
+                                "type": "string",
+                                "const": "max"
+                              }
+                            ]
+                          },
+                          "measure": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "bytes"
+                              },
+                              {
+                                "type": "string",
+                                "const": "count"
+                              },
+                              {
+                                "type": "string",
+                                "const": "tokens"
+                              }
+                            ]
+                          },
+                          "ports": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false

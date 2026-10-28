@@ -1365,10 +1365,10 @@ export async function profileRecordersAreOneSharedInterface(
 ) {
   const grafana: tracer.GrafanaRecorder = await tracer.GrafanaRecorder.create();
   const full: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   > = grafana;
   const fromJsonl: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   > = new tracer.JsonlRecorder({ path: "samples.jsonl", monitored: true });
   // The `tools` and `tracer` names are the same imported interface.
   const memory: tools.ProfileRecorder<"memory"> =

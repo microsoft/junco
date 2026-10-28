@@ -123,7 +123,9 @@ export type NodeRegistration<
   readonly tracer: DataflowTracer;
   /** The owning graph's current recorder view, if it records. */
   readonly recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   /** The owning graph's current signal. */
   readonly signal: AbortSignal;

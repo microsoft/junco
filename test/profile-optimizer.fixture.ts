@@ -287,7 +287,7 @@ import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { bytes, tokens } from "dataflow-engine";
-import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco-agency";
+import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 ${p.header ?? ""}
 type OptimizerLimits = {
   memoryBytes?: number;

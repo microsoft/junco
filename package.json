@@ -1,5 +1,5 @@
 {
-  "name": "junco-agency",
+  "name": "junco",
   "version": "0.1.0",
   "private": true,
   "description": "Recursive Pi agencies: typed work graphs paired with composable scheduling policies.",
@@ -27,16 +27,23 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && bun build ./src/optimizer-cli.ts --root ./src --outdir ./dist --target bun --format esm --packages external --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build": "bun run --cwd packages/dataflow-engine build && bun run --cwd packages/junco-tools build && bun run --cwd packages/junco-mcp build && bun run --cwd packages/junco-agent build && bun run --cwd packages/junco-scheduler build && bun run --cwd packages/dataflow-engine-opik build && bun run --cwd packages/dataflow-profile build && bun run build:lib",
+    "build:lib": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && bun build ./src/optimizer-cli.ts --root ./src --outdir ./dist --target bun --format esm --packages external --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
+    "build:marsh": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo build --manifest-path crates/marsh/Cargo.toml --release --locked -p marsh --bins",
+    "build:junco-policy": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo build --manifest-path crates/junco-policy/Cargo.toml --release --locked --lib",
     "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/mixed/mixed.ts ./examples/oss-committee/oss-committee.ts ./examples/mcp/mcp.ts ./examples/yak-shaver/yak-shaver.ts ./examples/verus/verus.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
+    "install:marsh": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo install --path crates/marsh --locked --bin rmux --root \"$HOME/.local\" && printf 'Installed %s\\n' \"$HOME/.local/bin/rmux\" && case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$PATH\"' ;; esac",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
     "check:ci": "bun run --bun biome ci .",
-    "test": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-graph.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/grafana-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts",
-    "test:coverage": "bun run test --coverage",
-    "test:integration": "bun test ./test/junco-agency.test.ts ./test/scheduler-dsl.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/std-workflows.test.ts ./test/yak-shaver.test.ts ./test/verus.test.ts",
+    "test": "bun ci/run-tests.ts junco",
+    "test:unit": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-graph.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/grafana-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts ./test/install.test.ts",
+    "test:coverage": "bun run test:unit --coverage",
+    "test:marsh": "bun ci/run-tests.ts marsh",
+    "test:junco-policy": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo test --locked --manifest-path crates/junco-policy/Cargo.toml && node packages/junco-tools/scripts/with-junco-build-env.mjs cargo test --release --locked --manifest-path crates/junco-policy/fuzz/Cargo.toml --lib",
+    "fuzz:junco-policy": "cd crates/junco-policy && node ../../packages/junco-tools/scripts/with-junco-build-env.mjs cargo +nightly fuzz run lock_policy -- -max_total_time=60",
+    "test:integration": "bun test ./test/junco.test.ts ./test/scheduler-dsl.test.ts ./test/oss-committee.test.ts ./test/mixed.test.ts ./test/std-workflows.test.ts ./test/yak-shaver.test.ts ./test/verus.test.ts",
     "test:native": "bun test ./test/policy-yield.test.ts ./test/mcp-graphs.test.ts ./test/yak-shaver-native.test.ts ./test/tui-tracer.test.ts ./test/profile-recorder-native.test.ts",
-    "test:all": "bun run test && bun run test:integration && bun run test:native",
     "smoke": "bun run test/deterministic-agency.fixture.ts",
     "smoke:deterministic": "node --experimental-strip-types ./test/deterministic-agency.fixture.ts",
     "smoke:deterministic:bun": "bun run ./test/deterministic-agency.fixture.ts",
@@ -67,6 +74,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
+    "@inquirer/checkbox": "5.2.5",
     "@nanonets/graft": "0.21.1",
     "@types/bun": "1.4.2",
     "@types/node": "26.6.3",
@@ -74,7 +82,7 @@
     "typescript": "7.0.2"
   },
   "overrides": {
-    "junco-agency": "file:.",
+    "junco": "file:.",
     "@earendil-works/pi-agent-core": "0.99.2",
     "typebox": "1.3.34"
   },

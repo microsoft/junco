@@ -37,6 +37,7 @@ const profiles = Type.Object(
     memory: Type.Optional(quantity),
     runtime: Type.Optional(quantity),
     tokens: Type.Optional(quantity),
+    cost: Type.Optional(quantity),
   },
   strict,
 );

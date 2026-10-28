@@ -41,12 +41,12 @@ flowchart TB
 
 ## Install
 
-The package isn't published to npm. It lives in the [junco-agency](https://github.com/junco-org/junco-agency) Bun workspace at `packages/dataflow-engine`. Build it and install the tarball:
+The package isn't published to npm. It lives in the [junco](https://github.com/microsoft/junco) Bun workspace at `packages/dataflow-engine`. Build it and install the tarball:
 
 ```sh
 bun install                                                  # once, at the workspace root
 (cd packages/dataflow-engine && bun run build && bun pm pack)   # writes dataflow-engine-0.1.0.tgz
-cd <your-app> && bun add <junco-agency>/packages/dataflow-engine/dataflow-engine-0.1.0.tgz
+cd <your-app> && bun add <junco>/packages/dataflow-engine/dataflow-engine-0.1.0.tgz
 ```
 
 Under Bun, the `bun` export condition loads `src/index.ts` directly. The `import` condition serves the Bun-built `dist/index.js`, and types come from `dist/index.d.ts`.
@@ -320,7 +320,7 @@ The Opik build needs the examples workspace's optional dependencies (`dataflow-e
 
 ### Running Fibonacci with Opik
 
-Prerequisites: Bun, Docker with Compose, and the junco-agency workspace, which holds this package beside [`dataflow-engine-opik`](../dataflow-engine-opik). Run the commands from the workspace root:
+Prerequisites: Bun, Docker with Compose, and the junco workspace, which holds this package beside [`dataflow-engine-opik`](../dataflow-engine-opik). Run the commands from the workspace root:
 
 1. Install the workspace, which includes the examples' optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`); the example bundles the engine and the Opik integration from source, so no package build comes first:
 
@@ -346,7 +346,7 @@ Prerequisites: Bun, Docker with Compose, and the junco-agency workspace, which h
 
 4. Open <http://localhost:8888>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
 
-5. Stop Opik when finished: `(cd <junco-agency>/../opik && ./opik.sh --stop)`.
+5. Stop Opik when finished: `(cd <junco>/../opik && ./opik.sh --stop)`.
 
 ## License
 

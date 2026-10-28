@@ -28,7 +28,7 @@ import {
   JuncoGraph,
   schedules,
   tools as toolsApi,
-} from "junco-agency";
+} from "junco";
 import type {
   AgenticInputSchema,
   AgenticStep,

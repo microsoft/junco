@@ -52,6 +52,7 @@ export const ProfilesFileSchema = Type.Object({
     memory: Type.Optional(profile),
     runtime: Type.Optional(profile),
     tokens: Type.Optional(profile),
+    cost: Type.Optional(profile),
   }, strict), strict),
 }, strict);
 
@@ -66,11 +67,13 @@ export const SampleSchema = Type.Object({
     memory: Type.Optional(nonnegative()),
     runtime: Type.Optional(nonnegative()),
     tokens: Type.Optional(nonnegative()),
+    cost: Type.Optional(nonnegative()),
   }, strict),
   units: Type.Object({
     memory: Type.Optional(unitSymbols("memory")),
     runtime: Type.Optional(unitSymbols("runtime")),
     tokens: Type.Optional(unitSymbols("tokens")),
+    cost: Type.Optional(unitSymbols("cost")),
   }, strict),
   runId: Type.Optional(Type.String()),
   firedAt: Type.Optional(Type.String()),
@@ -90,6 +93,7 @@ export const PinsFileSchema = Type.Object({
     memory: Type.Optional(pin),
     runtime: Type.Optional(pin),
     tokens: Type.Optional(pin),
+    cost: Type.Optional(pin),
   }, strict), strict),
 }, strict);
 

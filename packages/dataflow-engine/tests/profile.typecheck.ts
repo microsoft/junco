@@ -2,6 +2,7 @@ import { seconds } from "@buge/ts-units/time/index.js";
 import {
   constantProfile,
   DataflowGraph,
+  dollars,
   megabytes,
   NodeId,
   type NodeSpec,
@@ -84,3 +85,11 @@ export type _constantMemory = Expect<
 >;
 // @ts-expect-error memory requires an information quantity, not tokens.
 constantProfile("memory", tokens(1));
+const fixedCost = constantProfile("cost", dollars(0.125));
+export type _constantCost = Expect<
+  Equal<typeof fixedCost, ProfileData<"cost">>
+>;
+// @ts-expect-error cost requires a money quantity, not tokens.
+constantProfile("cost", tokens(1));
+// @ts-expect-error cost requires a money quantity, not time.
+constantProfile("cost", seconds(1));

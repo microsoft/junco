@@ -1,0 +1,54 @@
+{
+  "expectations": [
+    {
+      "text": "The response cites the inspected pair: the root numeric edge `quality` (Quality -> $sink, schema type number), the Writer agent on the uniform claude-sonnet-5.5/medium ladder at the default med rung, the existing hard limit `schedules.limit({ tools: 40 }, ...)`, the existing terminal assertion and the `bun run report.ts` invocation.",
+      "passed": true,
+      "evidence": "response.md names the parallel scheduler, the uniform claude-sonnet-5.5/medium ladder, Writer using only the med rung, the tools: 40 ceiling kept outside the regions, the receipt written only after the existing quality check, and argv bun run report.ts in request.json"
+    },
+    {
+      "text": "report.yml is byte-identical to the seeded file after preparation, and no node, edge, probe flag, label or type was added to it.",
+      "passed": true,
+      "evidence": "report.yml bytes equal the seeded file (programmatic comparison); no edits to it"
+    },
+    {
+      "text": "A unique session directory exists under {workspace}/.junco/profile-optimizer/ containing original.yml and original.ts equal to the seeded bytes, and prepared.ts byte-identical to the instrumented report.ts.",
+      "passed": true,
+      "evidence": ".junco/profile-optimizer/session-baTf1i holds original.yml/original.ts equal to the seeded bytes and prepared.ts equal to report.ts (programmatic)"
+    },
+    {
+      "text": "The instrumented report.ts contains exactly one ordered marker pair per axis (scheduler, ladder, limits) whose interiors define optimizerScheduler(label) (baseline schedules.parallel()), optimizerLadder/optimizerStrength (baseline: the existing uniform claude-sonnet-5.5 ladder, strength undefined) and optimizerLimits (baseline {}); the tools: 40 hard limit stays outside the regions and wraps every candidate outermost.",
+      "passed": true,
+      "evidence": "report.ts lines 15-24: three ordered marker pairs with optimizerScheduler = schedules.parallel(), the existing uniform ladder with optimizerStrength undefined, optimizerLimits {}; line 27 HARD_LIMITS { tools: 40 } applied outermost at line 135"
+    },
+    {
+      "text": "Fixed instrumentation outside the regions is guarded by JUNCO_PROFILE_RUN_DIR (normal behavior when absent), validates the run request, hashes the parsed graph document, enables probes on a runtime copy of the existing edge only, checks candidate ladder rungs against allowedModels and extra limits against limitBounds, attaches tracer.JsonlRecorder through fromYaml's recorder, closes graph then tracer then recorder, and writes completion.json via a temporary file and rename only after the existing Quality assertion passed; it imports only public packages, never the installed skill directory.",
+      "passed": true,
+      "evidence": "report.ts: RUN_DIR guard, profileRun validation, canonical graph hash, withProbes on a structuredClone, checkTuning against allowedModels/limitBounds, JsonlRecorder via fromYaml recorder, close loop graph->tracer->recorder, completion.json via .tmp + rename after the original 'no quality score' assertion; imports only junco, dataflow-engine, @earendil-works/pi-ai and node built-ins"
+    },
+    {
+      "text": "request.json passes the documented schema: objective {kind tokens, direction minimize}; one constraint {kind probe, node \"\", edgeId \"quality\", reduce single} >= 0.9; repeats 3; stop.improvement {relative, 0.2} and stop.plateau {window 3, absoluteTolerance 0, relativeTolerance 0.01}; axes [scheduler, ladder, limits]; allowedModels exactly the two given model/thinking pairs; limitBounds.tokens 20000; a fixed workloadId and the existing argv; no runBudget or other implicit cap.",
+      "passed": true,
+      "evidence": "request.json passes checkRequest from src/std/schedules/optimizer.ts (REQUEST_AND_TS_OK); fields match: tokens/minimize, probe ''/quality/single >= 0.9, repeats 3, improvement relative 0.2, plateau 3/0/0.01, three axes, both model pairs, limitBounds.tokens 20000, workloadId notes.md-sha256-59e5fac20028d641, no budget"
+    },
+    {
+      "text": "Exactly one optimizer invocation is given, `bun run junco-profile-optimizer <sessionDir>/request.json`, and it is not executed; the skill neither copies standard-library optimizer files nor writes a wrapper, an outer experiment loop or a fixed candidate catalog.",
+      "passed": true,
+      "evidence": "response.md gives `bun run junco-profile-optimizer .junco/profile-optimizer/session-baTf1i/request.json` and states it was not run; no optimizer source, wrapper, loop or catalog in the workspace"
+    },
+    {
+      "text": "Unverified prerequisites are reported plainly rather than claimed as validated: the installed package's junco-profile-optimizer binary, the Sol editor login and the allowed models' catalog/login/thinking preflight, and whether repeated runs of the workload are safe; no paid model call or target run happened.",
+      "passed": true,
+      "evidence": "response.md 'Before you run it' lists the missing installed binary/dependencies, Sol and model logins with no fallback, and the repeat-safety assumption; only a syntax-only compile was run"
+    }
+  ],
+  "summary": {
+    "passed": 8,
+    "failed": 0,
+    "total": 8,
+    "pass_rate": 1.0
+  },
+  "timing": {
+    "executor_duration_seconds": 77.0,
+    "total_duration_seconds": 77.0
+  }
+}

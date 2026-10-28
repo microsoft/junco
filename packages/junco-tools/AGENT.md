@@ -45,7 +45,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `tests/extension.btrfs.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, ownership release without a live peer and removal-triggered release (both across reopening the seed), and nested-seed refusal on a real btrfs seed. Runs only as a fixture child (`test:btrfs`). |
 | `tests/extension.test.mjs` | Lets plain `bun test` run that lane: owns one fixture around a Node run of `extension.btrfs.mjs`. |
 
-`dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco-agency workspace root's `bun.lock`.
+`dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco workspace root's `bun.lock`.
 
 ## Build and verification commands
 

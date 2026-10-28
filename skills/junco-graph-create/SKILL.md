@@ -1,6 +1,6 @@
 ---
 name: junco-graph-create
-description: 'Generate runnable Junco workflows as paired `name.yml` topology and `name.ts` configuration/code using `JuncoGraph.fromYaml` from `junco-agency`. Use for any dataflow graph, agent coordination, fan-out/fan-in, joined review, feedback or Ralph loops, nested agencies, committee rounds, deterministic `kind: code` nodes, repository workflows, or resource-ordered scheduling — even when the user says "agent pipeline", "multi-agent workflow" or "graph" without naming Junco.'
+description: 'Generate runnable Junco workflows as paired `name.yml` topology and `name.ts` configuration/code using `JuncoGraph.fromYaml` from `junco`. Use for any dataflow graph, agent coordination, fan-out/fan-in, joined review, feedback or Ralph loops, nested agencies, committee rounds, deterministic `kind: code` nodes, repository workflows, or resource-ordered scheduling — even when the user says "agent pipeline", "multi-agent workflow" or "graph" without naming Junco.'
 ---
 
 # Junco graph creation
@@ -9,7 +9,7 @@ One request → one runnable workflow: `<name>.yml` (declarative graph) + `<name
 
 ## Hard constraints
 
-- Import only public packages: `junco-agency`, `@earendil-works/pi-*`. Never machine, installed-skill, checkout or package-source paths.
+- Import only public packages: `junco`, `@earendil-works/pi-*`. Never machine, installed-skill, checkout or package-source paths.
 - Preserve the task's inputs, output, roles, dependencies, stop condition, tool permissions and tracing. Do not invent retries, extra agents, iteration caps, reviewers, resource allowances or cost ordering.
 - Deterministic computation → `kind: emit` or `kind: code`; agents only for judgment/language work. No wrapper class hierarchies, CLI scaffolding or runtime model-routing/fallback frameworks.
 - Reuse the standard library (`src/std`, see **Standard library**) before writing equivalents: `workflows.ralph` for revision loops, `schedules.*` policies, `tracer.*` observers, `graph.nodes.Deterministic` for code bodies.
@@ -90,7 +90,7 @@ Semantics that decide whether a document runs:
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, schedules, tracer } from "junco-agency";
+import { graph, JuncoGraph, schedules, tracer } from "junco";
 import source from "./review.yml" with { type: "text" };
 
 /**
@@ -155,7 +155,7 @@ export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => CodeRe
 ```ts
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { contentText } from "@earendil-works/pi-ai";
-import { graph, type syntax } from "junco-agency";
+import { graph, type syntax } from "junco";
 
 /** Publishes the assignment once to both competitors, then parks (like `emit`, but text comes from context). */
 export const Goals: syntax.DeterministicNode<{ goals: string }> = ({ context, edges, policy }) => {
@@ -209,7 +209,7 @@ Rules: start dependent bodies with `const inputs = yield []`; read values with `
 | Host-state gating (pause a member) | — | `BuildOptions.available` or code `is_available` reading `graph.getNode(id).status` |
 | Memory/token/runtime ordering | — | escape hatch: `schedules.limit`/`lowest`/`highest` need per-node `profiles`, which YAML has no field for |
 
-## Standard library (`src/std`, exported from `junco-agency`)
+## Standard library (`src/std`, exported from `junco`)
 
 Reuse these before writing anything equivalent:
 

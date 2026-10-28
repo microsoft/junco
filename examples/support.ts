@@ -1,7 +1,7 @@
 import type { AgentTool, PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Agentic, agent, JuncoGraph, schedules } from "junco-agency";
+import type { Agentic, agent, JuncoGraph, schedules } from "junco";
 import type { TSchema } from "typebox";
 
 /** A native member as YAML graphs host it: runtime-loaded inbox schemas and unknown parent values. */

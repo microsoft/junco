@@ -353,7 +353,7 @@ test("shared and cyclic native member graphs cascade abort and close once each",
 test(
   "LspTool delivers successful status and semantic errors through JuncoAgent",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "junco-agency-lsp-"));
+    const directory = await mkdtemp(join(tmpdir(), "junco-lsp-"));
     try {
       const lsp = await tools.LspTool.create(directory, { readOnly: true });
       try {

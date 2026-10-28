@@ -187,6 +187,51 @@ fn spawned_commands_are_traced_attributed_and_reaped_in_process() {
     fixture.finish(run);
 }
 
+#[test]
+fn quiescence_waits_for_last_exit_delivery() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (at_exit, exiting) = mpsc::channel();
+    let (release, released) = mpsc::sync_channel(0);
+    let child = {
+        let _entered = scope.enter();
+        fixture
+            .service
+            .spawn(
+                Command::new("/bin/true"),
+                Box::new(move |event| {
+                    if let ChildEvent::Exited(status) = event {
+                        at_exit.send(status).unwrap();
+                        released.recv().unwrap();
+                    }
+                }),
+            )
+            .unwrap()
+    };
+    assert!(
+        exiting
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .success()
+    );
+    let (finished, completion) = mpsc::channel();
+    let service = Arc::clone(&fixture.service);
+    let waiter = std::thread::spawn(move || finished.send(service.quiesce(run)).unwrap());
+    let early = completion.recv_timeout(Duration::from_millis(100));
+    let completed_early = early.is_ok();
+    release.send(()).unwrap();
+    let result = early.unwrap_or_else(|_| completion.recv_timeout(Duration::from_secs(5)).unwrap());
+    waiter.join().unwrap();
+    child.wait_observed().unwrap();
+    result.unwrap();
+    fixture.finish(run);
+    assert!(
+        !completed_early,
+        "quiescence returned before its observer's last delivery ended"
+    );
+}
+
 fn probe(path: &Path) -> HostCall<'_> {
     HostCall::Metadata {
         path,

@@ -1,10 +1,11 @@
 import { hours, milliseconds, minutes, seconds } from "@buge/ts-units/time/index.js";
-import { DataflowDefinitionError, bytes, gibibytes, gigabytes, kibibytes, kilobytes, mebibytes, megabytes, tokens, type ResourceKind, type ResourceUnit } from "dataflow-engine";
+import { DataflowDefinitionError, bytes, dollars, gibibytes, gigabytes, kibibytes, kilobytes, mebibytes, megabytes, tokens, type ResourceKind, type ResourceUnit } from "dataflow-engine";
 
 export const UNITS = {
   memory: { B: bytes, kB: kilobytes, MB: megabytes, GB: gigabytes, KiB: kibibytes, MiB: mebibytes, GiB: gibibytes },
   runtime: { ms: milliseconds, s: seconds, min: minutes, h: hours },
   tokens: { tok: tokens },
+  cost: { USD: dollars },
 } as const satisfies { readonly [R in ResourceKind]: Readonly<Record<string, ResourceUnit<R>>> };
 type Symbols = { readonly [R in ResourceKind]: keyof (typeof UNITS)[R] & string };
 export type UnitSymbol<R extends ResourceKind> = Symbols[R];

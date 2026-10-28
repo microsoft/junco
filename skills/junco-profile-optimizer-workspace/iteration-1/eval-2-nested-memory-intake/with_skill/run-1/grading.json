@@ -1,0 +1,44 @@
+{
+  "expectations": [
+    {
+      "text": "The response asks for the numeric quality requirement (a threshold and comparison) instead of assuming one, and proposes the existing nested edge as its candidate metric rather than inventing a judge.",
+      "passed": true,
+      "evidence": "response.md question 1 asks what number means high quality and proposes the existing nested probe; no judge invented"
+    },
+    {
+      "text": "The quality probe identity is given as wrapper path `Review` with local edge ID `quality` (Score -> $sink inside the nested graph), not the display label or a root-level edge.",
+      "passed": true,
+      "evidence": "response.md line 17: `{ kind: \"probe\", node: \"Review\", edgeId: \"quality\", reduce: \"single\" }`, noting the display label is not an identity"
+    },
+    {
+      "text": "The response explains that recorded memory is the per-activation shell-pipeline peak and that this pair has no native monitoring (no resources/monitorIntervalMs or recorder-bound monitored collection, cgroup v2 delegation unverified), so memory cannot be scored until that prerequisite is met or an existing caller-approved memory probe is chosen \u2014 and none exists in the YAML.",
+      "passed": true,
+      "evidence": "response.md explains recorded memory is the per-activation bash pipeline peak, audit.ts has no monitoring so values would be zeros and rejected, cgroup v2 unconfirmed, and no existing memory edge exists"
+    },
+    {
+      "text": "It asks for (or states as missing) the fixed workload, repeat count and a measurable stop condition (target, improvement and/or plateau window with tolerances) before execution.",
+      "passed": true,
+      "evidence": "Questions 2-3 ask for the stop condition (target/improvement/plateau), the workload command, fixed repository state, workloadId, repeat count and reset safety"
+    },
+    {
+      "text": "No files are modified and no optimizer request is written or executed while the required answers are missing; audit.yml stays byte-identical.",
+      "passed": true,
+      "evidence": "Programmatic: audit.yml and audit.ts equal the seeded bytes; no .junco session or request.json created"
+    },
+    {
+      "text": "No invented metric, new node or edge, probe flag in the YAML, implicit iteration cap, false convergence claim or unverified model fallback appears in the response.",
+      "passed": true,
+      "evidence": "No metric, node, edge, YAML probe, cap or fallback appears; it states there is no fallback model and no default budget"
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "total": 6,
+    "pass_rate": 1.0
+  },
+  "timing": {
+    "executor_duration_seconds": 37.2,
+    "total_duration_seconds": 37.2
+  }
+}

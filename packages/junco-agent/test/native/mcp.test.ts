@@ -1,6 +1,8 @@
 // Both JuncoAgent factories with real MCP stdio servers on one shared ToolCollection, over a
 // CopyTree seed of the test-fs addon. The model is Pi's faux provider; the servers are the
 // junco-mcp fixture, launched natively.
+// Await native rejections with node:assert; Bun's promise matchers can deadlock N-API dispatch
+// by entering a synchronous nested event loop (oven-sh/bun#36828).
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import assert from "node:assert/strict";
@@ -203,7 +205,7 @@ test("a failing source, a name conflict or an unknown active tool closes only th
   const tracker = trackConnections();
   try {
     // The good definition connects first; the failing one rejects initialization.
-    await expect(
+    await assert.rejects(
       JuncoAgent.create({
         models,
         provider: "faux",
@@ -212,7 +214,8 @@ test("a failing source, a name conflict or an unknown active tool closes only th
         collection,
         tools: [fixture("good"), fixture("bad", { JUNCO_MCP_FIXTURE_MODE: "list-failure" })],
       }),
-    ).rejects.toThrow('JuncoMcpTools: failed to initialize server "bad"');
+      /JuncoMcpTools: failed to initialize server "bad"/,
+    );
 
     await assert.rejects(
       JuncoAgent.create({
@@ -240,7 +243,7 @@ test("a failing source, a name conflict or an unknown active tool closes only th
       }),
       (error) => error instanceof JuncoAgentError && /Unknown active tool/.test(error.message),
     );
-    await expect(session.beginMutation(BACKGROUND_CONTEXT)).rejects.toThrow();
+    await assert.rejects(session.beginMutation(BACKGROUND_CONTEXT), Error);
   } finally {
     tracker.restore();
   }
@@ -389,7 +392,7 @@ function trackConnections(
 async function expectClosed(connection: JuncoMcpConnection): Promise<void> {
   assert.ok(connection.tools.length > 0);
   for (const tool of connection.tools) {
-    await expect(tool.execute("late", {} as never)).rejects.toThrow();
+    await assert.rejects(tool.execute("late", {} as never), Error);
   }
 }
 
@@ -639,13 +642,13 @@ test("a child keeps its own server after its parent closes; closing the child st
 
     await parent.return().finally(forgetParent);
     expect(alive(parentPid)).toBe(false);
-    await expect(parentTool!.execute("late", {} as never)).rejects.toThrow();
+    await assert.rejects(parentTool!.execute("late", {} as never), Error);
     const childPid = (await readState(childTool)).pid;
     expect(childPid).not.toBe(parentPid);
     expect(alive(childPid)).toBe(true);
 
     await child!.return().finally(forgetChild);
-    await expect(childTool!.execute("late", {} as never)).rejects.toThrow();
+    await assert.rejects(childTool!.execute("late", {} as never), Error);
     expect(alive(childPid)).toBe(false);
   }), TIMEOUT);
 
@@ -658,8 +661,9 @@ test("a failing later child connection closes every new sibling and connection, 
       connect(index === 3 ? fixture("second", { JUNCO_MCP_FIXTURE_MODE: "list-failure" }) : source),
     );
     try {
-      await expect(parent.createSubagents([{}, {}])).rejects.toThrow(
-        'JuncoMcpTools: failed to initialize server "second"',
+      await assert.rejects(
+        parent.createSubagents([{}, {}]),
+        /JuncoMcpTools: failed to initialize server "second"/,
       );
       for (const connection of tracker.connections) await expectClosed(connection);
       for (const name of ["mcp__good__read_state", "mcp__second__read_state"]) {

@@ -82,6 +82,8 @@ const TOKEN_FIELDS = [
   "output_tokens",
   "cache_read_tokens",
   "cache_write_tokens",
+] as const;
+const COST_FIELDS = [
   "cost_input",
   "cost_output",
   "cost_cache_read",
@@ -221,7 +223,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
       this.#timer = setInterval(() => this.#tick(), this.#intervalMs);
       this.#timer.unref();
     }
-    if (event.kind === "usage") this.#usage(path, event.usage);
+    if (event.kind === "usage") this.#usage(path, event.resource, event.usage);
     else if (event.kind === "resource")
       this.#resource(path, event.source, event.event);
     else if (event.kind === "probe")
@@ -244,22 +246,27 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
 
   #usage(
     path: string,
+    resource: "tokens" | "cost",
     usage: Extract<ProfileEvent<string>, { kind: "usage" }>["usage"],
   ): void {
-    const values: [string, number | undefined][] = [
-      ["tokens_used", usage.totalTokens],
-      ["input_tokens", usage.input],
-      ["output_tokens", usage.output],
-      ["cache_read_tokens", usage.cacheRead],
-      ["cache_write_tokens", usage.cacheWrite],
-      ["cache_write_1h_tokens", usage.cacheWrite1h],
-      ["reasoning_tokens", usage.reasoning],
-      ["cost_input", usage.cost?.input],
-      ["cost_output", usage.cost?.output],
-      ["cost_cache_read", usage.cost?.cacheRead],
-      ["cost_cache_write", usage.cost?.cacheWrite],
-      ["cost_total", usage.cost?.total],
-    ];
+    const values: [string, number | undefined][] =
+      resource === "tokens"
+        ? [
+            ["tokens_used", usage.totalTokens],
+            ["input_tokens", usage.input],
+            ["output_tokens", usage.output],
+            ["cache_read_tokens", usage.cacheRead],
+            ["cache_write_tokens", usage.cacheWrite],
+            ["cache_write_1h_tokens", usage.cacheWrite1h],
+            ["reasoning_tokens", usage.reasoning],
+          ]
+        : [
+            ["cost_input", usage.cost?.input],
+            ["cost_output", usage.cost?.output],
+            ["cost_cache_read", usage.cost?.cacheRead],
+            ["cost_cache_write", usage.cost?.cacheWrite],
+            ["cost_total", usage.cost?.total],
+          ];
     // Only the one-hour cache split and reasoning are optional; both are subsets, never zero-filled.
     if (
       values.some(([field, value]) =>
@@ -276,7 +283,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     for (const [field, value] of values)
       if (value !== undefined)
         node.usage.set(field, (node.usage.get(field) ?? 0) + value);
-    node.pendingTokens += usage.totalTokens;
+    if (resource === "tokens") node.pendingTokens += usage.totalTokens;
   }
 
   #resource(path: string, source: object, event: NativeResourceEvent): void {
@@ -427,13 +434,18 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     let measured = false;
     let memoryPeak = 0;
     let pending = 0;
-    let usage = total;
+    let tokens = total;
+    let costs = total;
     for (const node of this.#nodes.values()) {
       if (!contains(node)) continue;
       pending += node.pendingTokens;
       if (node.usage !== undefined) {
-        usage = true;
-        for (const field of TOKEN_FIELDS) add(field, 0);
+        const hasTokens = node.usage.has("tokens_used");
+        const hasCosts = node.usage.has("cost_total");
+        tokens ||= hasTokens;
+        costs ||= hasCosts;
+        if (hasTokens) for (const field of TOKEN_FIELDS) add(field, 0);
+        if (hasCosts) for (const field of COST_FIELDS) add(field, 0);
         for (const [field, value] of node.usage) add(field, value);
       }
       if (!node.measured) continue;
@@ -442,10 +454,11 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
       peak = Math.max(peak, node.peak);
       for (const [field, value] of node.finished) add(field, value);
     }
-    if (usage) {
+    if (tokens) {
       for (const field of TOKEN_FIELDS) add(field, 0);
       fields.set("tokens_per_second", seconds > 0 ? pending / seconds : 0);
     }
+    if (costs) for (const field of COST_FIELDS) add(field, 0);
     if (!measured) return fields;
     for (const [, field] of SAMPLE_FIELDS) add(field, 0);
     for (const { node, last } of this.#active)

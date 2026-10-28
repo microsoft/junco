@@ -107,7 +107,9 @@ impl CommandHandle {
     /// Ends a command whose input has already been ended, and waits for its actual verdict.
     ///
     /// This is an active termination operation, and only execution is timed. Admission and view
-    /// preparation run to completion first. Once the command's producers are running they get
+    /// preparation run to completion first; initial native fork/trace/exec setup is also excluded.
+    /// Shell-only evaluation remains timed, and later native launches cannot renew the grace.
+    /// Once the command's producers are running they get
     /// `stdin_grace` to finish on their own, then `SIGTERM` and `terminate_grace`, and are then
     /// cancelled — which discards the command — provided one of them is still alive to end.
     /// Producers that already ended are never discarded because the native service is late to

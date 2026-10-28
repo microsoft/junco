@@ -25,6 +25,9 @@ import { withNativeCleanup } from "../../../../test/native-support.ts";
 const SERVER = fileURLToPath(new URL("../stdio-server.ts", import.meta.url));
 const TIMEOUT = 60_000;
 
+// Node's async assertions avoid Bun 1.4.2's nested native TSFN matcher loop.
+// https://github.com/oven-sh/bun/issues/36828
+
 /** The real test addon whose `NativeMux.open` opens a CopyTree seed. */
 const copyTree = {
   ...testAddon,
@@ -285,7 +288,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
       });
       expect(reply.text).toBe("final reply");
       // The server is gone: a retained tool now rejects instead of reconnecting.
-      await expect(call(connection, "mcp__final__echo")).rejects.toThrow();
+      await assert.rejects(call(connection, "mcp__final__echo"), Error);
     } finally {
       await connection.close();
     }
@@ -300,20 +303,16 @@ describe("native MCP stdio on the shared ShellMux", () => {
       const connection = await JuncoMcpTools.add(
         server(kind, { maxMessageBytes: 2048 }),
       ).connect({ cwd: seed, collection });
-      await expect(
-        call(connection, `mcp__${kind}__misbehave`, { kind, ...extra }),
-      ).rejects.toThrow();
+      await assert.rejects(call(connection, `mcp__${kind}__misbehave`, { kind, ...extra }), Error);
       // The fatal frame is the connection's failure; close joins the job's teardown.
-      await expect(connection.close()).rejects.toThrow();
+      await assert.rejects(connection.close(), Error);
     }
   }, TIMEOUT);
 
   test("early exit and list failure reject initialization and leave the collection usable", async () => {
-    await expect(
-      JuncoMcpTools.add(
-        server("early", { env: { JUNCO_MCP_FIXTURE_MODE: "exit-on-start" } }),
-      ).connect({ cwd: seed, collection }),
-    ).rejects.toThrow('JuncoMcpTools: failed to initialize server "early"');
+    await assert.rejects(JuncoMcpTools.add(
+      server("early", { env: { JUNCO_MCP_FIXTURE_MODE: "exit-on-start" } }),
+    ).connect({ cwd: seed, collection }), (error) => error instanceof Error && error.message.includes('JuncoMcpTools: failed to initialize server "early"'));
     const failed = await JuncoMcpTools.add(server("good"))
       .add(server("listing", { env: { JUNCO_MCP_FIXTURE_MODE: "list-failure" } }))
       .connect({ cwd: seed, collection })
@@ -333,12 +332,8 @@ describe("native MCP stdio on the shared ShellMux", () => {
   }, TIMEOUT);
 
   test("invalid definitions and NUL arguments fail before anything launches", async () => {
-    await expect(
-      JuncoMcpTools.add(server("timeout", { closeTimeoutMs: -1 })).connect({ cwd: seed, collection }),
-    ).rejects.toThrow("JuncoMcpTools: closeTimeoutMs must be finite and non-negative");
-    await expect(
-      JuncoMcpTools.add(server("missing", { cwd: "absent" })).connect({ cwd: seed, collection }),
-    ).rejects.toThrow('JuncoMcpTools: failed to initialize server "missing"');
+    await assert.rejects(JuncoMcpTools.add(server("timeout", { closeTimeoutMs: -1 })).connect({ cwd: seed, collection }), (error) => error instanceof Error && error.message.includes("JuncoMcpTools: closeTimeoutMs must be finite and non-negative"));
+    await assert.rejects(JuncoMcpTools.add(server("missing", { cwd: "absent" })).connect({ cwd: seed, collection }), (error) => error instanceof Error && error.message.includes('JuncoMcpTools: failed to initialize server "missing"'));
     const nul = await JuncoMcpTools.add(server("nul", { args: [SERVER, "a\0b"] }))
       .connect({ cwd: seed, collection })
       .then(
@@ -391,7 +386,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
         if (observed.held.includes("never")) break;
       }
       controller.abort();
-      await expect(held).rejects.toThrow();
+      await assert.rejects(held, Error);
     } finally {
       await connection.close();
     }
@@ -408,7 +403,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
       const forgetStubborn = defer(() => stubborn.close());
       await call(stubborn, "mcp__stubborn__echo");
       // Forced cancellation discards the command: an unpublished close, never a success.
-      await expect(stubborn.close().finally(forgetStubborn)).rejects.toThrow();
+      await assert.rejects(stubborn.close().finally(forgetStubborn), Error);
 
       const stalled = await JuncoMcpTools.add(
         server("stalled", { closeTimeoutMs: 200 }),
@@ -449,6 +444,33 @@ describe("native MCP stdio on the shared ShellMux", () => {
       await lease.close();
     }
   }, TIMEOUT);
+
+  test("an asynchronous finish rejection still aborts and closes its process", () =>
+    withNativeCleanup(async (defer) => {
+      const directory = join(root, "rejected-finish");
+      await mkdir(directory);
+      const local = await ToolCollection.create(directory, { native: copyTree, policy: LockPolicy });
+      defer(() => local.close());
+      const transport = new ShellMuxStdioTransport(local.mux, {
+        command: process.execPath,
+        args: [SERVER],
+        cwd: directory,
+        closeTimeoutMs: -1,
+      });
+      await transport.start();
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await assert.rejects(Promise.race([
+          transport.close(),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("transport did not close")), 5_000);
+          }),
+        ]), (error) => error instanceof Error && error.message.includes("closeTimeoutMs"));
+        await assert.rejects(transport.closed, (error) => error instanceof Error && error.message.includes("closeTimeoutMs"));
+      } finally {
+        clearTimeout(deadline);
+      }
+    }), TIMEOUT);
 
   test("Marsh authority: a lone server's unauthorized overwrite is denied at finalization", () =>
     withNativeCleanup(async (defer) => {
@@ -496,7 +518,7 @@ describe("native MCP stdio on the shared ShellMux", () => {
       await call(first, "mcp__left__write_file", { path: "race.txt", content: "left\n" });
       await call(second, "mcp__right__write_file", { path: "race.txt", content: "right\n" });
       await first.close().finally(forgetFirst);
-      await expect(second.close().finally(forgetSecond)).rejects.toThrow();
+      await assert.rejects(second.close().finally(forgetSecond), Error);
       expect(await readFile(join(seed, "race.txt"), "utf8")).toBe("left\n");
     }), TIMEOUT);
 });
@@ -549,9 +571,7 @@ describe("discard-only MCP connections", () => {
     });
     // The pending call fails only once the transport has the native verdict, so the exit
     // (even a successful one) has already won against close's cancellation.
-    await expect(
-      call(connection, "mcp__exits__misbehave", { kind: "exit", code: 0 }),
-    ).rejects.toThrow();
+    await assert.rejects(call(connection, "mcp__exits__misbehave", { kind: "exit", code: 0 }), Error);
     expect(await rejection(connection.close())).toContain(DISCARD_EXIT);
   }, TIMEOUT);
 
@@ -561,9 +581,7 @@ describe("discard-only MCP connections", () => {
       collection,
       discardOnClose: true,
     });
-    await expect(
-      call(connection, "mcp__broken__misbehave", { kind: "malformed" }),
-    ).rejects.toThrow();
+    await assert.rejects(call(connection, "mcp__broken__misbehave", { kind: "malformed" }), Error);
     const messages = await rejection(connection.close());
     expect(messages).toContain("MCP stdio server sent a malformed JSON-RPC message");
     expect(messages).not.toContain(DISCARD_EXIT);
@@ -584,7 +602,7 @@ describe("discard-only MCP connections", () => {
     ]);
     const pid = watch.pid();
     controller.abort();
-    await expect(connecting).rejects.toBeInstanceOf(McpAbortError);
+    await assert.rejects(connecting, McpAbortError);
     expect(fixtureRunning(pid)).toBe(false);
   }, TIMEOUT);
 
@@ -640,13 +658,11 @@ describe("MCP acquisition cancellation", () => {
     const controller = new AbortController();
     controller.abort();
     const watch = watchStderr();
-    await expect(
-      JuncoMcpTools.add(server("aborted", { onStderr: watch.onStderr })).connect({
-        cwd: seed,
-        collection,
-        signal: controller.signal,
-      }),
-    ).rejects.toBeInstanceOf(McpAbortError);
+    await assert.rejects(JuncoMcpTools.add(server("aborted", { onStderr: watch.onStderr })).connect({
+      cwd: seed,
+      collection,
+      signal: controller.signal,
+    }), McpAbortError);
     expect(watch.text).toBe("");
   }, TIMEOUT);
 
@@ -670,7 +686,7 @@ describe("MCP acquisition cancellation", () => {
         const pid = watch.pid();
         expect(fixtureRunning(pid)).toBe(true);
         controller.abort();
-        await expect(connecting).rejects.toBeInstanceOf(McpAbortError);
+        await assert.rejects(connecting, McpAbortError);
         // The rejection joined cleanup: the process has already exited.
         expect(fixtureRunning(pid)).toBe(false);
       }
@@ -707,7 +723,7 @@ describe("MCP acquisition cancellation", () => {
     const pids = [first.pid(), second.pid()];
     expect(pids.map(fixtureRunning)).toEqual([true, true]);
     controller.abort();
-    await expect(connecting).rejects.toBeInstanceOf(McpAbortError);
+    await assert.rejects(connecting, McpAbortError);
     expect(pids.map(fixtureRunning)).toEqual([false, false]);
   }, TIMEOUT);
 
@@ -835,7 +851,7 @@ describe("call-scoped MCP lifetime", () => {
       await collection.close().finally(forgetCollection);
       expect((await state(connection, "fresh", { path: "source.txt" })).file).toBe("Alpha\nBeta\n");
       await connection.close();
-      await expect(call(connection, "mcp__fresh__read_state")).rejects.toBeInstanceOf(McpConnectionClosedError);
+      await assert.rejects(call(connection, "mcp__fresh__read_state"), McpConnectionClosedError);
     }), TIMEOUT);
   test("call lifetime publishes by default before the call settles", () =>
     withNativeCleanup(async (defer) => {
@@ -912,7 +928,7 @@ describe("call-scoped MCP lifetime", () => {
       const identity = getJuncoMcpToolIdentity(dash);
       expect(Object.isFrozen(identity)).toBe(true);
       await writeFile(join(seed, "mcp-mode.txt"), "alias-underscore");
-      await expect(dash.execute("drift", {})).rejects.toThrow('expected one tool "alias/a-b", found 0');
+      await assert.rejects(dash.execute("drift", {}), (error) => error instanceof Error && error.message.includes('expected one tool "alias/a-b", found 0'));
       expect(watch.pids().map(fixtureRunning)).toEqual([false, false]);
       await writeFile(join(seed, "mcp-mode.txt"), "alias-both");
       expect((await call(connection, dash.name)).text).toBe("a-b");
@@ -937,7 +953,7 @@ describe("call-scoped MCP lifetime", () => {
       const preaborted = new AbortController();
       preaborted.abort();
       const before = watch.pids().length;
-      await expect(tool(connection, "mcp__overlap__hold").execute("same-id", { key: "pre" }, preaborted.signal)).rejects.toBeInstanceOf(McpAbortError);
+      await assert.rejects(tool(connection, "mcp__overlap__hold").execute("same-id", { key: "pre" }, preaborted.signal), McpAbortError);
       expect(watch.pids()).toHaveLength(before);
       const firstReady = Promise.withResolvers<void>();
       const secondReady = Promise.withResolvers<void>();
@@ -961,7 +977,7 @@ describe("call-scoped MCP lifetime", () => {
       expect(await secondOutcome).toBeInstanceOf(McpAbortError);
       expect(watch.pids().map(fixtureRunning)).toEqual(watch.pids().map(() => false));
       const count = watch.pids().length;
-      await expect(call(connection, "mcp__overlap__echo")).rejects.toBeInstanceOf(McpConnectionClosedError);
+      await assert.rejects(call(connection, "mcp__overlap__echo"), McpConnectionClosedError);
       expect(watch.pids()).toHaveLength(count);
     }), TIMEOUT);
 

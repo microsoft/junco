@@ -8,7 +8,7 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, MockAgent, schedules, tracer } from "junco-agency";
+import { graph, JuncoGraph, MockAgent, schedules, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { Reports } from "../examples/mcp/mcp.ts";
 import { assistant, run, settle } from "./deterministic-support.ts";

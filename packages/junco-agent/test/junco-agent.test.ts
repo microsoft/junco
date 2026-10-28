@@ -2759,6 +2759,27 @@ function profileRecorder() {
   return { recorder, events };
 }
 
+function profileUsage(
+  events: readonly Recorded[],
+  resource: "tokens" | "cost",
+  source: object,
+  path: string,
+): number {
+  let total = 0;
+  for (const row of events)
+    if (
+      row.path === path &&
+      row.event.kind === "usage" &&
+      row.event.resource === resource &&
+      row.event.source === source
+    )
+      total +=
+        resource === "tokens"
+          ? row.event.usage.totalTokens
+          : (row.event.usage.cost?.total ?? Number.NaN);
+  return total;
+}
+
 type Labels = {
   readonly category: string;
   readonly tool: string;
@@ -2799,13 +2820,17 @@ function calls(events: readonly Recorded[], labels: Labels) {
 test(
   "recorder: committed usage rows only, at the agent's own context, inherited by subagents",
   async () => {
+    const fixed = fixedUsage([
+      [fauxAssistantMessage("old"), 100, 10],
+      [fauxAssistantMessage("new"), 3, 0.125],
+      [fauxAssistantMessage("child"), 7, 0.375],
+    ]);
     const repo = new MemorySessionRepo();
     const session = await repo.create({}, BACKGROUND_CONTEXT);
-    const { faux, models, model } = scripted([fauxAssistantMessage("old")]);
     const first = await JuncoAgent.fromResolved({
       session,
-      models,
-      model,
+      models: fixed.models,
+      model: fixed.model,
       systemPrompt: "sys",
     });
     try {
@@ -2814,47 +2839,21 @@ test(
       await first.return();
     }
     const { recorder, events } = profileRecorder();
-    faux.setResponses([fauxAssistantMessage("new")]);
     const agent = await JuncoAgent.fromResolved({
       session: await repo.open(session.metadata, BACKGROUND_CONTEXT),
-      models,
-      model,
+      models: fixed.models,
+      model: fixed.model,
       systemPrompt: "sys",
       recorder,
       recorderNodeId: "solo",
-    });
-    const rows: unknown[] = [];
-    let restored = 0;
-    agent.events.on("usage", ({ row, totals }) => {
-      rows.push(row.usage);
-      restored = totals.totalTokens - row.usage.totalTokens;
     });
     try {
       assert.deepEqual(events, []);
       assert.equal(agent.recorder?.path, "solo");
       assert.equal(agent.recorder?.root, recorder);
       await agent.prompt("now");
-      assert.ok(restored > 0);
-      const usage = events.filter(({ event }) => event.kind === "usage");
-      assert.equal(rows.length, 1);
-      assert.deepEqual(
-        usage.map(({ path, event }) =>
-          event.kind === "usage"
-            ? {
-                path,
-                resource: event.resource,
-                source: event.source,
-                usage: event.usage,
-              }
-            : undefined,
-        ),
-        rows.map((row) => ({
-          path: "solo",
-          resource: "tokens",
-          source: agent,
-          usage: row,
-        })),
-      );
+      assert.equal(profileUsage(events, "tokens", agent, "solo"), 3);
+      assert.equal(profileUsage(events, "cost", agent, "solo"), 0.125);
       assert.deepEqual(calls(events, AGENT_RUN), {
         starts: 1,
         outcomes: ["success"],
@@ -2878,10 +2877,16 @@ test(
       assert.ok(events.every(({ path }) => path === "solo"));
       const [child] = await agent.createSubagents([{ tools: [] }]);
       try {
-        assert.equal(child!.recorder?.root, recorder);
-        assert.equal(child!.recorder?.path, child!.nodeId);
+        assert.ok(child);
+        assert.equal(child.recorder?.root, recorder);
+        assert.equal(child.recorder?.path, child.nodeId);
+        await child.prompt("child task");
+        assert.equal(profileUsage(events, "tokens", child, child.nodeId), 7);
+        assert.equal(profileUsage(events, "cost", child, child.nodeId), 0.375);
+        assert.equal(profileUsage(events, "tokens", agent, "solo"), 3);
+        assert.equal(profileUsage(events, "cost", agent, "solo"), 0.125);
       } finally {
-        await child!.return();
+        await child?.return();
       }
     } finally {
       await agent.return();
@@ -3036,10 +3041,10 @@ test(
   "recorder: a node context places the agent under the graph's view of the same session only",
   async () => {
     const { recorder, events } = profileRecorder();
-    const { agent } = await newAgent([fauxAssistantMessage("placed")], {
-      recorder,
-      recorderNodeId: "own",
-    });
+    const { agent } = await fixedAgent(
+      [[fauxAssistantMessage("placed"), 5, 0.25]],
+      { recorder, recorderNodeId: "own" },
+    );
     const { agent: bare } = await newAgent([]);
     const other = profileRecorder().recorder;
     try {
@@ -3061,9 +3066,15 @@ test(
         events.every(({ path }) => path === "nodeId1::nodeId2::NodeId_f"),
       );
       assert.equal(
-        events.filter(({ event }) => event.kind === "usage").length,
-        1,
+        profileUsage(events, "tokens", agent, "nodeId1::nodeId2::NodeId_f"),
+        5,
       );
+      assert.equal(
+        profileUsage(events, "cost", agent, "nodeId1::nodeId2::NodeId_f"),
+        0.25,
+      );
+      assert.equal(profileUsage(events, "tokens", agent, "own"), 0);
+      assert.equal(profileUsage(events, "cost", agent, "own"), 0);
       let ran = false;
       for (const [target, context] of [
         [agent, { recorder: other.add_context("g") }],
@@ -3087,20 +3098,22 @@ test(
 
 // Usage limits -----------------------------------------------------------------------------------
 
-const usageOf = (totalTokens: number) => ({
+const usageOf = (totalTokens: number, cost = 0) => ({
   input: totalTokens,
   output: 0,
   cacheRead: 0,
   cacheWrite: 0,
   totalTokens,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
 });
 
 /**
  * Models whose one model answers request k with `steps[k]`, settled at once with exactly its
  * token count; faux recomputes usage from the prompt, which no exact threshold survives.
  */
-function fixedUsage(steps: readonly (readonly [AssistantMessage, number])[]) {
+function fixedUsage(
+  steps: readonly (readonly [AssistantMessage, number, number?])[],
+) {
   const pending = [...steps];
   const state = { requests: 0 };
   const model: Model<Api> = {
@@ -3117,7 +3130,7 @@ function fixedUsage(steps: readonly (readonly [AssistantMessage, number])[]) {
       api: requestModel.api,
       provider: requestModel.provider,
       model: requestModel.id,
-      usage: usageOf(step[1]),
+      usage: usageOf(step[1], step[2]),
     };
     const stream = createAssistantMessageEventStream();
     queueMicrotask(() => {
@@ -3149,7 +3162,7 @@ function fixedUsage(steps: readonly (readonly [AssistantMessage, number])[]) {
 }
 
 async function fixedAgent(
-  steps: readonly (readonly [AssistantMessage, number])[],
+  steps: readonly (readonly [AssistantMessage, number, number?])[],
   options: Partial<Parameters<typeof JuncoAgent.fromResolved>[0]> = {},
 ) {
   const fixed = fixedUsage(steps);

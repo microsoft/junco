@@ -1326,13 +1326,45 @@ export async function profileRecordersNarrowByResource(
 ) {
   // Both concrete sinks satisfy the identical full producer union.
   const sinks: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >[] = [jsonl, grafana, jsonl.add_context("a"), grafana.add_context("a")];
   const full = sinks[0];
   // Narrowing is plain assignment; add_context preserves the narrowed union.
   const memory: ProfileRecorder<"memory"> = three;
   const leaf: ProfileRecorder<"memory"> = memory.add_context("leaf");
   const edits: ProfileRecorder<"edits"> = full.add_context("x");
+  const jsonlCost: ProfileRecorder<"cost"> = jsonl;
+  const grafanaCost: ProfileRecorder<"cost"> = grafana;
+  const capturedCost: ProfileRecorder<"cost"> | undefined =
+    captureRecorder(grafanaCost);
+  const tokenOnly: ProfileRecorder<"tokens"> = full;
+  jsonlCost.record({
+    resource: "cost",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  jsonlCost.record({
+    // @ts-expect-error cost-only cannot record token usage
+    resource: "tokens",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  tokenOnly.record({
+    // @ts-expect-error token-only cannot record cost usage
+    resource: "cost",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
+  memory.record({
+    // @ts-expect-error memory-only cannot record cost usage
+    resource: "cost",
+    kind: "usage",
+    source: agent,
+    usage: {} as never,
+  });
   three.record({
     resource: "tokens",
     kind: "usage",
@@ -1475,6 +1507,10 @@ export async function profileRecordersNarrowByResource(
     widerCapture,
     fromRoot,
     withProbe,
+    jsonlCost,
+    grafanaCost,
+    capturedCost,
+    tokenOnly,
   ];
 }
 

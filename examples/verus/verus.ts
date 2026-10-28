@@ -21,7 +21,7 @@ import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } 
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
-import { graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco-agency";
+import { graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { runCli, verifiedModels, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./verus.yml" with { type: "text" };

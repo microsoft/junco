@@ -1,0 +1,276 @@
+{
+  "metadata": {
+    "skill_name": "junco-profile-optimizer",
+    "skill_path": "<path/to/skill>",
+    "executor_model": "<model-name>",
+    "analyzer_model": "<model-name>",
+    "timestamp": "2026-10-27T20:53:33Z",
+    "evals_run": [
+      1,
+      2
+    ],
+    "runs_per_configuration": 3
+  },
+  "runs": [
+    {
+      "eval_id": 1,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 8,
+        "failed": 0,
+        "total": 8,
+        "time_seconds": 77.0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The response cites the inspected pair: the root numeric edge `quality` (Quality -> $sink, schema type number), the Writer agent on the uniform claude-sonnet-5.5/medium ladder at the default med rung, the existing hard limit `schedules.limit({ tools: 40 }, ...)`, the existing terminal assertion and the `bun run report.ts` invocation.",
+          "passed": true,
+          "evidence": "response.md names the parallel scheduler, the uniform claude-sonnet-5.5/medium ladder, Writer using only the med rung, the tools: 40 ceiling kept outside the regions, the receipt written only after the existing quality check, and argv bun run report.ts in request.json"
+        },
+        {
+          "text": "report.yml is byte-identical to the seeded file after preparation, and no node, edge, probe flag, label or type was added to it.",
+          "passed": true,
+          "evidence": "report.yml bytes equal the seeded file (programmatic comparison); no edits to it"
+        },
+        {
+          "text": "A unique session directory exists under {workspace}/.junco/profile-optimizer/ containing original.yml and original.ts equal to the seeded bytes, and prepared.ts byte-identical to the instrumented report.ts.",
+          "passed": true,
+          "evidence": ".junco/profile-optimizer/session-baTf1i holds original.yml/original.ts equal to the seeded bytes and prepared.ts equal to report.ts (programmatic)"
+        },
+        {
+          "text": "The instrumented report.ts contains exactly one ordered marker pair per axis (scheduler, ladder, limits) whose interiors define optimizerScheduler(label) (baseline schedules.parallel()), optimizerLadder/optimizerStrength (baseline: the existing uniform claude-sonnet-5.5 ladder, strength undefined) and optimizerLimits (baseline {}); the tools: 40 hard limit stays outside the regions and wraps every candidate outermost.",
+          "passed": true,
+          "evidence": "report.ts lines 15-24: three ordered marker pairs with optimizerScheduler = schedules.parallel(), the existing uniform ladder with optimizerStrength undefined, optimizerLimits {}; line 27 HARD_LIMITS { tools: 40 } applied outermost at line 135"
+        },
+        {
+          "text": "Fixed instrumentation outside the regions is guarded by JUNCO_PROFILE_RUN_DIR (normal behavior when absent), validates the run request, hashes the parsed graph document, enables probes on a runtime copy of the existing edge only, checks candidate ladder rungs against allowedModels and extra limits against limitBounds, attaches tracer.JsonlRecorder through fromYaml's recorder, closes graph then tracer then recorder, and writes completion.json via a temporary file and rename only after the existing Quality assertion passed; it imports only public packages, never the installed skill directory.",
+          "passed": true,
+          "evidence": "report.ts: RUN_DIR guard, profileRun validation, canonical graph hash, withProbes on a structuredClone, checkTuning against allowedModels/limitBounds, JsonlRecorder via fromYaml recorder, close loop graph->tracer->recorder, completion.json via .tmp + rename after the original 'no quality score' assertion; imports only junco, dataflow-engine, @earendil-works/pi-ai and node built-ins"
+        },
+        {
+          "text": "request.json passes the documented schema: objective {kind tokens, direction minimize}; one constraint {kind probe, node \"\", edgeId \"quality\", reduce single} >= 0.9; repeats 3; stop.improvement {relative, 0.2} and stop.plateau {window 3, absoluteTolerance 0, relativeTolerance 0.01}; axes [scheduler, ladder, limits]; allowedModels exactly the two given model/thinking pairs; limitBounds.tokens 20000; a fixed workloadId and the existing argv; no runBudget or other implicit cap.",
+          "passed": true,
+          "evidence": "request.json passes checkRequest from src/std/schedules/optimizer.ts (REQUEST_AND_TS_OK); fields match: tokens/minimize, probe ''/quality/single >= 0.9, repeats 3, improvement relative 0.2, plateau 3/0/0.01, three axes, both model pairs, limitBounds.tokens 20000, workloadId notes.md-sha256-59e5fac20028d641, no budget"
+        },
+        {
+          "text": "Exactly one optimizer invocation is given, `bun run junco-profile-optimizer <sessionDir>/request.json`, and it is not executed; the skill neither copies standard-library optimizer files nor writes a wrapper, an outer experiment loop or a fixed candidate catalog.",
+          "passed": true,
+          "evidence": "response.md gives `bun run junco-profile-optimizer .junco/profile-optimizer/session-baTf1i/request.json` and states it was not run; no optimizer source, wrapper, loop or catalog in the workspace"
+        },
+        {
+          "text": "Unverified prerequisites are reported plainly rather than claimed as validated: the installed package's junco-profile-optimizer binary, the Sol editor login and the allowed models' catalog/login/thinking preflight, and whether repeated runs of the workload are safe; no paid model call or target run happened.",
+          "passed": true,
+          "evidence": "response.md 'Before you run it' lists the missing installed binary/dependencies, Sol and model logins with no fallback, and the repeat-safety assumption; only a syntax-only compile was run"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 2,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 37.2,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The response asks for the numeric quality requirement (a threshold and comparison) instead of assuming one, and proposes the existing nested edge as its candidate metric rather than inventing a judge.",
+          "passed": true,
+          "evidence": "response.md question 1 asks what number means high quality and proposes the existing nested probe; no judge invented"
+        },
+        {
+          "text": "The quality probe identity is given as wrapper path `Review` with local edge ID `quality` (Score -> $sink inside the nested graph), not the display label or a root-level edge.",
+          "passed": true,
+          "evidence": "response.md line 17: `{ kind: \"probe\", node: \"Review\", edgeId: \"quality\", reduce: \"single\" }`, noting the display label is not an identity"
+        },
+        {
+          "text": "The response explains that recorded memory is the per-activation shell-pipeline peak and that this pair has no native monitoring (no resources/monitorIntervalMs or recorder-bound monitored collection, cgroup v2 delegation unverified), so memory cannot be scored until that prerequisite is met or an existing caller-approved memory probe is chosen \u2014 and none exists in the YAML.",
+          "passed": true,
+          "evidence": "response.md explains recorded memory is the per-activation bash pipeline peak, audit.ts has no monitoring so values would be zeros and rejected, cgroup v2 unconfirmed, and no existing memory edge exists"
+        },
+        {
+          "text": "It asks for (or states as missing) the fixed workload, repeat count and a measurable stop condition (target, improvement and/or plateau window with tolerances) before execution.",
+          "passed": true,
+          "evidence": "Questions 2-3 ask for the stop condition (target/improvement/plateau), the workload command, fixed repository state, workloadId, repeat count and reset safety"
+        },
+        {
+          "text": "No files are modified and no optimizer request is written or executed while the required answers are missing; audit.yml stays byte-identical.",
+          "passed": true,
+          "evidence": "Programmatic: audit.yml and audit.ts equal the seeded bytes; no .junco session or request.json created"
+        },
+        {
+          "text": "No invented metric, new node or edge, probe flag in the YAML, implicit iteration cap, false convergence claim or unverified model fallback appears in the response.",
+          "passed": true,
+          "evidence": "No metric, node, edge, YAML probe, cap or fallback appears; it states there is no fallback model and no default budget"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 1,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.75,
+        "passed": 6,
+        "failed": 2,
+        "total": 8,
+        "time_seconds": 268.0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The response cites the inspected pair: the root numeric edge `quality` (Quality -> $sink, schema type number), the Writer agent on the uniform claude-sonnet-5.5/medium ladder at the default med rung, the existing hard limit `schedules.limit({ tools: 40 }, ...)`, the existing terminal assertion and the `bun run report.ts` invocation.",
+          "passed": true,
+          "evidence": "response.md section 'Inspected the pair' names Writer on the med rung, the Quality node and root quality edge, and schedules.limit({ tools: 40 }, schedules.parallel())"
+        },
+        {
+          "text": "report.yml is byte-identical to the seeded file after preparation, and no node, edge, probe flag, label or type was added to it.",
+          "passed": true,
+          "evidence": "report.yml bytes equal the seeded file (programmatic comparison)"
+        },
+        {
+          "text": "A unique session directory exists under {workspace}/.junco/profile-optimizer/ containing original.yml and original.ts equal to the seeded bytes, and prepared.ts byte-identical to the instrumented report.ts.",
+          "passed": true,
+          "evidence": "session-P7LDEI holds original.yml/original.ts equal to the seeded bytes and prepared.ts equal to report.ts (programmatic); it also copied notes.md there"
+        },
+        {
+          "text": "The instrumented report.ts contains exactly one ordered marker pair per axis (scheduler, ladder, limits) whose interiors define optimizerScheduler(label) (baseline schedules.parallel()), optimizerLadder/optimizerStrength (baseline: the existing uniform claude-sonnet-5.5 ladder, strength undefined) and optimizerLimits (baseline {}); the tools: 40 hard limit stays outside the regions and wraps every candidate outermost.",
+          "passed": true,
+          "evidence": "report.ts lines 17-29: three ordered marker pairs with the baseline expressions; HARD_LIMITS { tools: 40 } outermost (line 146)"
+        },
+        {
+          "text": "Fixed instrumentation outside the regions is guarded by JUNCO_PROFILE_RUN_DIR (normal behavior when absent), validates the run request, hashes the parsed graph document, enables probes on a runtime copy of the existing edge only, checks candidate ladder rungs against allowedModels and extra limits against limitBounds, attaches tracer.JsonlRecorder through fromYaml's recorder, closes graph then tracer then recorder, and writes completion.json via a temporary file and rename only after the existing Quality assertion passed; it imports only public packages, never the installed skill directory.",
+          "passed": true,
+          "evidence": "report.ts: RUN_DIR guard, withProbes, checkTuning, JsonlRecorder, completion.json after cleanup; derived from the repository's library and test/profile-optimizer.fixture.ts rather than a skill"
+        },
+        {
+          "text": "request.json passes the documented schema: objective {kind tokens, direction minimize}; one constraint {kind probe, node \"\", edgeId \"quality\", reduce single} >= 0.9; repeats 3; stop.improvement {relative, 0.2} and stop.plateau {window 3, absoluteTolerance 0, relativeTolerance 0.01}; axes [scheduler, ladder, limits]; allowedModels exactly the two given model/thinking pairs; limitBounds.tokens 20000; a fixed workloadId and the existing argv; no runBudget or other implicit cap.",
+          "passed": true,
+          "evidence": "request.json is schema-valid with the requested objective, constraint, repeats, stop, axes, allowedModels and limitBounds; it adds an unrequested resetArgv that copies a session snapshot of notes.md over the input before every run"
+        },
+        {
+          "text": "Exactly one optimizer invocation is given, `bun run junco-profile-optimizer <sessionDir>/request.json`, and it is not executed; the skill neither copies standard-library optimizer files nor writes a wrapper, an outer experiment loop or a fixed candidate catalog.",
+          "passed": false,
+          "evidence": "The command given is `bun run /home/eioannidis/git/junco/dist/optimizer-cli.js ...`, a checkout path, not the package invocation `bun run junco-profile-optimizer <sessionDir>/request.json`"
+        },
+        {
+          "text": "Unverified prerequisites are reported plainly rather than claimed as validated: the installed package's junco-profile-optimizer binary, the Sol editor login and the allowed models' catalog/login/thinking preflight, and whether repeated runs of the workload are safe; no paid model call or target run happened.",
+          "passed": false,
+          "evidence": "Prerequisites are reported well (haiku-5 absent from the bundled catalog, logins, repeat safety), but it ran the prepared entrypoint with a dummy run directory: a target run occurred, though it stopped in the ladder check before graph construction"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 2,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 221.0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "The response asks for the numeric quality requirement (a threshold and comparison) instead of assuming one, and proposes the existing nested edge as its candidate metric rather than inventing a judge.",
+          "passed": true,
+          "evidence": "response.md asks whether the constraint is >= 0.9 on the nested quality edge and warns the Score heuristic is weak; no judge added"
+        },
+        {
+          "text": "The quality probe identity is given as wrapper path `Review` with local edge ID `quality` (Score -> $sink inside the nested graph), not the display label or a root-level edge.",
+          "passed": true,
+          "evidence": "response.md gives `{ \"kind\": \"probe\", \"node\": \"Review\", \"edgeId\": \"quality\", \"reduce\": \"single\" }` and distinguishes the root Review->Publish edge"
+        },
+        {
+          "text": "The response explains that recorded memory is the per-activation shell-pipeline peak and that this pair has no native monitoring (no resources/monitorIntervalMs or recorder-bound monitored collection, cgroup v2 delegation unverified), so memory cannot be scored until that prerequisite is met or an existing caller-approved memory probe is chosen \u2014 and none exists in the YAML.",
+          "passed": true,
+          "evidence": "response.md explains the cgroup v2 controller delegation requirement (observing the environment's root-owned init.scope), that unobserved runs are rejected, and that no memory edge exists"
+        },
+        {
+          "text": "It asks for (or states as missing) the fixed workload, repeat count and a measurable stop condition (target, improvement and/or plateau window with tolerances) before execution.",
+          "passed": true,
+          "evidence": "Questions 3-4 ask for the fixed workload, repeat safety/resetArgv, argv, repeats and a stop predicate"
+        },
+        {
+          "text": "No files are modified and no optimizer request is written or executed while the required answers are missing; audit.yml stays byte-identical.",
+          "passed": true,
+          "evidence": "Programmatic: audit.yml and audit.ts equal the seeded bytes; the draft prepared entrypoint was written only to outputs/audit.prepared.ts"
+        },
+        {
+          "text": "No invented metric, new node or edge, probe flag in the YAML, implicit iteration cap, false convergence claim or unverified model fallback appears in the response.",
+          "passed": true,
+          "evidence": "No invented metric, topology change, cap, convergence claim or fallback; budgets described as optional"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 57.1,
+        "stddev": 28.1428,
+        "min": 37.2,
+        "max": 77.0
+      },
+      "tokens": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.875,
+        "stddev": 0.1768,
+        "min": 0.75,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 244.5,
+        "stddev": 33.234,
+        "min": 221.0,
+        "max": 268.0
+      },
+      "tokens": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "delta": {
+      "pass_rate": "+0.12",
+      "time_seconds": "-187.4",
+      "tokens": "+0"
+    }
+  },
+  "notes": []
+}

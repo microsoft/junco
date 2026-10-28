@@ -10,27 +10,27 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir, constants as osConstants } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-/** The repository checkout and its `target/`, derived from this module, never from a caller. */
+/** The repository checkout and default allocation parent, derived from this module. */
 const checkout = fileURLToPath(new URL("../", import.meta.url)).replace(
   /\/$/,
   "",
 );
 const targetDir = fileURLToPath(new URL("../target", import.meta.url));
 
-/** Every automatically allocated fixture root is `target/btrfs-test-<random>`. */
+/** Every automatically allocated fixture root is a private `btrfs-test-<random>` child. */
 const FIXTURE_PREFIX = "btrfs-test-";
 
 /** btrfs gives every subvolume root object id 256; ordinary directories never get it. */
 const SUBVOLUME_INO = 256n;
 
 const PREREQUISITE =
-  "Automatic btrfs fixture requires target/ on a writable btrfs mount with user_subvol_rm_allowed.";
+  "Automatic btrfs fixture requires its allocation base (JUNCO_BTRFS_TEST_ROOT or target/) on a writable btrfs mount with user_subvol_rm_allowed.";
 
 const OWNED_CWD =
   "Run npm run test:btrfs; this suite requires its automatically created fixture working directory.";
@@ -113,12 +113,16 @@ async function requireDisposableMount(path) {
 }
 
 /**
- * The canonical `target/` this module owns fixtures under. `create` is set only by allocation:
- * reading a fixture must never bring the parent into existence.
+ * The canonical allocation parent. Only the default `target/` may be created; an external base
+ * must already exist, and reading a fixture must never bring its parent into existence.
  */
 async function resolveTarget(create) {
-  if (create) await mkdir(targetDir, { recursive: true });
-  const canonical = await realpath(targetDir);
+  const override = process.env.JUNCO_BTRFS_TEST_ROOT;
+  if (override !== undefined && (!override || !isAbsolute(override)))
+    throw new Error("JUNCO_BTRFS_TEST_ROOT must be a nonempty absolute path.");
+  if (create && override === undefined)
+    await mkdir(targetDir, { recursive: true });
+  const canonical = await realpath(override ?? targetDir);
   await requireDisposableMount(canonical);
   try {
     await access(canonical, constants.W_OK | constants.X_OK);
@@ -132,9 +136,9 @@ async function resolveTarget(create) {
 }
 
 /**
- * The single validation both entry points use: an owned root directly under `target/`, holding a
- * canonical, genuinely empty seed subvolume and an ordinary `tmp` directory. Nothing here accepts a
- * caller-supplied path, so there is no configurable-seed surface.
+ * The single validation both entry points use: an owned root directly under the allocation base,
+ * holding a canonical, genuinely empty seed subvolume and an ordinary `tmp` directory. The base
+ * is configurable, never the seed.
  */
 async function assertOwnedFixture({ root, seed, tmpdir }, target) {
   if (dirname(root) !== target || !basename(root).startsWith(FIXTURE_PREFIX)) {
@@ -282,9 +286,9 @@ async function teardown(root, identity) {
 }
 
 /**
- * Allocate a fresh disposable fixture under the repository's `target/`: an ordinary private root
- * holding a real, empty `seed` subvolume and an ordinary `tmp` directory. Accepts nothing; there is
- * no path, option, or environment input, and no fallback when the filesystem is unsuitable.
+ * Allocate a fresh disposable fixture under the canonical allocation base: an ordinary private
+ * root holding a real, empty `seed` subvolume and an ordinary `tmp` directory. The environment
+ * may select an existing parent, with no fallback when the filesystem is unsuitable.
  */
 export async function createBtrfsFixture() {
   const target = await resolveTarget(true);
@@ -326,7 +330,7 @@ export async function createBtrfsFixture() {
 
 /**
  * The fixture a child was handed through its working directory. Only the owned layout is accepted:
- * a general cwd, a seed argument, or an environment setting is never an alternative fixture.
+ * a general cwd or a seed argument is never an alternative fixture.
  */
 export async function readBtrfsFixture() {
   const target = await resolveTarget(false);

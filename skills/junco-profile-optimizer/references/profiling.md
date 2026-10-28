@@ -1,6 +1,6 @@
 # Target integration and library APIs
 
-How to prepare an existing `workflow.yml`/`workflow.ts` pair for `schedules.runOptimizer`, and what the optimizer's editor may change. All imports are public: `junco-agency`, `dataflow-engine`, `@earendil-works/pi-*`, Node built-ins.
+How to prepare an existing `workflow.yml`/`workflow.ts` pair for `schedules.runOptimizer`, and what the optimizer's editor may change. All imports are public: `junco`, `dataflow-engine`, `@earendil-works/pi-*`, Node built-ins.
 
 ## Contents
 
@@ -67,14 +67,14 @@ TypeScript patches are executable code in the user's environment, not a sandbox:
 
 ## Instrumentation template
 
-Fixed code added once during preparation. Adapt only the marked integration points to the runner's existing options; `test/profile-optimizer.fixture.ts` in junco-agency exercises this exact shape.
+Fixed code added once during preparation. Adapt only the marked integration points to the runner's existing options; `test/profile-optimizer.fixture.ts` in junco exercises this exact shape.
 
 ```ts
 import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { bytes, tokens } from "dataflow-engine";
-import { JuncoGraph, schedules, syntax, tracer } from "junco-agency";
+import { JuncoGraph, schedules, syntax, tracer } from "junco";
 
 type OptimizerLimits = {
   memoryBytes?: number;

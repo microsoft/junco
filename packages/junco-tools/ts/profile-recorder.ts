@@ -53,11 +53,11 @@ export type ProfileMetrics = {
 
 export type ProfileEvent<R extends string> =
   | {
-      readonly resource: R & "tokens";
+      readonly resource: R & ("tokens" | "cost");
       readonly kind: "usage";
       /** Opaque agent identity. */
       readonly source: object;
-      /** One committed increment, never restored totals. */
+      /** One committed increment; this event accounts only for its selected resource. */
       readonly usage: Usage;
     }
   | {
@@ -138,14 +138,18 @@ export function profileContexts(
 // invocation masks an enclosing one.
 const invocation = new AsyncLocalStorage<{
   readonly recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
 }>();
 
 /** Runs `work` with `recorder` as the invocation recorder every nested {@link captureRecorder} sees. */
 export function runWithRecorder<T>(
   recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined,
   work: () => T,
 ): T {
@@ -157,7 +161,7 @@ export function runWithRecorder<T>(
  * else none. Capture once before awaiting; native callbacks never use this.
  */
 export function captureRecorder<
-  R extends "memory" | "tokens" | "edits" | "operations" | "probe",
+  R extends "memory" | "tokens" | "cost" | "edits" | "operations" | "probe",
 >(
   recorder?: ProfileRecorder<R> | (() => ProfileRecorder<R> | undefined),
 ): ProfileRecorder<R> | undefined {

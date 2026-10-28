@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -9,7 +17,12 @@ import { deferred, WRITE_ALL_BODY } from "./helpers.mjs";
 
 const fixtureModule = new URL("./btrfs-fixture.mjs", import.meta.url).href;
 const checkout = fileURLToPath(new URL("../", import.meta.url));
-const target = fileURLToPath(new URL("../target", import.meta.url));
+const defaultTarget = fileURLToPath(new URL("../target", import.meta.url));
+if (process.env.JUNCO_BTRFS_TEST_ROOT === undefined)
+  await mkdir(defaultTarget, { recursive: true });
+const target = await realpath(
+  process.env.JUNCO_BTRFS_TEST_ROOT ?? defaultTarget,
+);
 
 /** The one line a probe prints once it holds its fixture; readiness is never a sleep. */
 const RECEIPT = "BTRFS_FIXTURE_READY";
@@ -25,8 +38,8 @@ const ROOT_PATTERN = new RegExp(
 );
 
 /**
- * Every probe recovers its fixture from the working directory the owner gave it. No probe reads an
- * environment variable or accepts a seed argument.
+ * Every probe recovers its fixture from the working directory the owner gave it. The environment
+ * selects only the allocation parent, never a seed.
  */
 const PROBE_PRELUDE = [
   'import fs from "node:fs";',
@@ -83,7 +96,7 @@ function launcherSource(executable, args) {
   ].join("\n");
 }
 
-function launch(signal, executable, args) {
+function launch(signal, executable, args, env = process.env) {
   if (signal?.aborted)
     throw new Error("launcher requested with an already-aborted signal");
 
@@ -108,6 +121,7 @@ function launch(signal, executable, args) {
     ["--input-type=module", "-e", launcherSource(executable, args)],
     {
       cwd: checkout,
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -226,24 +240,29 @@ const reportedRoots = (stderr) => [
 test("an owned fixture is created, used and reclaimed", {
   timeout: 60_000,
 }, async (t) => {
-  const outside = await mkdtemp(join(tmpdir(), "junco-outside-"));
+  const outside = await mkdtemp(join(target, "junco-external-"));
   const sentinel = join(outside, "sentinel.txt");
   await writeFile(sentinel, "outside\n");
-  const launcher = launch(t.signal, process.execPath, [
-    "--input-type=module",
-    "-e",
+  const launcher = launch(
+    t.signal,
+    process.execPath,
     [
-      PROBE_PRELUDE,
-      'fs.writeFileSync(fixture.seed + "/sentinel.txt", "owned\\n");',
-      LEFTOVER_SNAPSHOT,
-      `fs.symlinkSync(${JSON.stringify(sentinel)}, fixture.root + "/escape");`,
-      receiptLine("{ snapshot, nested }"),
-      WAIT_FOR_RELEASE,
-    ].join("\n"),
-  ]);
+      "--input-type=module",
+      "-e",
+      [
+        PROBE_PRELUDE,
+        'fs.writeFileSync(fixture.seed + "/sentinel.txt", "owned\\n");',
+        LEFTOVER_SNAPSHOT,
+        `fs.symlinkSync(${JSON.stringify(sentinel)}, fixture.root + "/escape");`,
+        receiptLine("{ snapshot, nested }"),
+        WAIT_FOR_RELEASE,
+      ].join("\n"),
+    ],
+    { ...process.env, JUNCO_BTRFS_TEST_ROOT: outside },
+  );
   try {
     const owned = await launcher.ready;
-    assert.equal(dirname(owned.root), target);
+    assert.equal(dirname(owned.root), outside);
     // Asserted while the probe still holds its fixture: teardown cannot race this read.
     assert.equal(
       await readFile(join(owned.seed, "sentinel.txt"), "utf8"),
@@ -268,6 +287,33 @@ test("an owned fixture is created, used and reclaimed", {
   } finally {
     await settleQuietly(launcher);
     await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("empty and relative allocation overrides are rejected", {
+  timeout: 60_000,
+}, async (t) => {
+  for (const value of ["", "relative-fixture-base"]) {
+    const launcher = launch(
+      t.signal,
+      process.execPath,
+      ["-e", "process.exit(99)"],
+      {
+        ...process.env,
+        JUNCO_BTRFS_TEST_ROOT: value,
+      },
+    );
+    try {
+      assert.deepEqual(await launcher.done, { status: 1 });
+      const { code, signal } = await launcher.closed;
+      assert.deepEqual([code, signal], [1, null]);
+      assert.match(
+        launcher.seen.stderr,
+        /JUNCO_BTRFS_TEST_ROOT must be a nonempty absolute path/,
+      );
+    } finally {
+      await settleQuietly(launcher);
+    }
   }
 });
 

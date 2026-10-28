@@ -7,7 +7,7 @@ Contents: `## Public API` → `### graph`, `### graph.nodes`, `### workflows and
 ## Public API
 
 ```text
-import { graph, agent, tools, schedules, tracer } from "junco-agency";
+import { graph, agent, tools, schedules, tracer } from "junco";
 ```
 
 Import only the namespaces a program uses. Spell node constructors as `graph.nodes.*` and trigger rules as `graph.trigger.*`. Model, session, and content APIs are not re-exported by `agent`; import them from `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-coding-agent`.
@@ -368,10 +368,10 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
 
 ### workflows and schedules.ralph
 
-`workflows.ralph` is YAML text exported from `junco-agency`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from `schedules.ralph` availability hooks.
+`workflows.ralph` is YAML text exported from `junco`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from `schedules.ralph` availability hooks.
 
 ```ts
-import { graph, JuncoGraph, schedules, workflows } from "junco-agency";
+import { graph, JuncoGraph, schedules, workflows } from "junco";
 
 // ladder has all five authoring-verified rungs; share acquired models/observer.
 const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
@@ -855,7 +855,7 @@ export class JuncoMcpTools {
 
 ### schedules
 
-Core `junco-scheduler` exports work-selection operators, the `strength` model-rung combinator, derived policies, resource combinator `limit`, comparators `lowest`/`highest`, decision helpers, the context pair/factory and types (including native `DataflowObservation`), with no runtime Pi peers. `junco-agency`'s `schedules` adds the agency-aware context bridge and optional `pi`. Native matrix/read types are engine execution formats, not another policy API.
+Core `junco-scheduler` exports work-selection operators, the `strength` model-rung combinator, derived policies, resource combinator `limit`, comparators `lowest`/`highest`, decision helpers, the context pair/factory and types (including native `DataflowObservation`), with no runtime Pi peers. `junco`'s `schedules` adds the agency-aware context bridge and optional `pi`. Native matrix/read types are engine execution formats, not another policy API.
 
 Verbatim signature excerpts (core language):
 
@@ -986,7 +986,7 @@ For a model-driven agency with an already-acquired `worker` and resolved `models
 ```ts
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools } from "junco-agency";
+import { graph, schedules, tools } from "junco";
 
 const terminal = graph.NodeId.create("worker");
 const final = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>("worker->$sink");
@@ -1016,7 +1016,7 @@ Use `schedules.parallel()` in the same external pair for deterministic select-al
 
 ### Resource profiles and schedules
 
-A profile predicts one node activation's cost in a fixed dimension; resource policies read snapshot predictions. Import constructors, units and profile types from `dataflow-engine` (a public `junco-agency` dependency, not re-exported by `graph`); policies are `schedules.limit`, `schedules.lowest`, `schedules.highest`.
+A profile predicts one node activation's cost in a fixed dimension; resource policies read snapshot predictions. Import constructors, units and profile types from `dataflow-engine` (a public `junco` dependency, not re-exported by `graph`); policies are `schedules.limit`, `schedules.lowest`, `schedules.highest`.
 
 Verbatim signature excerpts (`dataflow-engine`; `Quantity`/`Unit` are `@buge/ts-units` types, `seconds` for runtime comes from `@buge/ts-units/time`):
 
@@ -1077,7 +1077,7 @@ export class MockJuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never> 
 
 - **Profiles are registration data.** Put `profiles` beside `trigger` in `NodeOptions`: `{ ...options, state, policy, profiles: { memory: constantProfile("memory", megabytes(3000)) } }`. Keys must match profile `resource`; otherwise `addNode` throws `Dataflow node "<id>" maps resource "<kind>" to a profile for "<resource>"`. Native `DataflowGraph<…, K>` with `K = "memory"` requires every node's `profiles.memory` at compile time. `JuncoGraph` uses `K = never`: agents, coroutines, nested contexts and full specs from `JuncoGraph.map`/`spawn` opt in individually, without completeness checks. `Source` accepts no `profiles`; `Sink` discards its options' `profiles`. Neither port, `JuncoAgent` nor `Deterministic` carries its own profiles. `graph.observe().nodes` exposes node `profiles` as `ProfileSet`.
 - **Constant costs.** The engine's only constructor, `constantProfile(kind, quantity)`, takes a finite non-negative amount (including zero) in its own unit; it has `features: []` and every `predict` returns the same frozen `{ value, safe, source: "fallback", reason: "constant" }`. Invalid amounts throw `DataflowDefinitionError("constantProfile: <kind> must be a finite non-negative quantity")`. Dimensions are typed: `constantProfile("memory", tokens(1))` cannot compile. Task-supplied predictors may use hand-written `ProfileData`; keep `predict` pure.
-- **Fitted costs.** Add separate workspace package `dataflow-profile` to workflow dependencies; `junco-agency` does not depend on it. `profilesOf(parseProfiles(readFileSync(path, "utf8")), "<node>", ["memory"]).memory` loads a fitted record whose `features` name inbound **message** edge IDs measured by `count`. Evaluation rejects ports other than that node's inbound message edges. Estimating `bytes`/`tokens` throws `estimate: node "<id>" profile "<kind>" measures "<measure>" on port "<port>"; only "count" features can be estimated from a planned batch`. Counts use `snapshot.plans` (this decision's planned consumption), not whole queues.
+- **Fitted costs.** Add separate workspace package `dataflow-profile` to workflow dependencies; `junco` does not depend on it. `profilesOf(parseProfiles(readFileSync(path, "utf8")), "<node>", ["memory"]).memory` loads a fitted record whose `features` name inbound **message** edge IDs measured by `count`. Evaluation rejects ports other than that node's inbound message edges. Estimating `bytes`/`tokens` throws `estimate: node "<id>" profile "<kind>" measures "<measure>" on port "<port>"; only "count" features can be estimated from a planned batch`. Counts use `snapshot.plans` (this decision's planned consumption), not whole queues.
 - **`limit({ memory }, inner)`.** Calls `inner`, validates its decision, then visits selected IDs in order, admitting nodes whose `safe` memory in base units (`safe * unit.scale`) fits with prior admissions: Σ safe ≤ allowance per concurrent column. Nonfitting nodes stay available; if none fit, throws `limit: node "<id>" needs memory=<quantity> alone, exceeding <allowance>`. Every selected node requires a `memory` profile (`limit: node "<id>" has no memory profile`); allowance must be finite/positive (`limit: memory must be a positive quantity`). Retained memory across yields is untracked: leave headroom. Wrap the outermost policy; wrapping one `separate` branch gives that branch the whole allowance.
 - **`choose({ rank: lowest(kind) })` / `highest(kind)`.** Rank available owned work by predicted `safe` base-unit cost, breaking ties by raw ID. Comparators cache one prediction/node/snapshot and are reusable across decisions. Comparing an unprofiled candidate throws `lowest: node "<id>" has no <kind> profile` (or `highest: …`); lone candidates require no comparison, so this cannot check completeness. `width: () => 1` starts only the cheapest. With positive-cost racers, a zero-cost `anyOf` consumer wins the next decision once a racer emits; losers gated on the winner never start.
 - **Agency graphs: separate the ports.** Unprofiled `$source`/`$sink` fail `limit` when selected and `lowest`/`highest` when compared. Partition authority: `schedules.separate((_snapshot, id) => id === source.id || id === sink.id, schedules.parallel(), <limited or ranked policy>)`. Ports run unbounded (zero cost); members obey the bound, with the limited branch retaining the full allowance. Put task-uncosted members in the unbounded branch too; never fabricate policy-satisfying costs.
@@ -1089,7 +1089,7 @@ For an agency whose members `a`–`d` (already-acquired `agent.JuncoAgent`s with
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { constantProfile, gigabytes, megabytes } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools } from "junco-agency";
+import { graph, schedules, tools } from "junco";
 
 type Policy = schedules.Scheduler<graph.nodes.Agentic, graph.nodes.AgenticInput, AssistantMessage, schedules.AgencyNodeMetadata>;
 const costs = { a: 3000, b: 3000, c: 2000, d: 1000 } as const;
@@ -1273,7 +1273,7 @@ close(context: Context): Promise<void>;
 Valid quiescence with a non-returning sink, ordered fan-in, and optional tracing:
 
 ```ts
-import { graph, schedules, tracer } from "junco-agency";
+import { graph, schedules, tracer } from "junco";
 import { context } from "junco-scheduler";
 
 /**

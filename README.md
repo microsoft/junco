@@ -1,4 +1,4 @@
-# junco-agency
+# junco
 
 Recursive agentic dataflow graphs. A `JuncoGraph` is a native [`dataflow-engine`](packages/dataflow-engine) graph whose node states are `Agentic`: agents, nested graphs, `Deterministic` coroutines, and deterministic `Source`/`Sink` ports. Every graph has fresh positional source and sink nodes; nested execution returns only its sink's retained result. Graphs own work and resource lifetime, never scheduling policy. An external `schedules.context({ graph, scheduler })` pairs a graph with a typed function from [`junco-scheduler`](packages/junco-scheduler); `parallel()`, `roundRobin()` or the stateless `pi(...)` oracle decide which existing work nodes advance.
 
@@ -26,29 +26,55 @@ During graph activations, each request also ends with `Inbox { <edgeId>: <count>
 
 Prepared `agents` in `JuncoGraph.fromYaml` transfer ownership at entry: failed parsing or construction closes every supplied agent, including unregistered agents; successful construction leaves them owned by the graph. The node-path mapping must cover each agent exactly once and is exclusive with `createAgent`. Prepared agents keep their existing model/tool/skill/system configuration; YAML prompts, contracts and profiles still apply, without creating a default collection.
 
-For package development (Node `dist` builds, declarations, and the native addon), build in dependency order (tools → engine → agent → scheduler → Opik adapter → profile → agency):
+For package development (Node `dist` builds, declarations, and the native addon), the root build runs in producer order: engine → tools → MCP → agent → scheduler → Opik adapter → profile → Junco. The root and standalone tools packages pin Rust `1.95.0`.
 
 ```sh
-bun install --frozen-lockfile
-(cd packages/junco-tools && bun run build)
-(cd packages/junco-mcp && bun run build)
-(cd packages/dataflow-engine && bun run build)
-(cd packages/junco-agent && bun run build)
-(cd packages/junco-scheduler && bun run build)
-(cd packages/dataflow-engine-opik && bun run build)
-(cd packages/dataflow-profile && bun run build)
-bun run typecheck
+bun install --frozen-lockfile --ignore-scripts
 bun run build
+bun run typecheck
 bun run check
-bun run test
+bun run test:unit
 bun run smoke
 ```
 
+| Root command | Behavior |
+| --- | --- |
+| `bun run build:lib` | Build only the root standard library, after its producers. |
+| `bun run build:marsh` | Locked release build of standalone `rmux`, without installation. |
+| `bun run build:junco-policy` | Locked release build of the policy library. |
+| `bun test:junco-policy` | Policy tests and the deterministic release-mode fuzz oracle. |
+| `bun fuzz:junco-policy [libFuzzer flags...]` | Fixed `lock_policy` target, with a 60-second default; requires nightly and `cargo-fuzz` (`0.13.2` in CI). |
+| `bun run install:marsh` | Install only `rmux` into `$HOME/.local/bin`; print PATH instructions if needed, without changing startup files. |
+| `bun run install` | Build and globally link Junco's library/CLI tools and install bundled skills for selected harnesses; no `rmux`. |
+| `bun test:marsh [--btrfs=<path>]` | Whole Marsh workspace and executable smoke, requiring real Btrfs and resource enforcement. |
+| `bun run test [--btrfs=<path>]` | Complete policy, Marsh, native/addon, JavaScript package and integration suites. |
+
+`bun run test:marsh`, `bun run test:junco-policy` and `bun run fuzz:junco-policy` are equivalent explicit spellings. Native `bun install` installs workspace dependencies; native `bun test` remains Bun's runner. Use explicit `bun run install` and `bun run test` for Junco's installation and complete-suite entrypoints.
+
+`bun run install` requires interactive stdin and stdout. It bootstraps the frozen dependencies with lifecycle scripts disabled, then shows an unchecked harness checklist: arrows navigate, Space selects, Enter confirms, `a` selects all and `i` inverts. At least one choice is required. Ctrl-C exits 130 before global links or skills change; non-terminal invocation exits 2 before dependency installation or builds.
+
+| Harness | Default personal skill root | Override |
+| --- | --- | --- |
+| GitHub Copilot CLI | `$HOME/.copilot/skills` | `$COPILOT_HOME/skills` |
+| Claude Code | `$HOME/.claude/skills` | `$CLAUDE_CONFIG_DIR/skills` |
+| Pi | `$HOME/.pi/agent/skills` | `$PI_CODING_AGENT_DIR/skills` |
+| OpenAI Codex | `$HOME/.agents/skills` | `$CODEX_HOME/skills` |
+| OpenCode | `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` | `$OPENCODE_CONFIG_DIR/skills` |
+
+Empty overrides mean unset; nonempty overrides must be absolute. Identical destinations are deduplicated and unselected harnesses stay untouched. Codex's default `.agents/skills` is shared and may also be discovered by compatible harnesses. The installer does not install harness executables, register MCP servers or edit client settings.
+
+Both bundled skills, `junco-graph-create` and `junco-profile-optimizer`, are copied whole, including `references/` and `evals/`. Existing skill directories are replaceable only when a regular `.junco-installed` file contains exactly `junco\n`; foreign directories, files and symlinks are conflicts. Each skill is staged beside its destination and renamed into place, removing stale managed files. Failed replacement restores the previous tree or reports its retained backup; earlier successful destinations are reported on failure.
+
+Global binaries use `bun pm bin -g`, including Bun's configured `BUN_INSTALL_BIN`: `junco-profile-optimizer` links to `dist/optimizer-cli.js`, and `profile-fit` to `packages/dataflow-profile/src/cli.ts`. Conflicting executables are refused before linking. PATH instructions are printed when needed; shell startup files are never changed. In a separate consuming project, run `bun link --save --ignore-scripts junco`. Global registration alone does not resolve arbitrary-project imports: the checkout, its `node_modules` and its built outputs must remain in place.
+
+Both aggregate test commands default to the privileged Docker Btrfs environment. Add `--btrfs=/existing/base` to use the local toolchain and checkout caches instead: the existing directory must be writable and searchable on Btrfs with `user_subvol_rm_allowed`; ordinary directories within a subvolume are valid. A private `.junco-tests-*` child contains separate HOME and fixture directories. Success removes only that identity-checked allocation; failure or interruption retains it and prints its path. The supplied parent is never created, mounted, formatted or deleted. Local execution requires `systemd-run --user --scope -p Delegate=yes --` for an isolated delegated cgroup; unavailable delegation fails rather than falling back to partial tests or changing host configuration.
+
 - One root `bun.lock` with the hoisted linker. Internal dependencies use `workspace:*`, so every package links to its `packages/` directory, a rebuild is visible to its consumers without reinstalling, and the engine and Pi peers each have one installed identity. The root `overrides` are the only version policy. The agent uses Pi `0.99.2`'s native `AgentHarness` adapter; no Pi patch or fork is installed.
 - Bun `1.4.2`'s `bun update` may fail to resolve nested linked development/workspace paths; this does not invalidate a successful frozen-lockfile install. Use the checked-in lockfile for reproducible installs rather than editing consumers' dependencies to work around that update limitation.
-- `bun run test:native` (root, `junco-mcp` and `junco-agent`) and junco-tools' Node suite additionally need junco-tools' CopyTree native test addon (`bun run build:native:test` in `packages/junco-tools`, loaded from `packages/junco-tools/target/native-test/index.js`). They run on CopyTree workspaces, not a Btrfs mount; only junco-tools' `bun run test:btrfs` and a plain root `bun test` (every discovered test, that lane included) need Btrfs. Their resource-limit and memory-profiling tests also need a delegated cgroup v2 subtree with `cpu`, `memory` and `pids`, and fail with `cgroup resource control unavailable` without one; under a systemd user session, prefix the command with `systemd-run --user --scope -p Delegate=yes --`.
-- CI runs the native lane in `ci/Dockerfile`'s container, whose entrypoint mounts a fresh loop-backed Btrfs (`user_subvol_rm_allowed`) as the project root, delegates a cgroup v2 subtree (`+cpu +memory +pids`) for marsh's resource limits, and runs `ci/test.sh` there as an unprivileged user, ending with a plain `bun test` that fails on any skipped test, counted or self-reported (`skipping: …`). Locally: `docker build -t junco-ci ci && docker run --rm --privileged -v "$PWD:/src:ro" junco-ci` (only tracked and unignored files are copied in; add `-v /some/dir:/artifacts` for coverage reports).
-- `bun run check` runs Biome `2.5.15` (pinned at the root; `bun run check:ci` is the non-writing CI form) over one policy from the root `biome.json`: the agency's `src/` and `test/`, the whole `packages/dataflow-engine` (whose nested `biome.json` extends the root, so its own `check`/`check:ci` keep the same scope), the `src/` and `test/` of `junco-agent`, `junco-mcp` and `junco-scheduler`, junco-tools' `ts/` and `tests/`, and those packages' `package.json`/`tsconfig*.json`. Git-ignored and generated trees (`node_modules`, `dist`, `target`, `native`, `coverage`) and the `graft` graph are excluded; Rust stays with rustfmt and Clippy.
+- The individually runnable `test:native` suites (root, `junco-mcp` and `junco-agent`) and junco-tools' Node suite need the CopyTree native test addon (`bun run build:native:test` in `packages/junco-tools`, loaded from `packages/junco-tools/target/native-test/index.js`). The aggregate builds it separately from the production addon. The tools Btrfs lane and final bare Bun discovery use owned fixtures; `JUNCO_BTRFS_TEST_ROOT` can select an existing allocation parent for low-level entrypoints. Resource-limit and memory-profiling tests also require delegated cgroup v2 `cpu`, `memory` and `pids` controllers.
+- The aggregate also prepares Graft's native Tree-sitter bindings, whose dependency install scripts were skipped by `--ignore-scripts`. It reuses installed Node headers when available; `ci/Dockerfile` exposes npm's bundled `node-gyp`.
+- CI retains `ci/Dockerfile`'s full-suite default: a fresh loop-backed Btrfs (`user_subvol_rm_allowed`), an unprivileged `ci` user with separate Btrfs HOME/fixtures, and delegated `cpu`, `memory` and `pids` controllers. Only tracked and unignored source files are copied in; image Cargo/Rustup homes remain in use. The outer commands forward `CARGO_BUILD_JOBS` and `BTRFS_SIZE` only when supplied. Full-suite discovery ends with bare `bun test` and fails on skips. Direct Docker users can mount a directory at `/artifacts` for coverage reports.
+- `bun run check` runs Biome `2.5.15` (pinned at the root; `bun run check:ci` is the non-writing CI form) over one policy from `biome.json`: root `src/`, `test/`, `install.ts` and `ci/run-tests.ts`; the whole `packages/dataflow-engine` (whose nested `biome.json` extends the root); `src/` and `test/` of `junco-agent`, `junco-mcp` and `junco-scheduler`; junco-tools' `ts/` and `tests/`; and package manifests/typecheck configurations. Git-ignored and generated trees (`node_modules`, `dist`, `target`, `native`, `coverage`) and the `graft` graph are excluded; Rust stays with rustfmt and Clippy.
 
 Return-only and throw-only `AsyncGenerator` protocol fixtures are exempt from Biome's `useYield` rule in explicitly listed test files: first-activation completion or failure is intentional, and inserting a yield would change the schedule.
 
@@ -69,7 +95,7 @@ Profiling uses a separate `recorder` dependency, never a tracer: one application
 Close graphs, agents and caller-owned collections first (native close drains the final resource events), then `await recorder.close()` once; closing a source never closes the recorder.
 
 ```ts
-import { JuncoGraph, tracer } from "junco-agency";
+import { JuncoGraph, tracer } from "junco";
 
 const recorder = await tracer.GrafanaRecorder.create();
 console.log(recorder.dashboardUrl);
@@ -113,7 +139,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, YieldTool } from "junco-tools";
-import { graph as graphApi, schedules } from "junco-agency";
+import { graph as graphApi, schedules } from "junco";
 
 // Resolve member options and schedulerOptions.models/model beforehand.
 // Only member agents own sessions; scheduling makes one completeSimple call per decision.
@@ -355,7 +381,7 @@ The root entry also re-exports the standard library for building junco workflows
 | `workflows` | Declarative YAML graph strings: `ralph`, driven by `schedules.ralph` with models supplied in the TypeScript ladder; `optimizer`, driven by `schedules.runOptimizer` | this package |
 
 ```ts
-import { graph, schedules, tracer, trigger } from "junco-agency";
+import { graph, schedules, tracer, trigger } from "junco";
 import { context } from "junco-scheduler";
 
 const g = new graph.DataflowGraph<void, number, string, never>(graph.Width.create(1), graph.UNBOUNDED, new tracer.DummyTracer());
@@ -391,7 +417,7 @@ Ralph is an ordinary YAML agent graph with a `Ralph -> Ralph` value feedback edg
 ```ts
 import { contentText } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { AssistantMessageSchema, graph, JuncoGraph, schedules, workflows } from "junco-agency";
+import { AssistantMessageSchema, graph, JuncoGraph, schedules, workflows } from "junco";
 import { Value } from "typebox/value";
 
 const rung = { model: "github-copilot/claude-sonnet-5.5", thinking: "medium" } as const;
@@ -476,7 +502,7 @@ The profile optimizer (`workflows.optimizer`, driven only by `schedules.runOptim
 
 ## Verification
 
-`bun run test` is the deterministic default suite, run by CI with agency-source coverage (`coverage/lcov.info`). Packages test their own implementation: engine graph/trigger/tracer/primitives; scheduler `test/scheduler.test.ts`, `test/scheduler-dsl.property.test.ts` (executable CSL authority laws with fast-check), and faux-only `test/agent.test.ts`; native agent/tool behavior in their packages. Root type fixtures cover typed observations, metadata, ports and context subtype preservation. Root mock-backed suites exercise both `roundRobin()` (window/thread 1) and `parallel()` (window 1/unbounded threads): native priming, all/any reads, batches, unseen-value fairness, nested sink-only completion, cancellation, resource ownership, shared/cyclic graphs and deep stack-safe traversal. Mock transcripts preserve agent admission, queue, yield, result, abort and close semantics without a provider. `bun run smoke` drives one real context per policy, then two `JuncoGraph.fromYaml` numeric scenarios (YAML text via `Bun.YAML.stringify` on Bun; the same parsed document on Node): two faux-backed agents passing `7` over a `{ type: number }` message route (a non-number `send` is a tool error against the advertised route schema; `recv` returns the raw number), and code nodes carrying `7` through a nested graph's source and sink. It closes every graph and prints:
+`bun run test:unit` is the selected deterministic root suite, run by CI with agency-source coverage (`coverage/lcov.info`) through `bun run test:coverage`. Packages test their own implementation: engine graph/trigger/tracer/primitives; scheduler `test/scheduler.test.ts`, `test/scheduler-dsl.property.test.ts` (executable CSL authority laws with fast-check), and faux-only `test/agent.test.ts`; native agent/tool behavior in their packages. Root type fixtures cover typed observations, metadata, ports and context subtype preservation. Root mock-backed suites exercise both `roundRobin()` (window/thread 1) and `parallel()` (window 1/unbounded threads): native priming, all/any reads, batches, unseen-value fairness, nested sink-only completion, cancellation, resource ownership, shared/cyclic graphs and deep stack-safe traversal. Mock transcripts preserve agent admission, queue, yield, result, abort and close semantics without a provider. `bun run smoke` drives one real context per policy, then two `JuncoGraph.fromYaml` numeric scenarios (YAML text via `Bun.YAML.stringify` on Bun; the same parsed document on Node): two faux-backed agents passing `7` over a `{ type: number }` message route (a non-number `send` is a tool error against the advertised route schema; `recv` returns the raw number), and code nodes carrying `7` through a nested graph's source and sink. It closes every graph and prints:
 
 ```json
 {"scheduler":"round-robin","producer":"seed","worker":"done","inputs":["upstream: seed","context first","then work"],"closed":true}
@@ -497,4 +523,4 @@ The mock replays Agentic interactions; it does not simulate provider reasoning, 
 - `bun run smoke:pi` runs the offline recursive Pi example, including its `Join` code node, with automatic tracing: interactive terminals show the TUI until dismissal; redirected runs stay silently untraced. After restoration it prints both branch results and the current root decision count.
 - `bun run smoke:tui` is a credential-free real-terminal smoke using native agents with faux responses. With the production addon built, run it in an interactive terminal (`TERM=xterm-256color`, at least 100×30): observe Alpha then Beta green, stable upper topology and live lower-pane text, then press `q` after completion. It checks terminal restoration before printing `TUI_SMOKE_OK`; it needs neither a Btrfs mount nor model credentials.
 - `bun run test:native` includes the real Linux PTY tests in `test/tui-tracer.test.ts` (automatic/explicit acquisition, live member and task traces, failure, dismissal and terminal restoration) and `test/policy-yield.test.ts`, which uses junco-tools' real Marsh policy through the CopyTree native test addon (see Setup): denied `edit`, applying `ast_edit`, and `bash` calls pause in source order without publishing edits or starting a second model request until resumed. A failed native test is not evidence of a passing policy boundary, and the deterministic policy-reason scenario does not prove native enforcement.
-- `bun run test:all` runs all three suites. The build can be loaded under Node.js with `node --input-type=module -e 'await import("./dist/index.js")'`.
+- The build can be loaded under Node.js with `node --input-type=module -e 'await import("./dist/index.js")'`.

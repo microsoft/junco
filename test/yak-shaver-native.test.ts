@@ -77,7 +77,7 @@ async function withRepository(
   body: (fixture: Fixture) => Promise<void>,
 ): Promise<void> {
   await withNativeCleanup(async (defer) => {
-    const root = await mkdtemp(join(tmpdir(), "junco-agency-yak-"));
+    const root = await mkdtemp(join(tmpdir(), "junco-yak-"));
     defer(() => rm(root, { recursive: true, force: true }));
     const seed = join(root, "seed");
     await mkdir(seed);
@@ -382,9 +382,7 @@ test("refused proposals change neither source nor index", async () => {
       "linked.ts": "linked\n",
     },
     async (fixture) => {
-      const outside = await mkdtemp(
-        join(tmpdir(), "junco-agency-yak-outside-"),
-      );
+      const outside = await mkdtemp(join(tmpdir(), "junco-yak-outside-"));
       try {
         await symlink(outside, join(fixture.seed, "escape"));
         await symlink(
@@ -606,7 +604,7 @@ test("refreshGraftSnapshot sees current source and publishes the refreshed Graft
   await withRepository(
     { ".gitignore": "graft/\n", "src/a.ts": "export class Alpha {}\n" },
     async (fixture) => {
-      execFileSync("graft", ["build", fixture.seed], { stdio: "ignore" });
+      execFileSync("graft", ["build", fixture.seed], { encoding: "utf8" });
       assert.deepEqual(
         await apply(fixture, 5, [
           {

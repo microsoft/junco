@@ -20,10 +20,32 @@ const sample = {
   resources: { memory: 100 }, units: { memory: "MB" },
 };
 const pins = {
-  version: 1, nodes: { worker: { memory: {
-    model: "linear", features: [{ derived: "sum", ports: ["a", "b"], measure: "count" }],
-  } } },
+  version: 1, nodes: {
+    worker: {
+      memory: {
+        model: "linear", features: [{ derived: "sum", ports: ["a", "b"], measure: "count" }],
+      }
+    }
+  },
 };
+
+const cost = {
+  resource: "cost", unit: "USD", features: [], model: { kind: "constant" },
+  fit: { n: 1, residP95: 0, fittedAt: "2026-10-12" }, range: [], bound: 0.125,
+};
+const costSample = {
+  node: "worker", features: {}, resources: { cost: 0.125 }, units: { cost: "USD" },
+};
+const costPins = {
+  version: 1, nodes: { worker: { cost: { model: "constant", features: [] } } },
+};
+
+test("round-trips cost profiles, samples, and pins", () => {
+  const profiles = { version: 1, nodes: { worker: { cost } } };
+  assert.deepEqual(parseProfiles(JSON.stringify(profiles)), profiles);
+  assert.deepEqual(parseSamples(JSON.stringify(costSample)), [costSample]);
+  assert.deepEqual(parsePins(JSON.stringify(costPins)), costPins);
+});
 
 function rejects(action: () => unknown, message: RegExp): void {
   assert.throws(action, (error: unknown) => {
@@ -49,6 +71,10 @@ describe("profile JSON validation", () => {
     rejects(
       () => parseProfiles(profileText({ ...memory, resource: "runtime", unit: "s" })),
       /key "memory" holds a "runtime" profile.*\/nodes\/worker\/memory\/resource/,
+    );
+    rejects(
+      () => parseProfiles(JSON.stringify({ version: 1, nodes: { worker: { cost: { ...memory, resource: "tokens", unit: "tok" } } } })),
+      /key "cost" holds a "tokens" profile.*\/nodes\/worker\/cost\/resource/,
     );
   });
 
@@ -109,6 +135,9 @@ describe("sample JSONL validation", () => {
       ...sample, resources: { memory: 0 }, units: {},
     })), /samples line 1: resource "memory" has no unit/);
     rejects(() => parseSamples(JSON.stringify({
+      ...costSample, resources: { cost: 0 }, units: {},
+    })), /samples line 1: resource "cost" has no unit/);
+    rejects(() => parseSamples(JSON.stringify({
       ...sample, resources: { memory: 100, runtime: 1 },
     })), /resource "runtime" has no unit/);
   });
@@ -119,6 +148,9 @@ describe("sample JSONL validation", () => {
         ...sample, units: { memory: unit },
       })), /samples line 1:.*\/units\/memory/);
     }
+    rejects(() => parseSamples(JSON.stringify({
+      ...costSample, units: { cost: "tok" },
+    })), /samples line 1:.*\/units\/cost/);
   });
 
   test("rejects negative resources, negative features and nonfinite numbers", () => {
@@ -129,6 +161,10 @@ describe("sample JSONL validation", () => {
       ...sample, features: { in: { count: -1 } },
     })), /\/features\/in\/count/);
     rejects(() => parseSamples(JSON.stringify(sample).replace('"memory":100', '"memory":1e999')), /\/resources\/memory/);
+    rejects(() => parseSamples(JSON.stringify({
+      ...costSample, resources: { cost: -1 },
+    })), /\/resources\/cost/);
+    rejects(() => parseSamples(JSON.stringify(costSample).replace('"cost":0.125', '"cost":1e999')), /\/resources\/cost/);
   });
 
   test("rejects extra properties at every structured boundary", () => {
@@ -144,30 +180,60 @@ describe("sample JSONL validation", () => {
 describe("pin JSON validation", () => {
   test("preserves derived feature pins and accepts direct port features", () => {
     assert.deepEqual(parsePins(JSON.stringify(pins)), pins);
-    const direct = { version: 1, nodes: { worker: { runtime: {
-      model: "power", features: [{ port: "in", measure: "tokens" }],
-    } } } };
+    const direct = {
+      version: 1, nodes: {
+        worker: {
+          runtime: {
+            model: "power", features: [{ port: "in", measure: "tokens" }],
+          }
+        }
+      }
+    };
     assert.deepEqual(parsePins(JSON.stringify(direct)), direct);
   });
 
   test("rejects unknown model kinds, resource kinds and feature measures", () => {
-    rejects(() => parsePins(JSON.stringify({ version: 1, nodes: { worker: { memory: {
-      model: "polynomial", features: [],
-    } } } })), /\/nodes\/worker\/memory\/model/);
-    rejects(() => parsePins(JSON.stringify({ version: 1, nodes: { worker: { disk: {
-      model: "constant", features: [],
-    } } } })), /\/nodes\/worker/);
-    rejects(() => parsePins(JSON.stringify({ version: 1, nodes: { worker: { memory: {
-      model: "linear", features: [{ port: "in", measure: "words" }],
-    } } } })), /\/nodes\/worker\/memory\/features\/0/);
+    rejects(() => parsePins(JSON.stringify({
+      version: 1, nodes: {
+        worker: {
+          memory: {
+            model: "polynomial", features: [],
+          }
+        }
+      }
+    })), /\/nodes\/worker\/memory\/model/);
+    rejects(() => parsePins(JSON.stringify({
+      version: 1, nodes: {
+        worker: {
+          disk: {
+            model: "constant", features: [],
+          }
+        }
+      }
+    })), /\/nodes\/worker/);
+    rejects(() => parsePins(JSON.stringify({
+      version: 1, nodes: {
+        worker: {
+          memory: {
+            model: "linear", features: [{ port: "in", measure: "words" }],
+          }
+        }
+      }
+    })), /\/nodes\/worker\/memory\/features\/0/);
   });
 
   test("rejects extra properties and unsupported versions", () => {
     rejects(() => parsePins(JSON.stringify({ ...pins, version: 2 })), /\/version/);
     rejects(() => parsePins(JSON.stringify({ ...pins, extra: true })), /pins:/);
-    rejects(() => parsePins(JSON.stringify({ version: 1, nodes: { worker: { memory: {
-      model: "constant", features: [], extra: true,
-    } } } })), /\/nodes\/worker\/memory/);
+    rejects(() => parsePins(JSON.stringify({
+      version: 1, nodes: {
+        worker: {
+          memory: {
+            model: "constant", features: [], extra: true,
+          }
+        }
+      }
+    })), /\/nodes\/worker\/memory/);
     rejects(() => parsePins("{"), /pins:/);
   });
 });
