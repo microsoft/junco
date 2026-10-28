@@ -1416,7 +1416,9 @@ mod tests {
         );
         run.finish().await.expect("the reader's producers finish");
         run.enter_finalization();
-        watch.await.expect("the close observes the end of execution");
+        watch
+            .await
+            .expect("the close observes the end of execution");
         assert!(!run.is_cancelled(), "cooperative work is retained");
     }
 
