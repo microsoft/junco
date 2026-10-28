@@ -16,7 +16,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax } from "junco-agency";
+import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax } from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { runCli, type YamlAgent } from "../support.ts";

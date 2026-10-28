@@ -17,7 +17,7 @@ import {
   fauxToolCall,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import { JuncoGraph, schedules, tracer } from "junco-agency";
+import { JuncoGraph, schedules, tracer } from "junco";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
 import { nativeOptions } from "./support.ts";

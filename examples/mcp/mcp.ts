@@ -21,7 +21,7 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco-agency";
+import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco";
 import type { TSchema } from "typebox";
 import { runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };

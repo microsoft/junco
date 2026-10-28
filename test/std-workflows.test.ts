@@ -21,7 +21,7 @@ import {
   schedules,
   tracer,
   workflows,
-} from "junco-agency";
+} from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { nativeOptions } from "./support.ts";

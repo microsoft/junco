@@ -8,7 +8,7 @@ Record the task, requested scope, output, permissions, parallelism, handoffs and
 
 ## 2. Establish prerequisites
 
-Require Bun, a resolvable public `junco-agency` package and an absolute repository root for validation and execution. Do not require `code_graph` in omp's tool inventory or stop authoring because it is absent. Use omp's available file, search and semantic-navigation tools to inspect README scope, source and interfaces. Do not install anything or invoke `code_graph` through a CLI or host-side substitute; configure it in the relevant Junco agents' YAML `tools:` instead. A failure to resolve a configured tool during build or execution is a runtime prerequisite failure; report it without fabricating graph evidence.
+Require Bun, a resolvable public `junco` package and an absolute repository root for validation and execution. Do not require `code_graph` in omp's tool inventory or stop authoring because it is absent. Use omp's available file, search and semantic-navigation tools to inspect README scope, source and interfaces. Do not install anything or invoke `code_graph` through a CLI or host-side substitute; configure it in the relevant Junco agents' YAML `tools:` instead. A failure to resolve a configured tool during build or execution is a runtime prerequisite failure; report it without fabricating graph evidence.
 
 Follow SKILL.md **Model selection** unchanged: catalog, saved credentials, dated official freshness evidence, supported thinking levels and user overrides. Declare the complete five-rung ladder in the paired TypeScript; catalog presence alone does not establish authorization. Report missing prerequisites rather than invent model identities or claim live execution.
 
@@ -88,7 +88,7 @@ Adapt SKILL.md's runner with the authored scheduler, verified models/ladder and 
 
 ```ts
 import { contentText } from "@earendil-works/pi-ai";
-import { JuncoGraph, schedules, syntax } from "junco-agency";
+import { JuncoGraph, schedules, syntax } from "junco";
 import source from "./<name>.yml" with { type: "text" };
 
 export async function run(config: syntax.FromYamlOptions): Promise<string> {

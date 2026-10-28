@@ -1,0 +1,10 @@
+graph:
+  name: Report
+  nodes:
+    Writer:
+      prompt: Summarize the release notes in notes.md under a ## Highlights heading.
+      trigger: always
+    Quality: { kind: code }
+  edges:
+    - { from: Writer, to: Quality, schema: { type: object } }
+    - { id: quality, from: Quality, to: $sink, schema: { type: number } }

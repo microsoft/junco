@@ -2,13 +2,14 @@ import type { Quantity, Unit } from "@buge/ts-units";
 import { Time } from "@buge/ts-units/time/dimension.js";
 import { DataflowDefinitionError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
-import { Information, Tokens } from "./units.js";
+import { Information, Money, Tokens } from "./units.js";
 
 /** Each resource name has a fixed dimension; profiles and budgets choose their units. */
 export const RESOURCES = {
   memory: Information,
   runtime: Time,
   tokens: Tokens,
+  cost: Money,
 } as const;
 export type ResourceKind = keyof typeof RESOURCES;
 export const RESOURCE_KINDS = Object.freeze(
@@ -104,4 +105,5 @@ export const COMPOSE: Readonly<
   memory: { parallel: "sum", sequential: "max" },
   runtime: { parallel: "max", sequential: "sum" },
   tokens: { parallel: "sum", sequential: "sum" },
+  cost: { parallel: "sum", sequential: "sum" },
 };

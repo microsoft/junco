@@ -319,11 +319,15 @@ export class JuncoGraph<
   readonly #delegate: DataflowTracer;
   /** This graph's own context: the constructor recorder at `recorderNodeId`. */
   readonly #recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   /** The placement of the drive {@link runWithRecorder} brackets. */
   #placement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
 
   readonly source: Source<N, T>;
@@ -342,7 +346,7 @@ export class JuncoGraph<
     policy: ToolCollection["policy"],
     collection?: ToolCollection,
     recorder?: ProfileRecorder<
-      "memory" | "tokens" | "edits" | "operations" | "probe"
+      "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
     >,
     recorderNodeId?: string,
   ) {
@@ -457,7 +461,7 @@ export class JuncoGraph<
       collection: ToolCollection,
       recorder:
         | ProfileRecorder<
-            "memory" | "tokens" | "edits" | "operations" | "probe"
+            "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
           >
         | undefined,
     ) =>
@@ -508,7 +512,7 @@ export class JuncoGraph<
       readonly policy: ToolCollection["policy"];
       readonly tracer?: DataflowTracer;
       readonly recorder?: ProfileRecorder<
-        "memory" | "tokens" | "edits" | "operations" | "probe"
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
       >;
       readonly recorderNodeId?: string;
     },
@@ -591,7 +595,7 @@ export class JuncoGraph<
     child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
     recorder?: ProfileRecorder<
-      "memory" | "tokens" | "edits" | "operations" | "probe"
+      "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
     >,
     recorderNodeId?: string,
     messageSchema: N = source.schema,
@@ -763,7 +767,9 @@ export class JuncoGraph<
 
   /** The current drive's placement, else this graph's own recorder context. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined {
     return this.#placement ?? this.#recorder;
   }
@@ -774,7 +780,7 @@ export class JuncoGraph<
    */
   async runWithRecorder<T>(
     recorder: ProfileRecorder<
-      "memory" | "tokens" | "edits" | "operations" | "probe"
+      "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
     >,
     work: () => T | Promise<T>,
   ): Promise<T> {

@@ -1013,7 +1013,7 @@ import "junco-mcp";
 const listeners = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal));
 const addons = Object.keys(require.cache).filter((path) => path.endsWith(".node"));
 // Loading-boundary test: static root import would execute before the captured baselines.
-const { JuncoGraph, Deterministic, tracer, graph, trigger, schedules } = await import("junco-agency");
+const { JuncoGraph, Deterministic, tracer, graph, trigger, schedules } = await import("junco");
 import { LockPolicy } from "junco-tools";
 import { Type } from "typebox";
 assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => process.listenerCount(signal)), listeners);

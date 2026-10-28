@@ -209,7 +209,7 @@ export type JuncoAgentNodeContext<N extends TSchema = TSchema, T = unknown> = {
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
   /** The graph's own view of the profiling session; the agent records under its node ID there. */
   readonly recorder?: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
   /** This activation's final graph node ID; default the agent's own {@link JuncoAgent.nodeId}. */
   readonly recorderNodeId?: string;
@@ -841,25 +841,35 @@ export class JuncoAgent<
   #nodeContext: JuncoAgentNodeContext | undefined;
   /** This agent's view of its constructor recorder, used outside graph placements. */
   readonly #ownRecorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   /** The graph placement {@link runWithNodeContext} binds. */
   #placement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   /** Where the latest admitted run started. */
   #runPlacement:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   /** The bound graph placement, else this agent's own view of its `recorder` option. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined {
     return this.#placement ?? this.#ownRecorder;
   }
   /** Where current work records: the bound placement, else the latest run's, else this agent's own. */
   #currentRecorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined {
     return this.#placement ?? this.#runPlacement ?? this.#ownRecorder;
   }
@@ -1177,10 +1187,16 @@ export class JuncoAgent<
         await this.#monitorUsage(harness, tokenMonitor);
       if (this.#ownRecorder !== undefined)
         harness.events.on("usage", ({ row }) => {
-          const recorder: ProfileRecorder<"tokens"> | undefined =
+          const recorder: ProfileRecorder<"tokens" | "cost"> | undefined =
             this.#currentRecorder();
           recorder?.record({
             resource: "tokens",
+            kind: "usage",
+            source: this,
+            usage: row.usage,
+          });
+          recorder?.record({
+            resource: "cost",
             kind: "usage",
             source: this,
             usage: row.usage,

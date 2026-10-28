@@ -11,7 +11,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import { DataflowNodeError, megabytes } from "dataflow-engine";
 import { fitProfiles, parseSamples } from "dataflow-profile";
-import { JuncoGraph, MockAgent, schedules, tracer } from "junco-agency";
+import { JuncoGraph, MockAgent, schedules, tracer } from "junco";
 import { AssistantMessageSchema } from "junco-agent";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
@@ -238,20 +238,34 @@ test("JSONL reduction keeps same-path agent activations independent", async () =
     assert.equal(view.root, recorder);
     const lease = {};
     const [agentA, agentB] = [{}, {}];
-    const usage = (source: object, totalTokens: number) =>
+    const usage = (source: object, totalTokens: number, cost = 0) => {
+      const payload = {
+        input: totalTokens,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens,
+        cost: {
+          input: cost,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: cost,
+        },
+      };
       view.record({
         resource: "tokens",
         kind: "usage",
         source,
-        usage: {
-          input: totalTokens,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        },
+        usage: payload,
       });
+      view.record({
+        resource: "cost",
+        kind: "usage",
+        source,
+        usage: payload,
+      });
+    };
     const memory = (owner: string | undefined, memoryBytes: number) =>
       view.record({
         resource: "memory",
@@ -314,13 +328,13 @@ test("JSONL reduction keeps same-path agent activations independent", async () =
       });
     const rows = () => parseSamples(readFileSync(path, "utf8"));
 
-    usage(agentA, 100); // history before the activation is not its usage
+    usage(agentA, 100, 10); // history before the activation is not its usage
     const a = activation(agentA, "owner-a");
     const b = activation(agentB, "owner-b");
     start(a);
     start(b);
-    usage(agentA, 3);
-    usage(agentB, 7);
+    usage(agentA, 3, 0.125);
+    usage(agentB, 7, 0.375);
     memory("owner-a", 30);
     memory("owner-b", 90);
     memory("owner-unknown", 500);
@@ -350,23 +364,28 @@ test("JSONL reduction keeps same-path agent activations independent", async () =
       samples.map((sample) => [
         sample.node,
         sample.resources.tokens,
+        sample.resources.cost,
         sample.resources.memory,
       ]),
       [
-        ["Inner/Work:er", 3, 40],
-        ["Inner/Work:er", 7, 90],
-        ["Inner/Work:er", 0, 0],
-        ["Inner/Work:er", undefined, 0],
+        ["Inner/Work:er", 3, 0.125, 40],
+        ["Inner/Work:er", 7, 0.375, 90],
+        ["Inner/Work:er", 0, 0, 0],
+        ["Inner/Work:er", undefined, undefined, 0],
       ],
     );
     assert.deepEqual(samples[0]?.units, {
       runtime: "ms",
       tokens: "tok",
+      cost: "USD",
       memory: "B",
     });
     assert.deepEqual(samples[3]?.units, { runtime: "ms", memory: "B" });
     assert.equal(samples[0]?.resources.runtime, 5);
     assert.deepEqual(samples[0]?.features, { "Start~>Worker": { count: 1 } });
+    const { file } = fitProfiles(samples, { fittedAt: "2026-10-20" });
+    assert.equal(file.nodes["Inner/Work:er"]?.cost?.unit, "USD");
+    assert.equal(file.nodes["Inner/Work:er"]?.cost?.bound, 0.375);
 
     const negative = activation(agentB, "owner-b");
     start(negative);
@@ -384,6 +403,96 @@ test("JSONL reduction keeps same-path agent activations independent", async () =
     start(activation(agentA, "owner-a")); // ignored after close
     assert.throws(() => recorder.add_context("x"), /JsonlRecorder: closed/);
     assert.equal(rows().length, 4);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("JSONL invalid costs exclude their successful activations and latch", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "junco-profile-recorder-invalid-cost-"),
+  );
+  const path = join(directory, "samples.jsonl");
+  const recorder = new tracer.JsonlRecorder({ path });
+  const operation = {
+    resource: "operations",
+    category: "graph",
+    tool: "",
+    operation: "prime",
+  } as const;
+  const invalid = [
+    undefined,
+    { input: -1, output: 0, cacheRead: 0, cacheWrite: 0, total: -1 },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: Number.NaN },
+    {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: Number.POSITIVE_INFINITY,
+    },
+  ];
+  try {
+    for (const [index, cost] of invalid.entries()) {
+      const agent = {};
+      const activation: tracer.ProfileActivation = {
+        runId: `invalid-${index}`,
+        firedAt: "2026-10-26T00:00:00.000Z",
+        features: {},
+        agent,
+        owner: undefined,
+      };
+      recorder.record({ ...operation, kind: "start", activation });
+      assert.doesNotThrow(() =>
+        recorder.record({
+          resource: "cost",
+          kind: "usage",
+          source: agent,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: cost!,
+          },
+        }),
+      );
+      recorder.record({
+        ...operation,
+        kind: "finish",
+        activation,
+        outcome: "success",
+        durationMs: 1,
+      });
+    }
+    const plain: tracer.ProfileActivation = {
+      runId: "plain",
+      firedAt: "2026-10-26T00:00:00.000Z",
+      features: {},
+      agent: undefined,
+      owner: undefined,
+    };
+    recorder.record({ ...operation, kind: "start", activation: plain });
+    recorder.record({
+      ...operation,
+      kind: "finish",
+      activation: plain,
+      outcome: "success",
+      durationMs: 1,
+    });
+    await assert.rejects(
+      recorder.flush(),
+      /JsonlRecorder: invalid cost sample/,
+    );
+    assert.deepEqual(
+      parseSamples(readFileSync(path, "utf8")).map((sample) => sample.runId),
+      ["plain"],
+    );
+    await assert.rejects(
+      recorder.close(),
+      /JsonlRecorder: invalid cost sample/,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

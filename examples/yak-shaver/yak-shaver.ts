@@ -61,7 +61,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { OpikTracer } from "dataflow-engine-opik";
-import { agent, Deterministic, graph, JuncoGraph, mcp, schedules, syntax, tools, tracer } from "junco-agency";
+import { agent, Deterministic, graph, JuncoGraph, mcp, schedules, syntax, tools, tracer } from "junco";
 import { Opik } from "opik";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";

@@ -15,3 +15,8 @@ export const gibibytes = bytes.times(1024 ** 3).withSymbol("GiB");
 export type Tokens = { readonly tokens: 1 };
 export const Tokens: Tokens = { tokens: 1 };
 export const tokens: Unit<number, Tokens> = makeUnit("tok", Tokens);
+
+/** Dimension of monetary cost, `[Money]`. */
+export type Money = { readonly money: 1 };
+export const Money: Money = { money: 1 };
+export const dollars: Unit<number, Money> = makeUnit("USD", Money);

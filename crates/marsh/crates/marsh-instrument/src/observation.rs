@@ -49,7 +49,7 @@ pub(crate) struct Resume {
 pub(crate) type Observe<'a> =
     dyn FnMut(u64, Pid, i32, Option<u64>, Option<Syscall>) -> io::Result<Resume> + 'a;
 
-/// Why a tree whose remaining tasks are all held can make no progress.
+/// Why held tasks cannot be classified once every other task has begun exiting.
 pub(crate) const UNCLASSIFIED: &str = "native creator exited with unclassified child effects";
 
 struct Entry {
@@ -64,6 +64,8 @@ struct Task {
     /// Whether an entry, or the one return allowed before any, has kept this task in step.
     synchronized: bool,
     in_syscall: bool,
+    /// An exit event was observed; no later creation event can come from this task.
+    exiting: bool,
     entry: Option<Entry>,
 }
 
@@ -146,8 +148,9 @@ impl Observer {
         self.detached
     }
 
-    /// Seizes a spawned child parked in its launch handshake and stops it. Returns the raw status
-    /// of its interrupt stop, still unresumed, or `None` once the child vanished first.
+    /// Seizes a spawned child and returns its first ptrace stop, still unresumed, or `None`
+    /// once the child vanished first. An interrupt may be acknowledged by another stop kind;
+    /// the normal dispatcher must consume that stop rather than waiting for a second trap.
     pub(crate) fn seize(&mut self, pid: Pid) -> io::Result<Option<i32>> {
         ptrace::seize(pid, OPTIONS)
             .map_err(|error| io::Error::other(format!("seizing child {pid}: {error}")))?;
@@ -171,29 +174,30 @@ impl Observer {
                 }
             }
             match WaitStatus::from_raw(pid, status)? {
-                WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_STOP as i32 => {
+                WaitStatus::Stopped(..)
+                | WaitStatus::PtraceEvent(..)
+                | WaitStatus::PtraceSyscall(..) => {
                     return Ok(Some(status));
                 }
                 WaitStatus::Exited(..) | WaitStatus::Signaled(..) => {
                     self.tasks.remove(&pid);
                     return Ok(None);
                 }
-                // A signal delivered before the interrupt: pass it on; the interrupt stays pending.
-                WaitStatus::Stopped(_, signal) => {
-                    alive(ptrace::cont(pid, signal))?;
-                }
-                _ => {
-                    alive(ptrace::cont(pid, None))?;
-                }
+                _ => {}
             }
         }
     }
 
-    /// Observes every stop until this thread has no tracee left. A tree whose every remaining
-    /// task is held can never be released by any of them, and fails.
+    /// Observes every stop until this thread has no tracee left. Held tasks cannot be released
+    /// once every other task is exiting: a zombie leader's final wait can depend on a held thread.
     pub(crate) fn run(&mut self, observe: &mut Observe<'_>) -> io::Result<()> {
         loop {
-            if !self.held.is_empty() && self.tasks.keys().all(|tid| self.held.contains_key(tid)) {
+            if !self.held.is_empty()
+                && self
+                    .tasks
+                    .iter()
+                    .all(|(tid, task)| task.exiting || self.held.contains_key(tid))
+            {
                 return Err(io::Error::other(UNCLASSIFIED));
             }
             let Some((tid, status)) = wait_any()? else {
@@ -262,6 +266,7 @@ impl Observer {
             // retired here, without manufacturing a successful kernel result.
             task.entry = None;
             task.in_syscall = false;
+            task.exiting = true;
         }
         Ok(message)
     }

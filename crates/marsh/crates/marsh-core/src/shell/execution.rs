@@ -103,6 +103,7 @@ impl ExternalCommandSpawner for MarshExecutor {
     fn spawn(&self, command: std::process::Command, kill_on_drop: bool) -> std::io::Result<Child> {
         let context = self.context().map_err(std::io::Error::other)?;
         let _guard = context.enter().map_err(std::io::Error::other)?;
+        let _launch = context.run.prepare_native_launch();
         let Backend::Managed { tracing, .. } = &context.run.backend else {
             let child = DefaultExternalCommandSpawner.spawn(command, kill_on_drop)?;
             return context.run.adopt(child);
@@ -260,6 +261,33 @@ enum RunPhase {
     Publishing,
 }
 
+/// Only the first native launch can precede every native producer. Its fork/trace/exec handshake
+/// is preparation, not a process ignoring end of input; later launches cannot renew that grace.
+#[derive(Clone, Copy)]
+enum NativeLaunch {
+    Pending,
+    Preparing(tokio::time::Instant),
+    Finished {
+        began: tokio::time::Instant,
+        ended: tokio::time::Instant,
+    },
+}
+
+struct NativeLaunchGuard<'a>(&'a Run);
+impl Drop for NativeLaunchGuard<'_> {
+    fn drop(&mut self) {
+        let mut launch = self.0.native_launch.lock().recover();
+        if let NativeLaunch::Preparing(began) = *launch {
+            *launch = NativeLaunch::Finished {
+                began,
+                ended: tokio::time::Instant::now(),
+            };
+            drop(launch);
+            self.0.changed.notify_waiters();
+        }
+    }
+}
+
 /// A child process of a direct run, pinned by its pidfd; readable once it has exited.
 type DirectChild = Arc<AsyncFd<OwnedFd>>;
 
@@ -281,6 +309,7 @@ pub(super) struct Run {
     /// The span's logical initial directory, for contexts not created by a builtin.
     pub cwd: Arc<PathBuf>,
     workers: Mutex<Workers>,
+    native_launch: Mutex<NativeLaunch>,
     pub closed: AtomicBool,
     phase: AtomicU8,
     changed: tokio::sync::Notify,
@@ -292,6 +321,7 @@ impl Run {
             backend,
             cwd,
             workers: Mutex::new(Workers::default()),
+            native_launch: Mutex::new(NativeLaunch::Pending),
             closed: AtomicBool::new(false),
             phase: AtomicU8::new(RunPhase::Running as u8),
             changed: tokio::sync::Notify::new(),
@@ -520,20 +550,55 @@ impl Run {
             .map(|_| ())
             .map_err(|_| ShellError::new(ShellErrorKind::Interrupted))
     }
-    /// Resolves once the run's producers are no longer running: finished, or cancelled.
-    async fn wait_until_not_running(&self) {
+    /// Marks initial native setup, before a child can execute or observe its end of input.
+    fn prepare_native_launch(&self) -> Option<NativeLaunchGuard<'_>> {
+        let mut launch = self.native_launch.lock().recover();
+        if matches!(*launch, NativeLaunch::Finished { .. }) {
+            return None;
+        }
+        if matches!(*launch, NativeLaunch::Pending) {
+            *launch = NativeLaunch::Preparing(tokio::time::Instant::now());
+            drop(launch);
+            self.changed.notify_waiters();
+        }
+        Some(NativeLaunchGuard(self))
+    }
+    /// Waits for the producers to end within `grace`, excluding initial native launch setup.
+    /// Shell-only evaluation is still timed, and subsequent launches never extend a window.
+    async fn wait_until_not_running(&self, grace: Duration) -> bool {
+        let started = tokio::time::Instant::now();
         loop {
             let changed = self.changed.notified();
             if !self.is_running() {
-                return;
+                return true;
             }
-            changed.await;
+            let deadline = match *self.native_launch.lock().recover() {
+                NativeLaunch::Pending => started.checked_add(grace),
+                NativeLaunch::Preparing(_) => None,
+                NativeLaunch::Finished { began, ended } => {
+                    started.checked_add(grace).and_then(|deadline| {
+                        deadline.checked_add(ended.saturating_duration_since(began.max(started)))
+                    })
+                }
+            };
+            let Some(deadline) = deadline else {
+                changed.await;
+                continue;
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::select! {
+                () = changed => {},
+                () = tokio::time::sleep_until(deadline) => {},
+            }
         }
     }
     /// Bounds the run's remaining execution once its input has ended.
     ///
     /// `stdin_grace` for the producers to finish after their input ended, then `SIGTERM` and
-    /// `terminate_grace` windows, then cancellation.
+    /// `terminate_grace` windows, then cancellation. The first native launch's infrastructure
+    /// setup is excluded from those windows: the child cannot read its input until it completes.
     /// Each step applies only while the run is still running, so a run that reached finalization
     /// is never signalled or discarded here, however long finalization takes.
     ///
@@ -545,20 +610,14 @@ impl Run {
     /// is cancelled at the next window. Signalling failures are ignored: the run's own verdict
     /// says what happened.
     async fn terminate_within(&self, stdin_grace: Duration, terminate_grace: Duration) {
-        if tokio::time::timeout(stdin_grace, self.wait_until_not_running())
-            .await
-            .is_ok()
-        {
+        if self.wait_until_not_running(stdin_grace).await {
             return;
         }
         if self.is_running() {
             let _ = self.signal(libc::SIGTERM);
         }
         loop {
-            if tokio::time::timeout(terminate_grace, self.wait_until_not_running())
-                .await
-                .is_ok()
-            {
+            if self.wait_until_not_running(terminate_grace).await {
                 return;
             }
             if self.has_live_producers() {
@@ -1318,6 +1377,102 @@ mod tests {
             tokio::runtime::Handle::current(),
             Arc::new(PathBuf::from("/")),
         ))
+    }
+
+    /// A native launch held beyond both windows still leaves a cooperative child its EOF grace.
+    #[tokio::test(start_paused = true)]
+    async fn native_launch_preparation_does_not_consume_close_grace() {
+        let run = direct_run();
+        let launch = run.prepare_native_launch();
+        let watch = tokio::spawn({
+            let run = Arc::clone(&run);
+            async move { run.terminate_within(GRACE, GRACE).await }
+        });
+        tokio::time::sleep(GRACE * 20).await;
+        assert!(!run.is_cancelled(), "launch preparation is not execution");
+        assert!(!watch.is_finished(), "the close waits for native launch");
+
+        let (input, eof) = std::io::pipe().expect("the child's input pipe");
+        let (mut output, ready) = std::io::pipe().expect("the child's readiness pipe");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "printf ready; exec /bin/cat >/dev/null"])
+            .stdin(input)
+            .stdout(ready);
+        let child = DefaultExternalCommandSpawner
+            .spawn(command, true)
+            .expect("launch the cooperative reader");
+        let mut child = run.adopt(child).expect("pin the cooperative reader");
+        let mut ready = [0_u8; 5];
+        std::io::Read::read_exact(&mut output, &mut ready).expect("the child is executing");
+        drop(launch);
+        // Native process completion uses real time rather than paused Tokio's auto-advancement.
+        tokio::time::resume();
+        drop(eof);
+        let status = child.wait().await.expect("reap the cooperative reader");
+        assert!(
+            status.success(),
+            "the reader exits on EOF, not a signal: {status}"
+        );
+        run.finish().await.expect("the reader's producers finish");
+        run.enter_finalization();
+        watch.await.expect("the close observes the end of execution");
+        assert!(!run.is_cancelled(), "cooperative work is retained");
+    }
+
+    /// Preparation pauses one window without forgiving earlier execution or later launches.
+    #[tokio::test(start_paused = true)]
+    async fn native_launch_preserves_elapsed_execution_and_cannot_renew_grace() {
+        let run = direct_run();
+        let wait = tokio::spawn({
+            let run = Arc::clone(&run);
+            async move { run.wait_until_not_running(GRACE).await }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(GRACE / 2).await;
+        let launch = run.prepare_native_launch();
+        tokio::time::advance(GRACE * 20).await;
+        assert!(!wait.is_finished(), "initial launch pauses the window");
+        drop(launch);
+        tokio::time::advance(GRACE / 2).await;
+        assert!(
+            !tokio::time::timeout(GRACE / 4, wait)
+                .await
+                .expect("preparation cannot refund earlier execution")
+                .expect("the window ends"),
+            "earlier execution still counts"
+        );
+
+        let _later_launch = run.prepare_native_launch();
+        assert!(
+            !tokio::time::timeout(GRACE * 2, run.wait_until_not_running(GRACE))
+                .await
+                .expect("a later launch cannot suspend the window"),
+            "a later launch does not pause or renew the window"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unbounded_grace_waits_for_execution_to_finish() {
+        for after_native_launch in [false, true] {
+            let run = direct_run();
+            if after_native_launch {
+                drop(run.prepare_native_launch());
+            }
+            let wait = tokio::spawn({
+                let run = Arc::clone(&run);
+                async move { run.wait_until_not_running(Duration::MAX).await }
+            });
+            tokio::task::yield_now().await;
+            assert!(!wait.is_finished(), "running work retains unbounded grace");
+            run.enter_finalization();
+            assert!(
+                tokio::time::timeout(GRACE, wait)
+                    .await
+                    .expect("finalization wakes the grace waiter")
+                    .expect("unbounded grace does not overflow")
+            );
+        }
     }
 
     /// Producers that all ended are not discarded while their ends are still being proven,

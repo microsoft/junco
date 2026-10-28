@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/junco-org/junco-agency.git",
+    "url": "git+https://github.com/microsoft/junco.git",
     "directory": "packages/dataflow-engine"
   },
-  "homepage": "https://github.com/junco-org/junco-agency/tree/main/packages/dataflow-engine#readme",
+  "homepage": "https://github.com/microsoft/junco/tree/main/packages/dataflow-engine#readme",
   "bugs": {
-    "url": "https://github.com/junco-org/junco-agency/issues"
+    "url": "https://github.com/microsoft/junco/issues"
   },
   "type": "module",
   "packageManager": "bun@1.4.2",

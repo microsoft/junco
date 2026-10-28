@@ -28,7 +28,7 @@ import {
   tracer,
   trigger,
   workflows,
-} from "junco-agency";
+} from "junco";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import {

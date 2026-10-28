@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tracer } from "junco-agency";
+import { tracer } from "junco";
 
 const COLLECTION =
   "/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
@@ -200,6 +200,7 @@ const usage = (values: {
   cacheWrite1h?: number;
   reasoning?: number;
   cost?: number;
+  costInput?: number;
 }) => ({
   input: values.input ?? 0,
   output: values.output ?? 0,
@@ -211,13 +212,22 @@ const usage = (values: {
   ...(values.reasoning === undefined ? {} : { reasoning: values.reasoning }),
   totalTokens: values.totalTokens,
   cost: {
-    input: values.cost ?? 0,
+    input: values.costInput ?? values.cost ?? 0,
     output: 0,
     cacheRead: 0,
     cacheWrite: 0,
     total: values.cost ?? 0,
   },
 });
+const recordUsage = (
+  view: tracer.ProfileRecorder<"tokens" | "cost">,
+  values: Parameters<typeof usage>[0],
+) => {
+  const source = {};
+  const payload = usage(values);
+  view.record({ resource: "tokens", kind: "usage", source, usage: payload });
+  view.record({ resource: "cost", kind: "usage", source, usage: payload });
+};
 
 test("validates options without contacting Grafana", async () => {
   const fake = await fakeGrafana();
@@ -510,14 +520,14 @@ test("resources roll up through nested contexts without double counting", async 
   const fake = await fakeGrafana();
   const recorder = await open(fake);
   const outer: tracer.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   > = recorder.add_context("nodeId1");
   const inner = outer.add_context("nodeId2");
   const full = inner.add_context("NodeId_f");
   assert.equal(full.path, "nodeId1::nodeId2::NodeId_f");
   assert.equal(full.root, recorder);
   const memory: tracer.ProfileRecorder<"memory"> = full;
-  const tokens: tracer.ProfileRecorder<"tokens"> = full;
+  const usageRecorder: tracer.ProfileRecorder<"tokens" | "cost"> = full;
   const edits: tracer.ProfileRecorder<"edits"> = full;
   const operations: tracer.ProfileRecorder<"operations"> = full;
   const lease: tracer.ProfileRecorder<"memory"> = recorder;
@@ -565,11 +575,10 @@ test("resources roll up through nested contexts without double counting", async 
     pids: 3,
     elapsedMs: 20,
   });
-  tokens.record({
-    resource: "tokens",
-    kind: "usage",
-    source: {},
-    usage: usage({ totalTokens: 12 }),
+  recordUsage(usageRecorder, {
+    totalTokens: 12,
+    cost: 0.125,
+    costInput: 0.5,
   });
   await recorder.flush();
   let lines = lastPush(fake);
@@ -586,6 +595,7 @@ test("resources roll up through nested contexts without double counting", async 
     assert.equal(fields.cpu_usage_ms, 5);
     assert.equal(fields.elapsed_ms, 30);
     assert.equal(fields.tokens_used, 12);
+    assert.equal(fields.cost_total, 0.125);
   }
   // Context creation alone emits no node series; no shell child path.
   assert.deepEqual(
@@ -705,11 +715,11 @@ test("resources roll up through nested contexts without double counting", async 
     output_tokens: 0,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
-    cost_input: 0,
+    cost_input: 0.5,
     cost_output: 0,
     cost_cache_read: 0,
     cost_cache_write: 0,
-    cost_total: 0,
+    cost_total: 0.125,
     tokens_per_second: 0,
     elapsed_ms: 37,
     memory_bytes: 0,
@@ -768,28 +778,43 @@ test("usage sums committed increments and rates over the reporting clock", async
   let now = 1000;
   const clock = spyOn(performance, "now").mockImplementation(() => now);
   try {
-    const a: tracer.ProfileRecorder<"tokens"> = recorder.add_context("A");
-    const b: tracer.ProfileRecorder<"tokens"> = recorder.add_context("B");
-    const agent = {};
-    const record = (
-      view: tracer.ProfileRecorder<"tokens">,
-      values: Parameters<typeof usage>[0],
-    ) =>
-      view.record({
-        resource: "tokens",
-        kind: "usage",
-        source: agent,
-        usage: usage(values),
-      });
+    const a: tracer.ProfileRecorder<"tokens" | "cost"> =
+      recorder.add_context("A");
+    const b: tracer.ProfileRecorder<"tokens" | "cost"> =
+      recorder.add_context("B");
+    const tokenOnly: tracer.ProfileRecorder<"tokens"> =
+      recorder.add_context("token-only");
+    const costOnly: tracer.ProfileRecorder<"cost"> =
+      recorder.add_context("cost-only");
     await recorder.flush();
     let total = fieldsOf(lastPush(fake), "junco_total");
     assert.equal(total.tokens_used, 0);
     assert.equal(total.tokens_per_second, 0);
+    assert.equal(total.cost_total, 0);
     assert.equal(Object.hasOwn(total, "memory_bytes"), false);
 
     // Provider-authoritative totals differ from the component sum.
-    record(a, { totalTokens: 10, input: 3, output: 4, cost: 0.5 });
-    record(b, { totalTokens: 4, input: 1, output: 1 });
+    recordUsage(a, {
+      totalTokens: 10,
+      input: 3,
+      output: 4,
+      cost: 0.125,
+      costInput: 0.5,
+    });
+    recordUsage(b, { totalTokens: 4, input: 1, output: 1 });
+    const isolated = usage({ totalTokens: 1, cost: 0.25 });
+    tokenOnly.record({
+      resource: "tokens",
+      kind: "usage",
+      source: {},
+      usage: isolated,
+    });
+    costOnly.record({
+      resource: "cost",
+      kind: "usage",
+      source: {},
+      usage: isolated,
+    });
     now = 3000;
     await recorder.flush();
     let lines = lastPush(fake);
@@ -802,22 +827,33 @@ test("usage sums committed increments and rates over the reporting clock", async
       2,
     );
     total = fieldsOf(lines, "junco_total");
-    assert.equal(total.tokens_per_second, 7);
-    assert.equal(total.tokens_used, 14);
+    assert.equal(total.tokens_per_second, 7.5);
+    assert.equal(total.tokens_used, 15);
     assert.equal(total.input_tokens, 4);
     assert.equal(total.output_tokens, 5);
-    assert.equal(total.cost_input, 0.5);
-    assert.equal(total.cost_total, 0.5);
+    assert.equal(total.cost_input, 0.75);
+    assert.equal(total.cost_total, 0.375);
     assert.equal(Object.hasOwn(total, "reasoning_tokens"), false);
     assert.equal(Object.hasOwn(total, "cache_write_1h_tokens"), false);
+    const aFields = fieldsOf(lines, "junco_node", { node: "A" });
+    assert.equal(aFields.tokens_used, 10);
+    assert.equal(aFields.cost_total, 0.125);
+    const tokenFields = fieldsOf(lines, "junco_node", { node: "token-only" });
+    assert.equal(tokenFields.tokens_used, 1);
+    assert.equal(Object.hasOwn(tokenFields, "cost_total"), false);
+    const costFields = fieldsOf(lines, "junco_node", { node: "cost-only" });
+    assert.equal(costFields.cost_total, 0.25);
+    assert.equal(Object.hasOwn(costFields, "tokens_used"), false);
+    assert.equal(Object.hasOwn(costFields, "tokens_per_second"), false);
 
     now = 5000;
     await recorder.flush();
     assert.equal(fieldsOf(lastPush(fake), "junco_total").tokens_per_second, 0);
+    assert.equal(fieldsOf(lastPush(fake), "junco_total").cost_total, 0.375);
 
     // A nonpositive interval reports zero and keeps the pending increment.
-    record(a, { totalTokens: 6, reasoning: 2, cacheWrite1h: 1 });
-    record(a, { totalTokens: -2 });
+    recordUsage(a, { totalTokens: 6, reasoning: 2, cacheWrite1h: 1 });
+    recordUsage(a, { totalTokens: -2 });
     await recorder.flush();
     lines = lastPush(fake);
     assert.equal(fieldsOf(lines, "junco_total").tokens_per_second, 0);
@@ -872,8 +908,33 @@ test("invalid values latch atomically without changing accounting", async () => 
     resource: "tokens",
     kind: "usage",
     source: {},
-    usage: { ...usage({ totalTokens: 5 }), input: Number.NaN },
+    usage: usage({ totalTokens: 5 }),
   });
+  assert.doesNotThrow(() =>
+    view.record({
+      resource: "cost",
+      kind: "usage",
+      source: {},
+      usage: { ...usage({ totalTokens: 0 }), cost: undefined! },
+    }),
+  );
+  assert.doesNotThrow(() =>
+    view.record({
+      resource: "cost",
+      kind: "usage",
+      source: {},
+      usage: {
+        ...usage({ totalTokens: 0 }),
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: Number.NaN,
+        },
+      },
+    }),
+  );
   view.record({
     resource: "memory",
     kind: "resource",
@@ -902,11 +963,11 @@ test("invalid values latch atomically without changing accounting", async () => 
   });
   await assert.rejects(recorder.flush(), /GrafanaRecorder: invalid usage/);
   const lines = lastPush(fake);
-  assert.equal(fieldsOf(lines, "junco_total").tokens_used, 0);
-  assert.deepEqual(
-    lines.map((line) => line.measurement),
-    ["junco_total"],
-  );
+  assert.equal(fieldsOf(lines, "junco_total").tokens_used, 5);
+  assert.equal(fieldsOf(lines, "junco_total").cost_total, 0);
+  const valid = fieldsOf(lines, "junco_node", { node: "n" });
+  assert.equal(valid.tokens_used, 5);
+  assert.equal(Object.hasOwn(valid, "cost_total"), false);
   await assert.rejects(recorder.close(), /invalid usage/);
 });
 

@@ -12,6 +12,8 @@
     "includes": [
       "src/**",
       "test/**",
+      "install.ts",
+      "ci/run-tests.ts",
       "package.json",
       "tsconfig*.json",
       "biome.json",

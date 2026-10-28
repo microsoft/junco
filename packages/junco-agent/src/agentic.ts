@@ -374,7 +374,7 @@ export type AgenticOptions<
    * places the agent under that graph's view of the same session.
    */
   readonly recorder?: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
   /** This agent's node ID under `recorder`; default its own `nodeId`. */
   readonly recorderNodeId?: string;

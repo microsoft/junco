@@ -22,7 +22,7 @@ import {
   type MockRun,
   type MockTerminal,
   schedules,
-} from "junco-agency";
+} from "junco";
 import {
   AgenticInputSchema,
   type AgenticYieldReason,

@@ -49,7 +49,7 @@ export interface ToolCollectionOptions {
    * `ShellMuxLease.create`).
    */
   recorder?: ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
 }
 
@@ -71,10 +71,12 @@ type BuildTools = (
   mux: NativeMux,
   operations: NonNullable<BashToolOptions["operations"]>,
   recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | (() =>
         | ProfileRecorder<
-            "memory" | "tokens" | "edits" | "operations" | "probe"
+            "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
           >
         | undefined)
     | undefined,
@@ -123,7 +125,9 @@ export class ToolCollection {
   /** The final teardown, once started; fences execution and further leases. */
   #closing: Promise<void> | undefined;
   readonly #recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
 
   private constructor(
@@ -133,7 +137,9 @@ export class ToolCollection {
     operations: ShellMuxOperations | undefined,
     customOperations: NonNullable<BashToolOptions["operations"]> | undefined,
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+      | ProfileRecorder<
+          "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+        >
       | undefined,
   ) {
     this.policy = lease.policy;
@@ -162,7 +168,9 @@ export class ToolCollection {
 
   /** This collection's view, which its own tools and the default {@link bind} record in. */
   get recorder():
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined {
     return this.#recorder;
   }
@@ -178,10 +186,12 @@ export class ToolCollection {
     closed: () => Error | undefined,
     own: Set<Promise<unknown>>,
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+      | ProfileRecorder<
+          "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+        >
       | (() =>
           | ProfileRecorder<
-              "memory" | "tokens" | "edits" | "operations" | "probe"
+              "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
             >
           | undefined)
       | undefined,
@@ -321,10 +331,12 @@ export class ToolCollection {
    */
   bind(
     recorder:
-      | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+      | ProfileRecorder<
+          "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+        >
       | (() =>
           | ProfileRecorder<
-              "memory" | "tokens" | "edits" | "operations" | "probe"
+              "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
             >
           | undefined)
       | undefined = this.#recorder,

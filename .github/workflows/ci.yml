@@ -14,12 +14,12 @@ jobs:
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: junco-agency
+        working-directory: junco
     steps:
-      - name: Checkout junco-agency
+      - name: Checkout junco
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          path: junco-agency
+          path: junco
           persist-credentials: false
 
       - name: Set up Node.js
@@ -144,26 +144,26 @@ jobs:
         run: bun run --cwd packages/junco-mcp test
 
       - name: Build dataflow-engine
-        working-directory: junco-agency/packages/dataflow-engine
+        working-directory: junco/packages/dataflow-engine
         run: bun run build
 
       # Core DSL plus faux-only model oracle: no native addons or credentials.
       - name: Build, typecheck and test junco-scheduler core
-        working-directory: junco-agency/packages/junco-scheduler
+        working-directory: junco/packages/junco-scheduler
         run: |
           bun run build:core
           bun run typecheck:core
           bun test ./test/scheduler.test.ts ./test/scheduler-dsl.property.test.ts ./test/agent.test.ts ./test/resources.test.ts
 
       - name: Build, typecheck and test dataflow-profile
-        working-directory: junco-agency/packages/dataflow-profile
+        working-directory: junco/packages/dataflow-profile
         run: |
           bun run build
           bun run typecheck
           bun run test
 
       - name: Build, typecheck and test dataflow-engine-opik
-        working-directory: junco-agency/packages/dataflow-engine-opik
+        working-directory: junco/packages/dataflow-engine-opik
         run: |
           bun run build
           bun run typecheck
@@ -172,13 +172,13 @@ jobs:
       # The parent config checks every example with the Dummy tracer; examples:typecheck checks
       # the default Opik route against the engine, scheduler-core and adapter declarations.
       - name: dataflow-engine typecheck
-        working-directory: junco-agency/packages/dataflow-engine
+        working-directory: junco/packages/dataflow-engine
         run: |
           bun run typecheck
           bun run examples:typecheck
 
       - name: dataflow-engine tests with coverage
-        working-directory: junco-agency/packages/dataflow-engine
+        working-directory: junco/packages/dataflow-engine
         run: bun run test:coverage
 
       - name: Upload coverage
@@ -186,7 +186,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: junco-agency/packages/dataflow-engine/coverage/lcov.info
+          path: junco/packages/dataflow-engine/coverage/lcov.info
           if-no-files-found: error
 
       # The packed engine and scheduler root in an isolated consumer with no agent or Pi peers,
@@ -300,15 +300,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - name: Checkout junco-agency
+      - name: Checkout junco
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          path: junco-agency
+          path: junco
           persist-credentials: false
 
       # ponytail: the toolchain image is rebuilt every run; cache its layers if build time matters.
       - name: Build the CI image
-        run: docker build --tag junco-ci junco-agency/ci
+        run: docker build --tag junco-ci junco/ci
 
       # The image, the btrfs loop file and every build share the runner's root disk.
       - name: Free runner disk
@@ -319,7 +319,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/artifacts"
           docker run --rm --privileged \
             --env CARGO_BUILD_JOBS=2 \
-            --volume "$GITHUB_WORKSPACE/junco-agency:/src:ro" \
+            --volume "$GITHUB_WORKSPACE/junco:/src:ro" \
             --volume "$RUNNER_TEMP/artifacts:/artifacts" \
             junco-ci
 

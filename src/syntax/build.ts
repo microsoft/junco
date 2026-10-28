@@ -88,7 +88,7 @@ export type AgentSpec = {
   readonly collection?: tools.ToolCollection;
   /** The immediate parent graph's recorder view; the agent's context is `recorderNodeId` in it. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
   /** The agent's local node ID. */
   readonly recorderNodeId?: string;
@@ -103,7 +103,7 @@ export type CodeContext<C = unknown> = {
   readonly collection?: tools.ToolCollection;
   /** The enclosing graph's recorder view; the node's context is `recorderNodeId` in it. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
   readonly recorderNodeId?: string;
   readonly context: C;
@@ -144,7 +144,7 @@ export type BuildOptions<C = unknown> = {
   readonly tracer?: tracer.DataflowTracer;
   /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
   readonly recorder?: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
   /** The root graph's context in `recorder` (default: the recorder's own context). */
   readonly recorderNodeId?: string;
@@ -365,6 +365,7 @@ const ZERO: graph.ProfileSet = Object.freeze({
   memory: graph.constantProfile("memory", unitOf("memory", "B")(0)),
   runtime: graph.constantProfile("runtime", unitOf("runtime", "ms")(0)),
   tokens: graph.constantProfile("tokens", unitOf("tokens", "tok")(0)),
+  cost: graph.constantProfile("cost", unitOf("cost", "USD")(0)),
 });
 
 const hasProfiles = (spec: GraphSpec) =>

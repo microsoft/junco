@@ -4,7 +4,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Scope and compatibility
 
-- This is a private ESM TypeScript library. `JuncoAgent` extends Pi's `AgentHarness` unchanged as the conversation/control plane and adds a cooperative lifetime iterator over scheduling boundaries. It has no dataflow graph, persistence layer, capability checking, standalone agent CLI, native code, or Cargo manifest; `bun run cli <seed>` only launches Pi's CLI with the `junco-tools` extension. Graphs of agents live in the workspace root package [`junco-agency`](../..). Never import from or depend on `../junco-runtime`.
+- This is a private ESM TypeScript library. `JuncoAgent` extends Pi's `AgentHarness` unchanged as the conversation/control plane and adds a cooperative lifetime iterator over scheduling boundaries. It has no dataflow graph, persistence layer, capability checking, standalone agent CLI, native code, or Cargo manifest; `bun run cli <seed>` only launches Pi's CLI with the `junco-tools` extension. Graphs of agents live in the workspace root package [`junco`](../..). Never import from or depend on `../junco-runtime`.
 - Pins: Bun `1.3.14` for package management and tests, TypeScript `6.0.3`, and every `@earendil-works/*` package at exactly `0.80.6` (`pi-agent-core` also forced through the workspace root's `overrides`). That is the Pi version `junco-tools` declares as its peer and the version the patch targets. Supported runtime: Linux x86-64 with glibc and Node.js `>=22.19.0`.
 - Runtime dependencies are exactly `junco-tools` (`workspace:*`, the workspace package at `../junco-tools`), `pi-agent-core`, `pi-ai`, `pi-coding-agent` (Pi's login-backed `ModelRuntime`, also a `junco-tools` peer) and `typebox` (the `yield` schema). Never substitute a registry package or the old monorepo's tools package.
 - Keep changes scoped to the request and preserve unrelated local work. Unless explicitly authorized, do not push, publish, edit `../junco-tools` from here, or create or mount Btrfs volumes.
@@ -16,7 +16,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `src/agentic.ts` | The `Agentic` contract: `AgentHarnessApi`, `AgenticStatus`, `AgenticYieldReason`, `AgenticStep`, `AgenticOptions`, `AgenticConstructor`. Types only. |
 | `src/junco-agent.ts` | `JuncoAgent`: run admission through the patch's per-run integration, pause recording and gating, the demand queue, status, abort, terminal close, the protected subclass hooks, and the `create` factory with its owned resources. |
 | `src/index.ts` | Public exports: the contract types, `JuncoAgent`, `JuncoAgentError`, `AgenticRun`, `JuncoAgentCreateOptions`, `TaskAgentOptions`, `TaskPolicy`, `TaskFailurePolicy`, `SubagentObserver`. Nothing else; `YieldTool`, `TaskTool`, `AssignedTaskTool` and their helpers and types are owned and exported by `junco-tools`. |
-| `patches/@earendil-works%2Fpi-agent-core@0.80.6.patch` | The one canonical Pi patch, registered here and by consumers (`../junco-agency`) from their own roots. |
+| `patches/@earendil-works%2Fpi-agent-core@0.80.6.patch` | The one canonical Pi patch, registered here and by consumers (`../junco`) from their own roots. |
 | `scripts/run-cli.sh` | Bun script launcher: enter the caller's dedicated Btrfs seed, exec pinned Pi `cli.js` with the installed `junco-tools` extension, and forward Pi arguments. |
 | `test/harness.ts` | Offline scaffolding: `scripted`/`nativeOptions` (faux model, in-memory session, no tools), `newAgent`, `gatedTool`, `countingTool`. |
 | `test/junco-agent.test.ts` | Native fidelity against a raw harness, iterator ordering, pauses, abort, terminal close, the native limits, `create` ownership, and saved Pi login/error behavior. |
@@ -25,7 +25,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 ## Build and verification commands
 
-Install once at the junco-agency workspace root, then run from `packages/junco-agent`:
+Install once at the junco workspace root, then run from `packages/junco-agent`:
 
 ```sh
 bun install --frozen-lockfile    # at the workspace root

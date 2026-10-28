@@ -14,7 +14,10 @@ cd /workspace
 
 # Tracked plus untracked-but-not-ignored files: host builds and node_modules never cross over.
 git -C /src -c safe.directory='*' ls-files -z --cached --others --exclude-standard \
-  | tar -C /src --null --files-from=- --ignore-failed-read -c \
+  | while IFS= read -r -d '' path; do
+      if [ -e "/src/$path" ] || [ -L "/src/$path" ]; then printf '%s\0' "$path"; fi
+    done \
+  | tar -C /src --null --files-from=- -c \
   | setpriv --reuid=ci --regid=ci --init-groups tar -x
 
 # Lock identities need a machine id; a container image has none.
@@ -30,10 +33,13 @@ echo "+cpu +memory +pids" >"$cg/cgroup.subtree_control"
 mkdir "$cg/ci"
 chown ci:ci "$cg/ci" "$cg/ci/cgroup.procs" "$cg/ci/cgroup.subtree_control" "$cg/ci/cgroup.threads"
 
+install -d --mode=700 --owner=ci --group=ci /workspace/.ci-home /workspace/.ci-fixtures
+
 status=0
 (
   echo "$BASHPID" >"$cg/ci/cgroup.procs"
-  HOME=/home/ci exec setpriv --reuid=ci --regid=ci --init-groups "$@"
+  HOME=/workspace/.ci-home JUNCO_BTRFS_TEST_ROOT=/workspace/.ci-fixtures JUNCO_TEST_CONTAINER=1 \
+    exec setpriv --reuid=ci --regid=ci --init-groups "$@"
 ) || status=$?
 
 if [ -w /artifacts ]; then

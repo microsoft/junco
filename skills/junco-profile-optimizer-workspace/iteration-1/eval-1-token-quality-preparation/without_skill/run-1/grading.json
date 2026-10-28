@@ -1,0 +1,54 @@
+{
+  "expectations": [
+    {
+      "text": "The response cites the inspected pair: the root numeric edge `quality` (Quality -> $sink, schema type number), the Writer agent on the uniform claude-sonnet-5.5/medium ladder at the default med rung, the existing hard limit `schedules.limit({ tools: 40 }, ...)`, the existing terminal assertion and the `bun run report.ts` invocation.",
+      "passed": true,
+      "evidence": "response.md section 'Inspected the pair' names Writer on the med rung, the Quality node and root quality edge, and schedules.limit({ tools: 40 }, schedules.parallel())"
+    },
+    {
+      "text": "report.yml is byte-identical to the seeded file after preparation, and no node, edge, probe flag, label or type was added to it.",
+      "passed": true,
+      "evidence": "report.yml bytes equal the seeded file (programmatic comparison)"
+    },
+    {
+      "text": "A unique session directory exists under {workspace}/.junco/profile-optimizer/ containing original.yml and original.ts equal to the seeded bytes, and prepared.ts byte-identical to the instrumented report.ts.",
+      "passed": true,
+      "evidence": "session-P7LDEI holds original.yml/original.ts equal to the seeded bytes and prepared.ts equal to report.ts (programmatic); it also copied notes.md there"
+    },
+    {
+      "text": "The instrumented report.ts contains exactly one ordered marker pair per axis (scheduler, ladder, limits) whose interiors define optimizerScheduler(label) (baseline schedules.parallel()), optimizerLadder/optimizerStrength (baseline: the existing uniform claude-sonnet-5.5 ladder, strength undefined) and optimizerLimits (baseline {}); the tools: 40 hard limit stays outside the regions and wraps every candidate outermost.",
+      "passed": true,
+      "evidence": "report.ts lines 17-29: three ordered marker pairs with the baseline expressions; HARD_LIMITS { tools: 40 } outermost (line 146)"
+    },
+    {
+      "text": "Fixed instrumentation outside the regions is guarded by JUNCO_PROFILE_RUN_DIR (normal behavior when absent), validates the run request, hashes the parsed graph document, enables probes on a runtime copy of the existing edge only, checks candidate ladder rungs against allowedModels and extra limits against limitBounds, attaches tracer.JsonlRecorder through fromYaml's recorder, closes graph then tracer then recorder, and writes completion.json via a temporary file and rename only after the existing Quality assertion passed; it imports only public packages, never the installed skill directory.",
+      "passed": true,
+      "evidence": "report.ts: RUN_DIR guard, withProbes, checkTuning, JsonlRecorder, completion.json after cleanup; derived from the repository's library and test/profile-optimizer.fixture.ts rather than a skill"
+    },
+    {
+      "text": "request.json passes the documented schema: objective {kind tokens, direction minimize}; one constraint {kind probe, node \"\", edgeId \"quality\", reduce single} >= 0.9; repeats 3; stop.improvement {relative, 0.2} and stop.plateau {window 3, absoluteTolerance 0, relativeTolerance 0.01}; axes [scheduler, ladder, limits]; allowedModels exactly the two given model/thinking pairs; limitBounds.tokens 20000; a fixed workloadId and the existing argv; no runBudget or other implicit cap.",
+      "passed": true,
+      "evidence": "request.json is schema-valid with the requested objective, constraint, repeats, stop, axes, allowedModels and limitBounds; it adds an unrequested resetArgv that copies a session snapshot of notes.md over the input before every run"
+    },
+    {
+      "text": "Exactly one optimizer invocation is given, `bun run junco-profile-optimizer <sessionDir>/request.json`, and it is not executed; the skill neither copies standard-library optimizer files nor writes a wrapper, an outer experiment loop or a fixed candidate catalog.",
+      "passed": false,
+      "evidence": "The command given is `bun run /home/eioannidis/git/junco/dist/optimizer-cli.js ...`, a checkout path, not the package invocation `bun run junco-profile-optimizer <sessionDir>/request.json`"
+    },
+    {
+      "text": "Unverified prerequisites are reported plainly rather than claimed as validated: the installed package's junco-profile-optimizer binary, the Sol editor login and the allowed models' catalog/login/thinking preflight, and whether repeated runs of the workload are safe; no paid model call or target run happened.",
+      "passed": false,
+      "evidence": "Prerequisites are reported well (haiku-5 absent from the bundled catalog, logins, repeat safety), but it ran the prepared entrypoint with a dummy run directory: a target run occurred, though it stopped in the ladder check before graph construction"
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 2,
+    "total": 8,
+    "pass_rate": 0.75
+  },
+  "timing": {
+    "executor_duration_seconds": 268.0,
+    "total_duration_seconds": 268.0
+  }
+}

@@ -9,7 +9,7 @@
 // The exports exist for the offline tests in test/mixed.test.ts.
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, JuncoGraph, schedules, syntax } from "junco-agency";
+import { graph, JuncoGraph, schedules, syntax } from "junco";
 import { runCli, type YamlExecution } from "../support.ts";
 import source from "./mixed.yml" with { type: "text" };
 

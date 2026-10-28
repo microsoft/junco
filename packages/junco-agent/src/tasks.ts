@@ -39,7 +39,9 @@ export type TaskNotice =
 export type TaskPlacement = {
   readonly usage: UsageContext | undefined;
   readonly recorder:
-    | ProfileRecorder<"memory" | "tokens" | "edits" | "operations" | "probe">
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
     | undefined;
   readonly tracer: Pick<DataflowTracer, "complain"> | undefined;
 };

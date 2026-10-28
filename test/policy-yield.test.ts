@@ -51,7 +51,7 @@ async function withClaimedSeed(
   policy: ToolCollection["policy"],
   body: (seed: string, collection: ToolCollection) => Promise<void>,
 ): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "junco-agency-policy-"));
+  const root = await mkdtemp(join(tmpdir(), "junco-policy-"));
   const seed = join(root, "seed");
   await mkdir(join(seed, "src"), { recursive: true });
   await writeFile(join(seed, SOURCE), "const value = seed;\n");

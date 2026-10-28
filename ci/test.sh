@@ -1,12 +1,35 @@
 #!/usr/bin/env bash
-# The full native test lane, run by ci/btrfs-run.sh from the btrfs-mounted project root. Ends with a
-# plain `bun test`: every discovered test file, the btrfs lane included, with nothing skipped.
+# The full native test lane, run in a delegated cgroup with writable Btrfs HOME and fixtures.
+# Ends with plain `bun test`: every discovered test, the Btrfs lane included, with nothing skipped.
 set -euo pipefail
-export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 DO_NOT_TRACK=1
 
 step() { echo "::endgroup::"; echo "::group::$*"; }
 echo "::group::Install workspace"
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
+
+step "Build Junco runtime packages and standard library"
+bun run build
+
+step "Build Graft native grammar bindings"
+(
+  node_prefix=$(node -p 'require("node:path").resolve(process.execPath, "../..")')
+  if [ -z "${npm_config_nodedir:-}" ] && [ -f "$node_prefix/include/node/node.h" ]; then
+    export npm_config_nodedir="$node_prefix"
+  fi
+  for grammar in tree-sitter tree-sitter-go tree-sitter-java tree-sitter-javascript \
+    tree-sitter-kotlin tree-sitter-php tree-sitter-python tree-sitter-r \
+    tree-sitter-swift tree-sitter-typescript; do
+    bun run --cwd "node_modules/$grammar" install
+  done
+)
+
+step "junco-policy: tests and deterministic release oracle"
+bun run test:junco-policy
+
+step "Marsh workspace and executable smoke"
+bash ci/test-marsh.sh
 
 step "junco-tools Rust: rustfmt, Clippy, unit tests (CopyTree)"
 (
@@ -20,38 +43,34 @@ step "junco-tools Rust: rustfmt, Clippy, unit tests (CopyTree)"
 )
 
 step "rust-graph: unit and integration tests"
-(cd packages/junco-tools/crates/rust-graph && cargo test --locked)
+(cd packages/junco-tools/crates/rust-graph && node ../../scripts/with-junco-build-env.mjs cargo test --locked)
 
-# Before junco-tools, whose declaration build imports the engine's public types.
-step "Build dataflow-engine"
-(cd packages/dataflow-engine && bun run build)
+step "Typecheck and test dataflow-engine with coverage"
+(cd packages/dataflow-engine && bun run typecheck && bun run examples:typecheck && bun run test:coverage)
 
-step "Build, typecheck and test junco-tools (CopyTree and btrfs lanes)"
+step "Typecheck and test junco-tools (CopyTree and Btrfs lanes)"
 (
   cd packages/junco-tools
-  bun run build
   bun run typecheck
   bun run build:native:test
   bun run test
   bun run test:btrfs
 )
 
-step "Build, typecheck and test junco-mcp"
-(cd packages/junco-mcp && bun run build && bun run typecheck && bun run test && bun run test:native)
+step "Typecheck and test junco-mcp"
+(cd packages/junco-mcp && bun run typecheck && bun run test && bun run test:native)
 
-step "Build, typecheck and test junco-agent with coverage"
-(cd packages/junco-agent && bun run build && bun run typecheck && bun run test:coverage && bun run test:native)
+step "Typecheck and test junco-agent with coverage"
+(cd packages/junco-agent && bun run typecheck && bun run test:coverage && bun run test:native)
 
-step "Build, typecheck and test junco-scheduler with coverage"
-(cd packages/junco-scheduler && bun run build && bun run typecheck && bun run test:coverage)
+step "Typecheck and test junco-scheduler with coverage"
+(cd packages/junco-scheduler && bun run typecheck && bun run test:coverage)
 
-# The agency's declaration build and typecheck import dataflow-profile's public types.
-step "Build dataflow-engine-opik and dataflow-profile"
-(cd packages/dataflow-engine-opik && bun run build)
-(cd packages/dataflow-profile && bun run build)
+step "Typecheck and test dataflow-engine-opik and dataflow-profile"
+(cd packages/dataflow-engine-opik && bun run typecheck && bun run test)
+(cd packages/dataflow-profile && bun run typecheck && bun run test)
 
-step "Build and test junco-agency"
-bun run build
+step "Typecheck and test junco"
 bun run typecheck
 bun run smoke:profile-optimizer
 bun run test:coverage

@@ -2,7 +2,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { graph } from "junco-agency";
+import { graph } from "junco";
 import { Type } from "typebox";
 import { YAMLError } from "yaml";
 import { ValidationError } from "../src/syntax/errors.ts";
@@ -1296,7 +1296,12 @@ test("strict object boundaries and malformed list/map entries", () => {
 });
 
 test("resource quantities parse on every node kind and reject unknown units", () => {
-  const profiles = { memory: "512 MB", runtime: "1.5 s", tokens: "4000 tok" };
+  const profiles = {
+    memory: "512 MB",
+    runtime: "1.5 s",
+    tokens: "4000 tok",
+    cost: "0.125 USD",
+  };
   const doc = parse({
     graph: {
       nodes: {
@@ -1332,6 +1337,12 @@ test("resource quantities parse on every node kind and reject unknown units", ()
   assert.equal(error.path, "/graph/nodes/A/profiles/memory");
   assert.match(error.message, /"MBs"/);
   assert.match(error.help, /MiB/);
+  const costError = failure(
+    variant((d) => {
+      d.graph.nodes.A.profiles = { cost: "1 dollars" };
+    }),
+  );
+  assert.equal(costError.path, "/graph/nodes/A/profiles/cost");
 });
 
 test("all builtins, collision identities and legal parallel edges", () => {

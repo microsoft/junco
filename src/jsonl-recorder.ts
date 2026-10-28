@@ -36,11 +36,17 @@ type Activation = {
   readonly activation: ProfileActivation;
   /** The agent's committed token sum at start; undefined for non-agents. */
   readonly tokens0: number | undefined;
+  /** The agent's committed cost sum at start; undefined for non-agents. */
+  readonly cost0: number | undefined;
   peak: number;
   /** By JSON-encoded `[resource, category, tool, operation]`. */
   readonly operations: Map<string, Operation>;
   ended:
-    | { readonly runtime: number; readonly tokens: number | undefined }
+    | {
+        readonly runtime: number;
+        readonly tokens: number | undefined;
+        readonly cost: number | undefined;
+      }
     | undefined;
 };
 
@@ -66,6 +72,7 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   // ponytail: late events land on the owner's last activation until it is written; a later one is dropped.
   readonly #latest = new Map<string, Activation>();
   readonly #tokens = new WeakMap<object, number>();
+  readonly #cost = new WeakMap<object, number>();
   /** Ended activations and standalone probe samples, in record order. */
   #pending: (Activation | Sample)[] = [];
   #writing: Promise<void> = Promise.resolve();
@@ -104,10 +111,17 @@ export class JsonlRecorder implements ProfileRecorder<string> {
         });
         return;
       case "usage":
-        this.#tokens.set(
-          event.source,
-          (this.#tokens.get(event.source) ?? 0) + event.usage.totalTokens,
-        );
+        if (event.resource === "tokens")
+          this.#tokens.set(
+            event.source,
+            (this.#tokens.get(event.source) ?? 0) + event.usage.totalTokens,
+          );
+        else
+          this.#cost.set(
+            event.source,
+            (this.#cost.get(event.source) ?? 0) +
+              (event.usage.cost?.total ?? Number.NaN),
+          );
         return;
       case "resource": {
         const { owner, sample } = event.event;
@@ -132,6 +146,10 @@ export class JsonlRecorder implements ProfileRecorder<string> {
               activation.agent === undefined
                 ? undefined
                 : (this.#tokens.get(activation.agent) ?? 0),
+            cost0:
+              activation.agent === undefined
+                ? undefined
+                : (this.#cost.get(activation.agent) ?? 0),
             peak: 0,
             operations: new Map(),
             ended: undefined,
@@ -166,6 +184,10 @@ export class JsonlRecorder implements ProfileRecorder<string> {
             agent === undefined || act.tokens0 === undefined
               ? undefined
               : (this.#tokens.get(agent) ?? 0) - act.tokens0,
+          cost:
+            agent === undefined || act.cost0 === undefined
+              ? undefined
+              : (this.#cost.get(agent) ?? 0) - act.cost0,
         };
         this.#pending.push(act);
         return;
@@ -271,7 +293,11 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   }
 
   #sampleOf(act: Activation): Sample {
-    const ended = act.ended ?? { runtime: 0, tokens: undefined };
+    const ended = act.ended ?? {
+      runtime: 0,
+      tokens: undefined,
+      cost: undefined,
+    };
     const resources: Partial<Record<keyof Sample["resources"], number>> = {
       runtime: ended.runtime,
     };
@@ -281,6 +307,10 @@ export class JsonlRecorder implements ProfileRecorder<string> {
     if (ended.tokens !== undefined) {
       resources.tokens = ended.tokens;
       units.tokens = "tok";
+    }
+    if (ended.cost !== undefined) {
+      resources.cost = ended.cost;
+      units.cost = "USD";
     }
     if (this.#monitored) {
       resources.memory = act.peak;

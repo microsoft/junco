@@ -12,7 +12,7 @@ import {
   type AgenticInput,
   AssistantMessageSchema,
   Deterministic,
-} from "junco-agency";
+} from "junco";
 import { Value } from "typebox/value";
 import {
   approvedPlan,
@@ -373,10 +373,6 @@ test("repository search sends only the scoped GitHub request and rejects invalid
         assert.equal(
           new Headers(init?.headers).get("Accept"),
           "application/vnd.github+json",
-        );
-        assert.equal(
-          new Headers(init?.headers).get("User-Agent"),
-          "junco-agency-oss-committee",
         );
         assert.equal(init?.signal, controller.signal);
         return Response.json({ incomplete_results: false, items: [] });

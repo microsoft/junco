@@ -1,8 +1,7 @@
 /target/
 /dist/
-/native/*.node
-/native/index.js
-/native/index.d.ts
+/native/
+/.native.napi-stage-*/
 /node_modules/
 *.tsbuildinfo
 /graphify-out/

@@ -15,7 +15,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { parseSamples } from "dataflow-profile";
-import { JuncoGraph, schedules, type tools, tracer } from "junco-agency";
+import { JuncoGraph, schedules, type tools, tracer } from "junco";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, type NativeModule, ToolCollection } from "junco-tools";
 import { nativeOptions } from "./support.ts";
@@ -76,7 +76,7 @@ type Run = { readonly tokens: number };
 /** Run the real Start~>Worker->$sink graph once, attributing everything to `recorder`. */
 async function runRecorded(
   recorder: tools.ProfileRecorder<
-    "memory" | "tokens" | "edits" | "operations" | "probe"
+    "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >,
   seed: string,
 ): Promise<Run> {
@@ -153,7 +153,7 @@ async function seeded(prefix: string) {
   return { root, seed };
 }
 
-test("JsonlRecorder records real Worker pipeline memory and committed tokens", async () => {
+test("JsonlRecorder records real Worker pipeline memory and committed usage", async () => {
   const { root, seed } = await seeded("junco-profile-native-");
   const path = join(root, "samples.jsonl");
   const recorder = new tracer.JsonlRecorder({ path, monitored: true });
@@ -180,16 +180,19 @@ test("JsonlRecorder records real Worker pipeline memory and committed tokens", a
       assert.ok((worker.resources.memory ?? 0) > 0);
       assert.ok(run.tokens > 0);
       assert.equal(worker.resources.tokens, run.tokens);
+      assert.equal(worker.resources.cost, 0);
       assert.deepEqual(worker.features, { "Start~>Worker": { count: 1 } });
       assert.deepEqual(worker.units, {
         runtime: "ms",
         tokens: "tok",
+        cost: "USD",
         memory: "B",
       });
       const sink = samples.find((sample) => sample.node === "$sink");
       assert.ok(sink, "$sink must have a recorded activation");
       assert.equal(sink.resources.memory, 0);
       assert.equal(sink.resources.tokens, undefined);
+      assert.equal(sink.resources.cost, undefined);
     } finally {
       await recorder.close();
     }

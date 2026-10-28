@@ -94,6 +94,8 @@ impl Thread {
 #[derive(Default)]
 struct RunState {
     cancelled: bool,
+    /// Accepted spawns whose tracer has not finished delivering and retiring its tree.
+    observers: usize,
     waker: Option<std::task::Waker>,
 }
 
@@ -222,6 +224,24 @@ pub struct Tracing {
     selected: SysnoSet,
 }
 
+/// Keeps cancellation and attribution alive until this command's observer has retired.
+struct ObserverRun {
+    tracing: Arc<Tracing>,
+    run: TraceRun,
+}
+
+impl Drop for ObserverRun {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.tracing.fail("native tracer panicked");
+        }
+        if let Some(run) = lock(&self.tracing.state).runs.get_mut(&self.run) {
+            run.observers -= 1;
+        }
+        self.tracing.progress.notify_all();
+    }
+}
+
 impl Tracing {
     /// Shares the live service, or starts a new generation once the previous one is gone.
     ///
@@ -317,21 +337,28 @@ impl Tracing {
         self.sequence.next()
     }
 
-    /// Waits for all inherited producers and their pending calls to end.
+    /// Waits for every inherited producer, pending call and observer to finish.
     pub fn quiesce(&self, run: TraceRun) -> io::Result<()> {
         let mut state = lock(&self.state);
         loop {
-            state.run(run)?;
-            let busy = state.threads.values().any(|thread| {
-                thread.inherited == Some(run)
-                    || thread
-                        .pending
-                        .is_some_and(|(_, target)| target == Some(run))
-            }) || state
-                .deferred
-                .values()
-                .flatten()
-                .any(|(owner, _)| *owner == run);
+            state.check()?;
+            let observers = state
+                .runs
+                .get(&run)
+                .ok_or_else(|| io::Error::other("closed trace run"))?
+                .observers;
+            let busy = observers != 0
+                || state.threads.values().any(|thread| {
+                    thread.inherited == Some(run)
+                        || thread
+                            .pending
+                            .is_some_and(|(_, target)| target == Some(run))
+                })
+                || state
+                    .deferred
+                    .values()
+                    .flatten()
+                    .any(|(owner, _)| *owner == run);
             if !busy {
                 break;
             }
@@ -459,7 +486,20 @@ impl Tracing {
         let run = self
             .current()
             .ok_or_else(|| io::Error::other("a managed command spawned outside its run's scope"))?;
-        lock(&self.state).run(run)?;
+        let observation = {
+            let mut state = lock(&self.state);
+            state.check()?;
+            state
+                .runs
+                .get_mut(&run)
+                .ok_or_else(|| io::Error::other("closed trace run"))?
+                .observers += 1;
+            drop(state);
+            ObserverRun {
+                tracing: Arc::clone(self),
+                run,
+            }
+        };
         // A PATH search would exec several candidates, and only the first failure is detached.
         if !command.get_program().as_encoded_bytes().contains(&b'/') {
             return Err(io::Error::new(
@@ -471,11 +511,19 @@ impl Tracing {
         let (request_read, request_write) = pipe()?;
         let (release_read, release_write) = pipe()?;
         let (pinned, identity) = std::sync::mpsc::sync_channel(1);
-        let tracing = Arc::clone(self);
         let tracer = std::thread::Builder::new()
             .name("marsh-tracer".into())
             .spawn(move || {
-                tracing.trace(request_read, release_write, &pinned, run, host, events)
+                let result = observation.tracing.trace(
+                    request_read,
+                    release_write,
+                    &pinned,
+                    observation.run,
+                    host,
+                    events,
+                );
+                drop(observation);
+                result
             })?;
         let (request, release) = (request_write.as_raw_fd(), release_read.as_raw_fd());
         // SAFETY: the hook runs in the forked child and only calls async-signal-safe getpid, write

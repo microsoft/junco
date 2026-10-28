@@ -24,7 +24,7 @@ import {
   tools as toolsApi,
   tracer as tracerApi,
   workflows,
-} from "junco-agency";
+} from "junco";
 import { Value } from "typebox/value";
 import { userTexts } from "./deterministic-support.ts";
 import { fauxRuntime, scripted } from "./support.ts";

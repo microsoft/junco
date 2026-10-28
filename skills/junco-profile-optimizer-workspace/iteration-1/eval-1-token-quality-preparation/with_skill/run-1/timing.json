@@ -1,0 +1,6 @@
+{
+  "total_tokens": null,
+  "duration_ms": 77000,
+  "total_duration_seconds": 77,
+  "note": "duration from the task completion notice; the harness reported no token count"
+}

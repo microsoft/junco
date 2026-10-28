@@ -11,7 +11,7 @@ One request → one prepared target plus one invocation of the standard-library 
 bun run junco-profile-optimizer <sessionDir>/request.json
 ```
 
-The library (`workflows.optimizer`, `schedules.runOptimizer` from `junco-agency`) owns execution: it runs the target in fresh child processes, parses `JsonlRecorder` evidence, scores trials, decides convergence and drives a fixed GPT-6.1 Sol editor (`github-copilot/gpt-6.1-sol`, thinking `high`) that patches the tuning regions. This skill only inspects, asks for missing intent, prepares the target, writes the request and invokes the command once. Never copy, wrap or re-implement optimizer code, write an outer experiment loop, or hand the editor a fixed candidate catalog.
+The library (`workflows.optimizer`, `schedules.runOptimizer` from `junco`) owns execution: it runs the target in fresh child processes, parses `JsonlRecorder` evidence, scores trials, decides convergence and drives a fixed GPT-6.1 Sol editor (`github-copilot/gpt-6.1-sol`, thinking `high`) that patches the tuning regions. This skill only inspects, asks for missing intent, prepares the target, writes the request and invokes the command once. Never copy, wrap or re-implement optimizer code, write an outer experiment loop, or hand the editor a fixed candidate catalog.
 
 Target integration details, templates and API limits: [references/profiling.md](references/profiling.md). Read it before preparing a target.
 
@@ -82,13 +82,13 @@ Optional keys: `target.resetArgv`, `runBudget`, `timeBudgetMs`. Unknown keys are
 
 ## 4. Invoke once
 
-From the workflow project, with `junco-agency` installed:
+From the workflow project, with `junco` installed:
 
 ```sh
 bun run junco-profile-optimizer <sessionDir>/request.json
 ```
 
-Exit 0 converged; 2 budget or blocked; 1 failed or invalid input; 130/143 interrupted. Stdout is one JSON summary (`stop`, `baselineScore`, `incumbentScore`, `runCount`, `statePath`, `profilePaths`). If the installed package lacks the `junco-profile-optimizer` binary, report that an optimizer-capable `junco-agency` build/install is required; do not generate a wrapper. Programmatic use under Bun: `schedules.runOptimizer(request, { signal })`.
+Exit 0 converged; 2 budget or blocked; 1 failed or invalid input; 130/143 interrupted. Stdout is one JSON summary (`stop`, `baselineScore`, `incumbentScore`, `runCount`, `statePath`, `profilePaths`). If the installed package lacks the `junco-profile-optimizer` binary, report that an optimizer-capable `junco` build/install is required; do not generate a wrapper. Programmatic use under Bun: `schedules.runOptimizer(request, { signal })`.
 
 Before invoking, the user must have authorized paid execution of the workload, and the Sol editor and every allowed target model must pass the optimizer's preflight (catalog, saved login, account access, thinking support). There is no fallback model.
 

@@ -54,6 +54,11 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1.7976931348623157e+308
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.7976931348623157e+308
         }
       },
       "additionalProperties": false
@@ -118,6 +123,14 @@
             {
               "type": "string",
               "const": "tok"
+            }
+          ]
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "USD"
             }
           ]
         }

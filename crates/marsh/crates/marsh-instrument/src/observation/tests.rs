@@ -564,6 +564,37 @@ fn held_stops() {
         },
     );
     assert_eq!(failed.err().unwrap().to_string(), UNCLASSIFIED);
+
+    // A zombie leader is not held, but its final wait depends on a held sibling's exit.
+    let mut root = None;
+    let mut leader_exiting = false;
+    let mut held_exit = false;
+    let failed = observe_with(
+        Command::new("/bin/sh")
+            .args(["-c", "read _; exec \"$0\" --exact \"$1\" --nocapture"])
+            .arg(std::env::current_exe().unwrap())
+            .arg(TEST)
+            .env("MARSH_OBSERVER_SCENARIO", "thread-fixture"),
+        |delivery| {
+            let leader = *root.get_or_insert(delivery.tid);
+            let mut resume = Resume::default();
+            if let WaitStatus::PtraceEvent(_, _, code) = delivery.status
+                && code == Event::PTRACE_EVENT_EXIT as i32
+            {
+                if delivery.tid == leader {
+                    leader_exiting = true;
+                    nix::sys::signal::kill(leader, Signal::SIGKILL).unwrap();
+                } else {
+                    held_exit = true;
+                    resume.hold_current = true;
+                }
+            }
+            resume
+        },
+    );
+    assert!(leader_exiting);
+    assert!(held_exit);
+    assert_eq!(failed.err().unwrap().to_string(), UNCLASSIFIED);
 }
 
 #[test]
@@ -572,6 +603,38 @@ fn native_observer_regressions() {
         Ok("memory-fixture") => {
             memory_fixture();
             return;
+        }
+        Ok("thread-fixture") => {
+            extern "C" fn exit_thread(_: libc::c_int) {
+                // SAFETY: this fixture intentionally exits only the receiving thread, without
+                // unwinding through libtest or terminating its still-live sibling.
+                unsafe { libc::syscall(libc::SYS_exit, 0) };
+            }
+            // SAFETY: only this fresh fixture process installs the handler, which makes one
+            // async-signal-safe raw syscall and never returns.
+            unsafe {
+                nix::sys::signal::signal(
+                    Signal::SIGUSR1,
+                    nix::sys::signal::SigHandler::Handler(exit_thread),
+                )
+                .unwrap();
+            }
+            let leader = nix::unistd::getpid();
+            assert_eq!(
+                // SAFETY: both ids name this process's leader; SIGUSR1 runs the handler above there.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_tgkill,
+                        leader.as_raw(),
+                        leader.as_raw(),
+                        libc::SIGUSR1,
+                    )
+                },
+                0
+            );
+            loop {
+                std::thread::park();
+            }
         }
         Ok("isolated") => {
             let directory = tempfile::tempdir().unwrap();

@@ -4,12 +4,18 @@
     "module": "ESNext",
     "noEmit": true,
     "paths": {
-      "junco-agency": ["./src/index.ts"]
+      "junco": ["./src/index.ts"]
     },
     "declaration": false,
     "rootDir": ".",
     "allowImportingTsExtensions": true,
     "types": ["node", "bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "examples/**/*.ts",
+    "install.ts",
+    "ci/run-tests.ts"
+  ]
 }

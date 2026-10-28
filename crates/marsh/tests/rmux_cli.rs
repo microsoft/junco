@@ -1905,35 +1905,44 @@ async fn pipe_pane_close_waits_for_publication() {
     host.shutdown().await;
 }
 
-/// A pipe command that ignores both end of file and `SIGTERM` is still forced, and discarded.
+/// A pipe command that ignores end of file is forced and discarded, whether native or builtin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn pipe_pane_close_forces_an_uncooperative_command() {
-    let host = Host::with(Arc::new(PausingCopyTree::default())).await;
-    open_piped_pane(&host).await;
-    let ready = host.scratch.path().join("pipe-ready");
-    let stubborn = sh_command(&format!(
-        "trap '' TERM; printf private > stubborn-pipe-log; printf ready > {}; \
-         while :; do /bin/sleep 60; done",
-        sh_word(&ready.to_string_lossy())
-    ));
-    let receipt = open_pipe(&host, &stubborn, "stubborn-pipe-log").await;
-    await_ready(&ready).await;
+    for native in [true, false] {
+        let host = Host::with(Arc::new(PausingCopyTree::default())).await;
+        open_piped_pane(&host).await;
+        let ready = host.scratch.path().join("pipe-ready");
+        let stubborn = if native {
+            sh_command(&format!(
+                "trap '' TERM; printf private > stubborn-pipe-log; printf ready > {}; \
+                 while :; do /bin/sleep 60; done",
+                sh_word(&ready.to_string_lossy())
+            ))
+        } else {
+            format!(
+                "printf private > stubborn-pipe-log; printf ready > {}; while :; do :; done",
+                sh_word(&ready.to_string_lossy())
+            )
+        };
+        let receipt = open_pipe(&host, &stubborn, "stubborn-pipe-log").await;
+        await_ready(&ready).await;
 
-    let closed = close_pipe(&host).await;
-    assert_ne!(
-        closed.code,
-        0,
-        "a forced close is reported as a failure: {}",
-        String::from_utf8_lossy(&closed.stdout)
-    );
-    assert_interrupted(&*verdict(&receipt).await);
-    assert!(
-        !host.seed("stubborn-pipe-log").exists(),
-        "nothing the forced command staged is published"
-    );
-    await_pane_pipe(&host, "0").await;
-    host.shutdown().await;
+        let closed = close_pipe(&host).await;
+        assert_ne!(
+            closed.code,
+            0,
+            "a forced close is reported as a failure (native={native}): {}",
+            String::from_utf8_lossy(&closed.stdout)
+        );
+        assert_interrupted(&*verdict(&receipt).await);
+        assert!(
+            !host.seed("stubborn-pipe-log").exists(),
+            "nothing the forced command staged is published (native={native})"
+        );
+        await_pane_pipe(&host, "0").await;
+        host.shutdown().await;
+    }
 }
 
 /// An explicit forced stop still beats a publication that has not been sealed.

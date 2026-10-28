@@ -1,0 +1,44 @@
+{
+  "expectations": [
+    {
+      "text": "The response asks for the numeric quality requirement (a threshold and comparison) instead of assuming one, and proposes the existing nested edge as its candidate metric rather than inventing a judge.",
+      "passed": true,
+      "evidence": "response.md asks whether the constraint is >= 0.9 on the nested quality edge and warns the Score heuristic is weak; no judge added"
+    },
+    {
+      "text": "The quality probe identity is given as wrapper path `Review` with local edge ID `quality` (Score -> $sink inside the nested graph), not the display label or a root-level edge.",
+      "passed": true,
+      "evidence": "response.md gives `{ \"kind\": \"probe\", \"node\": \"Review\", \"edgeId\": \"quality\", \"reduce\": \"single\" }` and distinguishes the root Review->Publish edge"
+    },
+    {
+      "text": "The response explains that recorded memory is the per-activation shell-pipeline peak and that this pair has no native monitoring (no resources/monitorIntervalMs or recorder-bound monitored collection, cgroup v2 delegation unverified), so memory cannot be scored until that prerequisite is met or an existing caller-approved memory probe is chosen \u2014 and none exists in the YAML.",
+      "passed": true,
+      "evidence": "response.md explains the cgroup v2 controller delegation requirement (observing the environment's root-owned init.scope), that unobserved runs are rejected, and that no memory edge exists"
+    },
+    {
+      "text": "It asks for (or states as missing) the fixed workload, repeat count and a measurable stop condition (target, improvement and/or plateau window with tolerances) before execution.",
+      "passed": true,
+      "evidence": "Questions 3-4 ask for the fixed workload, repeat safety/resetArgv, argv, repeats and a stop predicate"
+    },
+    {
+      "text": "No files are modified and no optimizer request is written or executed while the required answers are missing; audit.yml stays byte-identical.",
+      "passed": true,
+      "evidence": "Programmatic: audit.yml and audit.ts equal the seeded bytes; the draft prepared entrypoint was written only to outputs/audit.prepared.ts"
+    },
+    {
+      "text": "No invented metric, new node or edge, probe flag in the YAML, implicit iteration cap, false convergence claim or unverified model fallback appears in the response.",
+      "passed": true,
+      "evidence": "No invented metric, topology change, cap, convergence claim or fallback; budgets described as optional"
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "total": 6,
+    "pass_rate": 1.0
+  },
+  "timing": {
+    "executor_duration_seconds": 221.0,
+    "total_duration_seconds": 221.0
+  }
+}

@@ -32,7 +32,7 @@ import {
   type syntax,
   tools,
   tracer,
-} from "junco-agency";
+} from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {

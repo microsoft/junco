@@ -2670,7 +2670,7 @@ describe("graph recorder bridge", () => {
     const level = (
       view:
         | toolsApi.ProfileRecorder<
-            "memory" | "tokens" | "edits" | "operations" | "probe"
+            "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
           >
         | undefined,
       id: string,

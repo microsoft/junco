@@ -1,4 +1,4 @@
-import { Deterministic, graph } from "junco-agency";
+import { Deterministic, graph } from "junco";
 import type { TSchema } from "typebox";
 import type { DeterministicNode } from "../src/syntax/build.ts";
 import { assistant } from "./deterministic-support.ts";

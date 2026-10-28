@@ -24,7 +24,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as E from "fp-ts/lib/Either.js";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { AgenticInputSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco-agency";
+import { AgenticInputSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { runCli, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
@@ -80,7 +80,7 @@ export class OssSearchTool {
           const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query.trim())}&per_page=5`;
           const response = await fetcher(url, {
             method: "GET",
-            headers: { Accept: "application/vnd.github+json", "User-Agent": "junco-agency-oss-committee" },
+            headers: { Accept: "application/vnd.github+json", "User-Agent": "junco-oss-committee" },
             signal,
           });
           if (!response.ok) throw new Error(`GitHub OSS search failed: HTTP ${response.status}`);
