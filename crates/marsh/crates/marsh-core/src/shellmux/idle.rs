@@ -265,7 +265,7 @@ impl IdleTerminal {
         set_attributes(fd.as_fd(), &raw)?;
 
         Ok(Self {
-            fd: Some(AsyncFd::new(fd)?),
+            fd: Some(crate::shellmux::pipes::register_fd(fd)?),
             state,
             saved,
         })

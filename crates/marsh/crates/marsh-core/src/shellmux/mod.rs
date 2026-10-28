@@ -24,6 +24,7 @@ pub use idle::IdleTerminal;
 pub use ids::{JobDir, Principal, ShellId};
 pub use jobs::{JobView, MuxSnapshot, RunningView, Shell};
 pub use mux::{Sandbox, ShellMux};
+pub(crate) use pipes::register_fd;
 pub use types::{
     CommandOptions, JobCloseMode, JobEnd, JobIo, MuxProfile, OutputChannel, SpawnOptions,
     TerminalGeometry,

@@ -74,9 +74,6 @@ const noRoutes = Type.Object(
   { additionalProperties: false },
 );
 
-/** A receiver's one-line description of the payload it accepts on one edge and what it does with it. */
-export type Contract = { readonly expect: string };
-
 /** What a {@link SendTool} sends through: its outgoing routes' parameter schema and admission. */
 export type SendToolHost<N extends TSchema> = {
   readonly sendParameters: TSchema;
@@ -122,11 +119,11 @@ type InfoToolStruct = AgentTool<
   Readonly<
     Record<
       "parents" | "children",
-      readonly (Contract & {
+      readonly {
         readonly id: NodeIdType;
         readonly edgeId: EdgeIdType;
         readonly kind: "message" | "value";
-      })[]
+      }[]
     >
   >
 >;
@@ -390,7 +387,7 @@ export class SendTool<N extends TSchema = never> {
 }
 
 /**
- * `info`: the current graph node's parent and child routes with their receivers' contracts,
+ * `info`: the current graph node's parent and child routes,
  * describing `host`'s node, or the node a `JuncoAgent` binds to its graph activation; without
  * either it fails rather than report an empty topology.
  */
@@ -399,8 +396,7 @@ export class InfoTool {
   readonly name = "info";
   readonly label = "info";
   readonly description: string =
-    "Shows parent and child nodes, edge routes, and receiver expectations for the current " +
-    "graph node. Send only on message edges; value edges carry final results.";
+    "Shows parent and child nodes and edge routes for the current graph node. Send only on message edges; value edges carry final results.";
   readonly parameters = infoParameters;
   readonly executionMode = "sequential";
   execute: UncheckedExecute<InfoToolStruct>;

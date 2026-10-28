@@ -43,7 +43,7 @@
  * their native research children and is closed before the next batch is admitted. Previously
  * applied and released refactors are retained when a later step fails.
  *
- * Prerequisites: an installed `graft` (0.21.1-compatible, run as `graft mcp <root>` and
+ * Prerequisites: an installed `graft` (0.28.0-compatible, run as `graft mcp <root>` and
  * `graft build .`; Graft's normal query refresh stays enabled), the
  * production `junco-tools/native` addon, the Git working-tree root inside a dedicated Btrfs seed,
  * and a saved Pi GitHub Copilot login entitled to both pinned models. Configure Opik's endpoint,
@@ -1379,7 +1379,6 @@ function laneDocument(lanes: readonly CandidateLane[]): syntax.JuncoDocument {
     const proposerId = `Proposer:${work.rank}`;
     const judgeId = `Judge:${work.rank}`;
     const proposal = `proposal:${work.rank}`;
-    const summary = `summary:${work.rank}`;
     const ranked = (node: string) => node === "Proposer" || node === "Judge" ? `${node}:${work.rank}` : node;
     const start = `start:${work.rank}`;
     nodes[proposerId] = {
@@ -1392,7 +1391,6 @@ function laneDocument(lanes: readonly CandidateLane[]): syntax.JuncoDocument {
       ...judge,
       description: `Independently judges the proposal for ${work.candidate.definition.id}.`,
       trigger: proposal,
-      contracts: { [proposal]: judge.contracts!.proposal!, [summary]: judge.contracts!.summary! },
     };
     for (const edge of template) {
       if (edge.from === "FinalizeBatch") continue;
@@ -1535,7 +1533,7 @@ function liveRunner(options: {
         const identity = mcp.getJuncoMcpToolIdentity(tool);
         return identity?.serverName === "graft" && identity.originalToolName === name;
       });
-      if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.21.1-compatible server is required`);
+      if (matches.length !== 1) throw new Error(`Graft MCP exposed ${matches.length} ${name} tools; a Graft 0.28.0-compatible server is required`);
       return matches[0]!;
     });
     for (const name of FILE_RESEARCH_TOOLS) {

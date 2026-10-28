@@ -79,6 +79,17 @@ pub(crate) fn open_pipes() -> std::io::Result<PipeSet> {
     })
 }
 
+/// Registers an owned descriptor with the current Tokio reactor.
+///
+/// # Errors
+///
+/// Fails when the descriptor cannot be registered with the reactor.
+pub(crate) fn register_fd(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
+    // SAFETY: an `OwnedFd` is open until its own drop closes it and always reports the same
+    // descriptor, so it stays valid and unchanged for as long as the `AsyncFd` owns it.
+    Ok(unsafe { AsyncFd::register(fd) }?)
+}
+
 /// The write end of one job's standard input, shared by every handle on that job.
 ///
 /// Behind an async mutex, which is also what serializes writes: two callers writing concurrently
@@ -99,7 +110,7 @@ impl PipeInput {
     /// Fails when the descriptor cannot be registered with the reactor.
     pub(crate) fn new(fd: OwnedFd) -> std::io::Result<Self> {
         Ok(Self {
-            fd: tokio::sync::Mutex::new(Some(AsyncFd::new(fd)?)),
+            fd: tokio::sync::Mutex::new(Some(register_fd(fd)?)),
         })
     }
 
@@ -331,7 +342,7 @@ mod tests {
 
         // Only the test's reader is polled: the shell's own end of this pipe is blocking.
         set_nonblocking(&pipes.child_stdin).expect("a pollable read end");
-        let reader = AsyncFd::new(pipes.child_stdin).expect("a registered read end");
+        let reader = register_fd(pipes.child_stdin).expect("a registered read end");
         let drained = tokio::time::timeout(LIMIT, async {
             let writers = async {
                 write_first.as_mut().await.expect("the first write");
@@ -370,7 +381,7 @@ mod tests {
         let payload = pattern(prefilled.len() * 2, 251, 0);
 
         // Owned here, so a failure or a timeout below still drops it and lets the reader finish.
-        let writer = AsyncFd::new(pipes.input).expect("a registered write end");
+        let writer = register_fd(pipes.input).expect("a registered write end");
         let child_stdin = pipes.child_stdin;
         let drain = tokio::task::spawn_blocking(move || {
             use std::io::Read as _;
@@ -402,7 +413,7 @@ mod tests {
     async fn a_terminal_read_ends_when_its_slave_is_gone() {
         let (master, slave) =
             crate::shellmux::pty::open_pty(24, 80).expect("a private pseudoterminal");
-        let terminal = AsyncFd::new(master).expect("a registered master");
+        let terminal = register_fd(master).expect("a registered master");
         drop(slave);
 
         let mut buffer = [0_u8; 32];

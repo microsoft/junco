@@ -17,3 +17,4 @@ coverage/
 
 # junco-tools' code_graph cache — regenerable, not committed.
 .junco/
+

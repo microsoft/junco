@@ -73,7 +73,6 @@ export {
   type LspToolOptions,
 } from "./lsp.js";
 export {
-  type Contract,
   InfoTool,
   RecvTool,
   type RecvToolHost,

@@ -8,10 +8,10 @@ pub(crate) struct ReedlineCompleter<SE: brush_core::ShellExtensions> {
 }
 
 impl<SE: brush_core::ShellExtensions> reedline::Completer for ReedlineCompleter<SE> {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<reedline::Suggestion> {
-        tokio::task::block_in_place(|| {
+    fn complete(&mut self, line: &str, pos: usize) -> reedline::CompletionResult {
+        reedline::CompletionResult::fresh(tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.complete_async(line, pos))
-        })
+        }))
     }
 }
 

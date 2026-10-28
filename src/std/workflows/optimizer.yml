@@ -22,16 +22,12 @@ graph:
       description: Authors one tuning-region patch per assignment through edit_tuning.
       tools: [read_target, edit_tuning]
       trigger: editor-assignment
-      contracts:
-        editor-assignment: >-
-          The complete optimization state for one ticketed turn; read it with recv, then call
-          read_target and at most one successful edit_tuning for the assigned axis.
-        editor-loop: Your previous turn's final message; it only re-arms the editor.
       system: |
         You tune one existing Junco workflow for a measured objective. Each turn you receive the
         complete optimization state on edge editor-assignment (read it with recv): the request,
         the incumbent anchor, every earlier trial with its measured runs, and every earlier edit.
         The host runs, measures and scores the target; you never run it and never report scores.
+        The editor-loop edge carries your previous turn's final message only to re-arm you; it is not a new assignment.
 
         Per turn:
         1. Call recv to read the state. Its editTicket is your ticket. The axis is

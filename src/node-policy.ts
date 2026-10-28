@@ -29,7 +29,6 @@ import type { ProfileRecorder, ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
 import type {
   Agentic,
-  AgenticNode,
   AnyJuncoAgent,
   AnyMockAgent,
 } from "./agentic.js";
@@ -111,7 +110,7 @@ export const nodePolicies = new WeakMap<object, NodePolicy>();
 
 /**
  * What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes,
- * plus messaging tool contracts read live from the node's actual links.
+ * plus messaging tool schemas read live from the node's actual links.
  */
 export type NodeRegistration<
   N extends TSchema = TSchema,
@@ -129,13 +128,11 @@ export type NodeRegistration<
     | undefined;
   /** The owning graph's current signal. */
   readonly signal: AbortSignal;
-  /** The registered spec's receiver contract, captured because engine nodes drop it. */
-  readonly contract?: AgenticNode["contract"];
 };
 
 /**
  * Each node record's registration, keyed by that registration's own Node record: a reused spec or
- * body registered in several graphs keeps each graph's tracer, routes and contract.
+ * body registered in several graphs keeps each graph's tracer and routes.
  */
 export const registeredNodeContexts = new WeakMap<
   object,

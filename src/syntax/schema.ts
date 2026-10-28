@@ -52,7 +52,6 @@ const agentFields = {
   mcp: Type.Optional(strings),
   skills: Type.Optional(strings),
   prompt: Type.Optional(Type.String()),
-  contracts: Type.Optional(Type.Record(Type.String(), Type.String())),
 };
 // TypeBox 1.x spells recursive schemas Cyclic (Recursive was removed).
 const graphSchema = Type.Cyclic(

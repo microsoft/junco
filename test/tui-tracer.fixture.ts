@@ -225,17 +225,8 @@ async function nativeDisplay(before: string) {
       NativeTui.open("second"),
       /A TUI session already owns this terminal/,
     );
-    tui.setGraph(
-      [
-        { key: "left", nodeId: "A", scope: "g1" },
-        { key: "right", nodeId: "A", scope: "g2" },
-      ],
-      ["A --- A", "0123456789".repeat(14)],
-      [
-        { nodeKey: "left", x: 0, y: 0, width: 1, height: 1 },
-        { nodeKey: "right", x: 6, y: 0, width: 1, height: 1 },
-      ],
-    );
+    tui.setNode({ key: "left", nodeId: "A", scope: "g1" });
+    tui.setNode({ key: "right", nodeId: "A", scope: "g2" });
     tui.setActive("left", true);
     tui.setActive("right", true);
     tui.trace({ nodeKey: "left", recordId: "stream", text: "streamed " });
@@ -288,22 +279,6 @@ async function nativeDisplay(before: string) {
     assert.throws(() =>
       tui.trace({ text: "invalid", tone: "invalid" as never }),
     );
-    for (const x of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 32]) {
-      assert.throws(() =>
-        tui.setGraph(
-          [],
-          ["invalid geometry"],
-          [{ nodeKey: "left", x, y: 0, width: 1, height: 1 }],
-        ),
-      );
-    }
-    assert.throws(() =>
-      tui.setGraph(
-        [],
-        [],
-        [{ nodeKey: "left", x: 0, y: 0, width: 0, height: 1 }],
-      ),
-    );
     const pending = tui.finish();
     phase("awaiting-dismissal", { settled: false });
     await pending;
@@ -316,76 +291,6 @@ async function nativeDisplay(before: string) {
   const fresh = await NativeTui.open("Fresh reservation");
   await fresh.close();
   await restored(before, "TUI_NATIVE_OK");
-}
-
-async function renderingFailure(before: string) {
-  using control = commands();
-  await withNativeCleanup(async (defer) => {
-    const tui = await tracer.TuiTracer.create();
-    const forgetTui = defer(() => tui.close());
-    const graphPorts = terminalPorts(Type.String(), Type.String());
-    const graph = new JuncoGraph(
-      graphPorts.source,
-      graphPorts.sink,
-      Width.create(1),
-      UNBOUNDED,
-      tui,
-      LockPolicy,
-    );
-    const graphContext = schedules.context({
-      graph: graph,
-      scheduler: schedules.parallel(),
-    });
-    const forgetGraph = defer(() => graph.close());
-    const failure = new Error("tui retained rendering failure");
-    // Fail only the TUI layout walk; scheduler observations use the same link iterator.
-    const forEachLink = graph.forEachLink.bind(graph);
-    graph.forEachLink = (callback) => {
-      if (new Error().stack?.includes("frameOf")) throw failure;
-      forEachLink(callback);
-    };
-    const id = graph.addNode({
-      id: NodeId.create("RenderFailure"),
-      trigger: TriggerRule.always(),
-      state: new Deterministic<TString, string>(async function* () {
-        yield [];
-        return "computed";
-      }, LockPolicy),
-    });
-    graphPorts.connect(graph, id);
-    assert.equal((await graphContext.run()).get(id), "computed");
-    await graph.close().finally(forgetGraph);
-    phase("active", { stage: "render-failure" });
-    await control.next("finish");
-    const pending = tui.flush();
-    phase("awaiting-dismissal", { settled: false });
-    await assert.rejects(pending, (error: unknown) => {
-      assert.equal(error, failure);
-      return true;
-    });
-    await assert
-      .rejects(tui.close(), (error: unknown) => {
-        assert.equal(error, failure);
-        return true;
-      })
-      .finally(forgetTui);
-  });
-  assert.equal(modes(), before);
-  const records: string[] = [];
-  const release = redirectLog({
-    write: (line) => {
-      records.push(line);
-    },
-    flush: async () => {},
-  });
-  try {
-    log.error("TUI_RENDER_LOG_RELEASED");
-    await flushLog();
-  } finally {
-    release();
-  }
-  assert.ok(records.some((line) => line.includes("TUI_RENDER_LOG_RELEASED")));
-  await restored(before, "TUI_DISPLAY_FAILURE_OK");
 }
 
 async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
@@ -444,32 +349,6 @@ async function scopes(tui: tracer.TuiTracer, signal: AbortSignal) {
     gates[1]!.resolve();
     await completion;
     for (const execution of roots) await execution.graph.close();
-    const replacementPorts = terminalPorts(Type.String(), Type.String());
-    const replacement = new JuncoGraph(
-      replacementPorts.source,
-      replacementPorts.sink,
-      Width.create(1),
-      UNBOUNDED,
-      tui,
-      LockPolicy,
-    );
-    const replacementContext = schedules.context({
-      graph: replacement,
-      scheduler: schedules.parallel(),
-    });
-    defer(() => replacement.close());
-    replacement.addNode({
-      id: NodeId.create("Replacement"),
-      trigger: TriggerRule.always(),
-      state: new Deterministic<TString, string>(async function* () {
-        yield [];
-        return "new result";
-      }, LockPolicy),
-    });
-    replacementPorts.connect(replacement, NodeId.create("Replacement"));
-    await replacementContext.run({ signal });
-    await replacement.close();
-    phase("active", { stage: "replacement" });
   });
 }
 
@@ -760,7 +639,6 @@ async function main() {
   if (flags.has("--missing") || flags.has("--missing-lazy"))
     return await missingBinding(before, flags.has("--missing-lazy"));
   if (flags.has("--native")) return await nativeDisplay(before);
-  if (flags.has("--display-failure")) return await renderingFailure(before);
   const require = createRequire(import.meta.url);
   const loadedBefore = Object.keys(require.cache).filter((path) =>
     path.endsWith(".node"),

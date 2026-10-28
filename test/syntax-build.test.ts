@@ -1823,44 +1823,31 @@ for (const row of [
     }
   });
 
-for (const advertised of [true, false])
-  test(`builtin info exposes ${advertised ? "the receiver's declared contract" : "a missing-edge error for an empty contract map"}`, async () => {
-    const expectation = "A complete ownership report for the receiver.";
+test("builtin info exposes routes without receiver contracts", async () => {
     let inspected = false;
     const { models, faux } = await fauxRuntime([
       fauxAssistantMessage(
-        [fauxToolCall("info", {}, { id: "inspect-contract" })],
+        [fauxToolCall("info", {}, { id: "inspect-routes" })],
         { stopReason: "toolUse" },
       ),
       (context) => {
         const result = context.messages.find(
           (message) =>
             message.role === "toolResult" &&
-            message.toolCallId === "inspect-contract",
+            message.toolCallId === "inspect-routes",
         );
         assert.ok(
           result?.role === "toolResult",
           "the sender must see info's actual tool result on its next request",
         );
         const text = contentText(result.content);
-        if (advertised) {
-          assert.ok(!result.isError);
-          assert.deepEqual(JSON.parse(text), {
-            parents: [],
-            children: [
-              {
-                id: "Receiver",
-                edgeId: "handoff",
-                kind: "message",
-                expect: expectation,
-              },
-            ],
-          });
-        } else {
-          assert.equal(result.isError, true);
-          assert.match(text, /No contract for edge "handoff"/);
-          assert.doesNotMatch(text, /"expect"\s*:/);
-        }
+        assert.equal(result.isError, false);
+        assert.deepEqual(JSON.parse(text), {
+          parents: [],
+          children: [
+            { id: "Receiver", edgeId: "handoff", kind: "message" },
+          ],
+        });
         inspected = true;
         return fauxAssistantMessage("INSPECTED");
       },
@@ -1873,11 +1860,10 @@ for (const advertised of [true, false])
           graph: {
             nodes: {
               Sender: {
-                prompt: "Inspect the receiver's actual contract using info.",
+                prompt: "Inspect the receiver's routes using info.",
               },
               Receiver: {
                 trigger: "never",
-                contracts: advertised ? { handoff: expectation } : {},
               },
             },
             edges: [
@@ -1899,7 +1885,7 @@ for (const advertised of [true, false])
       assert.equal(
         faux.state.callCount,
         2,
-        "only the sender runs; contract lookup must not execute the receiver",
+        "only the sender runs; topology discovery must not execute the receiver",
       );
       assert.equal(faux.getPendingResponseCount(), 0);
       assert.equal(

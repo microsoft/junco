@@ -1259,6 +1259,7 @@ fn replaced_source(
     mut edits: Vec<&AstSourceEdit>,
 ) -> std::result::Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     use std::os::unix::fs::MetadataExt;
 
     if edits.iter().any(|edit| edit.kind != "replace") {
@@ -1278,7 +1279,13 @@ fn replaced_source(
         return Err(format!("{path} has {} hard links", metadata.nlink()));
     }
     let bytes = std::fs::read(physical).map_err(|err| format!("{path}: {err}"))?;
-    if format!("{:x}", Sha256::digest(&bytes)) != baseline {
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    if digest != baseline {
         return Err(format!("{path} changed since its baseline"));
     }
     let (bom, wide) = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {

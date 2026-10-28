@@ -19,7 +19,6 @@ export const Emitter: DeterministicNode<{ log: string[] }> = ({
       return assistant(`${label}/${node}`);
     }, policy),
     is_available: () => !finished,
-    contract: () => ({ expect: "x" }),
   };
 };
 

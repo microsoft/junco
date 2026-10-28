@@ -41,7 +41,7 @@ import {
   JuncoAgentError,
   SYSTEM_INSTRUCTION,
 } from "junco-agent";
-import { type Contract, EmptyPolicy, LockPolicy } from "junco-tools";
+import { EmptyPolicy, LockPolicy } from "junco-tools";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -91,7 +91,6 @@ type Route = {
   readonly id: string;
   readonly edgeId: string;
   readonly kind: string;
-  readonly expect: string;
 };
 /** What `info` reports, as the model reads it from the tool's JSON text. */
 type Topology = { readonly parents: Route[]; readonly children: Route[] };
@@ -136,18 +135,6 @@ const sorted = (routes: readonly Route[]) =>
     ),
   );
 
-/** A finite receiver's contracts by incoming edge id; it expects nothing on any other edge. */
-function contracts(byEdge: Readonly<Record<string, string>>) {
-  return (edgeId: EdgeIdType): Contract => {
-    if (!Object.hasOwn(byEdge, edgeId))
-      throw new JuncoAgentError(
-        "invalid_state",
-        `No contract for edge "${edgeId}"`,
-      );
-    return { expect: byEdge[edgeId]! };
-  };
-}
-
 /**
  * A real JuncoAgent with a genuine `yield` plus `tools` (fresh recv/send/info by default), serving
  * `responses`. Records each request's context and every tool result it commits. `N` is the inbox
@@ -161,11 +148,9 @@ async function member<N extends TSchema = Chat>(
       new toolsApi.SendTool(),
       new toolsApi.InfoTool(),
     ],
-    contract,
     prompt,
   }: {
     readonly tools?: readonly AgentTool[];
-    readonly contract?: (edgeId: EdgeIdType) => Contract;
     readonly prompt?: AgenticOptions<
       Skill,
       PromptTemplate,
@@ -193,7 +178,6 @@ async function member<N extends TSchema = Chat>(
     ...options,
     systemPrompt: "member",
     tools: [new toolsApi.YieldTool(), ...tools],
-    ...(contract === undefined ? {} : { contract }),
     ...(prompt === undefined ? {} : { prompt }),
   });
   closers.push(() => agent.return());
@@ -204,12 +188,11 @@ async function member<N extends TSchema = Chat>(
   return { agent, faux, contexts, results };
 }
 
-/** A registered coroutine node that never runs; a receiver under `contract` when given. */
+/** A registered coroutine node that never runs. */
 function inert(
   graph: Graph,
   options: {
     readonly id?: NodeIdType;
-    readonly contract?: (edgeId: EdgeIdType) => Contract;
   } = {},
 ): NodeIdType {
   const body = new Deterministic<Chat, AssistantMessage>(async function* () {
@@ -224,12 +207,11 @@ function inert(
   });
 }
 
-/** A coroutine node `id` recording every payload delivered on `edge`, with its contract. */
+/** A coroutine node `id` recording every payload delivered on `edge`. */
 function sink(
   graph: Graph,
   edge: Edge<Chat, AssistantMessage>,
   id: string,
-  expect: string,
 ) {
   const delivered: AgenticInput[] = [];
   const body = new Deterministic<Chat, AssistantMessage>(async function* () {
@@ -243,7 +225,6 @@ function sink(
   const node = graph.addNode({
     id: NodeId.create(id),
     trigger: TriggerRule.when(edge),
-    contract: contracts({ [edge.id]: expect }),
     state: body,
   });
   return { id: node, delivered };
@@ -1192,10 +1173,6 @@ for (const strategy of STRATEGIES) {
             lookup,
             publish,
           ],
-          contract: contracts({
-            [toAgent.id]: "Ordered notes to work through.",
-            [seed.id]: "The source's final seed.",
-          }),
         },
       );
       const graphPorts = terminalPorts();
@@ -1221,12 +1198,7 @@ for (const strategy of STRATEGIES) {
           TriggerEntry.on(seed),
         ),
       });
-      const out = sink(
-        graph,
-        toSink,
-        "sink",
-        "Forwarded notes, kept in order.",
-      );
+      const out = sink(graph, toSink, "sink");
       graph
         .addEdge(sourceId, agentId, toAgent)
         .addEdge(sourceId, agentId, seed)
@@ -1263,13 +1235,11 @@ for (const strategy of STRATEGIES) {
             id: sourceId,
             edgeId: toAgent.id,
             kind: "message",
-            expect: "Ordered notes to work through.",
           },
           {
             id: sourceId,
             edgeId: seed.id,
             kind: "value",
-            expect: "The source's final seed.",
           },
         ]),
       );
@@ -1278,14 +1248,11 @@ for (const strategy of STRATEGIES) {
           id: out.id,
           edgeId: toSink.id,
           kind: "message",
-          expect: "Forwarded notes, kept in order.",
         },
         {
           id: graph.sink.id,
           edgeId: "terminal->$sink",
           kind: "value",
-          expect:
-            "Graph output consumes final work results and publishes messages.",
         },
       ]);
       // info consumed nothing: the first recv holds every delivery, and the second is empty.
@@ -1456,20 +1423,20 @@ for (const strategy of STRATEGIES) {
       });
       const toP = chatEdge("P->sink");
       const toQ = chatEdge("Q->sink");
-      const sinkP = sink(graph, toP, "sinkP", "P's report.");
-      const sinkQ = sink(graph, toQ, "sinkQ", "Q's report.");
+      const sinkP = sink(graph, toP, "sinkP");
+      const sinkQ = sink(graph, toQ, "sinkQ");
       graph.addEdge(ids[0]!, sinkP.id, toP).addEdge(ids[1]!, sinkQ.id, toQ);
 
       graphPorts.connect(graph, ids[2]!);
       await graphContext.run();
 
-      for (const [agent, out, edge, expect] of [
-        [p, sinkP, toP, "P's report."],
-        [q, sinkQ, toQ, "Q's report."],
+      for (const [agent, out, edge] of [
+        [p, sinkP, toP],
+        [q, sinkQ, toQ],
       ] as const) {
         assert.deepEqual(jsonResult<Topology>(agent.results, "info-1"), {
           parents: [],
-          children: [{ id: out.id, edgeId: edge.id, kind: "message", expect }],
+          children: [{ id: out.id, edgeId: edge.id, kind: "message" }],
         });
       }
       assert.deepEqual(sinkP.delivered, [{ kind: "prompt", text: "from P" }]);
@@ -1503,7 +1470,6 @@ for (const strategy of STRATEGIES) {
       const a = inert(graph, { id: NodeId.create("a") });
       const b = inert(graph, {
         id: NodeId.create("b"),
-        contract: contracts({ [edge.id]: "Anything." }),
       });
       graph.addEdge(a, b, edge);
       graphPorts.connect(graph, b);
@@ -1522,7 +1488,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(queued(graph, edge.id), 1);
     });
 
-    test("info reports every actual route with its receiver's live contract, under engine node ids", async () => {
+    test("info reports every actual live route under engine node ids without running receivers", async () => {
       const ab1 = chatEdge("a-b-1");
       const ab2 = chatEdge("a-b-2");
       const abValue = answerEdge("a=>b");
@@ -1531,7 +1497,6 @@ for (const strategy of STRATEGIES) {
       const bw = chatEdge("b-w");
       const xy = chatEdge("b-d");
       const be = chatEdge("b-e");
-      let dExpect = "D: first contract.";
       const b = await member(
         [
           call("info", {}, "info-1"),
@@ -1539,24 +1504,9 @@ for (const strategy of STRATEGIES) {
           call("info", {}, "info-2"),
           fauxAssistantMessage("inspected"),
         ],
-        {
-          contract: contracts({
-            [ab1.id]: "B: first note.",
-            [ab2.id]: "B: second note.",
-            [abValue.id]: "B: A's result.",
-            [self.id]: "B: own reminder.",
-          }),
-        },
       );
-      // A receiving agent answers contract queries without running.
-      const d = new MockAgent({
-        runs: [],
-        contract: (edgeId) => {
-          if (edgeId !== bd.id)
-            throw new JuncoAgentError("invalid_state", "unexpected edge");
-          return { expect: dExpect };
-        },
-      });
+      // Topology discovery does not execute a receiving agent.
+      const d = new MockAgent({ runs: [] });
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
         graphPorts.source,
@@ -1577,7 +1527,7 @@ for (const strategy of STRATEGIES) {
         policy: LockPolicy,
         trigger: TriggerRule.when(bd),
       });
-      // The wrapper's contract, not its selected inner result node's, describes its edge.
+      // A nested wrapper is exposed under its outer node id.
       const innerPorts = terminalPorts();
       const innerContext = plainContext(
         innerPorts.source,
@@ -1585,21 +1535,17 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const inner = innerContext.graph;
-      const innerId = inert(inner, {
-        contract: contracts({ [bw.id]: "inner: unrelated." }),
-      });
+      const innerId = inert(inner);
       innerPorts.connect(inner, innerId);
       const w = graph.addNode({
         id: NodeId.create("W"),
         trigger: TriggerRule.when(bw),
         state: innerContext,
-        contract: contracts({ [bw.id]: "W: wrapper expectation." }),
       });
-      // A disconnected link reusing B->D's edge id has its own receiver's contract.
+      // A disconnected link reusing B->D's edge id stays a separate route.
       const x = inert(graph, { id: NodeId.create("X") });
       const y = inert(graph, {
         id: NodeId.create("Y"),
-        contract: contracts({ [xy.id]: "Y: same edge id, other route." }),
       });
       const z = inert(graph, { id: NodeId.create("Z") });
       graph
@@ -1615,23 +1561,19 @@ for (const strategy of STRATEGIES) {
 
       graphPorts.connect(graph, bId);
       await stepUntil(graphContext, () => b.agent.status === "suspended");
-      // While B is paused, a route is added and a receiver's contract changes.
-      const e = inert(graph, {
-        contract: contracts({ [be.id]: "E: late route." }),
-      });
+      // While B is paused, add a route to the live graph.
+      const e = inert(graph);
       graph.addEdge(bId, e, be);
-      dExpect = "D: second contract.";
       await graphContext.run();
 
       const parents = [
-        { id: a, edgeId: ab1.id, kind: "message", expect: "B: first note." },
-        { id: a, edgeId: ab2.id, kind: "message", expect: "B: second note." },
-        { id: a, edgeId: abValue.id, kind: "value", expect: "B: A's result." },
+        { id: a, edgeId: ab1.id, kind: "message" },
+        { id: a, edgeId: ab2.id, kind: "message" },
+        { id: a, edgeId: abValue.id, kind: "value" },
         {
           id: bId,
           edgeId: self.id,
           kind: "message",
-          expect: "B: own reminder.",
         },
       ];
       const children = [
@@ -1639,20 +1581,16 @@ for (const strategy of STRATEGIES) {
           id: graph.sink.id,
           edgeId: "terminal->$sink",
           kind: "value",
-          expect:
-            "Graph output consumes final work results and publishes messages.",
         },
         {
           id: bId,
           edgeId: self.id,
           kind: "message",
-          expect: "B: own reminder.",
         },
         {
           id: w,
           edgeId: bw.id,
           kind: "message",
-          expect: "W: wrapper expectation.",
         },
       ];
       const first = jsonResult<Topology>(b.results, "info-1");
@@ -1665,7 +1603,6 @@ for (const strategy of STRATEGIES) {
             id: dId,
             edgeId: bd.id,
             kind: "message",
-            expect: "D: first contract.",
           },
         ]),
       );
@@ -1679,12 +1616,11 @@ for (const strategy of STRATEGIES) {
             id: dId,
             edgeId: bd.id,
             kind: "message",
-            expect: "D: second contract.",
           },
-          { id: e, edgeId: be.id, kind: "message", expect: "E: late route." },
+          { id: e, edgeId: be.id, kind: "message" },
         ]),
       );
-      // A's child entries for B are B's own parent expectations for A.
+      // A's child routes to B mirror B's parent routes from A.
       assert.deepEqual(
         sorted(info(a).children),
         sorted(
@@ -1699,7 +1635,6 @@ for (const strategy of STRATEGIES) {
             id: x,
             edgeId: xy.id,
             kind: "message",
-            expect: "Y: same edge id, other route.",
           },
         ],
         children: [],
@@ -1711,50 +1646,6 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "inspected");
     });
 
-    test("info fails without a partial result when a receiver lacks, throws or breaks its contract", () => {
-      const graphPorts = terminalPorts();
-      const graphContext = plainContext(
-        graphPorts.source,
-        graphPorts.sink,
-        strategy,
-      );
-      const graph = graphContext.graph;
-      let contract: Contract | Error = { expect: "Anything." };
-      const s = inert(graph, { id: NodeId.create("S") });
-      const r = inert(graph, {
-        id: NodeId.create("R"),
-        contract: () => {
-          if (contract instanceof Error) throw contract;
-          return contract;
-        },
-      });
-      graph.addEdge(s, r, chatEdge("s->r"));
-      graphPorts.connect(graph, r);
-      const info = () => registeredNodeContexts.get(graph.getNode(s)!)!.info();
-      assert.deepEqual(
-        info().children.map(({ expect }) => expect),
-        ["Anything."],
-      );
-
-      const thrown = new Error("receiver broke");
-      contract = thrown;
-      assert.throws(info, (error: unknown) => error === thrown);
-      for (const expect of ["", "  ", "two\nlines", "two\u2028lines"]) {
-        contract = { expect };
-        assert.throws(info, invalidState);
-      }
-      contract = {} as Contract;
-      assert.throws(info, invalidState);
-
-      // Registration accepts a receiver without a contract; only info about its route fails.
-      contract = { expect: "Anything." };
-      graph.addEdge(
-        s,
-        inert(graph, { id: NodeId.create("bare") }),
-        chatEdge("s->bare"),
-      );
-      assert.throws(info, invalidState);
-    });
   });
 }
 
@@ -1866,7 +1757,6 @@ describe("edge schemas reach each agent's messaging tools", () => {
     const node = graph.addNode({
       id: NodeId.create(id),
       trigger: TriggerRule.when(edge),
-      contract: () => ({ expect: "Payloads." }),
       state: new Deterministic<N, T>(async function* () {
         let view = yield [];
         while (true) {
@@ -1973,7 +1863,6 @@ describe("edge schemas reach each agent's messaging tools", () => {
       state: a.agent,
       policy: LockPolicy,
       trigger: TriggerRule.when(feed),
-      contract: () => ({ expect: "Numbers." }),
     });
     graph.addEdge(feeder, aId, feed);
     ports.connect(graph, aId);

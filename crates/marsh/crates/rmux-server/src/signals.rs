@@ -1,13 +1,14 @@
 use std::io;
+use std::os::fd::AsFd;
 
 use rmux_os::signals::PolledServerSignal;
-use tokio::io::unix::AsyncFd;
+use tokio::net::unix::pipe;
 use tracing::debug;
 
 use crate::diagnostic_log::record_shutdown_request;
 
 pub(crate) struct SignalWatcher {
-    wake: AsyncFd<rmux_os::signals::SignalWakeReadFd>,
+    wake: pipe::Receiver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,20 +30,26 @@ impl std::fmt::Debug for SignalWatcher {
 impl SignalWatcher {
     pub(crate) fn install() -> io::Result<Self> {
         let wake = rmux_os::signals::install_server_signal_flags()?.into_read_fd();
-        Ok(Self {
-            wake: AsyncFd::new(wake)?,
-        })
+        // An owned duplicate of the process-global read end, registered without `unsafe`.
+        let wake = pipe::Receiver::from_owned_fd(wake.as_fd().try_clone_to_owned()?)?;
+        Ok(Self { wake })
     }
 
     pub(crate) async fn wait(&self) -> io::Result<()> {
         loop {
-            let mut guard = self.wake.readable().await?;
+            self.wake.readable().await?;
             let mut buffer = [0_u8; 64];
-            match guard.try_io(|fd| read_wake_pipe(fd.get_ref(), &mut buffer)) {
-                Ok(Ok(_)) => return Ok(()),
-                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(error)) => return Err(error),
-                Err(_would_block) => continue,
+            match self.wake.try_read(&mut buffer) {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -76,8 +83,4 @@ impl SignalWatcher {
             }
         }
     }
-}
-
-fn read_wake_pipe(fd: &rmux_os::signals::SignalWakeReadFd, buffer: &mut [u8]) -> io::Result<usize> {
-    rustix::io::read(fd, buffer).map_err(io::Error::from)
 }

@@ -1497,14 +1497,6 @@ function onlyState(
   return state as OptimizationState;
 }
 
-const contract =
-  (expectations: Readonly<Record<string, string>>) =>
-  (edgeId: string): { expect: string } => {
-    const expect = expectations[edgeId];
-    if (expect === undefined) throw new Error(`no contract for edge ${edgeId}`);
-    return { expect };
-  };
-
 const init: DeterministicNode<OptimizerContext> = ({
   edges,
   policy,
@@ -1562,11 +1554,6 @@ const evaluate: DeterministicNode<OptimizerContext> = ({
       },
       policy,
     ),
-    contract: contract({
-      [EDGES.initial]: "The initial optimization state, before the baseline.",
-      [EDGES.feedback]:
-        "The state after one recorded editor turn, ending in its edit outcome.",
-    }),
   };
 };
 
@@ -1659,10 +1646,6 @@ const feedback: DeterministicNode<OptimizerContext> = ({
       policy,
     ),
     is_available: (view, triggered) => triggered && settled(view),
-    contract: contract({
-      [EDGES.awaiting]: "The ticketed state of the editor turn in flight.",
-      [EDGES.complete]: "The editor's final assistant message for that turn.",
-    }),
   };
 };
 
@@ -1679,7 +1662,6 @@ const finalNode: DeterministicNode<OptimizerContext> = ({ edges, policy }) => {
       },
       policy,
     ),
-    contract: contract({ [EDGES.terminal]: "The stopped optimization state." }),
   };
 };
 

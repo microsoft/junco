@@ -20,7 +20,7 @@ step "Build Graft native grammar bindings"
   fi
   for grammar in tree-sitter tree-sitter-go tree-sitter-java tree-sitter-javascript \
     tree-sitter-kotlin tree-sitter-php tree-sitter-python tree-sitter-r \
-    tree-sitter-swift tree-sitter-typescript; do
+    tree-sitter-typescript; do
     bun run --cwd "node_modules/$grammar" install
   done
 )

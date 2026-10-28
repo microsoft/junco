@@ -31,7 +31,6 @@ import {
   bytes,
   constantProfile,
   type DataflowTracer,
-  type EdgeIdType,
   type ParentView,
   type ProfileSet,
   type ResourceQuantity,
@@ -47,7 +46,7 @@ import {
   resolveStagedPrompt,
   validateActiveTools,
 } from "junco-agent";
-import { type Contract, type Issue, issueLog, trackPromise } from "junco-tools";
+import { type Issue, issueLog, trackPromise } from "junco-tools";
 import type { TSchema } from "typebox";
 
 // An Agentic replaying a constant transcript: no provider, harness, tool or session is involved.
@@ -127,8 +126,6 @@ export type MockTranscript<
   readonly followUpMode?: QueueMode;
   readonly runs: readonly MockRun[];
   readonly maintenance?: readonly MockMaintenance[];
-  /** This agent's receiver contract per incoming graph edge; see {@link MockAgent.contract}. */
-  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
 
 /** What one frame's request would have sent, captured after its queue drains and hooks. */
@@ -701,20 +698,6 @@ export class MockAgent<
   /** The process-wide complaint history every agent and graph shares. */
   get issueLog(): typeof issueLog {
     return issueLog;
-  }
-
-  /**
-   * What this agent expects on its incoming graph edge `edgeId`, from the transcript's `contract`.
-   * Metadata only: it consumes no scripted run and records no request.
-   */
-  contract(edgeId: EdgeIdType): Contract {
-    const contract = this.#transcript.contract;
-    if (contract === undefined)
-      throw new JuncoAgentError(
-        "invalid_state",
-        `No contract for edge "${edgeId}"`,
-      );
-    return contract(edgeId);
   }
 
   // Configuration ----------------------------------------------------------------------------------

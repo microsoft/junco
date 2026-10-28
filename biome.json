@@ -44,6 +44,8 @@
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "javascript": { "formatter": { "quoteStyle": "double" } },
+  "markdown": { "formatter": { "enabled": false } },
+  "yaml": { "formatter": { "enabled": false } },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },
   "overrides": [
     {

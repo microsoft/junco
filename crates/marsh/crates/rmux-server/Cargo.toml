@@ -14,16 +14,16 @@ keywords = ["terminal", "multiplexer", "daemon"]
 categories = ["command-line-interface"]
 
 [dependencies]
-async-recursion = "=1.1.1"
-base64 = { version = "0.22", optional = true }
+async-recursion = "=1.2.0"
+base64 = { version = "0.23", optional = true }
 bincode = "1.3.3"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 glob = "0.3"
 either = "1"
 clap = { version = "4.6.0", features = ["derive"] }
 pin-project-lite = "0.2"
-hkdf = { version = "0.12", optional = true }
+hkdf = { version = "0.13", optional = true }
 httparse = { version = "1.9", optional = true }
 regex = "1.12.2"
 rmux-core.workspace = true
@@ -38,12 +38,12 @@ zeroize = { version = "1", default-features = false, optional = true }
 # results with it on every build, so the derives it needs must be available without `web` too.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
-sha1 = { version = "0.10", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha1 = { version = "0.11", optional = true }
+sha2 = { version = "0.11", optional = true }
 subtle = { version = "2.6", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 tracing = "0.1"
 # The shell engine every pane, popup and workload helper in this daemon runs on.
 marsh-core = { path = "../marsh-core" }

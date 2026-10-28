@@ -1261,7 +1261,6 @@ export async function messagingToolsAreNominalAgentTools(
   view: graph.ParentView<Num, string>,
   signal: AbortSignal,
 ) {
-  const contract: tools.Contract = { expect: "One number to add." };
   const numbersRoute = [graph.EdgeId.create("numbers"), NumberSchema] as const;
   const host = {
     view,
@@ -1278,7 +1277,6 @@ export async function messagingToolsAreNominalAgentTools(
           id: graph.NodeId.create("source"),
           edgeId: graph.EdgeId.create("numbers"),
           kind: "message" as const,
-          ...contract,
         },
       ],
       children: [],
@@ -1325,10 +1323,6 @@ export async function messagingToolsAreNominalAgentTools(
   const routeId: graph.NodeIdType | undefined = route?.id;
   const routeEdge: graph.EdgeIdType | undefined = route?.edgeId;
   const routeKind: "message" | "value" | undefined = route?.kind;
-  const expected: string | undefined = route?.expect;
-  const agreed: tools.Contract = specialized.contract(
-    graph.EdgeId.create("numbers"),
-  );
 
   // @ts-expect-error a copied carrier is not a nominal recv tool
   const plainRecv: tools.RecvTool<Num, string> = { ...recv };
@@ -1340,10 +1334,6 @@ export async function messagingToolsAreNominalAgentTools(
   void tools.RecvTool();
   // @ts-expect-error send names its edge
   await tools.SendTool.invoke(send, host, "send-2", { payload: 1 }, signal);
-  // @ts-expect-error a contract is queried by edge, not node
-  void specialized.contract(graph.NodeId.create("source"));
-  // @ts-expect-error a contract states its expectation
-  const vague: tools.Contract = {};
   return [
     recognized,
     messages,
@@ -1351,12 +1341,9 @@ export async function messagingToolsAreNominalAgentTools(
     routeId,
     routeEdge,
     routeKind,
-    expected,
-    agreed,
     plainRecv,
     plainSend,
     plainInfo,
-    vague,
   ];
 }
 

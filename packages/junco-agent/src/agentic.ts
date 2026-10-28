@@ -21,10 +21,9 @@ import type {
   Model,
   Usage,
 } from "@earendil-works/pi-ai";
-import type { EdgeIdType, ParentView } from "dataflow-engine";
+import type { ParentView } from "dataflow-engine";
 import type {
   ComplainToolHost,
-  Contract,
   ProfileRecorder,
   ToolCollection,
 } from "junco-tools";
@@ -315,11 +314,6 @@ export interface Agentic<
       customInstructions?: string;
     },
   ): Promise<NavigationResult>;
-  /**
-   * What this agent, as a graph receiver, expects on its incoming edge `edgeId`. A metadata query:
-   * it never starts or resumes a run.
-   */
-  contract(edgeId: EdgeIdType): Contract;
 }
 
 /**
@@ -364,8 +358,6 @@ export type AgenticOptions<
    * by itself.
    */
   readonly collection?: ToolCollection;
-  /** This agent's receiver contract per incoming graph edge; see {@link Agentic.contract}. */
-  readonly contract?: (edgeId: EdgeIdType) => Contract;
   /** Usage growth reports for this agent and every subagent it creates; see {@link TokenMonitorConfig}. */
   readonly tokenMonitor?: TokenMonitorConfig;
   /**

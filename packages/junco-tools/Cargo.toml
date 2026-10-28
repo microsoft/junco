@@ -18,8 +18,8 @@ default = []
 test-fs = ["marsh-core/testing"]
 
 [dependencies]
-napi = { version = "=3.13.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
-napi-derive = "=3.6.9"
+napi = { version = "=3.15.0", default-features = false, features = ["napi4", "tokio_rt", "dyn-symbols"] }
+napi-derive = "=3.6.13"
 marsh-core = { path = "../../crates/marsh/crates/marsh-core" }
 marsh-btrfs = { path = "../../crates/marsh/crates/marsh-btrfs" }
 brush-core = "=0.5.0"
@@ -41,9 +41,9 @@ grep-matcher = "0.1"
 grep-pcre2 = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 regex = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 serde_json = "1"
 rust-graph = { path = "crates/rust-graph" }
 smallvec = { version = "1.16.2", features = ["serde", "write", "union", "const_new"] }
@@ -52,7 +52,7 @@ smallvec = { version = "1.16.2", features = ["serde", "write", "union", "const_n
 libc = "0.2"
 
 [build-dependencies]
-napi-build = "=2.5.0"
+napi-build = "=2.6.0"
 
 [patch.crates-io]
 brush-core = { path = "../../crates/marsh/crates/brush-core" }

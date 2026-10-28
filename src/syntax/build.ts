@@ -112,7 +112,6 @@ export type CodeContext<C = unknown> = {
 export type CodeRegistration = {
   readonly state: Deterministic<TSchema, unknown>;
   readonly is_available?: Available;
-  readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
 };
 /** Definition keyed by the code node's id in the workflow config. */
 export type DeterministicNode<C = unknown> = (
@@ -153,7 +152,7 @@ export type BuildOptions<C = unknown> = {
    * Prepared agents keyed by node path (`Worker` or `Child/Worker`), exclusive with createAgent.
    * Ownership transfers at build entry: failure closes every supplied agent; success leaves
    * registered agents owned by the graph. Models, tools, skills and system prompts are already
-   * configured on these agents; node prompts, contracts and profiles still apply.
+   * configured on these agents; node prompts and profiles still apply.
    */
   readonly agents?: Readonly<Record<string, YamlAgent>>;
   /** Factory agents stay caller-owned on construction failure; `createAgentOwnership` decides on success. */
@@ -583,24 +582,11 @@ async function registerAgent(
   }
   if (node.prompt !== undefined)
     instance.stagePrompt(compilePrompt(node.prompt));
-  const byEdge = node.contracts;
-  const contract =
-    byEdge === undefined
-      ? undefined
-      : (edgeId: graph.EdgeIdType) => {
-          if (!Object.hasOwn(byEdge, edgeId))
-            throw new agent.JuncoAgentError(
-              "invalid_state",
-              `No contract for edge "${edgeId}"`,
-            );
-          return { expect: byEdge[edgeId] };
-        };
   const registered = g.addNode({
     ...registration,
     trigger: resolveTrigger(spec, id, edges, node.trigger),
     state: instance,
     policy: c.policy,
-    ...(contract ? { contract } : {}),
   });
   if (c.options.createAgent) {
     // No await since registration: until the build commits, rollback never disposes this agent.
@@ -732,7 +718,6 @@ async function buildGraph(
         ...(created.is_available ? { is_available: created.is_available } : {}),
         trigger: resolveTrigger(spec, id, edges, node.trigger),
         state: created.state,
-        ...(created.contract ? { contract: created.contract } : {}),
       });
     } else {
       await registerAgent(c, g, spec, edges, id, node, registration, key);

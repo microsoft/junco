@@ -940,17 +940,6 @@ export function parse(
         const known = inboundIds.length
           ? `reference one of its inbound edges: ${list(inboundIds)}`
           : `add an edge into "${id}" first`;
-        for (const e of Object.keys(node.contracts ?? {})) {
-          identifier(e, `${nodePath}/contracts/${pointer(e)}`, "key");
-          if (!inboundIds.includes(e))
-            fail(
-              `${nodePath}/contracts/${pointer(e)}`,
-              `Node "${id}" contracts references edge "${e}" which is not one of its inbound edges`,
-              known,
-              "reference",
-              { target: "key" },
-            );
-        }
         for (const [, e] of (node.prompt ?? "").matchAll(PLACEHOLDER))
           if (!inboundIds.includes(e ?? ""))
             fail(

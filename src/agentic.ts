@@ -4,10 +4,10 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { EdgeIdType, NodeSpec, Sink, Source } from "dataflow-engine";
+import type { NodeSpec, Sink, Source } from "dataflow-engine";
 import type { AgenticInputSchema, JuncoAgent } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
-import type { Contract, ToolCollection } from "junco-tools";
+import type { ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
 import type { Deterministic } from "./deterministic.js";
 import type { JuncoGraph } from "./junco-graph.js";
@@ -67,7 +67,7 @@ type StepLess<N extends TSchema, T> = Omit<
 export type AgenticNode<
   N extends TSchema = typeof AgenticInputSchema,
   T = AssistantMessage,
-> = (
+> =
   | (NodeSpec<Agentic<N, T>, N, T> & {
       readonly policy: ToolCollection["policy"];
     })
@@ -99,10 +99,7 @@ export type AgenticNode<
           readonly step?: never;
           readonly policy: ToolCollection["policy"];
         }
-      : never)
-) & {
-  readonly contract?: (edgeId: EdgeIdType) => Contract;
-};
+      : never);
 
 /**
  * Which direct prompt-agent node states `JuncoGraph.compact` compacts:

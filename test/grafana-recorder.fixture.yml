@@ -19,8 +19,6 @@ graph:
                   trigger: always
                   prompt: Allocate, wait for A, then map the code graph.
                   tools: [bash, code_graph]
-                  contracts:
-                    "A~>B": One text prompt announcing that src/a.ts was edited and released.
               edges:
                 - from: A
                   to: B

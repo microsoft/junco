@@ -21,8 +21,7 @@ use napi::bindgen_prelude::PromiseRaw;
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
@@ -51,16 +50,6 @@ pub struct NativeTuiNode {
     pub key: String,
     pub node_id: String,
     pub scope: String,
-}
-
-/// A full-canvas rectangle, validated before any numeric conversion.
-#[napi(object, object_to_js = false)]
-pub struct NativeTuiBox {
-    pub node_key: String,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
 }
 
 /// One chronological record or an update of an identified streaming/progress record.
@@ -285,16 +274,13 @@ impl NativeTui {
         }
     }
 
-    /// Replaces drawing geometry while retaining identity metadata and colors.
+    /// Registers or updates one scoped node identity.
     #[napi]
-    pub fn set_graph(
-        &self,
-        nodes: Vec<NativeTuiNode>,
-        lines: Vec<String>,
-        boxes: Vec<NativeTuiBox>,
-    ) -> Result<()> {
-        self.shared
-            .update(move |model| model.set_graph(nodes, lines, boxes))
+    pub fn set_node(&self, node: NativeTuiNode) -> Result<()> {
+        self.shared.update(move |model| {
+            model.set_node(node);
+            Ok(())
+        })
     }
 
     /// Highlights only the caller's currently executing node.
@@ -600,14 +586,6 @@ struct Node {
     active: bool,
 }
 
-struct NodeBox {
-    node: usize,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tone {
     Normal,
@@ -699,20 +677,11 @@ struct Model {
     nodes: Vec<Node>,
     node_index: HashMap<String, usize>,
     colors: HashSet<(u8, u8, u8)>,
-    lines: Vec<String>,
-    boxes: Vec<NodeBox>,
-    canvas_width: u64,
-    canvas_height: u64,
-    pan_x: u64,
-    pan_y: u64,
-    graph_area: Rect,
     trace_area: Rect,
     wrapped_width: u16,
     wrapping_dirty: bool,
     total_height: usize,
     tail_height: u16,
-    trace_focus: bool,
-    graph_title: String,
     trace_title: String,
     records: VecDeque<Record>,
     record_index: HashMap<RecordKey, u64>,
@@ -732,16 +701,7 @@ impl Model {
             nodes: Vec::new(),
             node_index: HashMap::new(),
             colors: HashSet::new(),
-            lines: vec!["(empty graph)".into()],
-            boxes: Vec::new(),
-            canvas_width: 13,
-            canvas_height: 1,
-            pan_x: 0,
-            pan_y: 0,
-            graph_area: Rect::default(),
             trace_area: Rect::default(),
-            trace_focus: false,
-            graph_title: String::new(),
             trace_title: String::new(),
             records: VecDeque::new(),
             record_index: HashMap::new(),
@@ -764,34 +724,23 @@ impl Model {
     }
 
     fn titles(&mut self) {
-        self.graph_title.clear();
-        self.graph_title.push_str("JuncoGraph");
-        if !self.name.is_empty() {
-            self.graph_title.push_str(" — ");
-            self.graph_title.push_str(&self.name);
-        }
-        if self.finished {
-            self.graph_title.push_str(" | complete");
-        }
-        let mut first = true;
-        for node in &self.nodes {
-            if node.active {
-                self.graph_title
-                    .push_str(if first { " | active: " } else { ", " });
-                self.graph_title.push_str(node.badge.trim());
-                first = false;
-            }
-        }
-        self.graph_title.push_str(if self.trace_focus {
-            " | Tab: focus; q/Esc: dismiss"
-        } else {
-            " | focused: arrows/page/home/end pan; Tab; q/Esc"
-        });
         self.trace_title.clear();
         self.trace_title.push_str("Agent traces");
         if !self.name.is_empty() {
             self.trace_title.push_str(" — ");
             self.trace_title.push_str(&self.name);
+        }
+        if self.finished {
+            self.trace_title.push_str(" | complete");
+        }
+        let mut first = true;
+        for node in &self.nodes {
+            if node.active {
+                self.trace_title
+                    .push_str(if first { " | active: " } else { ", " });
+                self.trace_title.push_str(node.badge.trim());
+                first = false;
+            }
         }
         if self.omitted != 0 {
             let _ = write!(self.trace_title, " | {} omitted", self.omitted);
@@ -801,11 +750,8 @@ impl Model {
         } else {
             " | paused"
         });
-        self.trace_title.push_str(if self.trace_focus {
-            " | focused: arrows/page/home/end scroll; Tab; q/Esc"
-        } else {
-            " | Tab: focus; q/Esc: dismiss"
-        });
+        self.trace_title
+            .push_str(" | arrows/page/home/end scroll; q/Esc: dismiss");
     }
 
     fn color(&mut self, key: &str) -> Color {
@@ -829,70 +775,21 @@ impl Model {
         Color::Rgb(rgb.0, rgb.1, rgb.2)
     }
 
-    fn set_graph(
-        &mut self,
-        nodes: Vec<NativeTuiNode>,
-        lines: Vec<String>,
-        boxes: Vec<NativeTuiBox>,
-    ) -> std::result::Result<(), String> {
-        // Validate the whole replacement before altering any retained metadata.
-        let keys: HashSet<&str> = nodes.iter().map(|node| node.key.as_str()).collect();
-        let mut geometry = Vec::with_capacity(boxes.len());
-        for rect in boxes {
-            if !keys.contains(rect.node_key.as_str())
-                && !self.node_index.contains_key(&rect.node_key)
-            {
-                return Err(format!("Unknown TUI node key: {}", rect.node_key));
-            }
-            let x = coordinate(rect.x, false)?;
-            let y = coordinate(rect.y, false)?;
-            let width = coordinate(rect.width, true)?;
-            let height = coordinate(rect.height, true)?;
-            if x.checked_add(width).is_none() || y.checked_add(height).is_none() {
-                return Err("Invalid TUI geometry: rectangle exceeds the coordinate range".into());
-            }
-            geometry.push((rect.node_key, x, y, width, height));
-        }
-        for node in nodes {
-            let badge = format!("[{}:{}] ", escape(node.scope), escape(node.node_id));
-            if let Some(&index) = self.node_index.get(&node.key) {
-                self.nodes[index].badge = badge;
-            } else {
-                let color = self.color(&node.key);
-                self.node_index.insert(node.key, self.nodes.len());
-                self.nodes.push(Node {
-                    badge,
-                    color,
-                    active: false,
-                });
-            }
-        }
-        self.boxes = geometry
-            .into_iter()
-            .map(|(key, x, y, width, height)| NodeBox {
-                node: self.node_index[&key],
-                x,
-                y,
-                width,
-                height,
-            })
-            .collect();
-        self.lines = if lines.is_empty() {
-            vec!["(empty graph)".into()]
+    fn set_node(&mut self, node: NativeTuiNode) {
+        let badge = format!("[{}:{}] ", escape(node.scope), escape(node.node_id));
+        if let Some(&index) = self.node_index.get(&node.key) {
+            self.nodes[index].badge = badge;
         } else {
-            lines.into_iter().map(escape).collect()
-        };
-        self.canvas_width = self
-            .lines
-            .iter()
-            .map(|line| Line::raw(line.as_str()).width() as u64)
-            .max()
-            .unwrap_or(0);
-        self.canvas_height = self.lines.len() as u64;
-        self.clamp_pan();
+            let color = self.color(&node.key);
+            self.node_index.insert(node.key, self.nodes.len());
+            self.nodes.push(Node {
+                badge,
+                color,
+                active: false,
+            });
+        }
         self.titles();
         self.changed();
-        Ok(())
     }
 
     fn set_active(&mut self, key: &str, active: bool) -> std::result::Result<(), String> {
@@ -1013,17 +910,6 @@ impl Model {
         (offset < self.records.len()).then_some(offset)
     }
 
-    fn clamp_pan(&mut self) {
-        self.pan_x = self.pan_x.min(
-            self.canvas_width
-                .saturating_sub(u64::from(self.graph_area.width)),
-        );
-        self.pan_y = self.pan_y.min(
-            self.canvas_height
-                .saturating_sub(u64::from(self.graph_area.height)),
-        );
-    }
-
     fn clamp_scroll(&mut self) {
         let Some(first) = self.records.front() else {
             self.scroll = Scroll::default();
@@ -1102,81 +988,40 @@ impl Model {
     }
 
     fn key(&mut self, key: KeyCode) {
-        if key == KeyCode::Tab {
-            self.trace_focus = !self.trace_focus;
-        } else if self.trace_focus {
-            self.wrap_records();
-            let max = self
-                .total_height
-                .saturating_sub(usize::from(self.trace_area.height));
-            let current = self.scroll_position();
-            let page = usize::from(self.trace_area.height).max(1);
-            let line = match key {
-                KeyCode::Up | KeyCode::Left => current.saturating_sub(1),
-                KeyCode::Down | KeyCode::Right => current.saturating_add(1).min(max),
-                KeyCode::PageUp => current.saturating_sub(page),
-                KeyCode::PageDown => current.saturating_add(page).min(max),
-                KeyCode::Home => 0,
-                KeyCode::End => {
-                    self.follow = true;
-                    self.tail();
-                    self.titles();
-                    self.changed();
-                    return;
-                }
-                _ => return,
-            };
-            self.follow = false;
-            self.position(line.min(max));
-        } else {
-            let page = u64::from(self.graph_area.height).max(1);
-            match key {
-                KeyCode::Up => self.pan_y = self.pan_y.saturating_sub(1),
-                KeyCode::Down => self.pan_y = self.pan_y.saturating_add(1),
-                KeyCode::Left => self.pan_x = self.pan_x.saturating_sub(1),
-                KeyCode::Right => self.pan_x = self.pan_x.saturating_add(1),
-                KeyCode::PageUp => self.pan_y = self.pan_y.saturating_sub(page),
-                KeyCode::PageDown => self.pan_y = self.pan_y.saturating_add(page),
-                KeyCode::Home => {
-                    self.pan_x = 0;
-                    self.pan_y = 0;
-                }
-                KeyCode::End => {
-                    self.pan_x = self.canvas_width;
-                    self.pan_y = self.canvas_height;
-                }
-                _ => return,
+        self.wrap_records();
+        let max = self
+            .total_height
+            .saturating_sub(usize::from(self.trace_area.height));
+        let current = self.scroll_position();
+        let page = usize::from(self.trace_area.height).max(1);
+        let line = match key {
+            KeyCode::Up | KeyCode::Left => current.saturating_sub(1),
+            KeyCode::Down | KeyCode::Right => current.saturating_add(1).min(max),
+            KeyCode::PageUp => current.saturating_sub(page),
+            KeyCode::PageDown => current.saturating_add(page).min(max),
+            KeyCode::Home => 0,
+            KeyCode::End => {
+                self.follow = true;
+                self.tail();
+                self.titles();
+                self.changed();
+                return;
             }
-            self.clamp_pan();
-        }
+            _ => return,
+        };
+        self.follow = false;
+        self.position(line.min(max));
         self.titles();
         self.changed();
     }
 
     fn render(&mut self, frame: &mut Frame<'_>) {
-        let [graph, traces] =
-            Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(frame.area());
-        let graph_block = Block::bordered()
-            .title(self.graph_title.as_str())
-            .border_style(if self.trace_focus {
-                Style::default()
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            });
+        let area = frame.area();
         let trace_block = Block::bordered()
             .title(self.trace_title.as_str())
-            .border_style(if self.trace_focus {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            });
-        self.graph_area = graph_block.inner(graph);
-        self.trace_area = trace_block.inner(traces);
-        frame.render_widget(graph_block, graph);
-        frame.render_widget(trace_block, traces);
-        self.clamp_pan();
-        self.render_graph(frame.buffer_mut());
+            .border_style(Style::default().add_modifier(Modifier::BOLD));
+        self.trace_area = trace_block.inner(area);
+        frame.render_widget(trace_block, area);
         self.wrap_records();
         if self.records.is_empty() {
             frame.render_widget(Paragraph::new("(no traces yet)"), self.trace_area);
@@ -1205,81 +1050,6 @@ impl Model {
             y += height;
         }
     }
-
-    fn render_graph(&self, buffer: &mut Buffer) {
-        let area = self.graph_area;
-        if area.is_empty() {
-            return;
-        }
-        for row in 0..area.height {
-            let index = self.pan_y.saturating_add(u64::from(row));
-            let Some(line) = usize::try_from(index)
-                .ok()
-                .and_then(|index| self.lines.get(index))
-            else {
-                break;
-            };
-            let mut x = 0u64;
-            for character in line.chars() {
-                let mut encoded = [0u8; 4];
-                let text = character.encode_utf8(&mut encoded);
-                let width = Span::raw(&*text).width() as u64;
-                let end = x.saturating_add(width);
-                if x >= self.pan_x && end <= self.pan_x + u64::from(area.width) {
-                    let column = u16::try_from(x - self.pan_x).unwrap_or(area.width);
-                    if column < area.width {
-                        buffer.set_stringn(
-                            area.x + column,
-                            area.y + row,
-                            &*text,
-                            usize::from(area.width - column),
-                            Style::default(),
-                        );
-                    }
-                }
-                x = end;
-                if x >= self.pan_x + u64::from(area.width) {
-                    break;
-                }
-            }
-        }
-        let right = self.pan_x + u64::from(area.width);
-        let bottom = self.pan_y + u64::from(area.height);
-        for rect in &self.boxes {
-            let left = u64::from(rect.x).max(self.pan_x);
-            let top = u64::from(rect.y).max(self.pan_y);
-            let clipped_right = (u64::from(rect.x) + u64::from(rect.width)).min(right);
-            let clipped_bottom = (u64::from(rect.y) + u64::from(rect.height)).min(bottom);
-            if left >= clipped_right || top >= clipped_bottom {
-                continue;
-            }
-            // All conversion happens after intersection with the u16 viewport.
-            let viewport = Rect::new(
-                area.x + u16::try_from(left - self.pan_x).unwrap_or(0),
-                area.y + u16::try_from(top - self.pan_y).unwrap_or(0),
-                u16::try_from(clipped_right - left).unwrap_or(0),
-                u16::try_from(clipped_bottom - top).unwrap_or(0),
-            );
-            let node = &self.nodes[rect.node];
-            let style = if node.active {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(node.color)
-            };
-            buffer.set_style(viewport, style);
-        }
-    }
-}
-
-fn coordinate(value: f64, positive: bool) -> std::result::Result<u32, String> {
-    let minimum = if positive { 1.0 } else { 0.0 };
-    if !value.is_finite() || value.fract() != 0.0 || value < minimum || value > f64::from(u32::MAX)
-    {
-        return Err("Invalid TUI geometry: coordinates must be non-negative integers and sizes positive integers within the u32 range".into());
-    }
-    Ok(value as u32)
 }
 
 fn escape(text: String) -> String {
@@ -1352,22 +1122,13 @@ fn append_escaped(body: &mut String, text: &str, max: usize, truncated: &mut boo
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     fn node(key: &str, id: &str, scope: &str) -> NativeTuiNode {
         NativeTuiNode {
             key: key.into(),
             node_id: id.into(),
             scope: scope.into(),
-        }
-    }
-
-    fn rect(key: &str, x: f64, y: f64, width: f64, height: f64) -> NativeTuiBox {
-        NativeTuiBox {
-            node_key: key.into(),
-            x,
-            y,
-            width,
-            height,
         }
     }
 
@@ -1391,18 +1152,9 @@ mod tests {
         let shared = Shared::new("test".into());
         shared
             .update(|model| {
-                model.set_graph(
-                    vec![node("alpha", "Alpha", "g1"), node("beta", "Beta", "g1")],
-                    vec![
-                        "+-------+           +------+".into(),
-                        "| Alpha |----edge-->| Beta |".into(),
-                        "+-------+           +------+".into(),
-                    ],
-                    vec![
-                        rect("alpha", 0.0, 0.0, 9.0, 3.0),
-                        rect("beta", 20.0, 0.0, 8.0, 3.0),
-                    ],
-                )
+                model.set_node(node("alpha", "Alpha", "g1"));
+                model.set_node(node("beta", "Beta", "g1"));
+                Ok(())
             })
             .unwrap();
         shared
@@ -1441,33 +1193,23 @@ mod tests {
     }
 
     #[test]
-    fn two_panes_preserve_topology_and_highlight_only_active_intervals() {
+    fn one_pane_uses_full_height_tracks_activity_and_coalesces_records() {
         let shared = scene();
         let mut terminal = test_terminal(100, 30);
         draw(&mut terminal, &shared).unwrap();
-        let graph_area = shared.lock().unwrap().graph_area;
-        let trace_area = shared.lock().unwrap().trace_area;
-        assert_eq!(graph_area, Rect::new(1, 1, 98, 10));
-        assert_eq!(trace_area, Rect::new(1, 13, 98, 16));
-        assert!(row(terminal.backend().buffer(), 0).contains("JuncoGraph"));
-        assert!(row(terminal.backend().buffer(), 12).contains("Agent traces"));
-        let topology = visible(terminal.backend().buffer(), graph_area);
+        assert_eq!(shared.lock().unwrap().trace_area, Rect::new(1, 1, 98, 28));
+        assert!(row(terminal.backend().buffer(), 0).contains("Agent traces"));
+        assert!(row(terminal.backend().buffer(), 1).contains("(no traces yet)"));
+
         let colors = {
             let model = shared.lock().unwrap();
             (model.nodes[0].color, model.nodes[1].color)
         };
         assert_ne!(colors.0, colors.1);
-        assert_eq!(terminal.backend().buffer()[(3, 2)].fg, colors.0);
-        assert_eq!(terminal.backend().buffer()[(23, 2)].fg, colors.1);
-
         shared
             .update(|model| {
                 model.set_active("alpha", true)?;
-                model.set_active("beta", true)
-            })
-            .unwrap();
-        shared
-            .update(|model| {
+                model.set_active("beta", true)?;
                 model.trace(record(Some("alpha"), "alpha ", Some("message"), None, None))?;
                 model.trace(record(
                     Some("beta"),
@@ -1480,13 +1222,8 @@ mod tests {
             })
             .unwrap();
         draw(&mut terminal, &shared).unwrap();
-        for coordinate in [(3, 2), (23, 2)] {
-            let cell = &terminal.backend().buffer()[coordinate];
-            assert_eq!(cell.fg, Color::Green);
-            assert!(cell.modifier.contains(Modifier::BOLD));
-        }
-        assert!(row(terminal.backend().buffer(), 0).contains("[g1:Alpha]"));
-        assert!(row(terminal.backend().buffer(), 0).contains("[g1:Beta]"));
+        assert!(row(terminal.backend().buffer(), 0).contains("active: [g1:Alpha], [g1:Beta]"));
+        assert!(row(terminal.backend().buffer(), 1).contains("[g1:Alpha] alpha text"));
         assert_eq!(
             cell_for(terminal.backend().buffer(), "[g1:Alpha]").fg,
             colors.0
@@ -1495,39 +1232,50 @@ mod tests {
             cell_for(terminal.backend().buffer(), "[g1:Beta]").fg,
             colors.1
         );
-        assert!(visible(terminal.backend().buffer(), trace_area).contains("alpha text"));
-        assert!(visible(terminal.backend().buffer(), trace_area).contains("beta text"));
-        assert_eq!(visible(terminal.backend().buffer(), graph_area), topology);
         assert_eq!(shared.lock().unwrap().records.len(), 2);
 
-        // Yield/end clears one activation without clearing its concurrently running peer.
-        shared
-            .update(|model| model.set_active("alpha", false))
-            .unwrap();
-        draw(&mut terminal, &shared).unwrap();
-        assert_eq!(terminal.backend().buffer()[(3, 2)].fg, colors.0);
-        assert_eq!(terminal.backend().buffer()[(23, 2)].fg, Color::Green);
         shared
             .update(|model| {
+                model.set_active("alpha", false)?;
                 model.set_active("beta", false)?;
-                model.trace(record(Some("beta"), "failed", None, None, Some("error")))
+                model.trace(record(Some("beta"), "failed", None, None, Some("error")))?;
+                model.finish();
+                Ok(())
             })
             .unwrap();
         draw(&mut terminal, &shared).unwrap();
-        assert_eq!(terminal.backend().buffer()[(23, 2)].fg, colors.1);
-        assert!(
-            !terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.fg == Color::Green)
-        );
+        assert!(row(terminal.backend().buffer(), 0).contains("complete"));
+        assert!(!row(terminal.backend().buffer(), 0).contains("active:"));
         assert_eq!(
             cell_for(terminal.backend().buffer(), "failed").fg,
             Color::Red
         );
-        assert_eq!(visible(terminal.backend().buffer(), graph_area), topology);
+
+        let unchanged = {
+            let model = shared.lock().unwrap();
+            (model.follow, model.scroll, model.generation)
+        };
+        shared
+            .update(|model| {
+                model.key(KeyCode::Tab);
+                Ok(())
+            })
+            .unwrap();
+        let model = shared.lock().unwrap();
+        assert_eq!((model.follow, model.scroll, model.generation), unchanged);
+        drop(model);
+
+        for (width, height) in [(0, 0), (1, 1), (2, 2), (3, 1), (1, 3), (10, 5)] {
+            let mut tiny = test_terminal(width, height);
+            draw(&mut tiny, &shared).unwrap();
+            shared
+                .update(|model| {
+                    model.key(KeyCode::Home);
+                    Ok(())
+                })
+                .unwrap();
+            draw(&mut tiny, &shared).unwrap();
+        }
     }
 
     #[test]
@@ -1535,32 +1283,10 @@ mod tests {
         let shared = Shared::new(String::new());
         shared
             .update(|model| {
-                model.set_graph(
-                    vec![node("[1,\"A\"]", "A", "g1"), node("[2,\"A\"]", "A", "g2")],
-                    vec!["A --> A".into()],
-                    vec![
-                        rect("[1,\"A\"]", 0.0, 0.0, 1.0, 1.0),
-                        rect("[2,\"A\"]", 6.0, 0.0, 1.0, 1.0),
-                    ],
-                )
-            })
-            .unwrap();
-        shared
-            .update(|model| {
-                model.trace(record(
-                    Some("[1,\"A\"]"),
-                    "first",
-                    Some("same-id"),
-                    None,
-                    None,
-                ))?;
-                model.trace(record(
-                    Some("[2,\"A\"]"),
-                    "second",
-                    Some("same-id"),
-                    None,
-                    None,
-                ))
+                model.set_node(node("[1,\"A\"]", "A", "g1"));
+                model.set_node(node("[2,\"A\"]", "A", "g2"));
+                model.trace(record(Some("[1,\"A\"]"), "first", None, None, None))?;
+                model.trace(record(Some("[2,\"A\"]"), "second", None, None, None))
             })
             .unwrap();
         let mut terminal = test_terminal(100, 30);
@@ -1568,52 +1294,37 @@ mod tests {
         let first = cell_for(terminal.backend().buffer(), "[g1:A]").fg;
         let second = cell_for(terminal.backend().buffer(), "[g2:A]").fg;
         assert_ne!(first, second);
+
         shared
             .update(|model| {
-                model.set_graph(
-                    vec![node("[1,\"A\"]", "A", "new-scope")],
-                    vec!["A".into()],
-                    vec![rect("[1,\"A\"]", 0.0, 0.0, 1.0, 1.0)],
-                )
-            })
-            .unwrap();
-        shared
-            .update(|model| {
-                model.trace(record(
-                    Some("[2,\"A\"]"),
-                    " retained",
-                    Some("same-id"),
-                    None,
-                    None,
-                ))
+                model.set_active("[1,\"A\"]", true)?;
+                model.set_node(node("[1,\"A\"]", "A", "new-scope"));
+                model.trace(record(Some("[1,\"A\"]"), "updated", None, None, None))?;
+                Ok(())
             })
             .unwrap();
         draw(&mut terminal, &shared).unwrap();
-        assert_eq!(cell_for(terminal.backend().buffer(), "[g1:A]").fg, first);
+        assert_eq!(
+            cell_for(terminal.backend().buffer(), "[new-scope:A]").fg,
+            first
+        );
+        assert!(row(terminal.backend().buffer(), 0).contains("active: [new-scope:A]"));
         assert_eq!(cell_for(terminal.backend().buffer(), "[g2:A]").fg, second);
-        assert_eq!(terminal.backend().buffer()[(1, 1)].fg, first);
+
         let mut model = shared.lock().unwrap();
-        let added = (0..100)
-            .map(|index| node(&format!("extra-{index}"), "A", "g3"))
-            .collect();
-        model.set_graph(added, Vec::new(), Vec::new()).unwrap();
+        for index in 0..100 {
+            model.set_node(node(&format!("extra-{index}"), "A", "g3"));
+        }
         assert_eq!(model.colors.len(), 102);
         assert_eq!(model.nodes[0].color, first);
         assert_eq!(model.nodes[1].color, second);
     }
 
     #[test]
-    fn empty_topology_controls_and_body_tones_render_safely() {
+    fn empty_trace_controls_and_body_tones_render_safely() {
         let shared = Shared::new("session\x1b\n\tname".into());
         let mut terminal = test_terminal(100, 30);
         draw(&mut terminal, &shared).unwrap();
-        assert!(
-            visible(
-                terminal.backend().buffer(),
-                shared.lock().unwrap().graph_area
-            )
-            .contains("(empty graph)")
-        );
         assert!(
             visible(
                 terminal.backend().buffer(),
@@ -1625,17 +1336,13 @@ mod tests {
             !shared
                 .lock()
                 .unwrap()
-                .graph_title
+                .trace_title
                 .chars()
                 .any(char::is_control)
         );
         shared
             .update(|model| {
-                model.set_graph(
-                    vec![node("a", "A\x1b", "g1")],
-                    vec!["A\x1b".into()],
-                    vec![rect("a", 0.0, 0.0, 7.0, 1.0)],
-                )?;
+                model.set_node(node("a", "A\x1b", "g1"));
                 model.trace(record(
                     Some("a"),
                     "ideas\t\x1b[31m\r\u{0085}\n分析🤖",
@@ -1705,64 +1412,9 @@ mod tests {
     }
 
     #[test]
-    fn validates_geometry_and_unknown_record_fields_without_partial_graph_updates() {
+    fn validates_unknown_record_fields_without_partial_updates() {
         let mut model = Model::new(String::new());
-        for value in [
-            -1.0,
-            0.5,
-            f64::NAN,
-            f64::INFINITY,
-            f64::from(u32::MAX) + 1.0,
-        ] {
-            assert!(
-                model
-                    .set_graph(
-                        vec![node("a", "A", "g1")],
-                        vec!["A".into()],
-                        vec![rect("a", value, 0.0, 1.0, 1.0)]
-                    )
-                    .is_err()
-            );
-            assert!(model.nodes.is_empty());
-        }
-        for size in [0.0, -1.0, 0.5, f64::NAN, f64::INFINITY] {
-            assert!(
-                model
-                    .set_graph(
-                        vec![node("a", "A", "g1")],
-                        vec!["A".into()],
-                        vec![rect("a", 0.0, 0.0, size, 1.0)]
-                    )
-                    .is_err()
-            );
-            assert!(
-                model
-                    .set_graph(
-                        vec![node("a", "A", "g1")],
-                        vec!["A".into()],
-                        vec![rect("a", 0.0, 0.0, 1.0, size)]
-                    )
-                    .is_err()
-            );
-        }
-        assert!(
-            model
-                .set_graph(
-                    vec![node("a", "A", "g1")],
-                    Vec::new(),
-                    vec![rect("a", f64::from(u32::MAX), 0.0, 1.0, 1.0)]
-                )
-                .is_err()
-        );
-        assert!(
-            model
-                .set_graph(
-                    Vec::new(),
-                    Vec::new(),
-                    vec![rect("missing", 0.0, 0.0, 1.0, 1.0)]
-                )
-                .is_err()
-        );
+        model.set_node(node("a", "A", "g1"));
         assert!(model.set_active("missing", true).is_err());
         assert!(
             model
@@ -1795,13 +1447,12 @@ mod tests {
             .unwrap();
         let mut terminal = test_terminal(100, 30);
         draw(&mut terminal, &shared).unwrap();
-        assert!(row(terminal.backend().buffer(), 12).contains("1 omitted"));
+        assert!(row(terminal.backend().buffer(), 0).contains("1 omitted"));
         {
             let mut model = shared.lock().unwrap();
             assert_eq!(model.records.len(), HISTORY_RECORDS);
             assert_eq!(model.record_index.len(), HISTORY_RECORDS);
             assert!(!model.record_index.contains_key(&(None, "0".into())));
-            model.key(KeyCode::Tab);
             model.key(KeyCode::Home);
             assert!(!model.follow);
             let first = model.records.front().unwrap().serial;
@@ -1863,7 +1514,7 @@ mod tests {
             })
             .unwrap();
         draw(&mut terminal, &shared).unwrap();
-        assert!(row(terminal.backend().buffer(), 12).contains("omitted"));
+        assert!(row(terminal.backend().buffer(), 0).contains("omitted"));
         assert!(
             visible(
                 terminal.backend().buffer(),
@@ -1874,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn unicode_wrapping_scrolls_by_stable_record_and_resize_not_topology() {
+    fn unicode_wrapping_scrolls_by_stable_record_and_resize() {
         let shared = scene();
         shared
             .update(|model| {
@@ -1893,10 +1544,22 @@ mod tests {
         let mut terminal = test_terminal(100, 30);
         draw(&mut terminal, &shared).unwrap();
         let wide_height = shared.lock().unwrap().records[0].height;
-        let lines = shared.lock().unwrap().lines.clone();
+        let before_tab = {
+            let model = shared.lock().unwrap();
+            (model.follow, model.scroll, model.generation)
+        };
         shared
             .update(|model| {
                 model.key(KeyCode::Tab);
+                Ok(())
+            })
+            .unwrap();
+        {
+            let model = shared.lock().unwrap();
+            assert_eq!((model.follow, model.scroll, model.generation), before_tab);
+        }
+        shared
+            .update(|model| {
                 model.key(KeyCode::Home);
                 Ok(())
             })
@@ -1917,11 +1580,11 @@ mod tests {
             .unwrap();
         draw(&mut terminal, &shared).unwrap();
         assert_eq!(shared.lock().unwrap().scroll, frozen);
+
         let mut narrow = test_terminal(20, 12);
         draw(&mut narrow, &shared).unwrap();
         {
             let model = shared.lock().unwrap();
-            assert_eq!(model.lines, lines);
             assert!(model.records[0].height > wide_height);
             assert_eq!(
                 model.records[0].height,
@@ -1952,55 +1615,6 @@ mod tests {
             )
             .contains("new tail")
         );
-    }
-
-    #[test]
-    fn full_canvas_panning_clips_before_u16_conversion_and_tiny_viewports_do_not_underflow() {
-        let shared = Shared::new(String::new());
-        shared
-            .update(|model| {
-                model.set_graph(
-                    vec![node("far", "ABC", "g1")],
-                    vec![format!("{}ABC", " ".repeat(70_000))],
-                    vec![rect("far", 70_000.0, 0.0, 3.0, 1.0)],
-                )
-            })
-            .unwrap();
-        let mut terminal = test_terminal(100, 30);
-        draw(&mut terminal, &shared).unwrap();
-        shared
-            .update(|model| {
-                model.set_active("far", true)?;
-                model.key(KeyCode::End);
-                Ok(())
-            })
-            .unwrap();
-        draw(&mut terminal, &shared).unwrap();
-        assert!(
-            visible(
-                terminal.backend().buffer(),
-                shared.lock().unwrap().graph_area
-            )
-            .contains("ABC")
-        );
-        assert_eq!(
-            cell_for(terminal.backend().buffer(), "ABC").fg,
-            Color::Green
-        );
-        assert!(shared.lock().unwrap().pan_x > u64::from(u16::MAX));
-        for (width, height) in [(0, 0), (1, 1), (2, 2), (3, 1), (1, 3), (10, 5)] {
-            let mut tiny = test_terminal(width, height);
-            draw(&mut tiny, &shared).unwrap();
-            shared
-                .update(|model| {
-                    model.key(KeyCode::Home);
-                    model.key(KeyCode::Tab);
-                    model.key(KeyCode::PageUp);
-                    Ok(())
-                })
-                .unwrap();
-            draw(&mut tiny, &shared).unwrap();
-        }
     }
 
     #[tokio::test]

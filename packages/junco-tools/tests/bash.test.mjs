@@ -226,7 +226,7 @@ test("LOG_LEVEL defaults to INFO, accepts trimmed case-insensitive names, and re
   const source = `
     const { log, flushLog } = await import("./dist/log.js");
     const records = [];
-    log.settings.prettyLogLevelMethod = { "*": () => {} };
+    log.settings.pretty.levelMethod = { "*": () => {} };
     log.attachTransport((record) => records.push({ level: record._meta.logLevelName, marker: record[0] }));
     log.debug("level-debug");
     log.info("level-info");
@@ -261,7 +261,7 @@ test("complaint observer failures keep issues and admit warnings at WARN but not
     const { issueLog } = await import("./dist/index.js");
     const { log, flushLog } = await import("./dist/log.js");
     const records = [];
-    log.settings.prettyLogLevelMethod = { "*": () => {} };
+    log.settings.pretty.levelMethod = { "*": () => {} };
     log.attachTransport((record) => records.push({ level: record._meta.logLevelName, marker: record[0] }));
     issueLog.append(
       { nodeId: NodeId.create("warning-check"), messages: [], prompt: { systemPrompt: "check", messages: [] }, complaint: "kept" },
@@ -286,7 +286,7 @@ test("redirectLog exclusively owns output, restores the exact table, and flushLo
     const { log, redirectLog, flushLog } = await import("./dist/log.js");
     const previousLines = [];
     const previous = { "*": (line) => previousLines.push(line) };
-    log.settings.prettyLogLevelMethod = previous;
+    log.settings.pretty.levelMethod = previous;
     const lines = [];
     let resolveBarrier;
     const barrier = new Promise((resolve) => { resolveBarrier = resolve; });
@@ -311,20 +311,20 @@ test("redirectLog exclusively owns output, restores the exact table, and flushLo
     resolveBarrier();
     await flushing;
     release();
-    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    assert.equal(log.settings.pretty.levelMethod, previous);
     release();
-    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    assert.equal(log.settings.pretty.levelMethod, previous);
     log.info("restored-marker");
     await flushLog();
     assert.equal(lines.length, 1);
     assert.equal(previousLines.length, 1);
     assert.ok(previousLines[0].includes("restored-marker"));
     const next = redirectLog({ write() {}, async flush() {} });
-    const owned = log.settings.prettyLogLevelMethod;
+    const owned = log.settings.pretty.levelMethod;
     release();
-    assert.equal(log.settings.prettyLogLevelMethod, owned);
+    assert.equal(log.settings.pretty.levelMethod, owned);
     next();
-    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    assert.equal(log.settings.pretty.levelMethod, previous);
     const failure = new Error("sink failure");
     const fail = redirectLog({ write() { throw failure; }, async flush() { throw failure; } });
     try {
@@ -333,7 +333,7 @@ test("redirectLog exclusively owns output, restores the exact table, and flushLo
     } finally {
       fail();
     }
-    assert.equal(log.settings.prettyLogLevelMethod, previous);
+    assert.equal(log.settings.pretty.levelMethod, previous);
   `,
     "INFO",
   );

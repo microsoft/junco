@@ -13,8 +13,6 @@ graph:
       description: Completes every goal in one response.
       trigger: Goals~>Direct
       prompt: Call recv once and complete every goal in the single received message in one response.
-      contracts:
-        Goals~>Direct: One prompt message containing the complete numbered goals assignment, consumed through recv to produce one complete answer.
     Ralph:
       kind: graph
       description: Runs two full-assignment rounds and sends only the final answer.
@@ -93,9 +91,8 @@ graph:
 
         Ralph answer:
         {{Ralph~>Reviewer}}
-      contracts:
-        Direct->Reviewer: Direct's normally completed, non-empty final answer for the joined review.
-        Ralph~>Reviewer: Exactly one message carrying Ralph's raw final assistant draft, normally completed and non-empty, for the joined review.
+
+        Direct's input is its normally completed, non-empty final answer. Ralph's input is exactly one message carrying its raw, normally completed, non-empty final assistant draft.
   edges:
     - from: Goals
       to: Direct

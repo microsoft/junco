@@ -17,13 +17,13 @@ jobs:
         working-directory: junco
     steps:
       - name: Checkout junco
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: junco
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22.19.0'
 
@@ -183,7 +183,7 @@ jobs:
 
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: junco/packages/dataflow-engine/coverage/lcov.info
@@ -301,7 +301,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout junco
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: junco
           persist-credentials: false
@@ -325,7 +325,7 @@ jobs:
 
       - name: Upload junco-agent coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junco-agent-coverage
           path: ${{ runner.temp }}/artifacts/packages/junco-agent/coverage/lcov.info
@@ -333,7 +333,7 @@ jobs:
 
       - name: Upload junco-scheduler coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junco-scheduler-coverage
           path: ${{ runner.temp }}/artifacts/packages/junco-scheduler/coverage/lcov.info
@@ -341,7 +341,7 @@ jobs:
 
       - name: Upload agency coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agency-coverage
           path: ${{ runner.temp }}/artifacts/coverage/lcov.info

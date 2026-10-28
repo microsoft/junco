@@ -23,7 +23,6 @@ import {
   type JuncoAgentNodeContext,
 } from "junco-agent";
 import {
-  type Contract,
   RecvTool,
   SendTool,
   type ToolCollection,
@@ -44,11 +43,6 @@ import { TuiTracer } from "./tui-tracer.js";
 type DrivenAgent<N extends TSchema, V> =
   | JuncoAgent<Skill, PromptTemplate, AgentTool, N, V>
   | MockAgent<Skill, PromptTemplate, AgentTool, N, V>;
-
-/** A registration's receiver contract, which engine nodes do not carry. */
-type NodeContract = {
-  readonly contract?: (edgeId: EdgeIdType) => Contract;
-};
 
 /**
  * The one run of a prompt agent driven by its graph node. Internal: graphs construct its node for
@@ -250,22 +244,18 @@ export class AgentDriver<N extends TSchema, V> {
    * calls `agent.next()` at most once per activation: a `yield` step leaves the agent suspended, a
    * settled step returns the native final message, and a failed step throws the native error.
    * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
-   * message edges and `info` describes this node's routes with each receiver's contract. Unless
+   * message edges and `info` describes this node's routes. Unless
    * `options.is_available` replaces it, the node is available before it starts only when its
    * trigger fires with a staged prompt or fresh inbound data, and once started it stays resumable
    * until it returns; a node re-armed through a value self-edge waits for its trigger again.
-   * Its receiver contract is `options.contract`, else the agent's. A `JuncoAgent`'s `task` calls
-   * run subagents natively; its settlement already follows their reports.
+   * A `JuncoAgent`'s `task` calls run subagents natively; its settlement already follows their reports.
    */
   static node<N extends TSchema, V>(
     agent: DrivenAgent<N, V>,
     options: NodeOptions<N, V> &
       Pick<NodeSpec<Agentic<N, V>, N, V>, "on_error"> &
-      Pick<ToolCollection, "policy"> &
-      NodeContract,
-  ): NodeSpec<Agentic<N, V>, N, V> &
-    Pick<ToolCollection, "policy"> &
-    NodeContract {
+      Pick<ToolCollection, "policy">,
+  ): NodeSpec<Agentic<N, V>, N, V> & Pick<ToolCollection, "policy"> {
     const driver = new AgentDriver<N, V>(agent);
     const step: StepFn<Agentic<N, V>, N, V> = async function* (): NodeGenerator<
       N,
@@ -289,7 +279,6 @@ export class AgentDriver<N extends TSchema, V> {
       ...options,
       state: agent,
       step,
-      contract: options.contract ?? ((edgeId) => agent.contract(edgeId)),
       is_available:
         options.is_available ??
         ((view, triggered) => driver.#isAvailable(view, triggered)),

@@ -50,8 +50,8 @@ junco-policy = { path = "../../../junco-policy" }
 marsh-btrfs = { path = "../marsh-btrfs", features = ["fake"] }
 tempfile = "3.27.0"
 hex = "0.4"
-serial_test = "3"
-sha1 = "0.10"
+serial_test = "4"
+sha1 = "0.11"
 tokio = { version = "1.52.3", features = ["macros", "test-util", "time"] }
 
 [lints]

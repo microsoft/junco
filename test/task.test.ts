@@ -93,7 +93,6 @@ function registry(...names: string[]) {
     async agent(
       provider: string,
       tools: AgentTool[],
-      contract?: (edgeId: graph.EdgeIdType) => toolsApi.Contract,
       recorder?: toolsApi.ProfileRecorder<string>,
     ): Promise<Agent> {
       const resolved = models.getModels(provider)[0];
@@ -105,7 +104,6 @@ function registry(...names: string[]) {
         systemPrompt: "sys",
         ...(recorder === undefined ? {} : { recorder }),
         tools,
-        ...(contract === undefined ? {} : { contract }),
       });
       closers.push(() => agent.return());
       return agent;
@@ -338,7 +336,6 @@ async function failingCaller(
   const caller = await r.agent(
     "caller",
     [new toolsApi.TaskTool()],
-    undefined,
     recorder,
   );
   caller.setTaskFailurePolicy(policy);
@@ -437,7 +434,6 @@ describe("native tasks on a graph-driven caller", () => {
     const receiver = outer.addNode({
       id: graph.NodeId.create("receiver"),
       trigger: trigger.TriggerRule.allOf(trigger.TriggerEntry.on(outbound)),
-      contract: () => ({ expect: "accepted sends" }),
       state: new Deterministic<Chat, AssistantMessage>(async function* () {
         yield [];
         return fauxAssistantMessage("receiver");
@@ -758,7 +754,6 @@ describe("native tasks on a graph-driven caller", () => {
     const consumerId = outer.addNode({
       id: graph.NodeId.create("consumer"),
       trigger: trigger.TriggerRule.when(outbound),
-      contract: () => ({ expect: "numbers" }),
       state: new Deterministic<N, T>(async function* () {
         const view = yield [];
         consumed.push(...graph.from(view, outbound));
@@ -808,10 +803,10 @@ describe("native tasks on a graph-driven caller", () => {
     assertGeometry(outer, geometry);
   });
 
-  test("external edges keep their contract: recv postponed across Yield, values once, messages in order, info/send on the original node, only the final result downstream", async () => {
+  test("external edges preserve routing: recv postponed across Yield, values once, messages in order, info/send on the original node, only the final result downstream", async () => {
     const r = registry("caller", "alpha", "beta");
     type Edge = graph.Edge<Chat, AssistantMessage>;
-    type Route = { id: string; edgeId: string; kind: string; expect: string };
+    type Route = { id: string; edgeId: string; kind: string };
     type Info = { parents: Route[]; children: Route[] };
     type Received = {
       messages: { id: string; payload: AgenticInput }[];
@@ -833,17 +828,6 @@ describe("native tasks on a graph-driven caller", () => {
       "caller=>down",
       AssistantMessageSchema,
     );
-    const expects: Record<string, string> = {
-      [sourceEdge.id]: "caller takes the upstream value",
-      [notesEdge.id]: "caller takes ordered notes",
-      [outboundEdge.id]: "down records follow-up texts",
-      [resultEdge.id]: "down returns the final caller answer",
-    };
-    const contract = (edgeId: graph.EdgeIdType) => {
-      const expect = expects[edgeId];
-      assert.ok(expect, `contract for ${edgeId}`);
-      return { expect };
-    };
     /** Parsed JSON results of every `name` tool call in `context`, in order. */
     const results = <R>(context: Context, name: string): R[] =>
       context.messages.flatMap((message) =>
@@ -960,7 +944,6 @@ describe("native tasks on a graph-driven caller", () => {
         new toolsApi.SendTool(),
         new toolsApi.InfoTool(),
       ],
-      contract,
     );
     const upstreamValue = fauxAssistantMessage("upstream value");
     const received: string[] = [];
@@ -1006,7 +989,6 @@ describe("native tasks on a graph-driven caller", () => {
         trigger.TriggerEntry.on(outboundEdge),
         trigger.TriggerEntry.on(resultEdge),
       ),
-      contract,
       state: new Deterministic<Chat, AssistantMessage>(async function* () {
         let view = yield [];
         while (true) {
@@ -1084,7 +1066,6 @@ describe("native tasks on a graph-driven caller", () => {
       id,
       edgeId: edge.id,
       kind,
-      expect: expects[edge.id],
     });
     const byEdge = (a: Route, b: Route) => a.edgeId.localeCompare(b.edgeId);
     const outerInfo = {

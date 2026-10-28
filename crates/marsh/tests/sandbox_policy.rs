@@ -1451,6 +1451,9 @@ async fn tool_calls_route_by_their_action_and_publish_their_effects() {
     run(&first, "printf mine > c.txt").await;
     denied(&peer, "printf peer > c.txt").await;
     run(&second, "release -- c.txt").await;
+    // The release does not refresh the peer's view of `first`'s edit: it reads before writing.
+    denied(&peer, "printf peer > c.txt").await;
+    run(&peer, "/bin/cat c.txt >/dev/null").await;
     run(&peer, "printf peer > c.txt").await;
     for shell in [shell, peer, first, second] {
         shell.close(false).await.unwrap();

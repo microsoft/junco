@@ -36,7 +36,7 @@ Results use snake_case fields. `sample_files` is only the first five sorted dist
 
 During authoring, read relevant source spans and use omp's available semantic-navigation tools to establish producer/consumer contracts. At execution time, Junco agents can use `code_graph` `deps` on relevant symbols; file deps with `direction: "out", relations: ["contains"]` lists definitions, and ordinary deps handles file imports. Trace interfaces needed by the requested task, not every edge in the repository.
 
-Map directory buckets are not cluster IDs. Directories and symbol clusters have many-to-many membership: one directory can touch several clusters, and one cluster can cross directories. Keep concise source references in descriptions, contracts and the authoring report instead of copying exhaustive inventories.
+Map directory buckets are not cluster IDs. Directories and symbol clusters have many-to-many membership: one directory can touch several clusters, and one cluster can cross directories. Keep concise source references in descriptions, prompts and the authoring report instead of copying exhaustive inventories.
 
 ## 5. Cross-check coverage against the scope
 
@@ -44,13 +44,13 @@ Zero symbols, no matching cluster, sparse/disconnected edges, macros and unsuppo
 
 ## 6. Choose task work packages and handoffs
 
-Choose responsibilities from requested outcomes and interfaces. Combine related small clusters or split a large cluster by task responsibility. There is no one-agent-per-cluster rule or symbol-count agent cap. Add an edge only when its receiver needs the sender's artifact, and name that artifact and acceptance condition in the receiver contract. Do not automatically reverse code edges into workflow edges.
+Choose responsibilities from requested outcomes and interfaces. Combine related small clusters or split a large cluster by task responsibility. There is no one-agent-per-cluster rule or symbol-count agent cap. Add an edge only when its receiver needs the sender's artifact. Name the artifact and acceptance condition in role/handoff prompts, and use the explicit edge ID for routing. Do not automatically reverse code edges into workflow edges.
 
 Cyclic code does not require cyclic execution. Settle a shared interface first or keep a cross-directory cycle in one coherent implementation responsibility. Add review/iteration only when requested; nesting alone is neither a review nor a loop.
 
 ## 7. Author valid YAML directly
 
-Use task-oriented names, brief source-grounded responsibilities, explicit triggers, staged prompts and inbound contracts, following SKILL.md syntax. Include only permitted tools. A read-only role has no edit, release or change-report instructions; constrain any shell access to read-only operations. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
+Use task-oriented names, brief source-grounded responsibilities, explicit triggers and staged prompts containing artifact and acceptance requirements, following SKILL.md syntax. Include only permitted tools. A read-only role has no edit, release or change-report instructions; constrain any shell access to read-only operations. Editing roles coordinate shared-file handoffs without claiming exclusive ownership or inventing hard file boundaries beyond the user's restrictions.
 
 Prefer flat workers unless a requested loop or nested agency needs wrappers. Use the standard Ralph pattern when appropriate. Write valid runtime YAML from the outset: no `files` metadata, post-processing pass, intermediate workflow schema, topology generator or exhaustive repository manifest.
 

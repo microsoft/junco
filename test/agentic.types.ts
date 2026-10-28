@@ -21,7 +21,6 @@ import {
   type DataflowTracer,
   Edge,
   EdgeId,
-  type EdgeIdType,
   Message,
   type NodeGenerator,
   NodeId,
@@ -56,7 +55,6 @@ import {
 import { type PiOptions, pi } from "junco-scheduler/agent";
 import {
   beginOperation,
-  type Contract,
   captureRecorder,
   EmptyPolicy,
   type Issue,
@@ -308,17 +306,14 @@ export function everyKindSharesOneNodeOptions(
     return [...view.values.keys()].length === 0 ? message : message;
   }, LockPolicy);
   mock.stagePrompt("go");
-  const contract = (edgeId: EdgeIdType) => ({ expect: `data on ${edgeId}` });
   const nestedNode = {
     ...options,
     state: child,
-    contract,
   } satisfies AgenticNode;
   const raw: AgenticNode = {
     ...options,
     ...policy,
     state: mock,
-    contract,
     step: async function* () {
       return message;
     },
@@ -326,19 +321,11 @@ export function everyKindSharesOneNodeOptions(
   const nodes: AgenticNode[] = [
     { ...options, ...policy, state: junco },
     { ...options, ...policy, state: mock },
-    { ...options, contract, state: coroutine },
+    { ...options, state: coroutine },
     nestedNode,
     raw,
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
-  const agreed: Contract[] = [
-    junco.contract(EdgeId.create("in")),
-    mock.contract(EdgeId.create("in")),
-  ];
-  // @ts-expect-error a contract is queried by edge, not node
-  void junco.contract(NodeId.create("in"));
-  // @ts-expect-error a contract is synchronous metadata
-  const later: Promise<Contract> = mock.contract(EdgeId.create("in"));
   // @ts-expect-error every node spec carries its policy
   void graph.addNode({ trigger: TriggerRule.always(), state: mock });
   // @ts-expect-error raw node specs carry their policy too
@@ -376,7 +363,7 @@ export function everyKindSharesOneNodeOptions(
   void graph.addNode({ ...options, state: coroutine, result });
   // @ts-expect-error only a nested graph node carries execution fields
   void graph.addNode({ ...options, state: mock, receive: () => undefined });
-  return [ids, agreed, later];
+  return [ids];
 }
 
 export async function promptsLiveOnAgents(

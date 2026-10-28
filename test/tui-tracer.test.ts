@@ -252,24 +252,7 @@ function occurrences(
   }
   return result;
 }
-const graphText = (screen: Screen) => screen.rows.slice(1, 11).join("\n");
-const traces = (screen: Screen) => screen.rows.slice(13, 29).join("\n");
-
-/** Visible records for one concrete node, including their wrapped continuation rows. */
-function nodeTraces(screen: Screen, node: string): string {
-  const lines: string[] = [];
-  let selected = false;
-  for (const row of screen.rows.slice(13, 29)) {
-    const badge = row.match(/\[(?:g\d+:[^\]]+|system)\]/u)?.[0];
-    if (badge !== undefined) selected = badge === node;
-    if (selected) lines.push(row.slice(1, -1).trim());
-  }
-  return lines.join("");
-}
-const green = (screen: Screen, id: string) =>
-  occurrences(screen, id, 1, 11).some(
-    ({ cell }) => cell.color === "green" && cell.bold,
-  );
+const traces = (screen: Screen) => screen.rows.slice(1, 29).join("\n");
 
 async function withPty(
   flags: readonly string[],
@@ -508,93 +491,58 @@ for (const [flag, level, marker] of [
         async (pty) => {
           if (flag !== "--explicit") await pty.phase("constructed");
           await pty.phase("active");
-          const completeTopology = (screen: Screen) => {
-            const canvas = graphText(screen);
-            return (
-              canvas.includes("terminal->$sink (value)") &&
-              canvas.includes("alpha=>beta (value)")
-            );
-          };
-          const alpha = await pty.screen(
-            (screen) => green(screen, "Alpha") && completeTopology(screen),
-            "Alpha actively green",
+          await pty.screen(
+            (screen) =>
+              screen.rows[0]!.includes("Agent traces") &&
+              screen.rows[0]!.includes("active: [g1:Alpha]") &&
+              !screen.rows[0]!.includes("g1:Beta"),
+            "Alpha is the only active identity",
           );
-          assert.equal(
-            green(alpha, "Beta"),
-            false,
-            "a future available/dependent node is not active",
-          );
-          assert.ok(alpha.rows[0]!.includes("JuncoGraph"));
-          assert.ok(alpha.rows[12]!.includes("Agent traces"));
-          const betaTitle = await pty.screen(
+          await pty.screen(
             (screen) =>
               screen.rows[0]!.includes("active: [g1:Beta]") &&
-              !green(screen, "Alpha") &&
-              completeTopology(screen),
-            "Beta scheduled after Alpha ends",
-          );
-          assert.equal(
-            graphText(betaTitle),
-            graphText(alpha),
-            "trace/activity changes must not relayout or erase the upper canvas",
-          );
-          await pty.input("\x1b[6~");
-          await pty.screen(
-            (screen) => green(screen, "Beta"),
-            "panning reveals the executing Beta rectangle",
+              !screen.rows[0]!.includes("g1:Alpha"),
+            "Beta replaces Alpha activity",
           );
           await pty.phase("awaiting-dismissal");
           await pty.input("\x1b[H");
-          const final = await pty.screen(
+          let page = await pty.screen(
             (screen) =>
               screen.rows[0]!.includes("complete") &&
-              !screen.rows[0]!.includes("active:") &&
-              !green(screen, "Alpha") &&
-              graphText(screen).includes("Alpha") &&
-              completeTopology(screen),
-            "final inactive topology restored to its original viewport",
+              screen.rows[0]!.includes("paused") &&
+              !screen.rows[0]!.includes("active:"),
+            "completed trace history pauses at Home",
           );
-          assert.equal(graphText(final), graphText(alpha));
-          if (flag === "--fail") await pty.input("\t\x1b[H\x1b[6~");
-          const messages = await pty.screen(
-            (screen) =>
-              screen.rows[0]!.includes("complete") &&
-              !screen.rows[0]!.includes("active:") &&
-              nodeTraces(screen, "[g1:Beta]").includes("beta done"),
-            "finalized Beta message remains in trace history",
-          );
-          assert.equal(
-            nodeTraces(messages, "[g1:Beta]")
-              .replace(/\s+/gu, "")
-              .split("betadone").length - 1,
-            1,
-            "Beta stream finalization must not duplicate Beta's message in another Beta record",
-          );
-          const betaBadge = occurrences(messages, ":Beta]", 13, 29);
-          assert.ok(betaBadge.length > 0);
-          assert.ok(
-            betaBadge.every(
-              ({ cell }) => cell.color !== "default" && cell.color !== "green",
-            ),
-          );
-          if (flag === "--fail") {
-            await pty.screen(
-              (screen) =>
-                occurrences(screen, "tui smoke failure", 13, 29).some(
-                  ({ cell }) => cell.color === "red",
-                ),
-              "retained computation failure in red",
+          let seen = "";
+          for (;;) {
+            seen += traces(page).replace(/\s+/gu, "");
+            if (seen.includes("betadone")) break;
+            const before = traces(page);
+            await pty.input("\x1b[6~");
+            page = await pty.screen(
+              (screen) => traces(screen) !== before,
+              "paging final trace history",
             );
           }
-          assert.equal(
-            pty.exited,
-            false,
-            "flush must still be pending before dismissal",
-          );
-          assert.equal(
-            pty.phases.some((phase) => phase.phase === "restored"),
-            false,
-          );
+          assert.equal(seen.split("betadone").length - 1, 1);
+          const betaBadge = occurrences(page, ":Beta]", 1, 29);
+          assert.ok(betaBadge.length > 0);
+          assert.ok(betaBadge.every(({ cell }) => cell.color !== "default"));
+          if (flag === "--fail") {
+            while (
+              !occurrences(page, "tui smoke failure", 1, 29).some(
+                ({ cell }) => cell.color === "red",
+              )
+            ) {
+              const before = traces(page);
+              await pty.input("\x1b[6~");
+              page = await pty.screen(
+                (screen) => traces(screen) !== before,
+                "paging retained computation failure",
+              );
+            }
+          }
+          assert.equal(pty.exited, false);
           assert.equal(
             pty.phases.find((phase) => phase.phase === "awaiting-dismissal")
               ?.settled,
@@ -602,24 +550,19 @@ for (const [flag, level, marker] of [
           );
           await pty.input("q");
           await pty.done(marker);
-          assert.equal(
-            pty.terminal.entered,
-            1,
-            "steps share one alternate-screen session",
-          );
+          assert.equal(pty.terminal.entered, 1);
           const historicalAlpha = pty.terminal.frames
-            .flatMap((screen) => occurrences(screen, ":Alpha]", 13, 29))
+            .flatMap((screen) => occurrences(screen, ":Alpha]", 1, 29))
             .map(({ cell }) => cell.color)
             .find((color) => color !== "default");
           const historicalBeta = pty.terminal.frames
-            .flatMap((screen) => occurrences(screen, ":Beta]", 13, 29))
+            .flatMap((screen) => occurrences(screen, ":Beta]", 1, 29))
             .map(({ cell }) => cell.color)
             .find((color) => color !== "default");
           assert.ok(
             historicalAlpha &&
               historicalBeta &&
               historicalAlpha !== historicalBeta,
-            "member badges have distinct identity colors",
           );
         },
         { LOG_LEVEL: level },
@@ -630,37 +573,21 @@ for (const [flag, level, marker] of [
 }
 
 test(
-  "native tasks preserve the parent scene and trace reports through the caller",
+  "native tasks retain reports in caller traces",
   async () => {
     await withPty(
       ["--tasks"],
       async (pty) => {
         await pty.phase("active", "worker");
-        const active = await pty.screen(
-          (screen) =>
-            graphText(screen).includes("caller") &&
-            graphText(screen).includes("terminal->$sink"),
-          "parent scene retained while the task runs",
-        );
         pty.command("worker");
         const complete = await pty.phase("tasks-complete");
         const taskId = complete.childId;
         assert.ok(taskId?.startsWith("task-"));
         await pty.phase("awaiting-dismissal");
-        const finalized = await pty.screen(
-          (screen) =>
-            screen.rows[0]?.includes("complete") === true &&
-            !screen.rows[0]!.includes("active:") &&
-            graphText(screen) === graphText(active),
-          "completed scene retains the parent geometry",
-        );
-        assert.ok(!graphText(finalized).includes("task-"));
-        await pty.input("\t");
         await pty.input("\x1b[H");
         let page = await pty.screen(
-          (screen) =>
-            screen.rows.some((row) => row.includes("home/end scroll")),
-          "focused trace history",
+          (screen) => screen.rows[0]?.includes("paused") === true,
+          "trace history pauses without focus switching",
         );
         let seen = "";
         const expected = [
@@ -679,14 +606,7 @@ test(
             "paging caller traces for handle, report and final answer",
           );
         }
-        assert.equal(
-          traces(page)
-            .replace(/[\s│]+/gu, "")
-            .split("assistant:combined:workerdone").length - 1,
-          1,
-          "one final caller output",
-        );
-        assert.equal(pty.exited, false);
+        assert.equal(seen.split("assistant:combined:workerdone").length - 1, 1);
         await pty.input("q");
         await pty.done("TUI_TASKS_OK");
         assert.equal(pty.terminal.entered, 1);
@@ -699,56 +619,44 @@ test(
 );
 
 test(
-  "concurrent roots retain distinct repeated IDs, clear only their own activations and replace completed scenes",
+  "concurrent roots retain scoped colors and clear only their own activations",
   async () => {
     await withPty(["--scopes"], async (pty) => {
       await pty.phase("active", "scoped-both");
       await pty.screen(
         (screen) =>
           screen.rows[0]!.includes("g1:A") && screen.rows[0]!.includes("g2:A"),
-        "both scoped activations reach the native display",
-      );
-      await pty.input("\x1b[B");
-      const both = await pty.screen(
-        (screen) =>
-          occurrences(screen, "A", 1, 11).filter(
-            ({ cell }) => cell.color === "green" && cell.bold,
-          ).length >= 2 &&
-          screen.rows[0]!.includes("g1:A") &&
-          screen.rows[0]!.includes("g2:A"),
-        "both concrete A nodes active concurrently",
+        "both scoped activations are visible",
       );
       pty.command("left");
       await pty.phase("active", "scoped-right");
-      const right = await pty.screen(
-        (screen) =>
-          occurrences(screen, "A", 1, 11).filter(
-            ({ cell }) => cell.color === "green" && cell.bold,
-          ).length === 1 &&
-          screen.rows[0]!.includes("g2:A") &&
-          !screen.rows[0]!.includes("g1:A"),
-        "only the surviving activation remains green",
-      );
-      assert.equal(graphText(right), graphText(both));
-      pty.command("right");
-      await pty.phase("active", "replacement");
-      await pty.phase("awaiting-dismissal");
       await pty.screen(
         (screen) =>
-          graphText(screen).includes("Replacement") &&
-          !/\bA\b/u.test(graphText(screen)),
-        "new unrelated root replaces both completed roots",
+          screen.rows[0]!.includes("g2:A") && !screen.rows[0]!.includes("g1:A"),
+        "only the surviving activation remains",
       );
-      await pty.input("\t\x1b[H");
-      const history = await pty.screen(
+      pty.command("right");
+      await pty.phase("awaiting-dismissal");
+      await pty.input("\x1b[H");
+      let history = await pty.screen(
         (screen) =>
-          occurrences(screen, "[g1:A]", 13, 29).length > 0 &&
-          occurrences(screen, "[g2:A]", 13, 29).length > 0,
-        "historical scoped badges survive root replacement",
+          !screen.rows[0]!.includes("active:") &&
+          occurrences(screen, "[g1:A]", 1, 29).length > 0,
+        "completed scoped history is visible",
       );
-      const first = occurrences(history, "[g1:A]", 13, 29);
-      const second = occurrences(history, "[g2:A]", 13, 29);
-      assert.notEqual(first[0]!.cell.color, second[0]!.cell.color);
+      while (occurrences(history, "[g2:A]", 1, 29).length === 0) {
+        const before = traces(history);
+        await pty.input("\x1b[6~");
+        history = await pty.screen(
+          (screen) => traces(screen) !== before,
+          "paging scoped history",
+        );
+      }
+      assert.notEqual(
+        occurrences(history, "[g1:A]", 1, 29)[0]!.cell.color,
+        occurrences(history, "[g2:A]", 1, 29)[0]!.cell.color,
+      );
+      assert.ok(!history.rows[0]!.includes("active:"));
       await pty.input("q");
       await pty.done("TUI_SCOPES_OK");
     });
@@ -757,73 +665,62 @@ test(
 );
 
 test(
-  "production NativeTui draw barriers, coalesced streams, keyboard scrolling/panning and validation cleanup",
+  "production NativeTui uses one full-height trace pane and direct history keys",
   async () => {
     await withPty(["--native"], async (pty) => {
       await pty.phase("active", "native-both");
-      const both = await pty.screen(
+      await pty.screen(
         (screen) =>
-          green(screen, "A") &&
-          occurrences(screen, "A", 1, 11).filter(
-            ({ cell }) => cell.color === "green",
-          ).length === 2,
-        "two native activations",
-      );
-      assert.ok(
-        both.rows[0]!.includes("JuncoGraph") &&
-          both.rows[12]!.includes("Agent traces"),
+          screen.rows[0]!.includes("Agent traces") &&
+          screen.rows[0]!.includes("active: [g1:A], [g2:A]") &&
+          traces(screen).includes("streamed"),
+        "both native activations and first-row traces",
       );
       pty.command("yield");
       await pty.phase("active", "native-right");
       const right = await pty.screen(
         (screen) =>
-          traces(screen).includes("streamed complete") &&
-          occurrences(screen, "A", 1, 11).filter(
-            ({ cell }) => cell.color === "green",
-          ).length === 1,
-        "append updates one streaming entry and clears only left",
+          screen.rows[0]!.includes("active: [g2:A]") &&
+          !screen.rows[0]!.includes("g1:A") &&
+          traces(screen).includes("streamed complete"),
+        "coalesced stream and surviving activity",
       );
-      assert.equal(graphText(right), graphText(both));
-      assert.equal(occurrences(right, "streamed complete", 13, 29).length, 1);
+      assert.equal(occurrences(right, "streamed complete", 1, 29).length, 1);
       assert.notEqual(
-        occurrences(right, "[g1:A]", 13, 29)[0]!.cell.color,
-        occurrences(right, "[g2:A]", 13, 29)[0]!.cell.color,
+        occurrences(right, "[g1:A]", 1, 29)[0]!.cell.color,
+        occurrences(right, "[g2:A]", 1, 29)[0]!.cell.color,
       );
       pty.command("fail");
       await pty.phase("active", "keyboard");
-      await pty.input("\t\x1b[H");
+      await pty.input("\x1b[H");
       const home = await pty.screen(
         (screen) =>
-          screen.rows[12]!.includes("paused") &&
+          screen.rows[0]!.includes("paused") &&
           traces(screen).includes("streamed complete"),
-        "Home freezes trace tail-follow and exposes oldest entry",
+        "Home immediately exposes oldest history",
       );
       assert.ok(
-        occurrences(home, "native failure", 13, 29).some(
+        occurrences(home, "native failure", 1, 29).some(
           ({ cell }) => cell.color === "red",
         ),
+      );
+      await pty.input("\t");
+      await pty.screen(
+        (screen) =>
+          screen.rows[0]!.includes("paused") && traces(screen) === traces(home),
+        "Tab leaves scrolling state unchanged",
       );
       await pty.input("\x1b[6~");
       await pty.screen(
         (screen) => !traces(screen).includes("streamed complete"),
-        "PageDown moves the trace viewport",
+        "PageDown advances history",
       );
       await pty.input("\x1b[F");
       await pty.screen(
         (screen) =>
-          screen.rows[12]!.includes("following") &&
+          screen.rows[0]!.includes("following") &&
           traces(screen).includes("scroll record 79"),
         "End restores tail-follow",
-      );
-      await pty.input("\t\x1b[C");
-      await pty.screen(
-        (screen) => graphText(screen) !== graphText(home),
-        "arrows pan only the graph canvas",
-      );
-      await pty.input("\x1b[H");
-      await pty.screen(
-        (screen) => graphText(screen) === graphText(home),
-        "Home restores graph origin",
       );
       pty.terminal.resize(2, 2);
       pty.command("tiny");
@@ -832,17 +729,16 @@ test(
         (screen) =>
           screen.rows.length === 2 &&
           screen.rows.some((row) => row.trim().length > 0),
-        "tiny viewport renders without underflow or panic",
+        "tiny viewport renders safely",
       );
       pty.terminal.resize(100, 30);
       pty.command("resize");
       await pty.phase("active", "resized");
       await pty.screen(
         (screen) =>
-          screen.rows[0]!.includes("JuncoGraph") &&
-          screen.rows[12]!.includes("Agent traces") &&
+          screen.rows[0]!.includes("Agent traces") &&
           traces(screen).includes("resized safely"),
-        "resize redraws both complete panes",
+        "resize redraws the full-height trace pane",
       );
       pty.command("finish");
       await pty.phase("awaiting-dismissal");
@@ -853,7 +749,6 @@ test(
         pty.terminal.frames.some((screen) =>
           screen.rows[0]?.includes("complete"),
         ),
-        "queued dismissal still draws the final frame before restoration",
       );
     });
   },
@@ -870,7 +765,7 @@ for (const [flags, input, marker] of [
       await withPty(flags, async (pty) => {
         await pty.phase("active");
         await pty.screen(
-          (screen) => green(screen, "Alpha"),
+          (screen) => screen.rows[0]!.includes("active: [g1:Alpha]"),
           "active Alpha before early input",
         );
         await pty.input(input);
@@ -912,39 +807,6 @@ test(
       await pty.input("q");
       await pty.done("TUI_SMOKE_OK");
     });
-  },
-  deadlineMs + 1_000,
-);
-
-test(
-  "graph rendering failure retains computation, diagnostic and original error through restored flush/close",
-  async () => {
-    await withPty(
-      ["--display-failure"],
-      async (pty) => {
-        await pty.phase("active", "render-failure");
-        // Checkout paths change stack wrapping; inspect retained history, not its tail.
-        await pty.input("\t\x1b[H");
-        await pty.screen(
-          (screen) =>
-            graphText(screen).includes("(graph rendering failed)") &&
-            nodeTraces(screen, "[system]")
-              .replace(/\s+/gu, "")
-              .includes("tuiretainedrenderingfailure") &&
-            occurrences(screen, "tui retained", 13, 29).some(
-              ({ cell }) => cell.color === "red",
-            ),
-          "real graph-render failure diagnostic across wrapped lines",
-        );
-        pty.command("finish");
-        await pty.phase("awaiting-dismissal");
-        assert.equal(pty.exited, false);
-        await pty.input("q");
-        await pty.done("TUI_DISPLAY_FAILURE_OK");
-      },
-      {},
-      60,
-    );
   },
   deadlineMs + 1_000,
 );

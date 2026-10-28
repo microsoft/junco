@@ -53,7 +53,6 @@ const DOCUMENT = {
       Worker: {
         prompt: "Measure resources",
         tools: ["bash"],
-        contracts: { "Start~>Worker": "One text prompt to measure." },
       },
     },
     edges: [

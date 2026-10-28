@@ -15,7 +15,6 @@ import {
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   DummyTracer,
-  type EdgeIdType,
   type Sink,
   type Source,
   UNBOUNDED,
@@ -102,11 +101,9 @@ export async function leaf(
   {
     prompt,
     tools = [],
-    contract,
   }: {
     readonly prompt?: string;
     readonly tools?: readonly AgentTool[];
-    readonly contract?: (edgeId: EdgeIdType) => toolsApi.Contract;
   } = {},
 ): Promise<{ faux: FauxProviderHandle; agent: JuncoAgent }> {
   const { faux, options } = await nativeOptions(responses);
@@ -117,7 +114,6 @@ export async function leaf(
       systemPrompt: "leaf",
       tools: [new toolsApi.YieldTool(), ...tools],
       ...(prompt === undefined ? {} : { prompt }),
-      ...(contract === undefined ? {} : { contract }),
     }),
   };
 }

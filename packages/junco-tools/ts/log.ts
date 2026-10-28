@@ -1,11 +1,11 @@
-import { DefaultLogLevels, type ILogObj, Logger } from "tslog";
+import { type ILogObj, Logger, LogLevel } from "tslog";
 import type { NativePolicyDecision } from "../native/index.js";
 
 /** `LOG_LEVEL`, read once at startup: blank or missing is INFO; anything unknown is refused. */
-function startupLevel(): DefaultLogLevels {
+function startupLevel(): LogLevel {
   const name = (process.env.LOG_LEVEL ?? "").trim().toUpperCase() || "INFO";
   // Numeric names (`"2"`) resolve to reverse-enum strings, not levels.
-  const level = DefaultLogLevels[name as keyof typeof DefaultLogLevels];
+  const level = LogLevel[name as keyof typeof LogLevel];
   if (typeof level !== "number") {
     throw new Error(
       "Junco LOG_LEVEL must be one of SILLY, TRACE, DEBUG, INFO, WARN, ERROR, FATAL",
@@ -29,19 +29,24 @@ function shared(): Logger<ILogObj> {
     name: "junco",
     type: "pretty",
     minLevel: startupLevel(),
-    prettyLogTemplate: "{{logLevelName}} ",
-    stylePrettyLogs: false,
-    hideLogPositionForProduction: true,
-    prettyInspectOptions: {
-      colors: false,
-      depth: null,
-      maxArrayLength: null,
-      maxStringLength: null,
-      compact: true,
-      breakLength: Number.POSITIVE_INFINITY,
-      getters: false,
-      customInspect: false,
+    pretty: {
+      template: "{{logLevelName}} ",
+      style: false,
+      inspectOptions: {
+        colors: false,
+        depth: null,
+        maxArrayLength: null,
+        maxStringLength: null,
+        compact: true,
+        breakLength: Number.POSITIVE_INFINITY,
+        getters: false,
+        customInspect: false,
+      },
     },
+    stack: { capture: "off" },
+    // Keep tslog 4's record shape and default masking; v5 renamed `_meta` and masks nothing.
+    meta: { property: "_meta" },
+    mask: { keys: ["password"] },
   });
   return global[SLOT];
 }
@@ -54,16 +59,16 @@ export function redirectLog(output: LogOutput): () => void {
   if (outputRegistry[OUTPUT_SLOT] !== undefined) {
     throw new Error("Junco log output is already redirected");
   }
-  const previous = log.settings.prettyLogLevelMethod;
+  const previous = log.settings.pretty.levelMethod;
   outputRegistry[OUTPUT_SLOT] = output;
-  log.settings.prettyLogLevelMethod = {
+  log.settings.pretty.levelMethod = {
     "*": (line) => output.write(line as string),
   };
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    log.settings.prettyLogLevelMethod = previous;
+    log.settings.pretty.levelMethod = previous;
     delete outputRegistry[OUTPUT_SLOT];
   };
 }

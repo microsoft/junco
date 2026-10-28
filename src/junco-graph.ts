@@ -33,7 +33,6 @@ import {
 import { parallel, type SchedulerContext } from "junco-scheduler";
 import {
   beginOperation,
-  type Contract,
   issueLog,
   type ProfileActivation,
   type ProfileRecorder,
@@ -99,10 +98,9 @@ export function isNestedContext<N extends TSchema, T>(
 /** Identity-only lifetime claims; no graph, policy or payload registry. */
 const claimedPorts = new WeakSet<object>();
 
-/** A complete spec as the native graph registers it, with this graph's policy and contract. */
+/** A complete spec as the native graph registers it, with this graph's policy. */
 type CompleteNode<N extends TSchema, T> = NodeSpec<Agentic<N, T>, N, T> & {
   readonly policy: ToolCollection["policy"];
-  readonly contract?: (edgeId: EdgeIdType) => Contract;
 };
 
 /** Resource operations can be awaited inside a drive without joining that drive's own gate. */
@@ -833,28 +831,9 @@ export class JuncoGraph<
       checkRecorder(this.#recorder, member);
     }
     let complete: CompleteNode<N, T>;
-    if (spec.step !== undefined) {
-      const port =
-        state instanceof Source || state instanceof Sink ? state : undefined;
-      let contract = spec.contract;
-      if (
-        port !== undefined &&
-        spec.step === port.step &&
-        contract === undefined
-      ) {
-        const expect =
-          port.description ||
-          (port instanceof Source
-            ? "Externally queued graph input."
-            : "Graph output consumes final work results and publishes messages.");
-        contract = () => ({ expect });
-      }
-      complete = {
-        ...spec,
-        policy,
-        ...(contract === undefined ? {} : { contract }),
-      };
-    } else if (state instanceof Deterministic)
+    if (spec.step !== undefined)
+      complete = { ...spec, policy };
+    else if (state instanceof Deterministic)
       complete = { ...spec, policy, state, step: state.step };
     else if (nested)
       complete = this.#graphNode(spec as NestedNode<N, T>, policy);
@@ -865,7 +844,6 @@ export class JuncoGraph<
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
     const schemas = () => this.#messageSchemas(id);
-    const { contract } = complete;
     const registration: NodeRegistration<N, T> = {
       tracer: this.#delegate,
       get recorder() {
@@ -885,7 +863,6 @@ export class JuncoGraph<
         this.emit(id, message);
       },
       info: () => this.#nodeInfo(id),
-      ...(contract === undefined ? {} : { contract }),
     };
     const node = this.getNode(id);
     if (node === undefined)
@@ -1010,10 +987,7 @@ export class JuncoGraph<
     };
   }
 
-  /**
-   * Node `id`'s parent and child routes, one entry per actual edge, each with the contract its
-   * receiving node in this graph declares for it. Fails rather than omit or invent a contract.
-   */
+  /** Node `id`'s parent and child routes, one entry per actual edge. */
   #nodeInfo(id: NodeIdType): ReturnType<NodeRegistration["info"]> {
     this.signal.throwIfAborted();
     const parents: ReturnType<NodeRegistration["info"]>["parents"][number][] =
@@ -1022,32 +996,9 @@ export class JuncoGraph<
     // ponytail: info scans graph links; add an adjacency index only if large graphs make this hot.
     this.forEachLink((from, to, edge) => {
       if (from !== id && to !== id) return;
-      const node = this.getNode(to);
-      const receiver = node && registeredNodeContexts.get(node)?.contract;
-      if (receiver === undefined)
-        throw new JuncoAgentError(
-          "invalid_state",
-          `No contract for edge "${edge.id}" at node "${to}"`,
-        );
-      const contract: unknown = receiver(edge.id);
-      const expect =
-        typeof contract === "object" &&
-        contract !== null &&
-        "expect" in contract
-          ? contract.expect
-          : undefined;
-      if (
-        typeof expect !== "string" ||
-        expect.trim() === "" ||
-        /[\r\n\u2028\u2029]/u.test(expect)
-      )
-        throw new JuncoAgentError(
-          "invalid_state",
-          `Invalid contract for edge "${edge.id}" at node "${to}"`,
-        );
       const kind = E.isLeft(edge.transport) ? "message" : "value";
-      if (to === id) parents.push({ id: from, edgeId: edge.id, kind, expect });
-      if (from === id) children.push({ id: to, edgeId: edge.id, kind, expect });
+      if (to === id) parents.push({ id: from, edgeId: edge.id, kind });
+      if (from === id) children.push({ id: to, edgeId: edge.id, kind });
     });
     this.signal.throwIfAborted();
     return { parents, children };

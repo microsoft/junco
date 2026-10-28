@@ -42,7 +42,6 @@ import {
   captureUsageContext,
   chargeTokenUsage,
   type DataflowTracer,
-  type EdgeIdType,
   isUsageLimitError,
   NodeId,
   type NodeIdType,
@@ -61,7 +60,6 @@ import {
   beginOperation,
   ComplainTool,
   type ComplaintContext,
-  type Contract,
   hasProfileOwner,
   InfoTool,
   type Issue,
@@ -1067,7 +1065,6 @@ export class JuncoAgent<
       tools: _tools,
       resources: _resources,
       collection: _collection,
-      contract: _contract,
       recorder: _recorder,
       recorderNodeId: _recorderNodeId,
       tokenMonitor,
@@ -2050,20 +2047,6 @@ export class JuncoAgent<
       this.#placement = undefined;
       this.#usagePlacement = usage;
     }
-  }
-
-  /**
-   * What this agent expects on its incoming graph edge `edgeId`, from its `contract` option. A
-   * metadata query: it never starts or resumes a run. Subclasses may override it.
-   */
-  contract(edgeId: EdgeIdType): Contract {
-    const contract = this.#options.contract;
-    if (contract === undefined)
-      throw new JuncoAgentError(
-        "invalid_state",
-        `No contract for edge "${edgeId}"`,
-      );
-    return contract(edgeId);
   }
 
   /**

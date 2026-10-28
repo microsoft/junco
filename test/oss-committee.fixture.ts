@@ -13,7 +13,6 @@ import {
 import { DummyTracer } from "dataflow-engine";
 import { JuncoAgent } from "junco-agent";
 import {
-  InfoTool,
   MARSH_POLICY_DENIED,
   SendTool,
   YieldTool,
@@ -67,16 +66,6 @@ function latestUserText(context: Context): string {
   return text;
 }
 
-/** The text of the request's latest message, which must be a result of tool `name`. */
-function toolResultText(context: Context, name: string): string {
-  const last = context.messages.at(-1);
-  if (last?.role !== "toolResult" || last.toolName !== name)
-    throw new Error(`Scripted actor expected a ${name} result`);
-  return last.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-}
-
 /** A Librarian tool whose only effect is a Marsh policy denial, which pauses the run. */
 const guardedTool: AgentTool = {
   name: "guarded",
@@ -117,8 +106,8 @@ function reportsFromPrompt(text: string, labels: readonly string[]): string[] {
 /**
  * Real search, review and graph tools with scripted members. Round r makes `lookups[r]` GitHub
  * lookups (default: one Terminal.Gui result) and ends with `reviews[r]`; `"skip"` omits the review
- * call. After a failed lookup the Librarian discovers the partial-research route with `info`,
- * `send`s there and yields; with `policyPauseBeforeSend` it is first paused by a policy denial.
+ * call. After a failed lookup the Librarian sends partial research on its declared edge
+ * and yields; with `policyPauseBeforeSend` it is first paused by a policy denial.
  * Dispose it to close every member.
  */
 export async function scriptedCommittee(
@@ -163,6 +152,13 @@ export async function scriptedCommittee(
   let librarianRound = -1;
   let librarianLookups = 0;
   let librarianReport = "";
+  const sendPartialResearch = () => fauxAssistantMessage(
+    [fauxToolCall("send", {
+      id: "Librarian~>DesignAssignment",
+      payload: { kind: "prompt", text: librarianReport },
+    }, { id: `librarian-send-${librarianRound + 1}` })],
+    { stopReason: "toolUse" },
+  );
   const librarian: FauxResponseFactory = (context) => {
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);
@@ -177,40 +173,7 @@ export async function scriptedCommittee(
       );
     }
     if (last?.role === "toolResult" && last.toolName === "guarded") {
-      return fauxAssistantMessage(
-        [
-          fauxToolCall(
-            "info",
-            {},
-            { id: `librarian-info-${librarianRound + 1}` },
-          ),
-        ],
-        { stopReason: "toolUse" },
-      );
-    }
-    if (last?.role === "toolResult" && last.toolName === "info") {
-      const { children } = JSON.parse(toolResultText(context, "info")) as {
-        children: { edgeId: string; kind: string; expect: string }[];
-      };
-      const route = children.find(
-        (child) =>
-          child.kind === "message" && /partial research/i.test(child.expect),
-      );
-      if (route === undefined)
-        throw new Error("info shows no partial-research message route");
-      return fauxAssistantMessage(
-        [
-          fauxToolCall(
-            "send",
-            {
-              id: route.edgeId,
-              payload: { kind: "prompt", text: librarianReport },
-            },
-            { id: `librarian-send-${librarianRound + 1}` },
-          ),
-        ],
-        { stopReason: "toolUse" },
-      );
+      return sendPartialResearch();
     }
     if (last?.role === "toolResult" && last.toolName === "send") {
       return fauxAssistantMessage(
@@ -309,19 +272,14 @@ export async function scriptedCommittee(
           stopReason: librarianStopReason,
         },
       );
+    if (!script.policyPauseBeforeSend) return sendPartialResearch();
     return fauxAssistantMessage(
       [
-        script.policyPauseBeforeSend
-          ? fauxToolCall(
-              "guarded",
-              {},
-              { id: `librarian-guarded-${librarianRound + 1}` },
-            )
-          : fauxToolCall(
-              "info",
-              {},
-              { id: `librarian-info-${librarianRound + 1}` },
-            ),
+        fauxToolCall(
+          "guarded",
+          {},
+          { id: `librarian-guarded-${librarianRound + 1}` },
+        ),
       ],
       { stopReason: "toolUse" },
     );
@@ -458,10 +416,9 @@ export async function scriptedCommittee(
         search.tool,
         new YieldTool(),
         guardedTool,
-        new InfoTool(),
         new SendTool(),
       ]),
-      Architect: await member("Architect", architect, [new InfoTool()]),
+      Architect: await member("Architect", architect, []),
       Reducer: await member("Reducer", reducer, [review.tool]),
     };
   } catch (error) {

@@ -461,8 +461,13 @@ async fn cli_release_is_durable_without_a_peer_and_owned_by_its_pane() {
     .await;
     host.succeeds(&["-c", "printf kept > kept"], "an unreleased write")
         .await;
-    host.succeeds(&["-c", "printf two > freed"], "the next owner writes")
-        .await;
+    // A fresh invocation must read the released file before it may edit it.
+    refused("printf two > freed").await;
+    host.succeeds(
+        &["-c", "cat freed >/dev/null && printf two > freed"],
+        "the next owner reads, then writes",
+    )
+    .await;
     assert_eq!(std::fs::read(host.seed("freed")).unwrap(), b"two");
     refused("printf lost > kept").await;
     for line in ["release", "release a b", "release -- kept"] {
@@ -494,8 +499,11 @@ async fn cli_release_is_durable_without_a_peer_and_owned_by_its_pane() {
     let line = "release -- pane-file";
     let released = submit_typed(&host, "release-pane", &job, &[line, "Enter"], line).await;
     assert_published(&released, line);
-    host.succeeds(&["-c", "printf next > pane-file"], "the pane released it")
-        .await;
+    host.succeeds(
+        &["-c", "cat pane-file >/dev/null && printf next > pane-file"],
+        "the pane released it",
+    )
+    .await;
     assert_eq!(std::fs::read(host.seed("pane-file")).unwrap(), b"next");
     host.shutdown().await;
 }

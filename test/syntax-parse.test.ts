@@ -134,12 +134,19 @@ test("ambiguous sink return", () =>
   rejects((d) => {
     d.graph.edges.push({ from: "A", to: "$sink", schema });
   }, "sink.returns is required: $sink has inbound edges from B, A"));
-for (const field of ["contracts", "prompt"])
-  test(`${field} references inbound`, () =>
-    rejects((d) => {
-      d.graph.nodes.B[field] =
-        field === "contracts" ? { wrong: "expect" } : "{{ wrong }}";
-    }, `Node "B" ${field} references edge "wrong" which is not one of its inbound edges`));
+test("prompt references inbound", () =>
+  rejects((d) => {
+    d.graph.nodes.B.prompt = "{{ wrong }}";
+  }, 'Node "B" prompt references edge "wrong" which is not one of its inbound edges'));
+
+test("removed contracts field is rejected", () => {
+  assert.throws(
+    () => parse(variant((d) => {
+      d.graph.nodes.B.contracts = { "A->B": "report" };
+    })),
+    ValidationError,
+  );
+});
 for (const [field, name] of [
   ["mcp", "mcp"],
   ["skills", "skill"],
@@ -260,14 +267,6 @@ test("identifiers, duplicates, source routes and sink results", () => {
       }),
       "identifier",
       "/graph/nodes/B/trigger",
-    ],
-    [
-      "blank contract",
-      variant((d) => {
-        d.graph.nodes.B!.contracts = { "": "x" };
-      }),
-      "identifier",
-      "/graph/nodes/B/contracts/",
     ],
     [
       "blank returns",
@@ -859,9 +858,6 @@ graph:
       prompt: |-
         External: {{ ingress }}
         Seed: {{ seed }}
-      contracts:
-        ingress: external prompt
-        seed: seed prompt
     Ralph:
       description: revises the seeded assignment
       system: revise the assignment
@@ -869,8 +865,6 @@ graph:
       mcp: [full]
       skills: [guide]
       prompt: "{{ ralph-input }}"
-      contracts:
-        ralph-input: complete assignment
     Child:
       kind: graph
       description: nested work
@@ -891,8 +885,6 @@ graph:
             system: work
             trigger: child-input
             prompt: "{{ child-input }}"
-            contracts:
-              child-input: revised assignment
         edges:
           - from: $source
             to: Worker
@@ -913,9 +905,6 @@ graph:
       trigger:
         all: [agent-answer, child-answer]
       prompt: "{{ agent-answer }}\\n{{ child-answer }}"
-      contracts:
-        agent-answer: direct final
-        child-answer: child final
   edges:
     - from: $source
       to: "Agent:1"
@@ -1002,7 +991,6 @@ graph:
           skills: ["guide"],
           trigger: { any: ["ingress", "seed"] },
           prompt: "External: {{ ingress }}\nSeed: {{ seed }}",
-          contracts: { ingress: "external prompt", seed: "seed prompt" },
         },
         Ralph: {
           description: "revises the seeded assignment",
@@ -1011,7 +999,6 @@ graph:
           mcp: ["full"],
           skills: ["guide"],
           prompt: "{{ ralph-input }}",
-          contracts: { "ralph-input": "complete assignment" },
         },
         Child: {
           kind: "graph",
@@ -1034,7 +1021,6 @@ graph:
                 system: "work",
                 trigger: "child-input",
                 prompt: "{{ child-input }}",
-                contracts: { "child-input": "revised assignment" },
               },
             },
             edges: [
@@ -1058,10 +1044,6 @@ graph:
           system: "combine both reports",
           trigger: { all: ["agent-answer", "child-answer"] },
           prompt: "{{ agent-answer }}\n{{ child-answer }}",
-          contracts: {
-            "agent-answer": "direct final",
-            "child-answer": "child final",
-          },
         },
       },
       edges: [
@@ -1266,14 +1248,13 @@ test("strict object boundaries and malformed list/map entries", () => {
       "tools",
       "skills",
       "mcp",
-      "contracts",
       "system",
       "prompt",
       "description",
     ].map((field): [string, Mutate] => [
       "/graph/nodes/A",
       (d) => {
-        d.graph.nodes.A[field] = field === "contracts" ? { x: 2 } : [2];
+        d.graph.nodes.A[field] = [2];
       },
     ]),
   ];
@@ -1370,7 +1351,6 @@ test("all builtins, collision identities and legal parallel edges", () => {
       { from: "B", to: "$sink", kind: "message", schema },
     );
     d.graph.nodes.B.prompt = "{{ custom }} / {{custom}}";
-    d.graph.nodes.B.contracts = { custom: "report" };
   });
   assert.deepEqual(parse(doc).graph.edges?.map(edgeId), [
     "A->B",

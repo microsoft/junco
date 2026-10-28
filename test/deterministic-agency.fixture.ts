@@ -15,7 +15,6 @@ import {
 import {
   Edge,
   EdgeId,
-  type EdgeIdType,
   NodeId,
   TriggerEntry,
   TriggerRule,
@@ -46,8 +45,8 @@ import { leaf, nativeOptions } from "./support.ts";
 import { Constant, Forward } from "./syntax-code-nodes.fixture.ts";
 
 // Directly executable deterministic smoke: one producer/worker JuncoGraph per policy over real
-// faux-backed JuncoAgents. The producer discovers its route through `info` and `send`s on it; the
-// worker discovers its parents and consumes its retained inbox through `recv`. No credentials.
+// faux-backed JuncoAgents. The producer sends on its declared edge; the worker consumes its
+// retained inbox through `recv`. No credentials.
 
 export type DeterministicSummary = {
   readonly scheduler: Strategy;
@@ -57,13 +56,6 @@ export type DeterministicSummary = {
   readonly closed: boolean;
 };
 
-type Route = {
-  readonly id: string;
-  readonly edgeId: string;
-  readonly kind: "message" | "value";
-  readonly expect: string;
-};
-type Info = { readonly parents: Route[]; readonly children: Route[] };
 type Received = {
   readonly messages: { id: string; payload: AgenticInput }[];
   readonly values: { id: string; payload: AssistantMessage }[];
@@ -84,47 +76,27 @@ function results<R>(messages: readonly AgentMessage[], name: string): R[] {
   );
 }
 
-const MESSAGE_EXPECT =
-  "AgenticInput text messages retained in FIFO order for the worker's input list.";
-const VALUE_EXPECT =
-  "The producer's final assistant seed, consumed once before the worker finishes.";
-
 /** Run the producer/worker agency on `strategy` to quiescence, close it, and summarize it. */
 export async function runDeterministicFixture(
   strategy: Strategy,
 ): Promise<DeterministicSummary> {
   const handoff = Edge.message("producer->worker", AgenticInputSchema);
   const value = Edge.value("producer=>worker", AssistantMessageSchema);
-  const infos: Record<"producer" | "worker", Info[]> = {
-    producer: [],
-    worker: [],
-  };
-
-  const sendOnRoute: FauxResponseFactory = (context) => {
-    const info = results<Info>(context.messages, "info").at(-1)!;
-    infos.producer.push(info);
-    const route = info.children.find((child) => child.kind === "message");
-    if (!route) return fauxAssistantMessage("no message route");
-    return fauxAssistantMessage(
-      [
-        { kind: "nextTurn", text: "context first" },
-        { kind: "prompt", text: "then work" },
-      ].map((payload, index) =>
-        fauxToolCall(
-          "send",
-          { id: route.edgeId, payload },
-          { id: `send-${index}` },
-        ),
-      ),
-      { stopReason: "toolUse" },
-    );
-  };
   const producer = await leaf(
     [
-      fauxAssistantMessage(fauxToolCall("info", {}, { id: "info" }), {
-        stopReason: "toolUse",
-      }),
-      sendOnRoute,
+      fauxAssistantMessage(
+        [
+          { kind: "nextTurn", text: "context first" },
+          { kind: "prompt", text: "then work" },
+        ].map((payload, index) =>
+          fauxToolCall(
+            "send",
+            { id: handoff.id, payload },
+            { id: `send-${index}` },
+          ),
+        ),
+        { stopReason: "toolUse" },
+      ),
       fauxAssistantMessage(
         fauxToolCall("yield", { reason: "sent" }, { id: "y" }),
         {
@@ -133,17 +105,11 @@ export async function runDeterministicFixture(
       ),
       fauxAssistantMessage("seed"),
     ],
-    { prompt: "produce", tools: [new tools.InfoTool(), new tools.SendTool()] },
+    { prompt: "produce", tools: [new tools.SendTool()] },
   );
 
   let received: Received[] = [];
   const work: FauxResponseFactory = (context) => {
-    const info = results<Info>(context.messages, "info");
-    if (info.length === 0)
-      return fauxAssistantMessage(fauxToolCall("info", {}), {
-        stopReason: "toolUse",
-      });
-    if (infos.worker.length === 0) infos.worker.push(info[0]!);
     const got = results<Received>(context.messages, "recv");
     const messages = got.flatMap((r) => r.messages);
     const values = got.flatMap((r) => r.values);
@@ -159,20 +125,11 @@ export async function runDeterministicFixture(
       { stopReason: "toolUse" },
     );
   };
-  const contracts: Record<string, tools.Contract> = {
-    [handoff.id]: { expect: MESSAGE_EXPECT },
-    [value.id]: { expect: VALUE_EXPECT },
-  };
   const worker = await leaf(
     Array.from({ length: 12 }, () => work),
     {
       prompt: "work",
-      tools: [new tools.InfoTool(), new tools.RecvTool()],
-      contract: (edgeId: EdgeIdType) => {
-        const contract = contracts[edgeId];
-        if (!contract) throw new Error(`No contract for edge "${edgeId}"`);
-        return contract;
-      },
+      tools: [new tools.RecvTool()],
     },
   );
 
@@ -207,31 +164,6 @@ export async function runDeterministicFixture(
     return textOf(result.value);
   });
   assert.deepEqual(outputs, ["seed", "done"]);
-
-  const routes: Route[] = [
-    { id: w, edgeId: handoff.id, kind: "message", expect: MESSAGE_EXPECT },
-    { id: w, edgeId: value.id, kind: "value", expect: VALUE_EXPECT },
-  ];
-  const byEdge = (a: Route, b: Route) => a.edgeId.localeCompare(b.edgeId);
-  const [producerInfo] = infos.producer;
-  assert.deepEqual(producerInfo?.parents, []);
-  assert.deepEqual(
-    [...(producerInfo?.children ?? [])].sort(byEdge),
-    [...routes].sort(byEdge),
-  );
-  assert.deepEqual(
-    [...(infos.worker[0]?.parents ?? [])].sort(byEdge),
-    routes.map((route) => ({ ...route, id: p })).sort(byEdge),
-  );
-  assert.deepEqual(infos.worker[0]?.children, [
-    {
-      id: graph.sink.id,
-      edgeId: "terminal->$sink",
-      kind: "value",
-      expect:
-        "Graph output consumes final work results and publishes messages.",
-    },
-  ]);
 
   // Parent result first, then message FIFO, from what recv actually returned.
   const inputs = [

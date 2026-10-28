@@ -4,7 +4,7 @@ import type { HarnessEvent } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Message } from "dataflow-engine";
 import {
-  DataflowGraph,
+  type DataflowGraph,
   type DataflowRunTrace,
   type DataflowStepTrace,
   type DataflowTracer,
@@ -16,17 +16,11 @@ import type { JuncoAgent } from "junco-agent";
 import { flushLog, redirectLog } from "junco-tools/log";
 import type {
   NativeTui,
-  NativeTuiBox,
   NativeTuiNode,
   NativeTuiTrace,
 } from "junco-tools/native";
 import type { TSchema } from "typebox";
 import { nodePolicies } from "./node-policy.js";
-import {
-  escapeTuiLabel,
-  renderTuiGraph,
-  type TuiGraphSection,
-} from "./tui-graph.js";
 
 const TERMINAL_ERROR =
   "TuiTracer requires an interactive terminal on stdin and stdout";
@@ -47,6 +41,15 @@ const serialOf = (graph: object): number => {
   }
   return serial;
 };
+
+/** ASCII cell spelling shared by node identities and trace labels. */
+const escapeTuiLabel = (decoded: string): string =>
+  JSON.stringify(decoded)
+    .slice(1, -1)
+    .replace(
+      /[^\x20-\x7e]/g,
+      (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
 
 /** Inspect NOW without calling application getters or custom inspection hooks. */
 export function formatTuiPayload(record: unknown): string {
@@ -87,24 +90,8 @@ export function formatTuiPayload(record: unknown): string {
   });
 }
 
-// Generic graph parameters are erased only in retained topology, never in observer handles.
 type Graph = DataflowGraph<unknown, TSchema, unknown, unknown>;
 type Metadata = { node: NativeTuiNode; rawId: string; agent: boolean };
-type Scope = {
-  graph: Graph;
-  serial: number;
-  members: Map<string, string>;
-  links: [string, string, string][];
-  marker?: "empty" | "recursive";
-};
-type Scene = {
-  graph: Graph;
-  scopes: Map<string, Scope>;
-  contained: Set<Graph>;
-  binding: string;
-  sections: readonly TuiGraphSection[];
-  failed: boolean;
-};
 type Activation = { key: string; token: symbol };
 type PendingRecord = {
   record: NativeTuiTrace;
@@ -191,14 +178,9 @@ export class TuiTracer implements DataflowTracer {
   readonly #signals = new Map<NodeJS.Signals, () => void>();
   readonly #subscriptions = new Set<() => void>();
   readonly #agentRuns = new Map<string, Map<string, AgentRunTrace>>();
+  readonly #active = new Map<string, Set<symbol>>();
   #nodeKeys = new WeakMap<object, string>();
   readonly #metadata = new Map<string, Metadata>();
-  readonly #unpublishedNodes = new Set<string>();
-  readonly #active = new Map<string, Set<symbol>>();
-  readonly #liveRuns = new Map<Graph, number>();
-  #roots: Scene[] = [];
-  #lines: string[] = ["(empty graph)"];
-  #boxes: NativeTuiBox[] = [];
   readonly #pending = new Map<number, PendingRecord>();
   readonly #pendingIndex = new Map<string, number>();
   #pendingSerial = 0;
@@ -308,12 +290,7 @@ export class TuiTracer implements DataflowTracer {
         await this.#exitMonitor;
         return;
       }
-      native.setGraph(
-        Array.from(this.#metadata.values(), ({ node }) => node),
-        this.#lines,
-        this.#boxes,
-      );
-      this.#unpublishedNodes.clear();
+      for (const { node } of this.#metadata.values()) native.setNode(node);
       for (const { record } of this.#pending.values()) native.trace(record);
       if (this.#omitted !== 0) {
         native.trace({
@@ -418,12 +395,7 @@ export class TuiTracer implements DataflowTracer {
     this.#agentRuns.clear();
     this.#nodeKeys = new WeakMap();
     this.#metadata.clear();
-    this.#unpublishedNodes.clear();
     this.#active.clear();
-    this.#liveRuns.clear();
-    this.#roots = [];
-    this.#lines = [];
-    this.#boxes = [];
     this.#pending.clear();
     this.#pendingIndex.clear();
     this.#pendingBytes = 0;
@@ -431,208 +403,24 @@ export class TuiTracer implements DataflowTracer {
     if (TuiTracer.#shared === this) TuiTracer.#shared = undefined;
   }
 
-  #registerNode(
+  #registerNode<S, N extends TSchema, T>(
     graph: Graph,
     id: string,
-    node: Node<unknown, TSchema, unknown>,
+    node: Node<S, N, T>,
   ): string {
     const serial = serialOf(graph);
     const key = JSON.stringify([serial, id]);
-    this.#nodeKeys.set(node, key);
     if (!this.#metadata.has(key)) {
-      this.#metadata.set(key, {
+      const metadata = {
         node: { key, nodeId: escapeTuiLabel(id), scope: `g${serial}` },
         rawId: id,
         agent: nodePolicies.get(node.step)?.agent !== undefined,
-      });
-      this.#unpublishedNodes.add(key);
+      };
+      this.#metadata.set(key, metadata);
+      this.#native?.setNode(metadata.node);
     }
+    this.#nodeKeys.set(node, key);
     return key;
-  }
-
-  #collect(graph: Graph): {
-    scopes: Map<string, Scope>;
-    contained: Set<Graph>;
-    binding: string;
-  } {
-    const scopes = new Map<string, Scope>();
-    const contained = new Set<Graph>();
-    const ancestry = new Set<Graph>();
-    const visit = (current: Graph, path: readonly string[]): void => {
-      contained.add(current);
-      const scope: Scope = {
-        graph: current,
-        serial: serialOf(current),
-        members: new Map(),
-        links: [],
-      };
-      scopes.set(JSON.stringify(path), scope);
-      if (ancestry.has(current)) {
-        scope.marker = "recursive";
-        return;
-      }
-      ancestry.add(current);
-      current.forEachNode((id, node) => {
-        scope.members.set(id, this.#registerNode(current, id, node));
-        if (node.state instanceof DataflowGraph) {
-          visit(node.state as Graph, [...path, id]);
-        }
-      });
-      current.forEachLink((from, to, edge) => {
-        if (!scope.members.has(from) || !scope.members.has(to)) {
-          throw new Error(
-            "TuiTracer topology contains an unregistered link endpoint",
-          );
-        }
-        scope.links.push([from, to, String(edge.id)]);
-      });
-      if (scope.members.size === 0) scope.marker = "empty";
-      ancestry.delete(current);
-    };
-    visit(graph, []);
-    const binding = JSON.stringify(
-      Array.from(scopes, ([path, scope]) => [
-        path,
-        scope.serial,
-        scope.marker,
-        Array.from(scope.members),
-        scope.links,
-      ]),
-    );
-    return { scopes, contained, binding };
-  }
-
-  #refreshRoot(scene: Scene): boolean {
-    let bindingChanged = false;
-    try {
-      const topology = this.#collect(scene.graph);
-      bindingChanged = scene.binding !== topology.binding;
-      scene.scopes = topology.scopes;
-      scene.contained = topology.contained;
-      scene.binding = topology.binding;
-      const changed = scene.failed || bindingChanged;
-      if (changed) scene.sections = renderTuiGraph(scene.graph);
-      scene.failed = false;
-      return changed;
-    } catch (error) {
-      const changed = !scene.failed || bindingChanged;
-      scene.failed = true;
-      scene.sections = [];
-      this.#diagnose(error, "graph rendering failed");
-      return changed;
-    }
-  }
-
-  #quiescent(scene: Scene): boolean {
-    for (const graph of scene.contained) {
-      if ((this.#liveRuns.get(graph) ?? 0) !== 0) return false;
-      try {
-        if (graph.available().size !== 0) return false;
-      } catch (error) {
-        this.#diagnose(error);
-        return false;
-      }
-    }
-    return true;
-  }
-
-  #refresh(graph: Graph, retire: boolean): void {
-    let changed = false;
-    for (const root of this.#roots)
-      changed = this.#refreshRoot(root) || changed;
-    if (!this.#roots.some((root) => root.contained.has(graph))) {
-      const root: Scene = {
-        graph,
-        scopes: new Map(),
-        contained: new Set([graph]),
-        binding: "",
-        sections: [],
-        failed: false,
-      };
-      this.#refreshRoot(root);
-      this.#roots.push(root);
-      if (retire)
-        this.#roots = this.#roots.filter(
-          (old) =>
-            old === root ||
-            root.contained.has(old.graph) ||
-            !this.#quiescent(old),
-        );
-      changed = true;
-    }
-    if (changed) {
-      // Suppress contained standalone roots even when containment changes after first observation.
-      // Reciprocal containment keeps the first-seen root instead of suppressing both.
-      this.#roots = this.#roots.filter(
-        (root, index, roots) =>
-          !roots.some(
-            (parent, parentIndex) =>
-              parent !== root &&
-              parent.contained.has(root.graph) &&
-              (!root.contained.has(parent.graph) || parentIndex < index),
-          ),
-      );
-    }
-    if (!changed && this.#unpublishedNodes.size === 0) return;
-    const lines: string[] = [];
-    const boxes: NativeTuiBox[] = [];
-    for (const root of this.#roots) {
-      if (root.failed) {
-        if (lines.length !== 0) lines.push("");
-        lines.push(`g${serialOf(root.graph)}`, "(graph rendering failed)");
-        continue;
-      }
-      for (const section of root.sections) {
-        const scope = root.scopes.get(JSON.stringify(section.path));
-        if (scope === undefined)
-          throw new Error("TuiTracer graph section has no concrete scope");
-        if (lines.length !== 0) lines.push("");
-        const path = section.path.map(escapeTuiLabel).join(" / ");
-        lines.push(`g${scope.serial}${path === "" ? "" : ` — ${path}`}`);
-        const offset = lines.length;
-        if (scope.marker !== undefined) {
-          lines.push(
-            scope.marker === "empty"
-              ? "(empty graph)"
-              : "(recursive reference)",
-          );
-          continue;
-        }
-        for (const line of section.lines) lines.push(line);
-        for (const box of section.boxes) {
-          const key = scope.members.get(box.id);
-          if (key === undefined)
-            throw new Error("TuiTracer rectangle has no concrete node");
-          boxes.push({
-            nodeKey: key,
-            x: box.x,
-            y: box.y + offset,
-            width: box.width,
-            height: box.height,
-          });
-        }
-      }
-    }
-    this.#lines = lines.length === 0 ? ["(empty graph)"] : lines;
-    this.#boxes = boxes;
-    if (this.#native !== undefined) {
-      try {
-        this.#native.setGraph(
-          Array.from(this.#unpublishedNodes, (key) => {
-            const metadata = this.#metadata.get(key);
-            if (metadata === undefined)
-              throw new Error(`TuiTracer has no metadata for node ${key}`);
-            return metadata.node;
-          }),
-          this.#lines,
-          this.#boxes,
-        );
-        this.#unpublishedNodes.clear();
-      } catch (error) {
-        this.#latch(error);
-        this.#stopDisplay();
-      }
-    }
   }
 
   #record(record: NativeTuiTrace): void {
@@ -765,8 +553,7 @@ export class TuiTracer implements DataflowTracer {
     this.#guard(() => {
       this.#initialize();
       if (this.#closed) return;
-      this.#liveRuns.set(current, (this.#liveRuns.get(current) ?? 0) + 1);
-      this.#refresh(current, true);
+      current.forEachNode((id, node) => this.#registerNode(current, id, node));
       this.#record({ text: `run ${run} start g${serialOf(graph)}` });
     });
     const finishRun = (): void => {
@@ -774,9 +561,6 @@ export class TuiTracer implements DataflowTracer {
       ended = true;
       for (const activation of activations) this.#deactivate(activation);
       activations.clear();
-      const count = (this.#liveRuns.get(current) ?? 1) - 1;
-      if (count === 0) this.#liveRuns.delete(current);
-      else this.#liveRuns.set(current, count);
     };
     return {
       startNode: (id, phase, inputs): DataflowStepTrace<N, T> => {
@@ -785,16 +569,12 @@ export class TuiTracer implements DataflowTracer {
         let activation: Activation | undefined;
         let settled = false;
         this.#guard(() => {
-          let node = graph.getNode(id);
-          if (node === undefined || this.#nodeKeys.get(node) === undefined) {
-            this.#refresh(current, false);
-            node = graph.getNode(id);
-          }
-          const key = node === undefined ? undefined : this.#nodeKeys.get(node);
-          if (key === undefined)
+          const node = graph.getNode(id);
+          if (node === undefined)
             throw new Error(
               `TuiTracer cannot map scheduled node ${escapeTuiLabel(id)}`,
             );
+          const key = this.#registerNode(current, id, node);
           activation = { key, token: Symbol() };
           activations.add(activation);
           this.#activate(key, activation.token);

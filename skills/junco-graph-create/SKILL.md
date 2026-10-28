@@ -63,8 +63,6 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
     mcp?: [<mcp name>]
     skills?: [<skill name>]
     prompt?: string                                    # staged prompt; {{<inbound edge id>}} placeholders
-    contracts?:                                       # receiver contract expect text
-      <inbound edge id>: string
   kind: emit                        # publishes one {kind: prompt, text} on every outbound message edge, once
     text: string                    # no inbound edges; no outbound value edges; >= 1 outbound message edge
   kind: graph                       # nested graph as a node
@@ -78,7 +76,7 @@ Semantics that decide whether a document runs:
 
 - **Edges.** `value` edges (default, id `A->B`) retain the source's latest returned `AssistantMessage`; `message` edges (id `A~>B`) queue `{ kind: "prompt", text }` payloads. Use message edges for assignments and partial handoffs, value edges for finished reports. Edges into `$source`, out of `$sink`, and value edges out of `$source` are rejected. Quote edge IDs containing `>` where YAML would misparse (`"Goals~>Direct"`).
 - **Agents run once per staged prompt.** A YAML `prompt` is staged once at build. `{{edge}}` placeholders make it a callback evaluated when the run starts: value edges insert `finalText(value)` (requires `stopReason === "stop"` and non-empty text, else the node fails), message edges insert delivered texts joined by `"\n\n"`, missing delivery inserts `""`. Delivered messages are data the agent reads with `recv`; without a `prompt`, nothing starts the agent — then code (a `kind: code` node, `createAgent`, or `schedules.ralph`) must stage it. A value self-edge re-arms a returned agent but still needs another staged prompt, so agent loops in pure YAML are Ralph loops only.
-- **Agent tools.** Every agent gets `yield`, `info`, `send`, `recv`, `task` (names reserved; cannot be listed or shadowed). `tools:` adds collection tools (`read`, `bash`, `edit`, `grep`, `find`, `code_graph`, `ast_grep`, `ast_edit`, `diff`, `release`) or names supplied through `BuildOptions.tools`. An agent `send`s on an outbound message edge discovered with `info`, then `yield`s; the receiver's `contracts` text is what `info` shows the sender as the route expectation. A missing `contracts` entry on a wired inbound edge throws `No contract for edge`; absent `contracts` adds none.
+- **Agent tools.** Every agent gets `yield`, `info`, `send`, `recv`, `task` (names reserved; cannot be listed or shadowed). `tools:` adds collection tools (`read`, `bash`, `edit`, `grep`, `find`, `code_graph`, `ast_grep`, `ast_edit`, `diff`, `release`) or names supplied through `BuildOptions.tools`. Put handoff requirements and explicit route IDs in prompts: `send` directly using the declared message edge ID, then `yield`. For dynamic topology discovery, `info` shows live parent and child routes as `{ id, edgeId, kind }`. Value edges carry final results; edge schemas and deterministic consumers validate payloads.
 - **`emit`** needs ≥ 1 outbound message edge and no inbound edges; it publishes the same text once per edge and parks.
 - **Nested graphs.** `source.routes` forwards each parent message on edge `k` unchanged onto the listed internal `$source~>…` edges; parent values arrive as `{ kind: "prompt", text: finalText(value) }`. No routes = closed source (unexpected ingress throws). The nested `sink` reads `graph.result(returns)` (default: the unique predecessor of `$sink`; several predecessors need an explicit `returns`), returns it as the wrapper's value, and also sends it as a prompt on every parent message edge leaving the wrapper. Only the final retained result escapes; intermediate drafts never do.
 - **`$sink` of the root** retains the selected terminal's exact result; read it from the `run()` map by node ID (`results.get(graph.NodeId.create("Reviewer"))`) or `execution.graph.result(execution.graph.sink.id)`. A sink whose `returns` node never finishes throws `<returns> did not produce a result`.
@@ -145,7 +143,6 @@ export type CodeContext<C = unknown> = {
 export type CodeRegistration = {
   readonly state: Deterministic<AgenticInput, AssistantMessage>;
   readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;  // overrides BuildOptions.available for this id
-  readonly contract?: (edgeId: graph.EdgeIdType) => { expect: string };
 };
 export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => CodeRegistration | Promise<CodeRegistration>;
 // graph.nodes.Deterministic: new Deterministic<AgenticInput, AssistantMessage>(
@@ -188,7 +185,6 @@ export const Join: syntax.DeterministicNode = ({ edges, policy }) => {
       while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, { kind: "prompt", text })];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
-    contract: (edgeId) => ({ expect: edgeId === a ? "A's normally completed report." : "B's normally completed report." }),
   };
 };
 ```
@@ -201,8 +197,8 @@ Rules: start dependent bodies with `const inputs = yield []`; read values with `
 |---|---|---|
 | Fixed assignment fan-out | `kind: emit` → message edges to each worker; workers `prompt: "{{Emit~>Worker}}"` | none |
 | Assignment from runtime input | `kind: code` publisher reading `context` | `Goals` above |
-| Join / review | `trigger: { all: [A->R, B->R] }`, `prompt` with `{{A->R}}`/`{{B->R}}`, `contracts` per edge | none; or a code join when reports need validation beyond `finalText` |
-| Partial handoff | sender's outbound message edge + receiver `trigger: { any: [partial~>, final->] }` and `contracts` describing the partial route | code receiver when "exactly one partial" must be enforced |
+| Join / review | `trigger: { all: [A->R, B->R] }`, `prompt` with `{{A->R}}`/`{{B->R}}` and report requirements | none; or a code join when reports need validation beyond `finalText` |
+| Partial handoff | sender prompt names the outbound message edge ID and payload requirements; receiver `trigger: { any: [partial~>, final->] }` | code receiver when "exactly one partial" must be enforced |
 | Fixed-round revision (Ralph) | standalone: `JuncoGraph.fromYaml(workflows.ralph, config)`, assignment on source route `assignment`. Nested: splice `syntax.parse(workflows.ralph).graph` into a `kind: graph` node, rekeying `source.routes` to the parent edge; do not re-declare the loop | `...schedules.ralph({ rounds })` in config; rounds only if stated (default two) |
 | Repeat until approved | one round graph with a verdict tool in `tools:` | runner loop with `createAgent` + `tools` + verdict take-and-clear; no cap |
 | Nested agency | `kind: graph` with `source.routes`/`sink.returns` | none |
@@ -237,7 +233,7 @@ Only for documents with agents. Deterministic-only documents skip this.
 
 1. **Extract the shape.** Inputs/output, roles, dependencies, stop condition, tool permissions, tracing. Map each role to a node kind (agent / emit / code / graph) and each dependency to an edge kind (message = assignment or handoff, value = finished report).
 2. **Select models** (above).
-3. **Write `<name>.yml`.** Top comment: purpose, topology, termination. Per node: `description`, explicit `trigger`, `prompt` placeholders and inbound `contracts`. Register only `mcp`/`skills`; never YAML model/thinking/code registries. Every finite path must end at `$sink`.
+3. **Write `<name>.yml`.** Top comment: purpose, topology, termination. Per node: `description`, explicit `trigger`, `prompt` placeholders and artifact/acceptance requirements in role or handoff prompts. Name explicit edge IDs for handoffs. Register only `mcp`/`skills`; never YAML model/thinking/code registries. Every finite path must end at `$sink`.
 4. **Export code nodes in `<name>.ts`** only when the pattern needs deterministic logic; pass them by node ID in config.code.
 5. **Run from `<name>.ts`.** Declare the ladder and call `JuncoGraph.fromYaml(source, config)` → run → read the terminal result → nested finally close/flush. Guard live acquisition with `if (import.meta.main)` when exporting a factory for tests. Operational prints go after flush; under TUI ownership use `log.info` from `junco-tools/log`.
 6. **Check offline first.** `syntax.parse(source)` checks schema, reserved IDs, edge direction, dangling edges and triggers. `syntax.resolveAgents` checks role tools/prompts; `schedules.validateLadder` checks model identities. Run these before agent acquisition.
@@ -252,7 +248,7 @@ Repository work (such as refactor, translate, verify or audit) follows `referenc
 ## Before returning
 
 - [ ] `syntax.parse(source)` succeeds offline; the complete ladder's models and thinking levels are verified.
-- [ ] Every agent has a `prompt` (or a documented code/Ralph staging path) and a `contracts` entry per inbound edge; message vs value kind matches assignment vs report.
+- [ ] Every agent has a `prompt` (or a documented code/Ralph staging path); handoff prompts name route IDs and payload requirements; message vs value kind matches assignment vs report.
 - [ ] Each `kind: code` ID has a same-named exported `syntax.DeterministicNode` in config.code; publishers gate with is_available; joins validate stopReason/text.
 - [ ] Stop condition matches the task: terminal node wired to `$sink`; Ralph rounds only as stated; no invented caps, retries, reviewers or allowances.
 - [ ] Model choices carry catalog + credential + dated freshness evidence beside the TypeScript ladder, or a reported missing prerequisite.

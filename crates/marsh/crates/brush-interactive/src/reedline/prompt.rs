@@ -48,7 +48,7 @@ impl reedline::Prompt for InteractivePrompt {
     }
 
     fn get_prompt_color(&self) -> reedline::Color {
-        reedline::Color::Reset
+        reedline::Color::Default
     }
 
     fn get_prompt_multiline_color(&self) -> nu_ansi_term::Color {
@@ -56,11 +56,12 @@ impl reedline::Prompt for InteractivePrompt {
     }
 
     fn get_indicator_color(&self) -> reedline::Color {
-        reedline::Color::Cyan
+        // crossterm's `Cyan`, which reedline used before its nu-ansi-term migration, is palette 14.
+        reedline::Color::LightCyan
     }
 
     fn get_prompt_right_color(&self) -> reedline::Color {
-        reedline::Color::AnsiValue(5)
+        reedline::Color::Fixed(5)
     }
 
     fn right_prompt_on_last_line(&self) -> bool {

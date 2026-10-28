@@ -41,7 +41,7 @@ use crate::shellmux::frontend::{FrontendEvent, ShellFrontend, notify};
 use crate::shellmux::idle::{IdleTerminal, LeaseRefusal, LeaseState, Revocation};
 use crate::shellmux::ids::ShellId;
 use crate::shellmux::mux::{Sandbox, ShellMux};
-use crate::shellmux::pipes::{PipeInput, read_pipe, read_terminal, write_fd};
+use crate::shellmux::pipes::{PipeInput, read_pipe, read_terminal, register_fd, write_fd};
 use crate::shellmux::pty::resize_pty;
 use crate::shellmux::types::{
     CommandOptions, JobCloseMode, JobEnd, JobIo, OutputChannel, SpawnOptions, TerminalGeometry,
@@ -586,7 +586,7 @@ impl ShellMux {
                 let (master, slave) = crate::shellmux::pty::open_pty(geometry.rows, geometry.cols)?;
                 let tty = file(&slave)?;
                 let tty_path = terminal_name(slave.as_fd());
-                let master = Arc::new(AsyncFd::new(master)?);
+                let master = Arc::new(register_fd(master)?);
                 (
                     [tty.clone(), tty.clone(), tty],
                     vec![slave],
@@ -614,11 +614,11 @@ impl ShellMux {
                     vec![
                         (
                             OutputChannel::Stdout,
-                            Reader::Pipe(AsyncFd::new(pipes.stdout)?),
+                            Reader::Pipe(register_fd(pipes.stdout)?),
                         ),
                         (
                             OutputChannel::Stderr,
-                            Reader::Pipe(AsyncFd::new(pipes.stderr)?),
+                            Reader::Pipe(register_fd(pipes.stderr)?),
                         ),
                     ],
                 )
@@ -2035,7 +2035,7 @@ mod tests {
         }));
 
         let pipes = crate::shellmux::pipes::open_pipes().expect("a pipe pair");
-        let reader = Reader::Pipe(AsyncFd::new(pipes.stdout).expect("a registered read end"));
+        let reader = Reader::Pipe(register_fd(pipes.stdout).expect("a registered read end"));
         let writer = pipes.child_stdout;
         drop((
             pipes.child_stdin,

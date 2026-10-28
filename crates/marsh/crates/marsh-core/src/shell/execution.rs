@@ -424,7 +424,7 @@ impl Run {
             .and_then(marsh_instrument::open_process)
             .and_then(|pidfd| {
                 let _runtime = self.runtime.enter();
-                AsyncFd::new(pidfd)
+                crate::shellmux::register_fd(pidfd)
             });
         match pinned {
             Ok(pidfd) => {

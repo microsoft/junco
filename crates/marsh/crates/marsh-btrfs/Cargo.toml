@@ -18,14 +18,14 @@ fake = []
 [dependencies]
 marsh-lib = { path = "../marsh-lib", default-features = false }
 thiserror = "2"
-sha1 = "0.10"
+sha1 = "0.11"
 hex = "0.4"
 btrfsutil = "=0.2.0"
 proc-mounts = "0.3"
 libc = "0.2"
 
 [dev-dependencies]
-mockall = "0.13"
+mockall = "0.15"
 tempfile = "3"
 
 

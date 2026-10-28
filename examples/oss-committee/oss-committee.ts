@@ -220,11 +220,6 @@ const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
       while (true) yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, { kind: "prompt", text })];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
-    contract: (edgeId) => ({
-      expect: edgeId === partialResearchId
-        ? "Exactly one prompt carrying partial research: available evidence, the failed lookup/error, and remaining gaps, used to prepare the Architect's assignment."
-        : "Normally completed, non-empty Librarian research after a valid OSS search and no unhanded failed lookup, used to prepare the Architect's assignment.",
-    }),
   };
 };
 
@@ -239,11 +234,6 @@ const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
       while (true) yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, { kind: "prompt", text })];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
-    contract: (edgeId) => ({
-      expect: edgeId === reducerResearchId
-        ? "The Librarian's normally completed, non-empty closing report for the joined review."
-        : "The Architect's normally completed, non-empty design report for the joined review.",
-    }),
   };
 };
 

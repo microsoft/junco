@@ -17,10 +17,10 @@
     "fit": "bun run src/cli.ts",
     "schemas": "bun run scripts/emit-schemas.ts"
   },
-  "dependencies": { "@buge/ts-units": "^1.2.3", "typebox": "1.3.34" },
+  "dependencies": { "@buge/ts-units": "^1.2.3", "typebox": "1.4.3" },
   "peerDependencies": { "dataflow-engine": "^0.1.0" },
   "devDependencies": {
-    "@types/bun": "1.4.2", "@types/node": "26.6.3", "dataflow-engine": "workspace:*",
+    "@types/bun": "1.4.2", "@types/node": "26.6.6", "dataflow-engine": "workspace:*",
     "junco-scheduler": "workspace:*",
     "fast-check": "^4.10.2", "typescript": "7.0.2"
   }

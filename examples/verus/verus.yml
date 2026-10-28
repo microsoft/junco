@@ -38,8 +38,6 @@ graph:
         Recommend concrete stronger guarantees/invariants, shorter proofs, and idiomatic semantically equivalent code with file/definition anchors and real diagnostics. Do not declare overall completion merely because Verus exits zero.
       description: "Run Verus and review specification adequacy"
       trigger: "PrepareReviewer->Reviewer"
-      contracts:
-        "PrepareReviewer->Reviewer": "Normally completed, nonblank Verifier report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
     PrepareCleanup:
       kind: code
       description: Validate the Reviewer report and require fresh diagnostics before preparing Cleanup.
@@ -58,8 +56,6 @@ graph:
         Check edits with mcp__verus__lsp_diagnostics. Report remaining failures and unresolved stricter-spec recommendations for the next Verifier. The proof/code ratio is an optimization goal, not a fabricated exact metric or a guarantee of monotonic decrease.
       description: "Simplify code and proofs without weakening obligations"
       trigger: "PrepareCleanup->Cleanup"
-      contracts:
-        "PrepareCleanup->Cleanup": "Normally completed, nonblank Reviewer report with actual file/definition anchors, diagnostics and remaining recommendations; used to stage the next assignment, not override role constraints."
   edges:
     - from: Verifier
       to: PrepareReviewer

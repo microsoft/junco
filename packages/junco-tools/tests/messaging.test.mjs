@@ -388,7 +388,7 @@ test("info rejects model-supplied identity and absent hosts, and preserves host 
   assert.equal(result.details, details);
   assert.equal(result.content[0].text, '{"parents":[],"children":[]}');
   await assert.rejects(call(new InfoTool()));
-  const failure = new Error("no contract");
+  const failure = new Error("host failed");
   await assert.rejects(
     call(
       new InfoTool({
@@ -536,10 +536,10 @@ test("messaging tools count each send, recv and info call once, direct or invoke
   const info = new InfoTool(
     {
       info: () => ({
-        parents: [{ id: "p", edgeId: "e1", kind: "message", expect: "x" }],
+        parents: [{ id: "p", edgeId: "e1", kind: "message" }],
         children: [
-          { id: "c", edgeId: "e2", kind: "value", expect: "y" },
-          { id: "d", edgeId: "e3", kind: "message", expect: "z" },
+          { id: "c", edgeId: "e2", kind: "value" },
+          { id: "d", edgeId: "e3", kind: "message" },
         ],
       }),
     },

@@ -782,10 +782,19 @@ test("forked owners: one owner across calls, distinct siblings, labels and other
     );
     assert.equal(await readFile(join(seed, "src/owned.txt"), "utf8"), "a");
 
-    // The owner's later release lets the sibling take the file.
+    // The owner's later release lets the sibling take the file once it reads the owner's edit.
     await owner.release(seed, "src/owned.txt");
+    await assert.rejects(
+      managed(sibling, seed, "printf b > src/owned.txt", "sibling"),
+      isMarshPolicyDenied,
+    );
     assert.equal(
-      await managed(sibling, seed, "printf b > src/owned.txt", "sibling"),
+      await managed(
+        sibling,
+        seed,
+        "cat src/owned.txt >/dev/null && printf b > src/owned.txt",
+        "sibling",
+      ),
       0,
     );
     assert.equal(await readFile(join(seed, "src/owned.txt"), "utf8"), "b");
@@ -863,7 +872,7 @@ test("a release in shared mode publishes without a live peer", {
       await managed(
         challenger,
         seed,
-        "printf b > src/shared.txt",
+        "cat src/shared.txt >/dev/null && printf b > src/shared.txt",
         "challenger",
       ),
       0,

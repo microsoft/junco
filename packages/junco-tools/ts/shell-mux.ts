@@ -1,4 +1,4 @@
-import { DefaultLogLevels } from "tslog";
+import { LogLevel } from "tslog";
 import type {
   NativeMux,
   NativeResourceEvent,
@@ -124,10 +124,10 @@ export const ShellMuxLease = {
       {
         sandbox,
         policy: policy.toNative(native),
-        policyDebug: level <= DefaultLogLevels.DEBUG,
+        policyDebug: level <= LogLevel.DEBUG,
         resources,
       },
-      level <= DefaultLogLevels.INFO ? logPolicyDecision : undefined,
+      level <= LogLevel.INFO ? logPolicyDecision : undefined,
       onResourceEvent === undefined
         ? undefined
         : (error: Error | null, event: NativeResourceEvent) => {

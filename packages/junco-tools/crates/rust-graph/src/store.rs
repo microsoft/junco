@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     path::Path,
     time::{Instant, UNIX_EPOCH},
@@ -89,7 +90,12 @@ fn file_entry(
         return Ok((c.clone(), true));
     }
     let bytes = fs::read(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
-    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let hash = Sha256::digest(&bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
     if let Some(c) = cached
         && c.hash == hash
     {
