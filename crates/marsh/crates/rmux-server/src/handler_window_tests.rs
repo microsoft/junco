@@ -131,7 +131,10 @@ async fn enable_global_monitor_silence(handler: &RequestHandler) {
         .await;
 }
 
+/// Inserts a window at `window_index` whose pane runs [`quiet_command`]: a shell's late prompt
+/// would reset the window's silence deadline after a test snapshotted it.
 async fn insert_window(handler: &RequestHandler, session_name: &SessionName, window_index: u32) {
+    let quiet = ProcessCommand::Argv(quiet_command());
     let mut state = handler.state.lock().await;
     let pane_id = state.sessions.allocate_pane_id();
     {
@@ -153,7 +156,7 @@ async fn insert_window(handler: &RequestHandler, session_name: &SessionName, win
             window_index,
             crate::pane_terminals::WindowSpawnOptions {
                 start_directory: None,
-                command: None,
+                command: Some(&quiet),
                 socket_path: Path::new("/tmp/rmux-test.sock"),
                 spawn_environment: None,
                 environment_overrides: None,

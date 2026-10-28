@@ -570,8 +570,17 @@ test("a release publishes without a live peer and survives reopening the seed", 
   try {
     const writer = reopened.mux.forkOwner();
     const live = await peer(reopened.mux);
+    // The release does not refresh a fresh owner's view of the earlier edit: it reads first.
+    await assert.rejects(
+      managed(writer, "printf next > src/released.txt", "writer"),
+      isMarshPolicyDenied,
+    );
     assert.equal(
-      await managed(writer, "printf next > src/released.txt", "writer"),
+      await managed(
+        writer,
+        "cat src/released.txt >/dev/null && printf next > src/released.txt",
+        "writer",
+      ),
       0,
     );
     await assert.rejects(

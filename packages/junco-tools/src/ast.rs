@@ -1105,14 +1105,16 @@ pub(crate) fn prepare_apply(options: AstApplyOptions<'_>) -> (AstApplySpec, task
 
 impl AstApplySpec {
     /// Applies every edit under `root` all-or-nothing: each file is preflighted and its output
-    /// computed before `persist` sees the first write. Returns the sorted edited paths.
+    /// computed before `persist` sees the first write; existing files' baseline bytes come from
+    /// `read`. Returns the sorted edited paths.
     pub(crate) fn run(
         self,
         ct: task::CancelToken,
         root: &Path,
+        read: &mut dyn FnMut(&Path) -> std::io::Result<Vec<u8>>,
         persist: &mut dyn FnMut(&Path, &[u8]) -> std::io::Result<()>,
     ) -> Result<Vec<String>> {
-        let writes = self.preflight(root).map_err(|reason| {
+        let writes = self.preflight(root, read).map_err(|reason| {
             Error::from_reason(format!(
                 "Applying {} failed: {reason}; nothing was written",
                 self.label
@@ -1131,6 +1133,7 @@ impl AstApplySpec {
     fn preflight(
         &self,
         root: &Path,
+        read: &mut dyn FnMut(&Path) -> std::io::Result<Vec<u8>>,
     ) -> std::result::Result<Vec<(String, PathBuf, Vec<u8>)>, String> {
         let mut files: Vec<&AstSourceFile> = self.files.iter().collect();
         files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1178,7 +1181,7 @@ impl AstApplySpec {
             let physical = source_path(root, &root_real, path)?;
             let bytes = match &file.sha256 {
                 None => created_source(path, &physical, &edits)?,
-                Some(baseline) => replaced_source(path, &physical, baseline, edits)?,
+                Some(baseline) => replaced_source(path, &physical, baseline, edits, read)?,
             };
             writes.push((file.path.clone(), physical, bytes));
         }
@@ -1251,12 +1254,13 @@ fn created_source(
 }
 
 /// An existing file's bytes after `edits`, keeping its BOM, encoding, and line terminators;
-/// inserted lines take the file's first terminator.
+/// inserted lines take the file's first terminator. Its current bytes come from `read`.
 fn replaced_source(
     path: &str,
     physical: &Path,
     baseline: &str,
     mut edits: Vec<&AstSourceEdit>,
+    read: &mut dyn FnMut(&Path) -> std::io::Result<Vec<u8>>,
 ) -> std::result::Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
@@ -1278,7 +1282,7 @@ fn replaced_source(
     if metadata.nlink() != 1 {
         return Err(format!("{path} has {} hard links", metadata.nlink()));
     }
-    let bytes = std::fs::read(physical).map_err(|err| format!("{path}: {err}"))?;
+    let bytes = read(physical).map_err(|err| format!("{path}: {err}"))?;
     let digest = Sha256::digest(&bytes)
         .iter()
         .fold(String::with_capacity(64), |mut hex, byte| {

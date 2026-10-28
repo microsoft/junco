@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -522,8 +522,9 @@ impl NativeMux {
     }
 
     /// A routed line-edit apply under `cwd`: every file is preflighted (baseline hash, lexical
-    /// path, regular file, before-lines) before any write; then each path is released so a fresh
-    /// owner may take it.
+    /// path, regular file, before-lines) before any write; its baseline check reads through the
+    /// call's context, so the verified bytes are the call's fresh read. Then each path is released
+    /// so a fresh owner may take it.
     #[napi(ts_return_type = "Promise<Array<string>>")]
     pub fn ast_apply<'env>(
         &self,
@@ -543,6 +544,12 @@ impl NativeMux {
             routed(session, self.owner.clone(), cwd, tool, move |ctx| {
                 let view = View::new(ctx, &seed)?;
                 let root = view.physical(&root)?;
+                let mut read = |path: &Path| {
+                    let mut bytes = Vec::new();
+                    ctx.open(&view.logical(path), std::fs::OpenOptions::new().read(true))?
+                        .read_to_end(&mut bytes)?;
+                    Ok(bytes)
+                };
                 let mut persist = |path: &Path, bytes: &[u8]| {
                     if let Some(parent) = path.parent().filter(|parent| !parent.is_dir()) {
                         ctx.create_dir_all(&view.logical(parent))?;
@@ -550,7 +557,7 @@ impl NativeMux {
                     replace_file(ctx, &view.logical(path), bytes)
                 };
                 let files = spec
-                    .run(ct, &root, &mut persist)
+                    .run(ct, &root, &mut read, &mut persist)
                     .map_err(|error| view.error(error))?;
                 for file in &files {
                     ctx.release(&view.logical(&root.join(file)))
