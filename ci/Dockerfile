@@ -12,8 +12,11 @@ RUN apt-get update \
     btrfs-progs ca-certificates curl git mount python3 util-linux unzip xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
+# Bun's temporary node-gyp shim is not found by install scripts that spawn node-gyp themselves
+# (tree-sitter-kotlin's node-gyp-build: `spawn node-gyp ENOENT`), so expose npm's bundled copy.
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-  | tar -xJ -C /usr/local --strip-components=1
+  | tar -xJ -C /usr/local --strip-components=1 \
+  && ln -s ../lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js /usr/local/bin/node-gyp
 
 RUN curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" -o /tmp/bun.zip \
   && unzip -j /tmp/bun.zip bun-linux-x64/bun -d /usr/local/bin \
