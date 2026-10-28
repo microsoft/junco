@@ -16,6 +16,7 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair for `schedules.runO
 
 - Every execution is a fresh child process running the user's existing `argv` in `target.cwd` (no shell), with the inherited environment plus `JUNCO_PROFILE_RUN_DIR=<sessionDir>/runs/<NNNN>`. `resetArgv`, when given, runs first in its own owned process and must succeed.
 - Children are detached process groups. Cancellation or time-budget expiry sends SIGTERM to the group, SIGKILL after 5 s, and waits until the group is gone before restoring files or starting another run. If disappearance cannot be proved, nothing is restored.
+- A target owning external resources (for example task containers) creates `<run>/cleanup.pending` before acquiring them and removes it only after proving all owned resources and processes gone. A surviving guard, even after child exit 0 or forced process-group cancellation, blocks further trials and file restoration. Keep its ownership/recovery evidence; process disappearance alone does not prove remote cleanup. Targets without external resources need no guard.
 - Baseline: the prepared, untuned file `R` times. Then cycles over the requested axes; each cycle (after the first) starts by re-measuring the incumbent `R` times. Each editor turn changes one axis; the candidate is measured `R` times. A batch scores (median; mean of the middle two for even `R`) only when every run passes process, receipt and metric validation. Feasible = scored and every run meets every constraint.
 - A feasible candidate replaces the incumbent when its directional gain exceeds `absoluteTolerance + relativeTolerance * |incumbent|` (zero without a plateau request). Execution or measurement errors and rejected edits retry the same axis; fully measured alternatives (even infeasible ones) advance it.
 - At a completed cycle where every requested predicate holds (plateau additionally: no promotion that cycle and the incumbent window stable), the saved entrypoint runs `max(R, W)` (plateau) or `R` fresh times. Passing confirmation converges and leaves the verified tuning saved; failing it starts another full cycle.
@@ -32,13 +33,15 @@ The host writes `<run>/request.json` exactly:
 ```
 
 - `monitored` is true only when a metric uses recorded memory. `probes` lists every probe metric. `expectedGraphHash` is null until the baseline's first receipt establishes it; afterwards a mismatch must fail before any agent is acquired.
-- The target writes only the fixed names `samples.jsonl` (the `JsonlRecorder`) and `completion.json`, and only after the existing terminal assertion passed and every graph, tracer and recorder close succeeded:
+- The target writes only the fixed names `samples.jsonl` (the `JsonlRecorder`) and `completion.json`, and only after its existing terminal invariant and every graph, tracer and recorder close succeeded. An external workload's terminal invariant is complete authoritative outcome coverage, not passing its quality threshold:
 
 ```json
-{ "version": 1, "nonce": "<the request's>", "terminal": true, "graphHash": "<sha256>", "resourceEvents": 0 }
+{ "version": 1, "nonce": "<the request's>", "terminal": true, "graphHash": "<sha256>", "resourceEvents": 0,
+  "metrics": { "resolved": 60 } }
 ```
 
   Publish it through a temporary file and `rename` inside the run directory. A failed run or cleanup leaves no receipt.
+- `metrics` is optional for existing targets. Every supplied value must be a finite number; a requested `{ kind: "result", name }` must be present. The host reads it only after validating the receipt envelope. The fixed adapter owns freshness, exact workload coverage and the authoritative evaluator; never let a solving agent write these outcomes. A complete run below its quality threshold is scored but infeasible; a missing, stale or incomplete result is a measurement failure.
 - The host accepts a run only after child `close` with exit 0, no signal, the exact nonce, `terminal: true`, the baseline `graphHash`, unchanged YAML bytes, the measured TS hash before and after, and a canonically parsed fresh profile containing every metric. Anything else is ineligible, however cheap its partial rows look.
 
 ## Tuning regions
@@ -59,7 +62,7 @@ const optimizerLimits: OptimizerLimits = {}; // extra limits only; hard limits s
 ```
 
 - Markers are whole-line `//` comments; a region's interior is the lines between them. The editor replaces one interior per turn through `edit_tuning`; every byte outside the interiors is fixed and checked on each write, and the YAML must stay unchanged.
-- Keep imports, graph parsing/building, code-node bodies, tools, round counts, recorder/probe integration, quality logic and the original hard limits outside every region. Scheduler candidates must not change which rung a node uses; the ladder region owns that.
+- Keep imports, graph parsing/building, code-node bodies, tools, round counts, recorder/probe integration, quality logic and the original hard limits outside every region. Scheduler candidates must not change which rung a node uses; the ladder region owns that. Agentic candidates call a fixed `optimizerPi(model, thinking?)` helper outside the regions: it checks the exact pair against `run.allowedModels` before acquiring a model and supplies `schedules.pi` a metered `completeSimple` implementation.
 - Keep YAML/TypeScript prediction profiles fixed. Ranking (`lowest`/`highest`) and memory admission need complete compatible profiles; the resource scheduler supports only constant and planned `count` features. A missing profile invalidates that candidate — never substitute zero forecasts or refit during tuning.
 - If the existing runner cannot expose these bindings without changing behavior (for example, scheduling decided inside a code node), report that integration prerequisite instead of claiming generic interception.
 
@@ -237,6 +240,9 @@ Integration notes:
 - **Recorder ownership.** Attach the recorder where the runner already builds: `fromYaml`'s `recorder` (agents created by `createAgent` receive it through their spec), or `JuncoGraph.create`'s collection options. An existing recorder must be integrated consistently or reported as an ownership conflict — never silently replaced. If the runner passes `recorderNodeId`, prefix probe `node` paths with it.
 - **Caller-owned resources.** With caller-owned `collection`, `createAgent` or `agents`, monitoring is configured where that collection is constructed, never through conflicting `BuildOptions.resources`.
 - **Cleanup order.** Graph and owned resources close first, the tracer flushes next, the recorder closes last; build failures still close. Run and cleanup failures are reported together.
+- **Request USD.** For an all-request objective use `new tracer.JsonlRecorder({ path, costMode: "usage" })`. Each `resource: "cost", kind: "usage"` increment becomes one USD sample with the original Pi `Usage` in `measurement.usage`, regardless of activation success; activation samples then omit cost. Agents already emit these events: do not wrap and count their requests a second time. Default `costMode: "activation"` preserves successful-activation rollups for existing consumers.
+- **Scheduler USD and domain.** The fixed `optimizerPi` helper validates both the candidate's `provider/model` and thinking level against `run.allowedModels`, then wraps only the scheduler's `completeSimple`. On every returned response, record `{ resource: "cost", kind: "usage", source: schedulerSource, usage: response.usage }` through a scheduler recorder context before `schedules.pi` checks cancellation, stop reason or scheduling output. Missing/nonfinite/negative cost invalidates the run. A thrown request with unknown usage is an accounting error, never a free request or a fallback. Agentic scheduling may order ready work, not omit required consultations or choose work-agent rungs.
+- **External results.** A fixed workload adapter can publish finite `metrics` in the same completion receipt after validating its complete official outcomes, cost coverage, source hash and cleanup. Keep these out of the solving agents' environment; no YAML edge or invented judge is needed. A solver failure with complete accounting and official outcomes remains a scored, quality-infeasible run; infrastructure or accounting failures leave no receipt.
 - **Repeated runs.** Each child is fresh, so module-level state resets. Persistent external effects need the caller's `resetArgv`.
 
 ## Configuration axes
@@ -245,18 +251,20 @@ The editor writes concrete TypeScript within `allowedModels` and `limitBounds`; 
 
 | Axis | Supported configurations and restrictions |
 |---|---|
-| Scheduling | Existing factory, `schedules.parallel()`, `schedules.roundRobin(undefined, width)`, `schedules.choose({ rank, width: () => width })`. `parallel` does not enforce finite YAML `threads`; prefer width-bounded candidates compatible with the unchanged graph. `schedules.lowest("tokens"\|"memory"\|"runtime")` / `highest(...)` are **rank callbacks for `choose`**, not schedulers. Every existing work node stays schedulable. |
+| Scheduling | Existing factory, `schedules.parallel()`, `schedules.roundRobin(undefined, width)`, `schedules.choose({ rank, width: () => width })`, or fixed metered/domain-checked `optimizerPi(model, thinking?)` using `schedules.pi`. `parallel` does not enforce finite YAML `threads`; prefer width-bounded candidates compatible with the unchanged graph. `schedules.lowest("tokens"\|"memory"\|"runtime")` / `highest(...)` are **rank callbacks for `choose`**, not schedulers. Every existing work node stays schedulable; no agentic omission or rung selection. |
 | Models | A complete `schedules.Ladder` (`smol`, `low`, `med`, `high`, `xhigh`, each `{ model: "provider/model-id", thinking? }`). `schedules.strength((snapshot, nodeId) => rung, inner)` selects a rung; built-in work policies otherwise use `med`. Changing an unused rung is not a measured model experiment. Keep graph-label dispatch and role assignments. |
 | Limits | `schedules.limit({ memory?, tokens?, tools?, scope? }, inner)` outermost around the selected policy, inside the original hard limits. Memory quantities and `tokens(n)` come from `dataflow-engine`. Memory is predicted per-decision admission; tokens/tools are nonnegative caps on actual usage per `scope` (`evaluation` \| `batch` \| `activation`). |
 
 - Policies are rebuilt through `scheduler(label)` for every child, so histories and limit ledgers cannot leak between trials. Nested graph levels get their own policies: parent token/tool budgets cover child work and child limits add to them, while parent memory prediction sees the nested wrapper, not its synchronized children. Use only the label granularity the existing factory exposes; never rename YAML labels to disambiguate.
-- A limit violation (`JUNCO_USAGE_LIMIT_EXCEEDED`), capacity rejection, failed task, missing metric or failed quality threshold makes a trial ineligible. Token caps can overshoot by in-flight requests: never promise a monetary hard cap from them.
+- A limit violation (`JUNCO_USAGE_LIMIT_EXCEEDED`), capacity rejection or failed target terminal invariant invalidates execution. Missing metrics invalidate measurement; complete quality values below the threshold produce a scored but infeasible trial. Token caps can overshoot by in-flight requests: never promise a monetary hard cap from them.
 
 ## Metrics and measurement coverage
 
 - **tokens** — sum of `resources.tokens` over samples: committed tokens of successful graph-node agent activations. Not `schedules.pi` oracle requests or `task` subagents. A target without agent activations has no token contributors, which is an error, not zero.
+- **cost** — sum of `resources.cost`, normalized to USD. No contributors is an error. For complete per-request USD, opt into `costMode: "usage"`, attach standalone agents and the scheduler wrapper to the same recorder, and reject unknown usage on failed/aborted attempts. Include spend on unresolved cases; report editor spend separately and in campaign totals. This is catalog-priced recorded usage, not subscription invoice charges.
 - **memory** — maximum `resources.memory` in bytes: one activation's shell-pipeline peak. Requires a native collection bound to the same recorder, delegated cgroup v2 monitoring and actual coverage: the receipt's `resourceEvents` must be positive. `monitored: true` alone records zeros and is rejected for scoring. An explicitly selected, caller-approved existing memory probe is the only substitute.
 - **probe** — values published on one existing numeric edge, matched by wrapper path (`""` root, `Parent/Child` nested) and exact local edge ID, in event order, reduced by `single` (exactly one value) | `last` | `min` | `max` | `sum` | `mean`. Zero and negative values are legitimate; units are the user's.
+- **result** — a named finite number from the validated completion receipt's optional `metrics` object, summarized once with unit `null`. Only fixed authoritative external producers qualify; the adapter must reject partial or stale coverage. Result thresholds never authorize changing the evaluator, combining best results across repeats or hiding unsuccessful spend.
 - **Stability** — over the last `W` values: `max - min <= absoluteTolerance + relativeTolerance * max(|value|)`. Window values are fresh feasible cycle-start incumbent measurements (or the confirmation's last `W`); promotions and failed re-measurements clear the window.
 
 ## Outcomes and evidence

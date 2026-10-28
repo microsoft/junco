@@ -10,8 +10,10 @@ import {
 export type JsonlRecorderOptions = {
   /** JSONL file appended at every graph evaluation end and `flush()`. */
   readonly path: string;
-  /** Set when the collection monitors: every sample then carries memory in bytes. */
+  /** Set when the collection monitors: activation samples then carry memory in bytes. */
   readonly monitored?: boolean;
+  /** `usage` records each cost increment, including outside activations, instead of activation rollups. */
+  readonly costMode?: "activation" | "usage";
 };
 
 /** One activation's `edits`/`operations` events with the same labels, summed. */
@@ -52,14 +54,15 @@ type Activation = {
 
 /**
  * Projects profile events into dataflow-profile JSONL training samples: one per successful graph
- * activation, keyed by its `/`-joined node IDs, plus one resource-free `measurement.probe` sample per
- * probe event.
+ * activation, keyed by its `/`-joined node IDs, plus standalone probe samples. In `usage` cost mode,
+ * each cost usage event contributes its own USD sample and activation samples omit cost.
  */
 export class JsonlRecorder implements ProfileRecorder<string> {
   readonly root: object = this;
   readonly path = "";
   readonly #file: string;
   readonly #monitored: boolean;
+  readonly #costMode: "activation" | "usage";
   readonly #contexts = profileContexts(
     this,
     (ids, _path, event) => this.#reduce(ids, event),
@@ -73,7 +76,7 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   readonly #latest = new Map<string, Activation>();
   readonly #tokens = new WeakMap<object, number>();
   readonly #cost = new WeakMap<object, number>();
-  /** Ended activations and standalone probe samples, in record order. */
+  /** Ended activations and standalone usage/probe samples, in record order. */
   #pending: (Activation | Sample)[] = [];
   #writing: Promise<void> = Promise.resolve();
   #failure: unknown;
@@ -82,6 +85,7 @@ export class JsonlRecorder implements ProfileRecorder<string> {
   constructor(options: JsonlRecorderOptions) {
     this.#file = options.path;
     this.#monitored = options.monitored ?? false;
+    this.#costMode = options.costMode ?? "activation";
   }
 
   readonly record = (event: ProfileEvent<string>): void =>
@@ -116,7 +120,21 @@ export class JsonlRecorder implements ProfileRecorder<string> {
             event.source,
             (this.#tokens.get(event.source) ?? 0) + event.usage.totalTokens,
           );
-        else
+        else if (this.#costMode === "usage") {
+          const cost = event.usage.cost?.total;
+          if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) {
+            this.#failure ??= new Error("JsonlRecorder: invalid cost sample");
+            return;
+          }
+          this.#pending.push({
+            node: ids.join("/"),
+            features: {},
+            resources: { cost },
+            units: { cost: "USD" },
+            firedAt: new Date().toISOString(),
+            measurement: { usage: event.usage },
+          });
+        } else
           this.#cost.set(
             event.source,
             (this.#cost.get(event.source) ?? 0) +
@@ -308,7 +326,7 @@ export class JsonlRecorder implements ProfileRecorder<string> {
       resources.tokens = ended.tokens;
       units.tokens = "tok";
     }
-    if (ended.cost !== undefined) {
+    if (this.#costMode === "activation" && ended.cost !== undefined) {
       resources.cost = ended.cost;
       units.cost = "USD";
     }

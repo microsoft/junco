@@ -75,21 +75,23 @@ async function checkMetrics(dir: string): Promise<void> {
   };
   const tokens: Metric = { kind: "tokens" };
   const memory: Metric = { kind: "memory" };
+  const cost: Metric = { kind: "cost" };
+  const resolved: Metric = { kind: "result", name: "resolved" };
   const row = (value: object) =>
     JSON.stringify({ features: {}, units: {}, resources: {}, ...value });
   const resources = await readProfile(
     await file("resources.jsonl", [
       row({
         node: "A",
-        resources: { tokens: 100, memory: 1 },
-        units: { tokens: "tok", memory: "KiB" },
+        resources: { tokens: 100, memory: 1, cost: 0.25 },
+        units: { tokens: "tok", memory: "KiB", cost: "USD" },
       }),
       "",
       "   ",
       row({
         node: "B",
-        resources: { tokens: 50, memory: 512 },
-        units: { tokens: "tok", memory: "B" },
+        resources: { tokens: 50, memory: 512, cost: 0.5 },
+        units: { tokens: "tok", memory: "B", cost: "USD" },
         measurement: { operations: [{ tool: "read", calls: 1 }] },
       }),
     ]),
@@ -104,6 +106,29 @@ async function checkMetrics(dir: string): Promise<void> {
     unit: "B",
     count: 2,
   });
+  assert.deepEqual(summarize(resources, cost), {
+    value: 0.75,
+    unit: "USD",
+    count: 2,
+  });
+  assert.deepEqual(summarize([], resolved, { resolved: 0 }), {
+    value: 0,
+    unit: null,
+    count: 1,
+  });
+  for (const results of [
+    undefined,
+    {},
+    { other: 60 },
+    Object.create({ resolved: 60 }),
+  ])
+    assert.throws(() => summarize([], resolved, results), /no result/);
+  for (const value of ["60", null, Number.NaN, Number.POSITIVE_INFINITY])
+    assert.throws(
+      () =>
+        summarize([], resolved, { resolved: value } as Record<string, number>),
+      /finite number/,
+    );
 
   for (const [name, lines, pattern] of [
     ["json", [row({ node: "A" }), "{not json"], /line 2/],
@@ -121,6 +146,16 @@ async function checkMetrics(dir: string): Promise<void> {
       "unit",
       [row({ node: "A" }), row({ node: "A", resources: { memory: 3 } })],
       /line 2.*no unit/,
+    ],
+    [
+      "negative-cost",
+      [row({ node: "A", resources: { cost: -1 }, units: { cost: "USD" } })],
+      /line 1/,
+    ],
+    [
+      "cost-unit",
+      [row({ node: "A", resources: { cost: 1 }, units: { cost: "EUR" } })],
+      /line 1/,
     ],
   ] as const)
     await assert.rejects(
@@ -177,6 +212,7 @@ async function checkMetrics(dir: string): Promise<void> {
   assert.throws(() => summarize(empty, tokens), /no tokens/);
   assert.throws(() => summarize(probes, tokens), /no tokens/);
   assert.throws(() => summarize(probes, memory), /no memory/);
+  assert.throws(() => summarize(probes, cost), /no cost/);
   assert.throws(
     () =>
       summarize(probes, {
@@ -277,6 +313,9 @@ type TargetParts = {
   readonly beforeBuild?: string;
   readonly afterCleanup?: string;
   readonly nonce?: string;
+  readonly metrics?: string;
+  readonly receiptFields?: string;
+  readonly afterRun?: string;
 };
 
 /** The instrumented entrypoint the skill prepares, per references/profiling.md. */
@@ -428,7 +467,7 @@ ${p.beforeBuild ?? ""}
 const recorder =
   run === undefined
     ? undefined
-    : new tracer.JsonlRecorder({ path: join(RUN_DIR as string, "samples.jsonl"), monitored: run.monitored });
+    : new tracer.JsonlRecorder({ path: join(RUN_DIR as string, "samples.jsonl"), monitored: run.monitored, costMode: "usage" });
 const observer = new tracer.DummyTracer();
 let resourceEvents = 0;
 const failures: unknown[] = [];
@@ -446,6 +485,7 @@ try {
   const result = execution.graph.result(execution.graph.sink.id);
   const value = result._tag === "Some" ? result.value : undefined;
   if (!(${p.check})) throw new Error(\`terminal check failed: \${String(value)}\`);
+  ${p.afterRun ?? ""}
 } catch (error) {
   failures.push(error);
 }
@@ -461,7 +501,7 @@ if (run !== undefined) {
   const receipt = join(RUN_DIR as string, "completion.json");
   await writeFile(
     \`\${receipt}.tmp\`,
-    JSON.stringify({ version: 1, nonce: ${p.nonce ?? "run.nonce"}, terminal: true, graphHash, resourceEvents }),
+    JSON.stringify({ version: 1, nonce: ${p.nonce ?? "run.nonce"}, terminal: true, graphHash, resourceEvents, ${p.metrics === undefined ? "" : `metrics: ${p.metrics},`} ...(${p.receiptFields ?? "{}"}) }),
     { flag: "wx" },
   );
   await rename(\`\${receipt}.tmp\`, receipt);
@@ -822,12 +862,18 @@ async function checkEvidence(target: Prepared, state: State): Promise<void> {
     for (const run of trial.runs) {
       if (run.status !== "ok") continue;
       const samples = await readProfile(join(run.directory, "samples.jsonl"));
+      const { metrics } = JSON.parse(
+        await readFile(join(run.directory, "completion.json"), "utf8"),
+      );
       assert.deepEqual(
-        summarize(samples, state.request.objective.metric),
+        summarize(samples, state.request.objective.metric, metrics),
         run.objective,
       );
       for (const [i, { metric }] of state.request.constraints.entries())
-        assert.deepEqual(summarize(samples, metric), run.constraints[i]);
+        assert.deepEqual(
+          summarize(samples, metric, metrics),
+          run.constraints[i],
+        );
     }
   }
   assert.deepEqual(
@@ -961,6 +1007,121 @@ async function numericScenario(dir: string): Promise<void> {
   assert.throws(
     () => summarize(targetSamples, { kind: "tokens" }),
     /no tokens/,
+  );
+}
+// --- per-request cost and fixed external outcomes -------------------------------------------------
+
+const COST_HEADER = (
+  stopReason = "toolUse",
+) => `import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+const schedulerProvider = fauxProvider({ api: "cost-scheduler", provider: "target", models: [{ id: "cheap" }] });
+const schedulerSource = {};
+function optimizerPi(model: string, thinking?: schedules.LadderRung["thinking"]) {
+  if (run !== undefined && !run.allowedModels.some((allowed) => allowed.model === model && allowed.thinking === thinking))
+    throw new Error(\`scheduler uses unauthorized \${model}/\${thinking ?? "default"}\`);
+  const selected = schedulerProvider.getModel();
+  if (model !== \`\${selected.provider}/\${selected.id}\`) throw new Error("unknown scheduler model");
+  return schedules.pi({
+    model: selected,
+    ...(thinking === undefined ? {} : { streamOptions: { reasoning: thinking } }),
+    models: {
+      completeSimple: async (_model, context) => {
+        const message = context.messages.at(-1);
+        if (message?.role !== "user" || typeof message.content !== "string") throw new Error("missing scheduler snapshot");
+        const snapshot = JSON.parse(message.content.slice("SchedulerSnapshot:\\n".length));
+        const response = fauxAssistantMessage(
+          fauxToolCall("schedule", { waves: snapshot.nodes.map((node: { id: string }) => [node.id]) }),
+          { stopReason: ${JSON.stringify(stopReason)} },
+        );
+        const usage = { ...response.usage, cost: { ...response.usage.cost, total: 0.25 } };
+        // Meter returned usage before schedules.pi checks cancellation, stop reason or output.
+        recorder?.add_context("Scheduler").record({ resource: "cost", kind: "usage", source: schedulerSource, usage });
+        return { ...response, usage };
+      },
+    },
+  });
+}
+`;
+const PI_SCHED =
+  'const optimizerScheduler = (_label: string) => optimizerPi("target/cheap");\n';
+const COST_USAGE = `const usage = fauxAssistantMessage("").usage;
+  recorder?.add_context("Solver").record({
+    resource: "cost", kind: "usage", source: {},
+    usage: { ...usage, cost: { ...usage.cost, total: peak * 100 } },
+  });`;
+const RESOLVED: Metric = { kind: "result", name: "resolved" };
+const costTarget = (extra: Partial<TargetParts> = {}): TargetParts =>
+  numericTarget({
+    header: COST_HEADER(),
+    afterRun: COST_USAGE,
+    metrics: "{ resolved: peak === 1 ? 60 : 59, attempted: 60 }",
+    ...extra,
+  });
+
+async function costResultScenario(dir: string): Promise<void> {
+  const target = await prepare(dir, costTarget());
+  const log: EditorLog = { states: [] };
+  const runtime = await editorRuntime(
+    editorTurn({ axis: "scheduler", source: PI_SCHED }, log),
+    ["cheap"],
+  );
+  const state = await optimize(
+    requestFor(target, {
+      objective: { metric: { kind: "cost" }, direction: "minimize" },
+      constraints: [{ metric: RESOLVED, op: ">=", threshold: 60 }],
+      repeats: 2,
+      stop: { target: 110 },
+      allowedModels: [{ model: "target/cheap" }],
+      runBudget: 6,
+    }),
+    runtime,
+  );
+  expectStop(state, "converged");
+  assert.equal(runtime.editor.getPendingResponseCount(), 0);
+  assert.equal(state.baselineScore, 200);
+  assert.equal(log.states[0]?.anchor.score, null);
+  assert.deepEqual(
+    trials(state).map((trial) => [trial.phase, trial.feasible]),
+    [
+      ["baseline", false],
+      ["candidate", true],
+      ["confirmation", true],
+    ],
+  );
+  assert.equal(await runDirs(target.sessionDir), 6);
+  for (const trial of trials(state))
+    for (const run of trial.runs) {
+      assert.equal(run.status, "ok");
+      assert.equal(run.objective?.unit, "USD");
+      assert.equal(
+        run.constraints[0]?.value,
+        trial.phase === "baseline" ? 59 : 60,
+      );
+      const request = JSON.parse(
+        await readFile(join(run.directory, "request.json"), "utf8"),
+      );
+      assert.deepEqual(request.allowedModels, [{ model: "target/cheap" }]);
+      const samples = await readProfile(join(run.directory, "samples.jsonl"));
+      const scheduler = samples.filter((sample) => sample.node === "Scheduler");
+      if (trial.phase === "baseline") assert.equal(scheduler.length, 0);
+      else {
+        assert.ok(scheduler.length > 0);
+        assert.equal(
+          summarize(scheduler, { kind: "cost" }).value,
+          scheduler.length * 0.25,
+        );
+        assert.equal(run.objective?.value, 100 + scheduler.length * 0.25);
+      }
+    }
+  await checkEvidence(target, state);
+  assert.equal(
+    await readFile(target.ts, "utf8"),
+    withRegions(target.prepared, state.anchor.candidate.sources),
+  );
+  assert.ok(
+    summarize(await readProfile(join(target.sessionDir, "optimizer.jsonl")), {
+      kind: "cost",
+    }).count > 0,
   );
 }
 
@@ -1152,9 +1313,10 @@ async function blockedScenario(
   extra: Partial<Request>,
   error: RegExp,
   reason: RegExp,
+  targetModels: readonly string[] = [],
 ): Promise<State> {
   const target = await prepare(dir, parts);
-  const { models, editorRung } = await editorRuntime([]);
+  const { models, editorRung } = await editorRuntime([], targetModels);
   const state = await optimize(requestFor(target, extra), {
     models,
     editorRung,
@@ -1168,6 +1330,196 @@ async function blockedScenario(
   assert.equal(await readFile(target.ts, "utf8"), target.original);
   await checkEvidence(target, state);
   return state;
+}
+
+async function resultFailureScenarios(dir: string): Promise<void> {
+  const noHash = /no baseline run established/;
+  const missing = /no complete measurement for an improvement goal/;
+  const request: Partial<Request> = {
+    objective: { metric: { kind: "cost" }, direction: "minimize" },
+    constraints: [{ metric: RESOLVED, op: ">=", threshold: 60 }],
+  };
+  const cases: readonly [string, Partial<TargetParts>, RegExp, RegExp][] = [
+    ["missing", { metrics: undefined }, /no result "resolved"/, missing],
+    ["unknown", { metrics: "{ other: 60 }" }, /no result "resolved"/, missing],
+    [
+      "null",
+      { metrics: "null" },
+      /metrics must be an object of finite numbers/,
+      noHash,
+    ],
+    [
+      "array",
+      { metrics: "[]" },
+      /metrics must be an object of finite numbers/,
+      noHash,
+    ],
+    ["string", { metrics: '{ resolved: "60" }' }, /finite numbers/, noHash],
+    [
+      "nonfinite",
+      {
+        afterCleanup: `await writeFile(join(RUN_DIR, "completion.json"),
+      JSON.stringify({ version: 1, nonce: run.nonce, terminal: true, graphHash, resourceEvents, metrics: { resolved: "overflow" } }).replace('"overflow"', "1e309")); process.exit(0);`,
+      },
+      /finite numbers/,
+      noHash,
+    ],
+    [
+      "unused-malformed",
+      { metrics: '{ resolved: 60, ignored: "bad" }' },
+      /finite numbers/,
+      noHash,
+    ],
+    [
+      "unknown-receipt-key",
+      { receiptFields: "{ unknown: true }" },
+      /malformed/,
+      noHash,
+    ],
+    ["stale", { nonce: '"stale"', metrics: "null" }, /another nonce/, noHash],
+    [
+      "not-terminal",
+      { receiptFields: "{ terminal: false }", metrics: "null" },
+      /malformed/,
+      noHash,
+    ],
+    [
+      "bad-hash",
+      { receiptFields: '{ graphHash: "bad" }', metrics: "null" },
+      /malformed/,
+      noHash,
+    ],
+    [
+      "incomplete",
+      { afterCleanup: "process.exit(0);" },
+      /no valid completion receipt/,
+      noHash,
+    ],
+    ["unaccounted", { afterRun: "" }, /no cost/, missing],
+  ];
+  for (const [name, parts, error, reason] of cases)
+    await blockedScenario(
+      join(dir, name),
+      costTarget(parts),
+      request,
+      error,
+      reason,
+    );
+
+  // Metrics remain strict even when only a recorder metric was requested.
+  await blockedScenario(
+    join(dir, "unused-metrics"),
+    costTarget({ metrics: "null" }),
+    {
+      objective: { metric: { kind: "cost" }, direction: "minimize" },
+    },
+    /finite numbers/,
+    noHash,
+  );
+
+  // Target-owned authorization applies to schedulers and ladders, before model acquisition.
+  for (const [name, scheduler] of [
+    [
+      "scheduler-model",
+      'const optimizerScheduler = (_label: string) => optimizerPi("target/other");\n',
+    ],
+    [
+      "scheduler-thinking",
+      'const optimizerScheduler = (_label: string) => optimizerPi("target/cheap", "high");\n',
+    ],
+  ] as const) {
+    const state = await blockedScenario(
+      join(dir, name),
+      costTarget({ scheduler }),
+      {
+        ...request,
+        allowedModels: [{ model: "target/cheap" }],
+      },
+      /exited with status 1/,
+      noHash,
+      ["cheap"],
+    );
+    const run = trials(state)[0]?.runs[0];
+    assert.match(
+      await readFile(join(run?.directory as string, "target.stderr"), "utf8"),
+      /scheduler uses unauthorized/,
+    );
+  }
+  const ladder = await blockedScenario(
+    join(dir, "ladder-model"),
+    costTarget({ ladder: ladderOf("other") }),
+    {
+      ...request,
+      allowedModels: [{ model: "target/cheap" }],
+    },
+    /exited with status 1/,
+    noHash,
+    ["cheap"],
+  );
+  assert.match(
+    await readFile(
+      join(trials(ladder)[0]?.runs[0]?.directory as string, "target.stderr"),
+      "utf8",
+    ),
+    /ladder rung .* unauthorized/,
+  );
+  await blockedScenario(
+    join(dir, "ladder-thinking"),
+    costTarget({
+      ladder:
+        'const optimizerLadder = schedules.uniformLadder({ model: "target/cheap", thinking: "high" });\nconst optimizerStrength = undefined;\n',
+    }),
+    { ...request, allowedModels: [{ model: "target/cheap" }] },
+    /exited with status 1/,
+    noHash,
+    ["cheap"],
+  );
+
+  // Failed scheduler responses still contribute usage before schedules.pi rejects them.
+  const failed = await blockedScenario(
+    join(dir, "scheduler-failed"),
+    costTarget({
+      scheduler: PI_SCHED,
+      header: COST_HEADER("error"),
+    }),
+    { ...request, allowedModels: [{ model: "target/cheap" }] },
+    /exited with status 1/,
+    noHash,
+    ["cheap"],
+  );
+  const samples = await readProfile(
+    join(trials(failed)[0]?.runs[0]?.directory as string, "samples.jsonl"),
+  );
+  assert.deepEqual(summarize(samples, { kind: "cost" }), {
+    value: 0.25,
+    unit: "USD",
+    count: 1,
+  });
+
+  // A candidate's stale document hash is rejected before even malformed result metrics are read.
+  const drift = await prepare(
+    join(dir, "receipt-hash-drift"),
+    costTarget({
+      receiptFields:
+        'peak === 1 ? { graphHash: "f".repeat(64), metrics: null } : {}',
+    }),
+  );
+  const runtime = await editorRuntime(
+    editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, { states: [] }),
+  );
+  const state = await optimize(
+    requestFor(drift, { ...request, stop: { target: 0 }, runBudget: 2 }),
+    runtime,
+  );
+  expectStop(state, "budget");
+  assert.equal(trials(state)[0]?.score, 200);
+  assert.equal(trials(state)[1]?.score, null);
+  assert.match(
+    trials(state)[1]?.runs[0]?.error ?? "",
+    /runtime graph document differs/,
+  );
+  assert.equal(await readFile(drift.ts, "utf8"), drift.original);
+  await checkEvidence(drift, state);
 }
 
 async function failureScenarios(dir: string): Promise<void> {
@@ -1474,6 +1826,33 @@ async function cancelScenario(dir: string): Promise<void> {
   assert.deepEqual(await readState(target.sessionDir), state);
 }
 
+async function externalCleanupScenario(dir: string): Promise<void> {
+  const target = await prepare(
+    dir,
+    numericTarget({
+      afterCleanup:
+        'await writeFile(join(RUN_DIR, "cleanup.pending"), "external resources may still be live");',
+    }),
+  );
+  const { models, editorRung } = await editorRuntime([]);
+  const state = await optimize(requestFor(target), { models, editorRung });
+  expectStop(state, "blocked");
+  assert.match(
+    state.stop?.reason ?? "",
+    /external cleanup unproven: .*cleanup\.pending.*original TS not restored/,
+  );
+  assert.equal(trials(state)[0]?.runs.length, 1);
+  assert.match(
+    trials(state)[0]?.runs[0]?.error ?? "",
+    /external cleanup unproven/,
+  );
+  assert.equal(await readFile(target.ts, "utf8"), target.prepared);
+  assert.ok(
+    existsSync(join(target.sessionDir, "runs", "0001", "cleanup.pending")),
+  );
+  assert.deepEqual(await readState(target.sessionDir), state);
+}
+
 // --- package boundaries ----------------------------------------------------------------------------
 
 async function exec(
@@ -1503,6 +1882,20 @@ async function exec(
 async function boundaryChecks(dir: string): Promise<void> {
   const target = await prepare(dir, numericTarget());
   const request = requestFor(target);
+  for (const metric of [
+    { kind: "cost", name: "unexpected" },
+    { kind: "result" },
+    { kind: "result", name: "" },
+    { kind: "result", name: 60 },
+    { kind: "result", name: "resolved", reduce: "sum" },
+  ])
+    await assert.rejects(
+      schedules.runOptimizer({
+        ...request,
+        objective: { metric, direction: "minimize" },
+      } as Request),
+      /invalid optimization request/,
+    );
   const portable = `
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -1556,10 +1949,13 @@ const main = async () => {
     await boundaryChecks(join(root, "boundaries"));
     await numericScenario(join(root, "numeric"));
     await tokenScenario(join(root, "tokens"));
+    await costResultScenario(join(root, "cost-results"));
+    await resultFailureScenarios(join(root, "result-failures"));
     await failureScenarios(join(root, "failures"));
     await ownershipScenario(join(root, "ownership"));
     await driftScenario(join(root, "drift"));
     await cancelScenario(join(root, "cancel"));
+    await externalCleanupScenario(join(root, "external-cleanup"));
     ok = true;
   } finally {
     if (ok) await rm(root, { recursive: true, force: true });

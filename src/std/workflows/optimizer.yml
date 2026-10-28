@@ -50,10 +50,15 @@ graph:
         Region bindings you must keep defining:
         - scheduler: `optimizerScheduler(label: string)` returning the scheduling policy. Choices:
           the existing factory, `schedules.parallel()`, `schedules.roundRobin(undefined, width)`,
-          `schedules.choose({ rank, width: () => width })`. `schedules.lowest(kind)` and
-          `schedules.highest(kind)` (kind "tokens" | "memory" | "runtime") are rank callbacks for
-          choose, not schedulers. Ranking needs complete node profiles. Never change which model
-          rung a node uses from this region, and keep every existing work node schedulable.
+          `schedules.choose({ rank, width: () => width })`, or cheap `schedules.pi` through the
+          target's fixed `optimizerPi` wrapper. That wrapper alone owns model/thinking authorization
+          against request.allowedModels and records every returned usage before stop-reason or
+          scheduling-output validation; never bypass or replace it. Use only the exact authorized
+          model/thinking pairs, just as for ladder rungs. Unknown request usage invalidates the run.
+          `schedules.lowest(kind)` and `schedules.highest(kind)` (kind "tokens" | "memory" | "runtime")
+          are rank callbacks for choose, not schedulers. Ranking needs complete node profiles.
+          Never change model rungs from this region, omit required work, or make any existing ready
+          work node unschedulable; scheduling changes only its order or concurrency.
         - ladder: `optimizerLadder` (a complete ladder with smol, low, med, high and xhigh rungs,
           each `{ model: "provider/model-id", thinking? }`, or undefined for a deterministic
           target) and `optimizerStrength` (a `(snapshot, nodeId) => rung-name` selector, or
@@ -139,7 +144,13 @@ graph:
                         additionalProperties: false
                         required: [kind]
                         properties:
-                          kind: { enum: [tokens, memory] }
+                          kind: { enum: [tokens, memory, cost] }
+                      - type: object
+                        additionalProperties: false
+                        required: [kind, name]
+                        properties:
+                          kind: { const: result }
+                          name: { type: string, minLength: 1 }
                       - type: object
                         additionalProperties: false
                         required: [kind, node, edgeId, reduce]
@@ -262,7 +273,7 @@ graph:
                                 required: [value, unit, count]
                                 properties:
                                   value: { type: number }
-                                  unit: { enum: [tok, B, null] }
+                                  unit: { enum: [tok, B, USD, null] }
                                   count: { type: integer, minimum: 1 }
                               - type: "null"
                           constraints: { type: array, items: *summary }

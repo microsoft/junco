@@ -5,6 +5,8 @@ import { parseSamples, type Sample, unitOf } from "dataflow-profile";
 
 export type Metric =
   | { kind: "tokens" }
+  | { kind: "cost" }
+  | { kind: "result"; name: string }
   | { kind: "memory" }
   | {
       kind: "probe";
@@ -16,7 +18,7 @@ export type Metric =
     };
 export type MetricSummary = {
   value: number;
-  unit: "tok" | "B" | null;
+  unit: "tok" | "B" | "USD" | null;
   count: number;
 };
 
@@ -54,16 +56,29 @@ function probesOf(sample: Sample): { edgeId: string; value: number }[] {
 }
 
 /**
- * `metric` over `samples`: summed committed tokens, the peak memory in bytes, or one reduction of
- * a probed edge's values in event order. Zero contributors is an error, never a zero score.
+ * `metric` over `samples`: summed tokens or USD, peak memory in bytes, a probe reduction, or a
+ * fixed completion-receipt result. Zero contributors is an error, never a zero score.
  */
 export function summarize(
   samples: readonly Sample[],
   metric: Metric,
+  results?: Readonly<Record<string, number>>,
 ): MetricSummary {
-  if (metric.kind === "tokens" || metric.kind === "memory") {
+  if (metric.kind === "result") {
+    const value = results?.[metric.name];
+    if (results === undefined || !Object.hasOwn(results, metric.name))
+      throw new Error(`completion receipt records no result "${metric.name}"`);
+    if (typeof value !== "number" || !Number.isFinite(value))
+      throw new TypeError(`result "${metric.name}" is not a finite number`);
+    return { value, unit: null, count: 1 };
+  }
+  if (
+    metric.kind === "tokens" ||
+    metric.kind === "memory" ||
+    metric.kind === "cost"
+  ) {
     const kind = metric.kind;
-    let value = kind === "tokens" ? 0 : Number.NEGATIVE_INFINITY;
+    let value = kind === "memory" ? Number.NEGATIVE_INFINITY : 0;
     let count = 0;
     for (const sample of samples) {
       const amount = sample.resources[kind];
@@ -74,13 +89,15 @@ export function summarize(
           `sample of "${sample.node}" has ${kind} without a unit`,
         );
       const base = amount * unitOf(kind, unit).scale;
-      value = kind === "tokens" ? value + base : Math.max(value, base);
+      if (kind === "cost" && !(Number.isFinite(base) && base >= 0))
+        throw new RangeError("cost must be finite and nonnegative");
+      value = kind === "memory" ? Math.max(value, base) : value + base;
       count++;
     }
     if (count === 0) throw new Error(`profile records no ${kind}`);
     return {
       value: finite(value, kind),
-      unit: kind === "tokens" ? "tok" : "B",
+      unit: kind === "tokens" ? "tok" : kind === "cost" ? "USD" : "B",
       count,
     };
   }

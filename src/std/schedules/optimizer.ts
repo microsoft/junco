@@ -83,7 +83,7 @@ export type OptimizationRequest = {
     };
   };
   axes: Axis[];
-  /** Target model/thinking pairs a candidate ladder may use; the editor is separate. */
+  /** Target model/thinking pairs candidate ladders and agentic schedulers may use; editor separate. */
   allowedModels: { model: string; thinking?: LadderRung["thinking"] }[];
   /** Upper bounds of the extra limits a candidate may add; original hard limits still apply. */
   limitBounds: { memoryBytes?: number; tokens?: number; tools?: number };
@@ -207,7 +207,7 @@ type Session = {
   readonly initial: OptimizationState;
   /** The latest checkpointed state, which an interrupted graph run is finalized from. */
   readonly latest: OptimizationState;
-  /** Why restoring the target would be unsafe, once a child's group was not proved gone. */
+  /** Why restoration is unsafe: a live child group or an external-resource cleanup guard. */
   unsafe: string | undefined;
 };
 type OptimizerContext = { readonly session: Session; turn: Turn | undefined };
@@ -743,6 +743,15 @@ async function spawnOwned(
         throw new Blocked(`child cleanup unproven: ${message(error)}`);
       }
     }
+    const pending = join(directory, "cleanup.pending");
+    try {
+      await lstat(pending);
+      session.unsafe = `external cleanup unproven: ${pending}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        session.unsafe = `cannot inspect external cleanup guard ${pending}: ${message(error)}`;
+    }
+    if (session.unsafe !== undefined) throw new Blocked(session.unsafe);
     return { ...closed, cancelled };
   } finally {
     clearTimeout(escalation);
@@ -768,10 +777,18 @@ const RECEIPT_KEYS = [
   "version",
 ];
 
+type Completion = {
+  graphHash: string;
+  resourceEvents: number;
+  /** Fixed target outcomes, validated only after the terminal nonce and graph identity. */
+  metrics?: Record<string, number>;
+};
+
 async function readReceipt(
   directory: string,
   nonce: string,
-): Promise<{ graphHash: string; resourceEvents: number }> {
+  expectedGraphHash: string | null,
+): Promise<Completion> {
   let receipt: unknown;
   try {
     receipt = JSON.parse(
@@ -783,7 +800,10 @@ async function readReceipt(
   if (
     typeof receipt !== "object" ||
     receipt === null ||
-    Object.keys(receipt).sort().join() !== RECEIPT_KEYS.join() ||
+    Object.keys(receipt)
+      .filter((key) => key !== "metrics")
+      .sort()
+      .join() !== RECEIPT_KEYS.join() ||
     !("version" in receipt) ||
     receipt.version !== 1 ||
     !("nonce" in receipt) ||
@@ -801,9 +821,27 @@ async function readReceipt(
     throw new Error(
       "the completion receipt is malformed or carries another nonce",
     );
+  if (expectedGraphHash !== null && receipt.graphHash !== expectedGraphHash)
+    throw new Error("the runtime graph document differs from the baseline's");
+  let metrics: Record<string, number> | undefined;
+  if ("metrics" in receipt) {
+    if (
+      typeof receipt.metrics !== "object" ||
+      receipt.metrics === null ||
+      Array.isArray(receipt.metrics) ||
+      Object.values(receipt.metrics).some(
+        (value) => typeof value !== "number" || !Number.isFinite(value),
+      )
+    )
+      throw new TypeError(
+        "completion receipt metrics must be an object of finite numbers",
+      );
+    metrics = receipt.metrics as Record<string, number>;
+  }
   return {
     graphHash: receipt.graphHash,
     resourceEvents: receipt.resourceEvents,
+    ...(metrics === undefined ? {} : { metrics }),
   };
 }
 
@@ -901,11 +939,9 @@ async function runChild(
   const problem = failure(outcome, "target");
   if (problem !== undefined)
     return failed(`${problem}; see ${join(directory, "target.stderr")}`);
-  let receipt: { graphHash: string; resourceEvents: number };
+  let receipt: Completion;
   try {
-    receipt = await readReceipt(directory, nonce);
-    if (state.graphHash !== null && receipt.graphHash !== state.graphHash)
-      throw new Error("the runtime graph document differs from the baseline's");
+    receipt = await readReceipt(directory, nonce, state.graphHash);
   } catch (error) {
     return failed(message(error));
   }
@@ -918,7 +954,7 @@ async function runChild(
         throw new Error(
           "memory is unobserved: the run reported no native resource events",
         );
-      return summarize(samples, metric);
+      return summarize(samples, metric, receipt.metrics);
     });
   } catch (error) {
     return { ...failed(message(error)), graphHash: receipt.graphHash };
@@ -1770,6 +1806,7 @@ export async function runOptimizer(
   const ladder = uniformLadder(editorRung);
   const recorder = new JsonlRecorder({
     path: join(request.sessionDir, "optimizer.jsonl"),
+    costMode: "usage",
   });
   await session.checkpoint(session.initial);
   const timer =

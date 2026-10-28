@@ -498,6 +498,183 @@ test("JSONL invalid costs exclude their successful activations and latch", async
   }
 });
 
+test("JSONL usage costs include standalone, scheduler and failed requests exactly once", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-profile-usage-cost-"));
+  const path = join(directory, "samples.jsonl");
+  const recorder = new tracer.JsonlRecorder({ path, costMode: "usage" });
+  try {
+    const worker = recorder.add_context("Worker");
+    const agent = {};
+    const usage = (total: number) => ({
+      input: 2,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 3,
+      cost: { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total },
+    });
+    // A standalone baseline has no graph lifecycle at all.
+    recorder.record({
+      resource: "cost",
+      kind: "usage",
+      source: agent,
+      usage: usage(0.125),
+    });
+    await recorder.flush();
+    const operation = {
+      resource: "operations",
+      category: "graph",
+      tool: "",
+      operation: "prime",
+    } as const;
+    for (const [index, outcome] of (
+      ["success", "error", "cancelled"] as const
+    ).entries()) {
+      const activation: tracer.ProfileActivation = {
+        runId: `usage-${index}`,
+        firedAt: "2026-10-28T00:00:00.000Z",
+        features: { input: { count: 1 } },
+        agent,
+        owner: undefined,
+      };
+      worker.record({ ...operation, kind: "start", activation });
+      const payload = usage(0.25);
+      worker.record({
+        resource: "tokens",
+        kind: "usage",
+        source: agent,
+        usage: payload,
+      });
+      worker.record({
+        resource: "cost",
+        kind: "usage",
+        source: agent,
+        usage: payload,
+      });
+      worker.record({
+        ...operation,
+        kind: "finish",
+        activation,
+        outcome,
+        durationMs: 1,
+      });
+    }
+    // The scheduler need not share an agent identity or have an activation.
+    recorder.add_context("Scheduler").record({
+      resource: "cost",
+      kind: "usage",
+      source: {},
+      usage: usage(0.5),
+    });
+    // Late usage, after all activations ended, still counts; token events do not.
+    worker.record({
+      resource: "cost",
+      kind: "usage",
+      source: agent,
+      usage: usage(0),
+    });
+    worker.record({
+      resource: "tokens",
+      kind: "usage",
+      source: agent,
+      usage: usage(99),
+    });
+    await recorder.close();
+    const samples = parseSamples(readFileSync(path, "utf8"));
+    const costs = samples.filter(
+      (sample) => sample.resources.cost !== undefined,
+    );
+    assert.deepEqual(
+      costs.map((sample) => sample.resources.cost),
+      [0.125, 0.25, 0.25, 0.25, 0.5, 0],
+    );
+    assert.deepEqual(
+      costs.map((sample) => sample.node),
+      ["", "Worker", "Worker", "Worker", "Scheduler", "Worker"],
+    );
+    for (const sample of costs) {
+      assert.deepEqual(sample.units, { cost: "USD" });
+      assert.deepEqual(sample.features, {});
+      assert.deepEqual(Object.keys(sample.resources), ["cost"]);
+    }
+    const activations = samples.filter((sample) => sample.runId !== undefined);
+    assert.equal(activations.length, 1);
+    assert.equal(activations[0]?.runId, "usage-0");
+    assert.deepEqual(activations[0]?.resources, { runtime: 1, tokens: 3 });
+    assert.deepEqual(activations[0]?.units, { runtime: "ms", tokens: "tok" });
+  } finally {
+    await recorder.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("JSONL usage mode rejects every invalid cost without needing an activation", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "junco-profile-usage-invalid-"),
+  );
+  try {
+    for (const [index, total] of [
+      undefined,
+      Number.NaN,
+      Infinity,
+      -1,
+      "0",
+    ].entries()) {
+      const path = join(directory, `${index}.jsonl`);
+      const recorder = new tracer.JsonlRecorder({ path, costMode: "usage" });
+      const usage = {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost:
+          total === undefined
+            ? undefined!
+            : {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: total as number,
+              },
+      };
+      // Invalid cost data on a token event is not a dollar contribution.
+      recorder.record({ resource: "tokens", kind: "usage", source: {}, usage });
+      await recorder.flush();
+      assert.doesNotThrow(() =>
+        recorder.record({ resource: "cost", kind: "usage", source: {}, usage }),
+      );
+      await assert.rejects(
+        recorder.flush(),
+        /JsonlRecorder: invalid cost sample/,
+      );
+      // A valid increment cannot clear the accounting failure.
+      recorder.record({
+        resource: "cost",
+        kind: "usage",
+        source: {},
+        usage: {
+          ...usage,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      });
+      await assert.rejects(
+        recorder.close(),
+        /JsonlRecorder: invalid cost sample/,
+      );
+      assert.deepEqual(
+        parseSamples(readFileSync(path, "utf8")).map(
+          (sample) => sample.resources.cost,
+        ),
+        [0],
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("JSONL samples sum edits and operations events into their activation", async () => {
   const directory = await mkdtemp(
     join(tmpdir(), "junco-profile-recorder-operations-"),
