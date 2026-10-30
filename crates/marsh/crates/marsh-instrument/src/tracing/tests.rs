@@ -733,7 +733,7 @@ def worker():
                     _fields_ = [('sec', ctypes.c_long), ('nsec', ctypes.c_long)]
                 word = ctypes.c_int()
                 timeout = Timespec(600, 0)
-                s.sendall(b'T' + threading.get_native_id().to_bytes(4, 'little'))
+                s.sendall(b'T' + threading.get_native_id().to_bytes(4, 'little') + ctypes.addressof(word).to_bytes(8, 'little'))
                 libc.syscall(int(sys.argv[3]), ctypes.byref(word), 128, 0, ctypes.byref(timeout), 0, 0)
             threading.Thread(target=timed_wait, daemon=True).start()
             continue
@@ -1067,6 +1067,67 @@ fn wait_in_syscall(pid: u32, tid: u32, expected: Sysno) {
     }
 }
 
+/// Waits until `tid` sleeps in the announced private futex wait on `word`, or, with
+/// `allow_restart`, in its kernel continuation, whose restart block has no argument ABI.
+fn wait_for_timed_futex(pid: u32, tid: u32, word: u64, allow_restart: bool) -> io::Result<()> {
+    let status = format!("/proc/{pid}/task/{tid}/status");
+    let registers = format!("/proc/{pid}/task/{tid}/syscall");
+    let operation = u64::from((libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG).cast_unsigned());
+    let invalid = |what: &str, text: &str| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{what}: {text:?}"))
+    };
+    let state = || -> io::Result<String> {
+        let text = std::fs::read_to_string(&status)?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("State:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("status lacks State", &text))
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        // Registers alone cannot tell a ptrace entry stop from the kernel sleep; bracket them.
+        let before = state()?;
+        let syscall = std::fs::read_to_string(&registers)?;
+        let after = state()?;
+        let mut fields = syscall.split_whitespace();
+        let waiting = match fields.next() {
+            Some("running") => false,
+            number => match number.and_then(|number| number.parse::<i64>().ok()) {
+                None => return Err(invalid("malformed syscall number", &syscall)),
+                Some(-1) => false,
+                Some(number) if number == Sysno::futex as i64 => {
+                    let mut argument = || {
+                        fields
+                            .next()
+                            .and_then(|field| {
+                                u64::from_str_radix(field.strip_prefix("0x").unwrap_or(field), 16)
+                                    .ok()
+                            })
+                            .ok_or_else(|| invalid("malformed futex arguments", &syscall))
+                    };
+                    (argument()?, argument()?, argument()?) == (word, operation, 0)
+                }
+                Some(number) => allow_restart && number == Sysno::restart_syscall as i64,
+            },
+        };
+        if waiting && before == "S" && after == "S" {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "pid {pid} tid {tid} never slept in the futex wait on {word:#x} \
+                     (allow_restart: {allow_restart}); last states {before}/{after}, \
+                     syscall {syscall:?}"
+                ),
+            ));
+        }
+        std::thread::yield_now();
+    }
+}
+
 fn bounded_park(service: &Arc<Tracing>, run: TraceRun) -> ParkedRun {
     let tracing = Arc::clone(service);
     let (sender, completed) = mpsc::channel();
@@ -1145,23 +1206,107 @@ fn a_socket_read_into_a_shared_mapping_must_complete_before_parking() {
 }
 
 #[test]
-fn effectless_timed_waits_remain_parkable_after_restart_syscall() {
+fn effectless_timed_waits_remain_parkable_across_resumes() {
     let fixture = Fixture::new();
     let run = fixture.service.begin_run(fixture.root).unwrap();
     let scope = fixture.service.scope(run).unwrap();
     let (child, events, mut socket) = parking_child(&fixture, &scope);
     socket.write_all(b"t").unwrap();
-    let mut ready = [0; 5];
+    let mut ready = [0; 13];
     socket.read_exact(&mut ready).unwrap();
     assert_eq!(ready[0], b'T');
-    let tid = u32::from_le_bytes(ready[1..].try_into().unwrap());
-    wait_in_syscall(child.pid, tid, Sysno::futex);
-    for _ in 0..3 {
-        bounded_park(&fixture.service, run).resume().unwrap();
-        wait_in_syscall(child.pid, tid, Sysno::restart_syscall);
+    let tid = u32::from_le_bytes(ready[1..5].try_into().unwrap());
+    let word = u64::from_le_bytes(ready[5..].try_into().unwrap());
+    // A resumed wait may continue as `restart_syscall` or still sleep in its original entry.
+    let cycles = || -> io::Result<()> {
+        wait_for_timed_futex(child.pid, tid, word, false)?;
+        for _ in 0..3 {
+            bounded_park(&fixture.service, run).resume()?;
+            wait_for_timed_futex(child.pid, tid, word, true)?;
+        }
+        Ok(())
+    };
+    let result = cycles();
+    if result.is_ok() {
+        bounded_park(&fixture.service, run).cancel().unwrap();
+    } else {
+        fixture.service.cancel(run).unwrap();
     }
-    bounded_park(&fixture.service, run).cancel().unwrap();
-    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    let signal = exited(&events).signal();
     child.wait_observed().unwrap();
     fixture.finish(run);
+    result.unwrap();
+    assert_eq!(signal, Some(libc::SIGKILL));
+}
+
+/// Feeds `tid`'s record-less stop, as the observer reports calls outside the selected set.
+fn note_syscall(
+    state: &mut State,
+    tid: Pid,
+    sequence: u64,
+    syscall: Sysno,
+    result: Option<RetCode>,
+) {
+    let entry = EntryInfo {
+        syscall: Some(syscall),
+        capture: None,
+        result,
+    };
+    Tracing::note_stop(
+        state,
+        tid,
+        WaitStatus::PtraceSyscall(tid),
+        sequence,
+        Some(entry),
+    )
+    .unwrap();
+}
+
+/// Pending (safe, writes memory), safe restart provenance, and no effectful interrupted call.
+fn restart_view(state: &State, tid: Pid) -> (Option<(bool, bool)>, Option<bool>, bool) {
+    let thread = state.threads.get(&tid).unwrap();
+    (
+        thread
+            .pending
+            .map(|pending| (pending.safe, pending.writes_memory)),
+        thread.safe_restart,
+        thread.restart.is_none() && !thread.restart_uncertain,
+    )
+}
+
+#[test]
+fn effectless_restartblock_preserves_park_safety_across_restarts() {
+    let tid = Pid::from_raw(1);
+    let mut state = State::default();
+    // Provenance of an interrupted wait that cannot write into a shared mapping.
+    state.threads.entry(tid).or_default().safe_restart = Some(false);
+    note_syscall(&mut state, tid, 1, Sysno::restart_syscall, None);
+    assert_eq!(restart_view(&state, tid), (Some((true, false)), None, true));
+    note_syscall(
+        &mut state,
+        tid,
+        2,
+        Sysno::restart_syscall,
+        Some(RetCode::Err(-516)),
+    );
+    assert_eq!(restart_view(&state, tid), (None, Some(false), true));
+    note_syscall(&mut state, tid, 3, Sysno::restart_syscall, None);
+    assert_eq!(restart_view(&state, tid), (Some((true, false)), None, true));
+}
+
+#[test]
+fn restart_syscall_requires_immediate_safe_predecessor() {
+    let tid = Pid::from_raw(1);
+    let mut state = State::default();
+    note_syscall(&mut state, tid, 1, Sysno::restart_syscall, None);
+    assert_eq!(restart_view(&state, tid), (Some((false, true)), None, true));
+
+    let mut state = State::default();
+    state.threads.entry(tid).or_default().safe_restart = Some(false);
+    note_syscall(&mut state, tid, 1, Sysno::openat, None);
+    assert_eq!(restart_view(&state, tid), (Some((false, true)), None, true));
+    note_syscall(&mut state, tid, 2, Sysno::openat, Some(RetCode::Ok(0)));
+    assert_eq!(restart_view(&state, tid), (None, None, true));
+    note_syscall(&mut state, tid, 3, Sysno::restart_syscall, None);
+    assert_eq!(restart_view(&state, tid), (Some((false, true)), None, true));
 }

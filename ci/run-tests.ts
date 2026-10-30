@@ -179,6 +179,7 @@ async function main(argv: string[]): Promise<number> {
       throw new Error(`Scratch allocation is not a real directory: ${scratch}`);
     if (interrupted) return signalStatus(interrupted);
     env.HOME = join(scratch, "home");
+    env.BTRFS_ROOT = env.HOME;
     env.JUNCO_BTRFS_TEST_ROOT = join(scratch, "fixtures");
     await mkdir(env.HOME, { mode: 0o700 });
     if (interrupted) return signalStatus(interrupted);

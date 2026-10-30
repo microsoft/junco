@@ -367,20 +367,21 @@ async fn real_btrfs_redo_is_readonly_and_recovery_checks_its_fingerprint() {
     use marsh_wal::{ContentHash, EntryKind, JsonLog, Mode, Seq, SourceUid, Staging, WalRecord};
     use std::os::unix::fs::PermissionsExt;
     const REQUIRED: &str =
-        "readonly redo regression requires a writable btrfs HOME with user_subvol_rm_allowed";
+        "readonly redo regression needs BTRFS_ROOT on writable btrfs with user_subvol_rm_allowed";
     let fs = marsh_btrfs::LibBtrfs;
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .unwrap_or_else(|| panic!("{REQUIRED}: HOME is unset or empty"));
-    let home = std::fs::canonicalize(&home)
-        .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", Path::new(&home).display()));
-    fs.assert_btrfs(&home)
-        .and_then(|()| fs.assert_user_subvol_rm_allowed(&home))
-        .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", home.display()));
+    let btrfs_root = std::env::var_os("BTRFS_ROOT")
+        .filter(|root| !root.is_empty())
+        .unwrap_or_else(|| panic!("{REQUIRED}: BTRFS_ROOT is unset or empty"));
+    let btrfs_root = std::fs::canonicalize(&btrfs_root).unwrap_or_else(|error| {
+        panic!("{REQUIRED}: {}: {error}", Path::new(&btrfs_root).display())
+    });
+    fs.assert_btrfs(&btrfs_root)
+        .and_then(|()| fs.assert_user_subvol_rm_allowed(&btrfs_root))
+        .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", btrfs_root.display()));
     let root = tempfile::Builder::new()
         .prefix("marsh-readonly-proof.")
-        .tempdir_in(&home)
-        .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", home.display()));
+        .tempdir_in(&btrfs_root)
+        .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", btrfs_root.display()));
     let seed = root.path().join("seed");
     fs.create_subvolume(&seed)
         .unwrap_or_else(|error| panic!("{REQUIRED}: {}: {error}", seed.display()));

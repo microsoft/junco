@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::{
-    create_session, send, send_ok, send_request, session_name, start_server, Fixture, TestHarness,
-    TestRequest,
+    create_session, send, send_ok, send_request, session_name, start_server, ClientConnection,
+    Fixture, TestHarness, TestRequest,
 };
 use rmux_proto::{
     DaemonStatusRequest, DeleteBufferRequest, KillServerRequest, ListBuffersRequest,
@@ -15,7 +15,9 @@ use rmux_proto::{
     SetBufferRequest, ShowBufferRequest, SourceFileRequest,
 };
 
-const FIFO_REQUEST_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// A hang guard, not a speed requirement: no FIFO here ever gets a peer, so a blocked request ends
+/// only by cancellation, and a regression never finishes at all. Loaded CI must not trip it.
+const FIFO_HANG_GUARD: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_disconnect_cancels_load_buffer_blocked_on_fifo_without_shutdown(
@@ -121,10 +123,14 @@ async fn wait_for_daemon_client_count(
     socket_path: &Path,
     expected: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + FIFO_REQUEST_CLEANUP_TIMEOUT;
+    // One connection for every poll: the daemon excludes the asker's own, while a fresh one per
+    // poll leaves closed connections it has not reaped yet in the count.
+    let mut status_client = ClientConnection::connect(socket_path).await?;
+    let deadline = Instant::now() + FIFO_HANG_GUARD;
     loop {
-        let response =
-            send_request(socket_path, &Request::DaemonStatus(DaemonStatusRequest)).await?;
+        let response = status_client
+            .send_request(&Request::DaemonStatus(DaemonStatusRequest))
+            .await?;
         let Response::DaemonStatus(status) = response else {
             return Err(format!("expected daemon-status response, got {response:?}").into());
         };
@@ -168,10 +174,10 @@ async fn kill_server_cancels_load_buffer_blocked_opening_fifo() -> Result<(), Bo
     let request =
         LoadBufferRequest::fixture((fifo_path.display().to_string(), "blocked")).into_request();
     let mut blocked_request = Box::pin(send_request(harness.socket_path(), &request));
-    assert_request_stays_blocked(blocked_request.as_mut()).await;
+    wait_until_request_admitted(harness.socket_path(), blocked_request.as_mut()).await?;
 
     request_kill_server(harness.socket_path()).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), handle.wait())
+    tokio::time::timeout(FIFO_HANG_GUARD, handle.wait())
         .await
         .expect("daemon shutdown must not wait for the blocked FIFO reader")?;
     assert_blocked_request_was_disconnected(blocked_request.as_mut()).await;
@@ -190,23 +196,30 @@ async fn kill_server_cancels_save_buffer_blocked_opening_fifo() -> Result<(), Bo
     let request =
         SaveBufferRequest::fixture((fifo_path.display().to_string(), "blocked")).into_request();
     let mut blocked_request = Box::pin(send_request(harness.socket_path(), &request));
-    assert_request_stays_blocked(blocked_request.as_mut()).await;
+    wait_until_request_admitted(harness.socket_path(), blocked_request.as_mut()).await?;
 
     request_kill_server(harness.socket_path()).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), handle.wait())
+    tokio::time::timeout(FIFO_HANG_GUARD, handle.wait())
         .await
         .expect("daemon shutdown must not wait for the blocked FIFO writer")?;
     assert_blocked_request_was_disconnected(blocked_request.as_mut()).await;
     Ok(())
 }
 
-async fn assert_request_stays_blocked<F>(mut request: std::pin::Pin<&mut F>)
+/// Drives `request` until the daemon counts it as admitted, so shutdown must cancel it in flight.
+async fn wait_until_request_admitted<F>(
+    socket_path: &Path,
+    mut request: std::pin::Pin<&mut F>,
+) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = Result<Response, Box<dyn Error>>> + ?Sized,
 {
+    // No earlier connection may still be counted, or it could stand in for the request below.
+    wait_for_daemon_client_count(socket_path, 0).await?;
     tokio::select! {
         response = request.as_mut() => panic!("FIFO request unexpectedly completed: {response:?}"),
-        () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        // The request's connection and the admitted request itself.
+        admitted = wait_for_daemon_client_count(socket_path, 2) => admitted,
     }
 }
 
@@ -214,7 +227,7 @@ async fn assert_blocked_request_was_disconnected<F>(request: std::pin::Pin<&mut 
 where
     F: Future<Output = Result<Response, Box<dyn Error>>> + ?Sized,
 {
-    let response = tokio::time::timeout(std::time::Duration::from_secs(2), request)
+    let response = tokio::time::timeout(FIFO_HANG_GUARD, request)
         .await
         .expect("blocked FIFO client should observe daemon shutdown");
     assert!(

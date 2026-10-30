@@ -168,7 +168,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Creates two sibling seeds under `$HOME`, on real btrfs or on a copy tree.
+    /// Creates two sibling seeds under `$BTRFS_ROOT` (else the temp dir), on real btrfs or on a
+    /// copy tree.
     ///
     /// Only *creating the first subvolume* decides which backend this returns. A seed that was
     /// made and then could not be opened is a real failure, not a reason to quietly swap in a
@@ -180,10 +181,10 @@ impl Fixture {
     /// The scratch root is owned before either seed is attempted, and a failure after that
     /// reclaims whatever was made before it is returned.
     fn new() -> Result<Self, Failure> {
-        let home = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
+        let base = std::env::var_os("BTRFS_ROOT").map_or_else(std::env::temp_dir, PathBuf::from);
         let scratch = tempfile::Builder::new()
             .prefix("marsh-rmux-smoke.")
-            .tempdir_in(home)?;
+            .tempdir_in(base)?;
         let seed = scratch.path().join("seed");
         let other = scratch.path().join("other");
 

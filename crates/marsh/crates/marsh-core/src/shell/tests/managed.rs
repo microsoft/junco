@@ -547,7 +547,18 @@ async fn delegated_resources_remain_charged_across_parks_and_finish_before_close
         .policy_owner(Some(Principal::from("resource-owner".to_owned())));
     builder.backend = Some(fixture.fs.clone());
     let mut managed = builder.build_managed_session().await.unwrap();
-    let first = managed
+    // Without a delegated cgroup the spawn fails closed; skip as the other resource tests do (the
+    // CI lanes reject the skip line, so they still require delegation).
+    let cgroup_unavailable = |error: &io::Error| {
+        std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |e| {
+            e.source()
+        })
+        .any(|e| {
+            e.to_string()
+                .starts_with("cgroup resource control unavailable")
+        })
+    };
+    let first = match managed
         .epoch(TypedTool, &ManagedCancellation::default(), async |epoch| {
             let cat = epoch.resolve_executable(OsStr::new("cat"), None)?;
             let mut command = Command::new(cat);
@@ -565,7 +576,14 @@ async fn delegated_resources_remain_charged_across_parks_and_finish_before_close
             Ok::<_, io::Error>(child)
         })
         .await
-        .unwrap();
+    {
+        Err(ManagedError::Operation(error)) if cgroup_unavailable(&error) => {
+            eprintln!("skipping: cgroup delegation unavailable");
+            managed.close().await.unwrap();
+            return;
+        }
+        result => result.unwrap(),
+    };
     let child = first.value;
     let pid = child.id();
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();

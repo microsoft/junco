@@ -23,7 +23,9 @@ jobs:
         shell: bash
         working-directory: crates/marsh
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-02-15
+      # Nightly for libtest's JSON reports: 1.99 meets rust-version 1.98.1; 1.100 nightlies overflow
+      # the trait solver on marsh's async tests.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-01
       CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
       # No DWARF in CI artifacts (keeps the job under 10 GB of disk); symbols, debug assertions
@@ -52,9 +54,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev libbtrfsutil-dev pkg-config git python3 jq coreutils btrfs-progs time
 
-      # The services' HOME: marsh's real-btrfs tests and rmux_smoke need a writable btrfs HOME
-      # with user_subvol_rm_allowed, which the runner's own HOME is not. rustup stays where it is.
-      - name: Mount a btrfs HOME for the test services
+      # The services' btrfs root, exported as BTRFS_ROOT (and HOME): marsh's real-btrfs tests and
+      # rmux_smoke need a writable btrfs with user_subvol_rm_allowed, which the runner's own disk is
+      # not. rustup stays where it is.
+      - name: Mount a btrfs root for the test services
         run: |
           truncate -s 1500000000 "$HOME_IMAGE"
           mkfs.btrfs -q "$HOME_IMAGE"
@@ -107,7 +110,7 @@ jobs:
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v cargo test --workspace --locked --no-run --message-format=json \
@@ -161,26 +164,28 @@ jobs:
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v cargo test --workspace --locked --no-fail-fast --color never -- --list -Z unstable-options --format json --test-threads 1 \
             > "$REPORT/discovery.log" 2>&1
 
+      # OOMPolicy=continue in the delegated test units: resource_limits_tests OOM-kills its own
+      # pipeline cgroup, and with OOMPolicy=kill systemd treats that as the unit's OOM and ends it.
       - name: Test sample 1
         timeout-minutes: 65
         run: |
           sudo systemd-run --uid="$(id -u)" --gid="$(id -g)" --wait --pipe --collect --service-type=exec --expand-environment=no \
             --working-directory="$PWD" --unit="$UNIT-sample-1" \
             -p CPUAffinity=0-1 -p CPUQuota=200% -p CPUQuotaPeriodSec=100ms \
-            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=kill \
+            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=continue \
             -p CPUAccounting=yes -p MemoryAccounting=yes \
             -p Delegate=yes -p KillMode=control-group -p TimeoutStopSec=5s -p RuntimeMaxSec=60min \
             --setenv=RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" --setenv=CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v cargo test --workspace --locked --no-fail-fast --color never -- -Z unstable-options --format json --report-time --test-threads 1 \
@@ -193,14 +198,14 @@ jobs:
           sudo systemd-run --uid="$(id -u)" --gid="$(id -g)" --wait --pipe --collect --service-type=exec --expand-environment=no \
             --working-directory="$PWD" --unit="$UNIT-sample-2" \
             -p CPUAffinity=0-1 -p CPUQuota=200% -p CPUQuotaPeriodSec=100ms \
-            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=kill \
+            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=continue \
             -p CPUAccounting=yes -p MemoryAccounting=yes \
             -p Delegate=yes -p KillMode=control-group -p TimeoutStopSec=5s -p RuntimeMaxSec=60min \
             --setenv=RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" --setenv=CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v cargo test --workspace --locked --no-fail-fast --color never -- -Z unstable-options --format json --report-time --test-threads 1 \
@@ -213,14 +218,14 @@ jobs:
           sudo systemd-run --uid="$(id -u)" --gid="$(id -g)" --wait --pipe --collect --service-type=exec --expand-environment=no \
             --working-directory="$PWD" --unit="$UNIT-sample-3" \
             -p CPUAffinity=0-1 -p CPUQuota=200% -p CPUQuotaPeriodSec=100ms \
-            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=kill \
+            -p MemoryMax=7G -p MemorySwapMax=0 -p OOMPolicy=continue \
             -p CPUAccounting=yes -p MemoryAccounting=yes \
             -p Delegate=yes -p KillMode=control-group -p TimeoutStopSec=5s -p RuntimeMaxSec=60min \
             --setenv=RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" --setenv=CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v cargo test --workspace --locked --no-fail-fast --color never -- -Z unstable-options --format json --report-time --test-threads 1 \
@@ -241,7 +246,7 @@ jobs:
             --setenv=CARGO_INCREMENTAL="$CARGO_INCREMENTAL" --setenv=CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
             --setenv=CARGO_PROFILE_TEST_STRIP="$CARGO_PROFILE_TEST_STRIP" --setenv=TOKIO_WORKER_THREADS="$TOKIO_WORKER_THREADS" \
             --setenv=CARGO_HOME="$CARGO_HOME" --setenv=CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            --setenv=HOME="$TEST_HOME" --setenv=PATH="$PATH" \
+            --setenv=HOME="$TEST_HOME" --setenv=BTRFS_ROOT="$TEST_HOME" --setenv=PATH="$PATH" \
             ${RUSTUP_HOME+"--setenv=RUSTUP_HOME=$RUSTUP_HOME"} ${TMPDIR+"--setenv=TMPDIR=$TMPDIR"} \
             ${LANG+"--setenv=LANG=$LANG"} ${LC_ALL+"--setenv=LC_ALL=$LC_ALL"} \
             /usr/bin/time -v env -u RMUX -u TMUX "$smoke" \

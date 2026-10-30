@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Container entrypoint (root): mount a fresh loop-backed btrfs with `user_subvol_rm_allowed` at
-# /workspace, copy the checkout bind-mounted at /src into it, delegate a cgroup v2 subtree, and run
-# the command there as `ci`. Coverage reports (`**/coverage/lcov.info`) are copied to /artifacts,
-# if mounted, afterwards.
+# /workspace, copy the checkout bind-mounted at /src into it, create the BTRFS_ROOT subvolume,
+# delegate a cgroup v2 subtree, and run the command there as `ci`. Coverage reports
+# (`**/coverage/lcov.info`) are copied to /artifacts, if mounted, afterwards.
 set -euo pipefail
 
 image=/var/tmp/workspace.btrfs
@@ -34,11 +34,16 @@ mkdir "$cg/ci"
 chown ci:ci "$cg/ci" "$cg/ci/cgroup.procs" "$cg/ci/cgroup.subtree_control" "$cg/ci/cgroup.threads"
 
 install -d --mode=700 --owner=ci --group=ci /workspace/.ci-home /workspace/.ci-fixtures
+# BTRFS_ROOT: a dedicated subvolume for marsh's real-btrfs tests and rmux_smoke seeds.
+btrfs -q subvolume create /workspace/.ci-btrfs
+chown ci:ci /workspace/.ci-btrfs
+chmod 700 /workspace/.ci-btrfs
 
 status=0
 (
   echo "$BASHPID" >"$cg/ci/cgroup.procs"
-  HOME=/workspace/.ci-home JUNCO_BTRFS_TEST_ROOT=/workspace/.ci-fixtures JUNCO_TEST_CONTAINER=1 \
+  HOME=/workspace/.ci-home BTRFS_ROOT=/workspace/.ci-btrfs \
+    JUNCO_BTRFS_TEST_ROOT=/workspace/.ci-fixtures JUNCO_TEST_CONTAINER=1 \
     exec setpriv --reuid=ci --regid=ci --init-groups "$@"
 ) || status=$?
 

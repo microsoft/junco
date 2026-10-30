@@ -417,8 +417,9 @@ falling behind is explicit. SDK and protocol connections address this same daemo
 ## Verification
 
 The `marsh-core` library suite includes the real readonly-redo/recovery regression by default. It
-requires a writable btrfs `$HOME` mounted with `user_subvol_rm_allowed`; missing prerequisites fail
-the test instead of skipping it.
+requires `BTRFS_ROOT` to name a writable btrfs directory mounted with `user_subvol_rm_allowed`;
+missing prerequisites fail the test instead of skipping it. `rmux_smoke` also seeds under
+`BTRFS_ROOT` and falls back to CopyTree without it.
 
 ```sh
 cargo build -p marsh --bins

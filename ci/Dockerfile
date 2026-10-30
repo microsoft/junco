@@ -1,5 +1,6 @@
 # The CI test toolchain. `ci/btrfs-run.sh` (the entrypoint) mounts a fresh btrfs at /workspace, the
-# project root, so the btrfs lane runs alongside everything else. Run with `--privileged` (loop mount).
+# project root, so the btrfs lane runs alongside everything else, and creates the BTRFS_ROOT
+# subvolume /workspace/.ci-btrfs. Run with `--privileged` (loop mount).
 FROM ubuntu:24.04
 
 ARG NODE_VERSION=22.19.0
