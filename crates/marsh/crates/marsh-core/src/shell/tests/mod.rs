@@ -6,6 +6,7 @@ use super::{SandboxPolicy, Shell, ShellError, ShellErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod managed;
 mod publication;
 mod reconciliation;
 
@@ -119,4 +120,57 @@ async fn refused(shell: &Shell, line: &str) {
 /// Closes `shell`, which must release everything it held.
 async fn close(shell: Shell) {
     shell.close(false).await.expect("close shell");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_preparation_compares_contents_not_bookkeeping() {
+    use super::snapshot::CommandNumber;
+    use std::sync::atomic::Ordering;
+
+    let fixture = Fixture::new();
+    let shell = fixture.shell().await;
+    let snapshot = shell
+        .shared
+        .live
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .resources
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .clone();
+    let scope = snapshot.session.tracing.internal_scope().unwrap();
+    {
+        let _guard = scope.enter();
+        let original = snapshot.state.lock().unwrap().tree_seq;
+        let source = snapshot.prepare_source(CommandNumber(100)).unwrap();
+        assert!(source.matches_work);
+        snapshot.reclaim(&source.baseline).unwrap();
+
+        // A no-op direct may-write invalidates counters, not an equal private tree.
+        snapshot.session.epoch.fetch_add(1, Ordering::AcqRel);
+        let source = snapshot.prepare_source(CommandNumber(101)).unwrap();
+        assert!(source.matches_work);
+        snapshot.reclaim(&source.baseline).unwrap();
+
+        std::fs::write(fixture.seed.join("src/a.txt"), b"external\n").unwrap();
+        assert!(snapshot.state.lock().unwrap().tree_seq == original);
+        let source = snapshot.prepare_source(CommandNumber(102)).unwrap();
+        assert!(!source.matches_work);
+        assert_eq!(read(&source.baseline.join("src/a.txt")), "external\n");
+        snapshot.reclaim(&source.baseline).unwrap();
+    }
+    accepted(&shell, "test \"$(cat src/a.txt)\" = external").await;
+    assert_eq!(read(&snapshot.path().join("src/a.txt")), "external\n");
+    {
+        let _guard = scope.enter();
+        std::fs::create_dir(fixture.seed.join(".git")).unwrap();
+        std::fs::write(fixture.seed.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let source = snapshot.prepare_source(CommandNumber(103)).unwrap();
+        assert!(!source.matches_work, ".git is part of source validity");
+        snapshot.reclaim(&source.baseline).unwrap();
+    }
+    close(shell).await;
 }

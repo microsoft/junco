@@ -1,4 +1,8 @@
-//! Stage 1: clean work generation, immutable baseline, and owned evaluation resources.
+//! Stage 1: freeze the source, compare the whole retained view, and own evaluation resources.
+//!
+//! Bookkeeping counters do not detect host edits. Reuse compares a readonly source snapshot
+//! against the work tree (including `.git`); unequal or dirty work is replaced from that same
+//! baseline. Authority and admission serialize marsh writers, not later unrelated host writes.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +47,13 @@ pub(super) struct SnapshotState {
     pub dirty: bool,
     access: Access,
     pub evidence: Option<(TraceRun, CommandEvidence)>,
+}
+
+pub(super) struct PreparedSource {
+    pub baseline: PathBuf,
+    pub tree_seq: super::session::TreeVersion,
+    pub epoch: u64,
+    pub matches_work: bool,
 }
 
 impl Snapshot {
@@ -174,6 +185,48 @@ impl Snapshot {
             .map_or_else(|_| path.to_path_buf(), |relative| self.path.join(relative))
     }
 
+    /// Freezes the source under authority before checking the retained work view.
+    /// The caller holds managed admission and an internal tracing scope.
+    pub(super) fn prepare_source(
+        &self,
+        number: CommandNumber,
+    ) -> Result<PreparedSource, ShellError> {
+        let session = &self.session;
+        session.check()?;
+        let authority = session.validator.read();
+        let mut state = self.state.lock().recover();
+        let baseline = session
+            .persistence
+            .snap()
+            .join(format!("{}-base-{number}", self.uid));
+        let frozen = (|| -> Result<PreparedSource, ShellError> {
+            session
+                .fs
+                .snapshot_readonly(&session.persistence.seed, &baseline)?;
+            let epoch = session.epoch.load(Ordering::Acquire);
+            // ponytail: full-tree validation on reuse; optimize only with measured cost and
+            // an equally sound validity mechanism. Host writers after the freeze are not excluded.
+            let matches_work =
+                !state.dirty && marsh_wal::diff_trees(&baseline, self.path())?.is_empty();
+            if matches_work {
+                state.tree_seq = authority.tree_seq;
+                state.epoch = epoch;
+            }
+            Ok(PreparedSource {
+                baseline: baseline.clone(),
+                tree_seq: authority.tree_seq,
+                epoch,
+                matches_work,
+            })
+        })();
+        drop(state);
+        drop(authority);
+        if frozen.is_err() {
+            let _ = self.reclaim(&baseline);
+        }
+        frozen
+    }
+
     fn observe(&self, run: TraceRun, info: Syscall) {
         let mut state = self.state.lock().recover();
         if state
@@ -242,6 +295,26 @@ impl Snapshot {
         }
         Ok(evidence)
     }
+
+    /// Takes one closed-evidence prefix without ending the lifetime native run.
+    pub(super) fn checkpoint(&self, run: TraceRun) -> Result<CommandEvidence, ShellError> {
+        let mut state = self.state.lock().recover();
+        let persistent = state
+            .access
+            .persistent_effects(self.path())
+            .map_err(ShellError::unsupported)?;
+        let Some((active, evidence)) = state.evidence.as_mut() else {
+            return Err(ShellError::infrastructure("missing managed epoch evidence"));
+        };
+        if *active != run {
+            return Err(ShellError::infrastructure(
+                "managed epoch evidence identity mismatch",
+            ));
+        }
+        let mut evidence = std::mem::take(evidence);
+        evidence.effects.push((u64::MAX, persistent));
+        Ok(evidence)
+    }
 }
 impl Drop for Snapshot {
     fn drop(&mut self) {
@@ -278,37 +351,35 @@ pub(super) fn prepare(
     session.check()?;
     let scope = session.tracing.internal_scope()?;
     let _guard = scope.enter();
-    let authority = session.validator.read();
-    let epoch = session.epoch.load(Ordering::Acquire);
-    let mut state = snapshot.state.lock().recover();
-    let retake = state.dirty || state.tree_seq != authority.tree_seq || state.epoch != epoch;
-    if retake {
-        session.fs.delete_subvolume(snapshot.path())?;
-        session
-            .fs
-            .snapshot(&session.persistence.seed, snapshot.path())?;
-        state.tree_seq = authority.tree_seq;
-        state.epoch = epoch;
-        state.dirty = false;
-    }
-    state.access.prepare(snapshot.path(), retake)?;
-    let baseline = session
-        .persistence
-        .snap()
-        .join(format!("{}-base-{number}", snapshot.uid));
-    session.fs.snapshot_readonly(snapshot.path(), &baseline)?;
-    let tree_seq = authority.tree_seq;
-    let trace = match session.tracing.begin_run(snapshot.root()?) {
-        Ok(run) => run,
+    let PreparedSource {
+        baseline,
+        tree_seq,
+        epoch,
+        matches_work,
+    } = snapshot.prepare_source(number)?;
+    let prepared = (|| -> Result<TraceRun, ShellError> {
+        let mut state = snapshot.state.lock().recover();
+        let retake = !matches_work;
+        if retake {
+            state.dirty = true;
+            session.fs.delete_subvolume(snapshot.path())?;
+            session.fs.snapshot(&baseline, snapshot.path())?;
+            state.tree_seq = tree_seq;
+            state.epoch = epoch;
+        }
+        state.access.prepare(snapshot.path(), retake)?;
+        let trace = session.tracing.begin_run(snapshot.root()?)?;
+        state.evidence = Some((trace, CommandEvidence::default()));
+        state.dirty = true;
+        Ok(trace)
+    })();
+    let trace = match prepared {
+        Ok(trace) => trace,
         Err(error) => {
-            session.fs.delete_subvolume(&baseline)?;
-            return Err(error.into());
+            let _ = snapshot.reclaim(&baseline);
+            return Err(error);
         }
     };
-    state.evidence = Some((trace, CommandEvidence::default()));
-    state.dirty = true;
-    drop(state);
-    drop(authority);
     let run = Arc::new(Run::managed(
         runtime,
         Arc::clone(&session.tracing),
@@ -323,6 +394,47 @@ pub(super) fn prepare(
         tree_seq,
         number,
     }))
+}
+
+/// Validates a parked view without replacing a tree its native processes still reference.
+/// A mismatch is returned only before any application operation can be admitted.
+pub(super) fn prepare_retained(
+    snapshot: &Arc<Snapshot>,
+    run: &Arc<Run>,
+    number: CommandNumber,
+) -> Result<Option<Completion<PreparedCommand>>, ShellError> {
+    let scope = snapshot.session.tracing.internal_scope()?;
+    let _guard = scope.enter();
+    let prepared = snapshot.prepare_source(number)?;
+    if !prepared.matches_work {
+        snapshot.reclaim(&prepared.baseline)?;
+        return Ok(None);
+    }
+    let reset = (|| -> Result<(), ShellError> {
+        let mut state = snapshot.state.lock().recover();
+        state.access.prepare(snapshot.path(), false)?;
+        let trace = run.trace()?.1;
+        if state
+            .evidence
+            .as_ref()
+            .is_none_or(|(active, _)| *active != trace)
+        {
+            return Err(ShellError::infrastructure("missing retained run evidence"));
+        }
+        state.dirty = true;
+        Ok(())
+    })();
+    if let Err(error) = reset {
+        let _ = snapshot.reclaim(&prepared.baseline);
+        return Err(error);
+    }
+    Ok(Some(Completion::new(PreparedCommand {
+        snapshot: Arc::clone(snapshot),
+        baseline: prepared.baseline,
+        run: Arc::clone(run),
+        tree_seq: prepared.tree_seq,
+        number,
+    })))
 }
 
 impl Completion<PreparedCommand> {

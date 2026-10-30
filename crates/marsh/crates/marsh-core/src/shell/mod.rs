@@ -23,6 +23,7 @@ mod completion;
 mod error;
 mod execution;
 mod input;
+mod managed;
 mod policy;
 mod publication;
 mod sandbox_policy;
@@ -32,6 +33,12 @@ mod snapshot;
 mod view;
 
 pub use error::{ShellError, ShellErrorKind};
+pub use managed::{
+    ManagedCancellation, ManagedChild, ManagedChildIo, ManagedChildStderr, ManagedChildStdin,
+    ManagedChildStdout, ManagedEpoch, ManagedError, ManagedGlobPaths, ManagedOutcome,
+    ManagedReadDir, ManagedSession,
+};
+pub(crate) use managed::{ManagedClose, ManagedRegistration};
 pub use policy::{
     Action, Bump, Denial, EmptyPolicy, Event, LockPolicy, Policy, PolicyDecision, PolicyEvent,
     PolicyHistory, PolicyObserver, PolicyValidator, Principal, Resource,
@@ -922,20 +929,28 @@ impl Shared {
         resources: &ExecutionResources,
         executed: execution::ExecutedCommand,
     ) -> Result<ExecutionResult, ShellError> {
-        if executed.uncertain {
+        let execution::ExecutedCommand {
+            transaction,
+            mut result,
+        } = executed;
+        if transaction.uncertain {
             resources.domain.fail(
                 &resources.coverage,
                 "a command's producers could not be proven to have finished",
             );
         }
-        let session = Arc::clone(&executed.prepared.snapshot.session);
-        let authorized = policy::authorize(
-            &session,
-            executed,
-            resources.shell_policy.as_ref(),
-            resources.policy_observer.as_deref(),
-        )?;
-        publication::commit(authorized)
+        let session = Arc::clone(&transaction.prepared.snapshot.session);
+        let publication = (|| {
+            let authorized = policy::authorize(
+                &session,
+                transaction,
+                resources.shell_policy.as_ref(),
+                resources.policy_observer.as_deref(),
+            )?;
+            publication::commit(authorized)
+        })();
+        publication.map_err(|error| error.with_result(result.take()))?;
+        result.ok_or_else(|| ShellError::infrastructure("accepted execution has no native result"))
     }
     async fn conclude_direct(
         resources: &ExecutionResources,

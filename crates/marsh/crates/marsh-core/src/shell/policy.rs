@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::completion::{Completion, Finalize};
-use super::execution::ExecutedCommand;
+use super::execution::ExecutedTransaction;
 use super::session::{Authority, Session};
 use super::{ShellError, ShellErrorKind};
 pub use junco_policy::{Action, Bump, PolicyDecision};
@@ -302,23 +302,23 @@ impl Authority {
     }
 }
 
-/// Only this payload can reach publication, holding the authority through intent and application;
-/// its finalizer rolls back tentative policy history unless the command completed.
-pub(super) struct AuthorizedCommand<'a> {
+/// Only this payload reaches publication, holding authority through the durable receipt.
+/// Its finalizer rolls back tentative policy history unless that receipt completed.
+pub(super) struct AuthorizedTransaction<'a> {
     pub guard: Option<RwLockWriteGuard<'a, Authority>>,
-    pub executed: Option<ExecutedCommand>,
+    pub executed: Option<ExecutedTransaction<'a>>,
     pub operations: Vec<CommitOp>,
     pub events: Vec<Event>,
     checkpoint: usize,
 }
-impl Completion<AuthorizedCommand<'_>> {
+impl Completion<AuthorizedTransaction<'_>> {
     /// Finalizes now and releases the authority; the later drop finds no guard to roll back.
     pub fn release_authority(&mut self) {
         self.payload.finalize(self.completed);
         drop(self.payload.guard.take());
     }
 }
-impl Finalize for AuthorizedCommand<'_> {
+impl Finalize for AuthorizedTransaction<'_> {
     fn finalize(&mut self, completed: bool) {
         if !completed && let Some(guard) = &mut self.guard {
             guard.history.truncate(self.checkpoint);
@@ -328,14 +328,18 @@ impl Finalize for AuthorizedCommand<'_> {
 
 pub(super) fn authorize<'session>(
     session: &'session Session,
-    mut executed: ExecutedCommand,
+    mut executed: ExecutedTransaction<'session>,
     shell_policy: &dyn Policy,
     observer: Option<&PolicyObserver>,
-) -> Result<Completion<AuthorizedCommand<'session>>, ShellError> {
-    // Every refusal carries the native status the command already produced.
+) -> Result<Completion<AuthorizedTransaction<'session>>, ShellError> {
     let admitted = (|| -> Result<_, ShellError> {
         if let Some(failure) = executed.failure.take() {
             return Err(failure);
+        }
+        if executed.uncertain {
+            return Err(ShellError::infrastructure(
+                "producer quiescence could not be proven",
+            ));
         }
         if executed.prepared.run.is_cancelled() {
             return Err(ShellError::new(ShellErrorKind::Interrupted));
@@ -373,18 +377,21 @@ pub(super) fn authorize<'session>(
         Ok((guard, operations, events, checkpoint))
     })();
     match admitted {
-        Ok((guard, operations, events, checkpoint)) => Ok(Completion::new(AuthorizedCommand {
+        Ok((guard, operations, events, checkpoint)) => Ok(Completion::new(AuthorizedTransaction {
             guard: Some(guard),
             executed: Some(executed),
             operations,
             events,
             checkpoint,
         })),
-        Err(error) => Err(error.with_result(executed.result.take())),
+        Err(error) => Err(error),
     }
 }
 
-fn preflight(executed: &ExecutedCommand, operations: &[CommitOp]) -> Result<(), ShellError> {
+fn preflight(
+    executed: &ExecutedTransaction<'_>,
+    operations: &[CommitOp],
+) -> Result<(), ShellError> {
     use std::os::unix::fs::MetadataExt;
     for operation in operations {
         let covered = executed.evidence.effects.iter().any(|(_, effect)| {
@@ -417,7 +424,7 @@ fn preflight(executed: &ExecutedCommand, operations: &[CommitOp]) -> Result<(), 
     Ok(())
 }
 
-fn stale_paths(executed: &ExecutedCommand, authority: &Authority) -> Vec<PathBuf> {
+fn stale_paths(executed: &ExecutedTransaction<'_>, authority: &Authority) -> Vec<PathBuf> {
     let mut stale = std::collections::BTreeSet::new();
     for (_, effects) in &executed.evidence.effects {
         for (changed, sequence) in &authority.versions {
@@ -446,7 +453,7 @@ fn stale_paths(executed: &ExecutedCommand, authority: &Authority) -> Vec<PathBuf
 /// The run's effects as one ordered capability batch for the shell's policy principal: a read
 /// claims, a write edits, a successful removal removes and an explicit release releases, each at
 /// its own entry order. A repeated action on a resource collapses into its first.
-fn translate(executed: &ExecutedCommand) -> Result<Vec<Event>, ShellError> {
+fn translate(executed: &ExecutedTransaction<'_>) -> Result<Vec<Event>, ShellError> {
     let principal = &executed.prepared.snapshot.owner;
     let mut ordered = Vec::new();
     for (order, effects) in &executed.evidence.effects {

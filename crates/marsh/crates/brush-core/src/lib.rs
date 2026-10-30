@@ -58,7 +58,7 @@ pub use extensions::ShellExtensions;
 pub use interp::{ExecutionParameters, ProcessGroupPolicy};
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use resources::{
-    CpuLimit, MIB, MemoryLimit, PipelineOptions, ResourceEvent, ResourceLimits,
+    CpuLimit, ExternalPipeline, MIB, MemoryLimit, PipelineOptions, ResourceEvent, ResourceLimits,
     ResourceMonitorConfig, ResourceSample,
 };
 pub use results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult};

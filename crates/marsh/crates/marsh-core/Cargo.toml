@@ -19,7 +19,7 @@ testing = ["marsh-btrfs/fake"]
 brush-core.workspace = true
 brush-builtins.workspace = true
 brush-interactive = { version = "^0.4.0", features = ["basic"] }
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 marsh-btrfs = { path = "../marsh-btrfs" }
 marsh-lib = { path = "../marsh-lib", default-features = false, features = ["watch"] }
 marsh-wal = { path = "../marsh-wal" }
@@ -28,20 +28,20 @@ lurk-cli.workspace = true
 syscalls.workspace = true
 nix-observer = { package = "nix", version = "=0.30.1", features = ["process"] }
 # Routing identity: the canonical work-tree root a shell's initial directory belongs to.
-git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
-glob = "0.3"
-futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.149"
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "sync", "net", "macros", "time"] }
+git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2"] }
+glob = "0.3.4"
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "sync", "net", "macros", "time", "process", "io-util"] }
 # The pty ioctls, the `read`/`write` on its master, and the `kill(-pgid, SIGKILL)` a forced stop
 # sends: all of them syscalls with no safe wrapper in this dependency set.
-libc = "0.2"
+libc = "0.2.191"
 # The terminal and pty primitives `shellmux::pty` is built from. Pinned to brush-core's own major
 # so `nix::errno::Errno` converts into `brush_core::Error` through the impl brush-core provides.
 # `term` carries both `nix::sys::termios` and `nix::pty`.
-nix = { version = "0.31.2", features = ["fs", "term"] }
+nix = { version = "0.31.3", features = ["fs", "term"] }
 # The ownership-lock policy every managed command's capabilities are checked against before it
 # is published: the monorepo's own crate.
 junco-policy = { path = "../../../junco-policy" }
@@ -49,10 +49,10 @@ junco-policy = { path = "../../../junco-policy" }
 [dev-dependencies]
 marsh-btrfs = { path = "../marsh-btrfs", features = ["fake"] }
 tempfile = "3.27.0"
-hex = "0.4"
-serial_test = "4"
-sha1 = "0.11"
-tokio = { version = "1.52.3", features = ["macros", "test-util", "time"] }
+hex = "0.4.3"
+serial_test = "4.0.1"
+sha1 = "0.11.0"
+tokio = { version = "1.54.1", features = ["macros", "test-util", "time"] }
 
 [lints]
 workspace = true

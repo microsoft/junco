@@ -12,11 +12,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { DummyTracer } from "dataflow-engine";
 import { JuncoAgent } from "junco-agent";
-import {
-  MARSH_POLICY_DENIED,
-  SendTool,
-  YieldTool,
-} from "junco-tools";
+import { MARSH_POLICY_DENIED, SendTool, YieldTool } from "junco-tools";
 import { Type } from "typebox";
 import {
   convene,
@@ -152,13 +148,20 @@ export async function scriptedCommittee(
   let librarianRound = -1;
   let librarianLookups = 0;
   let librarianReport = "";
-  const sendPartialResearch = () => fauxAssistantMessage(
-    [fauxToolCall("send", {
-      id: "Librarian~>DesignAssignment",
-      payload: { kind: "prompt", text: librarianReport },
-    }, { id: `librarian-send-${librarianRound + 1}` })],
-    { stopReason: "toolUse" },
-  );
+  const sendPartialResearch = () =>
+    fauxAssistantMessage(
+      [
+        fauxToolCall(
+          "send",
+          {
+            id: "Librarian~>DesignAssignment",
+            payload: { kind: "prompt", text: librarianReport },
+          },
+          { id: `librarian-send-${librarianRound + 1}` },
+        ),
+      ],
+      { stopReason: "toolUse" },
+    );
   const librarian: FauxResponseFactory = (context) => {
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);

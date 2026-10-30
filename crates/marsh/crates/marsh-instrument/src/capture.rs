@@ -47,10 +47,11 @@ const fn roles(syscall: Sysno) -> Roles {
         pivot_root => (3, 0, 0),
         mount => (2, 0, 0),
         read | write | close | lseek | ioctl | pread64 | pwrite64 | readv | writev | dup
-        | fcntl | flock | fsync | fdatasync | ftruncate | fchdir | fchmod | fchown | fstat
-        | fstatfs | readahead | fsetxattr | fgetxattr | flistxattr | fremovexattr | getdents64
-        | fadvise64 | sync_file_range | vmsplice | fallocate | preadv | pwritev | preadv2
-        | pwritev2 | open_by_handle_at | syncfs | io_uring_enter | io_uring_register => (0, 1, 0),
+        | sendto | recvfrom | fcntl | flock | fsync | fdatasync | ftruncate | fchdir | fchmod
+        | fchown | fstat | fstatfs | readahead | fsetxattr | fgetxattr | flistxattr
+        | fremovexattr | getdents64 | fadvise64 | sync_file_range | vmsplice | fallocate
+        | preadv | pwritev | preadv2 | pwritev2 | open_by_handle_at | syncfs | io_uring_enter
+        | io_uring_register => (0, 1, 0),
         mmap => (0, 16, 0),
         sendfile | tee | dup3 => (0, 3, 0),
         splice | copy_file_range => (0, 5, 0),
@@ -175,6 +176,67 @@ impl Captured {
             .and_then(|(_, target)| target.as_ref())
     }
 
+    /// Only calls whose unfinished work cannot change filesystem state or access evidence.
+    pub(crate) fn park_safe(syscall: Option<Sysno>, capture: Option<&Self>) -> bool {
+        let Some(syscall) = syscall else {
+            return false;
+        };
+        let stream = |capture: &Self, index| {
+            capture.descriptor(index).is_some_and(|target| {
+                target.mode & libc::S_IFMT == libc::S_IFSOCK
+                    || (target.mode & libc::S_IFMT == libc::S_IFIFO
+                        && target.path.starts_with(b"pipe:["))
+            })
+        };
+        match syscall {
+            Sysno::nanosleep
+            | Sysno::clock_nanosleep
+            | Sysno::ppoll
+            | Sysno::pselect6
+            | Sysno::epoll_pwait
+            | Sysno::epoll_pwait2
+            | Sysno::rt_sigsuspend
+            | Sysno::rt_sigtimedwait
+            | Sysno::wait4
+            | Sysno::waitid => true,
+            #[cfg(target_arch = "x86_64")]
+            Sysno::pause | Sysno::poll | Sysno::epoll_wait | Sysno::select => true,
+            Sysno::futex => capture.is_some_and(|capture| {
+                let Some(SyscallArg::Int(operation)) = capture.args.0.get(1) else {
+                    return false;
+                };
+                let operation = *operation & i64::from(libc::FUTEX_CMD_MASK);
+                operation == i64::from(libc::FUTEX_WAIT)
+                    || operation == i64::from(libc::FUTEX_WAIT_BITSET)
+            }),
+            Sysno::read
+            | Sysno::write
+            | Sysno::readv
+            | Sysno::writev
+            | Sysno::sendto
+            | Sysno::recvfrom => {
+                capture.is_some_and(|capture| capture.failure.is_none() && stream(capture, 0))
+            }
+            Sysno::splice => capture.is_some_and(|capture| {
+                capture.failure.is_none()
+                    && stream(capture, 0)
+                    && stream(capture, 2)
+                    && matches!(
+                        capture.args.0.get(1),
+                        Some(SyscallArg::Addr(0) | SyscallArg::Int(0))
+                    )
+                    && matches!(
+                        capture.args.0.get(3),
+                        Some(SyscallArg::Addr(0) | SyscallArg::Int(0))
+                    )
+            }),
+            Sysno::tee => capture.is_some_and(|capture| {
+                capture.failure.is_none() && stream(capture, 0) && stream(capture, 1)
+            }),
+            _ => false,
+        }
+    }
+
     /// Records the opcodes an `io_uring_enter` found pending at its entry.
     pub(crate) fn submit(&mut self, submissions: Option<Vec<u8>>) {
         self.submissions = submissions;
@@ -189,6 +251,50 @@ impl Captured {
                 None
             }
         }
+    }
+
+    /// Kernel-confirmed child identity and inheritance, not a syscall-return observation.
+    pub(crate) fn created(
+        &self,
+        tid: Pid,
+        syscall: Sysno,
+        child: Pid,
+        entry_order: u64,
+        duration: Duration,
+    ) -> io::Result<Syscall> {
+        if let Some(error) = &self.failure {
+            return Err(io::Error::other(format!(
+                "capturing created child of {tid}: {error}"
+            )));
+        }
+        let args = if syscall == Sysno::clone {
+            let Some(SyscallArg::Int(flags)) = self.args.0.first() else {
+                return Err(io::Error::other(
+                    "child creation lacks captured clone flags",
+                ));
+            };
+            vec![SyscallArg::Int(*flags)]
+        } else {
+            Vec::new()
+        };
+        Ok(Syscall {
+            info: SyscallInfo {
+                typ: "CREATION",
+                pid: tid,
+                syscall,
+                args: SyscallArgs(args),
+                result: RetCode::Ok(child.as_raw()),
+                duration,
+            },
+            creation_observed: false,
+            entry_order,
+            cwd: None,
+            return_fd: None,
+            paths: Vec::new(),
+            descriptors: Vec::new(),
+            flags: self.flags,
+            submissions: None,
+        })
     }
 
     pub(crate) fn complete(
@@ -230,6 +336,7 @@ impl Captured {
                 result,
                 duration,
             },
+            creation_observed: false,
             entry_order,
             cwd: self.cwd,
             return_fd,

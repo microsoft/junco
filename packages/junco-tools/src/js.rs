@@ -223,7 +223,10 @@ pub fn utf8(value: JsString<'_>) -> Result<Utf8> {
                 sys::napi_get_value_string_utf8(raw.env, raw.value, ptr.cast(), avail, &mut written)
             };
             napi::check_status!(status, "Failed to read JavaScript string")?;
-            if written < avail - 1 {
+            // Node-API truncates at a character boundary, up to 3 bytes short of
+            // the `avail - 1` it may fill, so only 4 bytes of slack prove the
+            // whole string fit.
+            if written + 4 < avail {
                 // SAFETY: Node-API initialised `written` bytes at `ptr`.
                 let bytes = unsafe { slice::from_raw_parts(ptr, written) };
                 if let Err(error) = str::from_utf8(bytes) {
@@ -303,7 +306,7 @@ pub fn utf16_append(value: JsString<'_>, out: &mut Vec<u16>) -> Result<Range<usi
 
 /// Owned UTF-16 text crossing the N-API boundary as a JavaScript string.
 ///
-/// Junco pins napi 3.9.0, whose `napi::bindgen_prelude::Utf16String` keeps its
+/// napi's `napi::bindgen_prelude::Utf16String` keeps its
 /// `Vec<u16>` private and only implements `From<String>`. Native code that
 /// already holds code units — the entire point of `pi-diff`'s UTF-16 path —
 /// could otherwise only reach that type through a lossy UTF-8 round trip,

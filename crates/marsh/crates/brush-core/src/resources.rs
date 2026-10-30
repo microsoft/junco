@@ -228,6 +228,23 @@ impl PipelineOptions {
         self
     }
 
+    /// Begins resource ownership for a direct-argv pipeline outside the interpreter.
+    ///
+    /// # Errors
+    /// Returns the same resource-setup errors as an ordinary interpreter pipeline.
+    pub fn begin_external(
+        &self,
+        description: impl Into<String>,
+    ) -> Result<ExternalPipeline, error::Error> {
+        let mut options = self.clone();
+        let owned = options.begin(|| description.into())?;
+        let owns_resources = owned.is_some();
+        Ok(ExternalPipeline {
+            resources: owned.or_else(|| options.active().cloned()),
+            owned: owns_resources,
+        })
+    }
+
     /// Installs ownership on the pipeline's private parameters clone, unless nested.
     #[cfg_attr(
         target_os = "linux",
@@ -272,6 +289,39 @@ impl PipelineOptions {
         #[cfg(not(target_os = "linux"))]
         {
             None
+        }
+    }
+}
+
+/// Resource ownership for a direct-argv pipeline, sharing the interpreter's accounting.
+#[derive(Debug)]
+pub struct ExternalPipeline {
+    resources: Option<Arc<PipelineResources>>,
+    owned: bool,
+}
+
+impl ExternalPipeline {
+    /// Installs the existing before-exec resource attachment and starts its observer monitor.
+    ///
+    /// # Errors
+    /// Refuses a resource setup that cannot be enforced, just like an interpreter spawn.
+    pub fn attach<EO: ExecutionObserver>(
+        &self,
+        command: &mut std::process::Command,
+        observer: &EO,
+    ) -> Result<(), error::Error> {
+        if let Some(resources) = &self.resources {
+            resources.attach(command, observer)?;
+        }
+        Ok(())
+    }
+
+    /// Finishes monitoring after the pipeline's native tree has drained.
+    pub async fn finish(self) {
+        if self.owned
+            && let Some(resources) = &self.resources
+        {
+            resources.finish().await;
         }
     }
 }

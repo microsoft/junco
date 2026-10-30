@@ -18,8 +18,8 @@ name = "lock_policy_harness"
 path = "src/lib.rs"
 
 [dependencies]
-libfuzzer-sys = "0.4"
-arbitrary = "1.4"
+libfuzzer-sys = "0.4.13"
+arbitrary = "1.5.0"
 
 [dependencies.junco-policy]
 path = ".."
@@ -29,7 +29,7 @@ path = ".."
 # backend exists (`lib.rs:411`), and without a backend it emits JSON only. The `html_reports`
 # feature is vestigial in 0.8 — declared but referenced nowhere — so enabling it would document a
 # gate that no longer exists. `rayon` stays off; it only parallelizes report rendering.
-criterion = { version = "0.8", default-features = false, features = [
+criterion = { version = "0.8.2", default-features = false, features = [
     "cargo_bench_support",
     "plotters",
 ] }

@@ -4,14 +4,13 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use brush_core::ExecutionResult;
 use marsh_lib::{CheckedAdvance, RecoverPoison as _};
 use marsh_wal::{Seq, SourceUid};
 
 use super::ShellError;
 use super::completion::Completion;
-use super::execution::ExecutedCommand;
-use super::policy::AuthorizedCommand;
+use super::execution::{ExecutedTransaction, PublicationMode};
+use super::policy::AuthorizedTransaction;
 use super::session::{GrantedCapability, PublishMeta, Session};
 use super::snapshot::{CommandEvidence, PreparedCommand, Snapshot};
 
@@ -20,8 +19,8 @@ use super::snapshot::{CommandEvidence, PreparedCommand, Snapshot};
     reason = "`authority` only borrows the guard `authorized` owns, which `release_authority` drops once publication ends"
 )]
 pub(super) fn commit(
-    mut authorized: Completion<AuthorizedCommand<'_>>,
-) -> Result<ExecutionResult, ShellError> {
+    mut authorized: Completion<AuthorizedTransaction<'_>>,
+) -> Result<bool, ShellError> {
     let mut executed = authorized
         .payload
         .executed
@@ -29,6 +28,12 @@ pub(super) fn commit(
         .ok_or_else(|| ShellError::infrastructure("missing authorized execution"))?;
     let snapshot = executed.prepared.snapshot.clone();
     let session = &snapshot.session;
+    let workspace_mutated = !authorized.payload.operations.is_empty()
+        || executed
+            .evidence
+            .effects
+            .iter()
+            .any(|(_, effects)| effects.workspace_mutated);
     let mut redo = None;
     let mut durable = false;
     let publication = (|| -> Result<(), ShellError> {
@@ -39,7 +44,13 @@ pub(super) fn commit(
             .guard
             .as_mut()
             .ok_or_else(|| ShellError::infrastructure("missing publication authority"))?;
-        let physical = !authorized.payload.operations.is_empty();
+        // A failed operation still authorizes all evidence, but its filesystem prefix is private.
+        let operations = if executed.mode == PublicationMode::Apply {
+            authorized.payload.operations.as_slice()
+        } else {
+            &[]
+        };
+        let physical = !operations.is_empty();
         let before = authority.tree_seq;
         if physical {
             before.next()?;
@@ -76,29 +87,32 @@ pub(super) fn commit(
                 &uid,
                 seq,
                 &meta,
-                &authorized.payload.operations,
+                operations,
             )?;
-            executed.prepared.run.seal_publication()?;
-            // The very first BEGIN write can partially succeed. From here on, retain the frozen
-            // source and refuse every subsequent admission until automatic reopen recovery.
+            let _seal = executed.prepared.run.seal_publication(&executed.seal)?;
+            // Even the first BEGIN write can partially succeed. Retain recovery resources until END.
             authority.recovery_required = true;
             snapshot.retained.store(true, Ordering::Release);
             transaction.apply()?;
             durable = true;
+            authorized.completed = true;
             authority.seq = seq;
-            Session::record_versions(authority, &authorized.payload.operations)?;
+            if physical {
+                Session::record_versions(authority, operations)?;
+            }
             authority.recovery_required = false;
             snapshot.retained.store(false, Ordering::Release);
         } else {
-            executed.prepared.run.seal_publication()?;
+            let _seal = executed.prepared.run.seal_publication(&executed.seal)?;
         }
         authorized.completed = true;
-        let mut state = snapshot.state.lock().recover();
-        if executed.prepared.tree_seq == before {
-            state.tree_seq = authority.tree_seq;
+        if executed.mode == PublicationMode::Apply {
+            let mut state = snapshot.state.lock().recover();
+            if executed.prepared.tree_seq == before {
+                state.tree_seq = authority.tree_seq;
+            }
             state.dirty = false;
         }
-        drop(state);
         Ok(())
     })();
     // No source deletion or post-commit work holds the policy/authority guard.
@@ -109,7 +123,8 @@ pub(super) fn commit(
         redo.as_deref(),
         &snapshot,
         &mut executed,
-    )
+    )?;
+    Ok(workspace_mutated)
 }
 
 /// Names the ledger source: a per-command redo snapshot when physical, else the principal.
@@ -149,8 +164,8 @@ fn conclude(
     durable: bool,
     redo: Option<&Path>,
     snapshot: &Snapshot,
-    executed: &mut ExecutedCommand,
-) -> Result<ExecutionResult, ShellError> {
+    executed: &mut ExecutedTransaction<'_>,
+) -> Result<(), ShellError> {
     match publication {
         Err(error) if !durable => {
             if !snapshot.retained.load(Ordering::Acquire)
@@ -158,7 +173,7 @@ fn conclude(
             {
                 let _ = snapshot.reclaim(redo);
             }
-            Err(error.with_result(executed.result.take()))
+            Err(error)
         }
         result => {
             // END is the commit point: cleanup can retain private resources but cannot relabel
@@ -169,9 +184,7 @@ fn conclude(
                 }
                 let _ = executed.prepared.reclaim();
             }
-            executed.result.take().ok_or_else(|| {
-                ShellError::infrastructure("accepted execution has no native result")
-            })
+            Ok(())
         }
     }
 }

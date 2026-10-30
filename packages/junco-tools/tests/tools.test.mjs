@@ -461,6 +461,40 @@ test("native search honours PCRE2, .gitignore, and literal patterns", {
   }
 });
 
+test("native UTF-8 paths retain a multibyte scalar at the scratch boundary", {
+  timeout: 30_000,
+}, async () => {
+  const { DiffSide, DiffStream } = await testNative();
+  const path = `${"a".repeat(65_533)}😀tail`;
+  await assert.rejects(
+    new DiffStream().openFile(DiffSide.Old, path),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(path));
+      return true;
+    },
+  );
+});
+
+test("native AST preparation observes an already-aborted signal", {
+  timeout: 30_000,
+}, async () => {
+  const ws = await workspace({ "a.ts": "const value = 1;\n" });
+  try {
+    await assert.rejects(
+      ws.mux.astGrep(ws.root, {
+        patterns: ["const $X = $Y"],
+        path: ws.root,
+        signal: AbortSignal.abort(),
+      }),
+      /Aborted: Signal/,
+    );
+    assert.equal(await ws.file("a.ts"), "const value = 1;\n");
+  } finally {
+    await ws.dispose();
+  }
+});
+
 test("pre-aborted calls reject without mutating or clobbering the signal", {
   timeout: 30_000,
 }, async () => {
@@ -2103,26 +2137,47 @@ test("policy denial is classified by its exact code", () => {
   assert.equal(isMarshPolicyDenied(null), false);
 });
 
-test("LspTool.create rejects under Node", { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "junco-tools-lsp-"));
-  // A Node child, so the Bun runner (where LspTool is supported) checks the Node refusal too.
+test("LspTool executes native status and semantic errors under Node", {
+  timeout: 30_000,
+}, async () => {
+  // Always spawn Node, including when this suite itself runs under Bun.
   const probe = [
+    `import assert from "node:assert/strict";`,
     `const { LspTool } = await import(${JSON.stringify(new URL("../dist/index.js", import.meta.url).href)});`,
-    "await LspTool.create(process.cwd()).then(",
-    "  () => process.exit(1),",
-    "  (error) => process.exit(error instanceof Error ? 0 : 2),",
-    ");",
+    `const { fixture, closeFixture } = await import(${JSON.stringify(new URL("./helpers.mjs", import.meta.url).href)});`,
+    `const ws = await fixture({ files: {} });`,
+    `try {`,
+    `  const options = { native: ws.native, mux: ws.mux.forkOwner(), readOnly: true };`,
+    `  const { execute } = await LspTool.create(ws.seed, options);`,
+    `  const status = await execute("node-status", { action: "status" });`,
+    `  assert.equal(status.details.action, "status");`,
+    `  assert.equal(status.details.success, true);`,
+    `  await assert.rejects(execute("node-error", { action: "diagnostics" }), error => {`,
+    `    assert.ok(error instanceof Error);`,
+    `    assert.equal(error.cause.details.action, "diagnostics");`,
+    `    assert.equal(error.cause.details.success, false);`,
+    `    return true;`,
+    `  });`,
+    `  await assert.rejects(execute("node-readonly", { action: "rename" }), { name: "ToolError" });`,
+    `  await LspTool.shutdown();`,
+    `  await LspTool.shutdown();`,
+    `  const again = await LspTool.create(ws.seed, options);`,
+    `  assert.equal((await again.execute("node-again", { action: "status" })).details.success, true);`,
+    `} finally {`,
+    `  try { await LspTool.shutdown(); } finally { await closeFixture(ws); }`,
+    `}`,
   ].join("\n");
+  const home = await mkdtemp(join(tmpdir(), "junco-tools-lsp-node-"));
   try {
     await promisify(execFile)(
       "node",
       ["--input-type=module", "--eval", probe],
       {
-        cwd: directory,
+        env: { ...process.env, HOME: home, TMPDIR: home },
       },
     );
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 });
 

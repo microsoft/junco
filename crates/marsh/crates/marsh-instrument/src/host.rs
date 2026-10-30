@@ -62,6 +62,29 @@ pub enum HostCall<'a> {
         /// The errno of a failed removal.
         errno: Option<i32>,
     },
+    /// A directory removal (`rmdir`).
+    RemoveDir {
+        /// The removed directory.
+        path: &'a Path,
+        /// The errno of a failed removal.
+        errno: Option<i32>,
+    },
+    /// A rename, without following either final symbolic link.
+    Rename {
+        /// The original path.
+        from: &'a Path,
+        /// The destination path.
+        to: &'a Path,
+        /// The errno of a failed rename.
+        errno: Option<i32>,
+    },
+    /// A symbolic-link target read, without following the final link.
+    ReadLink {
+        /// The link path.
+        path: &'a Path,
+        /// The errno of a failed read.
+        errno: Option<i32>,
+    },
     /// A descriptor opened by an earlier command is used again; the reads and writes made
     /// through it are not reported one by one.
     Descriptor {
@@ -116,6 +139,36 @@ pub(crate) fn records(
             sequence,
             Sysno::unlinkat,
             vec![at_cwd(), SyscallArg::Addr(0), int(0)],
+            errno.map_or(RetCode::Ok(0), RetCode::Err),
+            vec![(1, absolute(path)?)],
+            vec![(0, None)],
+            None,
+        )?]),
+        HostCall::RemoveDir { path, errno } => Ok(vec![record(
+            tid,
+            sequence,
+            Sysno::unlinkat,
+            vec![at_cwd(), SyscallArg::Addr(0), int(libc::AT_REMOVEDIR)],
+            errno.map_or(RetCode::Ok(0), RetCode::Err),
+            vec![(1, absolute(path)?)],
+            vec![(0, None)],
+            None,
+        )?]),
+        HostCall::Rename { from, to, errno } => Ok(vec![record(
+            tid,
+            sequence,
+            Sysno::renameat,
+            vec![at_cwd(), SyscallArg::Addr(0), at_cwd(), SyscallArg::Addr(0)],
+            errno.map_or(RetCode::Ok(0), RetCode::Err),
+            vec![(1, absolute(from)?), (3, absolute(to)?)],
+            vec![(0, None), (2, None)],
+            None,
+        )?]),
+        HostCall::ReadLink { path, errno } => Ok(vec![record(
+            tid,
+            sequence,
+            Sysno::readlinkat,
+            vec![at_cwd(), SyscallArg::Addr(0), SyscallArg::Addr(0), int(0)],
             errno.map_or(RetCode::Ok(0), RetCode::Err),
             vec![(1, absolute(path)?)],
             vec![(0, None)],
@@ -270,6 +323,7 @@ fn record(
             result,
             duration: Duration::ZERO,
         },
+        creation_observed: false,
         entry_order: sequence.next()?,
         cwd: None,
         return_fd,
@@ -286,4 +340,76 @@ const fn at_cwd() -> SyscallArg {
 
 const fn int(value: i32) -> SyscallArg {
     SyscallArg::Int(value as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn path_calls_preserve_native_paths_flags_and_failures() {
+        let sequence = Sequence::default();
+        let tid = Pid::from_raw(1);
+        let from = Path::new("/work/from");
+        let to = Path::new("/work/to");
+        let renamed = records(
+            HostCall::Rename {
+                from,
+                to,
+                errno: None,
+            },
+            tid,
+            &sequence,
+        )
+        .unwrap();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].info.syscall, Sysno::renameat);
+        assert_eq!(renamed[0].path(1), Some(b"/work/from".as_slice()));
+        assert_eq!(renamed[0].path(3), Some(b"/work/to".as_slice()));
+
+        let removed = records(
+            HostCall::RemoveDir {
+                path: from,
+                errno: None,
+            },
+            tid,
+            &sequence,
+        )
+        .unwrap();
+        assert_eq!(removed[0].info.syscall, Sysno::unlinkat);
+        assert!(
+            matches!(removed[0].info.args.0[2], SyscallArg::Int(flags) if flags == i64::from(libc::AT_REMOVEDIR))
+        );
+
+        let link = records(
+            HostCall::ReadLink {
+                path: from,
+                errno: Some(libc::ENOENT),
+            },
+            tid,
+            &sequence,
+        )
+        .unwrap();
+        assert_eq!(link[0].info.syscall, Sysno::readlinkat);
+        assert!(matches!(link[0].info.result, RetCode::Err(libc::ENOENT)));
+        assert_eq!(link[0].path(1), Some(b"/work/from".as_slice()));
+
+        let metadata = records(
+            HostCall::Metadata {
+                path: from,
+                follow: false,
+                errno: None,
+            },
+            tid,
+            &sequence,
+        )
+        .unwrap();
+        assert!(
+            matches!(metadata[0].info.args.0[3], SyscallArg::Int(flags) if flags == i64::from(libc::AT_SYMLINK_NOFOLLOW))
+        );
+        assert!(renamed[0].entry_order < removed[0].entry_order);
+        assert!(removed[0].entry_order < link[0].entry_order);
+    }
 }

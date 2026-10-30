@@ -22,6 +22,7 @@ fn info(syscall: Sysno, args: Vec<SyscallArg>, result: RetCode) -> Syscall {
             result,
             duration: std::time::Duration::ZERO,
         },
+        creation_observed: false,
         entry_order: 1,
         cwd: Some(target(b"/work")),
         return_fd: None,
@@ -132,6 +133,7 @@ fn metadata_is_a_dependency_not_a_content_claim() {
     assert_eq!(effect.dependencies, [PathBuf::from("missing")]);
     assert!(effect.reads.is_empty());
     assert!(effect.writes.is_empty());
+    assert!(!effect.workspace_mutated);
 }
 
 #[test]
@@ -169,13 +171,74 @@ fn read_only_open_and_large_descriptor_read_have_distinct_claims() {
 fn writing_intent_requires_edit_even_without_a_payload_change() {
     let mut access = Access::default();
     let effect = access
-        .observe(
-            &open(b"/work/file", libc::O_WRONLY | libc::O_TRUNC),
-            Path::new("/work"),
-        )
+        .observe(&open(b"/work/file", libc::O_WRONLY), Path::new("/work"))
         .unwrap();
     assert_eq!(effect.writes, [PathBuf::from("file")]);
     assert!(effect.reads.is_empty());
+    assert!(effect.workspace_mutated);
+}
+
+#[test]
+fn successful_writes_and_restores_both_record_workspace_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = root.join("file");
+    std::fs::write(&path, b"original").unwrap();
+    let mut access = Access::default();
+    let write = with_descriptor(
+        info(
+            Sysno::pwrite64,
+            vec![
+                SyscallArg::Int(3),
+                SyscallArg::Addr(42),
+                SyscallArg::Int(8),
+                SyscallArg::Int(0),
+            ],
+            RetCode::Ok(8),
+        ),
+        0,
+        path.as_os_str().as_bytes(),
+    );
+    for bytes in [b"modified", b"original"] {
+        std::fs::write(&path, bytes).unwrap();
+        let effect = access.observe(&write, root).unwrap();
+        assert!(effect.workspace_mutated);
+        assert_eq!(effect.writes, [PathBuf::from("file")]);
+    }
+    assert_eq!(std::fs::read(path).unwrap(), b"original");
+}
+
+#[test]
+fn failed_accesses_reads_and_outside_writes_do_not_record_workspace_mutation() {
+    let root = Path::new("/work");
+    let mut failed_open = open(b"/work/file", libc::O_WRONLY);
+    failed_open.info.result = RetCode::Err(-libc::EACCES);
+    let failed_write = with_descriptor(
+        info(
+            Sysno::write,
+            vec![SyscallArg::Int(3), SyscallArg::Addr(42), SyscallArg::Int(2)],
+            RetCode::Err(-libc::EBADF),
+        ),
+        0,
+        b"/work/file",
+    );
+    for call in [
+        failed_open,
+        failed_write,
+        unlinkat(b"file", 0, RetCode::Err(-libc::EACCES)),
+        open(b"/work/file", libc::O_RDONLY),
+        read_fd(b"/work/file"),
+        open(b"/outside/file", libc::O_WRONLY),
+        unlinkat(b"/outside/file", 0, RetCode::Ok(0)),
+    ] {
+        let effect = Access::default().observe(&call, root).unwrap();
+        assert!(!effect.workspace_mutated, "{:?}", call.info.syscall);
+        assert!(effect.writes.is_empty());
+    }
+    let effect = Access::default()
+        .observe(&unlinkat(b"file", 0, RetCode::Ok(0)), root)
+        .unwrap();
+    assert!(effect.workspace_mutated);
 }
 
 #[test]
@@ -378,6 +441,7 @@ fn release_names_one_protected_entry_without_following_its_leaf() {
     let through = access.release(&root.join("dir/missing"), &root).unwrap();
     assert_eq!(through.release, Some(PathBuf::from("real/missing")));
     assert!(through.reads.is_empty() && through.writes.is_empty());
+    assert!(!through.workspace_mutated);
     assert_eq!(
         access.release(&root.join("leaf"), &root).unwrap().release,
         Some(PathBuf::from("leaf"))
@@ -609,6 +673,63 @@ fn protect_for_write(address: usize) -> Syscall {
 }
 
 #[test]
+fn creation_completion_never_replaces_child_descriptor_or_mapping_changes() {
+    let root = Path::new("/work");
+    for flags in CLONE_FLAG_CASES {
+        let mut access = Access::default();
+        access
+            .observe(&open(b"/work/file", libc::O_RDONLY), root)
+            .unwrap();
+        access.observe(&shared_mapping(), root).unwrap();
+        let mut creation = clone_child(flags);
+        creation.info.typ = "CREATION";
+        let bytes = serde_json::to_vec(&creation).unwrap();
+        let creation: Syscall = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(creation.info.typ, "CREATION");
+        assert!(!creation.creation_observed);
+        access.observe(&creation, root).unwrap();
+        access
+            .observe(
+                &in_child(info(Sysno::close, vec![SyscallArg::Int(3)], RetCode::Ok(0))),
+                root,
+            )
+            .unwrap();
+        access
+            .observe(
+                &in_child(info(
+                    Sysno::munmap,
+                    vec![SyscallArg::Addr(0x10000), SyscallArg::Int(4096)],
+                    RetCode::Ok(0),
+                )),
+                root,
+            )
+            .unwrap();
+        let mut completion = clone_child(flags);
+        completion.creation_observed = true;
+        let bytes = serde_json::to_vec(&completion).unwrap();
+        let completion: Syscall = serde_json::from_slice(&bytes).unwrap();
+        assert!(completion.creation_observed);
+        access.observe(&completion, root).unwrap();
+        let child = access
+            .tasks
+            .get(&nix_observer::unistd::Pid::from_raw(2))
+            .unwrap();
+        assert!(
+            !child.descriptors.lock().recover().contains_key(&3),
+            "flags {flags:#x}"
+        );
+        assert_eq!(
+            access
+                .observe(&in_child(protect_for_write(0x10000)), root)
+                .unwrap()
+                .writes,
+            Vec::<PathBuf>::new(),
+            "flags {flags:#x}"
+        );
+    }
+}
+
+#[test]
 fn clone_files_alone_decides_whether_a_child_sees_parent_descriptor_replacements() {
     let root = Path::new("/work");
     for flags in CLONE_FLAG_CASES {
@@ -688,4 +809,357 @@ fn clone_vm_shares_an_address_space_that_had_no_mappings_yet() {
             .writes,
         [PathBuf::from("db")]
     );
+}
+
+fn unmap(address: usize, length: i64) -> Syscall {
+    info(
+        Sysno::munmap,
+        vec![SyscallArg::Addr(address), SyscallArg::Int(length)],
+        RetCode::Ok(0),
+    )
+}
+
+fn remap(address: usize, old_size: i64, new_size: i64, destination: usize, flags: i32) -> Syscall {
+    info(
+        Sysno::mremap,
+        vec![
+            SyscallArg::Addr(address),
+            SyscallArg::Int(old_size),
+            SyscallArg::Int(new_size),
+            SyscallArg::Int(i64::from(flags)),
+            SyscallArg::Addr(destination),
+        ],
+        RetCode::Address(destination),
+    )
+}
+
+#[test]
+fn persistent_mappings_reauthorize_content_and_shared_writes_every_epoch() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access.observe(&clone_child(libc::CLONE_VM), root).unwrap();
+    for _ in 0..2 {
+        let effects = access.persistent_effects(root).unwrap();
+        assert_eq!(effects.reads, [PathBuf::from("db")]);
+        assert_eq!(effects.dependencies, [PathBuf::from("db")]);
+        assert!(effects.writes.is_empty());
+        assert!(!effects.workspace_mutated);
+    }
+    access.observe(&protect_for_write(0x10000), root).unwrap();
+    for _ in 0..2 {
+        let effects = access.persistent_effects(root).unwrap();
+        assert_eq!(effects.reads, [PathBuf::from("db")]);
+        assert_eq!(effects.writes, [PathBuf::from("db")]);
+        assert_eq!(effects.dependencies, [PathBuf::from("db")]);
+        assert!(effects.workspace_mutated);
+    }
+    // Sharing a VM must not create duplicate claims, nor lose the other page on partial unmap.
+    access.observe(&in_child(unmap(0x10000, 1)), root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert_eq!(effects.reads, [PathBuf::from("db")]);
+    assert!(effects.writes.is_empty());
+    assert!(!effects.workspace_mutated);
+}
+
+#[test]
+fn persistent_mapping_protections_follow_pkey_changes_and_failed_calls_do_not_change_them() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    let mut protection = protect_for_write(0x10000);
+    protection.info.syscall = Sysno::pkey_mprotect;
+    protection.info.args.0[1] = SyscallArg::Int(8192);
+    protection.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_EXEC));
+    protection.info.args.0.push(SyscallArg::Int(0));
+    access.observe(&protection, root).unwrap();
+    assert_eq!(
+        access.persistent_effects(root).unwrap().reads,
+        [PathBuf::from("db")]
+    );
+    protection.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_NONE));
+    access.observe(&protection, root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert!(effects.reads.is_empty() && effects.dependencies.is_empty());
+    assert!(!effects.workspace_mutated);
+    protection.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_READ | libc::PROT_WRITE));
+    protection.info.result = RetCode::Err(libc::EACCES);
+    access.observe(&protection, root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert!(effects.reads.is_empty() && effects.writes.is_empty());
+}
+
+#[test]
+fn private_and_outside_mappings_do_not_manufacture_workspace_mutation() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    let mut mapping = shared_mapping();
+    mapping.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_READ | libc::PROT_WRITE));
+    mapping.info.args.0[3] = SyscallArg::Int(i64::from(libc::MAP_PRIVATE));
+    access.observe(&mapping, root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert_eq!(effects.reads, [PathBuf::from("db")]);
+    assert!(effects.writes.is_empty() && !effects.workspace_mutated);
+    mapping.info.args.0[3] = SyscallArg::Int(i64::from(libc::MAP_SHARED));
+    mapping.descriptors[0].1.as_mut().unwrap().path = b"/outside/db".to_vec();
+    access.observe(&mapping, root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert!(effects.reads.is_empty() && effects.writes.is_empty());
+    assert_eq!(effects.outside_writes, [PathBuf::from("/outside/db")]);
+    assert!(!effects.workspace_mutated);
+}
+
+#[test]
+fn remapping_split_protections_preserves_offsets_and_partial_unmaps() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access.observe(&protect_for_write(0x10000), root).unwrap();
+    access
+        .observe(
+            &remap(0x10000, 8192, 8192, 0x30000, libc::MREMAP_MAYMOVE),
+            root,
+        )
+        .unwrap();
+    assert!(access.persistent_effects(root).unwrap().workspace_mutated);
+    access.observe(&unmap(0x30000, 4096), root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert_eq!(effects.reads, [PathBuf::from("db")]);
+    assert!(effects.writes.is_empty() && !effects.workspace_mutated);
+    access.observe(&unmap(0x31000, 4096), root).unwrap();
+    assert!(
+        access
+            .persistent_effects(root)
+            .unwrap()
+            .dependencies
+            .is_empty()
+    );
+    assert!(
+        access
+            .observe(&protect_for_write(0x10000), root)
+            .unwrap()
+            .writes
+            .is_empty()
+    );
+}
+
+#[test]
+fn remapping_a_partial_range_preserves_the_rest_and_covers_growth() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access.observe(&protect_for_write(0x10000), root).unwrap();
+    access
+        .observe(
+            &remap(0x10000, 4096, 8192, 0x30000, libc::MREMAP_MAYMOVE),
+            root,
+        )
+        .unwrap();
+    access.observe(&unmap(0x30000, 4096), root).unwrap();
+    assert!(access.persistent_effects(root).unwrap().workspace_mutated);
+    access.observe(&unmap(0x31000, 4096), root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert_eq!(effects.reads, [PathBuf::from("db")]);
+    assert!(effects.writes.is_empty() && !effects.workspace_mutated);
+}
+
+#[test]
+fn remap_cloning_and_dontunmap_retain_both_ranges() {
+    let root = Path::new("/work");
+    for (old_size, flags) in [
+        (0, libc::MREMAP_MAYMOVE),
+        (8192, libc::MREMAP_MAYMOVE | libc::MREMAP_DONTUNMAP),
+    ] {
+        let mut access = Access::default();
+        access.observe(&shared_mapping(), root).unwrap();
+        access
+            .observe(&remap(0x10000, old_size, 8192, 0x30000, flags), root)
+            .unwrap();
+        access.observe(&unmap(0x10000, 8192), root).unwrap();
+        assert_eq!(
+            access.persistent_effects(root).unwrap().reads,
+            [PathBuf::from("db")]
+        );
+        access.observe(&unmap(0x30000, 8192), root).unwrap();
+        assert!(access.persistent_effects(root).unwrap().reads.is_empty());
+    }
+}
+
+#[test]
+fn fixed_mappings_replace_only_the_overwritten_file_ranges() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    let mut anonymous = info(
+        Sysno::mmap,
+        vec![
+            SyscallArg::Addr(0x10000),
+            SyscallArg::Int(1),
+            SyscallArg::Int(i64::from(libc::PROT_READ | libc::PROT_WRITE)),
+            SyscallArg::Int(i64::from(
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            )),
+            SyscallArg::Int(-1),
+            SyscallArg::Int(0),
+        ],
+        RetCode::Address(0x10000),
+    );
+    access.observe(&anonymous, root).unwrap();
+    assert!(
+        access
+            .observe(&protect_for_write(0x10000), root)
+            .unwrap()
+            .writes
+            .is_empty()
+    );
+    assert_eq!(
+        access.persistent_effects(root).unwrap().reads,
+        [PathBuf::from("db")]
+    );
+    anonymous.info.result = RetCode::Address(0x11000);
+    access.observe(&anonymous, root).unwrap();
+    assert!(
+        access
+            .persistent_effects(root)
+            .unwrap()
+            .dependencies
+            .is_empty()
+    );
+}
+
+#[test]
+fn persistent_mappings_refuse_retired_generations_and_removed_bindings() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access.generation = access.generation.next().unwrap();
+    assert!(access.persistent_effects(root).is_err());
+    assert!(access.observe(&unmap(0x10000, 8192), root).is_err());
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access
+        .observe(&unlinkat(b"db", 0, RetCode::Err(libc::EACCES)), root)
+        .unwrap();
+    assert!(access.persistent_effects(root).is_ok());
+    access
+        .observe(&unlinkat(b"db", 0, RetCode::Ok(0)), root)
+        .unwrap();
+    assert!(access.persistent_effects(root).is_err());
+    access.observe(&unmap(0x10000, 8192), root).unwrap();
+    assert!(
+        access
+            .persistent_effects(root)
+            .unwrap()
+            .dependencies
+            .is_empty()
+    );
+}
+
+#[test]
+fn fixed_remap_replaces_destination_mapping_origins() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    let mut destination = shared_mapping();
+    destination.info.result = RetCode::Address(0x30000);
+    destination.descriptors[0].1.as_mut().unwrap().path = b"/work/other".to_vec();
+    access.observe(&destination, root).unwrap();
+    access
+        .observe(
+            &remap(
+                0x10000,
+                8192,
+                8192,
+                0x30000,
+                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+            ),
+            root,
+        )
+        .unwrap();
+    assert_eq!(
+        access.persistent_effects(root).unwrap().reads,
+        [PathBuf::from("db")]
+    );
+    access.observe(&unmap(0x30000, 8192), root).unwrap();
+    assert!(access.persistent_effects(root).unwrap().reads.is_empty());
+}
+
+#[test]
+fn retained_mappings_follow_renames_and_refuse_overwritten_bindings() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    access.observe(&shared_mapping(), root).unwrap();
+    access.observe(&clone_child(libc::CLONE_VM), root).unwrap();
+    access
+        .aliases
+        .insert(Inode(1, 2), vec!["/work/db".into(), "/work/alias".into()]);
+    let mut rename = info(
+        Sysno::rename,
+        vec![SyscallArg::Addr(0x1000), SyscallArg::Addr(0x2000)],
+        RetCode::Ok(0),
+    );
+    rename.paths = vec![(0, b"/work/db".to_vec()), (1, b"/work/moved".to_vec())];
+    access.observe(&rename, root).unwrap();
+    assert_eq!(
+        access.persistent_effects(root).unwrap().reads,
+        [PathBuf::from("alias"), PathBuf::from("moved")]
+    );
+    rename.paths = vec![(0, b"/work/another".to_vec()), (1, b"/work/moved".to_vec())];
+    access.observe(&rename, root).unwrap();
+    assert!(access.persistent_effects(root).is_err());
+    access.observe(&unmap(0x10000, 8192), root).unwrap();
+    assert!(access.persistent_effects(root).unwrap().reads.is_empty());
+}
+
+#[test]
+fn dropping_a_retained_writable_mapping_does_not_erase_this_epochs_effects() {
+    let root = Path::new("/work");
+    let mut no_access = protect_for_write(0x10000);
+    no_access.info.args.0[1] = SyscallArg::Int(8192);
+    no_access.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_NONE));
+    let anonymous = info(
+        Sysno::mmap,
+        vec![
+            SyscallArg::Addr(0x10000),
+            SyscallArg::Int(8192),
+            SyscallArg::Int(i64::from(libc::PROT_NONE)),
+            SyscallArg::Int(i64::from(
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            )),
+            SyscallArg::Int(-1),
+            SyscallArg::Int(0),
+        ],
+        RetCode::Address(0x10000),
+    );
+    for removal in [unmap(0x10000, 8192), no_access, anonymous] {
+        let mut access = Access::default();
+        let mut mapping = shared_mapping();
+        mapping.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_READ | libc::PROT_WRITE));
+        access.observe(&mapping, root).unwrap();
+        // A later epoch can write/revert through memory before removing its last mapping.
+        let effects = access.observe(&removal, root).unwrap();
+        assert_eq!(effects.writes, [PathBuf::from("db")]);
+        assert!(effects.workspace_mutated);
+        assert!(access.persistent_effects(root).unwrap().writes.is_empty());
+    }
+}
+
+#[test]
+fn write_only_private_pages_are_read_dependencies_but_zero_length_changes_are_inert() {
+    let root = Path::new("/work");
+    let mut access = Access::default();
+    let mut mapping = shared_mapping();
+    mapping.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_WRITE));
+    mapping.info.args.0[3] = SyscallArg::Int(i64::from(libc::MAP_PRIVATE));
+    access.observe(&mapping, root).unwrap();
+    let effects = access.persistent_effects(root).unwrap();
+    assert_eq!(effects.reads, [PathBuf::from("db")]);
+    assert_eq!(effects.dependencies, [PathBuf::from("db")]);
+    assert!(effects.writes.is_empty() && !effects.workspace_mutated);
+    let mut no_op = protect_for_write(0x11000);
+    no_op.info.args.0[1] = SyscallArg::Int(0);
+    no_op.info.args.0[2] = SyscallArg::Int(i64::from(libc::PROT_NONE));
+    access.observe(&no_op, root).unwrap();
+    access.observe(&unmap(0x10000, 8192), root).unwrap();
+    assert!(access.persistent_effects(root).unwrap().reads.is_empty());
 }

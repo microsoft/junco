@@ -31,13 +31,13 @@ use crate::handler::{
 use crate::outer_terminal::OuterTerminalContext;
 use crate::server_access::{current_owner_uid, AccessMode};
 use crate::test_fixtures::{
-    unique_temp_path, wait_until, Fixture, SessionSpec, Sizeless, TestRequest,
+    quiet_command, unique_temp_path, wait_until, Fixture, SessionSpec, Sizeless, TestRequest,
 };
 use crate::test_names::session_name;
 use rmux_os::identity::UserIdentity;
 use rmux_proto::{
-    ControlMode, KillSessionRequest, Request, Response, RmuxError, SessionId, ShowBufferRequest,
-    WaitForMode, WaitForRequest,
+    ControlMode, KillSessionRequest, NewSessionExtRequest, Request, Response, RmuxError, SessionId,
+    ShowBufferRequest, WaitForMode, WaitForRequest,
 };
 
 const CONTROL_TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2120,8 +2120,16 @@ async fn immediate_socket_eof_preserves_fast_attach_query_payloads_and_guards() 
 async fn plain_control_eof_keeps_ready_existing_session_attach_before_exit() {
     let handler = Arc::new(RequestHandler::new());
     let requester_pid = 42_431;
-    let session_name =
-        SessionSpec::create(&handler, Sizeless("plain-control-eof-attach-race")).await;
+    // Shell prompts are unrelated to the control EOF ordering being asserted.
+    let session_name = SessionSpec::create_started(
+        &handler,
+        NewSessionExtRequest {
+            size: None,
+            command: Some(quiet_command()),
+            ..Fixture::fixture("plain-control-eof-attach-race")
+        },
+    )
+    .await;
 
     let (event_tx, event_rx) = mpsc::channel(CONTROL_SERVER_EVENT_CAPACITY);
     let (identity, closing) =

@@ -804,10 +804,7 @@ impl HashlineEdit {
 fn map_policy(view: &View<'_>, policy: &mut pi_edit::PathPolicy) -> Outcome<()> {
     policy.cwd = view.physical(&policy.cwd)?;
     policy.home_dir = view.physical(&policy.home_dir)?;
-    if let Some(root) = &mut policy.local_sandbox_root {
-        *root = view.physical(root)?;
-    }
-    for (_, root) in policy.vault_roots.iter_mut().flatten() {
+    for root in &mut policy.plan_writable_roots {
         *root = view.physical(root)?;
     }
     Ok(())

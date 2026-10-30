@@ -4,159 +4,122 @@ import type {
   AgentToolUpdateCallback,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
-import type {
-  LspTool as UpstreamLspTool,
-  LspToolDetails as UpstreamLspToolDetails,
-} from "@oh-my-pi/pi-coding-agent/lsp";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type TUnsafe, Type } from "typebox";
+import type { NativeMux } from "../native/index.js";
+import type { NativeModule } from "./native.js";
 import {
   captureRecorder,
   markProfileOwned,
   type ProfileRecorder,
   profileToolCall,
 } from "./profile-recorder.js";
-import { resolveToolPath } from "./tool-support.js";
+import { resolveToolPath, throwIfAborted } from "./tool-support.js";
 
-/** The upstream actions, the only operation labels a call may carry. */
-const LSP_ACTIONS: Record<LspToolInput["action"], true> = {
-  diagnostics: true,
-  definition: true,
-  references: true,
-  hover: true,
-  symbols: true,
-  rename: true,
-  rename_file: true,
-  code_actions: true,
-  type_definition: true,
-  implementation: true,
-  status: true,
-  reload: true,
-  capabilities: true,
-  request: true,
-};
+const ACTIONS = [
+  "diagnostics",
+  "definition",
+  "references",
+  "hover",
+  "symbols",
+  "rename",
+  "rename_file",
+  "code_actions",
+  "type_definition",
+  "implementation",
+  "status",
+  "reload",
+  "capabilities",
+  "request",
+] as const;
+const READ_ACTIONS = new Set<string>([
+  "diagnostics",
+  "definition",
+  "references",
+  "hover",
+  "symbols",
+  "type_definition",
+  "implementation",
+  "status",
+  "capabilities",
+]);
 
-/** Options for {@link LspTool.create}. */
-export interface LspToolOptions {
-  /**
-   * Restrict the tool to upstream's read-only actions. Write-tier actions
-   * (`code_actions`, `reload`, `rename`, `rename_file`, `request`) are
-   * rejected by the upstream tool before contacting a language server.
-   * Defaults to full upstream action support.
-   */
-  readonly readOnly?: boolean;
+/** Arguments for native LSP actions. Lines are one-based; timeouts are in seconds. */
+export interface LspToolInput {
+  action: (typeof ACTIONS)[number];
+  file?: string;
+  line?: number;
+  symbol?: string;
+  query?: string;
+  new_name?: string;
+  apply?: boolean;
+  timeout?: number;
+  payload?: string;
 }
 
-/**
- * Arguments accepted by {@link LspTool.execute}: the upstream oh-my-pi `lsp`
- * parameters. Navigation actions take a one-based `line` plus the `symbol`
- * text on that line; `timeout` is in seconds (default 20, schema range 5–300).
- */
-export type LspToolInput = Parameters<UpstreamLspTool["execute"]>[1];
+/** Structured details accompanying an authorized LSP result. */
+export interface LspToolDetails {
+  serverName?: string;
+  action: LspToolInput["action"];
+  success: boolean;
+  request?: LspToolInput;
+}
 
-/** Structured details reported by the upstream `lsp` tool for each action. */
-export type LspToolDetails = UpstreamLspToolDetails;
+/** Options for {@link LspTool.create}. Inject the same addon that created `mux`. */
+export interface LspToolOptions {
+  /** Reject write-tier actions before server contact; not a filesystem capability boundary. */
+  readonly readOnly?: boolean;
+  /** Borrow this owner-bound mux's policy, environment and resource configuration. */
+  readonly mux?: NativeMux;
+  readonly native?: NativeModule;
+}
 
-type UpstreamLspResult = Awaited<ReturnType<UpstreamLspTool["execute"]>>;
+const parameters: TUnsafe<LspToolInput> = Type.Unsafe<LspToolInput>(
+  Type.Object({
+    action: Type.Union(ACTIONS.map((action) => Type.Literal(action))),
+    file: Type.Optional(Type.String()),
+    line: Type.Optional(Type.Number()),
+    symbol: Type.Optional(Type.String()),
+    query: Type.Optional(Type.String()),
+    new_name: Type.Optional(Type.String()),
+    apply: Type.Optional(Type.Boolean()),
+    timeout: Type.Optional(Type.Number({ minimum: 5, maximum: 300 })),
+    payload: Type.Optional(Type.String()),
+  }),
+);
+const bindings = new Set<NativeModule>();
 type LspResult = AgentToolResult<LspToolDetails | undefined>;
 
-let sharedLspParameters: TUnsafe<LspToolInput> | undefined;
-let shutdownUpstream: (() => Promise<void>) | undefined;
-
-function toPiLspResult(result: UpstreamLspResult): LspResult {
-  return {
-    ...result,
-    details: result.details,
-    isError: result.isError === true || result.details?.success === false,
-  };
-}
-
-/** Upstream metadata and the bound executor carried by every {@link LspTool}. */
-interface LspToolFields {
-  readonly name: UpstreamLspTool["name"];
-  readonly label: UpstreamLspTool["label"];
-  readonly description: string;
-  /** Plain JSON Schema converted once from upstream's schema and shared by all tools. */
-  readonly parameters: TUnsafe<LspToolInput>;
-  /**
-   * Run one upstream `lsp` action. Bound to its tool, so a host may extract
-   * or copy it.
-   *
-   * @param toolCallId Identifier of the tool call.
-   * @param params Upstream action arguments; see {@link LspToolInput}.
-   * @param signal Aborts the request; aborts and upstream exceptions propagate unchanged.
-   * @param onUpdate Receives partial results, flagged `isError` on semantic failure.
-   * @returns The successful upstream result.
-   * @throws {Error} On semantic failure, with the upstream text as message and
-   *   the original upstream result as `cause`.
-   */
+/**
+ * Native Rust LSP tool for Node and Bun. Importing the package does not load the addon.
+ * The cwd constructor uses marsh's default LockPolicy; an optional owner-bound mux
+ * shares its selected policy and resources. Results and semantic errors are released
+ * only after policy authorization/publication. Observed workspace mutations retire
+ * servers before another call; marsh is not whole-host filesystem confinement.
+ * Install language-server binaries separately. This tool is opt-in, not part of
+ * ToolCollection or the Pi extension's default registration.
+ */
+export type LspTool = AgentTool<
+  TUnsafe<LspToolInput>,
+  LspToolDetails | undefined
+> & {
+  readonly name: "lsp";
+  readonly label: "LSP";
+  readonly summary: string;
+  readonly loadMode: "discoverable";
+  readonly strict: true;
+  readonly approval: (args: unknown) => "read" | "write";
+  readonly formatApprovalDetails: (args: unknown) => string[];
+  /** Extractable executor. Semantic failures reject with the Pi result as Error.cause. */
   readonly execute: (
     toolCallId: string,
     params: LspToolInput,
     signal?: AbortSignal,
     onUpdate?: AgentToolUpdateCallback<LspToolDetails | undefined>,
   ) => Promise<LspResult>;
-}
+};
 
-/**
- * The oh-my-pi `lsp` tool (from the npm `@oh-my-pi/pi-coding-agent` package)
- * as an Earendil Pi {@link AgentTool}, passed directly in any existing
- * `tools` array.
- *
- * - Requires Bun >=1.3.14 to create and run; importing this module under Node
- *   is safe, but {@link LspTool.create} rejects there.
- * - Language-server binaries are installed by the caller and discovered by
- *   upstream configuration (`lsp.json`, defaults, PATH); nothing is installed.
- * - Runs with upstream host filesystem and process behavior: it does **not**
- *   go through marsh's sandbox or hashline provenance, and is not part of
- *   `ToolCollection` or the Pi extension registration.
- * - Semantic failures (upstream `isError` or `details.success === false`)
- *   reject with the upstream text; the original result is `Error.cause`.
- * - Language-server clients are process-wide; release them with
- *   {@link LspTool.shutdown} once every LSP-using agent has drained.
- *
- * @example
- * ```ts
- * import { LspTool } from "junco-tools";
- *
- * const lsp = await LspTool.create(process.cwd());
- * try {
- *   const status = await lsp.execute("status-1", { action: "status" });
- *   console.log(status.content);
- *   const definition = await lsp.execute("definition-1", {
- *     action: "definition",
- *     file: "src/index.ts",
- *     line: 12, // one-based
- *     symbol: "createAgent",
- *   });
- *   console.log(definition.content);
- *   // Or pass it to an agent (junco-agent): JuncoAgent.fromResolved({ ...options, tools: [lsp] })
- * } finally {
- *   await LspTool.shutdown();
- * }
- * ```
- */
-export type LspTool = AgentTool<
-  TUnsafe<LspToolInput>,
-  LspToolDetails | undefined
-> &
-  LspToolFields &
-  Pick<
-    UpstreamLspTool,
-    "summary" | "loadMode" | "strict" | "approval" | "formatApprovalDetails"
-  >;
-
-/** Creates {@link LspTool}s and releases their process-wide language-server clients. */
 export const LspTool = {
-  /**
-   * Create a headless upstream `lsp` tool rooted at `cwd`.
-   *
-   * @param cwd Workspace directory, resolved against `process.cwd()`. It is
-   *   not created or validated here; upstream execution reports path failures.
-   * @param options See {@link LspToolOptions}.
-   * @returns A Pi `AgentTool` delegating to upstream oh-my-pi.
-   * @throws {Error} `LspTool requires Bun >=1.3.14` when not running under Bun.
-   */
+  /** Open a native tool rooted at cwd, resolved against process.cwd(). */
   async create(
     cwd: string,
     options: LspToolOptions = {},
@@ -164,87 +127,99 @@ export const LspTool = {
       | ProfileRecorder<"operations">
       | (() => ProfileRecorder<"operations"> | undefined),
   ): Promise<LspTool> {
-    if (!("Bun" in globalThis)) {
-      throw new Error("LspTool requires Bun >=1.3.14");
-    }
-    const resolvedCwd = resolveToolPath(process.cwd(), cwd);
-    // Dynamic by design: OMP ships Bun-only TypeScript sources, so a static
-    // import would make `import { LspTool }` fail under Node at module load.
-    const [{ LspTool: Upstream }, { Settings }, { shutdownAll }] =
-      await Promise.all([
-        import("@oh-my-pi/pi-coding-agent/lsp"),
-        import("@oh-my-pi/pi-coding-agent/config/settings"),
-        import("@oh-my-pi/pi-coding-agent/lsp/client"),
-      ]);
-    shutdownUpstream = shutdownAll;
-    const delegate = new Upstream({
-      cwd: resolvedCwd,
-      hasUI: false,
-      getSessionFile: () => null,
-      getSessionSpawns: () => null,
-      settings: Settings.isolated(),
-      enableLsp: true,
-      lspReadOnly: options.readOnly,
-    } satisfies ToolSession);
-    sharedLspParameters ??= Type.Unsafe<LspToolInput>(
-      delegate.parameters.toJsonSchema(),
+    const native = options.native ?? (await import("junco-tools/native"));
+    bindings.add(native);
+    const handle = await native.NativeLsp.open(
+      resolveToolPath(process.cwd(), cwd),
+      { readOnly: options.readOnly },
+      options.mux,
     );
     const describe = (args: unknown) => {
       const action = (args as { action?: unknown } | null | undefined)?.action;
       return {
         resource: "operations",
         category: "lsp",
-        tool: delegate.name,
+        tool: "lsp",
         operation:
-          typeof action === "string" && Object.hasOwn(LSP_ACTIONS, action)
+          typeof action === "string" &&
+          ACTIONS.some((value) => value === action)
             ? action
             : "invalid",
       } as const;
     };
     const tool: LspTool = {
-      name: delegate.name,
-      label: delegate.label,
-      description: delegate.description,
-      summary: delegate.summary,
-      loadMode: delegate.loadMode,
-      strict: delegate.strict,
-      approval: delegate.approval,
-      formatApprovalDetails: delegate.formatApprovalDetails,
-      parameters: sharedLspParameters,
-      execute: (toolCallId, params, signal, onUpdate) =>
+      name: "lsp",
+      label: "LSP",
+      description:
+        "Query language servers for diagnostics, navigation, symbols, refactoring, and raw requests.",
+      summary:
+        "Query LSP (language server) for diagnostics, hover info, and references",
+      loadMode: "discoverable",
+      strict: true,
+      approval: (args) => {
+        const action = (args as Partial<LspToolInput> | null)?.action;
+        return typeof action === "string" &&
+          READ_ACTIONS.has(action.toLowerCase())
+          ? "read"
+          : "write";
+      },
+      formatApprovalDetails: (args) => {
+        const params = args as Partial<LspToolInput> | null;
+        const lines = [
+          `Action: ${typeof params?.action === "string" ? params.action : "(missing)"}`,
+        ];
+        if (typeof params?.file === "string" && params.file.length > 0)
+          lines.push(`File: ${params.file}`);
+        return lines;
+      },
+      parameters,
+      execute: (_toolCallId, params, signal, _onUpdate) =>
         profileToolCall(
           captureRecorder(recorder),
           describe(params),
           signal,
           async () => {
-            const result = await delegate.execute(
-              toolCallId,
-              params,
-              signal,
-              onUpdate && ((partial) => onUpdate(toPiLspResult(partial))),
-            );
-            const converted = toPiLspResult(result);
-            if (converted.isError) {
-              throw new Error(contentText(result.content, "\n"), {
-                cause: result,
-              });
+            throwIfAborted(signal);
+            const call = handle.start(params);
+            const abort = () => call.abort();
+            signal?.addEventListener("abort", abort, { once: true });
+            if (signal?.aborted) abort();
+            try {
+              const result = await call.wait();
+              const converted = {
+                content: [{ type: "text" as const, text: result.text }],
+                details: {
+                  ...result.details,
+                  ...(result.details.request == null
+                    ? {}
+                    : { request: params }),
+                },
+                isError: result.isError || result.details.success === false,
+                ...(result.useless == null ? {} : { useless: result.useless }),
+              };
+              if (converted.isError) {
+                throw new Error(contentText(converted.content, "\n"), {
+                  cause: converted,
+                });
+              }
+              return converted;
+            } finally {
+              signal?.removeEventListener("abort", abort);
             }
-            return converted;
           },
         ),
     };
     return markProfileOwned(tool, describe);
   },
 
-  /**
-   * Shut down every language-server client started by any `LspTool` in this
-   * process (upstream's global client registry). Call only after all
-   * LSP-using agents and calls have drained, not per agent disposal.
-   * Resolves immediately when no tool was ever created.
-   *
-   * @returns Resolves once upstream shutdown completes.
-   */
+  /** Drain all native LSP instances, including injected addons. Repeatable; later opens work. */
   async shutdown(): Promise<void> {
-    await shutdownUpstream?.();
+    const results = await Promise.allSettled(
+      [...bindings].map((native) => native.NativeLsp.shutdownAll()),
+    );
+    const errors = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (errors.length) throw new AggregateError(errors, "LSP shutdown failed");
   },
 };

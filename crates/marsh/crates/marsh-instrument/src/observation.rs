@@ -2,6 +2,10 @@
 //! filter. It runs on the in-process tracer thread that seized them: the host itself is never
 //! traced, which Linux refuses within one thread group anyway. No CLI, renderer, tracee launcher,
 //! or dependency source patch participates here.
+//!
+//! A newborn killed before its adoption event may first report EXIT. Such terminal holds
+//! drain only after every creator is exiting; their lifecycle tombstones survive until the
+//! whole tree is reaped. This never completes a pending syscall or seals a parked epoch.
 
 use std::collections::HashMap;
 use std::io;
@@ -41,13 +45,34 @@ const OPTIONS: Options = Options::PTRACE_O_TRACESYSGOOD
 pub(crate) struct Resume {
     /// Keep the delivered task stopped until a later delivery releases it.
     pub hold_current: bool,
+    /// The hold is an intentional closed-evidence barrier, not unclassified adoption.
+    pub policy_hold: bool,
+    /// Drain an unsafe pending call without reinjecting a job-control signal.
+    pub drain_current: bool,
     /// Held tasks to resume now, each from the stop it was held at.
     pub release: Vec<Pid>,
+    /// Adoption stops whose ownership is now known and whose hold is now policy-owned.
+    pub policy: Vec<Pid>,
 }
 
-/// A stop as the consumer sees it: sequence, task, raw status, event message and completed call.
-pub(crate) type Observe<'a> =
-    dyn FnMut(u64, Pid, i32, Option<u64>, Option<Syscall>) -> io::Result<Resume> + 'a;
+/// Control decisions are executed only by the thread owning these ptrace relationships.
+pub(crate) enum Control {
+    Release,
+    Hold,
+    Interrupt,
+}
+
+/// Borrowed entry-time capture; unknown and unselected calls are explicit too.
+pub(crate) struct EntryInfo<'a> {
+    pub syscall: Option<Sysno>,
+    pub capture: Option<&'a Captured>,
+    /// Unselected exits still close their pending call, including kernel restart results.
+    pub result: Option<RetCode>,
+}
+
+/// A stop, completed evidence, and (only at entry) borrowed capture information.
+pub(crate) type Observe<'a> = dyn FnMut(u64, Pid, i32, Option<u64>, Option<Syscall>, Option<EntryInfo<'_>>) -> io::Result<Resume>
+    + 'a;
 
 /// Why held tasks cannot be classified once every other task has begun exiting.
 pub(crate) const UNCLASSIFIED: &str = "native creator exited with unclassified child effects";
@@ -57,6 +82,7 @@ struct Entry {
     capture: Captured,
     order: u64,
     started: Instant,
+    creation_observed: bool,
 }
 
 #[derive(Default)]
@@ -64,9 +90,16 @@ struct Task {
     /// Whether an entry, or the one return allowed before any, has kept this task in step.
     synchronized: bool,
     in_syscall: bool,
+    syscall: Option<Sysno>,
     /// An exit event was observed; no later creation event can come from this task.
     exiting: bool,
     entry: Option<Entry>,
+    interrupt_requested: bool,
+}
+
+struct Held {
+    status: i32,
+    policy: bool,
 }
 
 /// The service-wide delivery order shared by every tracer thread and host record.
@@ -97,7 +130,9 @@ pub(crate) struct Observer {
     /// The `io_uring` rings this tree set up.
     rings: Rings,
     /// Stops left unresumed at the consumer's request, by task: their raw status.
-    held: HashMap<Pid, i32>,
+    held: HashMap<Pid, Held>,
+    /// Newborn tasks drained only after every possible creator began exiting.
+    unexecuted_exits: Vec<Pid>,
 }
 
 impl Observer {
@@ -123,6 +158,9 @@ impl Observer {
             Sysno::io_uring_register,
             Sysno::io_submit,
             Sysno::io_getevents,
+            Sysno::futex,
+            Sysno::sendto,
+            Sysno::recvfrom,
         ] {
             selected.insert(syscall);
         }
@@ -139,6 +177,7 @@ impl Observer {
             detached: false,
             rings: Rings::default(),
             held: HashMap::new(),
+            unexecuted_exits: Vec::new(),
         }
     }
 
@@ -146,6 +185,11 @@ impl Observer {
     /// reports that failure and reaps the process itself.
     pub(crate) const fn detached(&self) -> bool {
         self.detached
+    }
+
+    /// Terminal-only tasks whose adoption event was lost when their creator died.
+    pub(crate) fn unexecuted_exits(&self) -> &[Pid] {
+        &self.unexecuted_exits
     }
 
     /// Seizes a spawned child and returns its first ptrace stop, still unresumed, or `None`
@@ -188,22 +232,91 @@ impl Observer {
         }
     }
 
-    /// Observes every stop until this thread has no tracee left. Held tasks cannot be released
-    /// once every other task is exiting: a zombie leader's final wait can depend on a held thread.
+    #[cfg(test)]
+    /// Observes an ordinary exit-only tree without policy-held stops.
     pub(crate) fn run(&mut self, observe: &mut Observe<'_>) -> io::Result<()> {
+        self.run_controlled(observe, &mut |_, _| Ok(Control::Hold))
+    }
+
+    /// Policy holds are released only after the owner consumes its current token.
+    pub(crate) fn run_controlled(
+        &mut self,
+        observe: &mut Observe<'_>,
+        control: &mut dyn FnMut(Pid, bool) -> io::Result<Control>,
+    ) -> io::Result<()> {
+        let mut release = Vec::new();
         loop {
-            if !self.held.is_empty()
+            for (&tid, task) in &mut self.tasks {
+                let held = self.held.get(&tid);
+                if task.exiting || held.is_some_and(|held| !held.policy) {
+                    continue;
+                }
+                match control(tid, held.is_some())? {
+                    Control::Release if held.is_some() => release.push(tid),
+                    Control::Interrupt if held.is_none() && !task.interrupt_requested => {
+                        // Holding SIGSTOP's delivery in one thread can prevent the group's stop
+                        // from completing. Interrupt every safe task through its owning tracer.
+                        match ptrace::interrupt(tid) {
+                            Ok(()) | Err(Errno::EIO) => task.interrupt_requested = true,
+                            Err(Errno::ESRCH) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for tid in release.drain(..) {
+                self.held.remove(&tid);
+                // SIGCONT has already cleared any group-stop. Never reinject SIGSTOP.
+                resume(tid, None)?;
+            }
+            if self.held.values().any(|held| !held.policy)
                 && self
                     .tasks
                     .iter()
                     .all(|(tid, task)| task.exiting || self.held.contains_key(tid))
             {
+                // exit_group/SIGKILL can replace a newborn's attachment stop with EXIT before
+                // its creator's event message can be read. An exit stop must reach its final
+                // wait, but only after every possible creator is exiting: otherwise its late
+                // adoption still needs the held task and its buffered lifecycle records.
+                let terminal_only = self.tasks.values().all(|task| task.exiting)
+                    && self.held.iter().all(|(tid, held)| {
+                        held.policy
+                            || self.tasks.get(tid).is_some_and(|task| {
+                                !task.synchronized
+                                    && !task.in_syscall
+                                    && task.entry.is_none()
+                                    && matches!(
+                                        WaitStatus::from_raw(*tid, held.status),
+                                        Ok(WaitStatus::PtraceEvent(_, _, code))
+                                            if code == Event::PTRACE_EVENT_EXIT as i32
+                                    )
+                            })
+                    });
+                if terminal_only {
+                    for (&tid, held) in &self.held {
+                        if !held.policy {
+                            release.push(tid);
+                        }
+                    }
+                    for tid in release.drain(..) {
+                        self.held.remove(&tid);
+                        self.unexecuted_exits.push(tid);
+                        resume(tid, None)?;
+                    }
+                    continue;
+                }
                 return Err(io::Error::other(UNCLASSIFIED));
             }
-            let Some((tid, status)) = wait_any()? else {
-                break;
-            };
-            self.stop(tid, status, observe)?;
+            match wait_ready(!self.held.is_empty())? {
+                Waited::Stop(tid, status) => self.stop(tid, status, observe)?,
+                Waited::End => break,
+                Waited::Pending => {
+                    // ponytail: poll only while ptrace-held; use a tracer wake fd if measured.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
         }
         if self.tasks.is_empty() {
             Ok(())
@@ -278,6 +391,9 @@ impl Observer {
         status: i32,
         observe: &mut Observe<'_>,
     ) -> io::Result<()> {
+        if let Some(task) = self.tasks.get_mut(&tid) {
+            task.interrupt_requested = false;
+        }
         let wait = WaitStatus::from_raw(tid, status)?;
         let event = match wait {
             WaitStatus::PtraceSyscall(_) => return self.syscall_stop(tid, status, observe),
@@ -293,24 +409,74 @@ impl Observer {
             }
             WaitStatus::Continued(_) | WaitStatus::StillAlive => return Ok(()),
         };
-        let resume = observe(self.sequence.next()?, tid, status, event, None)?;
+        let info = if matches!(wait, WaitStatus::PtraceEvent(_, _, code) if creation(code))
+            && let Some(message) = event
+        {
+            let child = event_pid(Some(message))?;
+            let entry = self
+                .tasks
+                .get_mut(&tid)
+                .and_then(|task| task.entry.as_mut())
+                .ok_or_else(|| io::Error::other("creation event lacks captured entry"))?;
+            if entry.creation_observed
+                || !matches!(
+                    entry.syscall,
+                    Sysno::clone | Sysno::clone3 | Sysno::fork | Sysno::vfork
+                )
+            {
+                return Err(io::Error::other(
+                    "creation event does not match pending call",
+                ));
+            }
+            let info = entry.capture.created(
+                tid,
+                entry.syscall,
+                child,
+                entry.order,
+                entry.started.elapsed(),
+            )?;
+            entry.creation_observed = true;
+            Some(info)
+        } else {
+            None
+        };
+        let resume = observe(self.sequence.next()?, tid, status, event, info, None)?;
         self.apply(tid, status, resume)
     }
 
     /// Resumes the delivered task — or holds it — and every held task the consumer released.
     /// A released task resumes from its own saved stop; nothing about that stop is delivered
     /// again.
-    fn apply(&mut self, tid: Pid, status: i32, resume: Resume) -> io::Result<()> {
+    fn apply(&mut self, tid: Pid, status: i32, decision: Resume) -> io::Result<()> {
         let wait = WaitStatus::from_raw(tid, status)?;
-        if resume.hold_current && !matches!(wait, WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+        self.held.remove(&tid);
+        if decision.hold_current
+            && !matches!(wait, WaitStatus::Exited(..) | WaitStatus::Signaled(..))
         {
-            self.held.insert(tid, status);
+            self.held.insert(
+                tid,
+                Held {
+                    status,
+                    policy: decision.policy_hold,
+                },
+            );
+        } else if decision.drain_current {
+            resume(tid, None)?;
         } else {
             resume_stop(tid, wait)?;
         }
-        for released in resume.release {
-            if let Some(status) = self.held.remove(&released) {
-                resume_stop(released, WaitStatus::from_raw(released, status)?)?;
+        for released in decision.release {
+            if let Some(held) = self.held.remove(&released) {
+                if held.policy {
+                    resume(released, None)?;
+                } else {
+                    resume_stop(released, WaitStatus::from_raw(released, held.status)?)?;
+                }
+            }
+        }
+        for held in decision.policy {
+            if let Some(held) = self.held.get_mut(&held) {
+                held.policy = true;
             }
         }
         Ok(())
@@ -376,10 +542,9 @@ impl Observer {
         }
         task.in_syscall = true;
         task.synchronized = true;
-        let selected = usize::try_from(number)
-            .ok()
-            .and_then(Sysno::new)
-            .filter(|syscall| self.selected.contains(*syscall));
+        let syscall = usize::try_from(number).ok().and_then(Sysno::new);
+        task.syscall = syscall;
+        let selected = syscall.filter(|syscall| self.selected.contains(*syscall));
         if let Some(syscall) = selected {
             let Some(registers) = alive(ptrace::getregs(tid))? else {
                 return Ok(());
@@ -397,11 +562,40 @@ impl Observer {
                 capture,
                 order,
                 started: Instant::now(),
+                creation_observed: false,
             });
-            let resume = observe(order, tid, status, None, None)?;
+            let entry = self
+                .tasks
+                .get(&tid)
+                .and_then(|task| task.entry.as_ref())
+                .ok_or_else(|| io::Error::other("missing entry capture"))?;
+            let resume = observe(
+                order,
+                tid,
+                status,
+                None,
+                None,
+                Some(EntryInfo {
+                    syscall: Some(syscall),
+                    capture: Some(&entry.capture),
+                    result: None,
+                }),
+            )?;
             return self.apply(tid, status, resume);
         }
-        resume(tid, None)
+        let resume = observe(
+            self.sequence.next()?,
+            tid,
+            status,
+            None,
+            None,
+            Some(EntryInfo {
+                syscall,
+                capture: None,
+                result: None,
+            }),
+        )?;
+        self.apply(tid, status, resume)
     }
 
     fn exit(
@@ -423,6 +617,7 @@ impl Observer {
             return resume(tid, None);
         }
         task.in_syscall = false;
+        let syscall = task.syscall.take();
         if let Some(entry) = task.entry.take() {
             let mut call = entry.capture.complete(
                 tid,
@@ -431,6 +626,7 @@ impl Observer {
                 entry.order,
                 entry.started.elapsed(),
             )?;
+            call.creation_observed = entry.creation_observed;
             if call.info.syscall == Sysno::io_uring_setup
                 && !matches!(call.info.result, RetCode::Err(_))
             {
@@ -440,7 +636,7 @@ impl Observer {
                 && !self.root_executed
                 && matches!(call.info.syscall, Sysno::execve | Sysno::execveat)
                 && matches!(call.info.result, RetCode::Err(_));
-            let resume = observe(self.sequence.next()?, tid, status, None, Some(call))?;
+            let resume = observe(self.sequence.next()?, tid, status, None, Some(call), None)?;
             if failed_launch {
                 // The launcher now reports the errno and waits for this process itself. Only
                 // the launcher's own code runs from here, which ran untraced before the
@@ -452,7 +648,19 @@ impl Observer {
             }
             return self.apply(tid, status, resume);
         }
-        resume(tid, None)
+        let resume = observe(
+            self.sequence.next()?,
+            tid,
+            status,
+            None,
+            None,
+            Some(EntryInfo {
+                syscall,
+                capture: None,
+                result: Some(result),
+            }),
+        )?;
+        self.apply(tid, status, resume)
     }
 }
 
@@ -561,20 +769,38 @@ fn syscall_info(tid: Pid) -> io::Result<Option<libc::ptrace_syscall_info>> {
     Ok(Some(info))
 }
 
-fn wait_any() -> io::Result<Option<(Pid, i32)>> {
+enum Waited {
+    Stop(Pid, i32),
+    Pending,
+    End,
+}
+
+fn wait_ready(nonblocking: bool) -> io::Result<Waited> {
     loop {
         let mut status = 0;
-        // SAFETY: status points to one writable integer. `__WNOTHREAD` confines the wait to this
-        // tracer thread's own tracees; the host's other children are never touched.
-        let tid = unsafe { libc::waitpid(-1, &raw mut status, libc::__WALL | libc::__WNOTHREAD) };
+        let options =
+            libc::__WALL | libc::__WNOTHREAD | if nonblocking { libc::WNOHANG } else { 0 };
+        // SAFETY: status is writable; __WNOTHREAD confines waits to this tracer's tracees.
+        let tid = unsafe { libc::waitpid(-1, &raw mut status, options) };
         if tid > 0 {
-            return Ok(Some((Pid::from_raw(tid), status)));
+            return Ok(Waited::Stop(Pid::from_raw(tid), status));
+        }
+        if tid == 0 {
+            return Ok(Waited::Pending);
         }
         match Errno::last() {
             Errno::EINTR => {}
-            Errno::ECHILD => return Ok(None),
+            Errno::ECHILD => return Ok(Waited::End),
             error => return Err(error.into()),
         }
+    }
+}
+
+fn wait_any() -> io::Result<Option<(Pid, i32)>> {
+    match wait_ready(false)? {
+        Waited::Stop(tid, status) => Ok(Some((tid, status))),
+        Waited::End => Ok(None),
+        Waited::Pending => unreachable!("blocking wait cannot report pending"),
     }
 }
 

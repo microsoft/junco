@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -353,9 +353,30 @@ test("shared and cyclic native member graphs cascade abort and close once each",
 test(
   "LspTool delivers successful status and semantic errors through JuncoAgent",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "junco-lsp-"));
+    const scratch = await mkdtemp(join(tmpdir(), "junco-lsp-"));
+    const directory = join(scratch, "seed");
+    await mkdir(directory);
+    const nativePath = new URL(
+      "../packages/junco-tools/target/native-test/index.js",
+      import.meta.url,
+    ).href;
+    const native = await import(nativePath);
+    const mux = (
+      await native.NativeMux.openCopyTree(directory, { sandbox: "always" })
+    ).forkOwner();
+    const options = { readOnly: true, mux, native };
     try {
-      const lsp = await tools.LspTool.create(directory, { readOnly: true });
+      const lsp = await tools.LspTool.create(directory, options);
+      assert.equal(lsp.name, "lsp");
+      assert.equal(lsp.label, "LSP");
+      assert.equal(lsp.strict, true);
+      assert.equal(lsp.loadMode, "discoverable");
+      assert.equal(lsp.approval({ action: "HOVER" }), "read");
+      assert.equal(lsp.approval({ action: "rename" }), "write");
+      assert.deepEqual(
+        lsp.formatApprovalDetails({ action: "hover", file: "a.ts" }),
+        ["Action: hover", "File: a.ts"],
+      );
       try {
         let status: ToolResultMessage | undefined;
         let failure: ToolResultMessage | undefined;
@@ -370,7 +391,7 @@ test(
                   message.role === "toolResult" &&
                   message.toolCallId === "lsp-status",
               );
-              // Schema-valid, but upstream's dispatcher rejects diagnostics without a file.
+              // Schema-valid, but the native dispatcher requires a diagnostics file.
               return toolTurn(
                 fauxToolCall(
                   "lsp",
@@ -414,13 +435,17 @@ test(
           await agent.return();
         }
 
-        const { execute } = await tools.LspTool.create(directory, {
-          readOnly: true,
-        });
+        const { execute } = await tools.LspTool.create(directory, options);
         const direct = await execute("direct-status", { action: "status" });
         assert.equal(direct.isError, false);
         assert.equal(direct.details?.action, "status");
         assert.equal(direct.details?.success, true);
+        const aborted = new AbortController();
+        aborted.abort();
+        await assert.rejects(
+          execute("already-aborted", { action: "status" }, aborted.signal),
+          /Operation aborted/,
+        );
 
         const diagnostics = await execute("direct-diagnostics", {
           action: "diagnostics",
@@ -454,7 +479,7 @@ test(
 
         await tools.LspTool.shutdown();
         await tools.LspTool.shutdown();
-        const again = await tools.LspTool.create(directory, { readOnly: true });
+        const again = await tools.LspTool.create(directory, options);
         const restarted = await again.execute("restarted-status", {
           action: "status",
         });
@@ -463,7 +488,8 @@ test(
         await tools.LspTool.shutdown();
       }
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      await mux.close();
+      await rm(scratch, { recursive: true, force: true });
     }
   },
   TIMEOUT_MS,

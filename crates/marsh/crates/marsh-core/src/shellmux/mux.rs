@@ -39,6 +39,8 @@ pub struct ShellMux {
     pub(crate) resize_lock: tokio::sync::Mutex<()>,
     pub(crate) command_counter: AtomicU64,
     frontend: Arc<Mutex<dyn ShellFrontend>>,
+    /// Construction reservations and retained sessions share this close fence.
+    managed: Mutex<(bool, Vec<crate::shell::ManagedClose>)>,
 }
 impl std::fmt::Debug for ShellMux {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +76,7 @@ impl ShellMux {
             resize_lock: tokio::sync::Mutex::new(()),
             command_counter: AtomicU64::new(1),
             frontend: Arc::clone(&frontend),
+            managed: Mutex::new((false, Vec::new())),
         });
         let mut bound = lock_frontend(&frontend);
         bound.bind(Arc::downgrade(&mux));
@@ -132,6 +135,105 @@ impl ShellMux {
         }
     }
 
+    /// Opens a forced-managed typed session with this mux's policy, environment and resources.
+    pub async fn open_managed_session(
+        self: &Arc<Self>,
+        initial_dir: &Path,
+        mut options: SpawnOptions,
+    ) -> Result<crate::ManagedSession, MuxError> {
+        let cancel = crate::ManagedCancellation::default();
+        let (ready, registration) =
+            tokio::sync::watch::channel(crate::shell::ManagedRegistration::Opening);
+        {
+            let mut managed = self
+                .managed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if managed.0 || self.is_closing() {
+                return Err(MuxError::ShuttingDown);
+            }
+            managed.1.retain(crate::shell::ManagedClose::live);
+            managed.1.push(crate::shell::ManagedClose {
+                cancel: cancel.clone(),
+                ready: registration,
+            });
+        }
+        options.io = super::JobIo::Pipes;
+        options.automatic_close = false;
+        options.force_sandbox = true;
+        let opened = async {
+            self.configured_builder(None, initial_dir, HashMap::new(), options)
+                .build_managed_session_with_cancel(cancel.clone())
+                .await
+                .map_err(MuxError::from)
+        }
+        .await;
+        match opened {
+            Ok(mut session) => {
+                ready.send_replace(session.registration());
+                if cancel.is_cancelled() {
+                    session.close().await?;
+                    return Err(MuxError::ShuttingDown);
+                }
+                Ok(session)
+            }
+            Err(error) => {
+                ready.send_replace(crate::shell::ManagedRegistration::Failed);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn close_managed(&self) -> Result<(), MuxError> {
+        let handles = {
+            let mut managed = self
+                .managed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            managed.0 = true;
+            let handles = std::mem::take(&mut managed.1);
+            for handle in &handles {
+                handle.cancel.cancel();
+            }
+            handles
+        };
+        let mut failure = None;
+        for handle in handles {
+            if let Err(error) = handle.close().await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), |error| Err(error.into()))
+    }
+
+    pub(crate) fn cancel_managed(&self) {
+        let mut managed = self
+            .managed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        managed.0 = true;
+        for handle in &managed.1 {
+            handle.cancel.cancel();
+        }
+    }
+
+    pub(crate) fn drop_managed(&self) {
+        let handles = {
+            let mut managed = self
+                .managed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            managed.0 = true;
+            std::mem::take(&mut managed.1)
+        };
+        for handle in handles {
+            handle.cancel.cancel();
+            self.runtime.spawn(async move {
+                let _ = handle.close().await;
+            });
+        }
+    }
+
     /// Builds a shell with this mux's builder and profile; `id` is the display name a job
     /// reserved, and a shell without one is named by its principal.
     ///
@@ -146,6 +248,19 @@ impl ShellMux {
         fds: HashMap<ShellFd, OpenFile>,
         options: SpawnOptions,
     ) -> Result<Arc<crate::Shell>, MuxError> {
+        Ok(Arc::new(
+            Box::pin(self.configured_builder(id, directory, fds, options).build()).await?,
+        ))
+    }
+
+    /// One setup path for ordinary jobs and retained typed sessions.
+    fn configured_builder(
+        &self,
+        id: Option<ShellId>,
+        directory: &Path,
+        fds: HashMap<ShellFd, OpenFile>,
+        options: SpawnOptions,
+    ) -> ShellBuilder {
         let policy = if options.force_sandbox {
             crate::SandboxPolicy::allow()
         } else {
@@ -175,6 +290,6 @@ impl ShellMux {
         }
         // Startup already routes under the name the mux reserved.
         builder.sandbox_id = id;
-        Ok(Arc::new(Box::pin(builder.build()).await?))
+        builder
     }
 }

@@ -368,6 +368,230 @@ fn cancellation_kills_traced_commands() {
     fixture.finish(run);
 }
 
+#[test]
+fn newborn_exit_before_adoption_drains_without_discarding_effects() {
+    const TEST: &str =
+        "tracing::tests::newborn_exit_before_adoption_drains_without_discarding_effects";
+    const SCENARIO: &str = "MARSH_NEWBORN_EXIT_FIXTURE";
+    if std::env::var_os(SCENARIO).is_none() {
+        crate::observation::tests::isolated(
+            TEST,
+            SCENARIO,
+            "newborn-exit",
+            Duration::from_secs(15),
+            "newborn exit fully drained",
+        );
+        return;
+    }
+    group_exit_during_creation(false);
+    println!("newborn exit fully drained");
+}
+
+#[test]
+fn creator_exit_before_return_preserves_child_inherited_effects() {
+    const TEST: &str =
+        "tracing::tests::creator_exit_before_return_preserves_child_inherited_effects";
+    const SCENARIO: &str = "MARSH_KNOWN_CHILD_EXIT_FIXTURE";
+    if std::env::var_os(SCENARIO).is_none() {
+        crate::observation::tests::isolated(
+            TEST,
+            SCENARIO,
+            "creator-exit",
+            Duration::from_secs(15),
+            "creator exit retains child effects",
+        );
+        return;
+    }
+    group_exit_during_creation(true);
+    println!("creator exit retains child effects");
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::zombie_processes,
+    reason = "one isolated ordering fixture; Observer is the child's sole reaper"
+)]
+fn group_exit_during_creation(adopt_child: bool) {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let file = fixture.path("creator-write");
+    let mut child = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            r#"
+import ctypes, os, sys, threading
+os.read(0, 1)
+file_fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(file_fd, b'creator\n')
+ready_read, ready_write = os.pipe()
+libc = ctypes.CDLL(None)
+callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
+@callback_type
+def newborn(_):
+    os.write(file_fd, b'child\n')
+    os.close(file_fd)
+    with open(sys.argv[2], 'w') as f:
+        f.write('must not run')
+    os.write(ready_write, b'r')
+    return None
+libc.pthread_create.argtypes = [ctypes.POINTER(ctypes.c_ulong), ctypes.c_void_p,
+                               callback_type, ctypes.c_void_p]
+def creator():
+    thread_id = ctypes.c_ulong()
+    assert libc.pthread_create(ctypes.byref(thread_id), None, newborn, None) == 0
+threading.Thread(target=creator).start()
+os.read(ready_read if sys.argv[3] == 'known' else 0, 1)
+os._exit(0)
+"#,
+        ])
+        .arg(&file)
+        .arg(fixture.path("child-write"))
+        .arg(if adopt_child { "known" } else { "unknown" })
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let root = Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let process = open_process(root.as_raw()).unwrap();
+    let mut observer = Observer::new(
+        fixture.service.selected.clone(),
+        Arc::clone(&fixture.service.sequence),
+        root,
+    );
+    let stopped = observer.seize(root).unwrap().unwrap();
+    fixture
+        .service
+        .adopt_root(
+            root,
+            run,
+            nix::unistd::gettid(),
+            process.try_clone().unwrap(),
+        )
+        .unwrap();
+    let mut root_status = None;
+    let created_child = std::cell::Cell::new(None);
+    let mut observe = |sequence, tid, status, event, info, entry: Option<EntryInfo<'_>>| {
+        let _delivery = fixture.service.delivery(run)?;
+        let mut decision = fixture
+            .service
+            .deliver(sequence, tid, status, event, info, entry)?;
+        if adopt_child
+            && tid != root
+            && matches!(WaitStatus::from_raw(tid, status)?,
+                WaitStatus::PtraceEvent(_, _, code) if creation(code))
+        {
+            let child = Pid::from_raw(i32::try_from(event.unwrap()).unwrap());
+            let state = lock(&fixture.service.state);
+            let pending = state.threads.get(&tid).unwrap().pending.unwrap();
+            assert!(
+                !pending.safe,
+                "creation proof must not close the pending syscall"
+            );
+            assert_eq!(state.threads.get(&child).unwrap().classify_after, None);
+            created_child.set(Some((child, pending.entry)));
+            decision.hold_current = true;
+            decision.policy_hold = true;
+        }
+        if tid == root && ended(status) {
+            root_status = Some(std::process::ExitStatus::from_raw(status));
+        }
+        Ok(decision)
+    };
+    observer.stop(root, stopped, &mut observe).unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"g").unwrap();
+    let mut stopped_creator = None;
+    loop {
+        let mut status = 0;
+        // SAFETY: this test thread spawned/seized the tree and remains its sole wait owner.
+        let tid = unsafe { libc::waitpid(-1, &raw mut status, libc::__WALL | libc::__WNOTHREAD) };
+        if tid < 0 && Errno::last() == Errno::EINTR {
+            continue;
+        }
+        assert!(tid > 0);
+        let tid = Pid::from_raw(tid);
+        let creating = matches!(WaitStatus::from_raw(tid, status).unwrap(),
+            WaitStatus::PtraceEvent(_, _, code) if creation(code));
+        if creating && tid != root {
+            assert!(stopped_creator.replace(tid).is_none());
+            // CDLL's pthread_create releases the GIL. Hold this creator at its real
+            // event while the newborn uses an inherited fd and main exits the group.
+            if adopt_child {
+                observer.stop(tid, status, &mut observe).unwrap();
+            } else {
+                // The terminal-only regression deliberately withholds adoption.
+                input.write_all(b"e").unwrap();
+            }
+            continue;
+        }
+        observer.stop(tid, status, &mut observe).unwrap();
+        if tid == root
+            && matches!(WaitStatus::from_raw(tid, status).unwrap(),
+            WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_EXIT as i32)
+        {
+            let creator = stopped_creator.expect("main exits only after the newborn creation gate");
+            // The leader's real EXIT proves group exit was entered before acknowledging
+            // the withheld creator stop. No userspace work can resume in the dying tree.
+            alive(nix::sys::ptrace::syscall(creator, None)).unwrap();
+            break;
+        }
+    }
+    let result = observer.run(&mut observe);
+    if result.is_err() {
+        observer.abandon(|tid, _| {
+            lock(&fixture.service.state).threads.remove(&tid);
+        });
+    }
+    result.unwrap();
+    assert_eq!(observer.unexecuted_exits().len(), usize::from(!adopt_child));
+    fixture
+        .service
+        .retire_unexecuted(observer.unexecuted_exits())
+        .unwrap();
+    assert!(root_status.unwrap().success());
+    fixture.service.quiesce(run).unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        if adopt_child {
+            b"creator\nchild\n".as_slice()
+        } else {
+            b"creator\n".as_slice()
+        }
+    );
+    assert_eq!(fixture.path("child-write").exists(), adopt_child);
+    let seen = lock(&fixture.seen);
+    assert!(mentions(&seen, b"creator-write"));
+    if adopt_child {
+        let (child, entry) = created_child.get().unwrap();
+        assert!(
+            seen.iter()
+                .any(|call| call.info.typ == "CREATION" && call.entry_order == entry)
+        );
+        assert!(
+            seen.iter()
+                .all(|call| call.entry_order != entry || call.info.typ != "SYSCALL"),
+            "creator never returned from its pending creation syscall"
+        );
+        assert!(seen.iter().any(|call| {
+            call.info.pid == child
+                && call.info.syscall == Sysno::write
+                && call
+                    .fd(0)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|target| target.path.ends_with(b"creator-write"))
+        }));
+    }
+    assert!(
+        seen.iter()
+            .all(|call| !observer.unexecuted_exits().contains(&call.info.pid))
+    );
+    drop(seen);
+    assert!(lock(&fixture.service.state).threads.is_empty());
+    fixture.finish(run);
+}
+
 thread_local! { static LABEL: RefCell<Option<&'static str>> = const { RefCell::new(None) }; }
 
 fn label() -> Option<&'static str> {
@@ -469,4 +693,475 @@ fn poll_scope_restores_context_after_unwind() {
     assert_eq!(label(), Some("outer"));
     drop(outer);
     assert_eq!(label(), None);
+}
+
+/// A real multithreaded process with a socket-controlled writer and process-local counter.
+fn parking_child(
+    fixture: &Fixture,
+    scope: &TraceScope,
+) -> (
+    TracedChild,
+    mpsc::Receiver<ChildEvent>,
+    std::os::unix::net::UnixStream,
+) {
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    let (mut host, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // SAFETY: this test owns the descriptor and keeps it alive until spawn completes.
+    assert_eq!(
+        unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_SETFD, 0) },
+        0
+    );
+    let mut command = Command::new("/usr/bin/python3");
+    command.args([
+        "-c",
+        r#"
+import ctypes, mmap, os, socket, sys, threading
+libc = ctypes.CDLL(None)
+s = socket.socket(fileno=int(sys.argv[1]))
+def worker():
+    count = 0
+    s.sendall(b'R')
+    while True:
+        command = s.recv(1)
+        if not command:
+            return
+        if command == b't':
+            def timed_wait():
+                class Timespec(ctypes.Structure):
+                    _fields_ = [('sec', ctypes.c_long), ('nsec', ctypes.c_long)]
+                word = ctypes.c_int()
+                timeout = Timespec(600, 0)
+                s.sendall(b'T' + threading.get_native_id().to_bytes(4, 'little'))
+                libc.syscall(int(sys.argv[3]), ctypes.byref(word), 128, 0, ctypes.byref(timeout), 0, 0)
+            threading.Thread(target=timed_wait, daemon=True).start()
+            continue
+        if command == b'o':
+            s.sendall(b'B' + threading.get_native_id().to_bytes(4, 'little'))
+            fd = os.open(sys.argv[2] + '-fifo', os.O_WRONLY)
+            os.close(fd)
+            s.sendall(b'O')
+            continue
+        if command == b'm':
+            file = open(sys.argv[2], 'r+b')
+            mapping = mmap.mmap(file.fileno(), 4096)
+            address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
+            s.sendall(b'M' + threading.get_native_id().to_bytes(4, 'little'))
+            libc.read(s.fileno(), ctypes.c_void_p(address), 1)
+            mapping.close()
+            file.close()
+            continue
+        count += 1
+        pid = os.fork() if command == b'f' else 0
+        if pid:
+            os.waitpid(pid, 0)
+            continue
+        with open(sys.argv[2], 'w') as f:
+            f.write(str(count))
+        s.sendall(bytes([count]))
+        if command == b'f':
+            os._exit(0)
+threading.Thread(target=worker).start()
+threading.Event().wait()
+"#,
+    ]);
+    command
+        .arg(peer.as_raw_fd().to_string())
+        .arg(fixture.path("counter"))
+        .arg((Sysno::futex as usize).to_string());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let (sender, events) = mpsc::channel();
+    let _guard = scope.enter();
+    let child = fixture
+        .service
+        .spawn(
+            command,
+            Box::new(move |event| {
+                let _ = sender.send(event);
+            }),
+        )
+        .unwrap();
+    drop(peer);
+    let mut ready = [0];
+    host.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [b'R']);
+    (child, events, host)
+}
+
+#[test]
+fn parking_preserves_multithreaded_process_state_and_blocks_external_continue() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    let mut reply = [0];
+    socket.write_all(b"w").unwrap();
+    socket.read_exact(&mut reply).unwrap();
+    assert_eq!(reply, [1]);
+    let parked = fixture.service.park(run).unwrap();
+    assert_eq!(parked.run(), run);
+    socket.write_all(b"w").unwrap();
+    // An embedder's SIGCONT must not release a policy-held tree.
+    signal_process(&child.process, libc::SIGCONT).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    assert!(matches!(
+        socket.read_exact(&mut reply).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    ));
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("counter")).unwrap(),
+        "1"
+    );
+    parked.resume().unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    socket.read_exact(&mut reply).unwrap();
+    assert_eq!(reply, [2], "same process-local counter survives resume");
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("counter")).unwrap(),
+        "2"
+    );
+    let parked = fixture.service.park(run).unwrap();
+    drop(parked);
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
+}
+
+#[test]
+fn empty_runs_park_resume_and_cancel_without_ending_the_run() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    fixture.service.park(run).unwrap().resume().unwrap();
+    assert_eq!(fixture.service.park(run).unwrap().cancel().unwrap(), 0);
+    fixture.finish(run);
+}
+
+#[test]
+fn parking_drains_a_pending_filesystem_open_before_closing_evidence() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let fifo = fixture.path("counter-fifo");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    pending_fifo_open(&mut socket, child.pid);
+    let service = Arc::clone(&fixture.service);
+    let (sender, completed) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = service.park(run);
+        let _ = sender.send(result);
+    });
+    assert!(
+        matches!(
+            completed.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "an effectful pending call cannot span epochs"
+    );
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    let parked = completed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    waiter.join().unwrap();
+    assert!(
+        lock(&fixture.seen).iter().any(|call| {
+            matches!(call.info.syscall, Sysno::open | Sysno::openat)
+                && call
+                    .paths
+                    .iter()
+                    .any(|(_, path)| path.ends_with(b"counter-fifo"))
+                && !matches!(call.info.result, RetCode::Err(_))
+        }),
+        "the completed open must be classified before parking succeeds"
+    );
+    parked.cancel().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    drop(reader);
+    fixture.finish(run);
+}
+
+#[test]
+fn descendants_adopted_while_parking_cannot_write_until_resumed() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    for expected in 1..=32 {
+        socket.write_all(b"f").unwrap();
+        let parked = bounded_park(&fixture.service, run);
+        let before = std::fs::read(fixture.path("counter")).ok();
+        // A socket command issued across a closed barrier cannot make progress.
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut reply = [0];
+        let pending_reply = socket.read_exact(&mut reply);
+        assert_eq!(std::fs::read(fixture.path("counter")).ok(), before);
+        parked.resume().unwrap();
+        if pending_reply.is_err() {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket.read_exact(&mut reply).unwrap();
+        }
+        assert_eq!(reply, [expected]);
+        assert_eq!(
+            std::fs::read_to_string(fixture.path("counter")).unwrap(),
+            expected.to_string()
+        );
+    }
+    bounded_park(&fixture.service, run).cancel().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
+}
+
+#[test]
+fn parking_waits_for_in_progress_classification_delivery() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let service = Tracing::shared().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let armed = Arc::new(AtomicBool::new(false));
+    let trigger = Arc::clone(&armed);
+    let (at_callback, callback) = mpsc::channel();
+    let (release, released) = mpsc::sync_channel(0);
+    let released = Mutex::new(released);
+    let root = service
+        .register_root(
+            &directory.path().canonicalize().unwrap(),
+            Arc::new(move |_, info| {
+                if info
+                    .paths
+                    .iter()
+                    .any(|(_, path)| path.ends_with(b"counter"))
+                    && trigger.swap(false, Ordering::AcqRel)
+                {
+                    at_callback.send(()).unwrap();
+                    released.lock().unwrap().recv().unwrap();
+                }
+                lock(&sink).push(info);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    let fixture = Fixture {
+        service,
+        directory,
+        root,
+        seen,
+    };
+    let run = fixture.service.begin_run(root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    armed.store(true, Ordering::Release);
+    socket.write_all(b"w").unwrap();
+    callback.recv_timeout(Duration::from_secs(5)).unwrap();
+    let service = Arc::clone(&fixture.service);
+    let (sender, completed) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = sender.send(service.park(run));
+    });
+    let early = completed.recv_timeout(Duration::from_millis(100));
+    release.send(()).unwrap();
+    let parked = match early {
+        Ok(_) => panic!("park returned with an unclassified delivery"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("park waiter disconnected"),
+        Err(mpsc::RecvTimeoutError::Timeout) => completed
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+    };
+    waiter.join().unwrap();
+    parked.cancel().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
+}
+
+#[test]
+fn cancellation_wakes_a_barrier_draining_an_effectful_call() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let fifo = fixture.path("counter-fifo");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    pending_fifo_open(&mut socket, child.pid);
+    let service = Arc::clone(&fixture.service);
+    let (sender, completed) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = sender.send(service.park(run));
+    });
+    assert!(matches!(
+        completed.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    fixture.service.cancel(run).unwrap();
+    assert!(
+        completed
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_err()
+    );
+    waiter.join().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
+}
+
+fn pending_fifo_open(socket: &mut std::os::unix::net::UnixStream, pid: u32) {
+    socket.write_all(b"o").unwrap();
+    let mut ready = [0; 5];
+    socket.read_exact(&mut ready).unwrap();
+    assert_eq!(ready[0], b'B');
+    let tid = u32::from_le_bytes(ready[1..].try_into().unwrap());
+    wait_in_syscall(pid, tid, Sysno::openat);
+}
+
+fn wait_in_syscall(pid: u32, tid: u32, expected: Sysno) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let syscall = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/syscall")).unwrap();
+        if syscall
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+            == Some(expected as usize)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker never entered {expected}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn bounded_park(service: &Arc<Tracing>, run: TraceRun) -> ParkedRun {
+    let tracing = Arc::clone(service);
+    let (sender, completed) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = sender.send(tracing.park(run));
+    });
+    match completed.recv_timeout(Duration::from_secs(5)) {
+        Ok(result) => {
+            waiter.join().unwrap();
+            result.unwrap()
+        }
+        Err(error) => {
+            let state = lock(&service.state);
+            let tasks: Vec<_> = state
+                .threads
+                .iter()
+                .filter(|(_, t)| t.inherited == Some(run))
+                .map(|(tid, t)| {
+                    (
+                        *tid,
+                        t.policy_held,
+                        t.pending.map(|p| (p.entry, p.safe)),
+                        t.classify_after,
+                        t.early.len(),
+                        t.restart,
+                        t.restart_uncertain,
+                    )
+                })
+                .collect();
+            drop(state);
+            eprintln!("park deadline before cancel: {error}; tasks={tasks:?}");
+            service.cancel(run).unwrap();
+            waiter.join().unwrap();
+            panic!("park deadline: {error}; tasks={tasks:?}");
+        }
+    }
+}
+
+#[test]
+fn a_socket_read_into_a_shared_mapping_must_complete_before_parking() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.path("counter"), [0; 4096]).unwrap();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    socket.write_all(b"m").unwrap();
+    let mut ready = [0; 5];
+    socket.read_exact(&mut ready).unwrap();
+    assert_eq!(ready[0], b'M');
+    wait_in_syscall(
+        child.pid,
+        u32::from_le_bytes(ready[1..].try_into().unwrap()),
+        Sysno::read,
+    );
+    let tracing = Arc::clone(&fixture.service);
+    let (sender, completed) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = sender.send(tracing.park(run));
+    });
+    let early = completed.recv_timeout(Duration::from_millis(100));
+    socket.write_all(b"x").unwrap();
+    let parked = match early {
+        Ok(_) => panic!("a kernel writer retained a shared file buffer across the barrier"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("park waiter disconnected"),
+        Err(mpsc::RecvTimeoutError::Timeout) => completed
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+    };
+    waiter.join().unwrap();
+    assert_eq!(std::fs::read(fixture.path("counter")).unwrap()[0], b'x');
+    parked.cancel().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
+}
+
+#[test]
+fn effectless_timed_waits_remain_parkable_after_restart_syscall() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let scope = fixture.service.scope(run).unwrap();
+    let (child, events, mut socket) = parking_child(&fixture, &scope);
+    socket.write_all(b"t").unwrap();
+    let mut ready = [0; 5];
+    socket.read_exact(&mut ready).unwrap();
+    assert_eq!(ready[0], b'T');
+    let tid = u32::from_le_bytes(ready[1..].try_into().unwrap());
+    wait_in_syscall(child.pid, tid, Sysno::futex);
+    for _ in 0..3 {
+        bounded_park(&fixture.service, run).resume().unwrap();
+        wait_in_syscall(child.pid, tid, Sysno::restart_syscall);
+    }
+    bounded_park(&fixture.service, run).cancel().unwrap();
+    assert_eq!(exited(&events).signal(), Some(libc::SIGKILL));
+    child.wait_observed().unwrap();
+    fixture.finish(run);
 }

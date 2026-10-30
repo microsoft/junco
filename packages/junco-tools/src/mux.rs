@@ -11,7 +11,7 @@ use marsh_core::shellmux::{
     CommandCompletion, CommandHandle, CommandOptions, JobIo, MuxError, MuxProfile, RunError, Shell,
     ShellFrontend, ShellId, ShellMux, SpawnOptions, WaitError,
 };
-use marsh_core::{PolicyObserver, Principal, ShellError, ShellErrorKind};
+use marsh_core::{ManagedCancellation, PolicyObserver, Principal, ShellError, ShellErrorKind};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
@@ -150,10 +150,17 @@ impl Backend {
     }
 }
 
-/// A task close joins before the mux shuts down: a run, which close also cancels through its
-/// state, or a routed tool call, which finishes on its own within its cancel token's bounds.
+/// Work close cancels and joins before the mux shuts down.
+enum TrackedWork {
+    Command(Option<Arc<RunState>>),
+    Lsp {
+        cancel: ManagedCancellation,
+        closed: watch::Receiver<Option<CloseResult>>,
+    },
+}
+
 struct TrackedTask {
-    run: Option<Arc<RunState>>,
+    work: TrackedWork,
     task: JoinHandle<()>,
 }
 
@@ -394,7 +401,7 @@ impl Session {
         session.tasks.insert(
             task.id(),
             TrackedTask {
-                run: Some(Arc::clone(state)),
+                work: TrackedWork::Command(Some(Arc::clone(state))),
                 task,
             },
         );
@@ -447,14 +454,58 @@ impl Session {
                         .remove(&tokio::task::id());
                 }
             });
-            session
-                .tasks
-                .insert(task.id(), TrackedTask { run: None, task });
+            session.tasks.insert(
+                task.id(),
+                TrackedTask {
+                    work: TrackedWork::Command(None),
+                    task,
+                },
+            );
             receipt
         };
         receipt
             .await
             .map_err(|_| "ShellMux tool task ended without a result".to_string())?
+    }
+
+    /// Registers before opening asynchronously, under the same fence as mux close. LSP
+    /// lifetimes are not commands and never occupy a principal's ordering queue.
+    pub(crate) fn register_lsp<Work>(
+        self: &Arc<Self>,
+        cancel: ManagedCancellation,
+        closed: watch::Receiver<Option<CloseResult>>,
+        work: impl FnOnce(Backend, Handle, PathBuf) -> Work,
+    ) -> Result<(), String>
+    where
+        Work: Future<Output = ()> + Send + 'static,
+    {
+        let mut session = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let backend = session
+            .backend
+            .as_ref()
+            .ok_or_else(|| "ShellMux session is closed".to_string())?
+            .clone();
+        let work = work(backend, self.runtime.clone(), self.seed.clone());
+        let owner = Arc::downgrade(self);
+        let task = self.runtime.spawn(async move {
+            work.await;
+            if let Some(owner) = owner.upgrade() {
+                owner
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .tasks
+                    .remove(&tokio::task::id());
+            }
+        });
+        session.tasks.insert(
+            task.id(),
+            TrackedTask {
+                work: TrackedWork::Lsp { cancel, closed },
+                task,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn begin_close(self: &Arc<Self>) -> watch::Receiver<Option<CloseResult>> {
@@ -465,8 +516,12 @@ impl Session {
         };
         let tasks = std::mem::take(&mut session.tasks);
         session.principals.clear();
-        for run in tasks.values().filter_map(|tracked| tracked.run.as_ref()) {
-            run.abort();
+        for tracked in tasks.values() {
+            match &tracked.work {
+                TrackedWork::Command(Some(run)) => run.abort(),
+                TrackedWork::Command(None) => {}
+                TrackedWork::Lsp { cancel, .. } => cancel.cancel(),
+            }
         }
         let closed = self.closed.clone();
         let policy_log = session.policy_log.take();
@@ -476,12 +531,29 @@ impl Session {
         self.runtime.spawn(async move {
             let mut failure = None;
             for tracked in tasks.into_values() {
-                let kind = if tracked.run.is_some() { "run" } else { "tool" };
+                let kind = match &tracked.work {
+                    TrackedWork::Command(Some(_)) => "run",
+                    TrackedWork::Command(None) => "tool",
+                    TrackedWork::Lsp { .. } => "LSP",
+                };
                 if let Err(error) = tracked.task.await {
                     remember_error(
                         &mut failure,
                         format!("ShellMux {kind} task failed: {error}"),
                     );
+                }
+                if let TrackedWork::Lsp { mut closed, .. } = tracked.work {
+                    match closed.wait_for(Option::is_some).await {
+                        Ok(receipt) => {
+                            if let Some(Err(error)) = &*receipt {
+                                remember_error(&mut failure, error.clone());
+                            }
+                        }
+                        Err(_) => remember_error(
+                            &mut failure,
+                            "ShellMux LSP task ended without a close receipt".to_string(),
+                        ),
+                    }
                 }
             }
             if let Err(error) = backend.mux.shutdown().await {
@@ -865,8 +937,12 @@ pub(crate) fn cancelled_result(exit_code: Option<i32>, timed_out: bool) -> Nativ
 }
 
 fn remember_error(failure: &mut Option<String>, error: String) {
-    if failure.is_none() {
-        *failure = Some(error);
+    match failure {
+        Some(previous) => {
+            previous.push('\n');
+            previous.push_str(&error);
+        }
+        None => *failure = Some(error),
     }
 }
 

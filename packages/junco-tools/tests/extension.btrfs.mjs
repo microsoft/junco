@@ -27,6 +27,7 @@ import {
 import {
   isMarshPolicyDenied,
   LockPolicy,
+  LspTool,
   ShellMuxLease,
   ShellMuxOperations,
 } from "../dist/index.js";
@@ -692,5 +693,152 @@ test("a nested btrfs seed is refused without disturbing an open mux", {
   } finally {
     // The fixture owner deletes every subvolume under its root, this one included.
     await lease.release();
+  }
+});
+
+test("cwd-only native LSP construction enforces production Btrfs policy and publication", {
+  timeout: 180_000,
+}, async () => {
+  // The runner owns this production seed; neither native nor mux is injected into create.
+  const { seed } = state;
+  const native = await import("../native/index.js");
+  const script = fileURLToPath(new URL("./lsp-fixture.mjs", import.meta.url));
+  const firstPath = "src/production-lsp-a.fixture";
+  const secondPath = "src/production-lsp-b.fixture";
+  const a = "const nativeProductionAdd = 1;\nnativeProductionAdd;\n";
+  const b = "nativeProductionAdd;\n";
+  const configPath = join(seed, "lsp.json");
+  let previousConfig;
+  try {
+    previousConfig = await readFile(configPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const home = join(state.testRoot, "lsp-home");
+  const tmp = join(state.testRoot, "lsp-tmp");
+  await Promise.all([mkdir(home), mkdir(tmp)]);
+  const environment = { ...nativeEnv(home), TMPDIR: tmp };
+  const keys = [
+    ...Object.keys(environment),
+    "PI_CONFIG_DIR",
+    "CLAUDE_CONFIG_DIR",
+  ];
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  );
+  let mux;
+  try {
+    for (const key of keys) {
+      if (environment[key] === undefined) delete process.env[key];
+      else process.env[key] = environment[key];
+    }
+    await Promise.all([
+      writeFile(join(seed, firstPath), a),
+      writeFile(join(seed, secondPath), b),
+      writeFile(
+        configPath,
+        JSON.stringify({
+          servers: {
+            "production-fixture": {
+              command: process.execPath,
+              args: [
+                script,
+                "stdio-server",
+                `--options=${JSON.stringify({ files: [firstPath, secondPath] })}`,
+              ],
+              fileTypes: ["fixture"],
+              rootMarkers: ["."],
+              languageId: "fixture",
+              warmupTimeoutMs: 15000,
+            },
+          },
+        }),
+      ),
+    ]);
+    mux = await native.NativeMux.open(seed, { sandbox: "always" });
+    const owner = mux.forkOwner();
+    const held = await owner
+      .start(
+        {
+          command: `cat ${secondPath} >/dev/null; printf 'nativeProductionAdd;\\n' > ${secondPath}`,
+          cwd: seed,
+          principal: "production-lsp-lock",
+          env: environment,
+        },
+        () => {},
+      )
+      .wait();
+    assert.equal(held.exitCode, 0);
+    const tool = await LspTool.create(seed);
+    const execute = tool.execute;
+    const hover = await execute("production-hover", {
+      action: "hover",
+      file: firstPath,
+    });
+    assert.equal(hover.details.success, true, text(hover));
+    assert.match(text(hover), /nativeProductionAdd/);
+    const oldPid = Number(/pid=(\d+)/.exec(text(hover))?.[1]);
+    assert.ok(oldPid);
+    const rename = {
+      action: "rename",
+      file: firstPath,
+      line: 1,
+      symbol: "nativeProductionAdd",
+      new_name: "nativeProductionSum",
+    };
+    const updates = [];
+    await assert.rejects(
+      execute("production-denied", rename, undefined, (result) =>
+        updates.push(result),
+      ),
+      (error) => {
+        assert.ok(isMarshPolicyDenied(error));
+        assert.ok(Object.hasOwn(error, "code"));
+        assert.equal(error.code, "MARSH_POLICY_DENIED");
+        assert.equal(error.cause, undefined);
+        return true;
+      },
+    );
+    assert.deepEqual(updates, []);
+    assert.equal(await readFile(join(seed, firstPath), "utf8"), a);
+    assert.equal(await readFile(join(seed, secondPath), "utf8"), b);
+    assert.throws(() => process.kill(oldPid, 0), { code: "ESRCH" });
+    await owner.release(seed, secondPath);
+    const renamed = await execute("production-rename", rename);
+    assert.equal(renamed.details.success, true, text(renamed));
+    assert.equal(
+      await readFile(join(seed, firstPath), "utf8"),
+      a.replaceAll("nativeProductionAdd", "nativeProductionSum"),
+    );
+    assert.equal(
+      await readFile(join(seed, secondPath), "utf8"),
+      b.replaceAll("nativeProductionAdd", "nativeProductionSum"),
+    );
+    const fresh = await execute("production-fresh", {
+      action: "hover",
+      file: firstPath,
+    });
+    assert.match(text(fresh), /nativeProductionSum/);
+    assert.notEqual(Number(/pid=(\d+)/.exec(text(fresh))?.[1]), oldPid);
+    await LspTool.shutdown();
+    assert.equal(
+      (await owner.readFile(seed, firstPath)).toString(),
+      a.replaceAll("nativeProductionAdd", "nativeProductionSum"),
+    );
+  } finally {
+    await cleanup(
+      () => LspTool.shutdown(),
+      () => mux?.close(),
+      () =>
+        previousConfig === undefined
+          ? rm(configPath, { force: true })
+          : writeFile(configPath, previousConfig),
+      () => {
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      },
+    );
   }
 });

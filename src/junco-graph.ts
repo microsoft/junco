@@ -831,8 +831,7 @@ export class JuncoGraph<
       checkRecorder(this.#recorder, member);
     }
     let complete: CompleteNode<N, T>;
-    if (spec.step !== undefined)
-      complete = { ...spec, policy };
+    if (spec.step !== undefined) complete = { ...spec, policy };
     else if (state instanceof Deterministic)
       complete = { ...spec, policy, state, step: state.step };
     else if (nested)

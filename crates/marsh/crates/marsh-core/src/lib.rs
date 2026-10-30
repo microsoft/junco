@@ -27,3 +27,9 @@ pub use shell::{
     ShellEnvironment, ShellError, ShellErrorKind, ShellFd, ShellVariable, Signal, SourceInfo,
     UIOptions, builtins, fresh_principal,
 };
+
+pub use shell::{
+    ManagedCancellation, ManagedChild, ManagedChildIo, ManagedChildStderr, ManagedChildStdin,
+    ManagedChildStdout, ManagedEpoch, ManagedError, ManagedGlobPaths, ManagedOutcome,
+    ManagedReadDir, ManagedSession,
+};

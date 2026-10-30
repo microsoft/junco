@@ -26,13 +26,13 @@
   },
   "peerDependencies": {
     "dataflow-engine": "^0.1.0",
-    "opik": "^2.2.86"
+    "opik": "^2.2.133"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
     "@types/node": "26.6.6",
     "dataflow-engine": "workspace:*",
-    "opik": "2.2.131",
+    "opik": "2.2.133",
     "typescript": "7.0.2"
   }
 }

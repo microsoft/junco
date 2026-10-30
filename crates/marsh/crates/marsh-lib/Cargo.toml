@@ -19,15 +19,15 @@ watch = ["dep:tokio"]
 [dependencies]
 # Only the watch channel the shared completion state is carried on. A consumer that waits on
 # nothing gets a std-only library.
-tokio = { version = "1.52.3", optional = true, default-features = false, features = ["sync"] }
+tokio = { version = "1.54.1", optional = true, default-features = false, features = ["sync"] }
 
 [dev-dependencies]
-tokio = { version = "1.52.3", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
     "rt",
     "macros",
     "time",
 ] }
-tempfile = "3"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

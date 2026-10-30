@@ -2,10 +2,9 @@
 # rustc shim for junco's isolated build environment.
 #
 # Oh My Pi builds on nightly. `pi-edit` (a pinned Git dependency imported
-# unmodified) depends on `xutf 1.5.0`, whose crate root unconditionally enables
-# `#![feature(portable_simd)]` / `#![feature(stmt_expr_attributes)]`. `xutf
-# 1.5.0` is the only published version satisfying pi-edit's `^1.5` requirement,
-# and upstream crates are not modified here, so that crate cannot build on a
+# unmodified) requires `xutf ^1.5`, currently resolved to `xutf 1.6.0`, whose
+# crate root unconditionally enables `#![feature(portable_simd)]` and
+# `#![feature(stmt_expr_attributes)]`. That upstream crate cannot build on a
 # stable channel without the bootstrap escape hatch.
 #
 # Rather than moving junco off its pinned stable 1.95.0 toolchain (which would

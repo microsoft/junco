@@ -17,16 +17,16 @@ fake = []
 
 [dependencies]
 marsh-lib = { path = "../marsh-lib", default-features = false }
-thiserror = "2"
-sha1 = "0.11"
-hex = "0.4"
+thiserror = "2.0.21"
+sha1 = "0.11.0"
+hex = "0.4.3"
 btrfsutil = "=0.2.0"
-proc-mounts = "0.3"
-libc = "0.2"
+proc-mounts = "0.3.0"
+libc = "0.2.191"
 
 [dev-dependencies]
-mockall = "0.15"
-tempfile = "3"
+mockall = "0.15.0"
+tempfile = "3.27.0"
 
 
 [lints]

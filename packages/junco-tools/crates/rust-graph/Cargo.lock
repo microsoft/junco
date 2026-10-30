@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.2.11"
-source = "git+https://github.com/can1357/oh-my-pi.git?rev=7ae76f8e4daca0c8f409f61bcd514260cd522365#7ae76f8e4daca0c8f409f61bcd514260cd522365"
+version = "18.6.3"
+source = "git+https://github.com/can1357/oh-my-pi.git?rev=093275112f7adff207608673c0e33c7f3d16e27f#093275112f7adff207608673c0e33c7f3d16e27f"
 dependencies = [
  "anyhow",
  "ast-grep-core",

@@ -1,7 +1,7 @@
 //! Blocking work scheduling for N-API exports.
 //!
 //! Adapted from Oh My Pi `crates/pi-natives/src/task.rs` at revision
-//! `7ae76f8e4daca0c8f409f61bcd514260cd522365` (see `LICENSE.oh-my-pi`).
+//! `093275112f7adff207608673c0e33c7f3d16e27f` (see `LICENSE.oh-my-pi`).
 //! The mapped-task/future APIs, profiling hooks, and crash-handler scope
 //! integration are omitted; [`panic_payload`] is inlined from that revision's
 //! `crates/pi-natives/src/crash_handler.rs`.
@@ -84,6 +84,14 @@ impl From<()> for CancelToken {
     }
 }
 
+/// Whether a JavaScript abort signal has already fired.
+fn signal_aborted(signal: &Unknown) -> bool {
+    signal
+        .coerce_to_object()
+        .and_then(|object| object.get_named_property::<bool>("aborted"))
+        .unwrap_or(false)
+}
+
 impl CancelToken {
     /// Create a new cancel token from optional timeout and abort signal.
     pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {
@@ -91,9 +99,14 @@ impl CancelToken {
             deadline: timeout_ms.map(|ms| Instant::now() + Duration::from_millis(u64::from(ms))),
             flag: None,
         };
-        if let Some(signal) = signal.and_then(|value| AbortSignal::from_unknown(value).ok()) {
-            let abort_token = result.emplace_abort_token();
-            signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+        if let Some(raw_signal) = signal {
+            // napi replaces `onabort`; an event fired before wrapping will not repeat.
+            if signal_aborted(&raw_signal) {
+                result.emplace_abort_token().abort(AbortReason::Signal);
+            } else if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {
+                let abort_token = result.emplace_abort_token();
+                signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+            }
         }
         result
     }
@@ -119,6 +132,11 @@ impl CancelToken {
     /// Emplaces an abort flag if there is none, returning a handle onto it.
     fn emplace_abort_token(&mut self) -> AbortToken {
         AbortToken(Arc::downgrade(self.flag.get_or_insert_default()))
+    }
+
+    /// Explicit cancellation only: a deadline may pass after work already completed.
+    fn abort_reason(&self) -> Option<AbortReason> {
+        self.flag.as_ref().and_then(|flag| flag.cause())
     }
 }
 
@@ -186,7 +204,13 @@ where
         }
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        if let Some(reason) = self.cancel_token.abort_reason() {
+            let message = format!("Aborted: {reason:?}");
+            let mut error = env.create_error(Error::new(Status::Cancelled, message))?;
+            error.set_named_property("name", "AbortError")?;
+            return Err(Error::from(error.to_unknown()));
+        }
         Ok(output)
     }
 }
@@ -277,6 +301,18 @@ mod tests {
             cancel_token: CancelToken::default(),
             work: Some(Box::new(work)),
         }
+    }
+
+    #[test]
+    fn settlement_cancellation_does_not_treat_elapsed_deadlines_as_signals() {
+        let mut token = CancelToken {
+            deadline: Some(Instant::now() - Duration::from_secs(1)),
+            flag: None,
+        };
+        assert!(token.heartbeat().is_err());
+        assert!(token.abort_reason().is_none());
+        token.emplace_abort_token().abort(AbortReason::Signal);
+        assert!(matches!(token.abort_reason(), Some(AbortReason::Signal)));
     }
 
     #[test]

@@ -31,7 +31,7 @@
     "build:lib": "bun build ./src/index.ts --root ./src --outdir ./dist --target node --format esm --packages external --splitting --sourcemap=external && bun build ./src/optimizer-cli.ts --root ./src --outdir ./dist --target bun --format esm --packages external --sourcemap=external && tsc -p tsconfig.json --emitDeclarationOnly",
     "build:marsh": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo build --manifest-path crates/marsh/Cargo.toml --release --locked -p marsh --bins",
     "build:junco-policy": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo build --manifest-path crates/junco-policy/Cargo.toml --release --locked --lib",
-    "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/mixed/mixed.ts ./examples/oss-committee/oss-committee.ts ./examples/mcp/mcp.ts ./examples/yak-shaver/yak-shaver.ts ./examples/verus/verus.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @oh-my-pi/pi-coding-agent --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
+    "build:examples": "bun build ./examples/recursive-agency/recursive-agency.ts ./examples/mixed/mixed.ts ./examples/oss-committee/oss-committee.ts ./examples/mcp/mcp.ts ./examples/yak-shaver/yak-shaver.ts ./examples/verus/verus.ts --root ./examples --outdir ./examples/dist --target bun --format esm --packages bundle --splitting --sourcemap=external --env=disable --external junco-tools/native --external @earendil-works/pi-agent-core --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent",
     "install:marsh": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo install --path crates/marsh --locked --bin rmux --root \"$HOME/.local\" && printf 'Installed %s\\n' \"$HOME/.local/bin/rmux\" && case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$PATH\"' ;; esac",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "bun run --bun biome check .",
@@ -59,7 +59,7 @@
     "@earendil-works/pi-agent-core": "0.99.2",
     "@earendil-works/pi-ai": "0.99.2",
     "@earendil-works/pi-coding-agent": "0.99.2",
-    "@grafana/grafana-foundation-sdk": "0.0.21",
+    "@grafana/grafana-foundation-sdk": "0.0.22",
     "dataflow-engine": "workspace:*",
     "dataflow-profile": "workspace:*",
     "fp-ts": "^2.16.11",
@@ -72,7 +72,7 @@
     "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.3",
+    "@biomejs/biome": "2.6.4",
     "@inquirer/checkbox": "5.2.8",
     "@nanonets/graft": "0.28.0",
     "@types/bun": "1.4.2",
@@ -86,7 +86,6 @@
     "typebox": "1.4.3",
     "@earendil-works/pi-coding-agent": {
       "undici": "8.12.3"
-    },
-    "puppeteer-core": "25.16.0"
+    }
   }
 }

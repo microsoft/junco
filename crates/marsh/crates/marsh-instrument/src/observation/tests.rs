@@ -88,7 +88,7 @@ fn observe_with(
     );
     let stopped = observer.seize(pid).unwrap().expect("a parked child");
     let mut deliveries = Vec::new();
-    let mut observe = |sequence, tid, status, event, call| {
+    let mut observe = |sequence, tid, status, event, call, _entry: Option<EntryInfo<'_>>| {
         let delivery = Delivery {
             sequence,
             tid,
@@ -491,7 +491,7 @@ fn memory_at_page_edges() {
     );
     assert!(crate::capture::read_flags(tid, locations[0] + locations[1] - 7).is_err());
     // Release the fresh executable, then let the same observer own every exit notification.
-    let mut ignore = |_, _, _, _, _| Ok(Resume::default());
+    let mut ignore = |_, _, _, _, _, _entry: Option<EntryInfo<'_>>| Ok(Resume::default());
     observer.stop(tid, stopped, &mut ignore).unwrap();
     child.stdin.take().unwrap().write_all(b"x").unwrap();
     observer.run(&mut ignore).unwrap();
@@ -688,7 +688,13 @@ pub(crate) fn isolated(
     }
     waiter.join().unwrap();
     let result = result
-        .unwrap_or_else(|error| panic!("native scenario {scenario} timed out: {error}"))
+        .unwrap_or_else(|error| {
+            let output = received.recv().unwrap().unwrap();
+            panic!(
+                "native scenario {scenario} timed out: {error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        })
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(

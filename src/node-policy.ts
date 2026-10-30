@@ -27,11 +27,7 @@ import {
 } from "junco-scheduler";
 import type { ProfileRecorder, ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
-import type {
-  Agentic,
-  AnyJuncoAgent,
-  AnyMockAgent,
-} from "./agentic.js";
+import type { Agentic, AnyJuncoAgent, AnyMockAgent } from "./agentic.js";
 import type { JuncoGraph } from "./junco-graph.js";
 
 /** One rung: a "provider/model-id" and its reasoning effort (`"off"` when omitted). */

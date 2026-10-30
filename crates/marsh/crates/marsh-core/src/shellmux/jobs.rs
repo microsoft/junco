@@ -853,6 +853,7 @@ impl ShellMux {
             drop(registry);
             shells
         };
+        self.cancel_managed();
         let mut closes = Vec::new();
         for shell in &shells {
             let core = shell.live_lock().as_ref().and_then(|live| {
@@ -868,7 +869,7 @@ impl ShellMux {
                 closes.push(self.runtime.spawn(async move { core.close(true).await }));
             }
         }
-        let mut failure = Ok(());
+        let mut failure = self.close_managed().await;
         for close in closes {
             match close.await {
                 Ok(Ok(())) => {}
@@ -914,6 +915,7 @@ impl Drop for ShellMux {
     /// A command still running holds an `Arc` on this collection, so this cannot run underneath
     /// one; [`ShellMux::shutdown`] remains the path that interrupts and joins those.
     fn drop(&mut self) {
+        self.drop_managed();
         for shell in self.drain_registry() {
             if let Some(live) = shell.take_live() {
                 live.abandon();

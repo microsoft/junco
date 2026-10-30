@@ -333,11 +333,7 @@ async function failingCaller(
     toolTurn(taskCall(names.map((name) => r.task(name)))),
     ...turns,
   ]);
-  const caller = await r.agent(
-    "caller",
-    [new toolsApi.TaskTool()],
-    recorder,
-  );
+  const caller = await r.agent("caller", [new toolsApi.TaskTool()], recorder);
   caller.setTaskFailurePolicy(policy);
   const { execution, ports } = taskExecution(quiet, recorder);
   const outer = execution.graph;
@@ -935,16 +931,13 @@ describe("native tasks on a graph-driven caller", () => {
       fauxAssistantMessage("alpha-report"),
     ]);
     r.script("beta", [fauxAssistantMessage("beta-report")]);
-    const caller = await r.agent(
-      "caller",
-      [
-        new toolsApi.TaskTool(),
-        new toolsApi.YieldTool(),
-        new toolsApi.RecvTool(),
-        new toolsApi.SendTool(),
-        new toolsApi.InfoTool(),
-      ],
-    );
+    const caller = await r.agent("caller", [
+      new toolsApi.TaskTool(),
+      new toolsApi.YieldTool(),
+      new toolsApi.RecvTool(),
+      new toolsApi.SendTool(),
+      new toolsApi.InfoTool(),
+    ]);
     const upstreamValue = fauxAssistantMessage("upstream value");
     const received: string[] = [];
     let downstreamValue: AssistantMessage | undefined;

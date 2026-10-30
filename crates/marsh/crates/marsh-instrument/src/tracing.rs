@@ -5,6 +5,11 @@
 //! thread of this process that owns exactly that command's process tree; the interpreter's own
 //! filesystem accesses arrive instead as host records it reports right after making them. Both
 //! are attributed through the scopes the host enters on its threads.
+//!
+//! `park` holds a live tree behind a generation-bound token after closing its evidence. Only
+//! proven effectless pending calls may cross that boundary; possible kernel writes to shared
+//! mappings are drained too. Dropping the token cancels and drains rather than resuming it.
+//! `quiesce` and `end_run` still require termination, not merely a parked tree.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -18,9 +23,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use crate::Syscall;
-use crate::capture::proc_field;
+use crate::capture::{Captured, proc_field};
 use crate::host::{HostCall, records};
-use crate::observation::{Observer, Resume, Sequence, UNCLASSIFIED, alive, creation, rekey};
+use crate::observation::{
+    Control, EntryInfo, Observer, Resume, Sequence, UNCLASSIFIED, alive, creation, rekey,
+};
 use lurk_cli::syscall_info::{RetCode, SyscallArgs, SyscallInfo};
 use marsh_lib::{CheckedAdvance, RecoverPoison as _};
 use nix::errno::Errno;
@@ -69,16 +76,33 @@ struct ProcessLease {
 /// A stop buffered until its thread's creator is known: sequence, status, event and record.
 type Early = (u64, i32, Option<u64>, Option<Syscall>);
 
+#[derive(Clone, Copy)]
+struct Pending {
+    entry: u64,
+    run: Option<TraceRun>,
+    safe: bool,
+    /// Kernel completion may copy results into a shared file mapping.
+    writes_memory: bool,
+}
+
 #[derive(Default)]
 struct Thread {
     inherited: Option<TraceRun>,
     known_parent: bool,
     process: Option<ProcessLease>,
-    pending: Option<(u64, Option<TraceRun>)>,
+    pending: Option<Pending>,
     classify_after: Option<u64>,
     early: Vec<Early>,
     /// Whether the task's last stop was a job-control (group) stop.
     job_stopped: bool,
+    /// A stop the observer must not release without this run's current token.
+    policy_held: bool,
+    /// An internal restart result is not a completed effectful call.
+    restart: Option<Option<Sysno>>,
+    /// Output-buffer safety of a proven effectless ERESTART_RESTARTBLOCK wait.
+    safe_restart: Option<bool>,
+    /// A signal handler obscured completion of an effectful interrupted call.
+    restart_uncertain: bool,
 }
 
 impl Thread {
@@ -91,11 +115,23 @@ impl Thread {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RunPhase {
+    #[default]
+    Running,
+    Parking(u64),
+    Parked(u64),
+    Cancelled,
+}
+
 #[derive(Default)]
 struct RunState {
-    cancelled: bool,
+    phase: RunPhase,
     /// Accepted spawns whose tracer has not finished delivering and retiring its tree.
     observers: usize,
+    starting: usize,
+    /// Deliveries and classifier calls outside the bookkeeping mutex.
+    deliveries: usize,
     waker: Option<std::task::Waker>,
 }
 
@@ -151,7 +187,7 @@ impl State {
             return Ok(());
         };
         let cancelled = self.cancelled(thread.inherited);
-        let Some((entry, _)) = thread.pending else {
+        let Some(Pending { entry, .. }) = thread.pending else {
             return Ok(());
         };
         let orphaned = self.deferred.contains_key(&entry)
@@ -176,8 +212,121 @@ impl State {
 
     /// Whether an attributed run has been cancelled.
     fn cancelled(&self, run: Option<TraceRun>) -> bool {
-        run.is_some_and(|run| self.runs.get(&run).is_some_and(|run| run.cancelled))
+        run.is_some_and(|run| {
+            self.runs
+                .get(&run)
+                .is_some_and(|run| run.phase == RunPhase::Cancelled)
+        })
     }
+}
+
+/// A closed-evidence, nonterminal stop of one trace run's native process tree.
+/// Dropping an armed token kills and drains the tree; it never resumes application work.
+#[must_use]
+pub struct ParkedRun {
+    tracing: Arc<Tracing>,
+    run: TraceRun,
+    generation: u64,
+    armed: bool,
+}
+
+impl std::fmt::Debug for ParkedRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ParkedRun")
+            .field("run", &self.run)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ParkedRun {
+    /// The lifetime attribution identity retained by this checkpoint.
+    pub const fn run(&self) -> TraceRun {
+        self.run
+    }
+
+    /// Validates that this proof still parks the requested run of this tracing service.
+    ///
+    /// # Errors
+    /// Rejects foreign, stale, cancelled, or unhealthy checkpoints.
+    pub fn validate(&self, tracing: &Arc<Tracing>, run: TraceRun) -> io::Result<()> {
+        if !self.armed || !Arc::ptr_eq(&self.tracing, tracing) || self.run != run {
+            return Err(io::Error::other("foreign or consumed parked trace proof"));
+        }
+        let state = lock(&tracing.state);
+        state.run(run)?;
+        if !state
+            .runs
+            .get(&run)
+            .is_some_and(|run| run.phase == RunPhase::Parked(self.generation))
+        {
+            return Err(io::Error::other("stale parked trace generation"));
+        }
+        Ok(())
+    }
+
+    /// Consumes the current checkpoint and permits its stopped tree to run again.
+    ///
+    /// # Errors
+    /// Rejects a stale/cancelled token, lost observation, or a failed pinned signal.
+    pub fn resume(mut self) -> io::Result<()> {
+        let mut state = lock(&self.tracing.state);
+        state.run(self.run)?;
+        let run = state
+            .runs
+            .get_mut(&self.run)
+            .ok_or_else(|| io::Error::other("closed trace run"))?;
+        if run.phase != RunPhase::Parked(self.generation) {
+            return Err(io::Error::other("stale parked trace generation"));
+        }
+        run.phase = RunPhase::Running;
+        let result = Tracing::signal_locked(&state, self.run, libc::SIGCONT, false);
+        drop(state);
+        self.tracing.progress.notify_all();
+        result?;
+        self.armed = false;
+        Ok(())
+    }
+
+    /// Kills and drains this checkpoint's tree without ending its lifetime TraceRun.
+    pub fn cancel(mut self) -> io::Result<usize> {
+        let result = self.tracing.cancel(self.run);
+        // Even a failed signal must finish the observer lifecycle before this proof is dropped.
+        self.tracing.drain(self.run);
+        self.armed = false;
+        let count = result?;
+        self.tracing.health(self.run)?;
+        Ok(count)
+    }
+}
+
+impl Drop for ParkedRun {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.tracing.cancel(self.run);
+            self.tracing.drain(self.run);
+        }
+    }
+}
+
+/// A pending kernel output buffer must not change shared file contents after sealing.
+fn shared_writable_mapping(tid: Pid) -> io::Result<bool> {
+    // ponytail: reject all file-backed shared-writable mappings for pending output buffers;
+    // inspect exact buffer ranges only if this conservative drainage prevents useful parking.
+    let maps = std::fs::read_to_string(format!("/proc/{tid}/maps"))?;
+    Ok(maps.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(permissions) = fields.nth(1) else {
+            return false;
+        };
+        let bytes = permissions.as_bytes();
+        // Anonymous kernel rings have no filesystem payload. Effectful/unknown asynchronous
+        // submissions are still refused by the common syscall classifier.
+        bytes.get(1) == Some(&b'w')
+            && bytes.get(3) == Some(&b's')
+            && fields.nth(3).is_some_and(|path| path.starts_with('/'))
+    }))
 }
 
 /// Locks trace bookkeeping, recovering the guard from a panicked holder.
@@ -200,6 +349,12 @@ pub struct TracedChild {
     pub pid: u32,
     /// A pidfd pinning the process, for signalling it.
     pub process: OwnedFd,
+    /// Piped standard input, if requested by the caller.
+    pub stdin: Option<std::process::ChildStdin>,
+    /// Piped standard output, if requested by the caller.
+    pub stdout: Option<std::process::ChildStdout>,
+    /// Piped standard error, if requested by the caller.
+    pub stderr: Option<std::process::ChildStderr>,
     /// The tracer thread observing the command's tree.
     observer: std::thread::JoinHandle<io::Result<()>>,
 }
@@ -228,6 +383,7 @@ pub struct Tracing {
 struct ObserverRun {
     tracing: Arc<Tracing>,
     run: TraceRun,
+    starting: bool,
 }
 
 impl Drop for ObserverRun {
@@ -236,7 +392,25 @@ impl Drop for ObserverRun {
             self.tracing.fail("native tracer panicked");
         }
         if let Some(run) = lock(&self.tracing.state).runs.get_mut(&self.run) {
+            if self.starting {
+                run.starting -= 1;
+            }
             run.observers -= 1;
+        }
+        self.tracing.progress.notify_all();
+    }
+}
+
+/// Counts callbacks even while they run outside the bookkeeping lock.
+struct Delivery<'a> {
+    tracing: &'a Tracing,
+    run: TraceRun,
+}
+
+impl Drop for Delivery<'_> {
+    fn drop(&mut self) {
+        if let Some(run) = lock(&self.tracing.state).runs.get_mut(&self.run) {
+            run.deliveries -= 1;
         }
         self.tracing.progress.notify_all();
     }
@@ -342,17 +516,17 @@ impl Tracing {
         let mut state = lock(&self.state);
         loop {
             state.check()?;
-            let observers = state
+            let current = state
                 .runs
                 .get(&run)
-                .ok_or_else(|| io::Error::other("closed trace run"))?
-                .observers;
-            let busy = observers != 0
+                .ok_or_else(|| io::Error::other("closed trace run"))?;
+            let busy = current.observers != 0
+                || current.deliveries != 0
                 || state.threads.values().any(|thread| {
                     thread.inherited == Some(run)
                         || thread
                             .pending
-                            .is_some_and(|(_, target)| target == Some(run))
+                            .is_some_and(|pending| pending.run == Some(run))
                 })
                 || state
                     .deferred
@@ -375,12 +549,28 @@ impl Tracing {
     /// would otherwise keep interrupting running commands with continue notifications.
     pub fn signal(&self, run: TraceRun, signal: i32) -> io::Result<usize> {
         let state = lock(&self.state);
-        if !state.runs.contains_key(&run) {
-            return Err(io::Error::other("closed trace run"));
+        let phase = state
+            .runs
+            .get(&run)
+            .ok_or_else(|| io::Error::other("closed trace run"))?
+            .phase;
+        // Job-control callbacks and external continue requests never release a policy hold.
+        if signal == libc::SIGCONT && phase != RunPhase::Running {
+            return Ok(0);
         }
+        Self::signal_locked(&state, run, signal, true)
+    }
+
+    fn signal_locked(
+        state: &State,
+        run: TraceRun,
+        signal: i32,
+        job_only: bool,
+    ) -> io::Result<usize> {
         let mut signalled = HashSet::new();
         for thread in state.threads.values().filter(|thread| {
-            thread.inherited == Some(run) && (signal != libc::SIGCONT || thread.job_stopped)
+            thread.inherited == Some(run)
+                && (signal != libc::SIGCONT || !job_only || thread.job_stopped)
         }) {
             if let Some(process) = &thread.process
                 && !signalled.contains(&process.group)
@@ -389,8 +579,177 @@ impl Tracing {
                 signalled.insert(process.group);
             }
         }
-        drop(state);
         Ok(signalled.len())
+    }
+
+    /// Stops a live run only once its complete evidence prefix is classified.
+    /// Effectful/unknown pending calls are drained before their tasks are held.
+    /// The caller supplies its deadline by cancelling the run from another thread.
+    ///
+    /// # Errors
+    /// Observation loss, cancellation, uncertain interrupted calls, and signalling failures
+    /// cancel and drain the tree rather than return an incomplete evidence prefix.
+    pub fn park(self: &Arc<Self>, run: TraceRun) -> io::Result<ParkedRun> {
+        let mut state = lock(&self.state);
+        if let Err(error) = state.run(run) {
+            drop(state);
+            let _ = self.cancel(run);
+            self.drain(run);
+            return Err(error);
+        }
+        if state
+            .runs
+            .get(&run)
+            .is_none_or(|run| run.phase != RunPhase::Running)
+        {
+            return Err(io::Error::other("trace run is not running"));
+        }
+        let generation = match state.next() {
+            Ok(generation) => generation,
+            Err(error) => {
+                drop(state);
+                let _ = self.cancel(run);
+                self.drain(run);
+                return Err(error);
+            }
+        };
+        state.runs.get_mut(&run).expect("checked run").phase = RunPhase::Parking(generation);
+        let result = self.wait_park(run, generation, state);
+        if let Err(error) = result {
+            let _ = self.cancel(run);
+            self.drain(run);
+            return Err(error);
+        }
+        Ok(ParkedRun {
+            tracing: Arc::clone(self),
+            run,
+            generation,
+            armed: true,
+        })
+    }
+
+    fn wait_park(
+        &self,
+        run: TraceRun,
+        generation: u64,
+        mut state: MutexGuard<'_, State>,
+    ) -> io::Result<()> {
+        Self::signal_locked(&state, run, libc::SIGSTOP, false)?;
+        loop {
+            state.run(run)?;
+            let current = state
+                .runs
+                .get(&run)
+                .ok_or_else(|| io::Error::other("closed trace run"))?;
+            if current.phase != RunPhase::Parking(generation) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "trace parking cancelled",
+                ));
+            }
+            if state
+                .threads
+                .values()
+                .any(|thread| thread.inherited == Some(run) && thread.restart_uncertain)
+            {
+                return Err(io::Error::other(
+                    "cannot park an unproven effectful syscall restart",
+                ));
+            }
+            let busy = current.starting != 0
+                || current.deliveries != 0
+                || state.threads.values().any(|thread| {
+                    thread.inherited == Some(run)
+                        && (!thread.policy_held
+                            || !thread.known_parent
+                            || !thread.early.is_empty()
+                            || thread.classify_after.is_some()
+                            || thread.pending.is_some_and(|pending| !pending.safe))
+                })
+                || state
+                    .deferred
+                    .values()
+                    .flatten()
+                    .any(|(owner, _)| *owner == run);
+            if !busy {
+                // A pipe/wait can still mutate a mapped file through its result buffer. All
+                // tasks are held here, so no peer can introduce a new mapping during this check.
+                let mut shared = HashMap::new();
+                for (tid, thread) in &state.threads {
+                    if thread.inherited == Some(run)
+                        && thread.pending.is_some_and(|pending| pending.writes_memory)
+                    {
+                        let group = thread
+                            .process
+                            .as_ref()
+                            .map_or(*tid, |process| process.group);
+                        if let std::collections::hash_map::Entry::Vacant(slot) = shared.entry(group)
+                        {
+                            slot.insert(shared_writable_mapping(*tid)?);
+                        }
+                    }
+                }
+                let mut draining = false;
+                for (tid, thread) in &mut state.threads {
+                    let group = thread
+                        .process
+                        .as_ref()
+                        .map_or(*tid, |process| process.group);
+                    if thread.inherited == Some(run)
+                        && shared.get(&group) == Some(&true)
+                        && let Some(pending) = &mut thread.pending
+                        && pending.writes_memory
+                    {
+                        pending.safe = false;
+                        thread.policy_held = false;
+                        draining = true;
+                    }
+                }
+                if draining {
+                    Self::signal_locked(&state, run, libc::SIGCONT, false)?;
+                    self.progress.notify_all();
+                    continue;
+                }
+                state.runs.get_mut(&run).expect("checked run").phase = RunPhase::Parked(generation);
+                return Ok(());
+            }
+            state = self.progress.wait(state).recover();
+        }
+    }
+
+    /// Waits for all producers and deliveries to drain, even when trace health has failed.
+    /// Cancel or terminate the native tree first; failed evidence is never made publishable.
+    pub fn drain(&self, run: TraceRun) {
+        let mut state = lock(&self.state);
+        while state
+            .runs
+            .get(&run)
+            .is_some_and(|run| run.observers != 0 || run.deliveries != 0)
+            || state
+                .threads
+                .values()
+                .any(|thread| thread.inherited == Some(run))
+        {
+            state = self.progress.wait(state).recover();
+        }
+    }
+
+    fn delivery(&self, run: TraceRun) -> io::Result<Delivery<'_>> {
+        let mut state = lock(&self.state);
+        state.run(run)?;
+        state.runs.get_mut(&run).expect("checked run").deliveries += 1;
+        Ok(Delivery { tracing: self, run })
+    }
+
+    fn application_delivery(&self, run: TraceRun) -> io::Result<Delivery<'_>> {
+        let mut state = lock(&self.state);
+        state.run(run)?;
+        let current = state.runs.get_mut(&run).expect("checked run");
+        if current.phase != RunPhase::Running {
+            return Err(io::Error::other("trace run is not running"));
+        }
+        current.deliveries += 1;
+        Ok(Delivery { tracing: self, run })
     }
 
     /// Reports loss of the native service even while a consumer callback is blocked.
@@ -400,10 +759,16 @@ impl Tracing {
 
     /// Cancels existing descendants and descendants whose creation is still being delivered.
     pub fn cancel(&self, run: TraceRun) -> io::Result<usize> {
-        if let Some(state) = lock(&self.state).runs.get_mut(&run) {
-            state.cancelled = true;
-        }
-        self.signal(run, libc::SIGKILL)
+        let mut state = lock(&self.state);
+        state
+            .runs
+            .get_mut(&run)
+            .ok_or_else(|| io::Error::other("closed trace run"))?
+            .phase = RunPhase::Cancelled;
+        let result = Self::signal_locked(&state, run, libc::SIGKILL, false);
+        drop(state);
+        self.progress.notify_all();
+        result
     }
 
     /// Registers the owning evaluation for immediate failure notification.
@@ -461,7 +826,7 @@ impl Tracing {
         let Some(run) = self.current() else {
             return Ok(());
         };
-        lock(&self.state).run(run)?;
+        let _delivery = self.application_delivery(run)?;
         for record in records(call, nix::unistd::gettid(), &self.sequence)? {
             self.classify(run, record)?;
         }
@@ -486,18 +851,20 @@ impl Tracing {
         let run = self
             .current()
             .ok_or_else(|| io::Error::other("a managed command spawned outside its run's scope"))?;
-        let observation = {
+        let mut observation = {
             let mut state = lock(&self.state);
-            state.check()?;
-            state
-                .runs
-                .get_mut(&run)
-                .ok_or_else(|| io::Error::other("closed trace run"))?
-                .observers += 1;
+            state.run(run)?;
+            let current = state.runs.get_mut(&run).expect("checked run");
+            if current.phase != RunPhase::Running {
+                return Err(io::Error::other("trace run is not running"));
+            }
+            current.observers += 1;
+            current.starting += 1;
             drop(state);
             ObserverRun {
                 tracing: Arc::clone(self),
                 run,
+                starting: true,
             }
         };
         // A PATH search would exec several candidates, and only the first failure is detached.
@@ -514,13 +881,15 @@ impl Tracing {
         let tracer = std::thread::Builder::new()
             .name("marsh-tracer".into())
             .spawn(move || {
-                let result = observation.tracing.trace(
+                let tracing = Arc::clone(&observation.tracing);
+                let result = tracing.trace(
                     request_read,
                     release_write,
                     &pinned,
                     observation.run,
                     host,
                     events,
+                    &mut observation.starting,
                 );
                 drop(observation);
                 result
@@ -535,9 +904,12 @@ impl Tracing {
         drop(command);
         drop((request_write, release_read));
         match spawned {
-            Ok(child) => {
+            Ok(mut child) => {
                 let pid = child.id();
-                // Dropping the std handle closes nothing the command uses and never waits.
+                let stdin = child.stdin.take();
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                // Pipe ownership has moved out; dropping the std handle never waits.
                 drop(child);
                 let process = identity
                     .recv()
@@ -545,6 +917,9 @@ impl Tracing {
                 Ok(TracedChild {
                     pid,
                     process,
+                    stdin,
+                    stdout,
+                    stderr,
                     observer: tracer,
                 })
             }
@@ -578,6 +953,7 @@ impl Tracing {
         run: TraceRun,
         host: Pid,
         mut events: Box<dyn FnMut(ChildEvent) + Send>,
+        starting: &mut bool,
     ) -> io::Result<()> {
         let mut pid = [0; 4];
         // End of file: the launch failed before its handshake.
@@ -587,13 +963,15 @@ impl Tracing {
         let root = Pid::from_raw(i32::from_ne_bytes(pid));
         let mut observer = Observer::new(self.selected.clone(), Arc::clone(&self.sequence), root);
         let result = (|| -> io::Result<()> {
-            let mut observe = |sequence, tid: Pid, status, event, info| {
-                let resume = self.deliver(sequence, tid, status, event, info)?;
-                if tid == root {
-                    report(&mut *events, status)?;
-                }
-                Ok(resume)
-            };
+            let mut observe =
+                |sequence, tid: Pid, status, event, info, entry: Option<EntryInfo<'_>>| {
+                    let _delivery = self.delivery(run)?;
+                    let resume = self.deliver(sequence, tid, status, event, info, entry)?;
+                    if tid == root {
+                        report(&mut *events, status)?;
+                    }
+                    Ok(resume)
+                };
             let Some(status) = observer.seize(root)? else {
                 return Ok(());
             };
@@ -602,9 +980,50 @@ impl Tracing {
                 .send(process.try_clone()?)
                 .map_err(|_| io::Error::other("spawner abandoned its command"))?;
             self.adopt_root(root, run, host, process)?;
+            {
+                let mut state = lock(&self.state);
+                state
+                    .runs
+                    .get_mut(&run)
+                    .ok_or_else(|| io::Error::other("closed trace run"))?
+                    .starting -= 1;
+                *starting = false;
+            }
+            self.progress.notify_all();
             observer.stop(root, status, &mut observe)?;
             std::fs::File::from(release).write_all(&[1])?;
-            observer.run(&mut observe)
+            observer.run_controlled(&mut observe, &mut |tid, held| {
+                let mut state = lock(&self.state);
+                state.check()?;
+                let decision = match state.threads.get(&tid) {
+                    None => Control::Release,
+                    Some(thread) => match thread.inherited.and_then(|run| state.runs.get(&run)) {
+                        None => Control::Release,
+                        Some(run)
+                            if matches!(run.phase, RunPhase::Running | RunPhase::Cancelled) =>
+                        {
+                            Control::Release
+                        }
+                        Some(_) if !thread.policy_held && held => Control::Release,
+                        Some(_)
+                            if !thread.policy_held
+                                && thread.pending.is_none_or(|pending| pending.safe)
+                                && thread.restart.is_none()
+                                && !thread.restart_uncertain =>
+                        {
+                            Control::Interrupt
+                        }
+                        Some(_) => Control::Hold,
+                    },
+                };
+                if matches!(decision, Control::Release)
+                    && let Some(thread) = state.threads.get_mut(&tid)
+                {
+                    thread.policy_held = false;
+                }
+                Ok(decision)
+            })?;
+            self.retire_unexecuted(observer.unexecuted_exits())
         })();
         if observer.detached() {
             lock(&self.state).threads.remove(&root);
@@ -636,6 +1055,56 @@ impl Tracing {
         result
     }
 
+    /// Removes only terminal lifecycle tombstones after their entire native tree drained.
+    /// Creator-side pending calls retain their ordinary completion/exit handling; this is not
+    /// a syscall-completion proof and cannot release an intermediate publication barrier.
+    fn retire_unexecuted(&self, tids: &[Pid]) -> io::Result<()> {
+        if tids.is_empty() {
+            return Ok(());
+        }
+        let mut state = lock(&self.state);
+        for tid in tids {
+            let Some(thread) = state.threads.get(tid) else {
+                return Err(io::Error::other(UNCLASSIFIED));
+            };
+            let terminal = thread.early.iter().any(|(_, status, _, _)| ended(*status));
+            let lifecycle_only = thread.early.iter().all(|(_, status, _, info)| {
+                if info.is_some() {
+                    return false;
+                }
+                match WaitStatus::from_raw(*tid, *status) {
+                    Ok(
+                        WaitStatus::Stopped(..) | WaitStatus::Exited(..) | WaitStatus::Signaled(..),
+                    ) => true,
+                    Ok(WaitStatus::PtraceEvent(_, _, code)) => {
+                        code == Event::PTRACE_EVENT_STOP as i32
+                            || code == Event::PTRACE_EVENT_EXIT as i32
+                    }
+                    _ => false,
+                }
+            });
+            if thread.known_parent
+                || thread.pending.is_some()
+                || thread.classify_after.is_some()
+                || !terminal
+                || !lifecycle_only
+                || state
+                    .deferred
+                    .values()
+                    .flatten()
+                    .any(|(_, info)| info.info.pid == *tid)
+            {
+                return Err(io::Error::other(UNCLASSIFIED));
+            }
+        }
+        for tid in tids {
+            state.threads.remove(tid);
+        }
+        drop(state);
+        self.progress.notify_all();
+        Ok(())
+    }
+
     /// Registers a seized command under the scope that spawned it, and hands its classifier
     /// the fork that created it, so its inherited descriptors are the host's.
     fn adopt_root(&self, root: Pid, run: TraceRun, host: Pid, process: OwnedFd) -> io::Result<()> {
@@ -662,6 +1131,7 @@ impl Tracing {
                 result: RetCode::Ok(root.as_raw()),
                 duration: Duration::ZERO,
             },
+            creation_observed: false,
             entry_order: self.sequence.next()?,
             cwd: None,
             return_fd: None,
@@ -676,6 +1146,9 @@ impl Tracing {
     fn fail(&self, cause: impl Into<String>) {
         let mut state = lock(&self.state);
         state.failure.get_or_insert_with(|| cause.into());
+        for thread in state.threads.values() {
+            let _ = thread.kill();
+        }
         let waiters: Vec<_> = state
             .runs
             .values_mut()
@@ -695,6 +1168,7 @@ impl Tracing {
         status: i32,
         event: Option<u64>,
         info: Option<Syscall>,
+        entry: Option<EntryInfo<'_>>,
     ) -> io::Result<Resume> {
         let wait = WaitStatus::from_raw(tid, status).map_err(io::Error::other)?;
         let mut resume = Resume::default();
@@ -724,6 +1198,16 @@ impl Tracing {
                             Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU
                         )
             );
+            if matches!(wait, WaitStatus::Stopped(_, signal)
+                if !matches!(signal, Signal::SIGSTOP | Signal::SIGCONT
+                    | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU))
+            {
+                // Ordinary exit-only observation is valid, but reuse cannot prove completion.
+                if thread.restart.is_some() {
+                    thread.restart_uncertain = true;
+                }
+                thread.safe_restart = None;
+            }
         }
         if matches!(wait, WaitStatus::PtraceEvent(..) | WaitStatus::Stopped(..)) {
             Self::lease(&mut state, tid)?;
@@ -734,17 +1218,44 @@ impl Tracing {
         {
             let child = Self::event_thread(event, "missing child identity")?;
             let early = Self::adopt(&mut state, tid, child)?;
+            let proof =
+                info.ok_or_else(|| io::Error::other("creation event lacks inheritance proof"))?;
+            let pending = state
+                .threads
+                .get(&tid)
+                .and_then(|thread| thread.pending)
+                .ok_or_else(|| io::Error::other("creation proof lacks pending attribution"))?;
+            if proof.info.typ != "CREATION"
+                || proof.entry_order != pending.entry
+                || !matches!(proof.info.result, RetCode::Ok(pid) if pid == child.as_raw())
+            {
+                return Err(io::Error::other(
+                    "creation proof does not match pending attribution",
+                ));
+            }
             drop(state);
+            // Inheritance is now kernel-confirmed. This does not consume the creator's
+            // pending call or make its still-running kernel work safe for parking.
+            if let Some(run) = pending.run {
+                self.classify(run, proof)?;
+            }
             let mut held = false;
             for (sequence, status, event, info) in early {
-                let replay = self.deliver(sequence, child, status, event, info)?;
+                let replay = self.deliver(sequence, child, status, event, info, None)?;
                 // The child was held at its first stop; it goes on unless its replay holds it.
                 held = !ended(status) && !replay.hold_current;
                 resume.release.extend(replay.release);
+                resume.policy.extend(replay.policy);
+                if replay.policy_hold {
+                    resume.policy.push(child);
+                }
             }
             if held {
                 resume.release.push(child);
             }
+            let mut state = lock(&self.state);
+            Self::policy_stop(&mut state, tid, wait, &mut resume)?;
+            drop(state);
             self.progress.notify_all();
             return Ok(resume);
         }
@@ -753,6 +1264,11 @@ impl Tracing {
         {
             // Nothing it does may run before its owner is known: its records could not be
             // attributed.
+            if entry.is_some() {
+                return Err(io::Error::other(
+                    "unclassified task reached a syscall entry",
+                ));
+            }
             resume.hold_current = !ended(status);
             thread.early.push((sequence, status, event, info));
             return Ok(resume);
@@ -769,10 +1285,18 @@ impl Tracing {
             state.retire(tid)?;
         }
         let Some(info) = info else {
-            Self::note_stop(&mut state, tid, wait, sequence)?;
+            Self::note_stop(&mut state, tid, wait, sequence, entry)?;
+            Self::policy_stop(&mut state, tid, wait, &mut resume)?;
+            drop(state);
+            self.progress.notify_all();
             return Ok(resume);
         };
-        let (entry, run) = state
+        let Pending {
+            entry,
+            run,
+            safe,
+            writes_memory,
+        } = state
             .threads
             .get_mut(&tid)
             .and_then(|thread| thread.pending.take())
@@ -780,12 +1304,64 @@ impl Tracing {
         if entry != info.entry_order {
             return Err(io::Error::other("native completion entry mismatch"));
         }
+        if safe && matches!(info.info.result, RetCode::Err(-516)) {
+            if let Some(thread) = state.threads.get_mut(&tid) {
+                thread.safe_restart = Some(writes_memory);
+            }
+        }
+        if !safe && matches!(info.info.result, RetCode::Err(-512 | -513 | -514 | -516)) {
+            if let Some(thread) = state.threads.get_mut(&tid) {
+                thread.restart = Some(Some(info.info.syscall));
+            }
+        }
         drop(state);
         if let Some(run) = run {
             self.classify(run, info)?;
         }
+        let mut state = lock(&self.state);
+        Self::policy_stop(&mut state, tid, wait, &mut resume)?;
+        drop(state);
         self.progress.notify_all();
         Ok(resume)
+    }
+
+    fn policy_stop(
+        state: &mut State,
+        tid: Pid,
+        wait: WaitStatus,
+        resume: &mut Resume,
+    ) -> io::Result<()> {
+        let Some(run) = state.threads.get(&tid).and_then(|thread| thread.inherited) else {
+            return Ok(());
+        };
+        let stopping = state
+            .runs
+            .get(&run)
+            .is_some_and(|run| matches!(run.phase, RunPhase::Parking(_) | RunPhase::Parked(_)));
+        let thread = state.threads.get_mut(&tid).expect("checked thread");
+        // Exiting tasks must reach their final wait; they cannot perform more application work.
+        let exiting = matches!(wait, WaitStatus::PtraceEvent(_, _, code)
+            if code == Event::PTRACE_EVENT_EXIT as i32);
+        if stopping && !exiting {
+            if thread.pending.is_none_or(|pending| pending.safe)
+                && thread.restart.is_none()
+                && !thread.restart_uncertain
+            {
+                thread.policy_held = true;
+                resume.hold_current = true;
+                resume.policy_hold = true;
+            } else {
+                // Drain through the call's completion, then hold at its exit stop. Continuing
+                // a group-stop here must not re-inject SIGSTOP or release already-held peers.
+                resume.drain_current = true;
+                if matches!(wait, WaitStatus::Stopped(_, Signal::SIGSTOP)) || thread.job_stopped {
+                    if let Some(process) = &thread.process {
+                        signal_process(&process.descriptor, libc::SIGCONT)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Pins a stopped task's process identity once, killing it when its run was cancelled.
@@ -824,7 +1400,7 @@ impl Tracing {
         let parent = state.threads.get(&tid);
         let parent_entry = parent.and_then(|thread| thread.pending);
         let inherited = parent_entry
-            .and_then(|(_, run)| run)
+            .and_then(|pending| pending.run)
             .or_else(|| parent.and_then(|thread| thread.inherited));
         let cancelled = state.cancelled(inherited);
         let thread = state.threads.entry(child).or_default();
@@ -834,29 +1410,86 @@ impl Tracing {
             thread.kill()?;
         }
         if inherited.is_some() {
-            thread.classify_after = parent_entry.map(|(entry, _)| entry);
+            thread.classify_after = parent_entry.map(|pending| pending.entry);
         }
         Ok(std::mem::take(&mut thread.early))
     }
 
     /// Records a record-less stop: a syscall entry's attribution, or an exit's cleared entry.
-    fn note_stop(state: &mut State, tid: Pid, wait: WaitStatus, sequence: u64) -> io::Result<()> {
+    fn note_stop(
+        state: &mut State,
+        tid: Pid,
+        wait: WaitStatus,
+        sequence: u64,
+        entry: Option<EntryInfo<'_>>,
+    ) -> io::Result<()> {
         let thread = state.threads.entry(tid).or_default();
-        if matches!(wait, WaitStatus::PtraceSyscall(_)) {
-            let target = thread.inherited;
-            if thread.pending.replace((sequence, target)).is_some() {
+        if entry.as_ref().is_some_and(|entry| entry.result.is_none()) {
+            let entry = entry.expect("checked entry");
+            if let Some(restarted) = thread.restart.take() {
+                if restarted != entry.syscall {
+                    thread.restart_uncertain = true;
+                }
+            }
+            let restarted = thread
+                .safe_restart
+                .take()
+                .filter(|_| entry.syscall == Some(Sysno::restart_syscall));
+            let writes_memory = restarted.unwrap_or_else(|| match entry.syscall {
+                Some(
+                    Sysno::write
+                    | Sysno::writev
+                    | Sysno::sendto
+                    | Sysno::splice
+                    | Sysno::tee
+                    | Sysno::futex
+                    | Sysno::rt_sigsuspend,
+                ) => false,
+                #[cfg(target_arch = "x86_64")]
+                Some(Sysno::pause) => false,
+                _ => true,
+            });
+            let safe = (restarted.is_some() || Captured::park_safe(entry.syscall, entry.capture))
+                && (!writes_memory || !shared_writable_mapping(tid)?);
+            let pending = Pending {
+                entry: sequence,
+                run: thread.inherited,
+                safe,
+                writes_memory,
+            };
+            if thread.pending.replace(pending).is_some() {
                 return Err(io::Error::other(
                     "native entry replaced pending attribution",
                 ));
             }
+        } else if matches!(wait, WaitStatus::PtraceSyscall(_)) {
+            // Unselected calls carry no completed record, but still close their entry.
+            let pending = thread
+                .pending
+                .take()
+                .ok_or_else(|| io::Error::other("native unselected completion lacks entry"))?;
+            if let Some(entry) = entry {
+                if pending.safe && matches!(entry.result, Some(RetCode::Err(-516))) {
+                    thread.safe_restart = Some(pending.writes_memory);
+                }
+                if !pending.safe
+                    && matches!(entry.result, Some(RetCode::Err(-512 | -513 | -514 | -516)))
+                {
+                    thread.restart = Some(entry.syscall);
+                }
+            }
         } else if matches!(wait, WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_EXIT as i32)
         {
             thread.pending = None;
+            thread.restart = None;
+            thread.safe_restart = None;
+            thread.restart_uncertain = false;
         }
         Ok(())
     }
 
     fn classify(&self, run: TraceRun, info: Syscall) -> io::Result<()> {
+        let _delivery = self.delivery(run)?;
         let mut state = lock(&self.state);
         if let Some(entry) = state
             .threads
@@ -866,11 +1499,11 @@ impl Tracing {
             state.deferred.entry(entry).or_default().push((run, info));
             return Ok(());
         }
-        let created = matches!(
+        let created = (matches!(
             info.info.syscall,
             Sysno::clone | Sysno::clone3 | Sysno::fork | Sysno::vfork
-        )
-        .then_some(info.entry_order);
+        ) && !info.creation_observed)
+            .then_some(info.entry_order);
         let observe = state
             .roots
             .get(&run.root)

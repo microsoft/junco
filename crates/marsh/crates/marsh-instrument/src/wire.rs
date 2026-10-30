@@ -130,7 +130,7 @@ impl<'de> Deserialize<'de> for Native<RetCode> {
     }
 }
 
-/// Upstream's `SYSCALL` tag, validated without allocating.
+/// Native completion and kernel creation-event tags, validated without allocating.
 struct Tag;
 impl<'de> DeserializeSeed<'de> for Tag {
     type Value = &'static str;
@@ -141,13 +141,13 @@ impl<'de> DeserializeSeed<'de> for Tag {
 impl Visitor<'_> for Tag {
     type Value = &'static str;
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the upstream SYSCALL tag")
+        formatter.write_str("the SYSCALL or CREATION observation tag")
     }
     fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
-        if value == "SYSCALL" {
-            Ok("SYSCALL")
-        } else {
-            Err(E::custom("invalid syscall tag"))
+        match value {
+            "SYSCALL" => Ok("SYSCALL"),
+            "CREATION" => Ok("CREATION"),
+            _ => Err(E::custom("invalid syscall tag")),
         }
     }
 }

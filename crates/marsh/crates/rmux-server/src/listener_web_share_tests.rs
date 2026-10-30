@@ -50,7 +50,12 @@ async fn client_disconnect_cancels_web_share_tunnel_start() -> io::Result<()> {
     )
     .await?;
 
-    let provider_pid = wait_for_pid_marker(&marker).await;
+    let provider_pid = tokio::select! {
+        pid = wait_for_pid_marker(&marker) => pid,
+        response = read_test_response(&mut client) => {
+            panic!("web-share create answered before the tunnel provider started: {response:?}");
+        }
+    };
     let mut provider_cleanup = ProcessCleanup::new(provider_pid);
     drop(client);
     let connection_result =

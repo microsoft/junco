@@ -8,6 +8,7 @@ publish = false
 
 [workspace]
 resolver = "3"
+members = ["crates/junco-lsp"]
 exclude = ["crates/rust-graph"]
 
 [lib]
@@ -22,34 +23,35 @@ napi = { version = "=3.15.0", default-features = false, features = ["napi4", "to
 napi-derive = "=3.6.13"
 marsh-core = { path = "../../crates/marsh/crates/marsh-core" }
 marsh-btrfs = { path = "../../crates/marsh/crates/marsh-btrfs" }
+junco-lsp = { path = "crates/junco-lsp" }
 brush-core = "=0.5.0"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
 crossterm = "=0.29.0"
 
 # Unmodified Oh My Pi engines, imported from a pinned public Git revision.
-pi-ast = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
-pi-diff = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
-pi-walker = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
-pi-edit = { git = "https://github.com/can1357/oh-my-pi.git", rev = "7ae76f8e4daca0c8f409f61bcd514260cd522365" }
+pi-ast = { git = "https://github.com/can1357/oh-my-pi.git", rev = "093275112f7adff207608673c0e33c7f3d16e27f" }
+pi-diff = { git = "https://github.com/can1357/oh-my-pi.git", rev = "093275112f7adff207608673c0e33c7f3d16e27f" }
+pi-walker = { git = "https://github.com/can1357/oh-my-pi.git", rev = "093275112f7adff207608673c0e33c7f3d16e27f" }
+pi-edit = { git = "https://github.com/can1357/oh-my-pi.git", rev = "093275112f7adff207608673c0e33c7f3d16e27f" }
 
 # Direct dependencies of the transplanted pi-natives binding/grep modules.
-async-trait = "0.1"
-ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
-flume = "0.12"
-grep-matcher = "0.1"
-grep-pcre2 = "0.1"
-grep-regex = "0.1"
-grep-searcher = "0.1"
+async-trait = "0.1.92"
+ast-grep-core = { version = "0.39.9", default-features = false, features = ["tree-sitter"] }
+flume = "0.12.0"
+grep-matcher = "0.1.9"
+grep-pcre2 = "0.1.10"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
 parking_lot = "0.13.0"
-regex = "1"
-sha2 = "0.11"
-serde_json = "1"
+regex = "1.13.1"
+sha2 = "0.11.1"
+serde_json = "1.0.154"
 rust-graph = { path = "crates/rust-graph" }
-smallvec = { version = "1.16.2", features = ["serde", "write", "union", "const_new"] }
+smallvec = { version = "1.16.4", features = ["serde", "write", "union", "const_new"] }
 
 [target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
+libc = "0.2.191"
 
 [build-dependencies]
 napi-build = "=2.6.0"

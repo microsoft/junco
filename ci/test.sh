@@ -42,6 +42,9 @@ step "junco-tools Rust: rustfmt, Clippy, unit tests (CopyTree)"
   node scripts/with-junco-build-env.mjs cargo test --locked --features test-fs --lib
 )
 
+step "junco-lsp: unit, managed and protocol regression tests"
+(cd packages/junco-tools && node scripts/with-junco-build-env.mjs cargo test --locked -p junco-lsp)
+
 step "rust-graph: unit and integration tests"
 (cd packages/junco-tools/crates/rust-graph && node ../../scripts/with-junco-build-env.mjs cargo test --locked)
 

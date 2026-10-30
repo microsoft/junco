@@ -35,6 +35,9 @@ pub struct Syscall {
     /// presentation-only serializer.
     #[serde(with = "crate::wire::Info")]
     pub info: SyscallInfo,
+    /// A completed creation call whose inheritance was already delivered by a `CREATION`
+    /// record. The earlier kernel lifecycle event does not complete the pending syscall.
+    pub creation_observed: bool,
     /// Delivery sequence assigned to this call's entry, before any completion or exec.
     pub entry_order: u64,
     /// Entry-time cwd when a captured path resolves relative to it.

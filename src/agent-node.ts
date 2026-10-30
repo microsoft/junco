@@ -22,11 +22,7 @@ import {
   JuncoAgentError,
   type JuncoAgentNodeContext,
 } from "junco-agent";
-import {
-  RecvTool,
-  SendTool,
-  type ToolCollection,
-} from "junco-tools";
+import { RecvTool, SendTool, type ToolCollection } from "junco-tools";
 import type { Static, TSchema } from "typebox";
 import type { Agentic } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";

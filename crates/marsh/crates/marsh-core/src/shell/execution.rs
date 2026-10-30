@@ -1,14 +1,14 @@
-//! Stage 2: one evaluation, scoped Brush work, transitive producers, and final native drain.
+//! Shared execution, complete transaction evidence, and scoped producer ownership.
 //!
-//! Both routes run the same persistent interpreter under one [`Run`]. A managed run observes its
-//! snapshot through the shared tracer; a direct run executes against the source and only owns the
-//! lifetimes of the children and tasks it starts.
+//! Ordinary commands finish all producers. Typed epochs close application leases while resource
+//! monitors remain infrastructure work, then publish only with a generation-bound parked proof.
+//! Both routes retain the same tracing, evidence and publication machinery.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -93,24 +93,21 @@ impl MarshExecutor {
             return Ok(context);
         }
         run.check()?;
-        Ok(BuiltinContext {
-            cwd: Arc::clone(&run.cwd),
-            run,
-        })
+        Ok(BuiltinContext::from_run(run))
     }
 }
 impl ExternalCommandSpawner for MarshExecutor {
     fn spawn(&self, command: std::process::Command, kill_on_drop: bool) -> std::io::Result<Child> {
         let context = self.context().map_err(std::io::Error::other)?;
-        let _guard = context.enter().map_err(std::io::Error::other)?;
-        let _launch = context.run.prepare_native_launch();
-        let Backend::Managed { tracing, .. } = &context.run.backend else {
+        if matches!(&context.run.backend, Backend::Direct { .. }) {
+            let _guard = context.enter().map_err(std::io::Error::other)?;
+            let _launch = context.run.prepare_native_launch();
             let child = DefaultExternalCommandSpawner.spawn(command, kill_on_drop)?;
             return context.run.adopt(child);
-        };
+        }
         // The tracer reaps the command and reports it here; the shell never waits on its pid.
         let (sender, events) = tokio::sync::mpsc::unbounded_channel();
-        let traced = tracing.spawn(
+        let traced = context.spawn_traced(
             command,
             Box::new(move |event| {
                 let _ = sender.send(match event {
@@ -185,7 +182,7 @@ impl ExecutionObserver for MarshExecutor {
         F::Output: Send + 'static,
     {
         let context = self.context().map_err(brush_error)?;
-        let lease = context.run.lease().map_err(brush_error)?;
+        let lease = context.run.application_lease().map_err(brush_error)?;
         let id = lease.id;
         let scoped = context.wrap(future).map_err(brush_error)?;
         let internal = context.run.internal_scope().map_err(brush_error)?;
@@ -242,13 +239,23 @@ impl ExecutionObserver for MarshExecutor {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerKind {
+    Application,
+    Infrastructure,
+}
+struct Worker {
+    kind: WorkerKind,
+    abort: Option<tokio::task::AbortHandle>,
+}
 #[derive(Default)]
 struct Workers {
     next: u64,
     // Counter allocation and producer registration are serialized by the enclosing mutex.
-    handles: HashMap<WorkerId, Option<tokio::task::AbortHandle>>,
+    handles: HashMap<WorkerId, Worker>,
     failure: bool,
     closing: bool,
+    application_closed: bool,
 }
 
 #[repr(u8)]
@@ -312,6 +319,7 @@ pub(super) struct Run {
     native_launch: Mutex<NativeLaunch>,
     pub closed: AtomicBool,
     phase: AtomicU8,
+    generation: AtomicU64,
     changed: tokio::sync::Notify,
 }
 impl Run {
@@ -324,6 +332,7 @@ impl Run {
             native_launch: Mutex::new(NativeLaunch::Pending),
             closed: AtomicBool::new(false),
             phase: AtomicU8::new(RunPhase::Running as u8),
+            generation: AtomicU64::new(0),
             changed: tokio::sync::Notify::new(),
         }
     }
@@ -381,10 +390,13 @@ impl Run {
         }
         Ok(())
     }
-    fn lease(self: &Arc<Self>) -> Result<Completion<Lease>, ShellError> {
+    pub fn application_lease(self: &Arc<Self>) -> Result<Completion<Lease>, ShellError> {
+        self.lease(WorkerKind::Application)
+    }
+    fn lease(self: &Arc<Self>, kind: WorkerKind) -> Result<Completion<Lease>, ShellError> {
         self.check()?;
         let mut workers = self.workers.lock().recover();
-        if workers.closing {
+        if workers.closing || (kind == WorkerKind::Application && workers.application_closed) {
             return Err(ShellError::new(ShellErrorKind::Closed));
         }
         workers.next = workers
@@ -392,7 +404,7 @@ impl Run {
             .checked_add(1)
             .ok_or_else(|| ShellError::infrastructure("worker identity exhausted"))?;
         let id = WorkerId(workers.next);
-        workers.handles.insert(id, None);
+        workers.handles.insert(id, Worker { kind, abort: None });
         drop(workers);
         Ok(Completion::new(Lease {
             run: Arc::clone(self),
@@ -401,11 +413,11 @@ impl Run {
     }
     fn install(&self, id: WorkerId, abort: tokio::task::AbortHandle) {
         let mut workers = self.workers.lock().recover();
-        if self.is_cancelled() {
-            abort.abort();
-        }
         if let Some(slot) = workers.handles.get_mut(&id) {
-            *slot = Some(abort);
+            if self.is_cancelled() && slot.kind == WorkerKind::Application {
+                abort.abort();
+            }
+            slot.abort = Some(abort);
         }
     }
     /// Takes ownership of a freshly spawned child. A direct run pins it by pidfd, or kills and
@@ -500,11 +512,16 @@ impl Run {
             self.cancel_owned_producers();
         }
     }
-    /// Aborts every owned worker and ends the run's native processes; the caller won the
-    /// transition to [`RunPhase::Cancelled`].
+    /// Aborts application workers and ends native processes. Infrastructure producers stop through
+    /// their resource owner's finish, preserving the final monitor event before the total drain.
     fn cancel_owned_producers(&self) {
         let workers = self.workers.lock().recover();
-        for abort in workers.handles.values().flatten() {
+        for abort in workers
+            .handles
+            .values()
+            .filter(|worker| worker.kind == WorkerKind::Application)
+            .filter_map(|worker| worker.abort.as_ref())
+        {
             abort.abort();
         }
         drop(workers);
@@ -539,7 +556,36 @@ impl Run {
             self.changed.notify_waiters();
         }
     }
-    pub fn seal_publication(&self) -> Result<(), ShellError> {
+    pub fn seal_publication<'a>(
+        &'a self,
+        proof: &PublicationSeal<'_>,
+    ) -> Result<PublicationGuard<'a>, ShellError> {
+        let checkpoint = match proof {
+            PublicationSeal::Completed => {
+                if !self.closed.load(Ordering::Acquire) {
+                    return Err(ShellError::infrastructure(
+                        "publication before producer completion",
+                    ));
+                }
+                false
+            }
+            PublicationSeal::Parked(parked) => {
+                let (tracing, trace) = self.trace()?;
+                parked.validate(tracing, trace)?;
+                let workers = self.workers.lock().recover();
+                if !workers.application_closed
+                    || workers
+                        .handles
+                        .values()
+                        .any(|worker| worker.kind == WorkerKind::Application)
+                {
+                    return Err(ShellError::infrastructure(
+                        "publication before application drain",
+                    ));
+                }
+                true
+            }
+        };
         self.phase
             .compare_exchange(
                 RunPhase::Finalizing as u8,
@@ -547,8 +593,72 @@ impl Run {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map(|_| ())
-            .map_err(|_| ShellError::new(ShellErrorKind::Interrupted))
+            .map_err(|_| ShellError::new(ShellErrorKind::Interrupted))?;
+        Ok(PublicationGuard {
+            run: self,
+            checkpoint,
+        })
+    }
+    /// Stops admitting application work without stopping resource monitor producers.
+    pub fn begin_closing(&self) {
+        self.workers.lock().recover().application_closed = true;
+        self.changed.notify_waiters();
+    }
+    pub async fn drain_application(&self) -> Result<(), ShellError> {
+        self.begin_closing();
+        loop {
+            let changed = self.changed.notified();
+            let state = {
+                let workers = self.workers.lock().recover();
+                (!workers
+                    .handles
+                    .values()
+                    .any(|worker| worker.kind == WorkerKind::Application))
+                .then_some(workers.failure)
+            };
+            if let Some(failed) = state {
+                if failed {
+                    return Err(ShellError::infrastructure(
+                        "an owned producer did not complete",
+                    ));
+                }
+                self.check()?;
+                self.enter_finalization();
+                return Ok(());
+            }
+            changed.await;
+        }
+    }
+    /// A new active generation may use the retained, already validated view.
+    pub fn reopen(&self) -> Result<(), ShellError> {
+        self.check()?;
+        let mut workers = self.workers.lock().recover();
+        if workers.closing || workers.failure || !workers.application_closed {
+            return Err(ShellError::infrastructure("run cannot reopen"));
+        }
+        let generation = self
+            .generation
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| ShellError::infrastructure("run generation exhausted"))?;
+        self.phase
+            .compare_exchange(
+                RunPhase::Finalizing as u8,
+                RunPhase::Running as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| ShellError::new(ShellErrorKind::Interrupted))?;
+        self.generation.store(generation, Ordering::Release);
+        workers.application_closed = false;
+        drop(workers);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+    pub fn infrastructure_observer(self: &Arc<Self>) -> InfrastructureObserver {
+        InfrastructureObserver {
+            run: Some(Arc::clone(self)),
+        }
     }
     /// Marks initial native setup, before a child can execute or observe its end of input.
     fn prepare_native_launch(&self) -> Option<NativeLaunchGuard<'_>> {
@@ -642,7 +752,7 @@ impl Run {
         }
     }
     /// Resolves with the native service's failure; a direct run has no such service.
-    async fn failure(&self) -> ShellError {
+    pub async fn failure(&self) -> ShellError {
         match &self.backend {
             Backend::Managed { tracing, trace, .. } => {
                 std::future::poll_fn(|context| tracing.poll_failure(*trace, context))
@@ -653,7 +763,7 @@ impl Run {
         }
     }
     /// Waits for every owned producer. `Err(true)` means some producer's end cannot be proven.
-    async fn finish(&self) -> Result<(), (ShellError, bool)> {
+    pub async fn finish(&self) -> Result<(), (ShellError, bool)> {
         let failed = loop {
             let changed = self.changed.notified();
             let state = {
@@ -736,9 +846,142 @@ impl ExecutionProgress {
         }
     }
 }
+/// A live checkpoint releases its publication phase; an exit-only run remains terminal.
+pub(super) struct PublicationGuard<'a> {
+    run: &'a Run,
+    checkpoint: bool,
+}
+impl Drop for PublicationGuard<'_> {
+    fn drop(&mut self) {
+        if self.checkpoint {
+            let _ = self.run.phase.compare_exchange(
+                RunPhase::Publishing as u8,
+                RunPhase::Finalizing as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.run.changed.notify_waiters();
+        }
+    }
+}
+
+/// Only resource monitoring uses this observer: it never installs a filesystem context.
+#[derive(Clone, Default)]
+pub(super) struct InfrastructureObserver {
+    run: Option<Arc<Run>>,
+}
+impl InfrastructureObserver {
+    fn run(&self) -> Result<&Arc<Run>, ShellError> {
+        let run = self
+            .run
+            .as_ref()
+            .ok_or_else(|| ShellError::new(ShellErrorKind::Closed))?;
+        run.check()?;
+        Ok(run)
+    }
+    fn scope(&self) -> Result<InfrastructureScope, ShellError> {
+        Ok(InfrastructureScope {
+            scope: self.run()?.internal_scope()?,
+        })
+    }
+}
+pub(super) struct InfrastructureScope {
+    scope: Option<TraceScope>,
+}
+pub(super) struct InfrastructureGuard {
+    _trace: Option<TraceScopeGuard>,
+    _context: ContextGuard,
+}
+impl PollScope for InfrastructureScope {
+    type Guard = InfrastructureGuard;
+    fn enter(&self) -> Self::Guard {
+        InfrastructureGuard {
+            _trace: self.scope.as_ref().map(TraceScope::enter),
+            _context: ContextGuard(CURRENT.with(|current| current.replace(None))),
+        }
+    }
+}
+impl ExecutionObserver for InfrastructureObserver {
+    type Builtin = ();
+    type SyncGuard = InfrastructureGuard;
+    fn enter_sync(&self) -> Result<Self::SyncGuard, brush_core::Error> {
+        Ok(self.scope().map_err(brush_error)?.enter())
+    }
+    fn begin_builtin(&self, _name: &str, _args: &[CommandArg], _cwd: &Path) {}
+    fn run_builtin<F, Make>(
+        &self,
+        _token: Self::Builtin,
+        _make: Make,
+    ) -> impl Future<Output = Result<ExecutionResult, brush_core::Error>> + Send + use<F, Make>
+    where
+        F: Future<Output = Result<ExecutionResult, brush_core::Error>> + Send,
+        Make: FnOnce() -> F + Send,
+    {
+        async {
+            Err(brush_error(ShellError::infrastructure(
+                "infrastructure cannot invoke builtins",
+            )))
+        }
+    }
+    fn scope_future<F>(
+        &self,
+        future: F,
+    ) -> Result<impl Future<Output = F::Output> + Send + use<F>, brush_core::Error>
+    where
+        F: Future + Send,
+    {
+        Ok(Scoped::new(future, self.scope().map_err(brush_error)?))
+    }
+    fn spawn_task<F>(
+        &self,
+        future: F,
+    ) -> Result<tokio::task::JoinHandle<F::Output>, brush_core::Error>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let run = self.run().map_err(brush_error)?;
+        let lease = run.lease(WorkerKind::Infrastructure).map_err(brush_error)?;
+        let id = lease.id;
+        let scope = self.scope().map_err(brush_error)?;
+        let internal = run.internal_scope().map_err(brush_error)?;
+        let _guard = internal.as_ref().map(TraceScope::enter);
+        let handle = run.runtime.spawn(async move {
+            let result = Scoped::new(future, scope).await;
+            lease.complete();
+            result
+        });
+        run.install(id, handle.abort_handle());
+        Ok(handle)
+    }
+    fn spawn_blocking_task<F, T>(
+        &self,
+        operation: F,
+    ) -> Result<tokio::task::JoinHandle<T>, brush_core::Error>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let run = self.run().map_err(brush_error)?;
+        let lease = run.lease(WorkerKind::Infrastructure).map_err(brush_error)?;
+        let id = lease.id;
+        let scope = self.scope().map_err(brush_error)?;
+        let internal = run.internal_scope().map_err(brush_error)?;
+        let _guard = internal.as_ref().map(TraceScope::enter);
+        let handle = run.runtime.spawn_blocking(move || {
+            let _guard = scope.enter();
+            let result = operation();
+            lease.complete();
+            result
+        });
+        run.install(id, handle.abort_handle());
+        Ok(handle)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct WorkerId(u64);
-struct Lease {
+pub(super) struct Lease {
     run: Arc<Run>,
     id: WorkerId,
 }
@@ -773,6 +1016,7 @@ impl Drop for ContextGuard {
 pub struct BuiltinContext {
     run: Arc<Run>,
     cwd: Arc<PathBuf>,
+    generation: u64,
 }
 impl std::fmt::Debug for BuiltinContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -797,6 +1041,13 @@ fn logical(view: Option<&Snapshot>, path: &Path) -> PathBuf {
 }
 
 impl BuiltinContext {
+    pub(super) fn from_run(run: Arc<Run>) -> Self {
+        Self {
+            cwd: Arc::clone(&run.cwd),
+            generation: run.generation.load(Ordering::Acquire),
+            run,
+        }
+    }
     /// The owning run, as a nested call's admission sees its caller.
     pub(super) fn parent(&self) -> Weak<Run> {
         Arc::downgrade(&self.run)
@@ -819,7 +1070,13 @@ impl BuiltinContext {
         }
     }
     fn check(&self) -> Result<(), ShellError> {
-        self.run.check()
+        self.run.check()?;
+        if self.generation != self.run.generation.load(Ordering::Acquire)
+            || self.run.workers.lock().recover().application_closed
+        {
+            return Err(ShellError::new(ShellErrorKind::Closed));
+        }
+        Ok(())
     }
     /// The workload scope of a managed run; direct work is never attributed.
     fn scope(&self) -> Result<Option<TraceScope>, ShellError> {
@@ -837,15 +1094,45 @@ impl BuiltinContext {
             _context: context,
         })
     }
-    fn wrap<F: Future>(&self, future: F) -> Result<Scoped<F, ContextScope>, ShellError> {
+    pub(super) fn wrap<F: Future>(&self, future: F) -> Result<Scoped<F, ContextScope>, ShellError> {
         self.check()?;
         Ok(Scoped::new(
             future,
             ContextScope {
                 scope: self.scope()?,
-                context: self.clone(),
+                context: Some(self.clone()),
             },
         ))
+    }
+    /// Typed callbacks borrow finite operations, never the cloneable CLI context in TLS.
+    pub(super) fn wrap_managed<F: Future>(
+        &self,
+        future: F,
+    ) -> Result<Scoped<F, ContextScope>, ShellError> {
+        self.check()?;
+        Ok(Scoped::new(
+            future,
+            ContextScope {
+                scope: self.scope()?,
+                context: None,
+            },
+        ))
+    }
+    pub(super) fn spawn_traced(
+        &self,
+        command: std::process::Command,
+        events: Box<dyn FnMut(ChildEvent) + Send>,
+    ) -> std::io::Result<marsh_instrument::TracedChild> {
+        let mut lease = self
+            .run
+            .application_lease()
+            .map_err(std::io::Error::other)?;
+        let _guard = self.enter().map_err(std::io::Error::other)?;
+        let _launch = self.run.prepare_native_launch();
+        let (tracing, _) = self.run.trace().map_err(std::io::Error::other)?;
+        let child = tracing.spawn(command, events);
+        lease.completed = true;
+        child
     }
     /// Logical working directory of the callback invocation.
     pub fn working_dir(&self) -> &Path {
@@ -900,7 +1187,7 @@ impl BuiltinContext {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let lease = self.run.lease()?;
+        let lease = self.run.application_lease()?;
         let id = lease.id;
         let context = self.clone();
         let scope = self.scope()?;
@@ -938,7 +1225,10 @@ impl BuiltinContext {
         ended: &str,
         operation: impl FnOnce(Option<&Snapshot>) -> T,
     ) -> std::io::Result<T> {
-        let mut lease = self.run.lease().map_err(std::io::Error::other)?;
+        let mut lease = self
+            .run
+            .application_lease()
+            .map_err(std::io::Error::other)?;
         let _guard = self.enter().map_err(std::io::Error::other)?;
         let view = match &self.run.backend {
             Backend::Managed { snapshot, .. } => Some(
@@ -1005,6 +1295,29 @@ impl BuiltinContext {
             metadata
         })
     }
+    /// Reads metadata without following the final symlink.
+    pub fn symlink_metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.io(path, |path| {
+            let metadata = std::fs::symlink_metadata(path);
+            self.report(HostCall::Metadata {
+                path,
+                follow: false,
+                errno: metadata.as_ref().err().map(errno),
+            });
+            metadata
+        })
+    }
+    /// Reads a symlink through the command's logical filesystem view.
+    pub fn read_link(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.io(path, |path| {
+            let target = std::fs::read_link(path);
+            self.report(HostCall::ReadLink {
+                path,
+                errno: target.as_ref().err().map(errno),
+            });
+            target
+        })
+    }
     /// Creates directories through the command's logical filesystem view.
     pub fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
         self.io(path, |path| {
@@ -1042,6 +1355,31 @@ impl BuiltinContext {
             });
             removed
         })
+    }
+    /// Removes an empty directory through the command's logical filesystem view.
+    pub fn remove_dir(&self, path: &Path) -> std::io::Result<()> {
+        self.io(path, |path| {
+            let removed = std::fs::remove_dir(path);
+            self.report(HostCall::RemoveDir {
+                path,
+                errno: removed.as_ref().err().map(errno),
+            });
+            removed
+        })
+    }
+    /// Renames two logical paths as one tracked filesystem operation.
+    pub fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.step("command context has ended", |view| {
+            let from = physical(view, &self.cwd.join(from));
+            let to = physical(view, &self.cwd.join(to));
+            let renamed = std::fs::rename(&from, &to);
+            self.report(HostCall::Rename {
+                from: &from,
+                to: &to,
+                errno: renamed.as_ref().err().map(errno),
+            });
+            renamed
+        })?
     }
     /// Opens a directory iterator; each subsequent call still checks owning-run liveness.
     pub fn read_dir(&self, path: &Path) -> std::io::Result<ReadDir> {
@@ -1192,14 +1530,14 @@ pub(super) struct SyncGuard {
     _context: ContextGuard,
 }
 /// Per-poll command context: TLS is entered before tracing and restored after it.
-struct ContextScope {
+pub(super) struct ContextScope {
     scope: Option<TraceScope>,
-    context: BuiltinContext,
+    context: Option<BuiltinContext>,
 }
 impl PollScope for ContextScope {
     type Guard = SyncGuard;
     fn enter(&self) -> Self::Guard {
-        let context = ContextGuard::enter(self.context.clone());
+        let context = ContextGuard(CURRENT.with(|current| current.replace(self.context.clone())));
         SyncGuard {
             _trace: self.scope.as_ref().map(TraceScope::enter),
             _context: context,
@@ -1221,10 +1559,7 @@ pub(super) async fn evaluate(
     run: &Arc<Run>,
     command: super::Command,
 ) -> (Option<ExecutionResult>, Option<ShellError>) {
-    let context = BuiltinContext {
-        run: Arc::clone(run),
-        cwd: Arc::clone(&run.cwd),
-    };
+    let context = BuiltinContext::from_run(Arc::clone(run));
     let evaluation = match context.wrap(command.evaluate(interpreter)) {
         Ok(evaluation) => evaluation,
         Err(error) => return (None, Some(error)),
@@ -1243,14 +1578,32 @@ pub(super) async fn evaluate(
     }
 }
 
-pub(super) struct ExecutedCommand {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PublicationMode {
+    Apply,
+    DiscardWrites,
+}
+
+pub(super) enum PublicationSeal<'a> {
+    Completed,
+    Parked(&'a marsh_instrument::ParkedRun),
+}
+
+/// Complete evidence and its publication boundary, independent of a native exit status.
+pub(super) struct ExecutedTransaction<'a> {
     pub prepared: Completion<PreparedCommand>,
-    pub result: Option<ExecutionResult>,
     pub failure: Option<ShellError>,
     pub evidence: CommandEvidence,
     pub command: String,
-    /// Producer quiescence could not be proven; the view and its coverage must be retained.
+    /// Producer quiescence could not be proven; retain the view and its coverage.
     pub uncertain: bool,
+    pub mode: PublicationMode,
+    pub seal: PublicationSeal<'a>,
+}
+
+pub(super) struct ExecutedCommand {
+    pub transaction: ExecutedTransaction<'static>,
+    pub result: Option<ExecutionResult>,
 }
 
 pub(super) async fn run(
@@ -1304,10 +1657,14 @@ pub(super) async fn complete(
     if failure.is_some() {
         prepared.run.cancel();
     }
-    if let Err((error, _)) = prepared.run.finish().await {
-        failure.get_or_insert(error);
-    }
     let mut uncertain = false;
+    if let Err((error, unproven)) = prepared.run.finish().await {
+        failure.get_or_insert(error);
+        uncertain = unproven;
+        if unproven {
+            prepared.snapshot.retained.store(true, Ordering::Release);
+        }
+    }
     let mut evidence = CommandEvidence::default();
     match prepared.run.trace() {
         Err(error) => {
@@ -1355,12 +1712,16 @@ pub(super) async fn complete(
         }
     }
     ExecutedCommand {
-        prepared,
+        transaction: ExecutedTransaction {
+            prepared,
+            failure,
+            evidence,
+            command: text,
+            uncertain,
+            mode: PublicationMode::Apply,
+            seal: PublicationSeal::Completed,
+        },
         result,
-        failure,
-        evidence,
-        command: text,
-        uncertain,
     }
 }
 
@@ -1377,6 +1738,73 @@ mod tests {
             tokio::runtime::Handle::current(),
             Arc::new(PathBuf::from("/")),
         ))
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fences_application_but_retains_infrastructure() {
+        let run = direct_run();
+        let old_context = BuiltinContext::from_run(Arc::clone(&run));
+        let application = run.application_lease().unwrap();
+        let infrastructure = run.lease(WorkerKind::Infrastructure).unwrap();
+        run.begin_closing();
+        assert!(run.application_lease().is_err());
+        assert!(old_context.physical_path(Path::new("/")).is_err());
+        assert!(run.drain_application().now_or_never().is_none());
+        application.complete();
+        run.drain_application().await.unwrap();
+        assert!(!run.closed.load(Ordering::Acquire));
+        run.reopen().unwrap();
+        assert!(old_context.physical_path(Path::new("/")).is_err());
+        assert!(
+            BuiltinContext::from_run(Arc::clone(&run))
+                .physical_path(Path::new("/"))
+                .is_ok()
+        );
+        run.application_lease().unwrap().complete();
+        infrastructure.complete();
+        run.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_callback_hides_cloneable_cli_context() {
+        let run = direct_run();
+        let context = BuiltinContext::from_run(run);
+        context
+            .wrap(async {
+                assert!(current_context().is_some());
+                context
+                    .wrap_managed(async {
+                        assert!(current_context().is_none());
+                    })
+                    .unwrap()
+                    .await;
+                assert!(current_context().is_some());
+                let observer = context.run.infrastructure_observer();
+                observer
+                    .scope_future(async {
+                        assert!(current_context().is_none());
+                    })
+                    .unwrap()
+                    .await;
+                assert!(current_context().is_some());
+            })
+            .unwrap()
+            .await;
+        assert!(current_context().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_infrastructure_until_owner_finishes() {
+        let run = direct_run();
+        let observer = run.infrastructure_observer();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let monitor = observer
+            .spawn_task(async move { stopped.await.unwrap() })
+            .unwrap();
+        run.cancel();
+        stop.send(()).unwrap();
+        monitor.await.unwrap();
+        run.finish().await.unwrap();
     }
 
     /// A native launch held beyond both windows still leaves a cooperative child its EOF grace.

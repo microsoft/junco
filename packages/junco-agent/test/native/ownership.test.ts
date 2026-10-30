@@ -153,12 +153,12 @@ test(
           errors(await drive(a.agent, a.faux, [release("f.txt"), release("g.txt")])),
           [false, false],
         );
-        // After reading, B now edits A's former file, and the child writes the other.
+        // Native reads supply anchors but deliberately bypass marsh; obtain the fresh Read through bash.
         assert.deepEqual(
-          errors(await drive(b.agent, b.faux, [read("f.txt"), edit("f.txt", "B")])),
-          [false, false],
+          errors(await drive(b.agent, b.faux, [bash("cat f.txt >/dev/null"), read("f.txt"), edit("f.txt", "B")])),
+          [false, false, false],
         );
-        assert.deepEqual(errors(await drive(child, a.faux, [bash("printf c > g.txt")])), [false]);
+        assert.deepEqual(errors(await drive(child, a.faux, [bash("cat g.txt >/dev/null && printf c > g.txt")])), [false]);
       } finally {
         await child.return();
       }

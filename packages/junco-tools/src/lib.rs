@@ -1,5 +1,5 @@
 // Oh My Pi native binding/grep modules transplanted from revision
-// 7ae76f8e4daca0c8f409f61bcd514260cd522365 — see LICENSE.oh-my-pi.
+// 093275112f7adff207608673c0e33c7f3d16e27f — see LICENSE.oh-my-pi.
 mod ast;
 mod diff;
 mod edit;
@@ -10,6 +10,7 @@ mod graph;
 mod grep;
 mod iofs;
 mod js;
+mod lsp;
 mod mux;
 mod policy;
 mod process;

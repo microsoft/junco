@@ -935,13 +935,25 @@ export async function toolFactoriesAreConsumerAgentTools(
 export async function lspToolTypesThroughBothRoutes(
   cwd: string,
   base: agent.AgenticOptions,
+  native?: tools.NativeModule,
+  mux?: tools.NativeMux,
 ) {
-  const options: tools.LspToolOptions = { readOnly: true };
-  const routedOptions: tools.LspToolOptions = { readOnly: false };
+  const options: tools.LspToolOptions = { readOnly: true, native, mux };
+  const routedOptions: tools.LspToolOptions = { readOnly: false, native, mux };
   const flat: tools.LspTool = await tools.LspTool.create(cwd, options);
   const routed: tools.LspTool = await tools.LspTool.create(cwd, routedOptions);
   const execute: tools.LspTool["execute"] = flat.execute;
   const routedExecute: tools.LspTool["execute"] = routed.execute;
+  if (native) {
+    const handle = await native.NativeLsp.open(cwd, { readOnly: true }, mux);
+    const call: InstanceType<tools.NativeModule["NativeLspCall"]> =
+      handle.start({ action: "status" });
+    const result = await call.wait();
+    const success: boolean = result.details.success;
+    call.abort();
+    await handle.close();
+    void success;
+  }
   const status: tools.LspToolInput = { action: "status" };
   const diagnostics: tools.LspToolInput = {
     action: "diagnostics",
@@ -966,7 +978,7 @@ export async function lspToolTypesThroughBothRoutes(
   await tools.LspTool.shutdown();
   await tools.LspTool.shutdown();
 
-  // @ts-expect-error an LSP action outside the upstream set is rejected
+  // @ts-expect-error an LSP action outside the supported set is rejected
   const unknownAction: tools.LspToolInput = { action: "format" };
   const textLine: tools.LspToolInput = {
     action: "hover",

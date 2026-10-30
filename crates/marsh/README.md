@@ -57,6 +57,15 @@ and reaps the command's whole process tree. The interpreter's own filesystem acc
 records in the same vocabulary. A launch the tracer cannot seize never runs, and failed
 observation fails closed. No trace spool, sysctl changes or fallback tracer is involved.
 
+During whole-tree exit, a newborn may reach its terminal ptrace stop before its adoption event.
+Marsh drains that stop only after every task is exiting and retains the newborn's bookkeeping
+until the tree is reaped. Tombstones with pending, deferred or application records still fail
+observation.
+
+Kernel fork/clone/vfork events establish child FD and mapping inheritance through explicit
+`CREATION` records; the creator's syscall stays pending. Its eventual completion cannot overwrite
+tables the child has already changed.
+
 `io_uring` operations bypass per-operation syscalls, so at every `io_uring_enter` stop the tracer
 reads the opcodes pending in that ring's submission queue. A ring is accepted only without a
 kernel submission thread (`IORING_SETUP_SQPOLL`) and while every submission has no filesystem
@@ -258,6 +267,34 @@ refuses publication. On the direct route the operation acts on the source. A ref
 interrupted call drops the operation's result. `ShellMux::run_tool(directory, owner, tool,
 operation)` runs one such call in a transient shell built with the mux's builder and profile
 policy; the shell has no streams, is not a job, and closes when the call ends.
+
+### Typed managed sessions
+
+`ShellBuilder::build_managed_session()` and `ShellMux::open_managed_session(directory, options)`
+retain the ordinary backend, selected policy, owner, exported environment and pipeline resources,
+while forcing managed execution. `ManagedSession::epoch(tool, cancellation, async |epoch| ...)`
+accepts a fallible, epoch-borrowed operation. Tracked filesystem methods and direct-argv `spawn`
+avoid shell-command serialization; child streams and directory/glob iterators cannot outlive the
+active epoch. Path conversion identifies the private view; it does not authorize untracked I/O.
+
+A successful value is released only after complete evidence, authorization and WAL commitment.
+An operation error goes through that same authorization boundary, but commits capability history
+with no filesystem operations: earlier edits in the failed operation never reach the source.
+Denial, cancellation and infrastructure failure suppress the callback's value or error content.
+Use a fresh `ManagedCancellation` for every call; cancellation after commitment cannot undo a receipt.
+
+Between epochs the native tree stays parked behind a closed-evidence barrier and releases source
+admission. Reuse compares the whole work tree, including `.git`, with a frozen source snapshot;
+bookkeeping counters alone cannot detect editor writes. `ManagedError::Invalidated` means the
+callback was not entered and may be issued fresh. Comparison errors are execution failures, not
+retry signals. Equality holds at the freeze point, not against unrelated host writes afterward.
+Cached content reads and persistent mappings remain dependencies and are reauthorized each epoch.
+
+`ManagedOutcome::workspace_mutated` includes observed write intent and writes later reverted, not
+only the final diff. `retire()` drains children and resource monitors and discards the runtime while
+retaining its configuration; `close()` additionally fences admission. Direct-argv children keep the
+CLI's resource accounting across parks, and mux shutdown drains its managed sessions too. This is
+marsh's workspace transaction boundary, not mount-namespace, network or whole-host confinement.
 
 ### Ownership
 

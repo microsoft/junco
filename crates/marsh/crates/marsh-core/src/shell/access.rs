@@ -1,6 +1,6 @@
 //! Filesystem capabilities and freshness dependencies from native, stopped-task evidence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -28,6 +28,8 @@ pub(super) struct Effects {
     pub recursive_reads: Vec<PathBuf>,
     pub recursive_writes: Vec<PathBuf>,
     pub outside_writes: Vec<PathBuf>,
+    /// A successful protected write effect, including write-capable opens, even if reverted.
+    pub workspace_mutated: bool,
     /// A successful unlink/rmdir: `writes` names the removed entry, whose claims it clears.
     pub removed: bool,
     /// The one entry an explicit `release` relinquishes; nothing is read or written.
@@ -59,6 +61,7 @@ struct Mapping {
     end: u64,
     target: FileTarget,
     shared: bool,
+    protection: u64,
     generation: WorkGeneration,
     /// The name `target` was captured at has since been removed.
     // ponytail: removing the captured name retires the binding even if a hard link survives;
@@ -131,6 +134,11 @@ impl Access {
             Sysno::clone | Sysno::clone3 | Sysno::fork | Sysno::vfork
         ) && success
         {
+            // The real syscall return must not replace descriptor/mapping tables the child
+            // may already have changed after its kernel-confirmed creation event.
+            if info.creation_observed {
+                return Ok(effects);
+            }
             let flags = if info.info.syscall == Sysno::clone3 {
                 captured_flags(info)?
             } else if info.info.syscall == Sysno::clone {
@@ -306,37 +314,40 @@ impl Access {
                 }
             }
             Sysno::mmap => {
-                if success
-                    && integer(info, 3)? & u64::from(libc::MAP_ANONYMOUS.cast_unsigned()) == 0
-                {
-                    let target = info
-                        .fd(4)?
-                        .ok_or_else(|| "file mapping has no stopped-task identity".to_string())?;
-                    self.check_fd(info, 4, root)?;
-                    let protection = integer(info, 2)?;
-                    let shared =
-                        integer(info, 3)? & u64::from(libc::MAP_SHARED.cast_unsigned()) != 0;
-                    self.target_effect(
-                        &mut effects,
-                        target,
-                        root,
-                        protection & u64::from((libc::PROT_READ | libc::PROT_EXEC).cast_unsigned())
-                            != 0,
-                        shared && protection & u64::from(libc::PROT_WRITE.cast_unsigned()) != 0,
-                    )?;
+                if success {
                     let start =
                         returned(info).ok_or_else(|| "mapping has no address".to_string())?;
-                    let end = start
-                        .checked_add(integer(info, 1)?)
-                        .ok_or_else(|| "mapping range overflow".to_string())?;
-                    self.task(tid).mappings.lock().recover().push(Mapping {
-                        start,
-                        end,
-                        target: target.clone(),
-                        shared,
-                        generation: self.generation,
-                        binding_removed: false,
-                    });
+                    let end = mapping_end(start, integer(info, 1)?)?;
+                    let mapping = if integer(info, 3)?
+                        & u64::from(libc::MAP_ANONYMOUS.cast_unsigned())
+                        == 0
+                    {
+                        let target = info.fd(4)?.ok_or_else(|| {
+                            "file mapping has no stopped-task identity".to_string()
+                        })?;
+                        self.check_fd(info, 4, root)?;
+                        let mapping = Mapping {
+                            start,
+                            end,
+                            target: target.clone(),
+                            shared: integer(info, 3)? & u64::from(libc::MAP_SHARED.cast_unsigned())
+                                != 0,
+                            protection: integer(info, 2)?,
+                            generation: self.generation,
+                            binding_removed: false,
+                        };
+                        self.mapped_effect(&mapping, mapping.protection, root, &mut effects)?;
+                        Some(mapping)
+                    } else {
+                        None
+                    };
+                    let mut mappings = self.task(tid).mappings.lock().recover();
+                    self.replaced_mapping_effects(&mappings, start, end, root, &mut effects)?;
+                    // MAP_FIXED, including anonymous mappings, replaces any earlier origin.
+                    remove_mapping_range(&mut mappings, start, end);
+                    if let Some(mapping) = mapping {
+                        mappings.push(mapping);
+                    }
                 }
             }
             Sysno::mprotect
@@ -439,6 +450,7 @@ impl Access {
                     ) {
                         let exchange =
                             info.info.syscall == Sysno::renameat2 && integer(info, 4)? & 2 != 0;
+                        self.rename_bindings(&from, &to, exchange);
                         let mut moved = Vec::new();
                         for (path, target) in &self.links {
                             if let Ok(relative) = path.strip_prefix(&from) {
@@ -576,6 +588,43 @@ impl Access {
         }
     }
 
+    /// Keeps retained mappings and prepared hard-link aliases bound to the moved inode's name.
+    fn rename_bindings(&mut self, from: &Path, to: &Path, exchange: bool) {
+        let relocated = |path: &Path| {
+            if let Ok(relative) = path.strip_prefix(from) {
+                Some(to.join(relative))
+            } else if exchange && let Ok(relative) = path.strip_prefix(to) {
+                Some(from.join(relative))
+            } else {
+                None
+            }
+        };
+        for names in self.aliases.values_mut() {
+            names.retain_mut(|name| {
+                if let Some(renamed) = relocated(name) {
+                    *name = renamed;
+                    true
+                } else {
+                    !name.starts_with(to)
+                }
+            });
+        }
+        let mut seen = HashSet::new();
+        for task in std::iter::once(&self.host).chain(self.tasks.values()) {
+            if !seen.insert(Arc::as_ptr(&task.mappings)) {
+                continue;
+            }
+            for mapping in &mut *task.mappings.lock().recover() {
+                let path = target_path(&mapping.target);
+                if let Some(renamed) = relocated(&path) {
+                    mapping.target.path = renamed.into_os_string().into_encoded_bytes();
+                } else if path.starts_with(to) {
+                    mapping.binding_removed = true;
+                }
+            }
+        }
+    }
+
     /// Resolves an explicit release of the physical absolute `path`: ancestor links are followed,
     /// the final component is not, and the resolved entry must be a protected, nonroot resource.
     pub fn release(&self, path: &Path, root: &Path) -> Result<Effects, String> {
@@ -598,6 +647,31 @@ impl Access {
             Some(_) => Err("release names the source root, not a file".into()),
             None => Err(format!("{} is outside the source", resolved.display())),
         }
+    }
+
+    /// Reauthorizes memory that a retained native tree can access without another syscall.
+    pub fn persistent_effects(&self, root: &Path) -> Result<Effects, String> {
+        let mut effects = Effects::default();
+        let mut seen = HashSet::new();
+        for task in std::iter::once(&self.host).chain(self.tasks.values()) {
+            if !seen.insert(Arc::as_ptr(&task.mappings)) {
+                continue;
+            }
+            for mapping in &*task.mappings.lock().recover() {
+                self.check_mapping(mapping, root, false)?;
+                self.mapped_effect(mapping, mapping.protection, root, &mut effects)?;
+            }
+        }
+        for paths in [
+            &mut effects.reads,
+            &mut effects.writes,
+            &mut effects.dependencies,
+            &mut effects.outside_writes,
+        ] {
+            paths.sort_unstable();
+            paths.dedup();
+        }
+        Ok(effects)
     }
 
     fn task(&self, tid: Pid) -> &TaskState {
@@ -690,6 +764,7 @@ impl Access {
                     effects.reads.push(relative.clone());
                 }
                 if write {
+                    effects.workspace_mutated = true;
                     effects.writes.push(relative);
                 }
             } else if write {
@@ -831,75 +906,195 @@ impl Access {
         Ok(())
     }
 
+    fn check_mapping(
+        &self,
+        mapping: &Mapping,
+        root: &Path,
+        allow_removed: bool,
+    ) -> Result<(), String> {
+        if mapping.generation != self.generation
+            && protected(root, &target_path(&mapping.target))?.is_some()
+        {
+            return Err("mapping belongs to a retired work generation".into());
+        }
+        if mapping.binding_removed && !allow_removed {
+            return Err("mapped file's name was removed".into());
+        }
+        Self::check_origin(&mapping.target, root)
+    }
+
+    fn mapped_effect(
+        &self,
+        mapping: &Mapping,
+        protection: u64,
+        root: &Path,
+        effects: &mut Effects,
+    ) -> Result<(), String> {
+        // PROT_WRITE can also permit reads (including Linux x86_64's page permissions).
+        let read = protection
+            & u64::from((libc::PROT_READ | libc::PROT_EXEC | libc::PROT_WRITE).cast_unsigned())
+            != 0;
+        let write = mapping.shared && protection & u64::from(libc::PROT_WRITE.cast_unsigned()) != 0;
+        if read || write {
+            self.target_effect(effects, &mapping.target, root, read, write)?;
+        }
+        Ok(())
+    }
+
+    fn replaced_mapping_effects(
+        &self,
+        mappings: &[Mapping],
+        start: u64,
+        end: u64,
+        root: &Path,
+        effects: &mut Effects,
+    ) -> Result<(), String> {
+        for mapping in mappings {
+            if start < mapping.end && end > mapping.start {
+                self.check_mapping(mapping, root, true)?;
+                if !mapping.binding_removed {
+                    self.mapped_effect(mapping, mapping.protection, root, effects)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn mapping_effects(
         &self,
         info: &Syscall,
         root: &Path,
         effects: &mut Effects,
     ) -> Result<(), String> {
+        let call = info.info.syscall;
         let start = integer(info, 0)?;
-        let end = start
-            .checked_add(integer(info, 1)?)
-            .ok_or_else(|| "mapping range overflow".to_string())?;
-        let group = Arc::clone(&self.task(info.info.pid).mappings);
+        let old_length = integer(info, 1)?;
+        let remap = if call == Sysno::mremap {
+            let address =
+                returned(info).ok_or_else(|| "mremap lacks returned address".to_string())?;
+            let length = integer(info, 2)?;
+            Some((address, mapping_end(address, length)?, length))
+        } else {
+            None
+        };
+        // A zero-size mremap clones a shareable mapping instead of removing its old range.
+        let end = mapping_end(
+            start,
+            if old_length == 0 {
+                remap.map_or(0, |(_, _, length)| length)
+            } else {
+                old_length
+            },
+        )?;
+        if start == end {
+            return Ok(());
+        }
+        let keep_old = call == Sysno::mremap
+            && (old_length == 0
+                || integer(info, 3)? & u64::from(libc::MREMAP_DONTUNMAP.cast_unsigned()) != 0);
+        let group = &self.task(info.info.pid).mappings;
         let mut mappings = group.lock().recover();
         let mut after = Vec::new();
         for mapping in &*mappings {
             if start >= mapping.end || end <= mapping.start {
                 continue;
             }
-            if mapping.generation != self.generation
-                && protected(root, &target_path(&mapping.target))?.is_some()
-            {
-                return Err("mapping belongs to a retired work generation".into());
+            self.check_mapping(mapping, root, call == Sysno::munmap)?;
+            // Memory may have been used before its final protection change or unmap.
+            let protection = if matches!(call, Sysno::mprotect | Sysno::pkey_mprotect) {
+                mapping.protection | integer(info, 2)?
+            } else {
+                mapping.protection
+            };
+            if !mapping.binding_removed {
+                self.mapped_effect(mapping, protection, root, effects)?;
             }
-            if mapping.binding_removed && info.info.syscall != Sysno::munmap {
-                return Err("mapped file's name was removed".into());
-            }
-            Self::check_origin(&mapping.target, root)?;
-            if matches!(info.info.syscall, Sysno::mprotect | Sysno::pkey_mprotect) {
-                let protection = integer(info, 2)?;
-                self.target_effect(
-                    effects,
-                    &mapping.target,
-                    root,
-                    protection & u64::from((libc::PROT_READ | libc::PROT_EXEC).cast_unsigned())
-                        != 0,
-                    mapping.shared && protection & u64::from(libc::PROT_WRITE.cast_unsigned()) != 0,
-                )?;
-            }
-            if info.info.syscall == Sysno::munmap {
-                if mapping.start < start {
-                    after.push(Mapping {
-                        end: start,
+            if matches!(call, Sysno::mprotect | Sysno::pkey_mprotect) {
+                let updated = Mapping {
+                    start: mapping.start.max(start),
+                    end: mapping.end.min(end),
+                    protection: integer(info, 2)?,
+                    ..mapping.clone()
+                };
+                after.push(updated);
+            } else if let Some((address, new_end, _)) = remap {
+                let mapped_start = address
+                    .checked_add(mapping.start.max(start) - start)
+                    .ok_or_else(|| "mremap range overflow".to_string())?;
+                let mapped_end = if mapping.end >= end {
+                    new_end
+                } else {
+                    address
+                        .checked_add(mapping.end - start)
+                        .ok_or_else(|| "mremap range overflow".to_string())?
+                        .min(new_end)
+                };
+                if mapped_start < mapped_end {
+                    let moved = Mapping {
+                        start: mapped_start,
+                        end: mapped_end,
                         ..mapping.clone()
-                    });
-                }
-                if end < mapping.end {
-                    after.push(Mapping {
-                        start: end,
-                        ..mapping.clone()
-                    });
+                    };
+                    after.push(moved);
                 }
             }
-            if info.info.syscall == Sysno::mremap {
-                let address =
-                    returned(info).ok_or_else(|| "mremap lacks returned address".to_string())?;
-                after.push(Mapping {
-                    start: address,
-                    end: address
-                        .checked_add(integer(info, 2)?)
-                        .ok_or_else(|| "mremap overflow".to_string())?,
+        }
+        if matches!(call, Sysno::mprotect | Sysno::pkey_mprotect | Sysno::munmap)
+            || (call == Sysno::mremap && !keep_old)
+        {
+            remove_mapping_range(&mut mappings, start, end);
+        }
+        if let Some((address, new_end, _)) = remap {
+            self.replaced_mapping_effects(&mappings, address, new_end, root, effects)?;
+            remove_mapping_range(&mut mappings, address, new_end);
+        }
+        mappings.extend(after);
+        Ok(())
+    }
+}
+
+/// Kernel mapping operations round their lengths up to whole pages.
+fn mapping_end(start: u64, length: u64) -> Result<u64, String> {
+    static PAGE_SIZE: std::sync::LazyLock<Option<u64>> = std::sync::LazyLock::new(|| {
+        // SAFETY: sysconf only reads the process's page-size configuration.
+        u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+            .ok()
+            .filter(|size| *size != 0)
+    });
+    let page_size = (*PAGE_SIZE).ok_or_else(|| "unable to determine page size".to_string())?;
+    length
+        .checked_next_multiple_of(page_size)
+        .and_then(|length| start.checked_add(length))
+        .ok_or_else(|| "mapping range overflow".to_string())
+}
+
+fn remove_mapping_range(mappings: &mut Vec<Mapping>, start: u64, end: u64) {
+    if start >= end {
+        return;
+    }
+    let mut tail = None;
+    mappings.retain_mut(|mapping| {
+        if start >= mapping.end || end <= mapping.start {
+            return true;
+        }
+        if mapping.start < start {
+            if end < mapping.end {
+                tail = Some(Mapping {
+                    start: end,
                     ..mapping.clone()
                 });
             }
+            mapping.end = start;
+            true
+        } else if end < mapping.end {
+            mapping.start = end;
+            true
+        } else {
+            false
         }
-        if matches!(info.info.syscall, Sysno::munmap | Sysno::mremap) {
-            mappings.retain(|mapping| start >= mapping.end || end <= mapping.start);
-            mappings.extend(after);
-        }
-        drop(mappings);
-        Ok(())
+    });
+    if let Some(tail) = tail {
+        mappings.push(tail);
     }
 }
 
@@ -963,6 +1158,7 @@ fn dependency(effects: &mut Effects, root: &Path, path: &Path) -> Result<(), Str
 }
 fn write_path(effects: &mut Effects, root: &Path, path: PathBuf) -> Result<(), String> {
     if let Some(relative) = protected(root, &path)? {
+        effects.workspace_mutated = true;
         effects.writes.push(relative);
     } else {
         effects.outside_writes.push(path);

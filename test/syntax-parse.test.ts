@@ -141,9 +141,12 @@ test("prompt references inbound", () =>
 
 test("removed contracts field is rejected", () => {
   assert.throws(
-    () => parse(variant((d) => {
-      d.graph.nodes.B.contracts = { "A->B": "report" };
-    })),
+    () =>
+      parse(
+        variant((d) => {
+          d.graph.nodes.B.contracts = { "A->B": "report" };
+        }),
+      ),
     ValidationError,
   );
 });
@@ -1244,19 +1247,14 @@ test("strict object boundaries and malformed list/map entries", () => {
       "/mcp/server/cwd",
       (d) => (d.mcp = { server: { command: "unused", cwd: 1 } }),
     ],
-    ...[
-      "tools",
-      "skills",
-      "mcp",
-      "system",
-      "prompt",
-      "description",
-    ].map((field): [string, Mutate] => [
-      "/graph/nodes/A",
-      (d) => {
-        d.graph.nodes.A[field] = [2];
-      },
-    ]),
+    ...["tools", "skills", "mcp", "system", "prompt", "description"].map(
+      (field): [string, Mutate] => [
+        "/graph/nodes/A",
+        (d) => {
+          d.graph.nodes.A[field] = [2];
+        },
+      ],
+    ),
   ];
   for (const [path, mutate] of cases) rejectsAt(variant(mutate), path);
   for (const trigger of [

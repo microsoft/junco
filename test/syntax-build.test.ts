@@ -1824,93 +1824,87 @@ for (const row of [
   });
 
 test("builtin info exposes routes without receiver contracts", async () => {
-    let inspected = false;
-    const { models, faux } = await fauxRuntime([
-      fauxAssistantMessage(
-        [fauxToolCall("info", {}, { id: "inspect-routes" })],
-        { stopReason: "toolUse" },
-      ),
-      (context) => {
-        const result = context.messages.find(
-          (message) =>
-            message.role === "toolResult" &&
-            message.toolCallId === "inspect-routes",
-        );
-        assert.ok(
-          result?.role === "toolResult",
-          "the sender must see info's actual tool result on its next request",
-        );
-        const text = contentText(result.content);
-        assert.equal(result.isError, false);
-        assert.deepEqual(JSON.parse(text), {
-          parents: [],
-          children: [
-            { id: "Receiver", edgeId: "handoff", kind: "message" },
-          ],
-        });
-        inspected = true;
-        return fauxAssistantMessage("INSPECTED");
-      },
-    ]);
-    const { collection, active } = countedCollection();
-    let execution: Awaited<ReturnType<typeof build>> | undefined;
-    try {
-      execution = await build(
-        parse({
-          graph: {
-            nodes: {
-              Sender: {
-                prompt: "Inspect the receiver's routes using info.",
-              },
-              Receiver: {
-                trigger: "never",
-              },
+  let inspected = false;
+  const { models, faux } = await fauxRuntime([
+    fauxAssistantMessage([fauxToolCall("info", {}, { id: "inspect-routes" })], {
+      stopReason: "toolUse",
+    }),
+    (context) => {
+      const result = context.messages.find(
+        (message) =>
+          message.role === "toolResult" &&
+          message.toolCallId === "inspect-routes",
+      );
+      assert.ok(
+        result?.role === "toolResult",
+        "the sender must see info's actual tool result on its next request",
+      );
+      const text = contentText(result.content);
+      assert.equal(result.isError, false);
+      assert.deepEqual(JSON.parse(text), {
+        parents: [],
+        children: [{ id: "Receiver", edgeId: "handoff", kind: "message" }],
+      });
+      inspected = true;
+      return fauxAssistantMessage("INSPECTED");
+    },
+  ]);
+  const { collection, active } = countedCollection();
+  let execution: Awaited<ReturnType<typeof build>> | undefined;
+  try {
+    execution = await build(
+      parse({
+        graph: {
+          nodes: {
+            Sender: {
+              prompt: "Inspect the receiver's routes using info.",
             },
-            edges: [
-              {
-                from: "Sender",
-                to: "Receiver",
-                kind: "message",
-                id: "handoff",
-                schema: prompt,
-              },
-              { from: "Receiver", to: "$sink", schema: reply },
-            ],
+            Receiver: {
+              trigger: "never",
+            },
           },
-        }),
-        { ...options(), models, collection, ladder: fauxLadder },
-      );
-      await execution.run();
-      assert.equal(inspected, true);
-      assert.equal(
-        faux.state.callCount,
-        2,
-        "only the sender runs; topology discovery must not execute the receiver",
-      );
-      assert.equal(faux.getPendingResponseCount(), 0);
-      assert.equal(
-        resultText(execution.graph, graph.NodeId.create("Sender")),
-        "INSPECTED",
-      );
-      assert.equal(
-        execution.graph.result(graph.NodeId.create("Receiver"))._tag,
-        "None",
-      );
-      assert.equal(
-        execution.graph.result(execution.graph.sink.id)._tag,
-        "None",
-      );
-      await execution.graph.close();
-      assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
+          edges: [
+            {
+              from: "Sender",
+              to: "Receiver",
+              kind: "message",
+              id: "handoff",
+              schema: prompt,
+            },
+            { from: "Receiver", to: "$sink", schema: reply },
+          ],
+        },
+      }),
+      { ...options(), models, collection, ladder: fauxLadder },
+    );
+    await execution.run();
+    assert.equal(inspected, true);
+    assert.equal(
+      faux.state.callCount,
+      2,
+      "only the sender runs; topology discovery must not execute the receiver",
+    );
+    assert.equal(faux.getPendingResponseCount(), 0);
+    assert.equal(
+      resultText(execution.graph, graph.NodeId.create("Sender")),
+      "INSPECTED",
+    );
+    assert.equal(
+      execution.graph.result(graph.NodeId.create("Receiver"))._tag,
+      "None",
+    );
+    assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
+    await execution.graph.close();
+    assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 0 });
+  } finally {
+    try {
+      await execution?.graph.close();
     } finally {
-      try {
-        await execution?.graph.close();
-      } finally {
-        await collection.close();
-      }
+      await collection.close();
     }
-    assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 1 });
-  });
+  }
+  assert.deepEqual(active, { leases: 0, bindings: 0, creatorCloses: 1 });
+});
 
 for (const nested of [false, true])
   for (const cleanupFails of [false, true])

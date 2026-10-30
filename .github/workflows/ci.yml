@@ -108,7 +108,6 @@ jobs:
               "@earendil-works/pi-agent-core",
               "@earendil-works/pi-ai",
               "@earendil-works/pi-coding-agent",
-              "@oh-my-pi/pi-coding-agent",
             ]) {
               const destination = join(consumer, "node_modules", name);
               await mkdir(dirname(destination), { recursive: true });

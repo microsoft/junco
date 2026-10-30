@@ -208,11 +208,7 @@ function inert(
 }
 
 /** A coroutine node `id` recording every payload delivered on `edge`. */
-function sink(
-  graph: Graph,
-  edge: Edge<Chat, AssistantMessage>,
-  id: string,
-) {
+function sink(graph: Graph, edge: Edge<Chat, AssistantMessage>, id: string) {
   const delivered: AgenticInput[] = [];
   const body = new Deterministic<Chat, AssistantMessage>(async function* () {
     let view = yield [];
@@ -1497,14 +1493,12 @@ for (const strategy of STRATEGIES) {
       const bw = chatEdge("b-w");
       const xy = chatEdge("b-d");
       const be = chatEdge("b-e");
-      const b = await member(
-        [
-          call("info", {}, "info-1"),
-          call("yield", { reason: "topology may change" }, "yield-1"),
-          call("info", {}, "info-2"),
-          fauxAssistantMessage("inspected"),
-        ],
-      );
+      const b = await member([
+        call("info", {}, "info-1"),
+        call("yield", { reason: "topology may change" }, "yield-1"),
+        call("info", {}, "info-2"),
+        fauxAssistantMessage("inspected"),
+      ]);
       // Topology discovery does not execute a receiving agent.
       const d = new MockAgent({ runs: [] });
       const graphPorts = terminalPorts();
@@ -1645,7 +1639,6 @@ for (const strategy of STRATEGIES) {
       const result = graph.result(bId);
       assert.ok(O.isSome(result) && textOf(result.value) === "inspected");
     });
-
   });
 }
 

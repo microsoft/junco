@@ -47,14 +47,6 @@ fn parse_mode(mode: &str) -> Result<EditMode> {
 // Policy and result objects
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A cached `vault://` root.
-#[napi(object)]
-pub struct EditVaultRoot {
-    /// Vault name; `_` is the active vault.
-    pub name: String,
-    pub root: String,
-}
-
 /// Session-wide policy; TypeScript builds it once per tool call.
 #[napi(object)]
 pub struct EditPolicy {
@@ -66,10 +58,12 @@ pub struct EditPolicy {
     pub enforce_seen_lines: bool,
     pub block_auto_generated: bool,
     pub plan_active: bool,
-    /// Root of the `local://` artifact sandbox; null when the session has none.
-    pub local_sandbox_root: Option<String>,
-    /// Cached vault roots; null when the vault protocol is disabled.
-    pub vault_roots: Option<Vec<EditVaultRoot>>,
+    /// Internal URL schemes recognized by the host; empty for filesystem-only tools.
+    pub url_schemes: Vec<String>,
+    /// Registered schemes that also accept a single-slash URL spelling.
+    pub url_alias_schemes: Vec<String>,
+    /// Plain-path roots that remain writable in plan mode.
+    pub plan_writable_roots: Vec<String>,
     pub home_dir: String,
     /// The payload is a verbatim custom-format string, not JSON.
     pub raw_input: bool,
@@ -82,13 +76,13 @@ impl EditPolicy {
             policy: PathPolicy {
                 cwd: PathBuf::from(self.cwd),
                 home_dir: PathBuf::from(self.home_dir),
-                local_sandbox_root: self.local_sandbox_root.map(PathBuf::from),
-                vault_roots: self.vault_roots.map(|roots| {
-                    roots
-                        .into_iter()
-                        .map(|r| (r.name, PathBuf::from(r.root)))
-                        .collect()
-                }),
+                url_schemes: self.url_schemes,
+                url_alias_schemes: self.url_alias_schemes,
+                plan_writable_roots: self
+                    .plan_writable_roots
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
                 plan_active: self.plan_active,
                 block_auto_generated: self.block_auto_generated,
             },
@@ -265,7 +259,7 @@ impl EditStore {
     pub fn seen_lines(&self, absolute_path: String, hash: String) -> Option<Vec<u32>> {
         self.inner
             .by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
-            .and_then(|s| s.seen_lines.map(|set| set.into_iter().collect()))
+            .and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect()))
     }
 
     #[napi]
@@ -518,6 +512,7 @@ pub fn edit_diff_string(
         &BlockContextSource {
             path: path.as_deref(),
             lang: None,
+            streaming: false,
         },
     );
     EditDiffResult {
@@ -546,8 +541,9 @@ pub fn edit_auto_generated_message(absolute_path: String, display_path: String) 
     let policy = PathPolicy {
         cwd: PathBuf::new(),
         home_dir: PathBuf::new(),
-        local_sandbox_root: None,
-        vault_roots: None,
+        url_schemes: Vec::new(),
+        url_alias_schemes: Vec::new(),
+        plan_writable_roots: Vec::new(),
         plan_active: false,
         block_auto_generated: true,
     };
