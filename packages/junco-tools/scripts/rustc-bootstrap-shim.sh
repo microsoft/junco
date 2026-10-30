@@ -7,7 +7,7 @@
 # `#![feature(stmt_expr_attributes)]`. That upstream crate cannot build on a
 # stable channel without the bootstrap escape hatch.
 #
-# Rather than moving junco off its pinned stable 1.95.0 toolchain (which would
+# Rather than moving junco off its pinned stable 1.98.1 toolchain (which would
 # let *every* crate, including junco's own, use unstable features), this shim
 # exports RUSTC_BOOTSTRAP only for the specific dependency crates that require
 # it. Every other compilation unit is compiled by plain stable rustc.

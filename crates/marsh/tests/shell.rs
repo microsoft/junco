@@ -190,6 +190,52 @@ async fn release_effects_keep_causal_order() {
     }
 }
 
+/// A blind foreign edit plus release leaves no owner and keeps A as the last reader, so only the
+/// stale-view rule can refuse A's edit; reading in the same batch refreshes A's view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn foreign_release_requires_a_fresh_read() {
+    let fixture = seed();
+    let a = fixture.shell().await;
+    let b = fixture
+        .managed_builder()
+        .shell_policy(Arc::new(marsh::EmptyPolicy))
+        .build()
+        .await
+        .unwrap();
+    run(&a, "/bin/cat src/a.txt >/dev/null").await;
+    run(&b, "printf B > src/a.txt; release -- src/a.txt").await;
+
+    let error = denied(&a, "printf lost > src/a.txt").await;
+    let ShellErrorKind::Denied { denials } = error.kind() else {
+        unreachable!()
+    };
+    let [denial] = denials.as_slice() else {
+        panic!("one refused edit: {error}");
+    };
+    assert_eq!(&denial.event.principal, a.principal());
+    assert_eq!(denial.event.action, marsh::Action::Edit);
+    assert_eq!(denial.event.resource.segments(), ["src", "a.txt"]);
+    let reader = a.principal().to_string();
+    assert!(
+        denial
+            .allowed_fixes
+            .iter()
+            .any(|fix| fix.contains(&reader) && fix.contains("read")),
+        "{error}"
+    );
+    assert_eq!(fixture.bytes("src/a.txt"), b"B");
+
+    run(
+        &a,
+        "/bin/cat src/a.txt >/dev/null; printf fresh > src/a.txt",
+    )
+    .await;
+    assert_eq!(fixture.bytes("src/a.txt"), b"fresh");
+    a.close(false).await.unwrap();
+    b.close(false).await.unwrap();
+}
+
 /// Native Git is an ordinary writer: staging changes the index but releases nothing, and its
 /// metadata is owned like any other file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -276,17 +322,11 @@ struct OneEditPerBatch;
 impl marsh::Policy for OneEditPerBatch {
     fn evaluator<'batch>(
         &'batch self,
-        _arena: &'batch marsh::Bump,
-    ) -> Box<
-        dyn FnMut(
-                &marsh::PolicyHistory<'batch>,
-                &marsh::PolicyEvent<'batch>,
-            ) -> marsh::PolicyDecision
-            + 'batch,
-    > {
+        _store: Arc<marsh::PolicyStore<'batch>>,
+    ) -> Result<Box<marsh::PolicyFn<'batch>>, marsh::ShellError> {
         let mut edited = false;
-        Box::new(move |_, event| {
-            if event.action != marsh::Action::Edit {
+        Ok(Box::new(move |_, event| {
+            Ok(if event.action != marsh::Action::Edit {
                 marsh::PolicyDecision::Grant
             } else if edited {
                 marsh::PolicyDecision::Deny {
@@ -296,8 +336,8 @@ impl marsh::Policy for OneEditPerBatch {
             } else {
                 edited = true;
                 marsh::PolicyDecision::Grant
-            }
-        })
+            })
+        }))
     }
 }
 

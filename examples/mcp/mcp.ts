@@ -23,7 +23,7 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco";
 import type { TSchema } from "typebox";
-import { runCli, verifiedModels } from "../support.ts";
+import { problemRecorder, runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
 
 /** Validate both reports before publishing the dependency report as the graph result. */
@@ -82,11 +82,12 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
   let researchText: string;
   let dependencyText: string;
   {
-    // LIFO: close the graph (its agents, their graft servers and the collection), then flush the tracer.
+    // LIFO: close the graph (its agents, their graft servers and the collection), flush the tracer, then close the recorder.
     await using lifetime = new AsyncDisposableStack();
     signal?.throwIfAborted();
     const models = await verifiedModels(LADDER.med, signal);
     signal?.throwIfAborted();
+    const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
       models,
@@ -94,6 +95,7 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
       code: { Reports },
       scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,
+      recorder,
       signal,
     });
     lifetime.defer(() => execution.graph.tracer.flush());

@@ -4,13 +4,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::completion::{Completion, Finalize};
 use super::execution::ExecutedTransaction;
 use super::session::{Authority, Session};
 use super::{ShellError, ShellErrorKind};
-pub use junco_policy::{Action, Bump, PolicyDecision};
+pub use history_semantics::PolicyDecision;
+use history_store::{History, Store};
+pub use junco_policy::Action;
 use marsh_lib::RecoverPoison as _;
 use marsh_wal::CommitOp;
 
@@ -133,7 +135,16 @@ impl Event {
 /// One owned [`Event`] borrowed for a single policy evaluation.
 pub type PolicyEvent<'a> = junco_policy::LockEvent<&'a Principal, &'a Resource>;
 /// Committed and tentative events of one evaluation, borrowed from owned history.
-pub type PolicyHistory<'a> = junco_policy::History<PolicyEvent<'a>>;
+pub type PolicyHistory<'a> = History<PolicyEvent<'a>>;
+/// Typed event store every history and compiled evaluator of one batch shares.
+pub type PolicyStore<'a> = Store<PolicyEvent<'a>>;
+/// One batch's decision function. Errors are operational failures, never denials.
+pub type PolicyFn<'a> =
+    dyn FnMut(&PolicyHistory<'a>, &PolicyEvent<'a>) -> Result<PolicyDecision, ShellError> + 'a;
+
+fn policy_error(error: impl std::error::Error + Send + Sync + 'static) -> ShellError {
+    ShellError::caused(ShellErrorKind::Infrastructure, error)
+}
 
 /// Receives every capability decision `Authority::check` makes, in order, before its effect.
 /// A grant is tentative: a later denial in the same batch or a failed publication rolls it back.
@@ -177,11 +188,11 @@ impl std::fmt::Display for Denial {
 /// once per command batch and owns everything around it: observer notification, append-on-grant,
 /// denial collection, rollback, freshness, and publication. The evaluator only decides.
 pub trait Policy: Send + Sync + 'static {
-    /// Fresh decision state for one batch; `arena` outlives it.
+    /// Fresh decision state for one batch over histories owned by `store`.
     fn evaluator<'batch>(
         &'batch self,
-        arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>;
+        store: Arc<PolicyStore<'batch>>,
+    ) -> Result<Box<PolicyFn<'batch>>, ShellError>;
 }
 
 /// The ownership-lock capability policy: a shell's default.
@@ -190,11 +201,12 @@ pub struct LockPolicy;
 impl Policy for LockPolicy {
     fn evaluator<'batch>(
         &'batch self,
-        arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>
-    {
-        let mut evaluator = junco_policy::LockPolicy::new(arena);
-        Box::new(move |history, event| evaluator.decide(history, event))
+        store: Arc<PolicyStore<'batch>>,
+    ) -> Result<Box<PolicyFn<'batch>>, ShellError> {
+        let mut policy = junco_policy::LockPolicy::new(store).map_err(policy_error)?;
+        Ok(Box::new(move |history, event| {
+            policy.decide(history, event).map_err(policy_error)
+        }))
     }
 }
 
@@ -204,10 +216,9 @@ pub struct EmptyPolicy;
 impl Policy for EmptyPolicy {
     fn evaluator<'batch>(
         &'batch self,
-        _arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>
-    {
-        Box::new(|_, _| PolicyDecision::Grant)
+        _store: Arc<PolicyStore<'batch>>,
+    ) -> Result<Box<PolicyFn<'batch>>, ShellError> {
+        Ok(Box::new(|_, _| Ok(PolicyDecision::Grant)))
     }
 }
 
@@ -235,12 +246,15 @@ impl PolicyValidator {
                 "source requires recovery before new commands",
             ));
         }
-        let arena = Bump::new();
-        let history =
-            PolicyHistory::from_events(authority.history.iter().map(Event::as_policy_event));
+        let store = Arc::new(PolicyStore::new().map_err(policy_error)?);
+        let history = PolicyHistory::from_events(
+            Arc::clone(&store),
+            authority.history.iter().map(Event::as_policy_event),
+        )
+        .map_err(policy_error)?;
         let candidate = event.as_policy_event();
-        let mut policy = junco_policy::LockPolicy::new(&arena);
-        Ok(policy.decide(&history, &candidate))
+        let mut policy = junco_policy::LockPolicy::new(store).map_err(policy_error)?;
+        policy.decide(&history, &candidate).map_err(policy_error)
     }
     pub(super) fn read(&self) -> RwLockReadGuard<'_, Authority> {
         self.authority.read().recover()
@@ -266,21 +280,24 @@ impl Authority {
         shell_policy: &dyn Policy,
         events: &[Event],
         observer: Option<&PolicyObserver>,
-    ) -> Result<(), Vec<Denial>> {
+    ) -> Result<(), ShellError> {
         let denials = {
-            let arena = Bump::new();
-            let mut history =
-                PolicyHistory::from_events(self.history.iter().map(Event::as_policy_event));
-            let mut decide = shell_policy.evaluator(&arena);
+            let store = Arc::new(PolicyStore::new().map_err(policy_error)?);
+            let mut history = PolicyHistory::from_events(
+                Arc::clone(&store),
+                self.history.iter().map(Event::as_policy_event),
+            )
+            .map_err(policy_error)?;
+            let mut decide = shell_policy.evaluator(store)?;
             let mut denials = Vec::new();
             for event in events {
                 let candidate = event.as_policy_event();
-                let decision = decide(&history, &candidate);
+                let decision = decide(&history, &candidate)?;
                 if let Some(observer) = observer {
                     observer.notify(event, &decision);
                 }
                 match decision {
-                    PolicyDecision::Grant => history.push(candidate),
+                    PolicyDecision::Grant => history.push(candidate).map_err(policy_error)?,
                     PolicyDecision::Deny {
                         failed_precondition,
                         allowed_fixes,
@@ -297,7 +314,7 @@ impl Authority {
             self.history.extend_from_slice(events);
             Ok(())
         } else {
-            Err(denials)
+            Err(ShellError::new(ShellErrorKind::Denied { denials }))
         }
     }
 }
@@ -371,9 +388,7 @@ pub(super) fn authorize<'session>(
         }
         let events = translate(&executed)?;
         let checkpoint = guard.history.len();
-        guard
-            .check(shell_policy, &events, observer)
-            .map_err(|denials| ShellError::new(ShellErrorKind::Denied { denials }))?;
+        guard.check(shell_policy, &events, observer)?;
         Ok((guard, operations, events, checkpoint))
     })();
     match admitted {
@@ -532,9 +547,12 @@ mod tests {
             Event::new("alice", Action::Release, Resource::from(["a/b"])),
             Event::new("eve", Action::Edit, Resource::from(["a", "b"])),
         ];
-        let denials = authority
+        let error = authority
             .check(&LockPolicy, &batch, Some(&observer))
             .expect_err("the batch has two refused capabilities");
+        let ShellErrorKind::Denied { denials } = error.kind() else {
+            panic!("expected a denial, got {error:?}");
+        };
         let denied: Vec<_> = denials.iter().map(|denial| &denial.event).collect();
         assert_eq!(denied, [&batch[1], &batch[3]]);
         let markers: Vec<_> = seen.lock().unwrap().iter().cloned().collect();
@@ -555,5 +573,49 @@ mod tests {
             .expect("the rejected batch left no read claim behind");
         assert_eq!(authority.history, [initial, retry.clone()]);
         assert_eq!(seen.lock().unwrap().last(), Some(&(retry, true)));
+    }
+
+    /// Grants its first decision, then fails operationally.
+    struct FailSecond;
+    impl Policy for FailSecond {
+        fn evaluator<'batch>(
+            &'batch self,
+            _store: Arc<PolicyStore<'batch>>,
+        ) -> Result<Box<PolicyFn<'batch>>, ShellError> {
+            let mut decided = false;
+            Ok(Box::new(move |_, _| {
+                if std::mem::replace(&mut decided, true) {
+                    Err(ShellError::infrastructure("test policy failure"))
+                } else {
+                    Ok(PolicyDecision::Grant)
+                }
+            }))
+        }
+    }
+
+    #[test]
+    fn policy_error_rolls_back_tentative_grants() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observer = PolicyObserver::new({
+            let seen = Arc::clone(&seen);
+            move |event, decision| {
+                let granted = matches!(decision, PolicyDecision::Grant);
+                seen.lock().unwrap().push((event.clone(), granted));
+            }
+        });
+        let initial = Event::new("alice", Action::Edit, Resource::from(["a"]));
+        let mut authority = Authority::default();
+        authority.history.push(initial.clone());
+
+        let batch = [
+            Event::new("bob", Action::Read, Resource::from(["b"])),
+            Event::new("bob", Action::Edit, Resource::from(["b"])),
+        ];
+        let error = authority
+            .check(&FailSecond, &batch, Some(&observer))
+            .expect_err("the second decision fails");
+        assert_eq!(error.kind(), &ShellErrorKind::Infrastructure);
+        assert_eq!(authority.history, [initial]);
+        assert_eq!(*seen.lock().unwrap(), [(batch[0].clone(), true)]);
     }
 }

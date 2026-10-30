@@ -19,12 +19,13 @@
 //! ```
 
 pub use marsh_core::{
-    Action, Bump, CommandContext, CpuLimit, Denial, EmptyPolicy, Event, ExecutionParameters,
+    Action, CommandContext, CpuLimit, Denial, EmptyPolicy, Event, ExecutionParameters,
     ExecutionResult, LockPolicy, MIB, MarshTool, MemoryLimit, OpenFile, PipelineOptions, Policy,
-    PolicyDecision, PolicyEvent, PolicyHistory, PolicyValidator, Principal, ProfileLoadBehavior,
-    RcLoadBehavior, Resource, ResourceEvent, ResourceLimits, ResourceMonitorConfig, ResourceSample,
-    SandboxPolicy, Shell, ShellBuilder, ShellCommand, ShellEnvironment, ShellError, ShellErrorKind,
-    ShellFd, ShellVariable, Signal, SourceInfo, UIOptions, builtins, fresh_principal, shellmux,
+    PolicyDecision, PolicyEvent, PolicyFn, PolicyHistory, PolicyStore, PolicyValidator, Principal,
+    ProfileLoadBehavior, RcLoadBehavior, Resource, ResourceEvent, ResourceLimits,
+    ResourceMonitorConfig, ResourceSample, SandboxPolicy, Shell, ShellBuilder, ShellCommand,
+    ShellEnvironment, ShellError, ShellErrorKind, ShellFd, ShellVariable, Signal, SourceInfo,
+    UIOptions, builtins, fresh_principal, shellmux,
 };
 
 pub mod rmux;

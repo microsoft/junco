@@ -824,6 +824,12 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "convert_case"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+
+[[package]]
+name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
@@ -1063,7 +1069,7 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
- "convert_case",
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
@@ -1464,12 +1470,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashconsing"
-version = "1.7.0"
-source = "git+https://github.com/elefthei/hashconsing?rev=6d79a7e287adbb9a8e43ddf96a956b80a156dfd0#6d79a7e287adbb9a8e43ddf96a956b80a156dfd0"
+name = "hashconsius"
+version = "0.1.0"
+source = "git+https://github.com/elefthei/hashconsius?rev=d7c17483a46b42a9e179cbfa0fdae9b7e8043dbf#d7c17483a46b42a9e179cbfa0fdae9b7e8043dbf"
 dependencies = [
- "bumpalo",
- "lazy_static",
+ "verus-bumpalo",
+ "vstd",
 ]
 
 [[package]]
@@ -1520,6 +1526,42 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "history-semantics"
+version = "0.1.0"
+dependencies = [
+ "history-store",
+ "history-syntax",
+ "junco-core",
+ "smallvec",
+ "thiserror 2.0.21",
+ "vstd",
+]
+
+[[package]]
+name = "history-store"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "hashconsius",
+ "history-syntax",
+ "junco-core",
+ "lru",
+ "parking_lot",
+ "smallvec",
+ "spin",
+ "verus-bumpalo",
+ "vstd",
+]
+
+[[package]]
+name = "history-syntax"
+version = "0.1.0"
+dependencies = [
+ "frunk_core",
+ "vstd",
+]
 
 [[package]]
 name = "hkdf"
@@ -1861,18 +1903,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "junco-core"
+version = "0.1.0"
+dependencies = [
+ "history-syntax",
+ "smallvec",
+ "thiserror 2.0.21",
+ "vstd",
+]
+
+[[package]]
 name = "junco-policy"
 version = "0.1.0"
 dependencies = [
- "bumpalo",
- "frunk_core",
- "hashbrown 0.17.1",
- "hashconsing",
- "lru 0.19.0",
- "smallbitvec",
- "smallvec",
- "string-interner",
- "thiserror 2.0.21",
+ "history-semantics",
+ "history-store",
+ "history-syntax",
+ "junco-core",
 ]
 
 [[package]]
@@ -2085,15 +2132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lru"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
-dependencies = [
- "hashbrown 0.17.1",
-]
-
-[[package]]
 name = "lurk-cli"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2173,6 +2211,8 @@ dependencies = [
  "git2",
  "glob",
  "hex",
+ "history-semantics",
+ "history-store",
  "junco-policy",
  "libc",
  "lurk-cli",
@@ -2848,7 +2888,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.14.0",
  "kasuari",
- "lru 0.18.5",
+ "lru",
  "strum",
  "thiserror 2.0.21",
  "unicode-segmentation",
@@ -3380,16 +3420,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "smallbitvec"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b0e903ee191d8f7a8fbf0d712c3a1699d19e04ceba5ad1eb673053c7d938a09"
-
-[[package]]
 name = "smallvec"
-version = "1.16.4"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "socket2"
@@ -3400,6 +3434,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
 
 [[package]]
 name = "stable_deref_trait"
@@ -3425,16 +3465,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "string-interner"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad3df9b59e2eded8d825c7c4363ad339a20fb6bc0b9a4778560f518f59910b15"
-dependencies = [
- "hashbrown 0.16.1",
- "serde",
-]
 
 [[package]]
 name = "strip-ansi-escapes"
@@ -3498,6 +3528,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synstructure"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3932,6 +3973,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "verus-bumpalo"
+version = "0.1.0"
+source = "git+https://github.com/elefthei/bumpus?rev=888a6983370524cf1686d82e5814dd17a2dd14e5#888a6983370524cf1686d82e5814dd17a2dd14e5"
+dependencies = [
+ "vstd",
+]
+
+[[package]]
+name = "verus_builtin"
+version = "0.0.0-2026-09-16-0054"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e4a9e69d45ddbe303075756d3fc2fcc965eb9dc70c80651d0e4458a6af1ed83"
+
+[[package]]
+name = "verus_builtin_macros"
+version = "0.0.0-2026-09-20-0158"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "213ca3e8a80925aec251d3f1952a213d6090156b58ad81dccc3a2f1fed77c99f"
+dependencies = [
+ "convert_case 0.4.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
+ "verus_prettyplease",
+ "verus_syn",
+]
+
+[[package]]
+name = "verus_prettyplease"
+version = "0.0.0-2026-09-06-0133"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71956c0dcf55f57fd5a5335fff16981f7e0912d2e887914518c5a64fe36c063c"
+dependencies = [
+ "proc-macro2",
+ "verus_syn",
+]
+
+[[package]]
+name = "verus_state_machines_macros"
+version = "0.0.0-2026-09-06-0133"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f78ea16629331605a440e9e0a259dd3492a78212186ba82253ad0988127407f"
+dependencies = [
+ "indexmap",
+ "proc-macro2",
+ "quote",
+ "verus_syn",
+]
+
+[[package]]
+name = "verus_syn"
+version = "0.0.0-2026-09-06-0133"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8b53574934e1f608dfccd809ce17f3733d6eb99c14ce8220326121929e1637"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "vstd"
+version = "0.0.0-2026-10-04-0306"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f22e1cad7b5f35642a5a020b25e9b49915066d836bab77f8431bbc80228290a7"
+dependencies = [
+ "verus_builtin",
+ "verus_builtin_macros",
+ "verus_state_machines_macros",
+]
+
+[[package]]
 name = "vte"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4312,7 +4426,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
- "synstructure",
+ "synstructure 0.14.0",
 ]
 
 [[package]]
@@ -4353,7 +4467,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
- "synstructure",
+ "synstructure 0.14.0",
 ]
 
 [[package]]

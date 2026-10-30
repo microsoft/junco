@@ -13,7 +13,7 @@ The file-tool engines (`pi-ast`, `pi-diff`, `pi-walker`, and `pi-edit`) and thei
 Requirements:
 
 - Linux x86-64 with glibc; Node.js **22.19.0 or newer** and Bun **1.4.2**.
-- Rust **1.95.0**, selected by `rust-toolchain.toml`.
+- Rust **1.98.1**, selected by `rust-toolchain.toml`.
 - This package lives in the junco Bun workspace at `packages/junco-tools`. Cargo builds `marsh-core`, `marsh-btrfs` and the patched `brush-core`/`brush-interactive` from the monorepo's `crates/marsh` (which takes `junco-policy` from `crates/junco-policy`), and fetches the pinned `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` revision from the public `can1357/oh-my-pi` repository: HTTPS access to GitHub, or that revision already in the Cargo cache. No sibling checkout or SSH key is needed.
 - Native build libraries. On Ubuntu 24.04:
 
@@ -30,7 +30,7 @@ The build launcher defaults to isolated Rust homes. If Rust is not installed the
 export CARGO_HOME="$HOME/.local/share/junco-tools/cargo"
 export RUSTUP_HOME="$HOME/.local/share/junco-tools/rustup"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-  sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
+  sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.98.1
 ```
 
 Then build the package:
@@ -49,7 +49,7 @@ The root `bun install` already runs `bun run build:native` through the workspace
 
 The launcher preserves explicit `CARGO_HOME` and `RUSTUP_HOME`. Native build scripts use the committed Cargo lockfile (refreshed for marsh and junco-policy as above) and fetch Git dependencies with the git CLI over anonymous HTTPS; they do not change global Git configuration. For direct Cargo commands, use `node scripts/with-junco-build-env.mjs cargo …` too.
 
-The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`. Oh My Pi builds on nightly, and `pi-edit`'s `xutf ^1.5` requirement currently resolves to `xutf 1.6.0`, which unconditionally enables `portable_simd` and `stmt_expr_attributes`. The shim exports `RUSTC_BOOTSTRAP` **only** while compiling that one crate, so junco's own crate and every other dependency still compile as plain stable 1.95.0 rather than moving the toolchain off the stable channel.
+The launcher also installs `scripts/rustc-bootstrap-shim.sh` as `RUSTC_WRAPPER`. Oh My Pi builds on nightly, and `pi-edit`'s `xutf ^1.5` requirement currently resolves to `xutf 1.6.0`, which unconditionally enables `portable_simd` and `stmt_expr_attributes`. The shim exports `RUSTC_BOOTSTRAP` **only** while compiling that one crate, so junco's own crate and every other dependency still compile as plain stable 1.98.1 rather than moving the toolchain off the stable channel.
 
 The `code_graph` engine lives in this package's [`crates/rust-graph`](crates/rust-graph) directory as a standalone Cargo workspace, with its own lockfile and toolchain pin. From this package, run `(cd crates/rust-graph && cargo test --locked)` to test it.
 

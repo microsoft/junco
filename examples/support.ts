@@ -1,7 +1,9 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import type { AgentTool, PromptTemplate, Skill } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Agentic, agent, JuncoGraph, schedules } from "junco";
+import { type Agentic, type agent, type JuncoGraph, type schedules, tracer } from "junco";
 import type { TSchema } from "typebox";
 
 /** A native member as YAML graphs host it: runtime-loaded inbox schemas and unknown parent values. */
@@ -39,6 +41,13 @@ export async function runCli(main: (signal: AbortSignal) => Promise<void>): Prom
     process.exitCode = cancellation.signal.aborted ? 130 : 1;
   }
   if (cancellation.signal.aborted) process.exitCode = 130;
+}
+
+/** A profile recorder appending to `<problem>/.junco/log.jsonl`; the caller closes it after its last graph. */
+export async function problemRecorder(problem: string): Promise<tracer.JsonlRecorder> {
+  const directory = join(problem, ".junco");
+  await mkdir(directory, { recursive: true });
+  return new tracer.JsonlRecorder({ path: join(directory, "log.jsonl") });
 }
 
 /** A network-refreshed `ModelRuntime` whose catalog, saved login and thinking support cover `rung`. */

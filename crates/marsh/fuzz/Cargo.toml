@@ -11,7 +11,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 # Application tier; see docs/reference/msrv-policy.md.
-rust-version = "1.95.0"
+rust-version = "1.98.1"
 
 [package.metadata]
 cargo-fuzz = true

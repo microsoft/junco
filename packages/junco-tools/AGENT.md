@@ -6,7 +6,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 
 - This is a private, local TypeScript package with a Rust napi-rs addon. It replaces **Pi's agent `bash`, `read`, `edit`, `grep`, and `find` tools** and adds `ast_grep`, `ast_edit`, and `diff`. `bash` runs on marsh ShellMux; the file tools run on Oh My Pi's `pi-ast`/`pi-diff`/`pi-walker`/`pi-edit` engines, imported unmodified from a pinned public Git revision, each call routed through the same mux as a marsh tool call. Pi's `write`, `ls`, and `user_bash` stay untouched.
 - Target `@earendil-works/pi-coding-agent@0.80.6`, not Oh My Pi. Preserve Pi's public tool interface rather than introducing another schema or error-result convention.
-- Supported build target: Linux x86-64 GNU/glibc, Node.js >=22.19.0, Rust 1.95.0. Bun is not required by the package.
+- Supported build target: Linux x86-64 GNU/glibc, Node.js >=22.19.0, Rust 1.98.1. Bun is not required by the package.
 - Keep changes scoped to the request. Preserve unrelated local work. Do not push, publish packages, change global Git settings, replace system Rust, or create/migrate filesystem subvolumes unless explicitly authorized.
 
 ## Source map
@@ -65,7 +65,7 @@ For focused Rust checks and formatting, use the same launcher as the package's n
 ```sh
 node scripts/with-junco-build-env.mjs cargo check --locked
 # The minimal Rust profile does not include rustfmt; install it when needed.
-node scripts/with-junco-build-env.mjs rustup component add rustfmt --toolchain 1.95.0
+node scripts/with-junco-build-env.mjs rustup component add rustfmt --toolchain 1.98.1
 node scripts/with-junco-build-env.mjs rustfmt --edition 2024 src/lib.rs src/mux.rs src/frontend.rs
 ```
 
@@ -82,7 +82,7 @@ The launcher defaults to `$HOME/.local/share/junco-tools/cargo` and `$HOME/.loca
 - Use locked builds. After an intentional dependency update, inspect `cargo metadata --format-version 1 --locked` and `cargo tree` through the launcher: one path-patched brush-core, every marsh crate and junco-policy resolving to the local `crates/` sources, and one compatible Tokio. Verify `marsh-btrfs/fake` is absent from production and enabled only by `test-fs`; `marsh-btrfs` itself is an ordinary dependency because production seed discovery needs `PersistenceLayer`/`LibBtrfs`.
 - The Oh My Pi engines are pinned Git dependencies (`pi-ast`, `pi-diff`, `pi-walker`, `pi-edit` at `7ae76f8e4daca0c8f409f61bcd514260cd522365`). Import them unmodified from that one URL/revision so each package keeps a single crate identity. Do not vendor them, add a `path` dependency, follow a branch, or point any build step at a local Oh My Pi checkout.
 - `src/*.rs` binding modules are transplants, not junco-authored code. When updating the pinned revision, re-extract them from that same commit rather than patching them in place, re-apply only the routing seams listed in the source map, and keep the source/licence attribution.
-- Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.95.0 or export `RUSTC_BOOTSTRAP` globally.
+- Oh My Pi builds on nightly, so the `xutf` crate in `pi-edit`'s tree needs unstable features. Keep that confined to `scripts/rustc-bootstrap-shim.sh`; do not move `rust-toolchain.toml` off stable 1.98.1 or export `RUSTC_BOOTSTRAP` globally.
 
 ## Native execution invariants
 

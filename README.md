@@ -4,7 +4,7 @@ Recursive agentic dataflow graphs. A `JuncoGraph` is a native [`dataflow-engine`
 
 ## Setup
 
-Requirements: Linux x86-64 with glibc and Bun `1.4.2`. Package development additionally needs Node.js `>=22.19.0` (Node `dist` builds and smokes); `junco-tools`' native addon needs Rust `1.95.0` plus native build libraries. This repository is a Bun workspace: the agency sits at the root and `packages/` holds `junco-tools`, `junco-agent`, `dataflow-engine` (with its `examples` workspace), `dataflow-engine-opik`, and `junco-scheduler`, each imported with its full Git history. `crates/marsh` and `crates/junco-policy` hold the marsh and junco-policy repositories, also with full history, as independent Cargo workspaces; junco-tools' native addon builds them as local path dependencies. The source example bundles below need no Rust. The tracer adapters are optional at runtime (see [Tracing](#tracing-local-only)).
+Requirements: Linux x86-64 with glibc and Bun `1.4.2`. Package development additionally needs Node.js `>=22.19.0` (Node `dist` builds and smokes); `junco-tools`' native addon needs Rust `1.98.1` plus native build libraries. This repository is a Bun workspace: the agency sits at the root and `packages/` holds `junco-tools`, `junco-agent`, `dataflow-engine` (with its `examples` workspace), `dataflow-engine-opik`, and `junco-scheduler`, each imported with its full Git history. `crates/marsh` and `crates/junco-policy` hold the marsh and junco-policy repositories, also with full history, as independent Cargo workspaces; junco-tools' native addon builds them as local path dependencies. The source example bundles below need no Rust. The tracer adapters are optional at runtime (see [Tracing](#tracing-local-only)).
 
 To run the root `examples/`, install once from the root and let Bun bundle them from workspace sources; no package or declaration build comes first. When junco-tools' Rust toolchain is installed (see its [README](packages/junco-tools/README.md)), the root install's `postinstall` also builds the production native addon (`bun run build:native` in `packages/junco-tools`, a locked build against the local `crates/`; a failed build fails the install); without it, the install prints a notice and skips the addon, as does `--ignore-scripts`:
 
@@ -34,7 +34,7 @@ During graph activations, each request also ends with `Inbox { <edgeId>: <count>
 
 Prepared `agents` in `JuncoGraph.fromYaml` transfer ownership at entry: failed parsing or construction closes every supplied agent, including unregistered agents; successful construction leaves them owned by the graph. The node-path mapping must cover each agent exactly once and is exclusive with `createAgent`. Prepared agents keep their existing model/tool/skill/system configuration; YAML prompts and profiles still apply, without creating a default collection.
 
-For package development (Node `dist` builds, declarations, and the native addon), the root build runs in producer order: engine → tools → MCP → agent → scheduler → Opik adapter → profile → Junco. The root and standalone tools packages pin Rust `1.95.0`.
+For package development (Node `dist` builds, declarations, and the native addon), the root build runs in producer order: engine → tools → MCP → agent → scheduler → Opik adapter → profile → Junco. The root and standalone tools packages pin Rust `1.98.1`.
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts

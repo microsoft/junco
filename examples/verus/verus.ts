@@ -23,7 +23,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
 import { graph, JuncoGraph, mcp, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
-import { runCli, verifiedModels, type YamlAgent, type YamlExecution } from "../support.ts";
+import { problemRecorder, runCli, verifiedModels, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./verus.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -183,7 +183,8 @@ export type VerusRound = Readonly<{
 /** Fresh one-shot nodes borrow idle agents; LockPolicy does not confine host filesystem writes. */
 export const VerusRound = {
   async create(workspace: VerusWorkspace, members: VerusMembers, verification: { runs(): number },
-    feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder): Promise<VerusRound> {
+    feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder,
+    recorder?: syntax.BuildOptions["recorder"]): Promise<VerusRound> {
     const assignment = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
     members.Verifier.stagePrompt(assignment + "Translate/repair the current output and address both feedback reports. Write actual source, then report evidence and unresolved obligations.");
     const context: VerusRoundContext = { assignment, members, verification };
@@ -191,6 +192,7 @@ export const VerusRound = {
       cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: observer, context,
       code: { PrepareReviewer, PrepareCleanup },
       ...(ladder === undefined ? {} : { ladder }),
+      ...(recorder === undefined ? {} : { recorder }),
       createAgent: async (spec) => members[spec.node as VerusRole],
       createAgentOwnership: "caller",
     });
@@ -198,9 +200,10 @@ export const VerusRound = {
   },
 };
 
-/** Success never terminates; caller owns members and observer, including disposal/flush. */
+/** Success never terminates; caller owns members, observer and recorder, including disposal/flush. */
 export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMembers,
-  signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder): Promise<void> {
+  signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder,
+  recorder?: syntax.BuildOptions["recorder"]): Promise<void> {
   let runs = 0;
   let failure: Error | undefined;
   const unsubscribe = Object.entries(members).map(([role, member]) => member.events.on("turn_end", ({ toolResults }) => {
@@ -215,7 +218,7 @@ export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMemb
     let feedback: VerusFeedback | undefined;
     for (;;) {
       signal?.throwIfAborted();
-      const round = await VerusRound.create(workspace, members, verification, feedback, observer, ladder);
+      const round = await VerusRound.create(workspace, members, verification, feedback, observer, ladder, recorder);
       await using roundGraph = round.execution.graph;
       const results = await round.execution.run({ signal });
       signal?.throwIfAborted();
@@ -235,6 +238,7 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   const observer = tracer.TuiTracer.shared();
   await using resources = new AsyncDisposableStack();
   resources.defer(() => observer.flush());
+  const recorder = resources.adopt(await problemRecorder(workspace.outputDir), (owned) => owned.close());
   const bridgeDir = await mkdtemp(join(workspace.outputDir, ".junco-verus-mcp-"));
   resources.defer(() => rm(bridgeDir, { recursive: true, force: true }));
   const verus = await loadVerusMcp(bridgeDir);
@@ -245,9 +249,9 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   const members = {} as Record<VerusRole, YamlAgent>;
   for (const spec of await syntax.resolveAgents(document, { cwd: workspace.outputDir })) {
     signal?.throwIfAborted();
-    members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus] }, LADDER, models));
+    members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus], recorder, recorderNodeId: spec.node }, LADDER, models));
   }
-  await runVerusLoop(workspace, members, signal, observer, LADDER);
+  await runVerusLoop(workspace, members, signal, observer, LADDER, recorder);
 }
 
 if (import.meta.main) await runCli(async (signal) => {

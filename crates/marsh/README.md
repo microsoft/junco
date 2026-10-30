@@ -28,7 +28,7 @@ are not rolled back.
 Requirements:
 
 * Linux 5.3+ with procfs, usable `ptrace`/`PTRACE_GET_SYSCALL_INFO`, and pidfds.
-* Rust 1.95 or newer, as specified by the root manifest.
+* Rust 1.98.1 or newer, as specified by the root manifest.
 * A C toolchain, Clang/libclang and libbtrfsutil. Debian/Ubuntu packages:
   `clang libclang-dev libbtrfsutil-dev`; Fedora: `clang-devel libbtrfsutil-devel`.
 * Git and btrfs-progs for the setup commands below.
@@ -302,8 +302,10 @@ The default `LockPolicy` decides four actions per file. A read always grants and
 the file's last reader. A write (`edit`) acquires ownership. `release` gives ownership up and keeps
 the last reader. An observed successful `unlink`/`rmdir` (`remove`) clears both claims, so anyone
 can recreate the name. `edit` and `remove` are denied while another principal owns the file or
-was its last reader; `release` is denied only while another principal owns it. Releasing an
-unowned file grants, so it is idempotent. `BuiltinContext::release(file)` and the `release` builtin
+was its last reader; `release` is denied only while another principal owns it. Another principal's
+`edit` also makes a file's view stale: until the acting principal reads it again, its `edit` and
+`remove` are denied even after the writer releases. Releasing an unowned file grants, so it is
+idempotent. `BuiltinContext::release(file)` and the `release` builtin
 record a release in the current managed command; it publishes atomically with that command's
 other effects. A direct command cannot release.
 

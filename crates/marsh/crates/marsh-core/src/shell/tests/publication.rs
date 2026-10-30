@@ -71,8 +71,7 @@ async fn shell_policy_selects_authorization_per_shell() {
 #[tokio::test]
 #[serial]
 async fn pre_intent_failure_preserves_exit_and_rolls_back_tentative_grants() {
-    use super::super::policy::{Action, Event, Resource};
-    use junco_policy::PolicyDecision;
+    use super::super::policy::{Action, Event, PolicyDecision, Resource};
     let fixture = Fixture::new();
     let mut builder = Shell::builder()
         .working_dir(fixture.seed.clone())

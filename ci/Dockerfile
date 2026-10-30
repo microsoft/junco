@@ -4,7 +4,7 @@ FROM ubuntu:24.04
 
 ARG NODE_VERSION=22.19.0
 ARG BUN_VERSION=1.4.2
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.98.1
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \

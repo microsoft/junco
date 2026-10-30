@@ -45,6 +45,9 @@ nix = { version = "0.31.3", features = ["fs", "term"] }
 # The ownership-lock policy every managed command's capabilities are checked against before it
 # is published: the monorepo's own crate.
 junco-policy = { path = "../../../junco-policy" }
+# Its histories and decisions, from their owning crates; features match the facade's selection.
+history-store = { path = "../../../junco-policy/crates/history-store", default-features = false, features = ["runtime", "std"] }
+history-semantics = { path = "../../../junco-policy/crates/history-semantics", default-features = false, features = ["runtime", "std", "cache"] }
 
 [dev-dependencies]
 marsh-btrfs = { path = "../marsh-btrfs", features = ["fake"] }

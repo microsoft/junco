@@ -1,8 +1,8 @@
 //! Real CopyTree transactions through the public typed-session API.
 use super::*;
 use crate::{
-    Action, Bump, ManagedCancellation, ManagedError, ManagedSession, MarshTool, Policy,
-    PolicyDecision, PolicyEvent, PolicyHistory, PolicyObserver, Principal,
+    Action, ManagedCancellation, ManagedError, ManagedSession, MarshTool, Policy, PolicyDecision,
+    PolicyFn, PolicyObserver, PolicyStore, Principal, ShellError,
 };
 use std::{
     borrow::Cow,
@@ -185,13 +185,14 @@ struct DenyAll;
 impl Policy for DenyAll {
     fn evaluator<'batch>(
         &'batch self,
-        _arena: &'batch Bump,
-    ) -> Box<dyn FnMut(&PolicyHistory<'batch>, &PolicyEvent<'batch>) -> PolicyDecision + 'batch>
-    {
-        Box::new(|_, _| PolicyDecision::Deny {
-            failed_precondition: "test policy refuses capabilities".into(),
-            allowed_fixes: Vec::new(),
-        })
+        _store: Arc<PolicyStore<'batch>>,
+    ) -> Result<Box<PolicyFn<'batch>>, ShellError> {
+        Ok(Box::new(|_, _| {
+            Ok(PolicyDecision::Deny {
+                failed_precondition: "test policy refuses capabilities".into(),
+                allowed_fixes: Vec::new(),
+            })
+        }))
     }
 }
 

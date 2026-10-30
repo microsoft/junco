@@ -25,7 +25,7 @@ import * as E from "fp-ts/lib/Either.js";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { AgenticInputSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
-import { runCli, type YamlAgent, type YamlExecution } from "../support.ts";
+import { problemRecorder, runCli, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -252,7 +252,7 @@ export interface ReviewRound {
 }
 
 export const ReviewRound = {
-  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder): Promise<ReviewRound> {
+  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder, recorder?: syntax.BuildOptions["recorder"]): Promise<ReviewRound> {
     const context: RoundContext = {
       request, feedback, members, search, failuresBefore: search.failures(), architectStarted: false,
     };
@@ -261,6 +261,7 @@ export const ReviewRound = {
       scheduler: () => schedules.strength((_, id) => ({ Librarian: "med", Architect: "high", Reducer: "xhigh" } as const)[id as MemberId] ?? "med", schedules.parallel()),
       tracer: observer, context, code: { ResearchAssignment, DesignAssignment, ReviewAssignment },
       ...(ladder === undefined ? {} : { ladder }),
+      ...(recorder === undefined ? {} : { recorder }),
       tools: {
         search: members.Librarian.getTools().find((tool) => tool.name === "search_oss")!,
         review: members.Reducer.getTools().find((tool) => tool.name === "review")!,
@@ -303,6 +304,7 @@ export async function convene(
   signal?: AbortSignal,
   observer?: tracer.DataflowTracer,
   ladder?: schedules.Ladder,
+  recorder?: syntax.BuildOptions["recorder"],
 ): Promise<string> {
   let feedback: string | undefined;
   // Rounds share the automatically selected tracer: flush it once, however the committee ends.
@@ -310,7 +312,7 @@ export async function convene(
   try {
     for (;;) {
       signal?.throwIfAborted();
-      const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected, ladder);
+      const { execution, reducerId } = await ReviewRound.create(request, members, search, feedback, selected, ladder, recorder);
       await using round = execution.graph;
       const plan = (await execution.run({ signal })).get(reducerId);
       signal?.throwIfAborted();
@@ -360,13 +362,16 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
   let plan: string;
   {
     await using resources = new AsyncDisposableStack();
+    // Adopted first, so it closes after every member.
+    const recorder = resources.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
     const members = {} as Record<MemberId, YamlAgent>;
     const specs = await syntax.resolveAgents(document, { cwd: process.cwd(), tools: { search: search.tool, review: review.tool } });
     for (const spec of specs) {
       signal?.throwIfAborted();
-      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent(spec, LADDER, models));
+      // Members outlive each round's graph; every round's graph requires their recorder.
+      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent({ ...spec, recorder, recorderNodeId: spec.node }, LADDER, models));
     }
-    plan = await convene(request, members, search, review, signal, undefined, LADDER);
+    plan = await convene(request, members, search, review, signal, undefined, LADDER, recorder);
   }
   signal?.throwIfAborted();
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });

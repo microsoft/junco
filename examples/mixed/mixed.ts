@@ -10,7 +10,7 @@
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { graph, JuncoGraph, schedules, syntax } from "junco";
-import { runCli, type YamlExecution } from "../support.ts";
+import { problemRecorder, runCli, type YamlExecution } from "../support.ts";
 import source from "./mixed.yml" with { type: "text" };
 
 const LADDER = schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" });
@@ -25,7 +25,7 @@ export interface MixedGraph {
 }
 
 export const MixedGraph = {
-  async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "models" | "ladder">): Promise<MixedGraph> {
+  async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "models" | "ladder" | "recorder">): Promise<MixedGraph> {
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: () => schedules.parallel(),
@@ -40,11 +40,12 @@ async function main(signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   const models = await ModelRuntime.create();
   signal?.throwIfAborted();
-  const { execution, reviewerId } = await MixedGraph.create({ models, ladder: LADDER });
   let review: string;
   {
-    // LIFO: close the graph, then flush the tracer it shares with the nested Ralph graph.
+    // LIFO: close the graph, flush the tracer it shares with the nested Ralph graph, then close the recorder.
     await using lifetime = new AsyncDisposableStack();
+    const recorder = lifetime.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
+    const { execution, reviewerId } = await MixedGraph.create({ models, ladder: LADDER, recorder });
     lifetime.defer(() => execution.graph.tracer.flush());
     lifetime.adopt(execution.graph, (graph) => graph.close());
     signal?.throwIfAborted();

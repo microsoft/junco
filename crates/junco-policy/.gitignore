@@ -1,9 +1,8 @@
 /target/
-/.archify/**
-/.archify
 /fuzz/target/
 # libFuzzer's local coverage cache. Nothing replays it: the no-surprise tests generate their own
 # traces, so the corpus never needs to be shared.
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
+/traces/

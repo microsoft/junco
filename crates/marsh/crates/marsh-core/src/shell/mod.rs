@@ -40,8 +40,8 @@ pub use managed::{
 };
 pub(crate) use managed::{ManagedClose, ManagedRegistration};
 pub use policy::{
-    Action, Bump, Denial, EmptyPolicy, Event, LockPolicy, Policy, PolicyDecision, PolicyEvent,
-    PolicyHistory, PolicyObserver, PolicyValidator, Principal, Resource,
+    Action, Denial, EmptyPolicy, Event, LockPolicy, Policy, PolicyDecision, PolicyEvent, PolicyFn,
+    PolicyHistory, PolicyObserver, PolicyStore, PolicyValidator, Principal, Resource,
 };
 pub use sandbox_policy::{CommandContext, MarshTool, SandboxPolicy, ShellCommand};
 pub use signal::Signal;
