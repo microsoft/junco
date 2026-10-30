@@ -14,6 +14,7 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair for `schedules.runO
 
 ## Execution model
 
+- `<sessionDir>` is a fresh `mkdtemp` child of `/tmp/junco-profile-optimizer-workspace/` holding optimizer metadata only (snapshots, request, `state.json`, `optimizer.jsonl`, run directories). It is not an execution workspace: `BTRFS_ROOT`, native/Btrfs workspaces and mounts stay where the user configured them, and the target runs from its original project. Request `target.yaml`, `target.ts` and `target.cwd` are therefore absolute paths into that project.
 - Every execution is a fresh child process running the user's existing `argv` in `target.cwd` (no shell), with the inherited environment plus `JUNCO_PROFILE_RUN_DIR=<sessionDir>/runs/<NNNN>`. `resetArgv`, when given, runs first in its own owned process and must succeed.
 - Children are detached process groups. Cancellation or time-budget expiry sends SIGTERM to the group, SIGKILL after 5 s, and waits until the group is gone before restoring files or starting another run. If disappearance cannot be proved, nothing is restored.
 - A target owning external resources (for example task containers) creates `<run>/cleanup.pending` before acquiring them and removes it only after proving all owned resources and processes gone. A surviving guard, even after child exit 0 or forced process-group cancellation, blocks further trials and file restoration. Keep its ownership/recovery evidence; process disappearance alone does not prove remote cleanup. Targets without external resources need no guard.

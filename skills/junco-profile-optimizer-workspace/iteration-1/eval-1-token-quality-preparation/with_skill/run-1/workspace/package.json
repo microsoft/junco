@@ -1,1 +1,0 @@
-{"name":"report","private":true,"type":"module","scripts":{"report":"bun run report.ts"},"dependencies":{"junco":"*","dataflow-engine":"*","@earendil-works/pi-ai":"*"}}

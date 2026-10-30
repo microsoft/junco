@@ -5,7 +5,7 @@ description: 'Profile and tune an existing Junco workflow pair (`workflow.yml` +
 
 # Junco profile optimizer
 
-One request → one prepared target plus one invocation of the standard-library optimizer:
+One request → one prepared target plus one invocation of the standard-library optimizer, run from the workflow project with the absolute session path:
 
 ```sh
 bun run junco-profile-optimizer <sessionDir>/request.json
@@ -58,16 +58,17 @@ Batch the questions. Required before execution:
 
 Follow [references/profiling.md](references/profiling.md):
 
-1. `mkdtemp` a session directory under `<directory of workflow.ts>/.junco/profile-optimizer/`.
+1. Create the session metadata directory: create `/tmp/junco-profile-optimizer-workspace/` if absent (mode `0700`; this literal path, not `$TMPDIR`), then `mkdtemp` with prefix `/tmp/junco-profile-optimizer-workspace/session-`. An existing parent must be a writable directory, not a symlink, owned by the current user, with no group/other access. On any conflict or creation failure, report the exact path and error before changing the target; never overwrite, chmod, empty or follow a conflicting parent, and never fall back to another location.
+   The session holds metadata only: snapshots, request, optimizer state/usage, profiles, receipts, output logs and cleanup guards. Leave `BTRFS_ROOT`, native/Btrfs workspaces, mounts, the target's source paths, `argv`/`resetArgv` and its original working directory unchanged. The original entrypoint is instrumented in place; never move or copy the runnable project or its dependencies into the session.
 2. Save `original.yml` and `original.ts` there **before** any change.
 3. Move the existing tuning expressions, unchanged, into exactly one ordered marker pair per axis (all three pairs, even for unrequested axes) defining `optimizerScheduler(label)`, `optimizerLadder`/`optimizerStrength` and `optimizerLimits`. Fixed code outside the regions applies strength, extra limits and the original hard limits outermost. If the runner cannot be separated this way without changing its semantics, stop and report the exact integration prerequisite.
 4. Add the fixed `JUNCO_PROFILE_RUN_DIR` instrumentation from the reference: run-request validation, document hash, runtime probe copy, ladder/scheduler/limit domain checks, `JsonlRecorder` on the existing ownership path, cleanup order, and the completion receipt (including requested external-result metrics only after complete evaluator coverage). With the variable absent the workflow behaves exactly as before. Import only public packages; never the installed skill directory.
 5. Save the instrumented file as `prepared.ts` (byte-identical to `workflow.ts`). Check it once without paid execution (e.g. `bun build --no-bundle workflow.ts` or the project's typecheck).
-6. Write `<sessionDir>/request.json` (schema below). Relative paths resolve against the request file.
+6. Write `<sessionDir>/request.json` (schema below). `target.yaml`, `target.ts` and `target.cwd` are absolute paths to the inspected workflow's files and its original working directory; keep `sessionDir: "."` (relative paths resolve against the request file). Direct `schedules.runOptimizer` calls require an absolute `sessionDir` too.
 
 ```json
 {
-  "target": { "yaml": "../../../workflow.yml", "ts": "../../../workflow.ts", "cwd": "../../..", "argv": ["bun", "run", "workflow.ts"] },
+  "target": { "yaml": "/absolute/path/to/project/workflow.yml", "ts": "/absolute/path/to/project/workflow.ts", "cwd": "/absolute/path/to/project", "argv": ["bun", "run", "workflow.ts"] },
   "sessionDir": ".",
   "workloadId": "fixed-input-corpus-v1",
   "objective": { "metric": { "kind": "tokens" }, "direction": "minimize" },
@@ -80,11 +81,11 @@ Follow [references/profiling.md](references/profiling.md):
 }
 ```
 
-Optional keys: `target.resetArgv`, `runBudget`, `timeBudgetMs`. Unknown keys are rejected.
+The `target` paths above are illustrative; substitute the inspected workflow's absolute paths. Optional keys: `target.resetArgv`, `runBudget`, `timeBudgetMs`. Unknown keys are rejected.
 
 ## 4. Invoke once
 
-From the workflow project, with `junco` installed:
+From the original workflow project, with `junco` installed, passing the absolute request path:
 
 ```sh
 bun run junco-profile-optimizer <sessionDir>/request.json
@@ -97,3 +98,5 @@ Before invoking, the user must have authorized paid execution of the workload, a
 ## 5. Report
 
 From `state.json` and the summary: stop kind and reason; baseline and confirmed medians with units and scope (cost = recorded USD with the target's stated request coverage; tokens = successful agent activations; memory = per-activation pipeline peak; probe/result = the producer's unit); quality values per constraint; the winning region sources (converged runs leave them saved in `workflow.ts` with dormant instrumentation); run count; and profile paths. A non-converged stop restores `original.ts` when safe — say whether it was restored or preserved because the file changed outside the optimizer. Report editor USD separately and include it in campaign spend. Plateau convergence is measured local stability, not a global optimum.
+
+Give the absolute session path and warn that evidence under `/tmp` can disappear on OS cleanup or reboot. Never delete the session yourself, whatever the stop kind: it is the recovery evidence.
