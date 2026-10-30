@@ -139,8 +139,6 @@ export type JuncoAgentResolvedOptions<
   N extends TSchema = typeof AgenticInputSchema,
   V = AssistantMessage,
 > = Omit<AgenticOptions<S, P, T, N, V>, "tools"> & {
-  /** Base directory MCP server definitions connect from; default `process.cwd()`. */
-  readonly cwd?: string;
   readonly tools?: JuncoAgentTools<T>;
 };
 
@@ -162,13 +160,8 @@ export type JuncoAgentCreateOptions<
   /** Transferred to JuncoAgent; its harness closes the supplied session. */
   readonly session?: Session;
   /**
-   * Base directory of the default or MCP-required ToolCollection (when none is supplied) and of
-   * MCP server definitions; default `process.cwd()`.
-   */
-  readonly cwd?: string;
-  /**
    * Concrete tools are caller-owned; MCP definitions are connected for, and closed with, this
-   * agent. Omitted tools include the collection's tools, task and yield.
+   * agent. Omitted or empty tools add nothing; enabled defaults are composed during initialization.
    */
   readonly tools?: JuncoAgentTools<T>;
 };
@@ -176,8 +169,10 @@ export type JuncoAgentCreateOptions<
 /** Per-subagent overrides of {@link JuncoAgent.createSubagents}; omitted values inherit the caller's. */
 export type TaskAgentOptions = {
   readonly model?: ModelIdentity;
-  /** Names among the caller's active tools; `[]` permits none. */
+  /** Additional names selected from the caller; `[]` selects no inherited additions. */
   readonly tools?: readonly string[];
+  /** Additional exact tool names to exclude; parent exclusions cannot be undone. */
+  readonly tool_block?: readonly string[];
 };
 
 /** A task attempt's result after it entered the caller's model context. */
@@ -255,6 +250,68 @@ type OwnedResources = {
   repo?: MemorySessionRepo;
 };
 
+const NATIVE_TOOL_NAMES = [
+  "read",
+  "bash",
+  "edit",
+  "release",
+  "grep",
+  "find",
+  "ast_grep",
+  "ast_edit",
+  "diff",
+  "code_graph",
+] as const;
+
+function normalizeToolBlock(
+  names: readonly string[] | undefined,
+): ReadonlySet<string> {
+  if (names === undefined) return new Set();
+  if (!Array.isArray(names))
+    throw new JuncoAgentError(
+      "invalid_argument",
+      "tool_block must be an array of non-blank tool names",
+    );
+  const blocked = new Set<string>();
+  for (const name of names) {
+    if (typeof name !== "string" || name.trim().length === 0)
+      throw new JuncoAgentError(
+        "invalid_argument",
+        "tool_block must be an array of non-blank tool names",
+      );
+    if (blocked.has(name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate blocked tool: ${name}`,
+      );
+    blocked.add(name);
+  }
+  return blocked;
+}
+
+function validateToolBlock(
+  tools: readonly AgentTool[],
+  blocked: ReadonlySet<string>,
+): void {
+  for (const tool of tools)
+    if (blocked.has(tool.name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `tools and tool_block both list "${tool.name}"; remove it from either tools or tool_block`,
+      );
+}
+
+async function ensureToolCollection(
+  owned: OwnedResources,
+  cwd: string,
+): Promise<ToolCollection> {
+  if (owned.toolCollection !== undefined) return owned.toolCollection;
+  const collection = await ToolCollection.create(cwd);
+  owned.toolCollection = collection;
+  owned.collection = collection;
+  return collection;
+}
+
 async function releaseOwned(owned: OwnedResources): Promise<unknown[]> {
   const failures: unknown[] = [];
   const { binding, collection, repo } = owned;
@@ -317,10 +374,7 @@ async function resolveToolSources(
   if (sources === undefined) return tools;
   for (const source of sources instanceof JuncoMcpTools ? [sources] : sources) {
     if (source instanceof JuncoMcpTools) {
-      if (source.size > 0 && owned.toolCollection === undefined) {
-        owned.toolCollection = await ToolCollection.create(cwd);
-        owned.collection = owned.toolCollection;
-      }
+      if (source.size > 0) await ensureToolCollection(owned, cwd);
       const connection = await source.connect({
         cwd,
         signal,
@@ -358,37 +412,97 @@ function validateTokenMonitor({
     );
 }
 
-/**
- * `tools` with every genuine complaint tool replaced in place by `own`, or `own` appended when none
- * is present, and the collection's genuine `release` tool appended when absent. Duplicates and
- * same-named impostors are left for validation to reject.
- */
-function withRequiredTools<T extends AgentTool>(
-  tools: readonly T[],
+/** Enabled defaults followed by concrete additions, preserving genuine supplied default objects. */
+function withDefaultTools(
+  tools: readonly AgentTool[],
+  collection: ToolCollection | undefined,
+  blocked: ReadonlySet<string>,
+): AgentTool[] {
+  validateToolBlock(tools, blocked);
+  const explicit = new Set<string>();
+  for (const tool of tools) {
+    if (explicit.has(tool.name))
+      throw new JuncoAgentError(
+        "invalid_argument",
+        `Duplicate tool name: ${tool.name}`,
+      );
+    explicit.add(tool.name);
+  }
+  const consumed = new Set<AgentTool>();
+  const result: AgentTool[] = [];
+  for (const tool of collection?.tools ?? []) {
+    if (blocked.has(tool.name)) continue;
+    if (tools.includes(tool)) consumed.add(tool);
+    result.push(tool);
+  }
+  const append = (
+    name: string,
+    is: (tool: AgentTool) => boolean,
+    create: () => AgentTool,
+  ): void => {
+    if (blocked.has(name)) return;
+    const supplied = tools.find((tool) => tool.name === name && is(tool));
+    if (supplied !== undefined) consumed.add(supplied);
+    result.push(supplied ?? create());
+  };
+  append(
+    "task",
+    (tool) => TaskTool.is(tool),
+    () => new TaskTool(),
+  );
+  append("yield", isYieldTool, () => new YieldTool());
+  append(
+    "recv",
+    (tool) => RecvTool.is(tool),
+    () => new RecvTool(),
+  );
+  append(
+    "send",
+    (tool) => SendTool.is(tool),
+    () => new SendTool(),
+  );
+  append(
+    "info",
+    (tool) => InfoTool.is(tool),
+    () => new InfoTool(),
+  );
+  result.push(...tools.filter((tool) => !consumed.has(tool)));
+  validateActiveTools(
+    result,
+    result.map((tool) => tool.name),
+  );
+  return result;
+}
+
+/** Rebind genuine complaints and conditionally require complaint and collection release tools. */
+function withRequiredTools(
+  tools: readonly AgentTool[],
   own: ComplainTool,
   release: AgentTool | undefined,
-): (T | ComplainTool)[] {
+  includeComplain: boolean,
+): AgentTool[] {
   let found = false;
-  const result = tools.map((tool): T | ComplainTool => {
+  const result = tools.map((tool): AgentTool => {
     if (!isComplainTool(tool)) return tool;
     found = true;
     return own;
   });
-  if (!found) result.push(own);
-  if (release !== undefined && !result.includes(release as T))
-    result.push(release as T);
+  if (includeComplain && !found) result.push(own);
+  if (release !== undefined && !result.includes(release)) result.push(release);
   return result;
 }
 
-/** An active-tool selection that always includes `complain`, and `release` when required. */
+/** An active selection with only the enabled required tool names added. */
 function withRequiredNames(
   names: readonly string[],
   release: AgentTool | undefined,
+  includeComplain: boolean,
 ): string[] {
   const result = [...names];
-  for (const name of release === undefined
-    ? ["complain"]
-    : ["complain", "release"])
+  for (const name of [
+    ...(includeComplain ? ["complain"] : []),
+    ...(release === undefined ? [] : ["release"]),
+  ])
     if (!result.includes(name)) result.push(name);
   return result;
 }
@@ -565,12 +679,11 @@ export class JuncoAgent<
   T extends AgentTool = AgentTool,
   N extends TSchema = typeof AgenticInputSchema,
   V = AssistantMessage,
-> implements Agentic<S, P, T | ComplainTool, N, V>
+> implements Agentic<S, P, AgentTool, N, V>
 {
   /**
-   * An agent over already resolved options. `tools` may also hold MCP definitions, connected
-   * from `cwd` before construction and closed with the agent; the supplied session is
-   * transferred, and closed if construction fails.
+   * Constructs over resolved concrete/MCP additions. Native defaults are acquired and composed by
+   * {@link initialize}; the supplied session is transferred and closed if construction fails.
    */
   static fromResolved<
     S extends Skill = Skill,
@@ -579,16 +692,8 @@ export class JuncoAgent<
     N extends TSchema = typeof AgenticInputSchema,
     V = AssistantMessage,
   >(
-    options: AgenticOptions<S, P, T, N, V> & { readonly cwd?: string },
+    options: JuncoAgentResolvedOptions<S, P, T, N, V>,
   ): Promise<JuncoAgent<S, P, T, N, V>>;
-  static fromResolved<
-    S extends Skill = Skill,
-    P extends PromptTemplate = PromptTemplate,
-    N extends TSchema = typeof AgenticInputSchema,
-    V = AssistantMessage,
-  >(
-    options: JuncoAgentResolvedOptions<S, P, AgentTool, N, V>,
-  ): Promise<JuncoAgent<S, P, AgentTool, N, V>>;
   static async fromResolved(
     options: JuncoAgentResolvedOptions<
       Skill,
@@ -599,19 +704,17 @@ export class JuncoAgent<
     >,
   ): Promise<AnyJuncoAgent> {
     const { cwd, tools, collection, ...native } = options;
+    const resolvedCwd = resolve(cwd ?? process.cwd());
     const owned: OwnedResources = { toolCollection: collection };
     let agent: AnyJuncoAgent;
     try {
-      const resolved = await resolveToolSources(
-        tools,
-        resolve(cwd ?? process.cwd()),
-        owned,
-      );
+      const additions = await resolveToolSources(tools, resolvedCwd, owned);
       agent = new JuncoAgent(
         {
           ...native,
+          cwd: resolvedCwd,
           collection: owned.toolCollection,
-          tools: resolved,
+          tools: additions,
         },
         owned,
       );
@@ -664,6 +767,7 @@ export class JuncoAgent<
       collection,
       ...native
     } = options;
+    const resolvedCwd = resolve(cwd ?? process.cwd());
     const owned: OwnedResources = { toolCollection: collection };
     let session: Session | undefined = suppliedSession;
     let agent: AnyJuncoAgent | undefined;
@@ -725,38 +829,16 @@ export class JuncoAgent<
       } else {
         session = suppliedSession;
       }
-      let agentTools: AgentTool[];
-      if (tools === undefined) {
-        // Explicit-tool construction does not allocate a local execution environment or addon.
-        if (owned.toolCollection === undefined) {
-          owned.toolCollection = await ToolCollection.create(
-            resolve(cwd ?? process.cwd()),
-          );
-          owned.collection = owned.toolCollection;
-        }
-        agentTools = [
-          ...owned.toolCollection.tools,
-          new TaskTool(),
-          new YieldTool(),
-          new RecvTool(),
-          new SendTool(),
-          new InfoTool(),
-        ];
-      } else {
-        agentTools = await resolveToolSources(
-          tools,
-          resolve(cwd ?? process.cwd()),
-          owned,
-        );
-      }
+      const additions = await resolveToolSources(tools, resolvedCwd, owned);
       agent = new JuncoAgent(
         {
           ...native,
+          cwd: resolvedCwd,
           session,
           models,
           model,
           collection: owned.toolCollection,
-          tools: agentTools,
+          tools: additions,
         },
         owned,
       );
@@ -775,12 +857,12 @@ export class JuncoAgent<
   }
 
   readonly #options: AgenticOptions<S, P, T, N, V>;
-  /**
-   * The collection selecting this agent's authorization policy and lifetime, borrowed: the agent
-   * holds it through its own binding, whose tools act as this agent's one policy owner. Take
-   * `collection.lease()` to keep it beyond the agent; never close it directly.
-   */
-  readonly collection: ToolCollection | undefined;
+  /** The immutable exact-name exclusions supplied at construction. */
+  readonly #blocked: ReadonlySet<string>;
+  /** The collection acquired or borrowed for this agent, if enabled defaults or MCP need one. */
+  get collection(): ToolCollection | undefined {
+    return this.#owned.toolCollection;
+  }
   /** Policy owner of this agent's tools (`NativeResourceEvent.owner`); absent without a collection. */
   get owner(): string | undefined {
     return this.#owned.binding?.owner;
@@ -806,11 +888,11 @@ export class JuncoAgent<
   }
   /** This agent's identity for complaints made outside a bound graph node. */
   readonly nodeId: NodeIdType = NodeId.create(`agent-${crypto.randomUUID()}`);
-  /** The always-on complaint tool this agent owns; supplied genuine ones are rebound to it. */
+  /** This agent's complaint tool, present only when not blocked. */
   readonly #complainTool: ComplainTool = new ComplainTool();
-  /** The collection's genuine `release` tool, always present and active with a collection. */
-  readonly #releaseTool: AgentTool | undefined;
-  #tools: (T | ComplainTool)[];
+  /** The enabled collection release tool, assigned during initialization. */
+  #releaseTool: AgentTool | undefined;
+  #tools: AgentTool[] = [];
   #activeNames: string[] = [];
   #resources: AgentHarnessResources<S, P>;
   #toolMutation: Promise<void> = Promise.resolve();
@@ -1030,17 +1112,10 @@ export class JuncoAgent<
     this.#ownRecorder = options.recorder?.add_context(
       options.recorderNodeId ?? this.nodeId,
     );
+    this.#blocked = normalizeToolBlock(options.tool_block);
     this.#options = options;
-    this.collection = options.collection;
     this.#owned = owned;
-    this.#releaseTool = options.collection?.tools.find(
-      (tool) => tool.name === "release",
-    );
-    this.#tools = withRequiredTools(
-      options.tools ?? [],
-      this.#complainTool,
-      this.#releaseTool,
-    );
+    this.#owned.toolCollection ??= options.collection;
     this.#resources = options.resources ?? {};
     if (options.prompt !== undefined) {
       this.#staged = {
@@ -1048,8 +1123,6 @@ export class JuncoAgent<
         ...(options.images === undefined ? {} : { images: options.images }),
       };
     }
-    // The single borrowing site: every agent over a collection acts as its own owner.
-    owned.binding ??= options.collection?.bind(() => this.#currentRecorder());
   }
 
   /** Complete the asynchronous native acquisition before any caller uses the agent. */
@@ -1062,20 +1135,45 @@ export class JuncoAgent<
     const {
       prompt: _prompt,
       images: _images,
-      tools: _tools,
+      tools: additions = [],
       resources: _resources,
       collection: _collection,
       recorder: _recorder,
       recorderNodeId: _recorderNodeId,
       tokenMonitor,
       activeToolNames,
+      cwd,
+      tool_block: _toolBlock,
       ...native
     } = this.#options;
-    const requested =
-      activeToolNames === undefined
-        ? undefined
-        : withRequiredNames(activeToolNames, this.#releaseTool);
+    const includeComplain = !this.#blocked.has("complain");
     try {
+      validateToolBlock(additions, this.#blocked);
+      if (
+        this.#owned.toolCollection === undefined &&
+        NATIVE_TOOL_NAMES.some((name) => !this.#blocked.has(name))
+      )
+        await ensureToolCollection(this.#owned, resolve(cwd ?? process.cwd()));
+      const collection = this.#owned.toolCollection;
+      this.#releaseTool =
+        collection === undefined || this.#blocked.has("release")
+          ? undefined
+          : collection.tools.find((tool) => tool.name === "release");
+      this.#tools = withRequiredTools(
+        withDefaultTools(additions, collection, this.#blocked),
+        this.#complainTool,
+        this.#releaseTool,
+        includeComplain,
+      );
+      this.#owned.binding ??= collection?.bind(() => this.#currentRecorder());
+      const requested =
+        activeToolNames === undefined
+          ? undefined
+          : withRequiredNames(
+              activeToolNames,
+              this.#releaseTool,
+              includeComplain,
+            );
       validateActiveTools(
         this.#tools,
         requested ?? this.#tools.map((tool) => tool.name),
@@ -1099,12 +1197,20 @@ export class JuncoAgent<
         );
       }
       this.#lane = await harness.lane("main", BACKGROUND_CONTEXT);
-      // A reopened idle lane retains its persisted selection, with no initial config_update event.
+      // Normalize a reopened lane's persisted subset before any model request.
       const restored =
         await this.#nativeLane.getActiveTools(BACKGROUND_CONTEXT);
-      this.#activeNames = withRequiredNames(restored, this.#releaseTool);
+      const surviving = restored.filter((name) => !this.#blocked.has(name));
+      this.#activeNames = withRequiredNames(
+        surviving,
+        this.#releaseTool,
+        includeComplain,
+      );
       validateActiveTools(this.#tools, this.#activeNames);
-      if (this.#activeNames.length !== restored.length)
+      if (
+        this.#activeNames.length !== restored.length ||
+        this.#activeNames.some((name, index) => name !== restored[index])
+      )
         await this.#nativeLane.setActiveTools(
           this.#activeNames,
           BACKGROUND_CONTEXT,
@@ -1909,10 +2015,10 @@ export class JuncoAgent<
       return Promise.reject(error);
     }
   }
-  getTools(): (T | ComplainTool)[] {
+  getTools(): AgentTool[] {
     return [...this.#tools];
   }
-  getActiveTools(): (T | ComplainTool)[] {
+  getActiveTools(): AgentTool[] {
     return this.#activeNames.flatMap((name) =>
       this.#tools.filter((tool) => tool.name === name),
     );
@@ -1949,21 +2055,22 @@ export class JuncoAgent<
       throw new AggregateError(failures, error.message, { cause: failures[0] });
     });
   }
-  setTools(
-    tools: (T | ComplainTool)[],
-    activeToolNames?: string[],
-  ): Promise<void> {
+  setTools(tools: AgentTool[], activeToolNames?: string[]): Promise<void> {
+    const includeComplain = !this.#blocked.has("complain");
     const nextTools = withRequiredTools(
       tools,
       this.#complainTool,
       this.#releaseTool,
+      includeComplain,
     );
     const names = withRequiredNames(
       activeToolNames ?? nextTools.map((tool) => tool.name),
       this.#releaseTool,
+      includeComplain,
     );
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
+      validateToolBlock(tools, this.#blocked);
       validateActiveTools(nextTools, names);
       const previousTools =
         await this.#nativeHarness.getTools(BACKGROUND_CONTEXT);
@@ -2000,7 +2107,11 @@ export class JuncoAgent<
     });
   }
   setActiveTools(names: string[]): Promise<void> {
-    const selection = withRequiredNames(names, this.#releaseTool);
+    const selection = withRequiredNames(
+      names,
+      this.#releaseTool,
+      !this.#blocked.has("complain"),
+    );
     return this.#mutateTools(async () => {
       if (this.#closing) throw closedError();
       validateActiveTools(this.#tools, selection);
@@ -2082,10 +2193,10 @@ export class JuncoAgent<
       return Promise.reject(
         new JuncoAgentError("invalid_state", "Agent has no genuine task tool"),
       );
-    let assigned: T;
+    let assigned: AgentTool;
     try {
       // A context-hosted tool keeps executing through its own explicit host.
-      assigned = new AssignedTaskTool(input, current.host) as AgentTool as T;
+      assigned = new AssignedTaskTool(input, current.host);
     } catch (cause) {
       return Promise.reject(
         new JuncoAgentError(
@@ -2179,9 +2290,10 @@ export class JuncoAgent<
     options: readonly TaskAgentOptions[],
     signal?: AbortSignal,
   ): Promise<JuncoAgent<S, P, AgentTool, C, W>[]> {
-    const requests = options.map(({ model, tools }) => ({
+    const requests = options.map(({ model, tools, tool_block }) => ({
       model: model && { provider: model.provider, modelId: model.modelId },
       tools: tools && [...tools],
+      tool_block: tool_block && [...tool_block],
     }));
     return this.#operation(async () => {
       if (requests.length === 0) return [];
@@ -2197,6 +2309,11 @@ export class JuncoAgent<
       const models = this.#options.models;
       const active: AgentTool[] = this.getActiveTools();
       const resources = this.#resources;
+      const candidates = withDefaultTools(
+        active,
+        this.collection,
+        this.#blocked,
+      );
       // One detached copy of every registered definition serves the whole batch.
       const registrations = (this.#owned.mcpSources ?? []).map(
         (registration) => ({
@@ -2222,8 +2339,22 @@ export class JuncoAgent<
           readonly identity: JuncoMcpToolIdentity;
         };
       };
-      const plans: { model: Model<Api>; selection: Selection[] }[] = [];
+      const plans: {
+        model: Model<Api>;
+        selection: Selection[];
+        tool_block: string[];
+      }[] = [];
       for (const request of requests) {
+        const additionalBlock = normalizeToolBlock(request.tool_block);
+        const effectiveBlock = new Set([...this.#blocked, ...additionalBlock]);
+        if (request.tools !== undefined) {
+          for (const name of request.tools)
+            if (effectiveBlock.has(name))
+              throw new JuncoAgentError(
+                "invalid_argument",
+                `tools and tool_block both list "${name}"; remove it from either tools or tool_block`,
+              );
+        }
         let model: Model<Api>;
         if (request.model === undefined) {
           if (inherited === undefined)
@@ -2263,11 +2394,18 @@ export class JuncoAgent<
             "invalid_argument",
             `${label} does not support thinking level ${thinkingLevel}`,
           );
-        const names = request.tools ?? active.map((tool) => tool.name);
-        validateActiveTools(active, names);
+        const available = candidates.filter(
+          (tool) => !effectiveBlock.has(tool.name),
+        );
+        const names =
+          request.tools ??
+          active
+            .map((tool) => tool.name)
+            .filter((name) => !effectiveBlock.has(name));
+        validateActiveTools(available, names);
         const selection = names
           .flatMap((name) =>
-            active.filter((candidate) => candidate.name === name),
+            available.filter((candidate) => candidate.name === name),
           )
           .map((tool): Selection => {
             const occurrence = registrations.findIndex(({ tools }) =>
@@ -2282,12 +2420,12 @@ export class JuncoAgent<
               );
             return { tool, mcp: { occurrence, identity } };
           });
-        plans.push({ model, selection });
+        plans.push({ model, selection, tool_block: [...effectiveBlock] });
       }
 
       const children: JuncoAgent<S, P, AgentTool, C, W>[] = [];
       try {
-        for (const { model, selection } of plans) {
+        for (const { model, selection, tool_block } of plans) {
           live();
           const repo = new MemorySessionRepo();
           const owned: OwnedResources = {
@@ -2324,8 +2462,10 @@ export class JuncoAgent<
                 );
               return fresh[0];
             });
-            const activeToolNames = tools.map((tool) => tool.name);
-            validateActiveTools(tools, activeToolNames);
+            validateActiveTools(
+              tools,
+              tools.map((tool) => tool.name),
+            );
             child = new JuncoAgent<S, P, AgentTool, C, W>(
               {
                 session,
@@ -2342,7 +2482,7 @@ export class JuncoAgent<
                 steeringMode,
                 followUpMode,
                 tools,
-                activeToolNames,
+                tool_block,
                 resources,
                 tokenMonitor: this.#options.tokenMonitor,
                 recorder: this.#options.recorder,

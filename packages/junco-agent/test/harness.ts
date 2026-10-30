@@ -12,7 +12,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { isComplainTool } from "junco-tools";
 import { Type } from "typebox";
-import { scripted } from "../../../test/support.ts";
+import { NATIVE_TOOL_BLOCK, scripted } from "../../../test/support.ts";
 import {
   type AgenticOptions,
   type AgenticStep,
@@ -66,6 +66,7 @@ export async function nativeOptions<
     models,
     model,
     systemPrompt: "sys",
+    tool_block: NATIVE_TOOL_BLOCK,
     ...overrides,
     faux,
   };

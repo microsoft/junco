@@ -59,6 +59,19 @@ export type AgencyContext = SchedulerContext<
   JuncoGraph<Chat, AssistantMessage>
 >;
 
+export const NATIVE_TOOL_BLOCK = [
+  "read",
+  "bash",
+  "edit",
+  "release",
+  "grep",
+  "find",
+  "ast_grep",
+  "ast_edit",
+  "diff",
+  "code_graph",
+] as const;
+
 /** A `ModelRuntime` with a saved login for a faux `provider` serving `responses` in order. */
 export async function fauxRuntime(
   responses: readonly FauxResponseStep[],
@@ -91,6 +104,7 @@ export async function nativeOptions(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
     },
   };
 }

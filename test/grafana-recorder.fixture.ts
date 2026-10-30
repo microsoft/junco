@@ -217,6 +217,7 @@ try {
             .options,
           systemPrompt: "leaf",
           tools: spec.tools,
+          tool_block: spec.tool_block ?? [],
           collection: spec.collection,
           recorder: spec.recorder,
           recorderNodeId: spec.recorderNodeId,

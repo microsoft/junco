@@ -65,7 +65,7 @@ import { agent, Deterministic, graph, JuncoGraph, mcp, schedules, syntax, tools,
 import { Opik } from "opik";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { runCli, type YamlAgent } from "../support.ts";
+import { problemRecorder, runCli, type YamlAgent } from "../support.ts";
 import source from "./yak-shaver.yml" with { type: "text" };
 
 const document = syntax.parse(source);
@@ -998,6 +998,7 @@ function researchTasks(snapshot: GraftSnapshot, work: CandidateWork, researchToo
     tasks: work.shards.map((shard) => ({
       name: shard.name,
       tools: [...researchTools],
+      tool_block: ["task"],
       task: [
         `You are researcher ${shard.name}. Examine every assigned file below for code that duplicates or re-implements the candidate's responsibility, so that one minimal generalization of the candidate could replace it.`,
         `Assigned files (${shard.files.length}, farthest from the candidate's callers first):\n${shard.files.map((path) => `- ${path}`).join("\n")}`,
@@ -1242,6 +1243,7 @@ type CandidateBatchRunOptions = {
   readonly apply: RefactorApplier;
   readonly collection?: tools.ToolCollection;
   readonly ladder?: schedules.Ladder;
+  readonly recorder?: syntax.BuildOptions["recorder"];
 };
 
 // ## 8b. FinalizeBatch code node
@@ -1458,6 +1460,7 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     available,
     code: { StartBatch, FinalizeBatch },
     ...(options.ladder === undefined ? {} : { ladder: options.ladder }),
+    ...(options.recorder === undefined ? {} : { recorder: options.recorder }),
   };
   // The builder owns every prepared agent from this call onward, including construction failures.
   pending.move();
@@ -1512,9 +1515,10 @@ function liveRunner(options: {
   readonly graft: mcp.JuncoMcpTools;
   readonly resources: AsyncDisposableStack;
   readonly observer: tracer.DataflowTracer;
+  readonly recorder: syntax.BuildOptions["recorder"];
   readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
 }): { readonly runBatch: BatchRunner; readonly refreshSnapshot: SnapshotRefresher } {
-  const { root, collection, observer } = options;
+  const { root, collection, observer, recorder } = options;
   let shared: { readonly models: ModelRuntime; readonly research: readonly AgentTool[] } | undefined;
 
   const acquireShared = async (signal?: AbortSignal) => {
@@ -1557,10 +1561,11 @@ function liveRunner(options: {
       const proposal = new ProposalRecorder({ snapshot, work, readSource, taskResults: () => proposer.getTaskResults() });
       const verdict = new VerdictRecorder();
       const proposerSpec = byNode.get("Proposer")!;
-      const proposer = pending.use(await syntax.createJuncoAgent({ ...proposerSpec, tools: [...proposerSpec.tools, ...research, proposal.tool] }, LADDER, models));
+      // Prepared agents join the batch graph, which requires their recorder at their lane node.
+      const proposer = pending.use(await syntax.createJuncoAgent({ ...proposerSpec, tools: [...proposerSpec.tools, ...research, proposal.tool], recorder, recorderNodeId: `Proposer:${work.rank}` }, LADDER, models));
       signal?.throwIfAborted();
       const judgeSpec = byNode.get("Judge")!;
-      const judge = pending.use(await syntax.createJuncoAgent({ ...judgeSpec, tools: [...judgeSpec.tools, ...research, verdict.tool] }, LADDER, models));
+      const judge = pending.use(await syntax.createJuncoAgent({ ...judgeSpec, tools: [...judgeSpec.tools, ...research, verdict.tool], recorder, recorderNodeId: `Judge:${work.rank}` }, LADDER, models));
       lanes.push({ work, proposer, judge, proposal, verdict });
     }
     const apply: RefactorApplier = async (refactor, applySignal) => {
@@ -1575,7 +1580,7 @@ function liveRunner(options: {
       return files;
     };
     pending.move();
-    return runCandidateBatch({ snapshot, lanes, observer, collection, apply, taskFailurePolicy: "ignore", ladder: LADDER }, signal);
+    return runCandidateBatch({ snapshot, lanes, observer, collection, apply, taskFailurePolicy: "ignore", ladder: LADDER, recorder }, signal);
   };
 
   return {
@@ -1601,6 +1606,8 @@ async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: Abo
     await using lifetime = new AsyncDisposableStack();
     const protectedCollection = lifetime.adopt(await tools.ToolCollection.create(root, { policy: tools.LockPolicy, sandbox: "always" }), (collection) => collection.close());
     await tools.requireWorkTreeRoot(protectedCollection, signal);
+    // Recorded only under a validated work-tree root; batch graphs all close before it does.
+    const recorder = lifetime.adopt(await problemRecorder(root), (owned) => owned.close());
     const buildCollection = lifetime.adopt(await tools.ToolCollection.create(root, { policy: tools.EmptyPolicy, sandbox: "always" }), (collection) => collection.close());
     const observer = new OpikTracer(new Opik(), "runYakShaver");
     lifetime.defer(() => observer.flush());
@@ -1619,6 +1626,7 @@ async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: Abo
       graft,
       resources,
       observer,
+      recorder,
       onApplied: (refactor, files) => {
         applied++;
         console.log(`Applied and released ${refactor.candidate.definition.id}: ${files.join(", ")}`);

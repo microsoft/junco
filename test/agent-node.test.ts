@@ -143,11 +143,7 @@ const sorted = (routes: readonly Route[]) =>
 async function member<N extends TSchema = Chat>(
   responses: readonly FauxResponseStep[],
   {
-    tools = [
-      new toolsApi.RecvTool(),
-      new toolsApi.SendTool(),
-      new toolsApi.InfoTool(),
-    ],
+    tools = [],
     prompt,
   }: {
     readonly tools?: readonly AgentTool[];
@@ -177,7 +173,7 @@ async function member<N extends TSchema = Chat>(
   >({
     ...options,
     systemPrompt: "member",
-    tools: [new toolsApi.YieldTool(), ...tools],
+    tools: [...tools],
     ...(prompt === undefined ? {} : { prompt }),
   });
   closers.push(() => agent.return());
@@ -1396,10 +1392,11 @@ for (const strategy of STRATEGIES) {
       const p = await member(script("from P"), { tools: shared });
       const q = await member(script("from Q"), { tools: shared });
       const copy = { ...new toolsApi.InfoTool() };
-      const r = await member(
-        [call("info", {}, "info-1"), fauxAssistantMessage("R done")],
-        { tools: [copy] },
-      );
+      const r = await member([
+        call("info", {}, "info-1"),
+        fauxAssistantMessage("R done"),
+      ]);
+      await r.agent.setTools([copy]);
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
         graphPorts.source,
@@ -1670,8 +1667,9 @@ test("a same-named tool that is not the genuine Yield, or a plain error, does no
   const agent = await agentApi.JuncoAgent.fromResolved({
     ...options,
     systemPrompt: "member",
-    tools: [impostor, failing],
+    tools: [],
   });
+  await agent.setTools([impostor, failing]);
   closers.push(() => agent.return());
   agent.prompt("go").catch(() => undefined);
   const step = await agent.next();

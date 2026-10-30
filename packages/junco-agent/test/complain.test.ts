@@ -16,7 +16,12 @@ import {
 import { EdgeId, NodeId } from "dataflow-engine";
 import { ComplainTool, isComplainTool, issueLog } from "junco-tools";
 import { userTexts } from "../../../test/deterministic-support.ts";
-import { fauxRuntime, scripted, toolTurn } from "../../../test/support.ts";
+import {
+  fauxRuntime,
+  NATIVE_TOOL_BLOCK,
+  scripted,
+  toolTurn,
+} from "../../../test/support.ts";
 import { JuncoAgent, SYSTEM_INSTRUCTION } from "../src/index.ts";
 import { countingTool, isCode, newAgent, settledText } from "./harness.ts";
 
@@ -86,6 +91,15 @@ function assertOnlyComplain(tools: readonly object[]) {
   assert.equal(isComplainTool(tools[0]!), true);
 }
 
+const ONLY_COMPLAIN_BLOCK = [
+  ...NATIVE_TOOL_BLOCK,
+  "task",
+  "yield",
+  "recv",
+  "send",
+  "info",
+] as const;
+
 test("complaint-only configurations still offer and execute exactly one genuine complain tool", async () => {
   const cases: [
     string,
@@ -97,7 +111,7 @@ test("complaint-only configurations still offer and execute exactly one genuine 
         const requests: Context[] = [];
         const { agent } = await newAgent(
           complainThenSettle("empty", "c-empty", requests),
-          { tools: [], activeToolNames: [] },
+          { tools: [], activeToolNames: [], tool_block: ONLY_COMPLAIN_BLOCK },
         );
         return { agent, requests };
       },
@@ -114,6 +128,7 @@ test("complaint-only configurations still offer and execute exactly one genuine 
           provider: "faux",
           model: "faux-1",
           tools: [],
+          tool_block: ONLY_COMPLAIN_BLOCK,
         });
         assert.equal((await agent.getModel())?.id, "faux-1");
         return { agent, requests };
@@ -150,7 +165,7 @@ test("complaint-only configurations still offer and execute exactly one genuine 
         const requests: Context[] = [];
         const { agent } = await newAgent(
           complainThenSettle("again", "c-again", requests),
-          { tools: [] },
+          { tools: [], tool_block: ONLY_COMPLAIN_BLOCK },
         );
         const before = agent.getTools()[0];
         await agent.setTools(agent.getTools());
@@ -193,6 +208,7 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
         models,
         model,
         tools,
+        tool_block: NATIVE_TOOL_BLOCK,
       }),
       isCode("invalid_argument"),
     );
@@ -227,8 +243,8 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
         isCode("invalid_argument"),
       );
     }
-    assert.equal(agent.getTools()[0], one.tool);
-    assert.equal(agent.getTools()[1], genuine);
+    assert.ok(agent.getTools().includes(one.tool));
+    assert.equal(agent.getTools().at(-1), genuine);
     assert.equal(Object.isFrozen(genuine), true);
     assert.equal(Reflect.set(genuine, "name", "renamed"), false);
     assert.equal(
@@ -279,6 +295,7 @@ test("a legacy persisted selection is repaired with complain on reopen without r
     models,
     model,
     tools: [one.tool, two.tool],
+    tool_block: NATIVE_TOOL_BLOCK,
   });
   try {
     assert.deepEqual(
@@ -299,6 +316,7 @@ test("a tool-free subagent complains with its own identity and fresh request", a
     [fauxAssistantMessage("parent")],
     {
       tools: [countingTool("one").tool],
+      tool_block: ONLY_COMPLAIN_BLOCK,
     },
   );
   try {
@@ -343,6 +361,7 @@ test("agents sharing one Models registry keep their request snapshots isolated",
       models,
       model,
       tools: [],
+      tool_block: NATIVE_TOOL_BLOCK,
     });
   const alpha = await make();
   const beta = await make();
@@ -389,6 +408,7 @@ test("the saved prompt is the final converted request, unaffected by later reque
       systemPrompt: "initial system",
       tools: [],
       toProviderMessages: () => [converted],
+      tool_block: ONLY_COMPLAIN_BLOCK,
     },
   );
   let requestCount = 0;

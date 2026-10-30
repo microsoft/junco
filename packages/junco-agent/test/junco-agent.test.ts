@@ -50,6 +50,7 @@ import { userTexts } from "../../../test/deterministic-support.ts";
 import {
   fauxRuntime,
   flushMacrotasks,
+  NATIVE_TOOL_BLOCK,
   scripted,
   toolTurn,
 } from "../../../test/support.ts";
@@ -89,7 +90,8 @@ test("the caller's tools remain inspectable and active selection governs executi
     },
   );
   try {
-    assertTools(agent.getTools(), [first.tool, second.tool]);
+    assert.ok(agent.getTools().includes(first.tool));
+    assert.ok(agent.getTools().includes(second.tool));
     assertTools(agent.getActiveTools(), [first.tool]);
     await agent.setActiveTools(["second"]);
     assertTools(agent.getActiveTools(), [second.tool]);
@@ -561,7 +563,7 @@ test(
 );
 
 test(
-  "edit and ast_edit mutate a file in source order without overlap",
+  "sequential mutation tools mutate a file in source order without overlap",
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "junco-agent-serial-"));
     const file = join(directory, "state.txt");
@@ -569,13 +571,13 @@ test(
     const firstStarted = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const edit: AgentTool = {
-      name: "edit",
-      label: "edit",
+      name: "first_mutation",
+      label: "first_mutation",
       description: "first file mutation",
       parameters: Type.Object({}),
       executionMode: "sequential",
       execute: async () => {
-        started.push("edit");
+        started.push("first_mutation");
         await writeFile(file, "first");
         firstStarted.resolve();
         await release.promise;
@@ -587,13 +589,13 @@ test(
       },
     };
     const astEdit: AgentTool = {
-      name: "ast_edit",
-      label: "ast_edit",
+      name: "dependent_mutation",
+      label: "dependent_mutation",
       description: "dependent file mutation",
       parameters: Type.Object({}),
       executionMode: "sequential",
       execute: async () => {
-        started.push("ast_edit");
+        started.push("dependent_mutation");
         const previous = await readFile(file, "utf8");
         if (previous !== "first complete")
           throw new Error(`Overlapping edits saw ${previous}`);
@@ -607,8 +609,8 @@ test(
     const { agent } = await newAgent(
       [
         toolTurn(
-          fauxToolCall("edit", {}, { id: "e1" }),
-          fauxToolCall("ast_edit", {}, { id: "a1" }),
+          fauxToolCall("first_mutation", {}, { id: "e1" }),
+          fauxToolCall("dependent_mutation", {}, { id: "a1" }),
         ),
         (context) => {
           const results = context.messages.filter(
@@ -627,11 +629,11 @@ test(
       const prompt = agent.prompt("apply both edits");
       await firstStarted.promise;
       await flushMacrotasks();
-      assert.deepEqual(started, ["edit"]);
+      assert.deepEqual(started, ["first_mutation"]);
       release.resolve();
       assert.equal((await prompt).content[0]?.type, "text");
       assert.equal(settledText(await agent.next()), "finished");
-      assert.deepEqual(started, ["edit", "ast_edit"]);
+      assert.deepEqual(started, ["first_mutation", "dependent_mutation"]);
       assert.equal(await readFile(file, "utf8"), "first complete + second");
     } finally {
       release.resolve();
@@ -649,8 +651,9 @@ test("a failed or spoofed yield never pauses the provider", async () => {
   const fake = countingTool("yield");
   const { agent: spoofed } = await newAgent(
     [toolTurn(yieldCall("pretend", "y1")), fauxAssistantMessage("continued")],
-    { tools: [fake.tool], prompt: "go" },
+    { prompt: "go" },
   );
+  await spoofed.setTools([fake.tool], ["yield"]);
   const { agent: blocked } = await newAgent(
     [toolTurn(yieldCall("denied", "y2")), fauxAssistantMessage("continued")],
     { tools: [new YieldTool()], prompt: "go" },
@@ -696,6 +699,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
       session,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [first.tool],
       activeToolNames: ["first", "first"],
     }),
@@ -706,6 +710,7 @@ test("duplicate and unknown active tools are rejected without changing the usabl
       session: await repo.create({}, BACKGROUND_CONTEXT),
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [first.tool],
       activeToolNames: ["missing"],
     }),
@@ -725,8 +730,10 @@ test("duplicate and unknown active tools are rejected without changing the usabl
         isCode("invalid_argument"),
       );
     }
-    assertTools(agent.getTools(), [first.tool, second.tool]);
-    assertTools(agent.getActiveTools(), [first.tool, second.tool]);
+    assert.ok(agent.getTools().includes(first.tool));
+    assert.ok(agent.getTools().includes(second.tool));
+    assert.ok(agent.getActiveTools().includes(first.tool));
+    assert.ok(agent.getActiveTools().includes(second.tool));
     await agent.setTools([second.tool], ["second"]);
     assertTools(agent.getActiveTools(), [second.tool]);
     assert.equal((await agent.prompt("continue")).stopReason, "stop");
@@ -745,6 +752,7 @@ test("an idle reopened session restores its selected tool without advertising ot
     session,
     models,
     model,
+    tool_block: NATIVE_TOOL_BLOCK,
     tools: [one.tool, two.tool],
   });
   try {
@@ -784,6 +792,7 @@ test("an idle reopened session restores its selected tool without advertising ot
     session: reopened,
     models,
     model,
+    tool_block: NATIVE_TOOL_BLOCK,
     tools: [one.tool, two.tool],
   });
   try {
@@ -873,6 +882,7 @@ test(
       session,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
     });
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
     try {
@@ -898,7 +908,7 @@ test(
 test(
   "closed: every async command rejects closed while close joins and after it completes",
   async () => {
-    const { tool } = countingTool("read");
+    const { tool } = countingTool("closed_tool");
     const { faux, session, ...native } = await nativeOptions([
       fauxAssistantMessage("must not be used"),
     ]);
@@ -948,8 +958,8 @@ test(
         isCode("closed"),
       );
       assert.equal(issueLog.length, before);
-      assertTools(agent.getTools(), [tool]);
-      assertTools(agent.getActiveTools(), [tool]);
+      assert.ok(agent.getTools().includes(tool));
+      assert.ok(agent.getActiveTools().includes(tool));
       assert.equal(agent.getResources(), resources);
     };
     const mutation = await session.beginMutation(BACKGROUND_CONTEXT);
@@ -982,6 +992,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
     models,
     provider: "faux",
     model: "faux-1",
+    tool_block: NATIVE_TOOL_BLOCK,
     tools: [],
     prompt: "go",
   });
@@ -997,6 +1008,7 @@ test("the resolving factory accepts explicit tools and rejects duplicate tool na
       models,
       provider: "faux",
       model: "faux-1",
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [duplicate, countingTool("same").tool],
     }),
     isCode("invalid_argument"),
@@ -1016,6 +1028,7 @@ test("create rejects an unsupported thinking level before reading credentials", 
       models,
       provider: "faux",
       model: "faux-1",
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [],
       thinkingLevel: "high",
     }),
@@ -1045,6 +1058,7 @@ test("create requires the selected provider's saved Pi login and closes a transf
           models,
           provider: "github-copilot",
           model: "claude-opus-5.5",
+          tool_block: NATIVE_TOOL_BLOCK,
           session,
           tools: [],
         }),
@@ -1089,6 +1103,7 @@ test("create reuses Pi's saved OAuth login without starting a login flow", async
       models,
       provider: "github-copilot",
       model: "claude-opus-5.5",
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [],
     });
     const selected = await agent.getModel();
@@ -1134,6 +1149,7 @@ test("create rejects an account-unavailable model and closes a transferred sessi
         provider: "github-copilot",
         model: "claude-opus-5.5",
         session,
+        tool_block: NATIVE_TOOL_BLOCK,
         tools: [],
       }),
       (error: unknown) => {
@@ -1181,6 +1197,7 @@ test("an unrefreshable Pi login fails with login guidance before creating an age
       models,
       provider: "github-copilot",
       model: "claude-opus-5.5",
+      tool_block: NATIVE_TOOL_BLOCK,
       tools: [],
     }),
     (error: unknown) => {
@@ -2263,6 +2280,7 @@ test(
       session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
       models,
       model: faux.getModel("plain")!,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
     });
     try {
@@ -2531,6 +2549,7 @@ test(
       session,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
       tools: [one.tool],
       compaction: COMPACTION,
@@ -2574,6 +2593,7 @@ test(
       session: reopened,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
       tools: [one.tool],
     });
@@ -2650,6 +2670,7 @@ test(
       session,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
       tokenMonitor: record(1),
     });
@@ -2703,6 +2724,7 @@ test(
       session: reopened,
       models,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
       tokenMonitor: record(1),
     });
@@ -2831,6 +2853,7 @@ test(
       session,
       models: fixed.models,
       model: fixed.model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
     });
     try {
@@ -2843,6 +2866,7 @@ test(
       session: await repo.open(session.metadata, BACKGROUND_CONTEXT),
       models: fixed.models,
       model: fixed.model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
       recorder,
       recorderNodeId: "solo",
@@ -3174,6 +3198,9 @@ async function fixedAgent(
     model: fixed.model,
     systemPrompt: "sys",
     ...options,
+    tool_block: [
+      ...new Set([...NATIVE_TOOL_BLOCK, ...(options.tool_block ?? [])]),
+    ],
   });
   return { ...fixed, agent, repo, session };
 }
@@ -3430,6 +3457,7 @@ test(
       session: reopened,
       models: restored.models,
       model: restored.model,
+      tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
     });
     try {

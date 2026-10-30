@@ -164,12 +164,6 @@ const EDGES = {
 } as const;
 /** Prefix of an edit error whose turn ended in a provider error: a non-converged stop, not a retry. */
 const PROVIDER_FAILURE = "editor provider failure";
-const EDITOR_TOOLS: Record<string, true> = {
-  info: true,
-  recv: true,
-  read_target: true,
-  edit_tuning: true,
-};
 
 type Receipt = {
   ticket: string;
@@ -1811,18 +1805,7 @@ export async function runOptimizer(
       ladder,
       models,
       tools: editorTools(ctx),
-      createAgent: (spec) =>
-        createJuncoAgent(
-          {
-            ...spec,
-            tools: spec.tools.filter(
-              (tool) =>
-                "name" in tool && Object.hasOwn(EDITOR_TOOLS, tool.name),
-            ),
-          },
-          ladder,
-          models,
-        ),
+      createAgent: (spec) => createJuncoAgent(spec, ladder, models),
       code: {
         Init: init,
         Evaluate: evaluate,

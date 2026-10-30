@@ -229,6 +229,19 @@ test("a failing source, a name conflict or an unknown active tool closes only th
       (error) => error instanceof JuncoAgentError && /Duplicate tool name/.test(error.message),
     );
 
+    await assert.rejects(
+      JuncoAgent.create({
+        models,
+        provider: "faux",
+        model: "faux-1",
+        cwd: seed,
+        collection,
+        tools: [fixture("fx")],
+        tool_block: ["mcp__fx__echo"],
+      }),
+      /tools and tool_block both list "mcp__fx__echo"/,
+    );
+
     const session = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
     const { models: resolvedModels, model } = scripted([]);
     await assert.rejects(
@@ -336,6 +349,23 @@ async function resolvedAgent(
 const toolNamed = (tools: readonly AgentTool[], name: string) =>
   tools.find((tool) => tool.name === name);
 const namesOf = (tools: readonly AgentTool[]) => tools.map((tool) => tool.name);
+const DEFAULT_NAMES = [
+  "read",
+  "bash",
+  "edit",
+  "release",
+  "grep",
+  "find",
+  "ast_grep",
+  "ast_edit",
+  "diff",
+  "code_graph",
+  "task",
+  "yield",
+  "recv",
+  "send",
+  "info",
+] as const;
 
 /** Executes `tool` directly with no arguments and returns its text. */
 async function callText(tool: AgentTool | undefined): Promise<string> {
@@ -554,14 +584,11 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
       const [inherit, none] = await parent.createSubagents([{}, { tools: [] }]);
       defer(() => inherit!.return());
       defer(() => none!.return());
-      expect(namesOf(inherit!.getTools())).toEqual(["task", "mcp__fx__read_state", "complain", "release"]);
-      expect(namesOf(inherit!.getActiveTools())).toEqual([
-        "task",
-        "mcp__fx__read_state",
-        "complain",
-        "release",
-      ]);
-      expect(namesOf(none!.getTools())).toEqual(["complain", "release"]);
+      const inherited = [...DEFAULT_NAMES, "mcp__fx__read_state", "complain"];
+      const defaultsOnly = [...DEFAULT_NAMES, "complain"];
+      expect(namesOf(inherit!.getTools())).toEqual(inherited);
+      expect(namesOf(inherit!.getActiveTools())).toEqual(inherited);
+      expect(namesOf(none!.getTools())).toEqual(defaultsOnly);
 
       // Neither model call reaches a server: each child's server counts only the probe.
       await none!.prompt("go");
@@ -579,7 +606,6 @@ test("a tool subset only narrows inherited MCP capabilities", () =>
         command: process.execPath,
         args: [SERVER],
       });
-      const inherited = ["task", "mcp__fx__read_state", "complain", "release"];
       expect(namesOf(inherit!.getTools())).toEqual(inherited);
       const [later] = await parent.createSubagents([{}]);
       defer(() => later!.return());

@@ -47,7 +47,7 @@ import {
   graph as std,
 } from "../src/index.ts";
 import { terminalPorts, textOf, yieldsThen } from "./deterministic-support.ts";
-import { toolTurn } from "./support.ts";
+import { NATIVE_TOOL_BLOCK, toolTurn } from "./support.ts";
 
 type Policy = schedules.Scheduler<
   Agentic<typeof AgenticInputSchema, AssistantMessage>,
@@ -396,6 +396,7 @@ async function placed(
     model: models.getModels(provider)[0]!,
     systemPrompt: "sys",
     tools,
+    tool_block: NATIVE_TOOL_BLOCK,
     prompt: "go",
   });
   return { agent, session };

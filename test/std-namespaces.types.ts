@@ -740,6 +740,7 @@ export async function agentFactoriesKeepSpecializations(
       resources: { skills: [skill], promptTemplates: [template] },
       prompt: "start",
       images: [image],
+      tool_block: ["bash"],
     };
   const resolved: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool> =
     await agent.JuncoAgent.fromResolved(options);
@@ -781,6 +782,11 @@ export async function agentFactoriesKeepSpecializations(
     provider: "faux",
     model: "plain",
   };
+  const malformedBlock: agent.AgenticOptions = {
+    ...native,
+    // @ts-expect-error tool_block entries are tool-name strings
+    tool_block: [1],
+  };
   const malformedResources: agent.AgenticOptions<TaggedSkill>["resources"] = {
     // @ts-expect-error specialized resources reject an untagged skill
     skills: [plainSkill],
@@ -797,6 +803,7 @@ export async function agentFactoriesKeepSpecializations(
     minimal,
     malformedResources,
     malformedTools,
+    malformedBlock,
   ];
 }
 
@@ -873,19 +880,10 @@ export async function toolFactoriesAreConsumerAgentTools(
   // @ts-expect-error a collection opens its own mux
   await tools.ToolCollection.create(cwd, { policy: tools.LockPolicy, mux });
   await tools.ToolCollection.create(cwd);
-  const agentTools: AgentTool[] = [
-    tools.ReadTool.create(cwd, store, native, mux),
-    edit,
-    tools.GrepTool.create(cwd, store, native, mux),
-    tools.FindTool.create(cwd, native, mux),
-    tools.AstGrepTool.create(cwd, native, mux),
-    tools.AstEditTool.create(cwd, native, mux),
-    tools.DiffTool.create(native),
-    bash,
-    ...collection.tools,
-  ];
+  const agentTools: AgentTool[] = [new tools.YieldTool()];
   const nativeAgent = await agent.JuncoAgent.fromResolved({
     ...base,
+    collection,
     tools: agentTools,
   });
 
@@ -1122,8 +1120,7 @@ export async function mcpDefinitionsComposeWithAgentFactories(
   };
   // @ts-expect-error definitions are factory-only sources, not concrete tools
   await mixed.setTools([graft]);
-  // @ts-expect-error mixed sources cannot promise a specialized tool type
-  const narrowed: agent.JuncoAgent<Skill, PromptTemplate, TaggedTool> = mixed;
+  const narrowed: agent.JuncoAgent<Skill, PromptTemplate, AgentTool> = mixed;
   return [
     chained,
     connectionLifetime,
@@ -1242,11 +1239,10 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   await task.invoke(host, { toolCallId: "c", input: {} }, signal);
   // @ts-expect-error a handle ID is a string
   const badHandles: tools.TaskToolDetails = { tasks: [{ id: 1 }] };
-  // @ts-expect-error children never promise the caller's specialized tool type
   const narrowedChildren: agent.JuncoAgent<
     TaggedSkill,
     TaggedTemplate,
-    TaggedTool
+    AgentTool
   >[] = children;
   return [
     branded,
@@ -1269,7 +1265,7 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
 }
 
 export async function messagingToolsAreNominalAgentTools(
-  specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
+  _specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
   view: graph.ParentView<Num, string>,
   signal: AbortSignal,
 ) {

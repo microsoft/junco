@@ -82,6 +82,7 @@ export type AgentSpec = {
   readonly graph: string;
   readonly node: string;
   readonly systemPrompt?: string;
+  readonly tool_block?: readonly string[];
   readonly tools: (AgentTool | mcp.JuncoMcpTools)[];
   readonly skills: Skill[];
   readonly cwd: string;
@@ -238,14 +239,17 @@ function mcpDefinition(
   });
 }
 
-function builtinTools(): AgentTool[] {
-  return [
-    new tools.YieldTool(),
-    new tools.InfoTool(),
-    new tools.SendTool(),
-    new tools.RecvTool(),
-    new tools.TaskTool(),
+function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
+  const defaults: readonly (readonly [string, () => AgentTool])[] = [
+    ["yield", () => new tools.YieldTool()],
+    ["info", () => new tools.InfoTool()],
+    ["send", () => new tools.SendTool()],
+    ["recv", () => new tools.RecvTool()],
+    ["task", () => new tools.TaskTool()],
   ];
+  return defaults.flatMap(([name, create]) =>
+    blocked.has(name) ? [] : [create()],
+  );
 }
 
 export async function resolveAgents(
@@ -255,8 +259,15 @@ export async function resolveAgents(
   const definitions = new Map<string, mcp.JuncoMcpTools>();
   const loaded = new Map<string, Skill>();
   const result: AgentSpec[] = [];
-  for (const { id, node, label } of walk(doc.graph)) {
+  for (const { id, node, key, label } of walk(doc.graph)) {
     if (!isAgent(node)) continue;
+    const block = node.tool_block ?? [];
+    const blocked = new Set(block);
+    const overlap = (node.tools ?? []).find((name) => blocked.has(name));
+    if (overlap !== undefined)
+      throw new TypeError(
+        `build: node "${key}": tools and tool_block both list "${overlap}"; remove it from either tools or tool_block`,
+      );
     const skills: Skill[] = [];
     for (const name of node.skills ?? []) {
       let skill = loaded.get(name);
@@ -277,6 +288,10 @@ export async function resolveAgents(
         options.tools?.[name];
       if (!tool)
         throw new TypeError(`build: unknown tool "${name}" for node "${id}"`);
+      if (blocked.has(tool.name))
+        throw new TypeError(
+          `build: node "${key}": tool "${name}" resolves to blocked tool "${tool.name}"; remove it from tools or tool_block`,
+        );
       if ((BUILTIN_TOOL_NAMES as readonly string[]).includes(tool.name))
         throw new TypeError(
           `build: tool "${name}" for node "${id}" shadows builtin tool "${tool.name}"`,
@@ -306,7 +321,8 @@ export async function resolveAgents(
         ]
           .filter(Boolean)
           .join("\n\n") || undefined,
-      tools: [...builtinTools(), ...extra, ...servers],
+      tools: [...builtinTools(blocked), ...extra, ...servers],
+      ...(node.tool_block === undefined ? {} : { tool_block: block }),
       skills,
       cwd: options.cwd,
       collection: options.collection,
@@ -324,7 +340,7 @@ export function createJuncoAgent(
     ladder,
     DEFAULT_MODEL_STRENGTH,
   );
-  return agent.JuncoAgent.create<Skill, PromptTemplate, TSchema, unknown>({
+  return agent.JuncoAgent.create({
     provider,
     model: modelId,
     models,
@@ -332,6 +348,7 @@ export function createJuncoAgent(
     systemPrompt: spec.systemPrompt,
     cwd: spec.cwd,
     tools: spec.tools,
+    tool_block: spec.tool_block,
     collection: spec.collection,
     recorder: spec.recorder,
     recorderNodeId: spec.recorderNodeId,

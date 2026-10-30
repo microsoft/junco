@@ -133,6 +133,9 @@ async function mixedWorkflow(
       ...options,
       systemPrompt: spec.systemPrompt,
       tools: spec.tools as AgentTool[],
+      tool_block: [
+        ...new Set([...(options.tool_block ?? []), ...(spec.tool_block ?? [])]),
+      ],
     });
     agents.push(created);
     return created;

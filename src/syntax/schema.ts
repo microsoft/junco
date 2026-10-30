@@ -49,6 +49,7 @@ const agentFields = {
   ...common,
   system: Type.Optional(Type.String()),
   tools: Type.Optional(strings),
+  tool_block: Type.Optional(strings),
   mcp: Type.Optional(strings),
   skills: Type.Optional(strings),
   prompt: Type.Optional(Type.String()),

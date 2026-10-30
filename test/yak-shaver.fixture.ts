@@ -168,8 +168,8 @@ export function sourceTool(
   sources: ReadonlyMap<string, string>,
 ): AgentTool<typeof readParameters, undefined> {
   return {
-    name: "read",
-    label: "read",
+    name: "source_read",
+    label: "source_read",
     description: "Read an in-memory source file.",
     parameters: readParameters,
     execute: async (_id, { path }) => ({
@@ -325,12 +325,12 @@ export async function scriptedLane(
         await script.hold.gate;
       }
       if (script.readAssigned)
-        return toolTurn(...files.map((path) => call("read", { path })));
+        return toolTurn(...files.map((path) => call("source_read", { path })));
     } else if (script.forbiddenProbe === shard) {
       log.forbidden.push(...latestResults(context));
     } else if (script.readAssigned) {
       log.reads += latestResults(context).filter(
-        (result) => result.toolName === "read" && !result.isError,
+        (result) => result.toolName === "source_read" && !result.isError,
       ).length;
     }
     // Attempts of one shard run one after another, so its latest start is this attempt.

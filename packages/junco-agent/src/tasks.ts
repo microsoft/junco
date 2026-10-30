@@ -229,7 +229,11 @@ export class TaskScope {
     const policy = this.owner.getTaskFailurePolicy();
     const admission = AbortSignal.any([signal, this.#controller.signal]);
     const children = await this.owner.createSubagents(
-      input.tasks.map(({ model, tools }) => ({ model, tools })),
+      input.tasks.map(({ model, tools, tool_block }) => ({
+        model,
+        tools,
+        tool_block,
+      })),
       admission,
     );
     const batch: TaskBatch = {
@@ -250,6 +254,9 @@ export class TaskScope {
           selection: {
             model: { provider: model.provider, modelId: model.id },
             tools: child.getActiveTools().map((tool) => tool.name),
+            ...(input.tasks[index].tool_block === undefined
+              ? {}
+              : { tool_block: [...input.tasks[index].tool_block] }),
           },
           policy,
           retries: policy === "ignore" ? 0 : policy.retries,

@@ -58,7 +58,6 @@ import {
   captureRecorder,
   EmptyPolicy,
   type Issue,
-  isComplainTool,
   LockPolicy,
   type Policy,
   type ProfileActivation,
@@ -139,13 +138,12 @@ export function protocolComplainTakesCompleteIssues(
 export function juncoAgentKeepsSpecializations(
   agent: JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
 ) {
-  const [first] = agent.getTools();
-  const tool: "tool" | undefined =
-    first === undefined || isComplainTool(first) ? undefined : first.tag;
+  const runtimeTools: AgentTool[] = agent.getTools();
+  const activeTools: AgentTool[] = agent.getActiveTools();
   const skill: "skill" | undefined = agent.getResources().skills?.[0]?.tag;
   const template: "template" | undefined =
     agent.getResources().promptTemplates?.[0]?.tag;
-  return [tool, skill, template];
+  return [runtimeTools, activeTools, skill, template];
 }
 
 export function agentFactoriesUseCollection(

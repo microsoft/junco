@@ -23,7 +23,7 @@ import {
 } from "../examples/oss-committee/oss-committee.ts";
 import type { YamlAgent } from "../examples/support.ts";
 import { userTexts } from "./deterministic-support.ts";
-import { scripted } from "./support.ts";
+import { NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
 
 export const request = "Design a C# TUI for committee decision history.";
 
@@ -408,6 +408,7 @@ export async function scriptedCommittee(
       model,
       systemPrompt: `You are the ${id} of a three-member design committee.`,
       tools,
+      tool_block: NATIVE_TOOL_BLOCK,
     });
     created.push(agent);
     return agent;

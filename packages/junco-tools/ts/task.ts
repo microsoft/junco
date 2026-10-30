@@ -35,9 +35,17 @@ const launchSchema = Type.Object(
             ),
           ),
           tools: Type.Optional(
-            Type.Array(Type.String(), {
+            Type.Array(nonBlank("Tool name."), {
+              uniqueItems: true,
               description:
-                "Subset of your active tool names; [] leaves only the always-on complain tool.",
+                "Additional tool names to inherit; defaults remain unless blocked. [] selects no additions.",
+            }),
+          ),
+          tool_block: Type.Optional(
+            Type.Array(nonBlank("Tool name."), {
+              uniqueItems: true,
+              description:
+                "Tool names to exclude; extends the parent block. Must not overlap tools.",
             }),
           ),
         },
@@ -233,19 +241,35 @@ abstract class TaskToolBase<P extends TSchema>
   protected snapshot(input: TaskInput): TaskInput {
     return {
       context: input.context,
-      tasks: input.tasks.map((item) => ({
-        ...(item.name === undefined ? {} : { name: item.name.trim() }),
-        task: item.task,
-        ...(item.model === undefined
-          ? {}
-          : {
-              model: {
-                provider: item.model.provider,
-                modelId: item.model.modelId,
-              },
-            }),
-        ...(item.tools === undefined ? {} : { tools: [...item.tools] }),
-      })),
+      tasks: input.tasks.map((item, index) => {
+        const toolBlock =
+          item.tool_block === undefined ? undefined : [...item.tool_block];
+        if (
+          toolBlock !== undefined &&
+          item.tools?.some((name) => toolBlock.includes(name))
+        ) {
+          const name = item.tools.find((candidate) =>
+            toolBlock.includes(candidate),
+          );
+          throw new Error(
+            `task: tasks[${index}].tools and tool_block both list "${name}"; remove it from either list`,
+          );
+        }
+        return {
+          ...(item.name === undefined ? {} : { name: item.name.trim() }),
+          task: item.task,
+          ...(item.model === undefined
+            ? {}
+            : {
+                model: {
+                  provider: item.model.provider,
+                  modelId: item.model.modelId,
+                },
+              }),
+          ...(item.tools === undefined ? {} : { tools: [...item.tools] }),
+          ...(toolBlock === undefined ? {} : { tool_block: toolBlock }),
+        };
+      }),
     };
   }
 
@@ -293,8 +317,8 @@ export class TaskTool extends TaskToolBase<typeof taskParameters> {
     "Start one or more subagents. Each runs in a fresh session with only the instructions you " +
     "give it (plus the shared context prepended to each), so be complete. This returns one handle per task " +
     "immediately. Each subagent's final report later arrives as a message carrying its handle ID. " +
-    `${START_HELP} Optionally choose a registered model ({ provider, modelId }) or a ` +
-    `subset of your active tool names per task; omitted values inherit yours. ${DECISION_HELP}`;
+    `${START_HELP} Optionally choose a registered model ({ provider, modelId }), additional inherited ` +
+    `tool names, or further exclusions in tool_block per task. ${DECISION_HELP}`;
   readonly parameters = taskParameters;
 
   /** Whether {@link TaskTool} or {@link AssignedTaskTool} built `tool`; copies are not task tools. */

@@ -174,7 +174,11 @@ describe("complaints through real graphs", () => {
     assert.ok(promptTexts(issue!).some((text) => text.includes(input.text)));
     assert.deepEqual(issue!.prompt.tools?.map((tool) => tool.name).sort(), [
       "complain",
+      "info",
       "recv",
+      "send",
+      "task",
+      "yield",
     ]);
     assert.deepEqual(tracer.complaints, [
       [workerId, "I cannot reach the coordinator."],

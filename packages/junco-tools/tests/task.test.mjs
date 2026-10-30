@@ -179,6 +179,7 @@ test("the host receives trimmed names, preserved text and a detached snapshot", 
         task: "  first\n task  ",
         model: { provider: "prov", modelId: "mod" },
         tools: ["read", "bash"],
+        tool_block: ["release"],
       },
       { name: "alpha", task: "second" },
     ],
@@ -194,6 +195,7 @@ test("the host receives trimmed names, preserved text and a detached snapshot", 
         task: "  first\n task  ",
         model: { provider: "prov", modelId: "mod" },
         tools: ["read", "bash"],
+        tool_block: ["release"],
       },
       { name: "alpha", task: "second" },
     ],
@@ -206,9 +208,11 @@ test("the host receives trimmed names, preserved text and a detached snapshot", 
   assert.notEqual(result.details.tasks[0].id, result.details.tasks[1].id);
 
   input.tasks[0].tools.push("edit");
+  input.tasks[0].tool_block.push("grep");
   input.tasks[0].model.modelId = "other";
   input.tasks.push({ task: "late" });
   assert.deepEqual(seen.tasks[0].tools, ["read", "bash"]);
+  assert.deepEqual(seen.tasks[0].tool_block, ["release"]);
   assert.equal(seen.tasks[0].model.modelId, "mod");
   assert.equal(seen.tasks.length, 2);
 });
@@ -327,6 +331,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
         task: "first",
         model: { provider: "p", modelId: "m" },
         tools: ["read"],
+        tool_block: ["release"],
       },
       { task: "second", tools: [] },
     ],
@@ -344,6 +349,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   input.context = "changed";
   input.tasks[0].task = "rewritten";
   input.tasks[0].tools.push("bash");
+  input.tasks[0].tool_block.push("grep");
   input.tasks[0].model.modelId = "other";
   input.tasks.push({ task: "late" });
 
@@ -355,6 +361,7 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
         task: "first",
         model: { provider: "p", modelId: "m" },
         tools: ["read"],
+        tool_block: ["release"],
       },
       { task: "second", tools: [] },
     ],
@@ -369,11 +376,29 @@ test("an assigned task tool launches its detached canonical batch from {}", asyn
   });
   // Each launch gets its own snapshot: a host mutating one cannot alter the next.
   calls[0].input.tasks[0].tools.push("edit");
+  calls[0].input.tasks[0].tool_block.push("grep");
   await tool.invoke(host, "again", {}, signal);
   assert.deepEqual(calls[1].input, expected);
 
   // Without a host, an assigned tool fails like an unhosted ordinary one.
   await assert.rejects(async () => tool.execute("direct", {}));
+});
+
+test("ordinary and assigned task tools reject tools/tool_block overlap before admission", async () => {
+  const { host, calls } = recordingHost();
+  const input = {
+    context: "c",
+    tasks: [{ task: "x", tools: ["bash"], tool_block: ["bash"] }],
+  };
+  await assert.rejects(
+    new TaskTool(host).execute("overlap", input),
+    /tasks\[0\]\.tools and tool_block both list "bash"/,
+  );
+  assert.throws(
+    () => new AssignedTaskTool(input, host),
+    /tasks\[0\]\.tools and tool_block both list "bash"/,
+  );
+  assert.equal(calls.length, 0);
 });
 
 test("an assigned task tool rejects invalid batches and non-trigger launches", async () => {

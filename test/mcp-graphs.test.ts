@@ -40,6 +40,7 @@ import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import {
   type AgencyContext,
+  NATIVE_TOOL_BLOCK,
   nativeOptions,
   schedulerModel,
 } from "./support.ts";
@@ -386,6 +387,7 @@ test(
             systemPrompt: "sys",
             cwd: seed,
             tools: [new TaskTool(), fixture],
+            tool_block: NATIVE_TOOL_BLOCK,
             collection,
           });
           const callerAgent = caller;

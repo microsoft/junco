@@ -19,7 +19,7 @@ import * as O from "fp-ts/lib/Option.js";
 import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax } from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
-import { runCli, type YamlAgent } from "../support.ts";
+import { problemRecorder, runCli, type YamlAgent } from "../support.ts";
 import source from "./recursive-agency.yml" with { type: "text" };
 
 const { JuncoAgent } = agent;
@@ -50,6 +50,19 @@ const Join: syntax.DeterministicNode = ({ policy }) => {
   };
 };
 
+
+const NATIVE_TOOL_BLOCK = [
+  "read",
+  "bash",
+  "edit",
+  "release",
+  "grep",
+  "find",
+  "ast_grep",
+  "ast_edit",
+  "diff",
+  "code_graph",
+] as const;
 let providers = 0;
 async function nativeOptions(responses: readonly FauxResponseStep[]) {
   const name = `faux-${++providers}`;
@@ -61,6 +74,7 @@ async function nativeOptions(responses: readonly FauxResponseStep[]) {
     session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
     models,
     model: faux.getModel(),
+    tool_block: NATIVE_TOOL_BLOCK,
   };
   return { faux, options };
 }
@@ -108,6 +122,9 @@ function fauxScheduler(
 }
 
 async function main(signal: AbortSignal) {
+  // Disposed when main returns, after the graph below has closed.
+  await using recording = new AsyncDisposableStack();
+  const recorder = recording.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
   const log: string[] = [];
   const leafResponses = [
     fauxAssistantMessage([fauxToolCall("yield", { reason: "waiting once" }, { id: "leaf-yield" })], {
@@ -137,12 +154,21 @@ async function main(signal: AbortSignal) {
       cwd: process.cwd(),
       scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
       code: { Start, Join },
+      recorder,
       createAgent: async (spec) => {
         const { faux, options } = await nativeOptions(spec.node === "0" ? leafResponses : siblingResponses);
         const agent: YamlAgent = await JuncoAgent.fromResolved({
           ...options,
           systemPrompt: spec.systemPrompt,
           tools: spec.tools as AgentTool[],
+          tool_block: [
+            ...new Set([
+              ...(options.tool_block ?? []),
+              ...(spec.tool_block ?? []),
+            ]),
+          ],
+          recorder: spec.recorder,
+          recorderNodeId: spec.recorderNodeId,
         });
         actors.set(spec.node, { faux, agent });
         if (spec.node === "1") {

@@ -48,7 +48,7 @@ import {
   settle,
   userTexts,
 } from "./deterministic-support.ts";
-import { fauxRuntime } from "./support.ts";
+import { fauxRuntime, NATIVE_TOOL_BLOCK } from "./support.ts";
 import {
   Collect,
   Constant,
@@ -448,6 +448,78 @@ test("named tools extend fresh builtins and cannot shadow them", async () => {
     }),
     /shadows builtin tool "yield"/,
   );
+});
+
+test("tool blocks filter helpers and reject literal or resolved-name conflicts", async () => {
+  const shell: AgentTool = {
+    name: "bash",
+    label: "bash",
+    description: "shell alias",
+    parameters: Type.Object({}),
+    execute: async () => ({
+      content: [{ type: "text", text: "ok" }],
+      details: {},
+    }),
+  };
+  const nested = parse({
+    graph: {
+      nodes: {
+        Child: {
+          kind: "graph",
+          graph: {
+            nodes: {
+              Worker: { tools: ["shell"], tool_block: ["bash"] },
+            },
+            edges: [{ from: "Worker", to: "$sink", schema: reply }],
+          },
+        },
+      },
+      edges: [{ from: "Child", to: "$sink", schema: reply }],
+    },
+  });
+  await assert.rejects(
+    resolveAgents(nested, { cwd: process.cwd(), tools: { shell } }),
+    (error) =>
+      error instanceof TypeError &&
+      error.message.includes('node "Child/Worker"') &&
+      error.message.includes('tool "shell" resolves to blocked tool "bash"'),
+  );
+
+  const direct = {
+    graph: {
+      nodes: { A: { tools: ["same"], tool_block: ["same"] } },
+    },
+  } as JuncoDocument;
+  await assert.rejects(
+    resolveAgents(direct, { cwd: process.cwd(), tools: { same: shell } }),
+    /tools and tool_block both list "same"/,
+  );
+
+  const disjoint = parse({
+    graph: {
+      nodes: { A: { tool_block: ["task", "send"] } },
+      edges: [{ from: "A", to: "$sink", schema: reply }],
+    },
+  });
+  const [spec] = await resolveAgents(disjoint, { cwd: process.cwd() });
+  assert.ok(spec);
+  assert.deepEqual(spec.tool_block, ["task", "send"]);
+  assert.deepEqual(
+    spec.tools.map((tool) => ("name" in tool ? tool.name : "mcp")),
+    ["yield", "info", "recv"],
+  );
+
+  let received: typeof spec | undefined;
+  const execution = await build(disjoint, {
+    ...options(),
+    ladder: fauxLadder,
+    createAgent: async (candidate) => {
+      received = candidate;
+      return mock("ok");
+    },
+  });
+  assert.deepEqual(received?.tool_block, ["task", "send"]);
+  await execution.graph.close();
 });
 
 test("skills are loaded once, advertised and reject nonexistent registry paths", async () => {
@@ -3004,7 +3076,7 @@ test("an agent reads a numeric code value with recv and sends a number through i
         sink: { returns: "Tail" },
         nodes: {
           Seven: { kind: "code", trigger: "always" },
-          Worker: { prompt: "work" },
+          Worker: { prompt: "work", tool_block: NATIVE_TOOL_BLOCK },
           Tail: { kind: "code" },
         },
         edges: [

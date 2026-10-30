@@ -44,7 +44,7 @@ import {
   terminalPorts,
   userTexts,
 } from "./deterministic-support.ts";
-import { toolTurn, waitingTool } from "./support.ts";
+import { NATIVE_TOOL_BLOCK, toolTurn, waitingTool } from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call runs fresh subagents natively in the background while the caller's node stays itself.
@@ -104,6 +104,7 @@ function registry(...names: string[]) {
         systemPrompt: "sys",
         ...(recorder === undefined ? {} : { recorder }),
         tools,
+        tool_block: NATIVE_TOOL_BLOCK,
       });
       closers.push(() => agent.return());
       return agent;
@@ -694,6 +695,7 @@ describe("native tasks on a graph-driven caller", () => {
       model,
       systemPrompt: "sys",
       tools,
+      tool_block: NATIVE_TOOL_BLOCK,
     });
     closers.push(() => caller.return());
     caller.setTaskFailurePolicy({ retries: 1 });
@@ -2038,7 +2040,10 @@ describe("native task failure policies", () => {
     const toolNames = children("a").map((child) =>
       child.getActiveTools().map(({ name }) => name),
     );
-    assert.ok(!toolNames[0]?.includes("task"), "the assignment's tool subset");
+    assert.ok(
+      toolNames[0]?.includes("task"),
+      "unblocked defaults survive tools: []",
+    );
     for (const names of toolNames) assert.deepEqual(names, toolNames[0]);
     const reports = reportsIn(finalContext);
     assert.deepEqual(

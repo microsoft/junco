@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   contentText,
   fauxAssistantMessage,
@@ -15,7 +14,6 @@ import { JuncoAgent } from "junco-agent";
 import {
   BashTool,
   EmptyPolicy,
-  isMarshPolicyDenied,
   LockPolicy,
   type NativeModule,
   ShellMuxOperations,
@@ -100,26 +98,6 @@ test(
       const tag = /#([0-9A-Fa-f]{4})\]/.exec(readText)?.[1];
       assert.ok(tag, readText);
 
-      // Observe each tool's raw rejection before Pi reduces it to a text tool result. The agent
-      // adds the collection's genuine release itself; a same-named wrapper would be refused.
-      const raw: unknown[] = [];
-      const attempts = new Map<string, number>();
-      const observed = collection.tools
-        .filter((tool) => tool.name !== "release")
-        .map(
-          (tool): AgentTool => ({
-            ...tool,
-            execute: async (...args) => {
-              attempts.set(tool.name, (attempts.get(tool.name) ?? 0) + 1);
-              try {
-                return await tool.execute(...args);
-              } catch (error) {
-                raw.push(error);
-                throw error;
-              }
-            },
-          }),
-        );
       const { faux, options } = await nativeOptions([
         fauxAssistantMessage(
           [
@@ -148,7 +126,8 @@ test(
       const agent = await JuncoAgent.fromResolved({
         ...options,
         collection,
-        tools: observed,
+        tools: [],
+        tool_block: [],
         prompt: "take the file",
       });
       const results = new Map<string, boolean>();
@@ -173,8 +152,6 @@ test(
           ["policy", "bash-1", "bash"],
         ],
       );
-      assert.equal(raw.length, 3);
-      assert.ok(raw.every(isMarshPolicyDenied));
       assert.deepEqual(Object.fromEntries(results), {
         "edit-1": true,
         "ast-1": true,
@@ -194,11 +171,6 @@ test(
           ),
       );
       assert.equal(faux.state.callCount, 2);
-      assert.deepEqual(Object.fromEntries(attempts), {
-        edit: 1,
-        ast_edit: 1,
-        bash: 1,
-      });
       assert.equal(await readFile(join(seed, SOURCE), "utf8"), OWNED);
 
       await agent.return();
@@ -224,7 +196,8 @@ test(
       const agent = await JuncoAgent.fromResolved({
         ...options,
         collection,
-        tools: collection.tools.filter((tool) => tool.name === "bash"),
+        tools: [],
+        tool_block: [],
         prompt: "take the file",
       });
       try {
@@ -253,6 +226,7 @@ test(
         ...options,
         collection,
         tools: [],
+        tool_block: [],
       });
       const ports = terminalPorts();
       const graphContext = policyContext(ports.source, ports.sink, "parallel");

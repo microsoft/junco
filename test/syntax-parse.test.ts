@@ -158,10 +158,10 @@ for (const [field, name] of [
     rejects((d) => {
       d.graph.nodes.A[field!] = ["missing"];
     }, `Node "A" references unknown ${name} "missing"`));
-test("builtins always on", () =>
+test("builtins are enabled by default", () =>
   rejects((d) => {
     d.graph.nodes.A.tools = ["yield"];
-  }, 'tool "yield" is builtin and always on'));
+  }, 'tool "yield" is builtin and enabled by default'));
 for (const mode of ["input", "value", "empty"])
   test(`invalid emit ${mode}`, () =>
     rejects((d) => {
@@ -1328,7 +1328,7 @@ test("all builtins, collision identities and legal parallel edges", () => {
   for (const name of ["yield", "info", "send", "recv", "task"])
     rejects((d) => {
       d.graph.nodes.A.tools = [name];
-    }, `tool "${name}" is builtin and always on`);
+    }, `tool "${name}" is builtin and enabled by default`);
   rejects((d) => {
     d.graph.edges[0].id = "shared";
     d.graph.edges[1] = {
@@ -1368,6 +1368,91 @@ test("all builtins, collision identities and legal parallel edges", () => {
       }),
       "/graph",
     );
+});
+
+test("agent tool_block validates conflicts, entries and source locations", () => {
+  const source = `graph:
+  nodes:
+    A:
+      tools: [bash]
+      tool_block: [bash]
+  edges:
+    - from: A
+      to: $sink
+      schema: { type: number }
+`;
+  const error = failure(source, { sourceName: "bad-tools.yml" });
+  assert.equal(error.code, "node");
+  assert.equal(error.path, "/graph/nodes/A/tool_block/0");
+  assert.equal(error.sourceName, "bad-tools.yml");
+  assert.equal(error.location?.start.line, 5);
+  assert.match(error.message, /Node "A"/);
+  assert.match(error.message, /tools and tool_block/);
+  assert.match(error.message, /"bash"/);
+  assert.match(error.help, /remove "bash" from either/);
+
+  const helper = failure(
+    variant((doc) => {
+      doc.graph.nodes.A.tools = ["yield"];
+      doc.graph.nodes.A.tool_block = ["yield"];
+    }),
+  );
+  assert.equal(helper.code, "node");
+  assert.match(helper.message, /tools and tool_block/);
+
+  const duplicate = failure(
+    variant((doc) => {
+      doc.graph.nodes.A.tool_block = ["bash", "bash"];
+    }),
+  );
+  assert.equal(duplicate.path, "/graph/nodes/A/tool_block/1");
+  assert.equal(duplicate.code, "duplicate");
+  assert.equal(
+    failure(
+      variant((doc) => {
+        doc.graph.nodes.A.tool_block = [" "];
+      }),
+    ).path,
+    "/graph/nodes/A/tool_block/0",
+  );
+  assert.equal(
+    failure(
+      variant((doc) => {
+        doc.graph.nodes.A.tool_block = [1];
+      }),
+    ).path,
+    "/graph/nodes/A/tool_block/0",
+  );
+
+  for (const node of [{}, { tool_block: [] }, { tool_block: ["bash"] }])
+    assert.deepEqual(
+      parse({
+        graph: {
+          nodes: { A: node },
+          edges: [{ from: "A", to: "$sink", schema }],
+        },
+      }).graph.nodes.A,
+      node,
+    );
+
+  const nestedConflict = failure({
+    graph: {
+      nodes: {
+        Child: {
+          kind: "graph",
+          graph: {
+            nodes: { Worker: { tools: ["x"], tool_block: ["x"] } },
+            edges: [{ from: "Worker", to: "$sink", schema }],
+          },
+        },
+      },
+      edges: [{ from: "Child", to: "$sink", schema }],
+    },
+  });
+  assert.equal(
+    nestedConflict.path,
+    "/graph/nodes/Child/graph/nodes/Worker/tool_block/0",
+  );
 });
 
 test("recursive validation accepts connected graphs with cycles", () => {

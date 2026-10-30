@@ -966,13 +966,25 @@ export function parse(
                 "reference",
               );
         }
-        unique(node.tools ?? [], `${nodePath}/tools`, `Node "${id}" tools`);
-        for (const [index, name] of (node.tools ?? []).entries())
+        const additions = node.tools ?? [];
+        const block = node.tool_block ?? [];
+        unique(additions, `${nodePath}/tools`, `Node "${id}" tools`);
+        unique(block, `${nodePath}/tool_block`, `Node "${id}" tool_block`);
+        const added = new Set(additions);
+        for (const [index, name] of block.entries())
+          if (added.has(name))
+            fail(
+              `${nodePath}/tool_block/${index}`,
+              `Node "${id}": tools and tool_block both list "${name}"`,
+              `remove "${name}" from either tools or tool_block; a tool cannot be both added and blocked`,
+              "node",
+            );
+        for (const [index, name] of additions.entries())
           if ((BUILTIN_TOOL_NAMES as readonly string[]).includes(name))
             fail(
               `${nodePath}/tools/${index}`,
-              `Node "${id}": tool "${name}" is builtin and always on`,
-              `remove "${name}"; builtin tools are always available`,
+              `Node "${id}": tool "${name}" is builtin and enabled by default`,
+              `remove "${name}" from tools; use tool_block to disable it`,
               "node",
             );
       }

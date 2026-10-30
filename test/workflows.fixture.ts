@@ -27,7 +27,7 @@ import {
 } from "junco";
 import { Value } from "typebox/value";
 import { userTexts } from "./deterministic-support.ts";
-import { fauxRuntime, scripted } from "./support.ts";
+import { fauxRuntime, NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 const revision = (previous: string) =>
@@ -66,6 +66,7 @@ async function assertPublicYieldBoundary(): Promise<void> {
       models: yieldModels,
       model: yieldFaux.getModel(),
       tools: [new toolsApi.YieldTool()],
+      tool_block: NATIVE_TOOL_BLOCK,
       prompt: "handoff",
     });
     const turns: { ids: string[]; errors: boolean[] }[] = [];
@@ -130,7 +131,17 @@ const ladder = schedules.uniformLadder({
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
-  createAgent: (spec) => syntax.createJuncoAgent(spec, ladder, models),
+  createAgent: (spec) =>
+    syntax.createJuncoAgent(
+      {
+        ...spec,
+        tool_block: [
+          ...new Set([...NATIVE_TOOL_BLOCK, ...(spec.tool_block ?? [])]),
+        ],
+      },
+      ladder,
+      models,
+    ),
   ladder,
   tracer: new tracerApi.DummyTracer(),
   ...schedules.ralph({ rounds: 3 }),

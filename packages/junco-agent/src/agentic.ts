@@ -348,14 +348,18 @@ export type AgenticOptions<
   AgentHarnessOptions<undefined>,
   "tools" | "resources" | "toolExecution"
 > & {
+  /** Base directory for native tools and MCP connections; default `process.cwd()`. */
+  readonly cwd?: string;
+  /** Exact, case-sensitive default tool names to exclude; must not overlap `tools`. */
+  readonly tool_block?: readonly string[];
+  /** Concrete additions; enabled defaults are composed during initialization. */
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string | ((inputs: ParentView<N, V>) => string);
   readonly images?: ImageContent[];
   /**
-   * Borrowed collection selecting the agent's authorization policy and native lifetime: the agent
-   * holds a lease until closed, and closes only that lease, never the collection. Grants no tools
-   * by itself.
+   * Borrowed collection selecting authorization, native defaults and lifetime. The agent holds
+   * and closes only its binding, never the caller's creator hold.
    */
   readonly collection?: ToolCollection;
   /** Usage growth reports for this agent and every subagent it creates; see {@link TokenMonitorConfig}. */

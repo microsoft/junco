@@ -28,6 +28,7 @@ import { Type } from "typebox";
 import { userTexts } from "../../../test/deterministic-support.ts";
 import {
   flushMacrotasks,
+  NATIVE_TOOL_BLOCK,
   scripted,
   toolTurn,
   waitingTool,
@@ -332,14 +333,9 @@ test(
             return fauxAssistantMessage("continued");
           },
         ],
-        {
-          tools: item.tools(host),
-          ...(item.activeToolNames
-            ? { activeToolNames: item.activeToolNames }
-            : {}),
-          prompt: "go",
-        },
+        { prompt: "go" },
       );
+      await agent.setTools(item.tools(host), item.activeToolNames);
       if (item.block)
         agent.hooks.on("before_tool", ({ toolName }) =>
           toolName === "task" ? { block: { reason: "denied" } } : undefined,
@@ -547,18 +543,27 @@ test(
     try {
       await active.agent.setTaskBatch(batch());
       const tools = active.agent.getTools();
-      const assigned = tools[1]!;
+      const assigned = tools.find((tool) => tool.name === "task")!;
       assert.notEqual(assigned, ordinary);
       assert.equal(AssignedTaskTool.is(assigned), true);
-      assertTools(tools, [a.tool, assigned, b.tool]);
+      assert.ok(tools.includes(a.tool));
+      assert.ok(tools.includes(b.tool));
       assertTools(active.agent.getActiveTools(), [assigned, a.tool]);
       // Replacing a not-yet-admitted batch is allowed.
       await active.agent.setTaskBatch(batch());
-      assert.notEqual(active.agent.getTools()[1], assigned);
-      assert.equal(AssignedTaskTool.is(active.agent.getTools()[1]!), true);
+      const reassigned = active.agent
+        .getTools()
+        .find((tool) => tool.name === "task")!;
+      assert.notEqual(reassigned, assigned);
+      assert.equal(AssignedTaskTool.is(reassigned), true);
 
       await inactive.agent.setTaskBatch(batch());
-      assert.equal(AssignedTaskTool.is(inactive.agent.getTools()[1]!), true);
+      assert.equal(
+        AssignedTaskTool.is(
+          inactive.agent.getTools().find((tool) => tool.name === "task")!,
+        ),
+        true,
+      );
       assertTools(inactive.agent.getActiveTools(), [b.tool]);
     } finally {
       await Promise.all([active.agent.return(), inactive.agent.return()]);
@@ -570,8 +575,10 @@ test(
 test(
   "setTaskBatch rejects a missing or spoofed task tool, an invalid batch and a busy agent",
   async () => {
-    const none = await newAgent([], { tools: [countingTool("a").tool] });
-    const spoofed = await newAgent([], { tools: [countingTool("task").tool] });
+    const none = await newAgent([]);
+    await none.agent.setTools([countingTool("a").tool]);
+    const spoofed = await newAgent([]);
+    await spoofed.agent.setTools([countingTool("task").tool]);
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const { host: recording } = recordingHost();
@@ -940,6 +947,9 @@ async function twoProviderParent(
     systemPrompt: "sys",
     tools,
     ...options,
+    tool_block: [
+      ...new Set([...NATIVE_TOOL_BLOCK, ...(options.tool_block ?? [])]),
+    ],
   });
   return { agent, main, second };
 }
@@ -991,14 +1001,21 @@ test(
         assert.equal(await child.getThinkingLevel(), "high");
       }
       assert.equal((await inherit.getModel())?.provider, "faux2");
-      assertTools(inherit.getActiveTools(), [c.tool, b.tool]);
-      assertTools(inherit.getTools(), [c.tool, b.tool]);
-      assertTools(narrowed.getTools(), [b.tool]);
-      assertTools(none.getTools(), []);
-      assertTools(none.getActiveTools(), []);
-      assert.notEqual(none.getTools()[0], agent.getTools().at(-1));
+      assert.deepEqual(
+        inherit.getActiveTools().map((tool) => tool.name),
+        ["task", "yield", "recv", "send", "info", "c", "b", "complain"],
+      );
+      assert.ok(inherit.getTools().includes(c.tool));
+      assert.ok(inherit.getTools().includes(b.tool));
+      assert.ok(narrowed.getTools().includes(b.tool));
+      assert.deepEqual(
+        none.getTools().map((tool) => tool.name),
+        ["task", "yield", "recv", "send", "info", "complain"],
+      );
+      assert.deepEqual(none.getActiveTools(), none.getTools());
+      assert.notEqual(none.getTools().at(-1), agent.getTools().at(-1));
       assert.equal((await overridden.getModel())?.id, "main");
-      assertTools(overridden.getActiveTools(), [c.tool]);
+      assert.ok(overridden.getActiveTools().includes(c.tool));
 
       second.setResponses([
         toolTurn(fauxToolCall("c", {}, { id: "i1" })),
@@ -1036,6 +1053,49 @@ test(
   },
   TIMEOUT,
 );
+
+test("subagents inherit and extend immutable tool blocks", async () => {
+  const a = countingTool("a");
+  const b = countingTool("b");
+  const { agent } = await twoProviderParent([a.tool, b.tool], {
+    tool_block: ["yield"],
+  });
+  const children: JuncoAgent[] = [];
+  try {
+    children.push(
+      ...(await agent.createSubagents([
+        {},
+        { tools: [] },
+        { tools: ["a"], tool_block: ["recv"] },
+      ])),
+    );
+    const [inherited, defaultsOnly, extended] = children;
+    assert.ok(inherited && defaultsOnly && extended);
+    assert.ok(inherited.getTools().includes(a.tool));
+    assert.ok(inherited.getTools().includes(b.tool));
+    assert.ok(!inherited.getTools().some(({ name }) => name === "yield"));
+    assert.ok(!defaultsOnly.getTools().includes(a.tool));
+    assert.ok(!defaultsOnly.getTools().includes(b.tool));
+    assert.ok(extended.getTools().includes(a.tool));
+    assert.ok(!extended.getTools().some(({ name }) => name === "recv"));
+
+    const spy = spySessions();
+    try {
+      await assert.rejects(
+        agent.createSubagents([{ tools: ["a"], tool_block: ["a"] }]),
+        /tools and tool_block both list "a"/,
+      );
+      assert.equal(spy.sessions.length, 0);
+    } finally {
+      spy.restore();
+    }
+  } finally {
+    await Promise.all([
+      agent.return(),
+      ...children.map((child) => child.return()),
+    ]);
+  }
+});
 
 test(
   "an invalid entry anywhere in a batch fails before any child exists",
@@ -1114,6 +1174,7 @@ test(
       session,
       models: withAuth,
       model,
+      tool_block: NATIVE_TOOL_BLOCK,
     });
     const spy = spySessions();
     const label = `${model.provider}/${model.id}`;
@@ -1216,17 +1277,18 @@ test(
     agent.setTaskPolicy(() => {
       throw new Error("parent policy");
     });
-    const assigned = agent.getTools()[0]!;
+    const assigned = agent.getTools().find((tool) => tool.name === "task")!;
     const [child] = await agent.createSubagents([{}]);
     assert.ok(child);
     const grand = `c\n\nx`;
     const contexts: Context[] = [];
     try {
-      const fresh = child.getTools()[0]!;
+      const fresh = child.getTools().find((tool) => tool.name === "task")!;
       assert.notEqual(fresh, assigned);
       assert.equal(TaskTool.is(fresh), true);
       assert.equal(AssignedTaskTool.is(fresh), false);
-      assertTools(child.getActiveTools(), [fresh, a.tool]);
+      assert.ok(child.getActiveTools().includes(fresh));
+      assert.ok(child.getActiveTools().includes(a.tool));
       assert.deepEqual(child.getTaskFailurePolicy(), { retries: 0 });
 
       // `{}` is no launch for an ordinary tool; a full launch skips the parent's policy and runs
@@ -1400,6 +1462,7 @@ async function callerOptions(
     model,
     systemPrompt: "sys",
     tools,
+    tool_block: NATIVE_TOOL_BLOCK,
   };
 }
 

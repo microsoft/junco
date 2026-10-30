@@ -309,6 +309,12 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
           ...options,
           systemPrompt: spec.systemPrompt,
           tools: spec.tools,
+          tool_block: [
+            ...new Set([
+              ...(options.tool_block ?? []),
+              ...(spec.tool_block ?? []),
+            ]),
+          ],
         });
         agents.push(member);
         return member;
