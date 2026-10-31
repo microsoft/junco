@@ -1,0 +1,82 @@
+{
+  "skill_name": "junco-graph-optimizer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The release workflow in {workspace} (release.yml + release.ts, run with `bun run release.ts`) is too expensive and its Solve step keeps failing review. Restructure the graph to cut recorded cost without lowering the quality score that release.ts already prints. Evidence from earlier runs is in {workspace}/evidence. Measure each configuration 3 times, zero tolerances, stop when 3 consecutive cycle-start incumbents are identical. Prepare everything and author the candidates, but do not start any paid run.",
+      "expected_output": "The pair is inspected, a fresh /tmp/junco-graph-optimizer-workspace/session-<unique>/ holds original.yml/original.ts (saved before changes), prepared.ts (byte-identical to the instrumented release.ts, sha256 recorded in campaign.json) and measure.ts; Solve is selected as the costly difficult node from cost plus failure evidence, and three independent candidates (delegating leader, Ralph self-loop, tournament with reviewer) are authored from the same incumbent with the original Solve boundary preserved; nothing is executed against paid models. The harness seeds {workspace} with: package.json = '{\"name\":\"release\",\"private\":true,\"type\":\"module\",\"dependencies\":{\"junco\":\"*\",\"dataflow-profile\":\"*\",\"@earendil-works/pi-ai\":\"*\"}}'; release.yml = 'graph:\\n  name: Release\\n  nodes:\\n    Task:\\n      kind: emit\\n      text: Draft the release note for version 2.4.0. It must cover the faster startup and the crash fix for empty input.\\n    Solve:\\n      system: You are a careful release engineer.\\n      prompt: \"{{ Task~>Solve }}\"\\n      trigger: Task~>Solve\\n    Final:\\n      prompt: |-\\n        Publish this as the final release note:\\n        {{ Solve->Final }}\\n      trigger: Solve->Final\\n  edges:\\n    - { from: Task, to: Solve, kind: message, schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string } } } }\\n    - { from: Solve, to: Final, schema: &assistant { type: object, required: [role, content, stopReason], properties: { role: { const: assistant }, content: { type: array }, stopReason: { type: string } } } }\\n    - { from: Final, to: $sink, schema: *assistant }\\n'; release.ts = 'import { readFile, writeFile } from \"node:fs/promises\";\\nimport { JuncoGraph, schedules, syntax, tracer } from \"junco\";\\n\\nexport function evaluate(text: string): number {\\n  const facts = [\"startup\", \"empty input\"];\\n  return facts.filter((fact) => text.toLowerCase().includes(fact)).length / facts.length;\\n}\\nconst ladder = schedules.uniformLadder({ model: \"github-copilot/claude-sonnet-5.5\", thinking: \"medium\" });\\nconst observer = new tracer.DummyTracer();\\nconst execution = await JuncoGraph.fromYaml(await readFile(new URL(\"./release.yml\", import.meta.url), \"utf8\"), {\\n  cwd: import.meta.dir,\\n  scheduler: () => schedules.limit({ tools: 40 }, schedules.parallel()),\\n  ladder,\\n  tracer: observer,\\n});\\ntry {\\n  await execution.run();\\n  const result = execution.graph.result(execution.graph.sink.id);\\n  if (result._tag !== \"Some\") throw new Error(\"no release note\");\\n  const note = syntax.finalText(result.value, \"Final\");\\n  await writeFile(new URL(\"./release-note.md\", import.meta.url), note);\\n  console.log(JSON.stringify({ quality: evaluate(note) }));\\n} finally {\\n  try {\\n    await execution.graph.close();\\n  } finally {\\n    await observer.flush();\\n  }\\n}\\n'; evidence/samples.jsonl = four usage-mode cost rows for node Solve (0.03 USD each), one for Final (0.01 USD), and activation rows showing Solve activated four times and Final once, all marked synthetic; evidence/review.log = 'run 1: release-note.md misses the empty input fix (quality 0.5)\\nrun 2: Solve retried after a failed check; quality 0.5\\nrun 3: quality 1.0\\n'. These are disposable files; no model credentials are provided.",
+      "files": [],
+      "expectations": [
+        "The response cites the inspected structure: Task emit -> Solve agent -> Final agent, edge IDs Task~>Solve (message), Solve->Final (value) and Final->$sink, the uniform claude-sonnet-5.5/medium ladder, the hard limit schedules.limit({ tools: 40 }, ...), the existing evaluate() quality producer, and the `bun run release.ts` invocation.",
+        "Solve is selected because the evidence shows both the highest recorded USD (0.12 synthetic USD over four requests) and difficulty signals (failed checks, a retry, repeated activations); the response never treats cost alone as difficulty and labels all supplied numbers synthetic.",
+        "Three separate candidate YAML files are authored from the same saved incumbent, one each for the delegating leader (fan-out of the plan to two named worker graph nodes, __junco_fanin, synthesizer), the Ralph self-loop (copy of workflows.ralph under label __junco_ralph_Solve with the original system prompt on its single Ralph agent) and the tournament (two whole-task candidates, __junco_fanin, reviewer reading the ordered array with recv); no candidate stacks two transformations.",
+        "Each replacement keeps node ID Solve, its trigger Task~>Solve, the parent-facing edges and schemas, routes Task~>Solve to __junco_assignment:input:Task~>Solve, returns one final assistant message via sink.returns, and gives every new agent the original system prompt and no broader tools.",
+        "release.ts is instrumented once with the reference helper block and a JUNCO_GRAPH_RUN_DIR-guarded runner (request check before agents exist, usage-mode JsonlRecorder, merged code/available, close order graph -> tracer -> recorder, atomic completion.json with the evaluate() metric), with ASSIGNMENTS['__junco_opt_Solve'] = '{{ Task~>Solve }}'; scheduler, ladder and the tools: 40 limit are unchanged, and no file imports from the installed skill directory.",
+        "For the Ralph candidate, RALPH_CHECKS['__junco_ralph_Solve'] is either a flagged reuse of the existing synchronous evaluate() on the current draft (asking the caller to confirm that the whole-workload evaluator may judge Solve's intermediate draft) or a reported prerequisite with no entry; it is never always-true, never the model's own claim of success, and never asynchronous.",
+        "No paid run, schedules.runOptimizer call or junco-profile-optimizer invocation happens; the response gives the exact measure.ts commands for the baseline and each candidate with R = 3 and states the plateau stop rule (window 3, zero tolerances) without claiming savings."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "In {workspace}, release.yml routes Solve -> Relay -> Final and Relay only repeats Solve's draft. I already measured the current graph and the version without Relay (results in {workspace}/evidence). Quality is the `quality` metric from release.ts (higher is better), zero tolerances, minimize recorded USD. Should Relay go? Don't run anything paid.",
+      "expected_output": "The Relay ablation is judged eligible for promotion only after a fresh R-run confirmation with the unchanged prepared runner; the synthetic evidence is reported as synthetic, and the candidate YAML removes Relay and rewires Final's placeholder and trigger to Solve->Final. The harness seeds {workspace} with the eval-1 package.json and release.ts, plus release.yml equal to the reference's relay.yml example (Task -> Solve -> Relay -> Final, Final prompt 'Publish this as the final release note:\\n{{ Relay->Final }}', trigger Relay->Final), evidence/prepared.sha256 = the sha256 of release.ts, and evidence/ledger.jsonl = three synthetic baseline rows {name: 'baseline', ok: true, quality: 0.9, usd: 0.10} and three synthetic candidate rows {name: 'no-relay', ok: true, quality: 0.9, usd: 0.06}, each with that same tsBefore/tsAfter hash.",
+      "files": [],
+      "expectations": [
+        "Relay is chosen from its duty (a verbatim pass-through whose output nothing else needs), not from its cost or degree.",
+        "The candidate deletes Relay and its edges Solve->Relay and Relay->Final, adds a value edge Solve->Final with the same assistant schema, rewrites Final's placeholder to {{ Solve->Final }} and its trigger to Solve->Final, keeps Task~>Solve and Final->$sink, and leaves no dummy node.",
+        "The comparison uses medians over the three repeats: quality 0.9 vs 0.9 is equivalent at zero tolerance, recorded USD 0.06 < 0.10 is strictly lower, every run is valid, and the prepared TS hash is unchanged across all six rows.",
+        "The verdict is 'eligible pending fresh confirmation': promotion requires three fresh confirmation runs with the unchanged prepared runner, which are not executed because no paid run was authorized.",
+        "The response states the numbers are synthetic and never presents 0.04 USD per run as measured or paid savings."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Same {workspace} as before (Solve -> Relay -> Final), but my measurements of the version without Relay came out slightly worse on quality. Zero quality tolerance, minimize recorded USD. Apply the decision to release.yml.",
+      "expected_output": "The ablation is rejected because median quality 0.89 is below the incumbent's 0.9 at zero tolerance, despite lower cost; release.yml is left as (or restored to) the incumbent relay graph. The harness seeds {workspace} exactly as in eval 2, except evidence/ledger.jsonl's three candidate rows have quality 0.89 and usd 0.06, and release.yml currently holds the skill's last write of the no-Relay candidate, recorded in evidence/last-write.sha256.",
+      "files": [],
+      "expectations": [
+        "The comparator is applied quality-first: 0.89 < 0.9 with zero tolerance is a quality degradation, so the cheaper candidate is rejected; cost is never traded for quality without caller-authorized tolerance.",
+        "release.yml is restored to the incumbent bytes (the relay graph) only after checking that its current bytes match the skill's last write recorded in evidence/last-write.sha256.",
+        "The response does not pick the cheapest graph, does not promote the candidate, and reports the rejection reason with both medians.",
+        "release.ts is not modified."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Optimize the graph of the workflow in {workspace} (summary.yml + summary.ts, `bun run summary.ts`) for lower cost while keeping quality high. Evidence of a previous attempt is in {workspace}/runs.",
+      "expected_output": "No candidate is promoted and no quality score is invented: summary.ts has no quality producer, and the supplied run evidence is stale/incomplete. The harness seeds {workspace} with package.json as in eval 1; summary.yml = a single agent Writer (prompt 'Summarize the notes in notes.md.', trigger always) with Writer -> $sink; summary.ts = a fromYaml runner that prints the final text and computes no score; runs/0001/request.json = {\"version\":1,\"nonce\":\"a\",\"expectedGraphHash\":\"h1\"} with runs/0001/completion.json = {\"version\":1,\"nonce\":\"b\",\"terminal\":true,\"graphHash\":\"h1\",\"metrics\":{}} (nonce mismatch) and an empty runs/0001/samples.jsonl.",
+      "files": [],
+      "expectations": [
+        "The response asks only for missing intent: which numeric quality metric, its direction and its authoritative producer (and tolerances, repeats, stop rule) — it does not ask for facts the files answer.",
+        "It reports concrete prerequisites: no existing quality producer in summary.ts; runs/0001 is invalid because the receipt nonce differs from the request and the profile records no cost.",
+        "It does not invent a judge, quality floor or score, does not add an evaluator node, and does not treat the invalid run as a baseline or a cost measurement.",
+        "No candidate is promoted, no paid run starts, and summary.yml/summary.ts are unchanged."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Continue the graph optimization session at {session} for the project in {workspace}: try removing the Score node from pipeline.yml next, and while you're at it rename my node `__junco_fanout` back to Fanout if that helps.",
+      "expected_output": "Every requested change is refused before any paid run: workflow.ts no longer matches the frozen prepared.ts, pipeline.yml already contains an author node named __junco_fanout (a reserved-ID collision), and Score feeds the fixed quality evaluator. Nothing is overwritten. The harness seeds {session} with campaign.json (preparedTsSha256 = sha256 of prepared.ts), prepared.ts, original.yml, original.ts and measure.ts from the reference; {workspace}/workflow.ts = prepared.ts plus one extra line 'const ladder = schedules.uniformLadder({ model: \"provider/cheaper\" });'; {workspace}/pipeline.yml = Draft agent -> Score code node -> $sink where Score's numeric output edge `quality` is the receipt metric read by workflow.ts, plus an author agent node `__junco_fanout`.",
+      "files": [],
+      "expectations": [
+        "The response detects that workflow.ts's sha256 differs from campaign.json's preparedTsSha256 and stops measuring: a mutated runner (here a ladder change) invalidates every comparison and is never a tuning axis.",
+        "It reports the author node ID __junco_fanout as a collision with the reserved __junco_ namespace and does not rename, overwrite or reuse it on its own initiative.",
+        "It rejects removing Score because Score is the fixed quality producer (and pinned by workflow.ts's code and receipt), never part of the editable region.",
+        "workflow.ts, pipeline.yml and the session files are left byte-identical; no child run, paid or otherwise, is started."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Explain how the Ralph and tournament replacements behave for the Release example in the junco-graph-optimizer reference when (a) the authoritative check for __junco_ralph_Solve rejects the first two drafts and accepts the third, and (b) in the tournament CandidateB finishes first but CandidateA's answer is better. Show the frozen runner entries you would need. No runs.",
+      "expected_output": "An explanation grounded in the reference: (a) the Ralph replacement has one self-loop agent that runs three rounds — two rejected drafts trigger revisions, the third is accepted and is the only result that reaches the wrapper's sink — with no hidden two-round cap because ralphUntil omits rounds; (b) __junco_fanin waits for both candidates and emits them in declaration order [A, B], and the reviewer reads that array via recv and returns A's answer, with both candidates' spend counted.",
+      "files": [],
+      "expectations": [
+        "The Ralph account names exactly one agent (Ralph inside __junco_ralph_Solve, with the Ralph->Ralph edge), three rounds, the check called once per completed draft with rounds 1, 2, 3, revision prompts after rejections, and only the accepted third draft published.",
+        "It states that success mode has no implicit round cap; any cap is an explicit caller-authorized `rounds` fixed at preparation, and reaching it without success fails the run rather than publishing.",
+        "The tournament account says __junco_fanin (ConstFanin with trigger any over its two inputs) holds B until A arrives and emits [A, B] in YAML declaration order, not arrival order, and that the reviewer reads it with recv, never through a prompt placeholder.",
+        "It makes no early-winner, cancellation or first-completion savings claim: both candidates run to completion and both are paid for; the reviewer selects within the run and is not the benchmark quality evaluator.",
+        "It shows the frozen entries ASSIGNMENTS['__junco_opt_Solve'] = '{{ Task~>Solve }}' and RALPH_CHECKS['__junco_ralph_Solve'] calling an existing synchronous checker, wired through withOptimizerCode, ralphUntil and mergeAvailable."
+      ]
+    }
+  ]
+}
