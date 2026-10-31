@@ -128,6 +128,7 @@ const ladder = schedules.uniformLadder({
   model: `${model.provider}/${model.id}`,
 });
 // createAgent keeps the smoke collection-free: no ShellMux, so no Btrfs seed is needed.
+const judged: number[] = [];
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
@@ -144,7 +145,13 @@ const execution = await JuncoGraph.fromYaml(workflows.ralph, {
     ),
   ladder,
   tracer: new tracerApi.DummyTracer(),
-  ...schedules.ralph({ rounds: 3 }),
+  // Uncapped: only the predicate ends the loop; the window watchdog below is the fixture's guard.
+  ...schedules.ralph({
+    until: (result, { round }) => {
+      judged.push(round);
+      return contentText(result.content) === "draft-3";
+    },
+  }),
 });
 const graph = execution.graph;
 const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!.state;
@@ -170,6 +177,7 @@ try {
     requests.map((request) => request.users.at(-1)),
     [assignment, revision("draft-1"), revision("draft-2")],
   );
+  assert.deepEqual(judged, [1, 2, 3]);
   const result = graph.result(graph.sink.id);
   assert.ok(O.isSome(result));
   assert.ok(Value.Check(AssistantMessageSchema, result.value));
@@ -179,5 +187,10 @@ try {
 }
 assert.equal(agent.status, "closed");
 console.log(
-  JSON.stringify({ rounds: 3, delivered: ["draft-3"], closed: true }),
+  JSON.stringify({
+    mode: "until",
+    rounds: judged.length,
+    delivered: ["draft-3"],
+    closed: true,
+  }),
 );

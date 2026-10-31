@@ -172,6 +172,8 @@ export type BuildOptions<C = unknown> = {
       (context: {
         graph: JuncoGraph<TSchema, unknown>;
         edges: ReadonlyMap<string, Edge>;
+        /** This graph level's label, the one `scheduler` receives. */
+        label: string;
       }) => Available | undefined
     >
   >;
@@ -672,7 +674,8 @@ async function buildGraph(
     recorderNodeId,
   );
   c.partialRoots.add(g);
-  const hook = (id: string) => c.options.available?.[id]?.({ graph: g, edges });
+  const hook = (id: string) =>
+    c.options.available?.[id]?.({ graph: g, edges, label });
   sinkHook = hook("$sink");
   const execution = context({
     scheduler: c.options.scheduler(label),

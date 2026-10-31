@@ -1,8 +1,9 @@
-# Ralph: one agent revises its complete answer for a fixed number of rounds.
-# The feedback edge Ralph->Ralph is the loop; rounds and prompts are code:
+# Ralph: one agent revises its complete answer for a fixed number of rounds, or until a
+# synchronous success check accepts a draft. The feedback edge Ralph->Ralph is the loop; rounds,
+# success and prompts are code:
 #   JuncoGraph.fromYaml(workflows.ralph, { cwd, scheduler: () => schedules.parallel(),
-#     ladder, ...schedules.ralph({ rounds: 3 }) });
-# Feed the assignment on route `assignment`; the result is Ralph's final round.
+#     ladder, ...schedules.ralph({ rounds: 3 }) });   // or schedules.ralph({ until })
+# Feed the assignment on route `assignment`; the result is Ralph's final (or accepted) round.
 graph:
   name: Ralph
   source:

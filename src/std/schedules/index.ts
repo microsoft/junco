@@ -54,4 +54,4 @@ export {
   type OptimizationState,
   runOptimizer,
 } from "./optimizer.js";
-export { type RalphOptions, ralph } from "./ralph.js";
+export { type RalphOptions, type RalphPredicate, ralph } from "./ralph.js";

@@ -1428,3 +1428,24 @@ export async function profileOptimizerIsAStandardWorkflow(signal: AbortSignal) {
   };
   return [yaml, kind, incumbent, invalid];
 }
+
+export function ralphSuccessModeTypes() {
+  const until: schedules.RalphPredicate = (result, context) => {
+    const message: AssistantMessage = result;
+    const assignment: string = context.assignment;
+    const round: number = context.round;
+    const label: string = context.label;
+    return message.stopReason === "stop" && round > 0 && label !== assignment;
+  };
+  const uncapped: schedules.RalphOptions = { until };
+  const capped: schedules.RalphOptions = { until, rounds: 5 };
+  const fixed: schedules.RalphOptions = { rounds: 3 };
+  // @ts-expect-error until is synchronous; a Promise is not a decision
+  const asynchronous: schedules.RalphPredicate = async () => true;
+  return [
+    schedules.ralph(uncapped),
+    schedules.ralph(capped),
+    schedules.ralph(fixed),
+    asynchronous,
+  ];
+}

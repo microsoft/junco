@@ -212,7 +212,7 @@ Reuse these before writing anything equivalent:
 | Namespace | Use in generated workflows |
 |---|---|
 | `workflows.ralph` | The only Ralph definition: YAML text, source route `assignment`, loop `Ralph->Ralph`, output `Ralph->$sink`. Models come from config.ladder. Never hand-write a Ralph graph. |
-| `schedules.ralph({ rounds })` | Round controller; returns `{ available }` for fromYaml config. Declines graph levels without `Ralph->Ralph`, so it is safe on a parent document. |
+| `schedules.ralph({ rounds })` / `schedules.ralph({ until, rounds? })` | Round controller; returns `{ available }` for fromYaml config. `until` is a synchronous success check per completed draft (no cap unless `rounds` is given). Declines graph levels without `Ralph->Ralph`, so it is safe on a parent document. |
 | `schedules.parallel()`, `roundRobin()`, `agent()`/`pi(...)`, `choose`, `separate`, `strength`, `limit`, `lowest`, `highest` | Scheduler policies for config.scheduler. Default `parallel()` chooses `med`; `strength` assigns a rung per node only when roles need different strengths. |
 | `schedules.context`, `SchedulerContext` | What `fromYaml` returns (`run()`, `step()`, `.graph`); only hand-wired graphs call `context` themselves. |
 | `tracer.DummyTracer`, `tracer.TuiTracer.shared()` | `BuildOptions.tracer`; omitting it makes every built `JuncoGraph` use `TuiTracer.shared()` (terminal ownership: print only after `flush()`). |

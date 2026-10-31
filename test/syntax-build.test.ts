@@ -9,6 +9,7 @@ import type {
   Skill,
 } from "@earendil-works/pi-agent-core";
 import {
+  type AssistantMessage,
   type Context,
   contentText,
   fauxAssistantMessage,
@@ -16,6 +17,7 @@ import {
   type Tool,
 } from "@earendil-works/pi-ai";
 import { megabytes } from "dataflow-engine";
+import * as O from "fp-ts/lib/Option.js";
 import {
   type AgenticInput,
   agent,
@@ -1053,12 +1055,280 @@ for (const [name, payloads] of [
     }
   });
 
-test("ralph rejects an invalid round count before building", () => {
+test("ralph rejects invalid options before building", () => {
   for (const rounds of [0, -1, 1.5, NaN, Infinity, 2 ** 53])
-    assert.throws(() => schedules.ralph({ rounds }), {
-      name: "RangeError",
-      message: "Ralph rounds must be a positive safe integer",
-    });
+    for (const until of [undefined, () => true])
+      assert.throws(() => schedules.ralph({ rounds, until }), {
+        name: "RangeError",
+        message: "Ralph rounds must be a positive safe integer",
+      });
+  assert.throws(
+    () =>
+      schedules.ralph({ until: true as unknown as schedules.RalphPredicate }),
+    { name: "TypeError", message: "Ralph until must be a function" },
+  );
+});
+
+type RalphCall = {
+  readonly text: string;
+  readonly assignment: string;
+  readonly round: number;
+  readonly label: string;
+  readonly published: boolean;
+};
+/** `ralphDoc()` in success mode, recording each `until` call and whether $sink had published by then. */
+async function untilRalph(
+  drafts: readonly AssistantMessage[],
+  decide: (text: string) => unknown,
+  rounds?: number,
+) {
+  const instance: YamlMock = new MockAgent({
+    runs: drafts.map((message) => run([settle(message)])),
+  });
+  const calls: RalphCall[] = [];
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({
+      rounds,
+      until: (result, context) => {
+        const text = contentText(result.content);
+        calls.push({
+          text,
+          ...context,
+          published: O.isSome(execution.graph.result(execution.graph.sink.id)),
+        });
+        return decide(text) as boolean;
+      },
+    }),
+  });
+  enqueuePrompts(execution, "assignment", {
+    kind: "prompt",
+    text: "assignment",
+  });
+  return { execution, instance, calls };
+}
+const ralphCall = (round: number): RalphCall => ({
+  text: `draft-${round}`,
+  assignment: "assignment",
+  round,
+  label: "Ralph",
+  published: false,
+});
+const NO_REJECTION = Symbol("no rejection");
+/** The rejection value of `run`, which may be falsy; `NO_REJECTION` when it resolves. */
+async function rejection(run: Promise<unknown>): Promise<unknown> {
+  try {
+    await run;
+    return NO_REJECTION;
+  } catch (error) {
+    return error;
+  }
+}
+
+test("until runs uncapped rounds and publishes only the accepted draft", async () => {
+  const { execution, instance, calls } = await untilRalph(
+    ["draft-1", "draft-2", "draft-3", "unreachable"].map((text) =>
+      assistant(text),
+    ),
+    (text) => text === "draft-3",
+  );
+  try {
+    await execution.run();
+    assert.deepEqual(calls, [1, 2, 3].map(ralphCall));
+    assert.deepEqual(lastPrompts(instance), [
+      "assignment",
+      revision("draft-1"),
+      revision("draft-2"),
+    ]);
+    assert.equal(resultText(execution.graph), "draft-3");
+    assert.equal(execution.graph.available().size, 0);
+    await execution.run();
+    assert.equal(calls.length, 3);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("until accepting the first draft never revises", async () => {
+  const { execution, instance, calls } = await untilRalph(
+    [assistant("draft-1"), assistant("unreachable")],
+    () => true,
+  );
+  try {
+    await execution.run();
+    assert.deepEqual(calls, [ralphCall(1)]);
+    assert.deepEqual(lastPrompts(instance), ["assignment"]);
+    assert.equal(resultText(execution.graph), "draft-1");
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("until with explicit rounds fails at the cap unless that round succeeds", async () => {
+  const drafts = ["draft-1", "draft-2", "unreachable"].map((text) =>
+    assistant(text),
+  );
+  const failing = await untilRalph(drafts, () => false, 2);
+  try {
+    const error = await rejection(failing.execution.run());
+    assert.ok(error instanceof Error);
+    assert.ok(!(error instanceof graph.DataflowNodeError));
+    assert.equal(
+      error.message,
+      "Ralph reached the round limit without success",
+    );
+    assert.deepEqual(failing.calls, [1, 2].map(ralphCall));
+    assert.equal(failing.instance.requests.length, 2);
+    assert.ok(
+      O.isNone(failing.execution.graph.result(failing.execution.graph.sink.id)),
+    );
+  } finally {
+    await failing.execution.graph.close();
+  }
+  const succeeding = await untilRalph(drafts, (text) => text === "draft-2", 2);
+  try {
+    await succeeding.execution.run();
+    assert.deepEqual(succeeding.calls, [1, 2].map(ralphCall));
+    assert.equal(resultText(succeeding.execution.graph), "draft-2");
+  } finally {
+    await succeeding.execution.graph.close();
+  }
+});
+
+for (const [name, draft, message] of [
+  ["blank", assistant("   "), "Ralph produced an empty report"],
+  [
+    "length",
+    { ...assistant("truncated"), stopReason: "length" as const },
+    "Ralph did not finish normally: length",
+  ],
+] as const)
+  test(`until never sees an invalid draft (${name})`, async () => {
+    const { execution, instance, calls } = await untilRalph(
+      [draft, assistant("unreachable")],
+      () => true,
+    );
+    try {
+      const error = await rejection(execution.run());
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, message);
+      assert.equal(calls.length, 0);
+      assert.equal(instance.requests.length, 1);
+      assert.ok(O.isNone(execution.graph.result(execution.graph.sink.id)));
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+for (const [name, decide, expected] of [
+  [
+    "throws a falsy value",
+    () => {
+      throw undefined;
+    },
+    (error: unknown) => error === undefined,
+  ],
+  [
+    "returns a non-boolean",
+    () => "yes",
+    (error: unknown) =>
+      error instanceof TypeError &&
+      error.message === "Ralph until must return a boolean",
+  ],
+  [
+    "returns a Promise",
+    async () => true,
+    (error: unknown) =>
+      error instanceof TypeError &&
+      error.message === "Ralph until must return a boolean",
+  ],
+] as const)
+  test(`an until that ${name} fails Ralph once and the failure is cached`, async () => {
+    const { execution, instance, calls } = await untilRalph(
+      [assistant("draft-1"), assistant("unreachable")],
+      decide,
+    );
+    try {
+      const error = await rejection(execution.run());
+      assert.ok(expected(error));
+      assert.equal(await rejection(execution.run()), error);
+      assert.equal(calls.length, 1);
+      assert.equal(instance.requests.length, 1);
+      assert.ok(O.isNone(execution.graph.result(execution.graph.sink.id)));
+    } finally {
+      await execution.graph.close();
+    }
+  });
+
+test("nested Ralph levels sharing one controller succeed independently", async () => {
+  const nested = (name: string) => {
+    const inner = ralphDoc().graph;
+    return {
+      ...inner,
+      name,
+      source: { routes: { [`$source~>${name}`]: ["$source~>Ralph"] } },
+    };
+  };
+  const drafts = (name: string) =>
+    new MockAgent({
+      runs: [`${name}-1`, `${name}-2`, `${name}-3`].map((text) =>
+        run([settle(assistant(text))]),
+      ),
+    }) as YamlMock;
+  const agents: Record<string, YamlMock> = {
+    Left: drafts("Left"),
+    Right: drafts("Right"),
+  };
+  const final = mock("final reply");
+  const calls: string[] = [];
+  const execution = await build(
+    parse({
+      graph: {
+        source: { routes: { seed: ["$source~>Left", "$source~>Right"] } },
+        nodes: {
+          Left: { kind: "graph", graph: nested("Left") },
+          Right: { kind: "graph", graph: nested("Right") },
+          Final: {
+            trigger: { all: ["Left~>Final", "Right~>Final"] },
+            prompt: "{{ Left~>Final }} | {{ Right~>Final }}",
+          },
+        },
+        edges: [
+          { from: "$source", to: "Left", kind: "message", schema: prompt },
+          { from: "$source", to: "Right", kind: "message", schema: prompt },
+          { from: "Left", to: "Final", kind: "message", schema: reply },
+          { from: "Right", to: "Final", kind: "message", schema: reply },
+          { from: "Final", to: "$sink", schema: reply },
+        ],
+      },
+    }),
+    {
+      ...options(),
+      createAgent: async (spec) => agents[spec.graph] ?? final,
+      ...schedules.ralph({
+        until: (result, { round, label }) => {
+          calls.push(`${label}:${round}:${contentText(result.content)}`);
+          return round === (label === "Left" ? 3 : 2);
+        },
+      }),
+    },
+  );
+  try {
+    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    await execution.run();
+    assert.deepEqual(calls.sort(), [
+      "Left:1:Left-1",
+      "Left:2:Left-2",
+      "Left:3:Left-3",
+      "Right:1:Right-1",
+      "Right:2:Right-2",
+    ]);
+    assert.deepEqual(lastPrompts(final), ["Left-3 | Right-2"]);
+    assert.equal(resultText(execution.graph), "final reply");
+  } finally {
+    await execution.graph.close();
+  }
 });
 
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {

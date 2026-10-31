@@ -36,7 +36,7 @@ function textOf(result: unknown): string {
 }
 
 async function ralphWorkflow(
-  rounds: number,
+  ralph: schedules.RalphOptions,
   responses: readonly (string | AssistantMessage)[],
 ) {
   const prompts: string[] = [];
@@ -79,7 +79,7 @@ async function ralphWorkflow(
         });
         return agent;
       },
-      ...schedules.ralph({ rounds }),
+      ...schedules.ralph(ralph),
     });
     assert.ok(agent);
     execution.graph.source.enqueue({
@@ -99,7 +99,7 @@ async function ralphWorkflow(
 }
 
 test("three rounds revise in one session and only the last draft is the result", async () => {
-  const { execution, agent, prompts } = await ralphWorkflow(3, [
+  const { execution, agent, prompts } = await ralphWorkflow({ rounds: 3 }, [
     "draft-1",
     "draft-2",
     "draft-3",
@@ -127,7 +127,9 @@ test("three rounds revise in one session and only the last draft is the result",
 }, 10_000);
 
 test("rounds: 1 asks once", async () => {
-  const { execution, prompts } = await ralphWorkflow(1, ["draft-1"]);
+  const { execution, prompts } = await ralphWorkflow({ rounds: 1 }, [
+    "draft-1",
+  ]);
   try {
     const results = await execution.run();
     assert.deepEqual(prompts, [assignment]);
@@ -138,7 +140,7 @@ test("rounds: 1 asks once", async () => {
 }, 10_000);
 
 test("a native yield resumes within a round and never counts as one", async () => {
-  const { execution, prompts } = await ralphWorkflow(2, [
+  const { execution, prompts } = await ralphWorkflow({ rounds: 2 }, [
     fauxAssistantMessage(
       [fauxToolCall("yield", { reason: "continue" }, { id: "y1" })],
       {
@@ -157,8 +159,37 @@ test("a native yield resumes within a round and never counts as one", async () =
   }
 }, 10_000);
 
+test("until judges only completed drafts and publishes the accepted one", async () => {
+  const judged: string[] = [];
+  const { execution, prompts } = await ralphWorkflow(
+    {
+      until: (result) => {
+        judged.push(contentText(result.content));
+        return judged.length === 2;
+      },
+    },
+    [
+      fauxAssistantMessage(
+        [fauxToolCall("yield", { reason: "continue" }, { id: "y1" })],
+        { stopReason: "toolUse" },
+      ),
+      "draft-1",
+      "draft-2",
+      "unreachable",
+    ],
+  );
+  try {
+    const results = await execution.run();
+    assert.deepEqual(judged, ["draft-1", "draft-2"]);
+    assert.deepEqual(prompts, [assignment, revision("draft-1")]);
+    assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-2");
+  } finally {
+    await execution.graph.close();
+  }
+}, 10_000);
+
 test("a blank intermediate draft fails before the next round", async () => {
-  const { execution, prompts } = await ralphWorkflow(3, [
+  const { execution, prompts } = await ralphWorkflow({ rounds: 3 }, [
     "draft-1",
     "  ",
     "unreachable",
