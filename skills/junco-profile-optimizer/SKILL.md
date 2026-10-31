@@ -30,6 +30,7 @@ Read the pair and how it is invoked today (scripts, README, CI, the user's comma
 - Graph structure: nodes, edge IDs (`edge.id ?? from + ("~>" for message | "->" for value) + to`), wrapper-node paths of nested graphs, existing `probe` flags and numeric edges (`schema.type` `number`/`integer`).
 - The runner: `JuncoGraph.fromYaml` call, `params`/`sourceName`, scheduler factory and its label dispatch, ladder and strength selection, existing `schedules.limit` wrappers (the hard ceilings), recorder/tracer/collection/`createAgent`/`agents` ownership, the terminal assertion, and cleanup order.
 - Agents and their models; deterministic targets (no agent nodes) have no ladder axis.
+- The models pi offers: every `provider/model` with a saved login, local/self-hosted providers from `~/.pi/agent/models.json` included, with its thinking levels and catalog price ([references/profiling.md](references/profiling.md#model-domain)).
 - Whether repeated runs are safe as-is or need an existing reset command.
 
 ## 2. Intake: ask only for what the files do not answer
@@ -38,7 +39,7 @@ Batch the questions. Required before execution:
 
 1. **Objective**: exactly one metric and a direction (`minimize` | `maximize`):
    - `tokens` — committed tokens recorded for successful graph-node agent activations. Excludes `schedules.pi` oracle requests and `task` subagent usage.
-   - `cost` — sum of recorded `resources.cost`, normalized to USD. For all-request dollars, prepare `JsonlRecorder` with `costMode: "usage"`, and meter scheduler requests separately; missing usage invalidates the run, including failed or aborted requests. Never call successful-activation cost total campaign spend.
+   - `cost` — sum of recorded `resources.cost`, normalized to USD. For all-request dollars, prepare `JsonlRecorder` with `costMode: "usage"`, and meter scheduler requests separately; missing usage invalidates the run, including failed or aborted requests. Never call successful-activation cost total campaign spend. Local models record their catalog price, 0 USD, so their requests still need reported usage.
    - `memory` — the maximum recorded per-activation shell-pipeline peak. Not JS heap, host RSS or simultaneous graph-total memory. Needs native monitoring coverage (see reference); otherwise only an existing caller-approved memory probe can substitute.
    - `probe` — an existing numeric edge: `{ node: <wrapper path, "" at the root>, edgeId: <exact local edge ID>, reduce: single|last|min|max|sum|mean }`. A graph's display label is not an identity.
 
@@ -51,7 +52,7 @@ Batch the questions. Required before execution:
    - `improvement`: `{ kind: absolute | relative, value > 0 }` over the baseline median ("must decrease/increase" needs this; an unchanged baseline does not satisfy it);
    - `plateau`: `{ window: integer >= 2, absoluteTolerance >= 0, relativeTolerance >= 0 }` (relative is a fraction: 0.01 = 1%).
    Candidate exhaustion or one lucky run is never convergence.
-5. **Domain**: axes to explore (`scheduler`, `ladder`, `limits`, in that order); permitted `provider/model` and thinking pairs for both target ladders and agentic schedulers, including the baseline's own (`allowedModels`); upper bounds for extra limits (`limitBounds.memoryBytes|tokens|tools`). Every requested axis must be explored or reported inapplicable with the reason. A `schedules.pi` alternative requires a fixed metered/domain-checked wrapper outside the tuning region; it may order ready work, never omit required work or choose model rungs.
+5. **Domain**: axes to explore (`scheduler`, `ladder`, `limits`, in that order); permitted `provider/model` and thinking pairs for both target ladders and agentic schedulers (`allowedModels`): by default every model pi offers at each thinking level it supports, local ones included, plus the baseline's own; a narrower set only when the user names one. Order them by ascending catalog price (local first): the editor sees only the IDs. Upper bounds for extra limits (`limitBounds.memoryBytes|tokens|tools`). Every requested axis must be explored or reported inapplicable with the reason. A `schedules.pi` alternative requires a fixed metered/domain-checked wrapper outside the tuning region; it may order ready work, never omit required work or choose model rungs.
 6. **Optional budgets**: `runBudget` (child runs) and `timeBudgetMs`. A spend/cost cap requires an authoritative external meter covering every attempt, including failures and subagents; successful-activation JSONL totals cannot enforce it — say so and do not accept it otherwise.
 
 ## 3. Prepare the target once
@@ -93,10 +94,10 @@ bun run junco-profile-optimizer <sessionDir>/request.json
 
 Exit 0 converged; 2 budget or blocked; 1 failed or invalid input; 130/143 interrupted. Stdout is one JSON summary (`stop`, `baselineScore`, `incumbentScore`, `runCount`, `statePath`, `profilePaths`). If the installed package lacks the `junco-profile-optimizer` binary, report that an optimizer-capable `junco` build/install is required; do not generate a wrapper. Programmatic use under Bun: `schedules.runOptimizer(request, { signal })`.
 
-Before invoking, the user must have authorized paid execution of the workload, and the Sol editor and every allowed target model must pass the optimizer's preflight (catalog, saved login, account access, thinking support). There is no fallback model.
+Before invoking, the user must have authorized paid execution of the workload, and the Sol editor and every allowed target model must pass the optimizer's preflight (catalog, saved login, account access, thinking support). There is no fallback model. A local provider also needs a saved login (any API key its server accepts) and a reachable server; its slot count bounds concurrent requests, so a workload whose existing deadlines cannot hold under that contention is a prerequisite to report, not a reason to raise them.
 
 ## 5. Report
 
-From `state.json` and the summary: stop kind and reason; baseline and confirmed medians with units and scope (cost = recorded USD with the target's stated request coverage; tokens = successful agent activations; memory = per-activation pipeline peak; probe/result = the producer's unit); quality values per constraint; the winning region sources (converged runs leave them saved in `workflow.ts` with dormant instrumentation); run count; and profile paths. A non-converged stop restores `original.ts` when safe — say whether it was restored or preserved because the file changed outside the optimizer. Report editor USD separately and include it in campaign spend. Plateau convergence is measured local stability, not a global optimum.
+From `state.json` and the summary: stop kind and reason; baseline and confirmed medians with units and scope (cost = recorded USD with the target's stated request coverage, local requests at 0 USD; tokens = successful agent activations; memory = per-activation pipeline peak; probe/result = the producer's unit); quality values per constraint; the winning region sources (converged runs leave them saved in `workflow.ts` with dormant instrumentation); which models the trials actually used; run count; and profile paths. A non-converged stop restores `original.ts` when safe — say whether it was restored or preserved because the file changed outside the optimizer. Report editor USD separately and include it in campaign spend. Plateau convergence is measured local stability, not a global optimum.
 
 Give the absolute session path and warn that evidence under `/tmp` can disappear on OS cleanup or reboot. Never delete the session yourself, whatever the stop kind: it is the recovery evidence.

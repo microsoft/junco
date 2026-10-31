@@ -9,6 +9,7 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair for `schedules.runO
 - [Tuning regions](#tuning-regions)
 - [Instrumentation template](#instrumentation-template)
 - [Configuration axes](#configuration-axes)
+- [Model domain](#model-domain)
 - [Metrics and measurement coverage](#metrics-and-measurement-coverage)
 - [Outcomes and evidence](#outcomes-and-evidence)
 
@@ -258,6 +259,34 @@ The editor writes concrete TypeScript within `allowedModels` and `limitBounds`; 
 
 - Policies are rebuilt through `scheduler(label)` for every child, so histories and limit ledgers cannot leak between trials. Nested graph levels get their own policies: parent token/tool budgets cover child work and child limits add to them, while parent memory prediction sees the nested wrapper, not its synchronized children. Use only the label granularity the existing factory exposes; never rename YAML labels to disambiguate.
 - A limit violation (`JUNCO_USAGE_LIMIT_EXCEEDED`), capacity rejection or failed target terminal invariant invalidates execution. Missing metrics invalidate measurement; complete quality values below the threshold produce a scored but infeasible trial. Token caps can overshoot by in-flight requests: never promise a monetary hard cap from them.
+
+## Model domain
+
+The default `allowedModels`: every model pi offers through a saved login, each at every thinking level it supports, cheapest first. Local/self-hosted providers registered in `~/.pi/agent/models.json` (llama.cpp, Ollama, vLLM) are included; their catalog price is 0, so they sort first and record 0 USD. Run once from the workflow project and paste the output; add the baseline's own pairs if missing:
+
+```ts
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+
+const runtime = await ModelRuntime.create({ allowModelNetwork: true, refreshOnCreate: false });
+await runtime.refresh({ allowNetwork: true });
+// The optimizer's preflight requires a saved login; environment-only keys do not qualify.
+const logins = new Set((await runtime.listCredentials()).map((c) => c.providerId));
+const price = (m: { cost: { input: number; output: number } }) => m.cost.input + m.cost.output;
+const allowedModels = (await runtime.getAvailable())
+  .filter((m) => logins.has(m.provider))
+  .sort((a, b) => price(a) - price(b))
+  .flatMap((m) =>
+    getSupportedThinkingLevels(m).map((thinking) =>
+      // Rungs without thinking mean "off"; the domain check compares the omitted key.
+      thinking === "off" ? { model: `${m.provider}/${m.id}` } : { model: `${m.provider}/${m.id}`, thinking },
+    ),
+  );
+console.log(JSON.stringify(allowedModels));
+process.exit(0);
+```
+
+A local provider without a saved login fails preflight: save one with `runtime.login(provider, "api_key", …)` using the key its server accepts, after the user approves changing `~/.pi/agent`. Local models still need `supportsUsageInStreaming` (or equivalent) so every request reports usage; a request without usage invalidates the run, never counts as free.
 
 ## Metrics and measurement coverage
 
