@@ -242,7 +242,10 @@ function wiredGraph(routes = [["a->b", Type.Unknown()]]) {
 
 test("send admits one message on a real outgoing message edge, keeping the payload reference", async () => {
   const { out, host } = wiredGraph([
-    ["a->b", Type.Object({ kind: Type.Literal("prompt"), text: Type.String() })],
+    [
+      "a->b",
+      Type.Object({ kind: Type.Literal("prompt"), text: Type.String() }),
+    ],
   ]);
   const payload = { kind: "prompt", text: "go" };
   const { id, payload: payloadDomain } = host.sendParameters.properties;
