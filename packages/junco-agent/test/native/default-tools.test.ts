@@ -226,6 +226,79 @@ test("all ten native defaults execute through one agent run", async () => {
   });
 }, TIMEOUT);
 
+test("custom defaults execute and survive inactive inheritance and atomic mutations", async () => {
+  await withNativeCleanup(async (defer) => {
+    const nativeBash = collection.tools.find((tool) => tool.name === "bash")!;
+    const customBash: AgentTool = {
+      ...nativeBash,
+      execute: async () => {
+        await writeFile(join(seed, "custom-marker.txt"), "custom");
+        return { content: [{ type: "text", text: "custom-bash" }], details: undefined };
+      },
+    };
+    const customComplain = { ...foo, name: "complain" };
+    const customRelease = { ...foo, name: "release" };
+    const runtime = scripted([
+      fauxAssistantMessage(fauxToolCall("bash", { command: "printf forbidden > forbidden-marker.txt" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const parent = await JuncoAgent.fromResolved({
+      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+      models: runtime.models, model: runtime.model, collection,
+      tools: [customBash, customComplain, customRelease],
+    });
+    defer(() => parent.return());
+    await parent.prompt("custom shell");
+    assert.equal(await readFile(join(seed, "custom-marker.txt"), "utf8"), "custom");
+    await assert.rejects(access(join(seed, "forbidden-marker.txt")), { code: "ENOENT" });
+    assert.equal(collection.tools.find((tool) => tool.name === "bash"), nativeBash);
+    await parent.setActiveTools([]);
+    const children = await parent.createSubagents([{}, { tools: [] }, { tool_block: ["bash", "complain", "release"] }]);
+    for (const child of children) defer(() => child.return());
+    for (const child of children.slice(0, 2))
+      for (const tool of [customBash, customComplain, customRelease])
+        assert.ok(child.getActiveTools().includes(tool));
+    assert.ok(!children[2]!.getTools().some((tool) => ["bash", "complain", "release"].includes(tool.name)));
+    await rm(join(seed, "custom-marker.txt"));
+    runtime.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("bash", { command: "printf forbidden > forbidden-marker.txt" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    await children[1]!.prompt("empty selection shell");
+    assert.equal(await readFile(join(seed, "custom-marker.txt"), "utf8"), "custom");
+    await assert.rejects(access(join(seed, "forbidden-marker.txt")), { code: "ENOENT" });
+    const nextBash = { ...foo, name: "bash" };
+    await parent.setTools([nextBash, customComplain, customRelease], []);
+    await assert.rejects(parent.setTools([customBash, customComplain, customRelease], ["unknown"]), /Unknown active tool/);
+    const [committed] = await parent.createSubagents([{ tools: [] }]);
+    defer(() => committed!.return());
+    assert.deepEqual(committed!.getTools().filter((tool) => tool.name === "bash"), [nextBash]);
+    const collectionless = await resolvedCollectionless(customRelease);
+    defer(() => collectionless.return());
+    assert.equal(collectionless.collection, undefined);
+    await collectionless.setActiveTools([]);
+    assert.ok(collectionless.getActiveTools().includes(customRelease));
+    assert.equal(contentText((await collectionless.prompt("custom release")).content), "released");
+    await collectionless.setTools([], []);
+    assert.ok(!collectionless.getTools().some((tool) => tool.name === "release"));
+  });
+}, TIMEOUT);
+
+async function resolvedCollectionless(release: AgentTool) {
+  const runtime = scripted([
+    fauxAssistantMessage(fauxToolCall("release", {}), { stopReason: "toolUse" }),
+    (context) => {
+      assert.equal(contentText(latest(context).content), "extra-ok");
+      return fauxAssistantMessage("released");
+    },
+  ]);
+  return JuncoAgent.fromResolved({
+    session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+    models: runtime.models, model: runtime.model, tools: [release],
+    tool_block: NATIVE.filter((name) => name !== "release"),
+  });
+}
+
 test("blocking native defaults avoids collection acquisition and all defaults may be empty", async () => {
   await withNativeCleanup(async (defer) => {
     const directory = await mkdtemp(join(root, "ordinary-"));
@@ -245,16 +318,6 @@ test("blocking native defaults avoids collection acquisition and all defaults ma
     assert.deepEqual(agent.getTools(), []);
     assert.equal(contentText((await agent.prompt("go")).content), "tool-free");
 
-    const failedSession = await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT);
-    await assert.rejects(
-      JuncoAgent.fromResolved({
-        session: failedSession,
-        models: runtime.models,
-        model: runtime.model,
-        cwd: directory,
-      }),
-    );
-    await assert.rejects(failedSession.beginMutation(BACKGROUND_CONTEXT));
   });
 }, TIMEOUT);
 
@@ -267,10 +330,15 @@ test("conflicts and blocked mutations fail without changing usable state", async
   } finally {
     await same.return();
   }
-  await assert.rejects(
-    resolved([{ ...read }]),
-    (error) => error instanceof JuncoAgentError && /Duplicate tool name: read/.test(error.message),
-  );
+  const customRead = { ...read };
+  const replaced = await resolved([customRead]);
+  try {
+    assert.deepEqual(replaced.getTools().filter((tool) => tool.name === "read"), [customRead]);
+    assert.ok(collection.tools.includes(read));
+  } finally {
+    await replaced.return();
+  }
+  await assert.rejects(resolved([read, customRead]), /Duplicate tool name: read/);
 
   const blocked = await resolved(undefined, ["bash", "complain", "release"]);
   try {

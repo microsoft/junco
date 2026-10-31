@@ -408,7 +408,7 @@ function countedCollection(failure?: { binding: number; error: Error }): {
   return { collection, events, active };
 }
 
-test("named tools extend fresh builtins and cannot shadow them", async () => {
+test("named aliases replace builtin definitions and execute without builtin dispatch", async () => {
   const custom = (name: string): AgentTool => ({
     name,
     label: name,
@@ -430,26 +430,40 @@ test("named tools extend fresh builtins and cannot shadow them", async () => {
     tools: { custom: custom("custom") },
   });
   assert.ok(spec);
-  assert.deepEqual(
-    spec.tools.map((t) => {
-      assert.ok("name" in t);
-      return t.name;
-    }),
-    ["yield", "info", "send", "recv", "task", "custom"],
-  );
+  assert.ok(spec.tools.some((tool) => "name" in tool && tool.name === "custom"));
   const shadow = parse({
     graph: {
       nodes: { A: { tools: ["shadow"] } },
       edges: [{ from: "A", to: "$sink", schema: reply }],
     },
   });
-  await assert.rejects(
-    resolveAgents(shadow, {
-      cwd: process.cwd(),
-      tools: { shadow: custom("yield") },
-    }),
-    /shadows builtin tool "yield"/,
-  );
+  const replacement = custom("yield");
+  const [selected] = await resolveAgents(shadow, {
+    cwd: process.cwd(), tools: { shadow: replacement }, toolSource: "declarations.ts",
+  });
+  assert.deepEqual(selected!.tools.filter((tool) => "name" in tool && tool.name === "yield"), [replacement]);
+  const runtime = await fauxRuntime([
+    fauxAssistantMessage(fauxToolCall("yield", {}), { stopReason: "toolUse" }),
+    (context) => {
+      const result = context.messages.find((message) => message.role === "toolResult");
+      assert.ok(result && result.role === "toolResult");
+      assert.equal(contentText(result.content), "ok");
+      assert.equal(result.isError, false);
+      return fauxAssistantMessage("done");
+    },
+  ]);
+  const instance = await createJuncoAgent({ ...selected!, tool_block: NATIVE_TOOL_BLOCK }, fauxLadder, runtime.models);
+  try {
+    assert.equal(contentText((await instance.prompt("custom yield")).content), "done");
+  } finally { await instance.return(); }
+  const duplicateDoc = parse({ graph: {
+    nodes: { A: { tools: ["first", "second"] } },
+    edges: [{ from: "A", to: "$sink", schema: reply }],
+  } });
+  const [duplicate] = await resolveAgents(duplicateDoc, {
+    cwd: process.cwd(), tools: { first: replacement, second: replacement },
+  });
+  await assert.rejects(createJuncoAgent({ ...duplicate!, tool_block: NATIVE_TOOL_BLOCK }, fauxLadder, runtime.models), /Duplicate tool name: yield/);
 });
 
 test("tool blocks filter helpers and reject literal or resolved-name conflicts", async () => {
@@ -625,7 +639,7 @@ test("resolution walks declarations depth-first and retains graph labels", async
   assert.equal(unnamed[0]?.graph, "graph");
 });
 
-test("collection tools win over code tools, code tools fill gaps, and builtins are fresh", async () => {
+test("explicit tools beat collection tools, fill gaps, and keep per-agent helpers fresh", async () => {
   const makeTool = (name: string, text: string): AgentTool => ({
     name,
     label: name,
@@ -660,22 +674,15 @@ test("collection tools win over code tools, code tools fill gaps, and builtins a
     );
     const [a, b] = specs;
     assert.ok(a && b);
-    assert.equal(a.tools[5], collectionTool);
-    assert.equal(a.tools[6], fallback);
-    assert.equal(b.tools[5], collectionTool);
-    assert.ok(!a.tools.includes(shadowedCodeTool));
-    for (const [index, name] of [
-      "yield",
-      "info",
-      "send",
-      "recv",
-      "task",
-    ].entries()) {
-      const left = a.tools[index];
-      const right = b.tools[index];
-      assert.ok(left && right && "name" in left && "name" in right);
-      assert.equal(left.name, name);
-      assert.equal(right.name, name);
+    assert.ok(a.tools.includes(shadowedCodeTool));
+    assert.ok(a.tools.includes(fallback));
+    assert.ok(b.tools.includes(shadowedCodeTool));
+    assert.ok(!a.tools.includes(collectionTool));
+    assert.equal(contentText((await shadowedCodeTool.execute("check", {}, new AbortController().signal)).content), "code");
+    for (const name of ["yield", "info", "send", "recv", "task"]) {
+      const left = a.tools.find((tool) => "name" in tool && tool.name === name);
+      const right = b.tools.find((tool) => "name" in tool && tool.name === name);
+      assert.ok(left && right);
       assert.notEqual(left, right);
     }
     await assert.rejects(

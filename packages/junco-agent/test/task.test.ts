@@ -918,7 +918,7 @@ test("task failure policy defaults to zero retries and validates retry counts", 
 /** One Models with two faux providers: `faux` (reasoning `main`, non-reasoning `plain`) and `faux2`. */
 async function twoProviderParent(
   tools: AgentTool[],
-  options: { activeToolNames?: string[] } = {},
+  options: { activeToolNames?: string[]; tool_block?: readonly string[] } = {},
 ) {
   const main = fauxProvider({
     api: "faux",
@@ -948,7 +948,7 @@ async function twoProviderParent(
     tools,
     ...options,
     tool_block: [
-      ...new Set([...NATIVE_TOOL_BLOCK, ...(options.tool_block ?? [])]),
+      ...new Set([...NATIVE_TOOL_BLOCK.filter((name) => !tools.some((tool) => tool.name === name)), ...(options.tool_block ?? [])]),
     ],
   });
   return { agent, main, second };
@@ -960,8 +960,9 @@ test(
     const a = countingTool("a");
     const b = countingTool("b");
     const c = countingTool("c");
+    const bash = countingTool("bash");
     const { agent, main, second } = await twoProviderParent(
-      [a.tool, b.tool, c.tool],
+      [a.tool, b.tool, c.tool, bash.tool],
       { activeToolNames: ["a", "b"] },
     );
     // What each child's model request contains: its users' text and the outcome of its tool call.
@@ -1000,17 +1001,22 @@ test(
         assert.equal(child.status, "idle");
         assert.equal(await child.getThinkingLevel(), "high");
       }
+      assert.equal(agent.collection, undefined);
+      for (const child of children) {
+        assert.equal(child.collection, undefined);
+        assert.deepEqual(child.getTools().filter((tool) => tool.name === "bash"), [bash.tool]);
+      }
       assert.equal((await inherit.getModel())?.provider, "faux2");
       assert.deepEqual(
         inherit.getActiveTools().map((tool) => tool.name),
-        ["task", "yield", "recv", "send", "info", "c", "b", "complain"],
+        ["task", "yield", "recv", "send", "info", "c", "b", "complain", "bash"],
       );
       assert.ok(inherit.getTools().includes(c.tool));
       assert.ok(inherit.getTools().includes(b.tool));
       assert.ok(narrowed.getTools().includes(b.tool));
       assert.deepEqual(
         none.getTools().map((tool) => tool.name),
-        ["task", "yield", "recv", "send", "info", "complain"],
+        ["task", "yield", "recv", "send", "info", "complain", "bash"],
       );
       assert.deepEqual(none.getActiveTools(), none.getTools());
       assert.notEqual(none.getTools().at(-1), agent.getTools().at(-1));
@@ -1044,6 +1050,12 @@ test(
       ]);
       assert.equal(c.state.executions, 1);
       assert.equal(b.state.executions, 0);
+      second.setResponses([toolTurn(fauxToolCall("bash", {})), fauxAssistantMessage("custom bash")]);
+      await none.prompt("execute replacement");
+      assert.equal(bash.state.executions, 1);
+      const [blocked] = await agent.createSubagents([{ tools: [], tool_block: ["bash"] }]);
+      children.push(blocked!);
+      assert.ok(!blocked!.getTools().some((tool) => tool.name === "bash"));
     } finally {
       await Promise.all([
         agent.return(),

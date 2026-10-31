@@ -158,10 +158,6 @@ for (const [field, name] of [
     rejects((d) => {
       d.graph.nodes.A[field!] = ["missing"];
     }, `Node "A" references unknown ${name} "missing"`));
-test("builtins are enabled by default", () =>
-  rejects((d) => {
-    d.graph.nodes.A.tools = ["yield"];
-  }, 'tool "yield" is builtin and enabled by default'));
 for (const mode of ["input", "value", "empty"])
   test(`invalid emit ${mode}`, () =>
     rejects((d) => {
@@ -1325,10 +1321,6 @@ test("resource quantities parse on every node kind and reject unknown units", ()
 });
 
 test("all builtins, collision identities and legal parallel edges", () => {
-  for (const name of ["yield", "info", "send", "recv", "task"])
-    rejects((d) => {
-      d.graph.nodes.A.tools = [name];
-    }, `tool "${name}" is builtin and enabled by default`);
   rejects((d) => {
     d.graph.edges[0].id = "shared";
     d.graph.edges[1] = {

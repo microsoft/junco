@@ -173,7 +173,7 @@ test(
 );
 
 test(
-  "a narrowed tool selection keeps the genuine release tool; a same-named impostor is refused",
+  "a narrowed tool selection requires release and accepts a custom implementation",
   async () => {
     const { agent, faux } = await agentOn();
     try {
@@ -185,10 +185,15 @@ test(
       );
       assert.ok(agent.getTools().includes(genuine));
       assert.deepEqual(errors(await drive(agent, faux, [release("unowned.txt")])), [false]);
-      await assert.rejects(
-        agent.setTools([...collection.tools.filter((tool) => tool !== genuine), { ...genuine }]),
-        /Duplicate tool name: release/,
-      );
+      let executed = false;
+      const custom = { ...genuine, execute: async () => {
+        executed = true;
+        return { content: [{ type: "text" as const, text: "custom-release" }], details: undefined };
+      } };
+      await agent.setTools([...collection.tools.filter((tool) => tool !== genuine), custom], ["read"]);
+      assert.ok(agent.getActiveTools().includes(custom));
+      assert.deepEqual(errors(await drive(agent, faux, [release("unowned.txt")])), [false]);
+      assert.equal(executed, true);
     } finally {
       await agent.return();
     }

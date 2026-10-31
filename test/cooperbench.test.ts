@@ -121,6 +121,7 @@ async function pair() {
     tracer: new tracer.DummyTracer(),
     createAgent: async (spec) => {
       created.push(spec.node);
+      assert.equal(spec.toolSource, "examples/cooperbench/run.ts");
       const { options } = await nativeOptions(
         script(spec.node === "Agent1" ? "agent1" : "agent2"),
       );
@@ -128,13 +129,14 @@ async function pair() {
         ...options,
         systemPrompt: spec.systemPrompt,
         tools: spec.tools as AgentTool[],
-        tool_block: [
-          ...new Set([
-            ...(options.tool_block ?? []),
-            ...(spec.tool_block ?? []),
-          ]),
-        ],
+        tool_block: spec.tool_block,
+        toolSource: spec.toolSource,
       });
+      assert.equal(agent.collection, undefined);
+      const shell = spec.tools.find((tool) => "name" in tool && tool.name === "bash");
+      assert.ok(shell);
+      assert.deepEqual(agent.getActiveTools().filter((tool) => tool.name === "bash"), [shell]);
+      assert.ok(!agent.getTools().some((tool) => tool.name === "container_bash"));
       agents.push(agent);
       return agent;
     },

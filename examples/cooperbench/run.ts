@@ -19,6 +19,8 @@
 
 import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
+import { relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import * as O from "fp-ts/lib/Option.js";
 import {
@@ -29,6 +31,7 @@ import {
   syntax,
   tracer,
 } from "junco";
+import { redirectLog } from "junco-tools/log";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -130,7 +133,7 @@ const PEER_MESSAGE = { type: "string", minLength: 1 };
 const instruction = (role: "Agent1" | "Agent2", outgoing: string): string =>
   `You are ${role}; your outgoing peer edge is "${outgoing}". ` +
   "You are one of two coding agents in isolated copies of /workspace/repo. Start by calling recv to read your private feature assignment. " +
-  "Inspect the repository and implement that feature with the supplied container_bash tool. " +
+  "Inspect the repository and implement that feature with the supplied bash tool. " +
   'Before broad edits, send your peer one concise plan covering files/interfaces and overlap risks: call send with id set to your outgoing peer edge and payload set to your message as one plain string, e.g. {"id":"' +
   outgoing +
   '","payload":"Plan: ..."}; then call yield. ' +
@@ -148,7 +151,6 @@ const START = "Begin: call recv to read your private feature assignment.";
 const PAIR_TOOL_BLOCK = [
   "ast_edit",
   "ast_grep",
-  "bash",
   "code_graph",
   "diff",
   "edit",
@@ -273,6 +275,7 @@ export async function createPair(
       workspace1: containerBashTool(request.agents.agent1.container_id),
       workspace2: containerBashTool(request.agents.agent2.container_id),
     },
+    toolSource: relative(process.cwd(), fileURLToPath(import.meta.url)),
     createAgent: create,
   });
   execution.graph.source.enqueue({
@@ -392,8 +395,8 @@ export function containerBashTool(
       "containerBashTool: containerId must be a full 64-hex Docker container ID",
     );
   const tool: AgentTool<typeof BashParameters, BashDetails> = {
-    name: "container_bash",
-    label: "container_bash",
+    name: "bash",
+    label: "bash",
     description:
       `Run a bash command (bash -lc) in /workspace/repo of your private task container; there is no network. ` +
       `Combined stdout/stderr is capped at ${OUTPUT_CAP / 1024} KiB (first and last halves kept); each command is stopped after ${timeoutSeconds} seconds.`,
@@ -633,14 +636,20 @@ async function runPair(
 }
 
 async function main(signal: AbortSignal): Promise<void> {
-  const request = parseRequest(await Bun.stdin.text());
-  if (request.mode === "preflight") {
-    await verifiedModels({ model: request.model }, signal);
-    emit({ type: "ready", model: request.model, thinking: request.thinking });
-    return;
-  }
-  const { status } = await runPair(request, signal);
-  if (status !== "Submitted") process.exitCode = 1;
+  const release = redirectLog({
+    write(line) { writeSync(2, `${line}\n`); },
+    async flush() {},
+  });
+  try {
+    const request = parseRequest(await Bun.stdin.text());
+    if (request.mode === "preflight") {
+      await verifiedModels({ model: request.model }, signal);
+      emit({ type: "ready", model: request.model, thinking: request.thinking });
+      return;
+    }
+    const { status } = await runPair(request, signal);
+    if (status !== "Submitted") process.exitCode = 1;
+  } finally { release(); }
 }
 
 if (import.meta.main) {

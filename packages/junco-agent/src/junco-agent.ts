@@ -90,6 +90,7 @@ import {
   errorGraph,
   isMarshPolicyDenied,
 } from "junco-tools/errors";
+import { log } from "junco-tools/log";
 import type { TSchema } from "typebox";
 import {
   type Agentic,
@@ -417,23 +418,26 @@ function withDefaultTools(
   tools: readonly AgentTool[],
   collection: ToolCollection | undefined,
   blocked: ReadonlySet<string>,
+  replaced?: Set<string>,
 ): AgentTool[] {
   validateToolBlock(tools, blocked);
-  const explicit = new Set<string>();
+  const explicit = new Map<string, AgentTool>();
   for (const tool of tools) {
     if (explicit.has(tool.name))
       throw new JuncoAgentError(
         "invalid_argument",
         `Duplicate tool name: ${tool.name}`,
       );
-    explicit.add(tool.name);
+    explicit.set(tool.name, tool);
   }
-  const consumed = new Set<AgentTool>();
+  const consumed = new Set<string>();
   const result: AgentTool[] = [];
   for (const tool of collection?.tools ?? []) {
     if (blocked.has(tool.name)) continue;
-    if (tools.includes(tool)) consumed.add(tool);
-    result.push(tool);
+    const supplied = explicit.get(tool.name);
+    if (supplied !== undefined) consumed.add(tool.name);
+    if (supplied !== undefined && supplied !== tool) replaced?.add(tool.name);
+    result.push(supplied ?? tool);
   }
   const append = (
     name: string,
@@ -441,32 +445,20 @@ function withDefaultTools(
     create: () => AgentTool,
   ): void => {
     if (blocked.has(name)) return;
-    const supplied = tools.find((tool) => tool.name === name && is(tool));
-    if (supplied !== undefined) consumed.add(supplied);
+    const supplied = explicit.get(name);
+    if (supplied !== undefined) consumed.add(name);
+    if (supplied !== undefined && !is(supplied)) replaced?.add(name);
     result.push(supplied ?? create());
   };
-  append(
-    "task",
-    (tool) => TaskTool.is(tool),
-    () => new TaskTool(),
-  );
+  append("task", TaskTool.is, () => new TaskTool());
   append("yield", isYieldTool, () => new YieldTool());
-  append(
-    "recv",
-    (tool) => RecvTool.is(tool),
-    () => new RecvTool(),
-  );
-  append(
-    "send",
-    (tool) => SendTool.is(tool),
-    () => new SendTool(),
-  );
-  append(
-    "info",
-    (tool) => InfoTool.is(tool),
-    () => new InfoTool(),
-  );
-  result.push(...tools.filter((tool) => !consumed.has(tool)));
+  append("recv", RecvTool.is, () => new RecvTool());
+  append("send", SendTool.is, () => new SendTool());
+  append("info", InfoTool.is, () => new InfoTool());
+  result.push(...tools.filter((tool) => !consumed.has(tool.name)));
+  if (collection === undefined)
+    for (const tool of tools)
+      if (NATIVE_TOOL_NAMES.some((name) => name === tool.name)) replaced?.add(tool.name);
   validateActiveTools(
     result,
     result.map((tool) => tool.name),
@@ -480,28 +472,32 @@ function withRequiredTools(
   own: ComplainTool,
   release: AgentTool | undefined,
   includeComplain: boolean,
+  replaced?: Set<string>,
 ): AgentTool[] {
-  let found = false;
-  const result = tools.map((tool): AgentTool => {
-    if (!isComplainTool(tool)) return tool;
-    found = true;
-    return own;
-  });
-  if (includeComplain && !found) result.push(own);
-  if (release !== undefined && !result.includes(release)) result.push(release);
+  const result = tools.map((tool): AgentTool =>
+    isComplainTool(tool) ? own : tool,
+  );
+  for (const tool of result) {
+    if (tool.name === "complain" && !isComplainTool(tool)) replaced?.add(tool.name);
+    if (tool.name === "release" && tool !== release) replaced?.add(tool.name);
+  }
+  if (includeComplain && !result.some((tool) => tool.name === "complain"))
+    result.push(own);
+  if (release !== undefined && !result.some((tool) => tool.name === "release"))
+    result.push(release);
   return result;
 }
 
 /** An active selection with only the enabled required tool names added. */
 function withRequiredNames(
   names: readonly string[],
-  release: AgentTool | undefined,
+  includeRelease: boolean,
   includeComplain: boolean,
 ): string[] {
   const result = [...names];
   for (const name of [
     ...(includeComplain ? ["complain"] : []),
-    ...(release === undefined ? [] : ["release"]),
+    ...(includeRelease ? ["release"] : []),
   ])
     if (!result.includes(name)) result.push(name);
   return result;
@@ -1136,6 +1132,7 @@ export class JuncoAgent<
       prompt: _prompt,
       images: _images,
       tools: additions = [],
+      toolSource,
       resources: _resources,
       collection: _collection,
       recorder: _recorder,
@@ -1147,11 +1144,14 @@ export class JuncoAgent<
       ...native
     } = this.#options;
     const includeComplain = !this.#blocked.has("complain");
+    const replaced = new Set<string>();
     try {
       validateToolBlock(additions, this.#blocked);
       if (
         this.#owned.toolCollection === undefined &&
-        NATIVE_TOOL_NAMES.some((name) => !this.#blocked.has(name))
+        NATIVE_TOOL_NAMES.some((name) =>
+          !this.#blocked.has(name) && !additions.some((tool) => tool.name === name),
+        )
       )
         await ensureToolCollection(this.#owned, resolve(cwd ?? process.cwd()));
       const collection = this.#owned.toolCollection;
@@ -1160,10 +1160,11 @@ export class JuncoAgent<
           ? undefined
           : collection.tools.find((tool) => tool.name === "release");
       this.#tools = withRequiredTools(
-        withDefaultTools(additions, collection, this.#blocked),
+        withDefaultTools(additions, collection, this.#blocked, replaced),
         this.#complainTool,
         this.#releaseTool,
         includeComplain,
+        replaced,
       );
       this.#owned.binding ??= collection?.bind(() => this.#currentRecorder());
       const requested =
@@ -1171,7 +1172,7 @@ export class JuncoAgent<
           ? undefined
           : withRequiredNames(
               activeToolNames,
-              this.#releaseTool,
+              this.#tools.some((tool) => tool.name === "release"),
               includeComplain,
             );
       validateActiveTools(
@@ -1203,7 +1204,7 @@ export class JuncoAgent<
       const surviving = restored.filter((name) => !this.#blocked.has(name));
       this.#activeNames = withRequiredNames(
         surviving,
-        this.#releaseTool,
+        this.#tools.some((tool) => tool.name === "release"),
         includeComplain,
       );
       validateActiveTools(this.#tools, this.#activeNames);
@@ -1305,6 +1306,10 @@ export class JuncoAgent<
             usage: row.usage,
           });
         });
+      for (const name of replaced)
+        log.info(toolSource
+          ? `Default tool "${name}" replaced with tool declared in ${toolSource}`
+          : `Default tool "${name}" replaced with explicitly supplied tool`);
     } catch (error) {
       this.#closing = true;
       const failures: unknown[] = [];
@@ -2065,7 +2070,7 @@ export class JuncoAgent<
     );
     const names = withRequiredNames(
       activeToolNames ?? nextTools.map((tool) => tool.name),
-      this.#releaseTool,
+      nextTools.some((tool) => tool.name === "release"),
       includeComplain,
     );
     return this.#mutateTools(async () => {
@@ -2109,7 +2114,7 @@ export class JuncoAgent<
   setActiveTools(names: string[]): Promise<void> {
     const selection = withRequiredNames(
       names,
-      this.#releaseTool,
+      this.#tools.some((tool) => tool.name === "release"),
       !this.#blocked.has("complain"),
     );
     return this.#mutateTools(async () => {
@@ -2309,8 +2314,16 @@ export class JuncoAgent<
       const models = this.#options.models;
       const active: AgentTool[] = this.getActiveTools();
       const resources = this.#resources;
+      const defaultNames = new Set<string>([
+        ...NATIVE_TOOL_NAMES,
+        ...(this.collection?.tools.map((tool) => tool.name) ?? []),
+        "task", "yield", "recv", "send", "info", "complain",
+      ]);
+      const effective = new Map(active.map((tool) => [tool.name, tool]));
+      for (const tool of this.#tools)
+        if (defaultNames.has(tool.name)) effective.set(tool.name, tool);
       const candidates = withDefaultTools(
-        active,
+        [...effective.values()],
         this.collection,
         this.#blocked,
       );
@@ -2403,10 +2416,9 @@ export class JuncoAgent<
             .map((tool) => tool.name)
             .filter((name) => !effectiveBlock.has(name));
         validateActiveTools(available, names);
-        const selection = names
-          .flatMap((name) =>
-            available.filter((candidate) => candidate.name === name),
-          )
+        const selectedNames = new Set(names);
+        const selection = available
+          .filter((tool) => defaultNames.has(tool.name) || selectedNames.has(tool.name))
           .map((tool): Selection => {
             const occurrence = registrations.findIndex(({ tools }) =>
               tools.includes(tool),
@@ -2473,6 +2485,7 @@ export class JuncoAgent<
                 model,
                 collection: owned.toolCollection,
                 thinkingLevel,
+                toolSource: this.#options.toolSource,
                 systemPrompt: this.#options.systemPrompt,
                 toProviderMessages: this.#options.toProviderMessages,
                 entryProjectors: this.#options.entryProjectors,

@@ -43,7 +43,6 @@ import {
 } from "yaml";
 import { ValidationError, type ValidationLocation } from "./errors.js";
 import {
-  BUILTIN_TOOL_NAMES,
   type EdgeSpec,
   type GraphSpec,
   type JuncoDocument,
@@ -977,14 +976,6 @@ export function parse(
               `${nodePath}/tool_block/${index}`,
               `Node "${id}": tools and tool_block both list "${name}"`,
               `remove "${name}" from either tools or tool_block; a tool cannot be both added and blocked`,
-              "node",
-            );
-        for (const [index, name] of additions.entries())
-          if ((BUILTIN_TOOL_NAMES as readonly string[]).includes(name))
-            fail(
-              `${nodePath}/tools/${index}`,
-              `Node "${id}": tool "${name}" is builtin and enabled by default`,
-              `remove "${name}" from tools; use tool_block to disable it`,
               "node",
             );
       }

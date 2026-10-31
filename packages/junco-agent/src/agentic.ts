@@ -354,6 +354,8 @@ export type AgenticOptions<
   readonly tool_block?: readonly string[];
   /** Concrete additions; enabled defaults are composed during initialization. */
   readonly tools?: T[];
+  /** Display-ready declaration module path for explicitly supplied tools. */
+  readonly toolSource?: string;
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string | ((inputs: ParentView<N, V>) => string);
   readonly images?: ImageContent[];

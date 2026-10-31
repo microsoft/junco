@@ -196,12 +196,23 @@ test("complaint-only configurations still offer and execute exactly one genuine 
   }
 });
 
-test("impostors, duplicates and unknown names are rejected, leaving the old tools usable", async () => {
+test("custom complain executes; duplicates and unknown names leave old tools usable", async () => {
   const one = countingTool("one");
-  const impostor = { ...countingTool("complain").tool };
+  const custom = countingTool("complain");
+  const { agent: replacement } = await newAgent([
+    toolTurn(complainCall("custom", "custom")),
+    fauxAssistantMessage("settled"),
+  ], { tools: [custom.tool], activeToolNames: [] });
+  try {
+    assert.deepEqual(replacement.getActiveTools(), [custom.tool]);
+    await promptSettles(replacement, "complain");
+    assert.equal(custom.state.executions, 1);
+  } finally {
+    await replacement.return();
+  }
   const { models, model } = scripted([]);
   const repo = new MemorySessionRepo();
-  for (const tools of [[impostor], [new ComplainTool(), new ComplainTool()]]) {
+  for (const tools of [[custom.tool, custom.tool], [new ComplainTool(), new ComplainTool()]]) {
     await assert.rejects(
       JuncoAgent.fromResolved({
         session: await repo.create({}, BACKGROUND_CONTEXT),
@@ -217,15 +228,15 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
     [
       toolTurn(fauxToolCall("one", {}, { id: "o1" })),
       fauxAssistantMessage("settled"),
+      toolTurn(complainCall("mutated", "mutated")),
+      fauxAssistantMessage("settled"),
     ],
     { tools: [one.tool] },
   );
   try {
     const genuine = agent.getTools().at(-1)!;
-    const copied = { ...genuine };
     for (const tools of [
-      [one.tool, impostor],
-      [one.tool, copied],
+      [one.tool, custom.tool, custom.tool],
       [one.tool, new ComplainTool(), new ComplainTool()],
     ])
       await assert.rejects(agent.setTools(tools), isCode("invalid_argument"));
@@ -254,6 +265,13 @@ test("impostors, duplicates and unknown names are rejected, leaving the old tool
     assert.equal(genuine.name, "complain");
     await promptSettles(agent, "use one");
     assert.equal(one.state.executions, 1);
+    await agent.setTools([custom.tool], []);
+    assert.deepEqual(agent.getActiveTools(), [custom.tool]);
+    await promptSettles(agent, "custom complaint after mutation");
+    assert.equal(custom.state.executions, 2);
+    await agent.setTools([one.tool]);
+    assert.ok(agent.getTools().includes(genuine));
+    assert.ok(!agent.getTools().includes(custom.tool));
   } finally {
     await agent.return();
   }

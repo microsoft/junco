@@ -44,6 +44,7 @@ import {
   YieldTool,
 } from "junco-tools";
 import { errorGraph, MARSH_POLICY_DENIED } from "junco-tools/errors";
+import { redirectLog } from "junco-tools/log";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { userTexts } from "../../../test/deterministic-support.ts";
@@ -76,6 +77,54 @@ import {
 const TIMEOUT = 5_000;
 const yieldCall = (reason: string, id: string) =>
   fauxToolCall("yield", { reason }, { id });
+
+test("custom bash avoids native acquisition and reports only successful replacements to the log owner", async () => {
+  const records: string[] = [];
+  const release = redirectLog({ write: (line) => { records.push(line); }, async flush() {} });
+  const bash = countingTool("bash");
+  let agent: JuncoAgent | undefined;
+  try {
+    const options = await nativeOptions([
+      (context) => {
+        const offered = getCurrentTools(context.messages).filter((tool) => tool.name === "bash");
+        assert.equal(offered.length, 1);
+        assert.deepEqual(offered[0]!.parameters, bash.tool.parameters);
+        return toolTurn(fauxToolCall("bash", {}));
+      },
+      fauxAssistantMessage("done"),
+    ]);
+    agent = await JuncoAgent.fromResolved({
+      ...options, tools: [bash.tool],
+      tool_block: NATIVE_TOOL_BLOCK.filter((name) => name !== "bash"),
+      toolSource: "CooperBench/.junco/wf.ts",
+    });
+    assert.equal(agent.collection, undefined);
+    assert.deepEqual(agent.getTools().filter((tool) => tool.name === "bash"), [bash.tool]);
+    assert.deepEqual(records, ['INFO Default tool "bash" replaced with tool declared in CooperBench/.junco/wf.ts']);
+    await agent.prompt("custom shell");
+    assert.equal(bash.state.executions, 1);
+    await agent.return();
+    agent = undefined;
+    records.length = 0;
+    const duplicate = await nativeOptions([]);
+    await assert.rejects(JuncoAgent.fromResolved({
+      ...duplicate, tools: [bash.tool, bash.tool],
+      tool_block: NATIVE_TOOL_BLOCK.filter((name) => name !== "bash"),
+      toolSource: "CooperBench/.junco/wf.ts",
+    }), /Duplicate tool name: bash/);
+    assert.deepEqual(records, []);
+    const unused = await nativeOptions([]);
+    const { parse, resolveAgents } = await import("../../../src/syntax/index.ts");
+    const [spec] = await resolveAgents(parse({ graph: {
+      nodes: { Worker: { tool_block: NATIVE_TOOL_BLOCK } },
+      edges: [{ from: "Worker", to: "$sink", schema: Type.Any() }],
+    } }), { cwd: process.cwd(), tools: { bash: bash.tool }, toolSource: "unused.ts" });
+    agent = await JuncoAgent.fromResolved({ ...unused, tools: spec!.tools as AgentTool[], toolSource: spec!.toolSource });
+    assert.deepEqual(records, []);
+  } finally {
+    try { await agent?.return(); } finally { release(); }
+  }
+});
 test("the caller's tools remain inspectable and active selection governs execution", async () => {
   const first = countingTool("first");
   const second = countingTool("second");

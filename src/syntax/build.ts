@@ -48,12 +48,7 @@ import {
   quantityOf,
   resolveTrigger,
 } from "./parse.js";
-import {
-  BUILTIN_TOOL_NAMES,
-  type GraphSpec,
-  type JuncoDocument,
-  type NodeSpec,
-} from "./schema.js";
+import type { GraphSpec, JuncoDocument, NodeSpec } from "./schema.js";
 
 /** YAML schemas are loaded at runtime: their payload/result domains are only known dynamically. */
 type Edge = graph.Edge<TSchema, unknown>;
@@ -84,6 +79,7 @@ export type AgentSpec = {
   readonly systemPrompt?: string;
   readonly tool_block?: readonly string[];
   readonly tools: (AgentTool | mcp.JuncoMcpTools)[];
+  readonly toolSource?: string;
   readonly skills: Skill[];
   readonly cwd: string;
   readonly collection?: tools.ToolCollection;
@@ -149,6 +145,8 @@ export type BuildOptions<C = unknown> = {
   /** The root graph's context in `recorder` (default: the recorder's own context). */
   readonly recorderNodeId?: string;
   readonly tools?: Readonly<Record<string, AgentTool>>;
+  /** Display-ready declaration module path for selected tool registrations. */
+  readonly toolSource?: string;
   /**
    * Prepared agents keyed by node path (`Worker` or `Child/Worker`), exclusive with createAgent.
    * Ownership transfers at build entry: failure closes every supplied agent; success leaves
@@ -256,7 +254,7 @@ function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
 
 export async function resolveAgents(
   doc: JuncoDocument,
-  options: Pick<BuildOptions, "cwd" | "tools" | "collection">,
+  options: Pick<BuildOptions, "cwd" | "tools" | "collection" | "toolSource">,
 ): Promise<readonly AgentSpec[]> {
   const definitions = new Map<string, mcp.JuncoMcpTools>();
   const loaded = new Map<string, Skill>();
@@ -284,19 +282,17 @@ export async function resolveAgents(
       }
       skills.push(skill);
     }
+    const defaults = builtinTools(blocked);
     const extra = (node.tools ?? []).map((name) => {
       const tool =
+        options.tools?.[name] ??
         options.collection?.tools.find((t) => t.name === name) ??
-        options.tools?.[name];
+        defaults.find((t) => t.name === name);
       if (!tool)
         throw new TypeError(`build: unknown tool "${name}" for node "${id}"`);
       if (blocked.has(tool.name))
         throw new TypeError(
           `build: node "${key}": tool "${name}" resolves to blocked tool "${tool.name}"; remove it from tools or tool_block`,
-        );
-      if ((BUILTIN_TOOL_NAMES as readonly string[]).includes(tool.name))
-        throw new TypeError(
-          `build: tool "${name}" for node "${id}" shadows builtin tool "${tool.name}"`,
         );
       return tool;
     });
@@ -323,11 +319,16 @@ export async function resolveAgents(
         ]
           .filter(Boolean)
           .join("\n\n") || undefined,
-      tools: [...builtinTools(blocked), ...extra, ...servers],
+      tools: [
+        ...defaults.filter((tool) => !extra.some((selected) => selected.name === tool.name)),
+        ...extra,
+        ...servers,
+      ],
       ...(node.tool_block === undefined ? {} : { tool_block: block }),
       skills,
       cwd: options.cwd,
       collection: options.collection,
+      toolSource: options.toolSource,
     });
   }
   return result;
@@ -350,6 +351,7 @@ export function createJuncoAgent(
     systemPrompt: spec.systemPrompt,
     cwd: spec.cwd,
     tools: spec.tools,
+    toolSource: spec.toolSource,
     tool_block: spec.tool_block,
     collection: spec.collection,
     recorder: spec.recorder,
