@@ -241,8 +241,19 @@ function wiredGraph(routes = [["a->b", Type.Unknown()]]) {
 }
 
 test("send admits one message on a real outgoing message edge, keeping the payload reference", async () => {
-  const { out, host } = wiredGraph();
+  const { out, host } = wiredGraph([
+    ["a->b", Type.Object({ kind: Type.Literal("prompt"), text: Type.String() })],
+  ]);
   const payload = { kind: "prompt", text: "go" };
+  const { id, payload: payloadDomain } = host.sendParameters.properties;
+  assert.equal(Value.Check(payloadDomain, payload), true);
+  assert.equal(Value.Check(payloadDomain, JSON.stringify(payload)), false);
+  assert.equal(Value.Check(id, "a->b"), true);
+  assert.equal(Value.Check(id, "nowhere"), false);
+  await assert.rejects(
+    call(new SendTool(host), { id: "a->b", payload: JSON.stringify(payload) }),
+    /^Error: Invalid send input/,
+  );
   const result = await call(new SendTool(host), { id: "a->b", payload });
   assert.equal(result.content[0].text, "Message sent.");
   assert.equal(result.details, undefined);
@@ -256,6 +267,13 @@ test("send correlates each route's ID with its schema", async () => {
     ["s", Type.String()],
   ]);
   const tool = new SendTool(host);
+  const { id, payload } = tool.parameters.properties;
+  assert.equal(Value.Check(payload, 7), true);
+  assert.equal(Value.Check(payload, "7"), true);
+  assert.equal(Value.Check(payload, {}), false);
+  assert.equal(Value.Check(id, "n"), true);
+  assert.equal(Value.Check(id, "s"), true);
+  assert.equal(Value.Check(id, "nowhere"), false);
   await call(tool, { id: "n", payload: 7 });
   await call(tool, { id: "s", payload: "7" });
   for (const input of [
@@ -309,6 +327,10 @@ test("identically named local $defs stay isolated per edge through send and recv
     ["s", { $defs: { P: Type.String() }, $ref: "#/$defs/P" }],
   ]);
   const send = new SendTool(host);
+  const { payload } = send.parameters.properties;
+  assert.equal(Value.Check(payload, 7), true);
+  assert.equal(Value.Check(payload, "7"), true);
+  assert.equal(Value.Check(payload, {}), false);
   await call(send, { id: "n", payload: 7 });
   await call(send, { id: "s", payload: "7" });
   for (const input of [

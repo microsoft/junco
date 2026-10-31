@@ -352,12 +352,16 @@ export class SendTool<N extends TSchema = never> {
   /**
    * send's parameters over the outgoing message `routes`: a strict `{id, payload}` object whose
    * `anyOf` branches correlate each edge ID with that edge's schema, embedded unchanged. With no
-   * route, no call is admitted.
+   * route, no call is admitted. Root property domains stay visible when a provider drops root
+   * combinators.
    */
   static parametersFor(routes: readonly Route[]): TSchema {
     if (routes.length === 0) return noRoutes;
     return Type.Object(
-      { id: Type.String(), payload: Type.Unknown() },
+      {
+        id: Type.Union(routes.map(([id]) => Type.Literal(id))),
+        payload: Type.Union(routes.map(([, schema]) => schema)),
+      },
       {
         additionalProperties: false,
         anyOf: routes.map(([id, schema]) =>
