@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Mirror the four shared library crates into the Regorus checkout beside the Junco monorepo, then
-# run its full Verus proof gate and history benchmarks. Overwrites everything inside the mapped crates.
+# Mirror the four shared library crates into the sibling Regorus checkout, then run its full
+# Verus proof gate and history benchmarks. Overwrites everything inside the mapped crates.
 set -euo pipefail
 
 if (($#)); then
@@ -14,9 +14,7 @@ fail() {
 }
 
 src_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-# Vendored at <junco>/crates/junco-policy; Regorus is a sibling of the Junco checkout.
-repo_root=$(cd -- "$src_root/../.." && pwd -P)
-dest_root="$(dirname -- "$repo_root")/regorus"
+dest_root="$(dirname -- "$src_root")/regorus"
 crates=(history-syntax junco-core history-store history-semantics)
 
 # Validate every boundary before the first write so a bad later mapping cannot leave a partial copy.

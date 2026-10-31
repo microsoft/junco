@@ -24,6 +24,11 @@ history without re-encoding its raw events. A foreign-store history returns
 by history owner and bindings: unchanged histories reuse progress, append processes the
 new suffix, and shortening invalidates the owner's cursors.
 
+`history_store::graph::CanonicalStore::new()` owns concrete arena tables and checked numeric
+node IDs. `KernelStore` defines the cross-crate graph contract.
+`history_semantics::RuleRuntime::bindings(&template, &request)` matches a lowered numeric
+head for resumable consumers; compiler helpers remain private.
+
 `History::new`, `from_events`, `push`, `truncate`, `rollback`, and `try_clone` are fallible.
 `try_clone` shares the store but gets a fresh history identity. There is no infallible
 `Clone`, `Default`, or `FromIterator` history constructor. Opaque checkpoints are tied to
@@ -108,16 +113,15 @@ Verification uses Rust `1.98.1`, Verus `0.2026.10.04.426d8b0`, Z3 `4.16.0`, and 
 
 ## Updating Regorus
 
-`crates/junco-policy/scripts/update_regorus.sh` (run from the Junco root, or from any directory;
-no arguments) mirrors the four library crates under `crates/` into `../../../regorus/src/`, the
-Regorus checkout beside Junco, deleting stale files inside those four directories, then runs
+`scripts/update_regorus.sh` (no arguments) mirrors the four library crates under `crates/` into
+the sibling `../regorus/src/`, deleting stale files inside those four directories, then runs
 `cargo fetch`, the eight per-package and three full-consumer `cargo verus verify --locked` gates,
 and the `history_table` benchmark with `history-cached`/`history-uncached` Criterion baselines.
 It validates every path (no symlinks, existing Regorus crates) before writing, needs `rsync`,
 Rust `1.98.1`, `verus`, `cargo-verus` and Z3 (`VERUS_Z3_PATH` or `z3`) on `PATH`, and never
 rolls back: a failed check leaves the copied files for inspection.
 `scripts/test_update_regorus.sh` checks that an unsafe destination aborts before any crate is
-touched, and that a safe one is mirrored from this nested location idempotently.
+touched.
 
 
 ## Fuzzing
@@ -145,8 +149,7 @@ no-surprise property tests against the independent oracle; these need only stabl
 cargo test --release --manifest-path fuzz/Cargo.toml --lib
 ```
 
-CI (Junco's `.github/workflows/junco-policy-ci.yml`) runs them plus a 60-second libFuzzer smoke on
-Ubuntu and macOS.
+CI (`.github/workflows/ci.yml`) runs them plus a 60-second libFuzzer smoke on Ubuntu and macOS.
 
 ## Benchmarking
 
