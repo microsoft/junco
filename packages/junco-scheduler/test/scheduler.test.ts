@@ -360,6 +360,49 @@ test("separate projects authority/history only and prevents sibling authority es
   );
 });
 
+test("separate gives a role and other work one round-robin slot each within capacity two", async () => {
+  const graph: Graph = new DataflowGraph(Width.create(1), Width.create(2));
+  const split = separate<void, typeof NumberSchema, string, never>(
+    (_s, node) => node === id("Coordinator"),
+    roundRobin(undefined, 1),
+    roundRobin(undefined, 1),
+  );
+  const decisions: string[][] = [];
+  const execution = context({
+    graph,
+    scheduler: async (view, signal) => {
+      const decision = await split(view, signal);
+      decisions.push(nodeIds(decision.selected));
+      return decision;
+    },
+  });
+  const names = ["Coordinator", "Worker1", "Worker2"];
+  for (const name of names)
+    graph.addNode({
+      id: id(name),
+      state: undefined,
+      trigger: TriggerRule.always(),
+      step: async function* () {
+        yield [];
+        yield [];
+        return name;
+      },
+    });
+  const result = await execution.run();
+  assert.deepEqual(new Set(result.keys()), new Set(ids(names)));
+  assert.deepEqual(
+    names.map((name) => result.get(id(name))),
+    names,
+  );
+  for (const selected of decisions) assert.ok(selected.length <= 2);
+  // While both branches have work, each decision advances one node from each.
+  assert.deepEqual(decisions.slice(0, 3), [
+    ["Coordinator", "Worker1"],
+    ["Coordinator", "Worker2"],
+    ["Coordinator", "Worker1"],
+  ]);
+});
+
 test("separate starts and drains both children, with leftmost failure and cancellation precedence", async () => {
   for (const abort of [false, true]) {
     const controller = new AbortController();

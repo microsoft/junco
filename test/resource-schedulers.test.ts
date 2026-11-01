@@ -545,6 +545,50 @@ test("nested activation and evaluation limits each count every agent call exactl
   }
 });
 
+test("an evaluation tool cap denies the call past it before its body; an adequate cap keeps the fixed result", async () => {
+  for (const cap of [2, 3]) {
+    const mock = countingTool();
+    const call = (id: string) => fauxToolCall("mock_tool", {}, { id });
+    const { models, faux } = providers({
+      solo: [
+        toolTurn(call("m1")),
+        toolTurn(call("m2")),
+        toolTurn(call("m3")),
+        fauxAssistantMessage("final"),
+      ],
+    });
+    const { agent } = await placed(models, "solo", [mock.tool]);
+    const { ports, graph } = agencyGraph();
+    try {
+      const id = graph.addNode(memberOf("solo", agent));
+      ports.connect(graph, id);
+      const run = schedules
+        .context({
+          graph,
+          scheduler: schedules.limit({ tools: cap }, schedules.parallel()),
+        })
+        .run();
+      if (cap === 2) {
+        const error = await usageFailure(run);
+        assert.equal(mock.state.executions, 2);
+        assert.equal(error.details.resource, "tools");
+        assert.equal(error.details.scope, "evaluation");
+        assert.equal(error.details.used, 2);
+        assert.deepEqual(error.details.nodePath, ["solo"]);
+        // The denied third call ends the run: no further model request follows.
+        assert.equal(faux.solo!.state.callCount, 3);
+      } else {
+        const results = await run;
+        assert.equal(mock.state.executions, 3);
+        assert.equal(textOf(results.get(id)!), "final");
+      }
+    } finally {
+      await graph.close();
+      await agent.return();
+    }
+  }
+});
+
 test("admitted parallel requests finish and count; no peer starts new work after the shared failure", async () => {
   const mocks = [countingTool(), countingTool()];
   const { models, faux } = providers({
