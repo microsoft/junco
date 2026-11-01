@@ -704,3 +704,123 @@ pub(crate) fn isolated(
     );
     assert!(stdout.contains(completed));
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bookkeeping fixture checked through extraction, release failure and abandon"
+)]
+fn replaced_exec_retirement_keeps_unrelated_tasks() {
+    // Synthetic bookkeeping above any kernel pid_max: never signaled or waited for.
+    let pid = |offset| Pid::from_raw((1 << 30) + offset);
+    let group = pid(0);
+    let exec = |group, entry, syscall| Task {
+        synchronized: true,
+        in_syscall: true,
+        syscall: Some(syscall),
+        pending_exec: Some(PendingExec { group, entry }),
+        ..Task::default()
+    };
+    let observer_with = |tasks: Vec<(Pid, Task)>| {
+        let mut observer = Observer::new(
+            Observer::selection().unwrap(),
+            Arc::new(Sequence::default()),
+            group,
+        );
+        observer.tasks.extend(tasks);
+        observer
+    };
+    let proofs = |replaced: &[ReplacedExec]| {
+        let mut proofs: Vec<_> = replaced
+            .iter()
+            .map(|exec| (exec.tid, exec.group, exec.entry))
+            .collect();
+        proofs.sort();
+        proofs
+    };
+    let expected = [(pid(1), group, 11), (pid(2), group, 12)];
+    let mut observe = |_: u64,
+                       _: Pid,
+                       _: i32,
+                       _: Option<u64>,
+                       _: Option<Syscall>,
+                       _: Option<EntryInfo<'_>>|
+     -> io::Result<Resume> { panic!("retirement observes nothing") };
+    let controlled = std::cell::Cell::new(false);
+    let mut stop_retirement = |replaced: &[ReplacedExec]| {
+        assert_eq!(proofs(replaced), expected);
+        Err(io::Error::other("retirement callback stop"))
+    };
+
+    let mut observer = observer_with(vec![
+        (pid(1), exec(group, 11, Sysno::execve)),
+        (pid(2), exec(group, 12, Sysno::execveat)),
+        (group, exec(group, 10, Sysno::execve)),
+        (pid(20), exec(pid(19), 21, Sysno::execve)),
+        (
+            pid(3),
+            Task {
+                synchronized: true,
+                in_syscall: true,
+                syscall: Some(Sysno::write),
+                ..Task::default()
+            },
+        ),
+    ]);
+    for tid in [pid(1), pid(3)] {
+        observer.held.insert(
+            tid,
+            Held {
+                status: 0,
+                policy: false,
+            },
+        );
+    }
+    observer.retire_replaced_exec(group);
+    let mut tasks: Vec<_> = observer.tasks.keys().copied().collect();
+    tasks.sort();
+    assert_eq!(tasks, [group, pid(3), pid(20)]);
+    assert_eq!(observer.held.keys().copied().collect::<Vec<_>>(), [pid(3)]);
+    assert_eq!(proofs(&observer.replaced_execs), expected);
+    observer.retire_replaced_exec(group);
+    assert_eq!(proofs(&observer.replaced_execs), expected);
+    // A failed release propagates before any control decision or wait, keeping its proofs.
+    let error = observer
+        .run_controlled(
+            &mut observe,
+            &mut |_, _| {
+                controlled.set(true);
+                Ok(Control::Hold)
+            },
+            &mut stop_retirement,
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "retirement callback stop");
+    assert!(!controlled.get());
+    assert_eq!(proofs(&observer.replaced_execs), expected);
+
+    // Abandoning after that failure reports each extinct identity once, without a status.
+    let mut observer = observer_with(vec![
+        (pid(1), exec(group, 11, Sysno::execve)),
+        (pid(2), exec(group, 12, Sysno::execveat)),
+    ]);
+    observer.retire_replaced_exec(group);
+    observer
+        .run_controlled(
+            &mut observe,
+            &mut |_, _| Ok(Control::Hold),
+            &mut stop_retirement,
+        )
+        .unwrap_err();
+    let mut retired = Vec::new();
+    // A fresh thread has no children, so abandon's __WNOTHREAD wait ends at once.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| observer.abandon(|tid, status| retired.push((tid, status))))
+            .join()
+            .unwrap();
+    });
+    retired.sort();
+    assert_eq!(retired, [(pid(1), None), (pid(2), None)]);
+    assert!(observer.replaced_execs.is_empty());
+}

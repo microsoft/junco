@@ -23,7 +23,7 @@ use nix::unistd::Pid;
 use syscalls::{Sysno, SysnoSet};
 
 use crate::Syscall;
-use crate::capture::{Captured, native_usize};
+use crate::capture::{Captured, native_usize, proc_field};
 use crate::ring::Rings;
 
 #[cfg(target_arch = "x86_64")]
@@ -85,6 +85,20 @@ struct Entry {
     creation_observed: bool,
 }
 
+/// A pending exec's thread group and entry, read while its caller was still stopped.
+#[derive(Clone, Copy)]
+struct PendingExec {
+    group: Pid,
+    entry: u64,
+}
+
+/// A former exec caller identity a real EXEC wait proved extinct, with its unfinished entry.
+pub(crate) struct ReplacedExec {
+    pub(crate) tid: Pid,
+    pub(crate) group: Pid,
+    pub(crate) entry: u64,
+}
+
 #[derive(Default)]
 struct Task {
     /// Whether an entry, or the one return allowed before any, has kept this task in step.
@@ -95,6 +109,7 @@ struct Task {
     exiting: bool,
     entry: Option<Entry>,
     interrupt_requested: bool,
+    pending_exec: Option<PendingExec>,
 }
 
 struct Held {
@@ -133,6 +148,8 @@ pub(crate) struct Observer {
     held: HashMap<Pid, Held>,
     /// Newborn tasks drained only after every possible creator began exiting.
     unexecuted_exits: Vec<Pid>,
+    /// Extinct former exec identities the consumer has not yet released.
+    replaced_execs: Vec<ReplacedExec>,
 }
 
 impl Observer {
@@ -178,6 +195,7 @@ impl Observer {
             rings: Rings::default(),
             held: HashMap::new(),
             unexecuted_exits: Vec::new(),
+            replaced_execs: Vec::new(),
         }
     }
 
@@ -235,17 +253,23 @@ impl Observer {
     #[cfg(test)]
     /// Observes an ordinary exit-only tree without policy-held stops.
     pub(crate) fn run(&mut self, observe: &mut Observe<'_>) -> io::Result<()> {
-        self.run_controlled(observe, &mut |_, _| Ok(Control::Hold))
+        self.run_controlled(observe, &mut |_, _| Ok(Control::Hold), &mut |_| Ok(()))
     }
 
-    /// Policy holds are released only after the owner consumes its current token.
+    /// Policy holds are released only after the owner consumes its current token. Former exec
+    /// identities proven extinct reach `retire_execs` before any further control or wait.
     pub(crate) fn run_controlled(
         &mut self,
         observe: &mut Observe<'_>,
         control: &mut dyn FnMut(Pid, bool) -> io::Result<Control>,
+        retire_execs: &mut dyn FnMut(&[ReplacedExec]) -> io::Result<()>,
     ) -> io::Result<()> {
         let mut release = Vec::new();
         loop {
+            if !self.replaced_execs.is_empty() {
+                retire_execs(&self.replaced_execs)?;
+                self.replaced_execs.clear();
+            }
             for (&tid, task) in &mut self.tasks {
                 let held = self.held.get(&tid);
                 if task.exiting || held.is_some_and(|held| !held.policy) {
@@ -328,8 +352,13 @@ impl Observer {
     }
 
     /// After a failure: kills every tracee and resumes whatever still stops, observing nothing,
-    /// until none is left. `exited` sees each final status; no tracee is left stopped or unreaped.
-    pub(crate) fn abandon(&mut self, mut exited: impl FnMut(Pid, i32)) {
+    /// until none is left. `retired` sees each final status, or `None` for a former exec identity
+    /// already proven extinct; no tracee is left stopped or unreaped.
+    pub(crate) fn abandon(&mut self, mut retired: impl FnMut(Pid, Option<i32>)) {
+        // Never signaled or waited for: their numeric TIDs no longer name these tasks.
+        for replaced in std::mem::take(&mut self.replaced_execs) {
+            retired(replaced.tid, None);
+        }
         for tid in self.tasks.keys() {
             let _ = nix::sys::signal::kill(*tid, Signal::SIGKILL);
         }
@@ -342,7 +371,7 @@ impl Observer {
                 WaitStatus::from_raw(tid, status)
             {
                 self.tasks.remove(&tid);
-                exited(tid, status);
+                retired(tid, Some(status));
             } else {
                 // A task created after the kill above is killed on its first stop.
                 if self.tasks.insert(tid, Task::default()).is_none() {
@@ -353,15 +382,13 @@ impl Observer {
         }
     }
 
-    /// Applies a lifecycle stop to the task table, returning its message.
-    fn lifecycle(&mut self, tid: Pid, code: i32) -> io::Result<Option<u64>> {
-        let message = event_message(tid, code)?;
+    /// Applies a lifecycle stop and its stop-bound message to the task table, returning it.
+    fn lifecycle(&mut self, tid: Pid, code: i32, message: Option<u64>) -> io::Result<Option<u64>> {
         let exec = code == Event::PTRACE_EVENT_EXEC as i32;
         if exec && tid == self.root {
             self.root_executed = true;
         }
-        // A task killed at this stop has no message left to read; its lifecycle then ends here.
-        let other = if (creation(code) || exec) && message.is_some() {
+        let other = if creation(code) || exec {
             Some(event_pid(message)?)
         } else {
             None
@@ -379,9 +406,28 @@ impl Observer {
             // retired here, without manufacturing a successful kernel result.
             task.entry = None;
             task.in_syscall = false;
+            task.pending_exec = None;
             task.exiting = true;
         }
         Ok(message)
+    }
+
+    /// A real EXEC wait for `group` proves `de_thread` released every other task of that group,
+    /// including its caller's former TID: those exec entries can never complete. Nothing is
+    /// resumed, signaled, rekeyed or completed here; the consumer releases their bookkeeping.
+    fn retire_replaced_exec(&mut self, group: Pid) {
+        let replaced = self.tasks.extract_if(|tid, task| {
+            *tid != group
+                && task
+                    .pending_exec
+                    .is_some_and(|pending| pending.group == group)
+        });
+        for (tid, task) in replaced {
+            if let Some(PendingExec { group, entry }) = task.pending_exec {
+                self.held.remove(&tid);
+                self.replaced_execs.push(ReplacedExec { tid, group, entry });
+            }
+        }
     }
 
     /// Delivers one stop, then resumes its task unless the consumer holds it.
@@ -391,10 +437,34 @@ impl Observer {
         status: i32,
         observe: &mut Observe<'_>,
     ) -> io::Result<()> {
+        let wait = WaitStatus::from_raw(tid, status)?;
+        let message = match wait {
+            WaitStatus::PtraceEvent(_, signal, code) if carries_message(code) => {
+                // A woken task's successor stop replaces both message and siginfo. Reading the
+                // siginfo after the message proves the message still belongs to this wait status.
+                let message = event_message(tid, code)?;
+                let current = match message {
+                    Some(_) => alive(ptrace::getsiginfo(tid))?,
+                    None => None,
+                };
+                if let (Some(message), Some(info)) = (message, current)
+                    && info.si_code == (code << 8) | signal as i32
+                {
+                    Some(message)
+                } else {
+                    // Vanished or already at its successor stop, whose own wait drains it. A
+                    // real EXEC wait still proves de_thread released its group's other tasks.
+                    if code == Event::PTRACE_EVENT_EXEC as i32 {
+                        self.retire_replaced_exec(tid);
+                    }
+                    return Ok(());
+                }
+            }
+            _ => None,
+        };
         if let Some(task) = self.tasks.get_mut(&tid) {
             task.interrupt_requested = false;
         }
-        let wait = WaitStatus::from_raw(tid, status)?;
         let event = match wait {
             WaitStatus::PtraceSyscall(_) => return self.syscall_stop(tid, status, observe),
             WaitStatus::Exited(..) | WaitStatus::Signaled(..) => {
@@ -402,7 +472,7 @@ impl Observer {
                 self.held.remove(&tid);
                 None
             }
-            WaitStatus::PtraceEvent(_, _, code) => self.lifecycle(tid, code)?,
+            WaitStatus::PtraceEvent(_, _, code) => self.lifecycle(tid, code, message)?,
             WaitStatus::Stopped(..) => {
                 self.tasks.entry(tid).or_default();
                 None
@@ -534,6 +604,27 @@ impl Observer {
         number: u64,
         observe: &mut Observe<'_>,
     ) -> io::Result<()> {
+        let syscall = usize::try_from(number).ok().and_then(Sysno::new);
+        // Read while the caller's original TID still names it: only a real EXEC wait for this
+        // thread group may later retire the entry once that former TID has vanished.
+        let group = if matches!(syscall, Some(Sysno::execve | Sysno::execveat)) {
+            match proc_field::<i32>(format!("/proc/{tid}/status"), "Tgid:") {
+                Ok(group) => Some(
+                    group
+                        .filter(|group| *group > 0)
+                        .map(Pid::from_raw)
+                        .ok_or_else(|| io::Error::other("missing or invalid exec thread group"))?,
+                ),
+                // This stopped entry vanished; its real terminal wait owns cleanup.
+                Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let pending_exec = |entry| group.map(|group| PendingExec { group, entry });
         let task = self.tasks.entry(tid).or_default();
         if task.in_syscall {
             return Err(io::Error::other(format!(
@@ -542,7 +633,6 @@ impl Observer {
         }
         task.in_syscall = true;
         task.synchronized = true;
-        let syscall = usize::try_from(number).ok().and_then(Sysno::new);
         task.syscall = syscall;
         let selected = syscall.filter(|syscall| self.selected.contains(*syscall));
         if let Some(syscall) = selected {
@@ -554,16 +644,18 @@ impl Observer {
                 capture.submit(self.rings.pending(tid, capture.descriptor(0)));
             }
             let order = self.sequence.next()?;
-            self.tasks
+            let task = self
+                .tasks
                 .get_mut(&tid)
-                .ok_or_else(|| io::Error::other("missing entry task"))?
-                .entry = Some(Entry {
+                .ok_or_else(|| io::Error::other("missing entry task"))?;
+            task.entry = Some(Entry {
                 syscall,
                 capture,
                 order,
                 started: Instant::now(),
                 creation_observed: false,
             });
+            task.pending_exec = pending_exec(order);
             let entry = self
                 .tasks
                 .get(&tid)
@@ -583,8 +675,13 @@ impl Observer {
             )?;
             return self.apply(tid, status, resume);
         }
+        let order = self.sequence.next()?;
+        self.tasks
+            .get_mut(&tid)
+            .ok_or_else(|| io::Error::other("missing entry task"))?
+            .pending_exec = pending_exec(order);
         let resume = observe(
-            self.sequence.next()?,
+            order,
             tid,
             status,
             None,
@@ -617,6 +714,7 @@ impl Observer {
             return resume(tid, None);
         }
         task.in_syscall = false;
+        task.pending_exec = None;
         let syscall = task.syscall.take();
         if let Some(entry) = task.entry.take() {
             let mut call = entry.capture.complete(
@@ -678,11 +776,14 @@ pub(crate) const fn creation(event: i32) -> bool {
         || event == Event::PTRACE_EVENT_VFORK as i32
 }
 
-fn event_message(tid: Pid, event: i32) -> io::Result<Option<u64>> {
-    if creation(event)
+const fn carries_message(event: i32) -> bool {
+    creation(event)
         || event == Event::PTRACE_EVENT_EXEC as i32
         || event == Event::PTRACE_EVENT_EXIT as i32
-    {
+}
+
+fn event_message(tid: Pid, event: i32) -> io::Result<Option<u64>> {
+    if carries_message(event) {
         // A killed task leaves its stop at once; ESRCH is its vanishing, not a failure.
         alive(ptrace::getevent(tid)).map(|message| message.map(i64::cast_unsigned))
     } else {

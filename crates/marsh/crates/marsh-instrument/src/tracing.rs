@@ -26,7 +26,8 @@ use crate::Syscall;
 use crate::capture::{Captured, proc_field};
 use crate::host::{HostCall, records};
 use crate::observation::{
-    Control, EntryInfo, Observer, Resume, Sequence, UNCLASSIFIED, alive, creation, rekey,
+    Control, EntryInfo, Observer, ReplacedExec, Resume, Sequence, UNCLASSIFIED, alive, creation,
+    rekey,
 };
 use lurk_cli::syscall_info::{RetCode, SyscallArgs, SyscallInfo};
 use marsh_lib::{CheckedAdvance, RecoverPoison as _};
@@ -992,37 +993,46 @@ impl Tracing {
             self.progress.notify_all();
             observer.stop(root, status, &mut observe)?;
             std::fs::File::from(release).write_all(&[1])?;
-            observer.run_controlled(&mut observe, &mut |tid, held| {
-                let mut state = lock(&self.state);
-                state.check()?;
-                let decision = match state.threads.get(&tid) {
-                    None => Control::Release,
-                    Some(thread) => match thread.inherited.and_then(|run| state.runs.get(&run)) {
+            observer.run_controlled(
+                &mut observe,
+                &mut |tid, held| {
+                    let mut state = lock(&self.state);
+                    state.check()?;
+                    let decision = match state.threads.get(&tid) {
                         None => Control::Release,
-                        Some(run)
-                            if matches!(run.phase, RunPhase::Running | RunPhase::Cancelled) =>
-                        {
-                            Control::Release
+                        Some(thread) => {
+                            match thread.inherited.and_then(|run| state.runs.get(&run)) {
+                                None => Control::Release,
+                                Some(run)
+                                    if matches!(
+                                        run.phase,
+                                        RunPhase::Running | RunPhase::Cancelled
+                                    ) =>
+                                {
+                                    Control::Release
+                                }
+                                Some(_) if !thread.policy_held && held => Control::Release,
+                                Some(_)
+                                    if !thread.policy_held
+                                        && thread.pending.is_none_or(|pending| pending.safe)
+                                        && thread.restart.is_none()
+                                        && !thread.restart_uncertain =>
+                                {
+                                    Control::Interrupt
+                                }
+                                Some(_) => Control::Hold,
+                            }
                         }
-                        Some(_) if !thread.policy_held && held => Control::Release,
-                        Some(_)
-                            if !thread.policy_held
-                                && thread.pending.is_none_or(|pending| pending.safe)
-                                && thread.restart.is_none()
-                                && !thread.restart_uncertain =>
-                        {
-                            Control::Interrupt
-                        }
-                        Some(_) => Control::Hold,
-                    },
-                };
-                if matches!(decision, Control::Release)
-                    && let Some(thread) = state.threads.get_mut(&tid)
-                {
-                    thread.policy_held = false;
-                }
-                Ok(decision)
-            })?;
+                    };
+                    if matches!(decision, Control::Release)
+                        && let Some(thread) = state.threads.get_mut(&tid)
+                    {
+                        thread.policy_held = false;
+                    }
+                    Ok(decision)
+                },
+                &mut |replaced| self.retire_replaced_execs(replaced),
+            )?;
             self.retire_unexecuted(observer.unexecuted_exits())
         })();
         if observer.detached() {
@@ -1044,7 +1054,9 @@ impl Tracing {
             }
             observer.abandon(|tid, status| {
                 lock(&self.state).threads.remove(&tid);
-                if tid == root {
+                if tid == root
+                    && let Some(status) = status
+                {
                     events(ChildEvent::Exited(std::process::ExitStatus::from_raw(
                         status,
                     )));
@@ -1099,6 +1111,42 @@ impl Tracing {
         }
         for tid in tids {
             state.threads.remove(tid);
+        }
+        drop(state);
+        self.progress.notify_all();
+        Ok(())
+    }
+
+    /// Releases former exec identities a real EXEC wait proved extinct. Their pending calls never
+    /// complete: no syscall result is claimed, and exit-time ordering rules still apply to them.
+    fn retire_replaced_execs(&self, replaced: &[ReplacedExec]) -> io::Result<()> {
+        if replaced.is_empty() {
+            return Ok(());
+        }
+        let mut state = lock(&self.state);
+        state.check()?;
+        let valid = replaced.iter().all(|exec| {
+            exec.tid != exec.group
+                && state.threads.get(&exec.tid).is_some_and(|thread| {
+                    thread.known_parent
+                        && thread.early.is_empty()
+                        && thread
+                            .pending
+                            .is_some_and(|pending| pending.entry == exec.entry)
+                        && thread
+                            .process
+                            .as_ref()
+                            .is_some_and(|process| process.group == exec.group)
+                })
+        });
+        if !valid {
+            return Err(io::Error::other("invalid replaced exec retirement"));
+        }
+        for exec in replaced {
+            state.retire(exec.tid)?;
+        }
+        for exec in replaced {
+            state.threads.remove(&exec.tid);
         }
         drop(state);
         self.progress.notify_all();

@@ -383,7 +383,7 @@ fn newborn_exit_before_adoption_drains_without_discarding_effects() {
         );
         return;
     }
-    group_exit_during_creation(false);
+    group_exit_during_creation(CreationStop::Withhold);
     println!("newborn exit fully drained");
 }
 
@@ -402,8 +402,58 @@ fn creator_exit_before_return_preserves_child_inherited_effects() {
         );
         return;
     }
-    group_exit_during_creation(true);
+    group_exit_during_creation(CreationStop::Adopt);
     println!("creator exit retains child effects");
+}
+
+#[test]
+fn replaced_creation_stop_with_zero_exit_status_is_not_an_identity() {
+    const TEST: &str =
+        "tracing::tests::replaced_creation_stop_with_zero_exit_status_is_not_an_identity";
+    const SCENARIO: &str = "MARSH_REPLACED_CREATION_FIXTURE";
+    if std::env::var_os(SCENARIO).is_none() {
+        crate::observation::tests::isolated(
+            TEST,
+            SCENARIO,
+            "zero",
+            Duration::from_secs(15),
+            "replaced creation stop drained",
+        );
+        return;
+    }
+    group_exit_during_creation(CreationStop::ReplacedByExit(0));
+    println!("replaced creation stop drained");
+}
+
+#[test]
+fn replaced_creation_stop_with_nonzero_exit_status_is_not_an_identity() {
+    const TEST: &str =
+        "tracing::tests::replaced_creation_stop_with_nonzero_exit_status_is_not_an_identity";
+    const SCENARIO: &str = "MARSH_REPLACED_CREATION_FIXTURE";
+    if std::env::var_os(SCENARIO).is_none() {
+        crate::observation::tests::isolated(
+            TEST,
+            SCENARIO,
+            "nonzero",
+            Duration::from_secs(15),
+            "replaced creation stop drained",
+        );
+        return;
+    }
+    group_exit_during_creation(CreationStop::ReplacedByExit(7));
+    println!("replaced creation stop drained");
+}
+
+/// How the fixture treats the creator's real, non-root creation stop.
+#[derive(Clone, Copy)]
+enum CreationStop {
+    /// Dispatch it and hold the creator there.
+    Adopt,
+    /// Never dispatch it; the newborn stays terminal-only.
+    Withhold,
+    /// Withhold it, then replay its saved wait status once the group exit with this status
+    /// has replaced the kernel stop with the creator's EXIT stop.
+    ReplacedByExit(u8),
 }
 
 #[allow(
@@ -411,7 +461,12 @@ fn creator_exit_before_return_preserves_child_inherited_effects() {
     clippy::zombie_processes,
     reason = "one isolated ordering fixture; Observer is the child's sole reaper"
 )]
-fn group_exit_during_creation(adopt_child: bool) {
+fn group_exit_during_creation(mode: CreationStop) {
+    let adopt_child = matches!(mode, CreationStop::Adopt);
+    let exit_code = match mode {
+        CreationStop::ReplacedByExit(code) => code,
+        CreationStop::Adopt | CreationStop::Withhold => 0,
+    };
     let fixture = Fixture::new();
     let run = fixture.service.begin_run(fixture.root).unwrap();
     let file = fixture.path("creator-write");
@@ -441,12 +496,13 @@ def creator():
     assert libc.pthread_create(ctypes.byref(thread_id), None, newborn, None) == 0
 threading.Thread(target=creator).start()
 os.read(ready_read if sys.argv[3] == 'known' else 0, 1)
-os._exit(0)
+os._exit(int(sys.argv[4]))
 "#,
         ])
         .arg(&file)
         .arg(fixture.path("child-write"))
         .arg(if adopt_child { "known" } else { "unknown" })
+        .arg(exit_code.to_string())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -471,7 +527,9 @@ os._exit(0)
         .unwrap();
     let mut root_status = None;
     let created_child = std::cell::Cell::new(None);
+    let deliveries = std::cell::Cell::new(0_usize);
     let mut observe = |sequence, tid, status, event, info, entry: Option<EntryInfo<'_>>| {
+        deliveries.set(deliveries.get() + 1);
         let _delivery = fixture.service.delivery(run)?;
         let mut decision = fixture
             .service
@@ -514,7 +572,7 @@ os._exit(0)
         let creating = matches!(WaitStatus::from_raw(tid, status).unwrap(),
             WaitStatus::PtraceEvent(_, _, code) if creation(code));
         if creating && tid != root {
-            assert!(stopped_creator.replace(tid).is_none());
+            assert!(stopped_creator.replace((tid, status)).is_none());
             // CDLL's pthread_create releases the GIL. Hold this creator at its real
             // event while the newborn uses an inherited fd and main exits the group.
             if adopt_child {
@@ -525,12 +583,44 @@ os._exit(0)
             }
             continue;
         }
-        observer.stop(tid, status, &mut observe).unwrap();
-        if tid == root
-            && matches!(WaitStatus::from_raw(tid, status).unwrap(),
-            WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_EXIT as i32)
+        let exit_stop = matches!(WaitStatus::from_raw(tid, status).unwrap(),
+            WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_EXIT as i32);
+        if let (CreationStop::ReplacedByExit(_), Some((creator, saved))) = (mode, stopped_creator)
+            && tid == creator
+            && exit_stop
         {
-            let creator = stopped_creator.expect("main exits only after the newborn creation gate");
+            // Group exit woke the withheld creator into this EXIT stop, which replaced the
+            // kernel's creation message while the saved wait status still names the creation.
+            assert!(matches!(WaitStatus::from_raw(creator, saved).unwrap(),
+                WaitStatus::PtraceEvent(_, _, code) if creation(code)));
+            let message = i64::from(exit_code) << 8;
+            assert_eq!(nix::sys::ptrace::getevent(creator).unwrap(), message);
+            assert_eq!(
+                nix::sys::ptrace::getsiginfo(creator).unwrap().si_code,
+                libc::SIGTRAP | ((Event::PTRACE_EVENT_EXIT as i32) << 8)
+            );
+            println!("staged replacement: exit={exit_code} message={message}");
+            let delivered = deliveries.get();
+            observer.stop(creator, saved, &mut observe).unwrap();
+            assert_eq!(
+                deliveries.get(),
+                delivered,
+                "a replaced creation stop must not reach the consumer"
+            );
+            assert_eq!(
+                nix::sys::ptrace::getevent(creator).unwrap(),
+                message,
+                "replaying the creation stop must not resume the real EXIT stop"
+            );
+            observer.stop(creator, status, &mut observe).unwrap();
+            assert_eq!(deliveries.get(), delivered + 1);
+            break;
+        }
+        observer.stop(tid, status, &mut observe).unwrap();
+        // Replacement modes never resume the creator: group exit itself wakes it to EXIT.
+        if tid == root && exit_stop && !matches!(mode, CreationStop::ReplacedByExit(_)) {
+            let (creator, _) =
+                stopped_creator.expect("main exits only after the newborn creation gate");
             // The leader's real EXIT proves group exit was entered before acknowledging
             // the withheld creator stop. No userspace work can resume in the dying tree.
             alive(nix::sys::ptrace::syscall(creator, None)).unwrap();
@@ -549,7 +639,7 @@ os._exit(0)
         .service
         .retire_unexecuted(observer.unexecuted_exits())
         .unwrap();
-    assert!(root_status.unwrap().success());
+    assert_eq!(root_status.unwrap().code(), Some(i32::from(exit_code)));
     fixture.service.quiesce(run).unwrap();
     assert_eq!(
         std::fs::read(&file).unwrap(),
@@ -589,6 +679,532 @@ os._exit(0)
     );
     drop(seen);
     assert!(lock(&fixture.service.state).threads.is_empty());
+    fixture.finish(run);
+}
+
+const REPLACED_EXEC: &str = "MARSH_REPLACED_EXEC_FIXTURE";
+
+/// Reruns `name` isolated, or runs its fixture inside that fresh process.
+fn replaced_exec_case(name: &str, scenario: &str, mode: ExecStop, selected_exec: bool) {
+    if std::env::var_os(REPLACED_EXEC).is_none() {
+        crate::observation::tests::isolated(
+            &format!("tracing::tests::{name}"),
+            REPLACED_EXEC,
+            scenario,
+            Duration::from_secs(15),
+            "replaced exec stop drained",
+        );
+    } else {
+        replaced_exec_stop(mode, selected_exec);
+    }
+}
+
+#[test]
+fn replaced_nonleader_exec_stop_drains() {
+    replaced_exec_case(
+        "replaced_nonleader_exec_stop_drains",
+        "exit",
+        ExecStop::Exit,
+        true,
+    );
+}
+
+#[test]
+fn vanished_nonleader_exec_stop_drains() {
+    replaced_exec_case(
+        "vanished_nonleader_exec_stop_drains",
+        "gone",
+        ExecStop::Gone,
+        true,
+    );
+}
+
+#[test]
+fn unselected_replaced_nonleader_exec_stop_drains() {
+    replaced_exec_case(
+        "unselected_replaced_nonleader_exec_stop_drains",
+        "unselected",
+        ExecStop::Exit,
+        false,
+    );
+}
+
+/// When the fixture replays a withheld nonleader EXEC stop after killing its new image.
+#[derive(Clone, Copy)]
+enum ExecStop {
+    /// While the root's real SIGKILL EXIT stop has replaced its message and siginfo.
+    Exit,
+    /// After the root's final status was reaped without dispatching its EXIT.
+    Gone,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::zombie_processes,
+    reason = "one isolated ordering fixture; Observer is the child's sole reaper"
+)]
+fn replaced_exec_stop(mode: ExecStop, selected_exec: bool) {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let before = fixture.path("before-exec");
+    let after = fixture.path("after-exec");
+    let mut child = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            r#"
+import os, sys, threading
+sys.stdout.write('R')
+sys.stdout.flush()
+os.read(0, 1)
+go = threading.Event()
+def worker():
+    go.wait()
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(fd, b'before\n')
+    os.close(fd)
+    os.execv('/bin/sh', ['sh', '-c', 'printf after > "$1"', 'sh', sys.argv[2]])
+threading.Thread(target=worker).start()
+# The leader's creating call has returned before the worker may exec.
+go.set()
+threading.Event().wait()
+"#,
+        ])
+        .arg(&before)
+        .arg(&after)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let mut ready = [0; 1];
+    output.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"R");
+    let root = Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let process = open_process(root.as_raw()).unwrap();
+    let mut selected = fixture.service.selected.clone();
+    if !selected_exec {
+        selected.remove(Sysno::execve);
+        selected.remove(Sysno::execveat);
+    }
+    assert!(selected.contains(Sysno::write));
+    let mut observer = Observer::new(selected, Arc::clone(&fixture.service.sequence), root);
+    let stopped = observer.seize(root).unwrap().unwrap();
+    fixture
+        .service
+        .adopt_root(
+            root,
+            run,
+            nix::unistd::gettid(),
+            process.try_clone().unwrap(),
+        )
+        .unwrap();
+    let delivered = RefCell::new(Vec::new());
+    let exec_entry = std::cell::Cell::new(None);
+    let mut root_status = None;
+    let mut observe = |sequence, tid: Pid, status, event, info, entry: Option<EntryInfo<'_>>| {
+        delivered.borrow_mut().push((tid, status));
+        let exec = tid != root
+            && entry.as_ref().is_some_and(|entry| {
+                entry.result.is_none()
+                    && matches!(entry.syscall, Some(Sysno::execve | Sysno::execveat))
+            });
+        let _delivery = fixture.service.delivery(run)?;
+        let decision = fixture
+            .service
+            .deliver(sequence, tid, status, event, info, entry)?;
+        if exec {
+            assert!(exec_entry.replace(Some((tid, sequence))).is_none());
+            let state = lock(&fixture.service.state);
+            let thread = state.threads.get(&tid).unwrap();
+            assert_eq!(thread.pending.unwrap().entry, sequence);
+            assert_eq!(thread.process.as_ref().unwrap().group, root);
+            drop(state);
+        }
+        if tid == root && ended(status) {
+            root_status = Some(std::process::ExitStatus::from_raw(status));
+        }
+        Ok(decision)
+    };
+    let wait = || {
+        loop {
+            let mut status = 0;
+            // SAFETY: this test thread spawned/seized the tree and remains its sole wait owner.
+            let tid =
+                unsafe { libc::waitpid(-1, &raw mut status, libc::__WALL | libc::__WNOTHREAD) };
+            if tid < 0 && Errno::last() == Errno::EINTR {
+                continue;
+            }
+            assert!(tid > 0);
+            return (Pid::from_raw(tid), status);
+        }
+    };
+    let event_stop = |tid, status, event: Event| {
+        matches!(WaitStatus::from_raw(tid, status).unwrap(),
+            WaitStatus::PtraceEvent(_, _, code) if code == event as i32)
+    };
+    observer.stop(root, stopped, &mut observe).unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"g").unwrap();
+    // The old leader's EXIT must be dispatched: de_thread waits for it before EXEC.
+    let (worker, exec_status) = loop {
+        let (tid, status) = wait();
+        if tid == root && event_stop(tid, status, Event::PTRACE_EVENT_EXEC) {
+            let (worker, _) = exec_entry
+                .get()
+                .expect("the nonleader exec entry precedes EXEC");
+            assert_ne!(worker, root);
+            // Fixture evidence only: the repair never learns this former identity.
+            assert_eq!(
+                nix::sys::ptrace::getevent(root).unwrap(),
+                i64::from(worker.as_raw())
+            );
+            assert_eq!(
+                nix::sys::ptrace::getsiginfo(root).unwrap().si_code,
+                libc::SIGTRAP | ((Event::PTRACE_EVENT_EXEC as i32) << 8)
+            );
+            break (worker, status);
+        }
+        observer.stop(tid, status, &mut observe).unwrap();
+    };
+    assert!(signal_process(&process, libc::SIGKILL).unwrap());
+    let exit_status = loop {
+        let (tid, status) = wait();
+        if tid == root && event_stop(tid, status, Event::PTRACE_EVENT_EXIT) {
+            break status;
+        }
+        observer.stop(tid, status, &mut observe).unwrap();
+    };
+    let exit_message = i64::from(libc::SIGKILL);
+    let exit_info = libc::SIGTRAP | ((Event::PTRACE_EVENT_EXIT as i32) << 8);
+    assert_eq!(nix::sys::ptrace::getevent(root).unwrap(), exit_message);
+    assert_eq!(
+        nix::sys::ptrace::getsiginfo(root).unwrap().si_code,
+        exit_info
+    );
+    let count = delivered.borrow().len();
+    match mode {
+        ExecStop::Exit => {
+            println!("staged replaced exec: exit message={exit_message}");
+            observer.stop(root, exec_status, &mut observe).unwrap();
+            assert_eq!(
+                delivered.borrow().len(),
+                count,
+                "a replaced EXEC stop must not reach the consumer"
+            );
+            assert_eq!(
+                nix::sys::ptrace::getevent(root).unwrap(),
+                exit_message,
+                "replaying EXEC must not resume the real EXIT stop"
+            );
+            assert_eq!(
+                nix::sys::ptrace::getsiginfo(root).unwrap().si_code,
+                exit_info
+            );
+            observer.stop(root, exit_status, &mut observe).unwrap();
+            assert_eq!(delivered.borrow().len(), count + 1);
+        }
+        ExecStop::Gone => {
+            nix::sys::ptrace::syscall(root, None).unwrap();
+            let (tid, final_status) = wait();
+            assert_eq!(tid, root);
+            assert!(ended(final_status));
+            assert_eq!(nix::sys::ptrace::getevent(root), Err(Errno::ESRCH));
+            println!("staged replaced exec: gone");
+            observer.stop(root, exec_status, &mut observe).unwrap();
+            observer.stop(root, exit_status, &mut observe).unwrap();
+            assert_eq!(delivered.borrow().len(), count);
+            observer.stop(root, final_status, &mut observe).unwrap();
+            assert_eq!(delivered.borrow().len(), count + 1);
+        }
+    }
+    observer
+        .run_controlled(
+            &mut observe,
+            &mut |_, _| Ok(Control::Hold),
+            &mut |replaced| fixture.service.retire_replaced_execs(replaced),
+        )
+        .unwrap();
+    fixture
+        .service
+        .retire_unexecuted(observer.unexecuted_exits())
+        .unwrap();
+    assert_eq!(root_status.unwrap().signal(), Some(libc::SIGKILL));
+    assert!(
+        delivered.borrow().iter().all(|&(tid, status)| tid != worker
+            || !(ended(status) || event_stop(tid, status, Event::PTRACE_EVENT_EXIT))),
+        "the former exec identity never reports its own end"
+    );
+    fixture.service.quiesce(run).unwrap();
+    assert_eq!(std::fs::read(&before).unwrap(), b"before\n");
+    assert!(!after.exists());
+    let (_, exec_order) = exec_entry.get().unwrap();
+    let seen = lock(&fixture.seen);
+    assert!(
+        seen.iter().all(|call| call.entry_order != exec_order),
+        "the replaced exec never completed"
+    );
+    assert!(seen.iter().any(|call| {
+        call.info.pid == worker
+            && call.info.syscall == Sysno::write
+            && call
+                .fd(0)
+                .ok()
+                .flatten()
+                .is_some_and(|target| target.path.ends_with(b"before-exec"))
+    }));
+    drop(seen);
+    assert!(lock(&fixture.service.state).threads.is_empty());
+    fixture.finish(run);
+    drop(output);
+    println!("replaced exec stop drained");
+}
+
+/// Synthetic bookkeeping above any kernel `pid_max`: never signaled or waited for.
+fn synthetic(offset: i32) -> Pid {
+    Pid::from_raw((1 << 30) + offset)
+}
+
+/// A known task pending at `entry`, leased to this test process, which is never signaled.
+fn leased(run: TraceRun, entry: u64, group: Pid) -> Thread {
+    Thread {
+        inherited: Some(run),
+        known_parent: true,
+        process: Some(ProcessLease {
+            descriptor: open_process(std::process::id().cast_signed()).unwrap(),
+            group,
+        }),
+        pending: Some(Pending {
+            entry,
+            run: Some(run),
+            safe: false,
+            writes_memory: true,
+        }),
+        ..Thread::default()
+    }
+}
+
+/// One test run's synthetic threads and their pending entries, in TID order. The service is
+/// shared by concurrent tests, so each test also uses its own synthetic TID range.
+fn synthetic_threads(service: &Tracing, run: TraceRun) -> Vec<(Pid, Option<u64>)> {
+    let mut threads: Vec<_> = lock(&service.state)
+        .threads
+        .iter()
+        .filter(|(_, thread)| thread.inherited == Some(run))
+        .map(|(tid, thread)| (*tid, thread.pending.map(|pending| pending.entry)))
+        .collect();
+    threads.sort();
+    threads
+}
+
+fn remove_synthetic(service: &Tracing, run: TraceRun) {
+    lock(&service.state)
+        .threads
+        .retain(|_, thread| thread.inherited != Some(run));
+}
+
+/// A completed record built directly as bookkeeping input, not a mocked ptrace event.
+fn completed(pid: Pid, syscall: Sysno, entry_order: u64, result: RetCode) -> Syscall {
+    Syscall {
+        info: SyscallInfo {
+            typ: "SYSCALL",
+            pid,
+            syscall,
+            args: SyscallArgs(Vec::new()),
+            result,
+            duration: Duration::ZERO,
+        },
+        creation_observed: false,
+        entry_order,
+        cwd: None,
+        return_fd: None,
+        paths: Vec::new(),
+        descriptors: Vec::new(),
+        flags: None,
+        submissions: None,
+    }
+}
+
+#[test]
+fn replaced_exec_retirement_validates_identity() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let service = &fixture.service;
+    let (group, other) = (synthetic(0), synthetic(100));
+    let entry: Vec<_> = (0..10).map(|_| service.next_order(run).unwrap()).collect();
+    {
+        let mut state = lock(&service.state);
+        for (tid, thread) in [
+            (group, leased(run, entry[0], group)),
+            (synthetic(1), leased(run, entry[1], group)),
+            (synthetic(2), leased(run, entry[2], group)),
+            // Sentinels: an unlisted task of the same group, and one of another group.
+            (synthetic(3), leased(run, entry[3], group)),
+            (synthetic(101), leased(run, entry[4], other)),
+            (
+                synthetic(4),
+                Thread {
+                    known_parent: false,
+                    ..leased(run, entry[5], group)
+                },
+            ),
+            (
+                synthetic(5),
+                Thread {
+                    pending: None,
+                    ..leased(run, entry[6], group)
+                },
+            ),
+            (
+                synthetic(6),
+                Thread {
+                    process: None,
+                    ..leased(run, entry[7], group)
+                },
+            ),
+            (
+                synthetic(7),
+                Thread {
+                    early: vec![(entry[8], 0, None, None)],
+                    ..leased(run, entry[8], group)
+                },
+            ),
+        ] {
+            state.threads.insert(tid, thread);
+        }
+    }
+    let proof = |tid, entry| ReplacedExec { tid, group, entry };
+    let before = synthetic_threads(service, run);
+    for (case, invalid) in [
+        ("missing task", proof(synthetic(50), entry[9])),
+        ("leader", proof(group, entry[0])),
+        ("unknown parent", proof(synthetic(4), entry[5])),
+        ("missing pending entry", proof(synthetic(5), entry[6])),
+        ("wrong pending entry", proof(synthetic(3), entry[9])),
+        ("missing process lease", proof(synthetic(6), entry[7])),
+        ("wrong process group", proof(synthetic(101), entry[4])),
+        ("early stops", proof(synthetic(7), entry[8])),
+    ] {
+        let error = service
+            .retire_replaced_execs(&[proof(synthetic(1), entry[1]), invalid])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid replaced exec retirement",
+            "{case}"
+        );
+        assert_eq!(synthetic_threads(service, run), before, "{case}");
+    }
+    service
+        .retire_replaced_execs(&[proof(synthetic(1), entry[1]), proof(synthetic(2), entry[2])])
+        .unwrap();
+    let mut after = before;
+    after.retain(|(tid, _)| ![synthetic(1), synthetic(2)].contains(tid));
+    assert_eq!(synthetic_threads(service, run), after);
+    remove_synthetic(service, run);
+    fixture.finish(run);
+}
+
+#[test]
+fn replaced_exec_retirement_preserves_creator_order() {
+    let fixture = Fixture::new();
+    let run = fixture.service.begin_run(fixture.root).unwrap();
+    let service = &fixture.service;
+    let (group, creator, retiring) = (synthetic(1000), synthetic(1001), synthetic(1002));
+    let [created, written, executed] = [(); 3].map(|()| service.next_order(run).unwrap());
+    {
+        let mut state = lock(&service.state);
+        state.threads.insert(creator, leased(run, created, group));
+        // The exec caller's earlier write still waits for its creator's completion.
+        state.threads.insert(
+            retiring,
+            Thread {
+                classify_after: Some(created),
+                ..leased(run, executed, group)
+            },
+        );
+        state.deferred.insert(
+            created,
+            vec![(
+                run,
+                completed(retiring, Sysno::write, written, RetCode::Ok(7)),
+            )],
+        );
+    }
+    service
+        .retire_replaced_execs(&[ReplacedExec {
+            tid: retiring,
+            group,
+            entry: executed,
+        }])
+        .unwrap();
+    {
+        let state = lock(&service.state);
+        assert!(!state.threads.contains_key(&retiring));
+        assert_eq!(
+            state.threads[&creator].pending.map(|pending| pending.entry),
+            Some(created)
+        );
+        let [(owner, info)] = state.deferred[&created].as_slice() else {
+            panic!("one deferred record");
+        };
+        assert_eq!(
+            (*owner, info.info.pid, info.entry_order),
+            (run, retiring, written)
+        );
+        assert!(matches!(info.info.result, RetCode::Ok(7)));
+        drop(state);
+    }
+    service
+        .classify(
+            run,
+            completed(
+                creator,
+                Sysno::clone,
+                created,
+                RetCode::Ok(retiring.as_raw()),
+            ),
+        )
+        .unwrap();
+    let seen: Vec<_> = lock(&fixture.seen)
+        .iter()
+        .map(|call| (call.info.pid, call.info.syscall, call.entry_order))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (creator, Sysno::clone, created),
+            (retiring, Sysno::write, written)
+        ]
+    );
+    assert!(!lock(&service.state).deferred.contains_key(&created));
+
+    // A live run cannot retire an entry its own unclassified dependent still waits for.
+    let (blocked, dependent) = (synthetic(1003), synthetic(1004));
+    let pending = service.next_order(run).unwrap();
+    {
+        let mut state = lock(&service.state);
+        state.threads.insert(blocked, leased(run, pending, group));
+        state.threads.insert(
+            dependent,
+            Thread {
+                inherited: Some(run),
+                known_parent: true,
+                classify_after: Some(pending),
+                ..Thread::default()
+            },
+        );
+    }
+    let error = service
+        .retire_replaced_execs(&[ReplacedExec {
+            tid: blocked,
+            group,
+            entry: pending,
+        }])
+        .unwrap_err();
+    assert_eq!(error.to_string(), UNCLASSIFIED);
+    assert!(lock(&service.state).threads.contains_key(&blocked));
+    remove_synthetic(service, run);
     fixture.finish(run);
 }
 

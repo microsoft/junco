@@ -62,6 +62,12 @@ Marsh drains that stop only after every task is exiting and retains the newborn'
 until the tree is reaped. Tombstones with pending, deferred or application records still fail
 observation.
 
+A nonleader `exec` reports its EXEC stop under the group leader's TID, naming the caller's former
+TID. If SIGKILL replaces that stop before its message is read, Marsh never treats the stale
+message as an identity. The real EXEC wait still proves the group's other tasks were released, so
+their pending `execve`/`execveat` entries, recorded with their thread group at entry, retire
+without a syscall result or final status. Any other unmatched entry still fails observation.
+
 Kernel fork/clone/vfork events establish child FD and mapping inheritance through explicit
 `CREATION` records; the creator's syscall stays pending. Its eventual completion cannot overwrite
 tables the child has already changed.
