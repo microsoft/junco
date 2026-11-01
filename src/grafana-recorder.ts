@@ -481,9 +481,11 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
       tags: string,
       fields: Map<string, number>,
     ) => {
-      if (fields.size === 0) return;
-      const values = [...fields].map(([field, value]) => `${field}=${value}`);
-      lines.push(`${measurement}${tags} ${values.join(",")} ${time}`);
+      // Grafana's labelled frame buffer cannot rebuild existing series after a field-schema change.
+      for (const [field, value] of fields)
+        lines.push(
+          `${measurement}${tags},metric=${tag(field)} value=${value} ${time}`,
+        );
     };
     line(
       "junco_total",
@@ -728,7 +730,7 @@ async function dashboard() {
         channel: `stream/\${stream}/${measurement}`,
         ...(fields === undefined
           ? {}
-          : { filter: { fields: ["time", ...fields] } }),
+          : { filter: { fields: ["time", "value"] } }),
         _implementsDataqueryVariant() {},
       };
       return target;
@@ -846,7 +848,16 @@ async function dashboard() {
             .values(false)
             .calcs(["lastNotNull"]),
         )
-        .withTarget(query("junco_total", [panel.field])),
+        .withTarget(query("junco_total", [panel.field]))
+        .withTransformation({
+          id: "filterFieldsByName",
+          options: {
+            include: {
+              names: ["time", "Time"],
+              pattern: `/\\b${panel.field}\\b/`,
+            },
+          },
+        }),
     );
   for (const panel of series)
     board.withPanel(
@@ -863,7 +874,16 @@ async function dashboard() {
             ? `\${__field.labels.node}`
             : panel.title,
         )
-        .withTarget(query(panel.measurement, [panel.field])),
+        .withTarget(query(panel.measurement, [panel.field]))
+        .withTransformation({
+          id: "filterFieldsByName",
+          options: {
+            include: {
+              names: ["time", "Time"],
+              pattern: `/\\b${panel.field}\\b/`,
+            },
+          },
+        }),
     );
   board.withPanel(
     new timeseries.PanelBuilder()

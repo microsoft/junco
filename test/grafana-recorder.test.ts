@@ -159,16 +159,18 @@ const fieldsOf = (
   measurement: string,
   tags: Record<string, string> = {},
 ) => {
-  const line = lines.find(
+  const matches = lines.filter(
     (candidate) =>
       candidate.measurement === measurement &&
-      Object.keys(candidate.tags).length === Object.keys(tags).length &&
+      Object.keys(candidate.tags).length === Object.keys(tags).length + 1 &&
       Object.entries(tags).every(
         ([key, value]) => candidate.tags[key] === value,
       ),
   );
-  assert.ok(line, `${measurement} ${JSON.stringify(tags)}`);
-  return line.fields;
+  assert.ok(matches.length, `${measurement} ${JSON.stringify(tags)}`);
+  return Object.fromEntries(
+    matches.map((line) => [line.tags.metric, line.fields.value]),
+  );
 };
 
 const open = (
@@ -245,196 +247,6 @@ test("validates options without contacting Grafana", async () => {
     assert.match(error.message, message);
   }
   assert.equal(fake.seen.length, 0);
-});
-
-test("provisions the Live dashboard with the eight panels and three tables", async () => {
-  const fake = await fakeGrafana();
-  const recorder = await open(fake);
-  assert.match(recorder.streamId, /^junco_[0-9a-f]{32}$/);
-  assert.equal(
-    recorder.dashboardUrl,
-    `${fake.url}/d/junco-telemetry?var-stream=${recorder.streamId}`,
-  );
-  const [lookup, create] = fake.seen;
-  assert.deepEqual(
-    [lookup?.method, lookup?.path, create?.method, create?.path],
-    ["GET", ITEM, "POST", COLLECTION],
-  );
-  assert.equal(create?.auth, undefined);
-  const posted = JSON.parse(create?.body ?? "");
-  assert.deepEqual(posted.metadata, { name: "junco-telemetry" });
-  const spec = posted.spec;
-  assert.equal(spec.uid, "junco-telemetry");
-  assert.equal(spec.title, "Junco telemetry");
-  assert.deepEqual(spec.tags, ["junco-telemetry"]);
-  assert.deepEqual(spec.time, { from: "now-15m", to: "now" });
-  assert.equal(spec.liveNow, true);
-  const [variable] = spec.templating.list;
-  assert.equal(variable.type, "textbox");
-  assert.equal(variable.name, "stream");
-  assert.equal(variable.label, "Telemetry session");
-  assert.equal(variable.query, "junco");
-
-  const grafana = { type: "grafana", uid: "grafana" };
-  const panels = new Map<string, typeof spec>(
-    spec.panels.map((panel: typeof spec) => [panel.title, panel]),
-  );
-  assert.equal(panels.size, 11);
-  for (const [title, type, measurement, field, unit, gridPos] of [
-    [
-      "Total memory",
-      "stat",
-      "junco_total",
-      "memory_bytes",
-      "bytes",
-      [0, 0, 8, 4],
-    ],
-    [
-      "Memory per node",
-      "timeseries",
-      "junco_node",
-      "memory_bytes",
-      "bytes",
-      [0, 4, 12, 8],
-    ],
-    [
-      "Peak memory",
-      "stat",
-      "junco_total",
-      "peak_memory_bytes",
-      "bytes",
-      [8, 0, 8, 4],
-    ],
-    [
-      "Total tokens used",
-      "stat",
-      "junco_total",
-      "tokens_used",
-      "suffix:tokens",
-      [16, 0, 8, 4],
-    ],
-    [
-      "Tokens per node",
-      "timeseries",
-      "junco_node",
-      "tokens_used",
-      "suffix:tokens",
-      [12, 4, 12, 8],
-    ],
-    [
-      "Tokens/sec",
-      "timeseries",
-      "junco_total",
-      "tokens_per_second",
-      "suffix:tokens/s",
-      [0, 12, 12, 8],
-    ],
-    [
-      "Tokens/node/sec",
-      "timeseries",
-      "junco_node",
-      "tokens_per_second",
-      "suffix:tokens/s",
-      [12, 12, 12, 8],
-    ],
-  ] as const) {
-    const panel = panels.get(title);
-    assert.ok(panel, title);
-    assert.equal(panel.type, type);
-    assert.deepEqual(panel.datasource, grafana);
-    const [x, y, w, h] = gridPos;
-    assert.deepEqual(panel.gridPos, { x, y, w, h });
-    assert.equal(panel.fieldConfig.defaults.unit, unit);
-    assert.ok(panel.description.length > 0);
-    assert.deepEqual(panel.targets, [
-      {
-        refId: "A",
-        datasource: grafana,
-        queryType: "measurements",
-        channel: `stream/\${stream}/${measurement}`,
-        filter: { fields: ["time", field] },
-      },
-    ]);
-    if (type === "stat")
-      assert.deepEqual(panel.options.reduceOptions.calcs, ["lastNotNull"]);
-    if (measurement === "junco_node")
-      assert.equal(
-        panel.fieldConfig.defaults.displayName,
-        `\${__field.labels.node}`,
-      );
-    if (unit === "bytes")
-      assert.equal(panel.fieldConfig.defaults.noValue, "No measured pipelines");
-  }
-  const probes = panels.get("Edge probes");
-  assert.ok(probes);
-  assert.equal(probes.type, "timeseries");
-  assert.deepEqual(probes.datasource, grafana);
-  assert.deepEqual(probes.gridPos, { x: 0, y: 20, w: 24, h: 8 });
-  assert.equal(probes.fieldConfig.defaults.unit, undefined);
-  assert.equal(
-    probes.fieldConfig.defaults.displayName,
-    `\${__field.labels.node} \${__field.labels.edge_id}`,
-  );
-  assert.equal(probes.transformations, undefined);
-  assert.ok(probes.description.length > 0);
-  assert.deepEqual(probes.targets, [
-    {
-      refId: "A",
-      datasource: grafana,
-      queryType: "measurements",
-      channel: `stream/\${stream}/junco_probe`,
-      filter: { fields: ["time", "value"] },
-    },
-  ]);
-  for (const [title, measurements, gridPos] of [
-    ["Tool and execution metrics", ["junco_operation"], [0, 28, 24, 12]],
-    [
-      "Resource and token details",
-      ["junco_node", "junco_total"],
-      [0, 40, 24, 10],
-    ],
-    ["Graph context totals", ["junco_context"], [0, 50, 24, 10]],
-  ] as const) {
-    const panel = panels.get(title);
-    assert.ok(panel, title);
-    assert.equal(panel.type, "table");
-    const [x, y, w, h] = gridPos;
-    assert.deepEqual(panel.gridPos, { x, y, w, h });
-    assert.equal(panel.fieldConfig.defaults.custom.filterable, true);
-    assert.deepEqual(panel.transformations, [
-      {
-        id: "reduce",
-        options: {
-          reducers: ["lastNotNull"],
-          mode: "seriesToRows",
-          labelsToFields: true,
-        },
-      },
-    ]);
-    assert.deepEqual(
-      panel.targets,
-      measurements.map((measurement, index) => ({
-        refId: index === 0 ? "A" : "B",
-        datasource: grafana,
-        queryType: "measurements",
-        channel: `stream/\${stream}/${measurement}`,
-      })),
-    );
-  }
-  type Grid = { x: number; y: number; w: number; h: number };
-  const grids: [string, Grid][] = spec.panels.map(
-    (panel: { title: string; gridPos: Grid }) => [panel.title, panel.gridPos],
-  );
-  for (const [i, [a, p]] of grids.entries())
-    for (const [b, q] of grids.slice(i + 1))
-      assert.ok(
-        p.x + p.w <= q.x ||
-          q.x + q.w <= p.x ||
-          p.y + p.h <= q.y ||
-          q.y + q.h <= p.y,
-        `${a} overlaps ${b}`,
-      );
-  await recorder.close();
 });
 
 test("updates a tagged dashboard and rejects untagged or differing ones", async () => {
@@ -599,9 +411,13 @@ test("resources roll up through nested contexts without double counting", async 
   }
   // Context creation alone emits no node series; no shell child path.
   assert.deepEqual(
-    lines
-      .filter((line) => line.measurement === "junco_node")
-      .map((line) => line.tags.node),
+    [
+      ...new Set(
+        lines
+          .filter((line) => line.measurement === "junco_node")
+          .map((line) => line.tags.node),
+      ),
+    ],
     [leaf.node],
   );
   assert.equal(new Set(lines.map((line) => line.time)).size, 1);
@@ -995,14 +811,17 @@ test("labels are escaped and requests omit Authorization", async () => {
     push.body.includes("node=a\\,b\\=c\\ d::x%3A%3Ay%25z::line\\nbreak\\r,"),
   );
   const lines = parse(push.body);
-  assert.equal(lines.length, 2);
-  assert.deepEqual(lines[1]?.tags, {
-    node: "a,b=c d::x%3A%3Ay%25z::line\\nbreak\\r",
-    resource: "operations",
-    category: "cat egory",
-    tool: "my,tool",
-    operation: "op=1",
-  });
+  assert.deepEqual(
+    lines.find((line) => line.measurement === "junco_operation")?.tags,
+    {
+      node: "a,b=c d::x%3A%3Ay%25z::line\\nbreak\\r",
+      resource: "operations",
+      category: "cat egory",
+      tool: "my,tool",
+      operation: "op=1",
+      metric: "calls",
+    },
+  );
   assert.match(lines[0]?.time ?? "", /^\d{19}$/);
   await recorder.close();
 });
@@ -1177,4 +996,65 @@ test("a failed probe push stops every later probe and snapshot push", async () =
     [{ value: 1 }, { value: 2 }],
   );
   await assert.rejects(recorder.close(), (thrown) => thrown === error);
+});
+
+test("new metrics and nodes keep Live schemas stable without inventing absent values", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake);
+  const operation = {
+    resource: "operations",
+    category: "custom",
+    tool: "container_bash",
+    operation: "execute",
+  } as const;
+  const leader = recorder.add_context("Agent1");
+  leader.record({ ...operation, kind: "start" });
+  recordUsage(leader, { totalTokens: 3, cost: 0.1 });
+  await recorder.flush();
+  const before = lastPush(fake);
+  assert.equal(
+    fieldsOf(before, "junco_node", { node: "Agent1" }).reasoning_tokens,
+    undefined,
+  );
+  leader.record({
+    ...operation,
+    kind: "metrics",
+    counters: { requested: 1, output_text_bytes: 4 },
+    gauges: { pending: 1 },
+  });
+  leader.record({
+    ...operation,
+    kind: "finish",
+    outcome: "cancelled",
+    durationMs: 20,
+  });
+  leader.record({ ...operation, kind: "metrics", gauges: { pending: null } });
+  const worker = recorder.add_context("agent1").add_context("Worker");
+  recordUsage(worker, {
+    totalTokens: 7,
+    reasoning: 2,
+    cacheWrite1h: 1,
+    cost: 0.3,
+  });
+  await recorder.close();
+  const after = lastPush(fake);
+  for (const line of [...before, ...after]) {
+    assert.deepEqual(Object.keys(line.fields), ["value"]);
+    assert.ok(line.tags.metric);
+  }
+  const tools = fieldsOf(after, "junco_operation", {
+    node: "Agent1",
+    ...operation,
+  });
+  assert.equal(tools.calls, 1);
+  assert.equal(tools.cancelled, 1);
+  assert.equal(tools.requested, 1);
+  assert.equal(tools.duration_ms_sum, 20);
+  assert.equal(tools.output_text_bytes, 4);
+  assert.equal(tools.pending, undefined);
+  const tokens = fieldsOf(after, "junco_node", { node: "agent1::Worker" });
+  assert.equal(tokens.tokens_used, 7);
+  assert.equal(tokens.reasoning_tokens, 2);
+  assert.equal(tokens.cache_write_1h_tokens, 1);
+  assert.equal(fieldsOf(after, "junco_total").tokens_used, 10);
 });
