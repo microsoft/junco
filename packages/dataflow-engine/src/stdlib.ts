@@ -223,7 +223,8 @@ function requireSchema(port: "Source" | "Sink", id: NodeId, schema: unknown) {
 /**
  * Externally queued native ingress; one detached delivery per selected activation. Every enqueued
  * message must satisfy `schema`, the port's admission domain; routing onto a real edge still checks
- * that edge's own schema.
+ * that edge's own schema. An optional `is_available` gate can only hold a pending delivery back: an
+ * empty source is never available.
  */
 export class Source<N extends TSchema, T>
   implements NodeSpec<Source<N, T>, N, T>
@@ -234,14 +235,17 @@ export class Source<N extends TSchema, T>
   readonly schema: N;
   readonly state = this;
   readonly trigger = TriggerRule.always<N, T>();
-  readonly is_available = () => this.#pending.length > 0;
+  readonly is_available: AvailabilityFn<N, T>;
   readonly step: () => NodeGenerator<N, T>;
   readonly #pending: ParentView<N, T>[] = [];
   #revision = 0;
 
   constructor(
     route: (view: ParentView<N, T>) => Message<N>[],
-    options: Pick<NodeOptions<N, T>, "description" | "profiles"> & {
+    options: Pick<
+      NodeOptions<N, T>,
+      "description" | "profiles" | "is_available"
+    > & {
       readonly id: NodeId;
       readonly schema: N;
     },
@@ -252,6 +256,12 @@ export class Source<N extends TSchema, T>
     if (options.profiles !== undefined) this.profiles = options.profiles;
     if (options.description !== undefined)
       this.description = options.description;
+    const gate = options.is_available;
+    this.is_available =
+      gate === undefined
+        ? () => this.#pending.length > 0
+        : (view, triggered) =>
+            this.#pending.length > 0 && gate(view, triggered);
     const source = this;
     this.step = async function* (): NodeGenerator<N, T> {
       while (true) {

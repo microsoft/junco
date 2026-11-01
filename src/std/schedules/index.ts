@@ -1,5 +1,5 @@
 // Policies select work; contexts pair a policy with a passive native graph; `ralph` drives the Ralph
-// workflow and `runOptimizer` the profile optimizer workflow.
+// workflow, `anyFanIn` the AnyFanIn workflow and `runOptimizer` the profile optimizer workflow.
 export {
   type InputSchedule,
   type MessageSchedule,
@@ -49,6 +49,7 @@ export {
   uniformLadder,
   validateLadder,
 } from "../../node-policy.js";
+export { anyFanIn } from "./any-fan-in.js";
 export {
   type OptimizationRequest,
   type OptimizationState,

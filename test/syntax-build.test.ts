@@ -57,6 +57,7 @@ import {
   Emitter,
   Forward,
   Increment,
+  Relay,
 } from "./syntax-code-nodes.fixture.ts";
 
 /** Edge schemas: chat inputs (AgenticInput) and native assistant results. */
@@ -430,7 +431,9 @@ test("named aliases replace builtin definitions and execute without builtin disp
     tools: { custom: custom("custom") },
   });
   assert.ok(spec);
-  assert.ok(spec.tools.some((tool) => "name" in tool && tool.name === "custom"));
+  assert.ok(
+    spec.tools.some((tool) => "name" in tool && tool.name === "custom"),
+  );
   const shadow = parse({
     graph: {
       nodes: { A: { tools: ["shadow"] } },
@@ -439,31 +442,57 @@ test("named aliases replace builtin definitions and execute without builtin disp
   });
   const replacement = custom("yield");
   const [selected] = await resolveAgents(shadow, {
-    cwd: process.cwd(), tools: { shadow: replacement }, toolSource: "declarations.ts",
+    cwd: process.cwd(),
+    tools: { shadow: replacement },
+    toolSource: "declarations.ts",
   });
-  assert.deepEqual(selected!.tools.filter((tool) => "name" in tool && tool.name === "yield"), [replacement]);
+  assert.deepEqual(
+    selected!.tools.filter((tool) => "name" in tool && tool.name === "yield"),
+    [replacement],
+  );
   const runtime = await fauxRuntime([
     fauxAssistantMessage(fauxToolCall("yield", {}), { stopReason: "toolUse" }),
     (context) => {
-      const result = context.messages.find((message) => message.role === "toolResult");
+      const result = context.messages.find(
+        (message) => message.role === "toolResult",
+      );
       assert.ok(result && result.role === "toolResult");
       assert.equal(contentText(result.content), "ok");
       assert.equal(result.isError, false);
       return fauxAssistantMessage("done");
     },
   ]);
-  const instance = await createJuncoAgent({ ...selected!, tool_block: NATIVE_TOOL_BLOCK }, fauxLadder, runtime.models);
+  const instance = await createJuncoAgent(
+    { ...selected!, tool_block: NATIVE_TOOL_BLOCK },
+    fauxLadder,
+    runtime.models,
+  );
   try {
-    assert.equal(contentText((await instance.prompt("custom yield")).content), "done");
-  } finally { await instance.return(); }
-  const duplicateDoc = parse({ graph: {
-    nodes: { A: { tools: ["first", "second"] } },
-    edges: [{ from: "A", to: "$sink", schema: reply }],
-  } });
-  const [duplicate] = await resolveAgents(duplicateDoc, {
-    cwd: process.cwd(), tools: { first: replacement, second: replacement },
+    assert.equal(
+      contentText((await instance.prompt("custom yield")).content),
+      "done",
+    );
+  } finally {
+    await instance.return();
+  }
+  const duplicateDoc = parse({
+    graph: {
+      nodes: { A: { tools: ["first", "second"] } },
+      edges: [{ from: "A", to: "$sink", schema: reply }],
+    },
   });
-  await assert.rejects(createJuncoAgent({ ...duplicate!, tool_block: NATIVE_TOOL_BLOCK }, fauxLadder, runtime.models), /Duplicate tool name: yield/);
+  const [duplicate] = await resolveAgents(duplicateDoc, {
+    cwd: process.cwd(),
+    tools: { first: replacement, second: replacement },
+  });
+  await assert.rejects(
+    createJuncoAgent(
+      { ...duplicate!, tool_block: NATIVE_TOOL_BLOCK },
+      fauxLadder,
+      runtime.models,
+    ),
+    /Duplicate tool name: yield/,
+  );
 });
 
 test("tool blocks filter helpers and reject literal or resolved-name conflicts", async () => {
@@ -678,10 +707,23 @@ test("explicit tools beat collection tools, fill gaps, and keep per-agent helper
     assert.ok(a.tools.includes(fallback));
     assert.ok(b.tools.includes(shadowedCodeTool));
     assert.ok(!a.tools.includes(collectionTool));
-    assert.equal(contentText((await shadowedCodeTool.execute("check", {}, new AbortController().signal)).content), "code");
+    assert.equal(
+      contentText(
+        (
+          await shadowedCodeTool.execute(
+            "check",
+            {},
+            new AbortController().signal,
+          )
+        ).content,
+      ),
+      "code",
+    );
     for (const name of ["yield", "info", "send", "recv", "task"]) {
       const left = a.tools.find((tool) => "name" in tool && tool.name === name);
-      const right = b.tools.find((tool) => "name" in tool && tool.name === name);
+      const right = b.tools.find(
+        (tool) => "name" in tool && tool.name === name,
+      );
       assert.ok(left && right);
       assert.notEqual(left, right);
     }
@@ -3255,6 +3297,104 @@ for (const [name, schema, value] of [
       await execution.graph.close();
     }
   });
+
+/** A streaming root relaying its `in` messages through streaming child `Child`'s `Echo`. */
+const streamingDocument = () => {
+  const schema = { type: "object" };
+  return parse({
+    graph: {
+      source: { routes: { in: ["$source~>Child"] } },
+      sink: { stream: true },
+      nodes: {
+        Child: {
+          kind: "graph",
+          trigger: { any: ["$source~>Child"] },
+          graph: {
+            name: "child",
+            source: { routes: { "$source~>Child": ["$source~>Echo"] } },
+            sink: { stream: true },
+            nodes: { Echo: { kind: "code", trigger: "$source~>Echo" } },
+            edges: [
+              { from: "$source", to: "Echo", kind: "message", schema },
+              { from: "Echo", to: "$sink", kind: "message", schema },
+            ],
+          },
+        },
+      },
+      edges: [
+        { from: "$source", to: "Child", kind: "message", schema },
+        { from: "Child", to: "$sink", kind: "message", schema },
+      ],
+    },
+  });
+};
+
+test("streaming sinks deliver every batch without a terminal result", async () => {
+  let open = true;
+  const execution = await codeBuild(
+    streamingDocument(),
+    { Echo: Relay("$source~>Echo", "Echo~>$sink") },
+    {
+      available: {
+        $source: ({ label }) => (label === "graph" ? () => open : undefined),
+      },
+    },
+  );
+  const root = execution.graph;
+  const enqueue = (...payloads: object[]) =>
+    root.source.enqueue({
+      messages: new Map([[graph.EdgeId.create("in"), payloads]]),
+      values: new Map(),
+    });
+  const drain = () => {
+    const delivered: unknown[] = [];
+    root.sink.drain((message) => {
+      assert.equal(message.id, "Child~>$sink");
+      delivered.push(message.payload);
+    });
+    return delivered;
+  };
+  const child = root.getNode(graph.NodeId.create("Child"));
+  assert.ok(child?.state instanceof JuncoGraph);
+  const nested = child.state;
+  const [a, b, c, d] = [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }];
+  try {
+    enqueue(a);
+    await execution.run();
+    const first = drain();
+    assert.deepEqual(first, [a]);
+    assert.equal(first[0], a);
+    enqueue(b, c);
+    await execution.run();
+    const second = drain();
+    assert.deepEqual(second, [b, c]);
+    assert.ok(second[0] === b && second[1] === c);
+    await execution.run();
+    assert.deepEqual(drain(), []);
+    for (const [g, id] of [
+      [root, child.id],
+      [root, root.sink.id],
+      [nested, nested.sink.id],
+    ] as const)
+      assert.ok(O.isNone(g.result(id)));
+    assert.equal(child.status, "running");
+
+    open = false;
+    enqueue(d);
+    enqueue(a);
+    const pending = root.source.peek();
+    await execution.run();
+    assert.deepEqual(drain(), []);
+    assert.equal(root.source.peek(), pending);
+    open = true;
+    await execution.run();
+    assert.deepEqual(drain(), [d, a]);
+    assert.equal(root.source.peek(), undefined);
+  } finally {
+    await root.close();
+  }
+  assert.ok(nested.signal.aborted);
+});
 
 test("probed edges record each publication once in their owning graph's context", async () => {
   const { recorder, probes } = probeRecorder();

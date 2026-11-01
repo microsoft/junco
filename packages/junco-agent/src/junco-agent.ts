@@ -458,7 +458,8 @@ function withDefaultTools(
   result.push(...tools.filter((tool) => !consumed.has(tool.name)));
   if (collection === undefined)
     for (const tool of tools)
-      if (NATIVE_TOOL_NAMES.some((name) => name === tool.name)) replaced?.add(tool.name);
+      if (NATIVE_TOOL_NAMES.some((name) => name === tool.name))
+        replaced?.add(tool.name);
   validateActiveTools(
     result,
     result.map((tool) => tool.name),
@@ -474,11 +475,12 @@ function withRequiredTools(
   includeComplain: boolean,
   replaced?: Set<string>,
 ): AgentTool[] {
-  const result = tools.map((tool): AgentTool =>
-    isComplainTool(tool) ? own : tool,
+  const result = tools.map(
+    (tool): AgentTool => (isComplainTool(tool) ? own : tool),
   );
   for (const tool of result) {
-    if (tool.name === "complain" && !isComplainTool(tool)) replaced?.add(tool.name);
+    if (tool.name === "complain" && !isComplainTool(tool))
+      replaced?.add(tool.name);
     if (tool.name === "release" && tool !== release) replaced?.add(tool.name);
   }
   if (includeComplain && !result.some((tool) => tool.name === "complain"))
@@ -1149,8 +1151,10 @@ export class JuncoAgent<
       validateToolBlock(additions, this.#blocked);
       if (
         this.#owned.toolCollection === undefined &&
-        NATIVE_TOOL_NAMES.some((name) =>
-          !this.#blocked.has(name) && !additions.some((tool) => tool.name === name),
+        NATIVE_TOOL_NAMES.some(
+          (name) =>
+            !this.#blocked.has(name) &&
+            !additions.some((tool) => tool.name === name),
         )
       )
         await ensureToolCollection(this.#owned, resolve(cwd ?? process.cwd()));
@@ -1307,9 +1311,11 @@ export class JuncoAgent<
           });
         });
       for (const name of replaced)
-        log.info(toolSource
-          ? `Default tool "${name}" replaced with tool declared in ${toolSource}`
-          : `Default tool "${name}" replaced with explicitly supplied tool`);
+        log.info(
+          toolSource
+            ? `Default tool "${name}" replaced with tool declared in ${toolSource}`
+            : `Default tool "${name}" replaced with explicitly supplied tool`,
+        );
     } catch (error) {
       this.#closing = true;
       const failures: unknown[] = [];
@@ -2317,7 +2323,12 @@ export class JuncoAgent<
       const defaultNames = new Set<string>([
         ...NATIVE_TOOL_NAMES,
         ...(this.collection?.tools.map((tool) => tool.name) ?? []),
-        "task", "yield", "recv", "send", "info", "complain",
+        "task",
+        "yield",
+        "recv",
+        "send",
+        "info",
+        "complain",
       ]);
       const effective = new Map(active.map((tool) => [tool.name, tool]));
       for (const tool of this.#tools)
@@ -2418,7 +2429,10 @@ export class JuncoAgent<
         validateActiveTools(available, names);
         const selectedNames = new Set(names);
         const selection = available
-          .filter((tool) => defaultNames.has(tool.name) || selectedNames.has(tool.name))
+          .filter(
+            (tool) =>
+              defaultNames.has(tool.name) || selectedNames.has(tool.name),
+          )
           .map((tool): Selection => {
             const occurrence = registrations.findIndex(({ tools }) =>
               tools.includes(tool),

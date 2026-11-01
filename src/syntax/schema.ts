@@ -79,6 +79,7 @@ const graphSchema = Type.Cyclic(
               description: common.description,
               trigger: Type.Optional(trigger),
               returns: Type.Optional(Type.String()),
+              stream: Type.Optional(Type.Literal(true)),
             },
             strict,
           ),

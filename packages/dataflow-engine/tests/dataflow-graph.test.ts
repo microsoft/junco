@@ -2610,6 +2610,69 @@ test("schemas: Source and Sink admission are atomic and keep identity", () => {
   assert.equal(drained[0], good);
 });
 
+test("Source: an availability gate holds FIFO deliveries back without dropping them", async () => {
+  type Port = Source<typeof NumberSchema, never>;
+  const input = EdgeId.create("in");
+  const out = Edge.message<typeof NumberSchema, never>("out", NumberSchema);
+  const routed: number[][] = [];
+  const gated: boolean[] = [];
+  let open = true;
+  const source: Port = new Source<typeof NumberSchema, never>(
+    (view) => {
+      const batch = [...(view.messages.get(input) ?? [])];
+      routed.push(batch);
+      return batch.map((n) => Message.create(out, n));
+    },
+    {
+      id: NodeId.create("src"),
+      schema: NumberSchema,
+      is_available: (_view, triggered) => {
+        gated.push(triggered);
+        return open;
+      },
+    },
+  );
+  const graph = new DataflowGraph<
+    Port | undefined,
+    typeof NumberSchema,
+    never,
+    never
+  >(Width.create(1), UNBOUNDED);
+  const execution = context({ graph, scheduler: parallel() });
+  const received: number[] = [];
+  const src = graph.addNode(source);
+  const dst = graph.addNode({
+    state: undefined,
+    trigger: TriggerRule.when(out),
+    step: async function* () {
+      let view = yield [];
+      while (true) {
+        received.push(...from(view, out));
+        view = yield [];
+      }
+    },
+  });
+  graph.addEdge(src, dst, out);
+
+  assert.equal(graph.available().has(src), false);
+  assert.deepEqual(gated, []);
+  open = false;
+  source.enqueue({ messages: new Map([[input, [1, 2]]]), values: new Map() });
+  source.enqueue({ messages: new Map([[input, [3]]]), values: new Map() });
+  const first = source.peek();
+  await execution.run();
+  assert.deepEqual([routed, received], [[], []]);
+  assert.equal(source.peek(), first);
+  assert.ok(gated.length > 0 && gated.every(Boolean));
+
+  open = true;
+  await execution.run();
+  assert.deepEqual(routed, [[1, 2], [3]]);
+  assert.deepEqual(received, [1, 2, 3]);
+  assert.equal(source.peek(), undefined);
+  assert.equal(graph.available().has(src), false);
+});
+
 test("schemas: factories and ports require a TypeBox schema", () => {
   assert.throws(
     () => Edge.message("m", undefined as never),

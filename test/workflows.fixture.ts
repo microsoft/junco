@@ -194,3 +194,95 @@ console.log(
     closed: true,
   }),
 );
+
+// Fan-in selectors on one scripted runtime: AllFanIn's single selection, then two AnyFanIn batches.
+const selections: Request[] = [];
+const fanIn = await fauxRuntime(
+  ["best", "x-complete", "y-complete"].map(
+    (reply) =>
+      (context: Context): AssistantMessage => {
+        selections.push({ users: userTexts(context.messages) });
+        return fauxAssistantMessage(reply);
+      },
+  ),
+  "fan-in-workflow-smoke",
+);
+const fanInModel = fanIn.faux.getModel();
+const fanInLadder = schedules.uniformLadder({
+  model: `${fanInModel.provider}/${fanInModel.id}`,
+});
+const fanInOptions = {
+  cwd: process.cwd(),
+  scheduler: () => schedules.parallel(),
+  createAgent: (spec: syntax.AgentSpec) =>
+    syntax.createJuncoAgent(
+      {
+        ...spec,
+        tool_block: [
+          ...new Set([...NATIVE_TOOL_BLOCK, ...(spec.tool_block ?? [])]),
+        ],
+      },
+      fanInLadder,
+      fanIn.models,
+    ),
+  ladder: fanInLadder,
+  tracer: new tracerApi.DummyTracer(),
+};
+const candidates = graphApi.EdgeId.create("candidates");
+
+const all = await JuncoGraph.fromYaml(workflows.allFanIn, fanInOptions);
+try {
+  all.graph.source.enqueue({
+    messages: new Map([
+      [candidates, ["worse", "best"].map((text) => fauxAssistantMessage(text))],
+    ]),
+    values: new Map(),
+  });
+  await all.run();
+  const selected = all.graph.result(all.graph.sink.id);
+  assert.ok(O.isSome(selected));
+  assert.ok(Value.Check(AssistantMessageSchema, selected.value));
+  assert.equal(contentText(selected.value.content), "best");
+  assert.ok(/worse\s+best/.test(selections[0]?.users.at(-1) ?? ""));
+} finally {
+  await all.graph.close();
+}
+
+const any = await JuncoGraph.fromYaml(workflows.anyFanIn, {
+  ...fanInOptions,
+  ...schedules.anyFanIn(),
+});
+const streamed: string[] = [];
+try {
+  for (const batch of [
+    ["x-short", "x-complete"],
+    ["y-short", "y-complete"],
+  ]) {
+    any.graph.source.enqueue({
+      messages: new Map([
+        [candidates, batch.map((text) => ({ kind: "prompt", text }))],
+      ]),
+      values: new Map(),
+    });
+    await any.run();
+    any.graph.sink.drain((message) => {
+      assert.equal(message.id, "AnyFanInPublish~>$sink");
+      assert.ok(Value.Check(AssistantMessageSchema, message.payload));
+      streamed.push(contentText(message.payload.content));
+    });
+    assert.ok(
+      selections
+        .at(-1)
+        ?.users.at(-1)
+        ?.endsWith(`CURRENT_BATCH:\n${JSON.stringify(batch)}`),
+    );
+  }
+  assert.deepEqual(streamed, ["x-complete", "y-complete"]);
+  // A streaming selector parks instead of returning.
+  assert.ok(O.isNone(any.graph.result(any.graph.sink.id)));
+} finally {
+  await any.graph.close();
+}
+console.log(
+  JSON.stringify({ allFanIn: "best", anyFanIn: streamed, closed: true }),
+);

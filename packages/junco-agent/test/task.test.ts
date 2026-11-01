@@ -948,7 +948,12 @@ async function twoProviderParent(
     tools,
     ...options,
     tool_block: [
-      ...new Set([...NATIVE_TOOL_BLOCK.filter((name) => !tools.some((tool) => tool.name === name)), ...(options.tool_block ?? [])]),
+      ...new Set([
+        ...NATIVE_TOOL_BLOCK.filter(
+          (name) => !tools.some((tool) => tool.name === name),
+        ),
+        ...(options.tool_block ?? []),
+      ]),
     ],
   });
   return { agent, main, second };
@@ -1004,7 +1009,10 @@ test(
       assert.equal(agent.collection, undefined);
       for (const child of children) {
         assert.equal(child.collection, undefined);
-        assert.deepEqual(child.getTools().filter((tool) => tool.name === "bash"), [bash.tool]);
+        assert.deepEqual(
+          child.getTools().filter((tool) => tool.name === "bash"),
+          [bash.tool],
+        );
       }
       assert.equal((await inherit.getModel())?.provider, "faux2");
       assert.deepEqual(
@@ -1050,10 +1058,15 @@ test(
       ]);
       assert.equal(c.state.executions, 1);
       assert.equal(b.state.executions, 0);
-      second.setResponses([toolTurn(fauxToolCall("bash", {})), fauxAssistantMessage("custom bash")]);
+      second.setResponses([
+        toolTurn(fauxToolCall("bash", {})),
+        fauxAssistantMessage("custom bash"),
+      ]);
       await none.prompt("execute replacement");
       assert.equal(bash.state.executions, 1);
-      const [blocked] = await agent.createSubagents([{ tools: [], tool_block: ["bash"] }]);
+      const [blocked] = await agent.createSubagents([
+        { tools: [], tool_block: ["bash"] },
+      ]);
       children.push(blocked!);
       assert.ok(!blocked!.getTools().some((tool) => tool.name === "bash"));
     } finally {

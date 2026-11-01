@@ -59,10 +59,11 @@ type StepLess<N extends TSchema, T> = Omit<
 /**
  * Complete bodies require their authorization policy. Builtin ports use the graph's policy;
  * step-less coroutines and nested contexts use their state's policy. A nested context advances
- * once per parent activation, admits input through its source and returns only its sink result.
- * Its native node state remains the actual child graph, never the context. A step-less native
- * agent reads exactly this graph's inputs and returns its native message, so the graph's result
- * domain must contain `AssistantMessage`.
+ * once per parent activation, admits input through its source and returns only its sink result;
+ * a `persistent` one never returns: it parks when its child quiesces, resumes on its next trigger
+ * message and exchanges only messages with its parent. Its native node state remains the actual
+ * child graph, never the context. A step-less native agent reads exactly this graph's inputs and
+ * returns its native message, so the graph's result domain must contain `AssistantMessage`.
  */
 export type AgenticNode<
   N extends TSchema = typeof AgenticInputSchema,
@@ -70,15 +71,18 @@ export type AgenticNode<
 > =
   | (NodeSpec<Agentic<N, T>, N, T> & {
       readonly policy: ToolCollection["policy"];
+      readonly persistent?: never;
     })
   | (NodeSpec<Agentic<N, T>, N, T> & {
       readonly state: Source<N, T> | Sink<N, T>;
       readonly policy?: never;
+      readonly persistent?: never;
     })
   | (StepLess<N, T> & {
       readonly state: Deterministic<N, T>;
       readonly step?: never;
       readonly policy?: never;
+      readonly persistent?: never;
     })
   | (StepLess<N, T> & {
       readonly state: SchedulerContext<
@@ -90,6 +94,7 @@ export type AgenticNode<
       >;
       readonly step?: never;
       readonly policy?: never;
+      readonly persistent?: true;
     })
   | ([AssistantMessage] extends [T]
       ? StepLess<N, T> & {
@@ -98,6 +103,7 @@ export type AgenticNode<
             | MockAgent<Skill, PromptTemplate, AgentTool, N, T>;
           readonly step?: never;
           readonly policy: ToolCollection["policy"];
+          readonly persistent?: never;
         }
       : never);
 

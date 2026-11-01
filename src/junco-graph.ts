@@ -403,6 +403,18 @@ export class JuncoGraph<
       throw new DataflowDefinitionError(
         "Graph source cannot produce value edges",
       );
+    if (
+      E.isRight(edge.transport) &&
+      [from, to].some((id) => {
+        const node = this.getNode(id);
+        return (
+          node !== undefined && nodePolicies.get(node.step)?.persistent === true
+        );
+      })
+    )
+      throw new DataflowDefinitionError(
+        "Persistent graph nodes require message edges",
+      );
     return super.addEdge(from, to, edge);
   }
 
@@ -632,6 +644,15 @@ export class JuncoGraph<
   ): ToolCollection["policy"] {
     const state = spec.state;
     const nested = isNestedContext<N, T>(state) ? state : undefined;
+    if (
+      "persistent" in spec &&
+      (spec.persistent !== true ||
+        nested === undefined ||
+        spec.step !== undefined)
+    )
+      throw new TypeError(
+        "persistent is supported only as true on nested graph nodes",
+      );
     if (state instanceof JuncoGraph || nested !== undefined) {
       if (
         Object.hasOwn(spec, "result") ||
@@ -927,7 +948,7 @@ export class JuncoGraph<
     spec: NestedNode<N, T>,
     policy: ToolCollection["policy"],
   ): CompleteNode<N, T> {
-    const { state: execution, ...options } = spec;
+    const { state: execution, persistent, ...options } = spec;
     const graph = execution.graph;
     const parent = this;
     const seenValues = new Map<EdgeIdType, unknown>();
@@ -961,7 +982,7 @@ export class JuncoGraph<
         signal.throwIfAborted();
         graph.sink.drain((message) => parent.emit(this.id, message));
         signal.throwIfAborted();
-        if (graph.available().size === 0) {
+        if (persistent !== true && graph.available().size === 0) {
           const retained = graph.result(graph.sink.id);
           if (O.isSome(retained)) {
             started = false;
@@ -975,14 +996,29 @@ export class JuncoGraph<
         view = yield [];
       }
     };
-    nodePolicies.set(step, { seenValues });
+    nodePolicies.set(
+      step,
+      persistent ? { seenValues, persistent } : { seenValues },
+    );
+    const triggerRule = options.trigger.rule;
     return {
       ...options,
       policy,
       state: graph,
       step,
       is_available:
-        options.is_available ?? ((_view, triggered) => started || triggered),
+        options.is_available ??
+        (persistent
+          ? // Parked: wake only for child work or a queued trigger message, never a bare empty rule.
+            (view, triggered) =>
+              started
+                ? graph.available().size > 0 ||
+                  (triggered &&
+                    triggerRule.some(
+                      (id) => (view.messages.get(id)?.length ?? 0) > 0,
+                    ))
+                : triggered
+          : (_view, triggered) => started || triggered),
     };
   }
 

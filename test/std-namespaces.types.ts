@@ -22,6 +22,7 @@ import {
   graph,
   mcp,
   schedules,
+  type syntax,
   tools,
   tracer,
   trigger,
@@ -1452,4 +1453,18 @@ export function ralphSuccessModeTypes() {
     schedules.ralph(fixed),
     asynchronous,
   ];
+}
+
+export function fanInSelectorTypes() {
+  const all: string = workflows.allFanIn;
+  const any: string = workflows.anyFanIn;
+  // The controller spreads into `JuncoGraph.fromYaml` options beside Ralph's hooks.
+  const controller: Pick<syntax.FromYamlOptions, "available" | "code"> =
+    schedules.anyFanIn();
+  const ralph: Pick<syntax.FromYamlOptions, "available"> = schedules.ralph();
+  const merged: Pick<syntax.FromYamlOptions, "available" | "code"> = {
+    ...controller,
+    available: { ...ralph.available, ...controller.available },
+  };
+  return [all, any, merged];
 }

@@ -65,6 +65,15 @@
         "test/task.test.ts"
       ],
       "linter": { "rules": { "correctness": { "useYield": "off" } } }
+    },
+    {
+      "includes": [
+        "packages/junco-tools/tests/lsp-fixture.mjs",
+        "packages/junco-tools/tests/lsp.test.mjs"
+      ],
+      "linter": {
+        "rules": { "suspicious": { "noTemplateCurlyInString": "off" } }
+      }
     }
   ]
 }

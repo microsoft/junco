@@ -38,6 +38,7 @@ import { type Static, type TNumber, Type } from "typebox";
 import {
   type Agentic,
   type AgenticInput,
+  type AgenticNode,
   Deterministic,
   JuncoGraph,
   MockAgent,
@@ -48,6 +49,7 @@ import {
 import {
   assistant,
   pause,
+  policy,
   policyContext,
   queued,
   reason,
@@ -55,6 +57,7 @@ import {
   resultText,
   run,
   STRATEGIES,
+  type Strategy,
   settle,
   terminalPorts,
   textOf,
@@ -2297,3 +2300,209 @@ describe("nested sink publication", () => {
     });
   }
 });
+
+type ChatEdge = Edge<typeof AgenticInputSchema, AssistantMessage>;
+const chatEdge = (id: string): ChatEdge =>
+  Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    id,
+    AgenticInputSchema,
+  );
+const promptOf = (text: string): AgenticInput => ({ kind: "prompt", text });
+
+/**
+ * One streaming level counting its scheduler decisions: its source forwards `input` deliveries to
+ * `work` over `into`, and its sink forwards `work`'s `out` messages onto `output`, never returning.
+ */
+function streamingLevel(
+  strategy: Strategy,
+  input: ChatEdge,
+  output: ChatEdge,
+  [into, out]: readonly [ChatEdge, ChatEdge],
+  work: AgenticNode<typeof AgenticInputSchema, AssistantMessage>,
+) {
+  const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+    (view) => from(view, input).map((payload) => Message.create(into, payload)),
+    { schema: AgenticInputSchema, id: NodeId.create("$source") },
+  );
+  const sink = new Sink<typeof AgenticInputSchema, AssistantMessage>(
+    async function* (): NodeGenerator<
+      typeof AgenticInputSchema,
+      AssistantMessage
+    > {
+      let view = yield [];
+      while (true)
+        view = yield from(view, out).map((payload) =>
+          Message.create(output, payload),
+        );
+    },
+    {
+      schema: AgenticInputSchema,
+      id: NodeId.create("$sink"),
+      trigger: TriggerRule.when(out),
+    },
+  );
+  const graph = policyContext(source, sink, strategy).graph;
+  const scheduler = policy<schedules.AgencyNodeMetadata>(strategy);
+  const counter = { decisions: 0 };
+  const context = schedules.context({
+    graph,
+    scheduler: (snapshot) => {
+      counter.decisions++;
+      return scheduler(snapshot);
+    },
+  });
+  const id = graph.addNode(work);
+  graph.addEdge(source.id, id, into).addEdge(id, sink.id, out);
+  return { context, counter, id };
+}
+
+for (const strategy of STRATEGIES)
+  describe(`persistent nested graphs (${strategy})`, () => {
+    test("a persistent child streams each later arrival and parks between them", async () => {
+      const ingress = chatEdge("ingress");
+      const egress = chatEdge("egress");
+      const outer = [
+        chatEdge("$source->outer"),
+        chatEdge("outer->$sink"),
+      ] as const;
+      const middle = [
+        chatEdge("$source->inner"),
+        chatEdge("inner->$sink"),
+      ] as const;
+      const inner = [
+        chatEdge("$source->echo"),
+        chatEdge("echo->$sink"),
+      ] as const;
+      const echo = new Deterministic<
+        typeof AgenticInputSchema,
+        AssistantMessage
+      >(async function* () {
+        let view = yield [];
+        while (true)
+          view = yield from(view, inner[0]).map((payload) =>
+            Message.create(inner[1], payload),
+          );
+      }, LockPolicy);
+      const innermost = streamingLevel(strategy, middle[0], middle[1], inner, {
+        trigger: TriggerRule.when(inner[0]),
+        state: echo,
+      });
+      const idle = new Counted({ runs: [] });
+      innermost.context.graph.addNode(member(idle, "idle"));
+      const between = streamingLevel(strategy, outer[0], outer[1], middle, {
+        trigger: TriggerRule.anyOf(TriggerEntry.on(middle[0])),
+        state: innermost.context,
+        persistent: true,
+      });
+      const root = streamingLevel(strategy, ingress, egress, outer, {
+        trigger: TriggerRule.anyOf(TriggerEntry.on(outer[0])),
+        state: between.context,
+        persistent: true,
+      });
+      const levels = [root, between, innermost];
+      const graph = root.context.graph;
+      const deliver = async (text: string) => {
+        graph.source.enqueue({
+          messages: new Map([[ingress.id, [promptOf(text)]]]),
+          values: new Map(),
+        });
+        await root.context.run();
+        const delivered: AgenticInput[] = [];
+        graph.sink.drain((message) => {
+          assert.equal(message.id, egress.id);
+          delivered.push(message.payload);
+        });
+        return delivered;
+      };
+      const assertParked = () => {
+        for (const { context } of levels) {
+          assert.equal(context.graph.available().size, 0);
+          assert.ok(O.isNone(context.graph.result(context.graph.sink.id)));
+        }
+        for (const { context, id } of [root, between]) {
+          assert.equal(context.graph.getNode(id)?.status, "running");
+          assert.ok(O.isNone(context.graph.result(id)));
+        }
+      };
+      try {
+        assert.deepEqual(await deliver("A"), [promptOf("A")]);
+        assertParked();
+        const parked = levels.map(({ counter }) => counter.decisions);
+        await root.context.run();
+        assert.deepEqual(
+          levels.map(({ counter }) => counter.decisions),
+          parked,
+        );
+        graph.sink.drain(() => assert.fail("a parked graph emits nothing"));
+        assert.deepEqual(await deliver("B"), [promptOf("B")]);
+        assertParked();
+      } finally {
+        await graph.close();
+      }
+      assert.equal(idle.status, "closed");
+      assert.deepEqual(
+        idle.lifecycle.filter((event) => event === "return"),
+        ["return"],
+      );
+      assert.ok(levels.every(({ context }) => context.graph.signal.aborted));
+    });
+
+    test("persistent nodes exchange only messages and opt in only as true nested contexts", async () => {
+      const ports = terminalPorts();
+      const parent = policyContext(ports.source, ports.sink, strategy).graph;
+      const childPorts = terminalPorts();
+      const child = policyContext(childPorts.source, childPorts.sink, strategy);
+      const persistent = parent.addNode({
+        trigger: TriggerRule.always(),
+        state: child,
+        persistent: true,
+      });
+      const other = parent.addNode(member(new MockAgent({ runs: [] })));
+      const valueOnly = (error: unknown) =>
+        error instanceof DataflowDefinitionError &&
+        error.message === "Persistent graph nodes require message edges";
+      try {
+        assert.throws(
+          () =>
+            parent.addEdge(
+              other,
+              persistent,
+              Edge.value("other=>persistent", AssistantMessageSchema),
+            ),
+          valueOnly,
+        );
+        assert.throws(
+          () =>
+            parent.addEdge(
+              persistent,
+              other,
+              Edge.value("persistent=>other", AssistantMessageSchema),
+            ),
+          valueOnly,
+        );
+        parent
+          .addEdge(other, persistent, chatEdge("other->persistent"))
+          .addEdge(persistent, other, chatEdge("persistent->other"));
+        const coroutine = new Deterministic<
+          typeof AgenticInputSchema,
+          AssistantMessage
+        >(async function* () {
+          return assistant("unused");
+        }, LockPolicy);
+        for (const spec of [
+          { trigger: TriggerRule.always(), state: child, persistent: false },
+          { trigger: TriggerRule.always(), state: coroutine, persistent: true },
+          { ...member(new MockAgent({ runs: [] })), persistent: true },
+        ])
+          assert.throws(
+            () => Reflect.apply(parent.addNode, parent, [spec]),
+            (error: unknown) =>
+              error instanceof TypeError &&
+              error.message ===
+                "persistent is supported only as true on nested graph nodes",
+          );
+      } finally {
+        await parent.close();
+      }
+    });
+  });

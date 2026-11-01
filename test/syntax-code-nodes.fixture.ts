@@ -64,6 +64,24 @@ export const Forward =
     }, policy),
   });
 
+/** Forwards every message on `from`, raw, onto message edge `to`; never returns. */
+export const Relay =
+  (from: string, to: string): DeterministicNode =>
+  ({ policy, edges }) => {
+    const input = graph.EdgeId.create(from);
+    const output = edges.get(to);
+    if (output === undefined) throw new TypeError(`unknown edge "${to}"`);
+    return {
+      state: new Deterministic<TSchema, unknown>(async function* () {
+        let view = yield [];
+        while (true)
+          view = yield (view.messages.get(input) ?? []).map((payload) =>
+            graph.Message.create(output, payload),
+          );
+      }, policy),
+    };
+  };
+
 /** Returns its single message on `id` plus one; anything but a number is rejected. */
 export const Increment =
   (id: string): DeterministicNode =>

@@ -199,10 +199,13 @@ test("complaint-only configurations still offer and execute exactly one genuine 
 test("custom complain executes; duplicates and unknown names leave old tools usable", async () => {
   const one = countingTool("one");
   const custom = countingTool("complain");
-  const { agent: replacement } = await newAgent([
-    toolTurn(complainCall("custom", "custom")),
-    fauxAssistantMessage("settled"),
-  ], { tools: [custom.tool], activeToolNames: [] });
+  const { agent: replacement } = await newAgent(
+    [
+      toolTurn(complainCall("custom", "custom")),
+      fauxAssistantMessage("settled"),
+    ],
+    { tools: [custom.tool], activeToolNames: [] },
+  );
   try {
     assert.deepEqual(replacement.getActiveTools(), [custom.tool]);
     await promptSettles(replacement, "complain");
@@ -212,7 +215,10 @@ test("custom complain executes; duplicates and unknown names leave old tools usa
   }
   const { models, model } = scripted([]);
   const repo = new MemorySessionRepo();
-  for (const tools of [[custom.tool, custom.tool], [new ComplainTool(), new ComplainTool()]]) {
+  for (const tools of [
+    [custom.tool, custom.tool],
+    [new ComplainTool(), new ComplainTool()],
+  ]) {
     await assert.rejects(
       JuncoAgent.fromResolved({
         session: await repo.create({}, BACKGROUND_CONTEXT),

@@ -875,33 +875,54 @@ export function parse(
         "sink-result",
       );
     const returns = spec.sink?.returns;
-    if (returns !== undefined) {
-      identifier(returns, `${path}/sink/returns`);
-      if (!predecessors.includes(returns))
+    if (spec.sink?.stream === true) {
+      // A streaming sink forwards messages and never returns, so no result is inferred.
+      if (returns !== undefined)
         fail(
           `${path}/sink/returns`,
-          `sink.returns "${returns}" has no edge to $sink`,
-          `add an edge from "${returns}" to $sink, or return one of: ${list(predecessors)}`,
+          "Streaming sink must not declare sink.returns",
+          "remove sink.returns; a streaming sink forwards messages and never returns",
           "sink-result",
         );
-    } else if (predecessors.length > 1)
-      fail(
-        spec.sink === undefined ? path : `${path}/sink`,
-        `sink.returns is required: $sink has inbound edges from ${predecessors.join(", ")}`,
-        `set sink.returns to the node whose result the graph returns: ${list(predecessors)}`,
-        "sink-result",
-      );
-    // $source and emit nodes never complete, so they can never supply the graph's result.
-    const result = returns ?? predecessors[0] ?? "";
-    if (result === "$source" || spec.nodes[result]?.kind === "emit")
-      fail(
-        returns === undefined
-          ? `${path}/edges/${edges.findIndex((e) => e.to === "$sink")}`
-          : `${path}/sink/returns`,
-        `$sink would return "${result}", which never produces a result`,
-        "return an agent, code or nested-graph predecessor of $sink instead",
-        "sink-result",
-      );
+      for (const [index, edge] of edges.entries())
+        if (edge.to === "$sink" && edge.kind !== "message")
+          fail(
+            edge.kind === undefined
+              ? `${path}/edges/${index}`
+              : `${path}/edges/${index}/kind`,
+            "Streaming sink accepts only message edges",
+            "set kind: message on every edge into a streaming $sink",
+            "sink-result",
+          );
+    } else {
+      if (returns !== undefined) {
+        identifier(returns, `${path}/sink/returns`);
+        if (!predecessors.includes(returns))
+          fail(
+            `${path}/sink/returns`,
+            `sink.returns "${returns}" has no edge to $sink`,
+            `add an edge from "${returns}" to $sink, or return one of: ${list(predecessors)}`,
+            "sink-result",
+          );
+      } else if (predecessors.length > 1)
+        fail(
+          spec.sink === undefined ? path : `${path}/sink`,
+          `sink.returns is required: $sink has inbound edges from ${predecessors.join(", ")}`,
+          `set sink.returns to the node whose result the graph returns: ${list(predecessors)}`,
+          "sink-result",
+        );
+      // $source and emit nodes never complete, so they can never supply the graph's result.
+      const result = returns ?? predecessors[0] ?? "";
+      if (result === "$source" || spec.nodes[result]?.kind === "emit")
+        fail(
+          returns === undefined
+            ? `${path}/edges/${edges.findIndex((e) => e.to === "$sink")}`
+            : `${path}/sink/returns`,
+          `$sink would return "${result}", which never produces a result`,
+          "return an agent, code or nested-graph predecessor of $sink instead",
+          "sink-result",
+        );
+    }
     checkTrigger("$sink", `${path}/sink/trigger`, spec.sink?.trigger);
     for (const [id, node] of Object.entries(spec.nodes)) {
       const nodePath = `${path}/nodes/${pointer(id)}`;
@@ -921,6 +942,17 @@ export function parse(
       const inbound = incoming.get(id) ?? [];
       const outbound = outgoing.get(id) ?? [];
       checkTrigger(id, `${nodePath}/trigger`, node.trigger);
+      if (node.kind === "graph" && node.graph.sink?.stream === true)
+        for (const [index, edge] of edges.entries())
+          if ((edge.to === id || edge.from === id) && edge.kind !== "message")
+            fail(
+              edge.kind === undefined
+                ? `${path}/edges/${index}`
+                : `${path}/edges/${index}/kind`,
+              "Streaming graph nodes require message edges",
+              `set kind: message on edges into and out of "${id}"; a streaming graph never returns`,
+              "port",
+            );
       if (node.kind === "emit") {
         const values = outbound.filter((e) => e.kind !== "message");
         if (inbound.length || !outbound.length || values.length)

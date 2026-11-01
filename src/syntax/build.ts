@@ -330,7 +330,9 @@ export async function resolveAgents(
           .filter(Boolean)
           .join("\n\n") || undefined,
       tools: [
-        ...defaults.filter((tool) => !extra.some((selected) => selected.name === tool.name)),
+        ...defaults.filter(
+          (tool) => !extra.some((selected) => selected.name === tool.name),
+        ),
         ...extra,
         ...servers,
       ],
@@ -485,6 +487,7 @@ function createSource(
   label: string,
   edges: ReadonlyMap<string, Edge>,
   profiles: graph.ProfileSet | undefined,
+  is_available: Available | undefined,
 ): graph.Source<TSchema, unknown> {
   const routes = spec.source?.routes;
   return new graph.Source<TSchema, unknown>(
@@ -516,6 +519,7 @@ function createSource(
           .map((target) => edgeOf(edges, target)),
       ),
       ...(profiles ? { profiles } : {}),
+      ...(is_available ? { is_available } : {}),
     },
   );
 }
@@ -524,10 +528,40 @@ function createSink(
   spec: GraphSpec,
   edges: ReadonlyMap<string, Edge>,
   parentOutputs: readonly Edge[],
+  root: boolean,
   result: (id: string) => O.Option<unknown>,
   is_available: Available | undefined,
   profiles: graph.ProfileSet | undefined,
 ): graph.Sink<TSchema, unknown> {
+  const options = {
+    id: graph.NodeId.create("$sink"),
+    description: spec.sink?.description,
+    trigger: resolveTrigger(spec, "$sink", edges, spec.sink?.trigger),
+    ...(is_available ? { is_available } : {}),
+    ...(profiles ? { profiles } : {}),
+  };
+  if (spec.sink?.stream === true) {
+    const inbound = inboundEdges(spec, "$sink").map((e) =>
+      edgeOf(edges, edgeId(e)),
+    );
+    // Forward every delivered message, never returning: nested onto each parent output, root under its own edge.
+    return new graph.Sink<TSchema, unknown>(
+      async function* (): graph.NodeGenerator<TSchema, unknown> {
+        let view = yield [];
+        while (true)
+          view = yield inbound.flatMap((edge) =>
+            graph
+              .from(view, edge)
+              .flatMap((payload) =>
+                (root ? [edge] : parentOutputs).map((target) =>
+                  graph.Message.create(target, payload),
+                ),
+              ),
+          );
+      },
+      { ...options, schema: domain(root ? inbound : parentOutputs) },
+    );
+  }
   const returns = spec.sink?.returns ?? inboundEdges(spec, "$sink")[0].from;
   return new graph.Sink<TSchema, unknown>(
     async function* (port): graph.NodeGenerator<TSchema, unknown> {
@@ -538,14 +572,7 @@ function createSink(
         port.send(graph.Message.create(edge, r.value));
       return r.value;
     },
-    {
-      id: graph.NodeId.create("$sink"),
-      description: spec.sink?.description,
-      schema: domain(parentOutputs),
-      trigger: resolveTrigger(spec, "$sink", edges, spec.sink?.trigger),
-      ...(is_available ? { is_available } : {}),
-      ...(profiles ? { profiles } : {}),
-    },
+    { ...options, schema: domain(parentOutputs) },
   );
 }
 
@@ -659,12 +686,23 @@ async function buildGraph(
     recorder === undefined ? undefined : () => g.recorder,
   );
   const portProfiles = c.profiled ? ZERO : undefined;
-  const source = createSource(spec, label, edges, portProfiles);
+  // Port hooks bind once `g` exists; ports consult them only during execution.
+  let sourceHook: Available | undefined;
+  const source = createSource(
+    spec,
+    label,
+    edges,
+    portProfiles,
+    c.options.available?.$source
+      ? (v, t) => (sourceHook ? sourceHook(v, t) : t)
+      : undefined,
+  );
   let sinkHook: Available | undefined;
   const sink = createSink(
     spec,
     edges,
     parentOutputs,
+    path === "",
     (id) => g.result(graph.NodeId.create(id)),
     c.options.available?.$sink
       ? (v, t) => (sinkHook ? sinkHook(v, t) : t)
@@ -688,6 +726,7 @@ async function buildGraph(
   c.partialRoots.add(g);
   const hook = (id: string) =>
     c.options.available?.[id]?.({ graph: g, edges, label });
+  sourceHook = hook("$source");
   sinkHook = hook("$sink");
   const execution = context({
     scheduler: c.options.scheduler(label, path),
@@ -725,6 +764,9 @@ async function buildGraph(
         ...registration,
         trigger: resolveTrigger(spec, id, edges, node.trigger),
         state: child,
+        ...(node.graph.sink?.stream === true
+          ? { persistent: true as const }
+          : {}),
       });
       c.partialRoots.delete(child.graph);
     } else if (node.kind === "code") {

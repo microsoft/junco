@@ -83,6 +83,8 @@ export type NodePolicy = {
   readonly agent?: AnyJuncoAgent | AnyMockAgent;
   /** Resolved value edges already delivered to the body, with the value delivered; a re-resolved edge is fresh again. */
   readonly seenValues?: Map<EdgeId, unknown>;
+  /** A nested-graph body that parks instead of returning; only message edges may touch it. */
+  readonly persistent?: true;
   /**
    * `all-messages`: every activation reads every nonempty inbound message queue, whatever the
    * trigger, and no value edge. Prompt agents use it so messaging is independent of activation.

@@ -2093,3 +2093,110 @@ test("probe flags survive YAML and are checked at nested levels", () => {
   doc.graph.edges[0]!.probe = true;
   rejectsAt(doc, "/graph/edges/0/probe");
 });
+
+/** A finite root wrapping streaming child `A` between entry `P` and consumer `B`; `kinds` are A's edges. */
+const streamingWrapper = (...kinds: (string | undefined)[]): LooseDoc => ({
+  graph: {
+    nodes: {
+      P: {},
+      A: {
+        kind: "graph",
+        graph: {
+          source: { routes: { in: ["$source~>W"] } },
+          sink: { stream: true },
+          nodes: { W: {} },
+          edges: [
+            { from: "$source", to: "W", kind: "message", schema },
+            { from: "W", to: "$sink", kind: "message", schema },
+          ],
+        },
+      },
+      B: {},
+    },
+    edges: [
+      ...kinds.map(
+        (kind, index): JsonObject => ({
+          id: index === 0 ? "in" : `out${index}`,
+          ...(index === 0 ? { from: "P", to: "A" } : { from: "A", to: "B" }),
+          ...(kind === undefined ? {} : { kind }),
+          schema,
+        }),
+      ),
+      { from: "B", to: "$sink", schema },
+    ],
+  },
+});
+
+test("streaming sinks forward only messages and never return", () => {
+  const root = variant((d) => {
+    d.graph.sink = { stream: true };
+    d.graph.edges[1]!.kind = "message";
+  });
+  assert.equal(parse(root).graph.sink?.stream, true);
+  assert.equal(
+    parse(streamingWrapper("message", "message")).graph.nodes.A?.kind,
+    "graph",
+  );
+  for (const stream of [false, "true", 1, null])
+    rejectsAt(
+      variant((d) => {
+        d.graph.sink = { stream };
+      }),
+      "/graph/sink/stream",
+    );
+  for (const [label, doc, message, path] of [
+    [
+      "returns",
+      variant((d) => {
+        d.graph.sink = { stream: true, returns: "B" };
+        d.graph.edges[1]!.kind = "message";
+      }),
+      "Streaming sink must not declare sink.returns",
+      "/graph/sink/returns",
+    ],
+    [
+      "implicit value input",
+      variant((d) => {
+        d.graph.sink = { stream: true };
+      }),
+      "Streaming sink accepts only message edges",
+      "/graph/edges/1",
+    ],
+    [
+      "explicit value input",
+      variant((d) => {
+        d.graph.sink = { stream: true };
+        d.graph.edges[1]!.kind = "value";
+      }),
+      "Streaming sink accepts only message edges",
+      "/graph/edges/1/kind",
+    ],
+  ] as const) {
+    const error = failure(doc);
+    assert.equal(error.code, "sink-result", label);
+    assert.equal(error.path, path, label);
+    assert.ok(error.message.includes(message), label);
+  }
+  for (const [label, kinds, path] of [
+    ["value into the wrapper", ["value", "message"], "/graph/edges/0/kind"],
+    [
+      "implicit value into the wrapper",
+      [undefined, "message"],
+      "/graph/edges/0",
+    ],
+    ["value out of the wrapper", ["message", "value"], "/graph/edges/1/kind"],
+    [
+      "mixed outgoing message and value",
+      ["message", "message", "value"],
+      "/graph/edges/2/kind",
+    ],
+  ] as const) {
+    const error = failure(streamingWrapper(...kinds));
+    assert.equal(error.code, "port", label);
+    assert.equal(error.path, path, label);
+    assert.ok(
+      error.message.includes("Streaming graph nodes require message edges"),
+      label,
+    );
+  }
+});

@@ -333,6 +333,8 @@ export type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
       readonly state: SchedulerContext<Agentic<N, T>, N, T, never, JuncoGraph<N, T>>;
       readonly step?: never;
       readonly policy?: never;
+      // Parks instead of returning when the child quiesces; message edges only.
+      readonly persistent?: true;
     })
   | (StepLess<N, T> & {
       readonly state: JuncoAgent | MockAgent; // chat wires only

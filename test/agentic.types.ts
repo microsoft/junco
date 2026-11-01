@@ -452,6 +452,47 @@ export function bindingsStayOutOfNodeOptions(
   return [prompted, selected, received, agent, nested, unbound, untriggered];
 }
 
+export function persistenceIsANestedOptIn(
+  mock: MockAgent,
+  coroutine: Deterministic,
+  child: NestedContext,
+  graph: JuncoGraph,
+) {
+  const persistent: AgenticNode = {
+    trigger: TriggerRule.always(),
+    state: child,
+    persistent: true,
+  };
+  const finite: AgenticNode = {
+    trigger: TriggerRule.always(),
+    state: child,
+    // @ts-expect-error persistence is a literal opt-in; there is no false mode
+    persistent: false,
+  };
+  const agent = graph.addNode({
+    state: mock,
+    trigger: TriggerRule.always(),
+    policy: LockPolicy,
+    // @ts-expect-error only a nested graph context can persist
+    persistent: true,
+  });
+  // @ts-expect-error a coroutine is not a nested graph
+  const parked: AgenticNode = {
+    trigger: TriggerRule.always(),
+    state: coroutine,
+    persistent: true,
+  };
+  const stepped: AgenticNode = {
+    trigger: TriggerRule.always(),
+    state: child.graph,
+    policy: LockPolicy,
+    step: child.graph.source.step,
+    // @ts-expect-error an explicit step is never a persistent nested context
+    persistent: true,
+  };
+  return [persistent, finite, agent, parked, stepped];
+}
+
 export function wireTypesAndContextsArePreserved(
   graph: JuncoGraph<Num, string, unknown>,
   mock: MockAgent,
