@@ -1338,6 +1338,134 @@ test("nested Ralph levels sharing one controller succeed independently", async (
   }
 });
 
+test("same-named sibling and deep wrappers bind agents and strengths by unique path", async () => {
+  // Every wrapper is labelled "Team" and every leaf is local `Worker`: only paths tell them apart.
+  const team = (route: string, inner?: object) => ({
+    name: "Team",
+    source: {
+      routes: { [route]: [inner ? "$source~>Inner" : "$source~>Worker"] },
+    },
+    nodes: inner
+      ? {
+          Inner: {
+            kind: "graph" as const,
+            trigger: "$source~>Inner",
+            graph: inner,
+          },
+        }
+      : { Worker: { trigger: "$source~>Worker" } },
+    edges: [
+      {
+        from: "$source",
+        to: inner ? "Inner" : "Worker",
+        kind: "message" as const,
+        schema: prompt,
+      },
+      { from: inner ? "Inner" : "Worker", to: "$sink", schema: reply },
+    ],
+  });
+  const rungs: Record<string, schedules.ModelStrengthName> = {
+    "Left/Worker": "smol",
+    "Right/Worker": "high",
+    "Deep/Inner/Worker": "low",
+    Final: "xhigh",
+  };
+  const agents = new Map<string, YamlMock>(
+    Object.keys(rungs).map((path) => [
+      path,
+      mock(`report:${path}`, path === "Final" ? undefined : "work"),
+    ]),
+  );
+  const levels: [string, string][] = [];
+  const execution = await build(
+    parse({
+      graph: {
+        name: "Team",
+        source: {
+          routes: {
+            seed: ["$source~>Left", "$source~>Right", "$source~>Deep"],
+          },
+        },
+        nodes: {
+          Left: { kind: "graph", graph: team("$source~>Left") },
+          Right: { kind: "graph", graph: team("$source~>Right") },
+          Deep: {
+            kind: "graph",
+            graph: team("$source~>Deep", team("$source~>Inner")),
+          },
+          Final: {
+            trigger: { all: ["Left~>Final", "Right~>Final", "Deep~>Final"] },
+            prompt:
+              "{{ Left~>Final }} | {{ Right~>Final }} | {{ Deep~>Final }}",
+          },
+        },
+        edges: [
+          ...["Left", "Right", "Deep"].flatMap((id) => [
+            {
+              from: "$source",
+              to: id,
+              kind: "message" as const,
+              schema: prompt,
+            },
+            { from: id, to: "Final", kind: "message" as const, schema: reply },
+          ]),
+          { from: "Final", to: "$sink", schema: reply },
+        ],
+      },
+    }),
+    {
+      ...options(),
+      ladder: {
+        smol: { model: "p/s" },
+        low: { model: "p/l" },
+        med: { model: "p/m" },
+        high: { model: "p/h" },
+        xhigh: { model: "p/x" },
+      },
+      scheduler: (label, graphPath) => {
+        levels.push([label, graphPath]);
+        return schedules.strength(
+          (_, id) =>
+            rungs[graphPath === "" ? id : `${graphPath}/${id}`] ?? "med",
+          schedules.parallel(),
+        );
+      },
+      createAgent: async (spec) => {
+        const instance = agents.get(spec.path);
+        assert.ok(instance, `unexpected agent path ${spec.path}`);
+        return instance;
+      },
+    },
+  );
+  try {
+    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    await execution.run();
+    assert.deepEqual(levels, [
+      ["Team", ""],
+      ["Team", "Left"],
+      ["Team", "Right"],
+      ["Team", "Deep"],
+      ["Team", "Deep/Inner"],
+    ]);
+    assert.deepEqual(lastPrompts(agents.get("Final")!), [
+      "report:Left/Worker | report:Right/Worker | report:Deep/Inner/Worker",
+    ]);
+    assert.equal(resultText(execution.graph), "report:Final");
+    const models = { smol: "s", low: "l", med: "m", high: "h", xhigh: "x" };
+    for (const [path, rung] of Object.entries(rungs))
+      assert.deepEqual(
+        agents
+          .get(path)!
+          .calls.filter(({ method }) => method === "setModel")
+          .map(({ args }) => args),
+        [[{ provider: "p", modelId: models[rung] }]],
+        path,
+      );
+  } finally {
+    await execution.graph.close();
+  }
+});
+
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {
   const inner = ralphDoc().graph;
   inner.source = { routes: { "$source~>Wrapper": ["$source~>Ralph"] } };

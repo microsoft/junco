@@ -74,8 +74,12 @@ type YamlMockAgent = MockAgent<
   unknown
 >;
 export type AgentSpec = {
+  /** The enclosing graph's display label; labels may repeat across nested graphs. */
   readonly graph: string;
+  /** The agent's local node ID within its enclosing graph. */
   readonly node: string;
+  /** The agent's unique root-relative node path: `Worker`, `Child/Worker`, `Child/Grandchild/Worker`. */
+  readonly path: string;
   readonly systemPrompt?: string;
   readonly tool_block?: readonly string[];
   readonly tools: (AgentTool | mcp.JuncoMcpTools)[];
@@ -116,8 +120,13 @@ export type DeterministicNode<C = unknown> = (
 ) => CodeRegistration | Promise<CodeRegistration>;
 export type BuildOptions<C = unknown> = {
   readonly cwd: string;
+  /**
+   * A fresh policy per graph level: `graph` is the level's display label (labels may repeat),
+   * `graphPath` its unique wrapper path (`""` at the root, `Child` or `Child/Grandchild` nested).
+   */
   readonly scheduler: (
     graph: string,
+    graphPath: string,
   ) => Scheduler<
     Agentic<TSchema, unknown>,
     TSchema,
@@ -312,6 +321,7 @@ export async function resolveAgents(
     result.push({
       graph: label,
       node: id,
+      path: key,
       systemPrompt:
         [
           node.system,
@@ -680,7 +690,7 @@ async function buildGraph(
     c.options.available?.[id]?.({ graph: g, edges, label });
   sinkHook = hook("$sink");
   const execution = context({
-    scheduler: c.options.scheduler(label),
+    scheduler: c.options.scheduler(label, path),
     graph: g,
     ...(c.options.ladder === undefined ? {} : { ladder: c.options.ladder }),
   });
