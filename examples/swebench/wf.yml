@@ -1,0 +1,382 @@
+# Shared divide-and-conquer SWE-bench workflow: one pair (wf.yml + wf.ts) for every prepared problem.
+#
+# Topology:
+#   Input (code) --> Lead (Opus) --> Assign (code: exactly one assignment per worker) --> Trace | Reproduce |
+#   Contracts (Sonnet, own sandboxes) --final reports--> JoinEvidence (code, all) --> Planner (nested graph:
+#   Draft (Opus) <-> CheckPlan (code: runs the plan's checks on the baseline, at most three correction turns))
+#   --accepted plan--> Dispatch (code: freezes the accepted checks) --> CandidateA | CandidateB
+#   (Sonnet, own sandboxes) --> ValidateA | ValidateB (code: capture patch, pristine acceptance sandbox)
+#   --verdicts--> TournamentGate (code, any: first valid verdict wins, loser cancelled) --> Apply (code)
+#   --> Integrator (Opus, canonical /testbed) --> Freeze (code) --> Verifier (Sonnet, canonical, read-only)
+#   --> Finish (code: unchanged deliverable, final checks in a pristine sandbox) --> $sink.
+# Agents hand off only through their final answers (value edges); code nodes publish every message. (Live
+# preflight: Sonnet 5 on Copilot passes `send`'s untyped payload as a JSON string, which the edge rejects.)
+# Termination: Finish returns the terminal report. A missing or abnormal report or assignment, a plan still
+# rejected after three correction turns, two invalid candidates, a changed deliverable or a failed final check
+# throws: the run fails explicitly.
+# Models and strengths live in wf.ts (ladder + strength scheduler); sandboxes are bound by the runner.
+graph:
+  name: SweBenchCB
+  threads: unbounded
+  sink:
+    description: Finish's terminal report, produced only after the final checks passed.
+    trigger: Finish->$sink
+    returns: Finish
+  nodes:
+    Input:
+      kind: code
+      description: Publishes the problem once to the lead.
+      trigger: always
+
+    Lead:
+      description: Decomposes the issue into three narrow, issue-specific evidence assignments.
+      trigger: Input~>Lead
+      system: |
+        You are the lead engineer of a small team resolving one GitHub issue in an open-source Python
+        repository. You have no shell: your teammates investigate in their own sandboxes of the repository
+        at the issue's base commit. You write precise assignments; you never guess the fix and present it
+        as fact.
+      prompt: |
+        <issue>
+        {{Input~>Lead}}
+        </issue>
+
+        Your team (each works independently and cannot see the others):
+        - Trace: locates the responsible implementation, every sibling code path sharing the faulty logic,
+          the callers and the public interfaces a fix must preserve.
+        - Reproduce: reproduces the reported behaviour in the repository's real environment and finds the
+          focused existing tests that exercise the affected code.
+        - Contracts: builds a behaviour matrix (adjacent inputs, edge cases, related APIs) with observed
+          baseline behaviour, expected behaviour and compatibility constraints.
+
+        Each assignment names the goal for this issue, the concrete symbols, modules, behaviours or
+        hypotheses suggested by the issue text that the teammate must examine, the evidence you require
+        (file:line references, observed command output) and boundaries (what is out of scope). Mark
+        hypotheses as hypotheses.
+
+        Reply with exactly three sections, in this order, each starting with its heading line and nothing
+        before the first heading. Each teammate receives only its own section, together with the issue.
+        ## Trace
+        <assignment>
+        ## Reproduce
+        <assignment>
+        ## Contracts
+        <assignment>
+
+    Assign:
+      kind: code
+      description: >-
+        Requires the Lead's normal answer with exactly one non-empty section per worker and sends each
+        worker the issue plus its own assignment, once.
+      trigger: Lead->Assign
+
+    Trace:
+      description: Source and caller tracing in its own sandbox; its final answer is the report.
+      trigger: Assign~>Trace
+      tools: [bash]
+      system: &evidence-system |
+        You are a senior engineer gathering evidence about one GitHub issue. Your bash tool runs in your own
+        disposable sandbox: the repository at /testbed at the issue's base commit, inside the official
+        SWE-bench image with the `testbed` conda environment active and no network. Treat /testbed as
+        read-only: write scratch files only under /tmp. Report observed facts (quote code and command
+        output) and label anything unverified as a hypothesis. Keep commands focused; never run a whole test
+        suite. Other teammates cannot read your sandbox, so inline every script you mention in your report.
+        Your final answer is your report: it is forwarded verbatim to the planner.
+      prompt: |
+        {{Assign~>Trace}}
+
+        Your role: locate the code responsible for the issue. Your report must cover:
+        1. Root-cause location(s): file:line, function/class names, the relevant lines quoted, and why they
+           produce the reported behaviour.
+        2. Every sibling code path that shares the faulty logic (other branches, subclasses, overrides,
+           backends, sync/async variants, similar helpers, other call sites of the same pattern). A fix that
+           covers only the issue's literal example is a known failure mode; enumerate them all.
+        3. Callers and public interfaces a fix must keep compatible (signatures, defaults, return types,
+           error messages that tests assert on).
+        4. Existing tests covering this code: exact file paths and test names.
+
+    Reproduce:
+      description: Reproduction and runnable focused checks in its own sandbox; its final answer is the report.
+      trigger: Assign~>Reproduce
+      tools: [bash]
+      system: *evidence-system
+      prompt: |
+        {{Assign~>Reproduce}}
+
+        Your role: reproduce the reported behaviour and find runnable focused checks. Your report must cover:
+        1. A self-contained reproduction command, runnable from /testbed exactly as written (for example
+           `python - <<'EOF' ... EOF`), that prints a line starting with `ISSUE REPRODUCED` and exits 1
+           while the bug is present, and exits 0 once the behaviour is correct. Include its full text and its
+           actual output on this baseline. Configure frameworks inline when needed (for example Django's
+           `settings.configure(...)` and `django.setup()`).
+        2. How this repository runs its tests (for example pytest, Django's `./tests/runtests.py`, SymPy's
+           `bin/test`) and the focused existing test commands that exercise the affected code: each exact
+           command as you ran it from /testbed, its exit code and the relevant baseline output.
+        3. A clear separation between genuine reproductions and environment, import or dependency errors; an
+           import failure is not a reproduction. Report a command that failed because a test, class, module,
+           fixture or plugin does not exist, or because the test runner could not start, as exactly that.
+
+    Contracts:
+      description: Compatibility analysis and behaviour matrix in its own sandbox; its final answer is the report.
+      trigger: Assign~>Contracts
+      tools: [bash]
+      system: *evidence-system
+      prompt: |
+        {{Assign~>Contracts}}
+
+        Your role: define what a correct fix must and must not change. Your report must cover:
+        1. A behaviour matrix for the behaviour the issue concerns: input variants and adjacent paths (types,
+           empty/None values, subclasses, related public APIs, other backends or call sites), each with its
+           observed baseline behaviour (run it), the expected behaviour after a correct fix (justified by the
+           issue, documentation or existing tests) and whether an existing test covers it.
+        2. Compatibility constraints: public signatures and defaults, documented behaviour, error messages
+           and serialized forms that existing tests or callers rely on.
+        3. Existing tests that must keep passing: each exact command as you ran it from /testbed, its exit code
+           and the relevant baseline output. Existing tests are the specification: never treat a failing
+           existing test as obsolete; report a command that failed because a test, module or plugin does not
+           exist, or the runner could not start, as exactly that.
+
+    JoinEvidence:
+      kind: code
+      description: >-
+        Waits for a normal, non-empty final report from every evidence worker, then forwards the joined
+        evidence once to Planner and Dispatch.
+      trigger:
+        all: [Trace->JoinEvidence, Reproduce->JoinEvidence, Contracts->JoinEvidence]
+
+    Planner:
+      kind: graph
+      description: >-
+        Turns the joined evidence into one structured plan with frozen checks and two candidate assignments;
+        CheckPlan returns rejected drafts to Draft for at most three correction turns, and only the accepted
+        plan reaches Dispatch.
+      trigger: JoinEvidence~>Planner
+      graph:
+        name: Planner
+        threads: unbounded
+        source:
+          routes:
+            "JoinEvidence~>Planner": ["$source~>Draft"]
+        sink:
+          description: The plan CheckPlan accepted.
+          trigger: CheckPlan->$sink
+          returns: CheckPlan
+        nodes:
+          Draft:
+            description: Writes the complete plan, and a complete corrected plan for each CheckPlan rejection.
+            trigger:
+              any: ["$source~>Draft", "Draft->Draft"]
+            system: |
+              You are the technical lead planning the fix for one GitHub issue from your team's evidence. You have
+              no shell. Your plan is executed by two independent implementers and its checks are run automatically,
+              exactly as written, so precision matters more than prose.
+            prompt: |
+              {{$source~>Draft}}
+
+              Write the plan as one JSON object in a single ```json fenced block, with exactly these fields:
+              {
+                "root_cause": "<the root cause, with file and symbol names>",
+                "interfaces": ["<public behaviour, signature or contract the fix must preserve>", ...],
+                "behavior_matrix": ["<case the fix must handle, with expected behaviour>", ...],
+                "checks": [
+                  {"kind": "reproduction" | "regression", "name": "<short name>", "command": "<bash command>"}, ...
+                ],
+                "candidates": {
+                  "A": {"approach": "<approach>", "steps": [{"target": "<file and symbol>", "change": "<what changes>", "check": "<how to confirm this step>"}, ...]},
+                  "B": {"approach": "<approach>", "steps": [...]}
+                }
+              }
+
+              Checks are run with `bash -lc` from /testbed in a fresh copy of the baseline sandbox (testbed conda
+              environment, no network, 900 s timeout each) and must be self-contained: inline every script; never
+              reference files that exist only in a teammate's sandbox.
+              - "reproduction" checks print a line starting with `ISSUE REPRODUCED` and exit non-zero while the bug
+                is present, and exit 0 once it is fixed. Together they must cover every case of the behaviour matrix
+                the issue requires (sibling paths included), not only the issue's literal example. A reproduction
+                check that does not print `ISSUE REPRODUCED` on the baseline (for example an import error) is
+                discarded.
+              - "regression" checks are focused existing tests (single test modules, classes or test ids) that
+                cover the code being changed, pass on the baseline and must keep passing. Do not include an existing
+                test that asserts the very behaviour the issue asks to change. Regression checks that fail on the
+                baseline are discarded.
+              - Where your teammates ran a focused test command that passed on the baseline and covers the change,
+                reuse it verbatim. Never invent test modules, classes or ids the evidence does not show exist. A
+                command that failed because a test, class, module or plugin does not exist, or because the runner
+                could not start, is not evidence about the issue: replace it with a command the evidence shows works.
+              - At least one reproduction and one regression check must survive the baseline run. Otherwise you
+                receive the observed baseline results and must return a complete corrected plan; after three
+                correction turns the run fails.
+
+              Candidates: give A and B materially different approaches when the evidence admits more than one
+              sound fix; otherwise give the same approach and let them implement it independently. Never force a
+              broad rewrite just to make them differ. Both must satisfy the same checks and preserve the same
+              interfaces. Steps are ordered, cohesive and name target symbols, the behaviour change and how to
+              check it.
+
+          CheckPlan:
+            kind: code
+            description: >-
+              Parses each new draft and runs its checks one by one on the clean canonical baseline; returns the
+              first accepted plan, otherwise stages a correction turn on Draft, failing after the third.
+            trigger: Draft->CheckPlan
+        edges:
+          - {from: $source, to: Draft, kind: message, schema: &prompt {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string, pattern: "\\S"}}}}
+          - {from: Draft, to: Draft, schema: {}}
+          - {from: Draft, to: CheckPlan, schema: {}}
+          - {from: CheckPlan, to: $sink, schema: {}}
+
+    Dispatch:
+      kind: code
+      description: >-
+        Requires the plan CheckPlan accepted, on a still clean canonical baseline, saves its frozen checks and
+        dispatches both candidates.
+      trigger:
+        all: [Planner->Dispatch, "JoinEvidence~>Dispatch"]
+
+    CandidateA:
+      description: Implements candidate assignment A in its own sandbox.
+      trigger: Dispatch~>CandidateA
+      tools: [bash]
+      system: &candidate-system |
+        You are a senior engineer implementing a fix for one GitHub issue. Your bash tool runs in your own
+        sandbox: the repository at /testbed at the issue's base commit, inside the official SWE-bench image
+        with the `testbed` conda environment active and no network. Your deliverable is the change you leave
+        in /testbed: it is captured automatically as a git diff against the baseline (new and deleted files
+        included) and re-verified in a pristine copy of the baseline, so ignored files, build artefacts and
+        anything outside /testbed are not carried over. Keep scratch files under /tmp.
+
+        Rules:
+        - Implement your assigned approach, following its steps in order; cover every case of the behaviour
+          matrix and every sibling path, not just the issue's literal example.
+        - Preserve the listed interfaces: public signatures, defaults, return types and error messages.
+        - Never edit, delete or weaken existing tests; you may add new tests.
+        - Run every acceptance check yourself, exactly as written, and iterate until all of them pass. A
+          failing regression check means your change broke existing behaviour: fix your change, never the
+          test.
+        - Leave no scratch files in /testbed (`git status --short` shows only intended changes).
+
+        Final reply: the files and functions you changed and why, and the observed result of every
+        acceptance check.
+      prompt: "{{Dispatch~>CandidateA}}"
+
+    CandidateB:
+      description: Implements candidate assignment B in its own sandbox.
+      trigger: Dispatch~>CandidateB
+      tools: [bash]
+      system: *candidate-system
+      prompt: "{{Dispatch~>CandidateB}}"
+
+    ValidateA:
+      kind: code
+      description: Captures candidate A's patch and runs the frozen checks in its pristine acceptance sandbox.
+      trigger:
+        all: [CandidateA->ValidateA, "Dispatch~>ValidateA"]
+
+    ValidateB:
+      kind: code
+      description: Captures candidate B's patch and runs the frozen checks in its pristine acceptance sandbox.
+      trigger:
+        all: [CandidateB->ValidateB, "Dispatch~>ValidateB"]
+
+    TournamentGate:
+      kind: code
+      description: >-
+        Publishes the first valid verdict it consumes exactly once and cancels the losing branch; both
+        invalid is an explicit no-winner failure.
+      trigger:
+        any: ["ValidateA~>TournamentGate", "ValidateB~>TournamentGate"]
+
+    Apply:
+      kind: code
+      description: Applies the selected patch to canonical /testbed and briefs the Integrator.
+      trigger:
+        all: ["TournamentGate~>Apply", "Dispatch~>Apply"]
+
+    Integrator:
+      description: Reviews the applied patch against the evidence and resolves concrete integration gaps in canonical /testbed.
+      trigger: Apply~>Integrator
+      tools: [bash]
+      system: |
+        You are the technical lead integrating the selected fix for one GitHub issue. Your bash tool runs in
+        the canonical sandbox: the repository at /testbed (official SWE-bench image, `testbed` conda
+        environment, no network) with the selected patch already applied. Whatever you leave in /testbed is
+        the final deliverable; it is re-verified automatically with the same acceptance checks in a pristine
+        copy of the baseline, and a failing check fails the whole task.
+      prompt: |
+        {{Apply~>Integrator}}
+
+        Your task is judgment and integration, not a fresh attempt:
+        - Review the applied patch against the root cause, the behaviour matrix and the interfaces. Resolve
+          concrete gaps only: missed sibling paths, compatibility breaks, changed error messages, unhandled
+          matrix cases. Keep edits minimal; do not rewrite working code for style.
+        - Never edit, delete or weaken existing tests.
+        - If the patch is already complete, change nothing.
+        - Afterwards run every acceptance check exactly as written and the focused existing tests, and leave
+          no scratch files in /testbed.
+
+        Final reply: what you changed and why (or "no changes"), and the observed check results.
+
+    Freeze:
+      kind: code
+      description: Captures the integrated patch from canonical /testbed and hands it to the Verifier and Finish.
+      trigger:
+        all: [Integrator->Freeze, "Apply~>Freeze"]
+
+    Verifier:
+      description: Independently verifies the final diff in canonical /testbed without changing it.
+      trigger: Freeze~>Verifier
+      tools: [bash]
+      system: |
+        You are an independent verifier for a fix to one GitHub issue. Your bash tool runs in the canonical
+        sandbox: /testbed holds the final patch (official SWE-bench image, `testbed` conda environment, no
+        network). You must not change anything under /testbed: no edits, no new files, no git commands that
+        modify the tree or index. Write scratch scripts under /tmp only. Any change to /testbed fails the task.
+      prompt: |
+        {{Freeze~>Verifier}}
+
+        Verify independently:
+        - Read the final diff and check it against the root cause, the behaviour matrix and the interfaces.
+        - Run every acceptance check exactly as written, the focused existing tests around the changed code,
+          and your own scripts (under /tmp) for matrix cases the checks do not cover.
+        - Report observed outputs only; do not trust earlier claims.
+
+        Final reply: your findings, ending with exactly one last line, either `VERDICT: PASS` when you
+        observed the issue resolved without regressions, or `VERDICT: FAIL: <reason>`.
+
+    Finish:
+      kind: code
+      description: >-
+        Requires a normal PASS verdict and an unchanged deliverable, reruns the frozen checks on the final
+        patch in a pristine sandbox and returns the terminal report.
+      trigger:
+        all: [Verifier->Finish, "Freeze~>Finish"]
+
+  edges:
+    - {from: Input, to: Lead, kind: message, schema: *prompt}
+    - {from: Lead, to: Assign, schema: {}}
+    - {from: Assign, to: Trace, kind: message, schema: *prompt}
+    - {from: Assign, to: Reproduce, kind: message, schema: *prompt}
+    - {from: Assign, to: Contracts, kind: message, schema: *prompt}
+    - {from: Trace, to: JoinEvidence, schema: {}}
+    - {from: Reproduce, to: JoinEvidence, schema: {}}
+    - {from: Contracts, to: JoinEvidence, schema: {}}
+    - {from: JoinEvidence, to: Planner, kind: message, schema: *prompt}
+    - {from: JoinEvidence, to: Dispatch, kind: message, schema: *prompt}
+    - {from: Planner, to: Dispatch, schema: {}}
+    - {from: Dispatch, to: CandidateA, kind: message, schema: *prompt}
+    - {from: Dispatch, to: CandidateB, kind: message, schema: *prompt}
+    - {from: Dispatch, to: ValidateA, kind: message, schema: &acceptance {type: object, required: [checks], properties: {checks: {type: array, minItems: 2}}}}
+    - {from: Dispatch, to: ValidateB, kind: message, schema: *acceptance}
+    - {from: Dispatch, to: Apply, kind: message, schema: {type: object, required: [brief, checks], properties: {brief: {type: string}, checks: {type: array, minItems: 2}}}}
+    - {from: CandidateA, to: ValidateA, schema: {}}
+    - {from: CandidateB, to: ValidateB, schema: {}}
+    - {from: ValidateA, to: TournamentGate, kind: message, schema: &verdict {type: object, required: [branch, valid, reason, patch, checks], properties: {branch: {enum: [A, B]}, valid: {type: boolean}, reason: {type: string}, patch: {type: string}, checks: {type: array}}}}
+    - {from: ValidateB, to: TournamentGate, kind: message, schema: *verdict}
+    - {from: TournamentGate, to: Apply, kind: message, schema: {type: object, required: [winner, verdicts, cleanup], properties: {winner: {enum: [A, B]}, verdicts: {type: array}, cleanup: {type: array, items: {type: string}}}}}
+    - {from: Apply, to: Integrator, kind: message, schema: *prompt}
+    - {from: Apply, to: Freeze, kind: message, schema: {type: object, required: [brief, checks, summary], properties: {brief: {type: string}, checks: {type: array, minItems: 2}, summary: {type: string}}}}
+    - {from: Integrator, to: Freeze, schema: {}}
+    - {from: Freeze, to: Verifier, kind: message, schema: *prompt}
+    - {from: Freeze, to: Finish, kind: message, schema: {type: object, required: [patch, checks, summary], properties: {patch: {type: string, pattern: "\\S"}, checks: {type: array, minItems: 2}, summary: {type: string}}}}
+    - {from: Verifier, to: Finish, schema: {}}
+    - {from: Finish, to: $sink, schema: {}}

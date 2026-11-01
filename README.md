@@ -267,7 +267,11 @@ Output-only mutation and Reviewer read-only behavior are role instructions, not 
 
 ### CooperBench pair (live, driven by CooperBench)
 
-[`examples/cooperbench/run.ts`](examples/cooperbench/run.ts) runs one feature pair as a native graph. Each agent receives only its container-bound custom `bash`, `yield`, `info`, `send`, `recv`, and `complain`: its node blocks the other nine native defaults plus `task`, so no native collection is acquired. Replacement notices name `examples/cooperbench/run.ts`; the CLI sends operational logs to stderr and reserves stdout for JSONL. The container command still uses `docker exec … timeout -s TERM -k 5 120 bash -lc` with a 64 KiB cap; assignments and peer messages stay on private routes.
+[`examples/cooperbench/wf.yml`](examples/cooperbench/wf.yml) and [`wf.ts`](examples/cooperbench/wf.ts) run one feature pair as two private feature teams. Each leader reads only its own assignment, works in its own network-less container through `container_bash`, coordinates with the other leader over native `send`/`recv`, and delegates leaf jobs through `divide` (all jobs must pass and compose) and `tournament` (first validated attempt wins) to worker graphs in disposable child containers. CooperBench's `scripts/run_junco.py` drives it; stdout is JSONL only. See [`examples/cooperbench/README.md`](examples/cooperbench/README.md).
+
+### SWE-bench Verified workflow (live, driven by junco-swebench)
+
+[`examples/swebench/wf.yml`](examples/swebench/wf.yml) and [`wf.ts`](examples/swebench/wf.ts) form one divide-and-conquer pair for every SWE-bench Verified problem: an Opus lead, three Sonnet evidence workers, an Opus planner, two Sonnet candidates validated in pristine acceptance containers, an Opus integrator and a Sonnet verifier. The separate junco-swebench harness runs it from a frozen snapshot of this repository and binds each shell-using node's `bash` to its own container; see [`examples/swebench/README.md`](examples/swebench/README.md).
 
 ## API
 

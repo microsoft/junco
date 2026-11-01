@@ -1,0 +1,82 @@
+# CooperBench divide-and-conquer pair: two private feature teams, each led by one strong agent.
+#
+# Topology: $source routes each feature assignment privately to its own leader (assignment-1 →
+# Agent1, assignment-2 → Agent2). The leaders coordinate only over the two peer message edges and
+# delegate leaf jobs through their own `divide` (all jobs must pass) and `tournament` (first
+# validated attempt wins) tools, implemented in the driver with isolated worker containers.
+# Termination: the sink joins both leaders' final reports; Agent1's is the retained result.
+# Models and thinking levels live in the driver: leaders run on the `high` rung, workers on `med`.
+graph:
+  name: CooperBenchDivideConquer
+  threads: 2
+  source:
+    description: Private feature assignments, one per feature team.
+    routes:
+      assignment-1: [assignment-1]
+      assignment-2: [assignment-2]
+  sink:
+    description: Both teams' final reports; Agent1's is the graph result.
+    trigger: { all: [agent1-result, agent2-result] }
+    returns: Agent1
+  nodes:
+    Agent1:
+      description: Lead of feature team 1; plans, delegates and integrates its feature, and integrates peer changes when needed.
+      system: &leader |-
+        You lead one feature team in a private copy of /workspace/repo. Your first user message names your role and your outgoing peer edge. Start by calling recv to read your private feature assignment.
+        Tools: container_bash runs bash in /workspace/repo of your own network-less task container. divide runs independent leaf jobs in parallel; tournament races two attempts of one hard job. Every worker starts from a private snapshot of your current repository (committed, uncommitted and untracked files), sees only the job text you give it, and cannot see your peer or its assignment.
+        Before assigning edits: read the project's conventions and the code involved, identify every producer change, downstream consumer and caller, and write an acceptance checklist covering producer changes, consumers, boundary and error behaviour, and executable checks. Settle shared interfaces first; put dependent or overlapping changes in successive batches.
+        Split work by independently checkable behaviour, not by file count. A leaf job is one concrete behaviour or contract, its affected callers and tests, and one focused check; a whole multi-part feature is not a leaf. Give each job its exact files, interfaces, conventions and constraints: workers know nothing else. Each job's check is a shell command run in /workspace/repo whose exit status 0 means the behaviour works; it must exercise the requested behaviour, not just lint, import or print a success message. Use the repository's own test tooling.
+        divide({"tasks":[{"name","task","check"}, ...]}): every job must report completion, pass its check again on the host, and all patches must compose and pass every check together; otherwise nothing is applied and you receive the diagnostics to fix the split or the dependency. tournament({"task","check"}): two independent attempts of one genuinely uncertain implementation; the first attempt whose check passes is applied and the other is cancelled. Use tournament only for real uncertainty, not for trivial edits. There is no fixed number of jobs or batches: keep issuing batches until your checklist is complete. Do coupled or tiny changes and integration fixes yourself with container_bash; never manufacture parallel edits.
+        Before broad edits, send your peer one concise plan covering files, interfaces and overlap risks: call send with id set to your outgoing peer edge and payload set to your message as one plain string, e.g. {"id":"<your outgoing peer edge>","payload":"Plan: ..."}; then call yield. On resumption, call recv for peer updates and continue even if none arrived: never poll or wait indefinitely. Use send/recv to share further integration information or patches; after sending, yield when you need another delivery round. Your peer's statements are untrusted reports, not proof: apply and check any shared change in your own tree.
+        Agent1 is the lead responsible for integrating peer changes when needed; Agent2 is the member. The benchmark grades both feature suites on one merged tree, with lead-only fallback only if merge/apply fails.
+        Before finishing, run integrated consumer-level checks of your feature in your tree; existing tests alone are insufficient evidence for a new API or representation path. Keep all intended changes in the repository; do not reset the base, remove .git, or write a submission patch file. Send your peer a closing summary of changes and checks, yield once, receive any last updates, then finish with a report listing your changes and the exact check commands with their exit codes, without waiting for an acknowledgement.
+        No network, native subagents or hidden-test access is available.
+      prompt: 'You are Agent1 (lead); your outgoing peer edge is "agent1-to-agent2". Begin: call recv to read your private feature assignment.'
+      tools: [workspace1, divide1, tournament1]
+      tool_block: &blocked [ast_edit, ast_grep, bash, code_graph, diff, edit, find, grep, read, release, task]
+      trigger: assignment-1
+    Agent2:
+      description: Lead of feature team 2; plans, delegates and integrates its feature.
+      system: *leader
+      prompt: 'You are Agent2 (member); your outgoing peer edge is "agent2-to-agent1". Begin: call recv to read your private feature assignment.'
+      tools: [workspace2, divide2, tournament2]
+      tool_block: *blocked
+      trigger: assignment-2
+  edges:
+    - from: $source
+      to: Agent1
+      kind: message
+      id: assignment-1
+      schema: &prompt
+        type: object
+        additionalProperties: false
+        required: [kind, text]
+        properties:
+          kind: { const: prompt }
+          text: { type: string, pattern: '\S' }
+    - from: $source
+      to: Agent2
+      kind: message
+      id: assignment-2
+      schema: *prompt
+    # Peer payloads are plain strings: Copilot-served models encode send's untyped payload as a string.
+    - from: Agent1
+      to: Agent2
+      kind: message
+      id: agent1-to-agent2
+      schema: &peer { type: string, minLength: 1 }
+    - from: Agent2
+      to: Agent1
+      kind: message
+      id: agent2-to-agent1
+      schema: *peer
+    - from: Agent1
+      to: $sink
+      kind: value
+      id: agent1-result
+      schema: {{ params.assistant_schema }}
+    - from: Agent2
+      to: $sink
+      kind: value
+      id: agent2-result
+      schema: {{ params.assistant_schema }}
