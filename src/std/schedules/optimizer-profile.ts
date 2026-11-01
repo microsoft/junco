@@ -1,5 +1,6 @@
-// Recorder evidence for the profile optimizer: canonical JSONL parsing plus the aggregate and
-// stability operations its controller scores trials with. Internal: not exported by the barrels.
+// Recorder evidence for the profile optimizer: canonical JSONL parsing plus the aggregate, batch
+// statistics and stability operations its controller scores trials with. Internal: not exported
+// by the barrels.
 import { readFile } from "node:fs/promises";
 import { parseSamples, type Sample, unitOf } from "dataflow-profile";
 
@@ -22,6 +23,18 @@ export type MetricSummary = {
   count: number;
 };
 
+/** Mean and sample standard deviation of one metric over a batch's repeated executions. */
+export type Distribution = {
+  mean: number;
+  standardDeviation: number;
+  repeats: number;
+};
+/** One complete batch's objective and per-constraint distributions, in `constraints` order. */
+export type TrialStatistics = {
+  objective: Distribution;
+  constraints: Distribution[];
+};
+
 /** The samples of one JSONL profile; parse failures carry their physical line numbers. */
 export async function readProfile(path: string): Promise<Sample[]> {
   return parseSamples(await readFile(path, "utf8"));
@@ -31,6 +44,29 @@ const finite = (value: number, what: string): number => {
   if (!Number.isFinite(value)) throw new RangeError(`${what} is not finite`);
   return value;
 };
+
+/** Welford mean and sample standard deviation of at least two finite `values`. */
+export function distribution(values: readonly number[]): Distribution {
+  if (values.length < 2)
+    throw new RangeError(
+      `a sample standard deviation needs at least two values, got ${values.length}`,
+    );
+  let mean = 0;
+  let m2 = 0;
+  for (const [i, value] of values.entries()) {
+    const delta = finite(value, `value ${i + 1}`) - mean;
+    mean = finite(mean + delta / (i + 1), "the running mean");
+    m2 = finite(m2 + delta * (value - mean), "the sum of squared deviations");
+  }
+  return {
+    mean,
+    standardDeviation: finite(
+      Math.sqrt(m2 / (values.length - 1)),
+      "the standard deviation",
+    ),
+    repeats: values.length,
+  };
+}
 
 /** Probe values `{edgeId, value}` of one sample; throws on a malformed probe payload. */
 function probesOf(sample: Sample): { edgeId: string; value: number }[] {

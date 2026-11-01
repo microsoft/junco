@@ -80,6 +80,7 @@ async function main(args: readonly string[]): Promise<number> {
       incumbentScore: state.anchor.score,
       runCount: runs.length,
       statePath: join(request.sessionDir, "state.json"),
+      scoresPath: join(request.sessionDir, "scores.jsonl"),
       profilePaths: runs.map((run) => join(run.directory, "samples.jsonl")),
     }),
   );

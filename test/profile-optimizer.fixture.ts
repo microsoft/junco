@@ -1,8 +1,9 @@
-// The profile optimizer's single executable check: metric boundaries on canonical JSONL, then
-// `schedules.runOptimizer` from the built package driving real child targets, recorders, code nodes
-// and a faux-backed persistent editor through convergence, failure and ownership scenarios; plus
-// the Node import boundary and the built CLI's malformed-input exit. Offline: the editor and the
-// target agents are scripted faux providers, so no measurement here is a real-world saving.
+// The profile optimizer's single executable check: metric and statistics boundaries, the promotion
+// oracle, then `schedules.runOptimizer` from the built package driving real child targets,
+// recorders, code nodes and a faux-backed persistent editor through convergence, coordinate
+// descent, novelty, score-table, failure and ownership scenarios; plus the Node import boundary and
+// the built CLI's malformed-input exit. Offline: the editor and the target agents are scripted faux
+// providers, so no measurement here is a real-world saving.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -14,6 +15,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   writeFile,
@@ -31,11 +33,14 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { schedules } from "../dist/index.js";
+import { improves } from "../src/std/schedules/optimizer.js";
 import {
+  distribution,
   isStable,
   type Metric,
   readProfile,
   summarize,
+  type TrialStatistics,
 } from "../src/std/schedules/optimizer-profile.js";
 
 type Request = schedules.OptimizationRequest;
@@ -48,6 +53,21 @@ const ROOT = resolve(import.meta.dir, "..");
 const AXES: readonly Axis[] = ["scheduler", "ladder", "limits"];
 const sha256 = (text: string | Buffer) =>
   createHash("sha256").update(text).digest("hex");
+const transpiler = new Bun.Transpiler({ loader: "ts" });
+/** The fixture's own triplet identity: per-region transpiled-JS hashes and their combined key. */
+function identityOf(sources: Record<Axis, string>) {
+  const triplet = {
+    ladder: sha256(transpiler.transformSync(sources.ladder)),
+    scheduler: sha256(transpiler.transformSync(sources.scheduler)),
+    limits: sha256(transpiler.transformSync(sources.limits)),
+  };
+  return {
+    triplet,
+    key: sha256(
+      JSON.stringify([triplet.ladder, triplet.scheduler, triplet.limits]),
+    ),
+  };
+}
 const sleep = (ms: number) => {
   const { promise, resolve: done } = Promise.withResolvers<void>();
   setTimeout(done, ms);
@@ -277,6 +297,88 @@ async function checkMetrics(dir: string): Promise<void> {
     );
 }
 
+// --- batch statistics and the promotion oracle ---------------------------------------------------
+
+function checkStatistics(): void {
+  assert.deepEqual(distribution([1, 2, 3]), {
+    mean: 2,
+    standardDeviation: 1,
+    repeats: 3,
+  });
+  assert.deepEqual(distribution([2, 4]), {
+    mean: 3,
+    standardDeviation: Math.SQRT2,
+    repeats: 2,
+  });
+  assert.deepEqual(distribution([7, 7, 7]), {
+    mean: 7,
+    standardDeviation: 0,
+    repeats: 3,
+  });
+  for (const values of [
+    [],
+    [1],
+    [1, Number.NaN],
+    [Number.POSITIVE_INFINITY, 1],
+    [-Number.MAX_VALUE, Number.MAX_VALUE],
+  ])
+    assert.throws(() => distribution(values), RangeError);
+
+  const stats = (objective: number[], quality: number[]): TrialStatistics => ({
+    objective: distribution(objective),
+    constraints: [distribution(quality)],
+  });
+  const request = (op: "<=" | ">=", qualityConstraint?: number) =>
+    ({
+      objective: { metric: SCORE, direction: "minimize" },
+      constraints: [{ metric: QUALITY, op, threshold: 0 }],
+      qualityConstraint,
+    }) as Request;
+  // Minimized cost with a higher-is-better quality; equal deviations keep pooled SDs 10 and 1.
+  const both = request(">=", 0);
+  const reference = stats([90, 100, 110], [9, 10, 11]);
+  for (const [objective, quality, expected] of [
+    [[80, 90, 100], [9, 10, 11], true],
+    [[90, 100, 110], [10, 11, 12], true],
+    [[80.001, 90.001, 100.001], [9, 10, 11], false],
+    [[90, 100, 110], [9.999, 10.999, 11.999], false],
+    [[80, 90, 100], [8.999, 9.999, 10.999], false],
+    [[90.001, 100.001, 110.001], [10, 11, 12], false],
+    [[90, 100, 110], [9, 10, 11], false],
+    [[80, 90, 100], [10, 11, 12], true],
+    // A wider candidate spread raises the pooled SD to sqrt(250), above the gain of 10.
+    [[70, 90, 110], [9, 10, 11], false],
+  ] as [number[], number[], boolean][])
+    assert.equal(
+      improves(both, reference, stats(objective, quality)),
+      expected,
+      `cost ${objective}, quality ${quality}`,
+    );
+  // Zero spread: equal means never promote; any strictly positive gain does.
+  const objectiveOnly = request(">=");
+  const flat = stats([5, 5], [1, 1]);
+  assert.equal(improves(objectiveOnly, flat, stats([5, 5], [1, 1])), false);
+  assert.equal(
+    improves(objectiveOnly, flat, stats([4.999, 4.999], [1, 1])),
+    true,
+  );
+  // Without a designated quality, only the objective is compared.
+  assert.equal(
+    improves(objectiveOnly, reference, stats([80, 90, 100], [0, 1, 2])),
+    true,
+  );
+  // A `<=` quality is better lower.
+  const lower = request("<=", 0);
+  assert.equal(
+    improves(lower, reference, stats([90, 100, 110], [8, 9, 10])),
+    true,
+  );
+  assert.equal(
+    improves(lower, reference, stats([80, 90, 100], [10, 11, 12])),
+    false,
+  );
+}
+
 // --- target template -----------------------------------------------------------------------------
 
 const marker = (edge: "start" | "end", axis: Axis) =>
@@ -347,7 +449,7 @@ const HARD_LIMITS: schedules.LimitOptions | undefined = ${p.hardLimits ?? "undef
 const PARAMS: Record<string, string> = ${p.params ?? "{}"};
 
 // --- junco-profile-optimizer instrumentation: fixed, outside every tuning region ---
-type ProfileRun = {
+interface ProfileRun {
   version: 1;
   nonce: string;
   monitored: boolean;
@@ -355,24 +457,8 @@ type ProfileRun = {
   expectedGraphHash: string | null;
   allowedModels: { model: string; thinking?: string }[];
   limitBounds: { memoryBytes?: number; tokens?: number; tools?: number };
-};
-const RUN_DIR = process.env.JUNCO_PROFILE_RUN_DIR;
-const RUN_KEYS = "allowedModels,expectedGraphHash,limitBounds,monitored,nonce,probes,version";
-
-async function profileRun(): Promise<ProfileRun | undefined> {
-  if (RUN_DIR === undefined) return undefined;
-  const run = JSON.parse(await readFile(join(RUN_DIR, "request.json"), "utf8"));
-  if (
-    Object.keys(run).sort().join() !== RUN_KEYS ||
-    run.version !== 1 ||
-    typeof run.nonce !== "string" ||
-    typeof run.monitored !== "boolean" ||
-    !Array.isArray(run.probes) ||
-    !Array.isArray(run.allowedModels)
-  )
-    throw new Error("invalid profile run request");
-  return run;
 }
+const RUN_KEYS = "allowedModels,expectedGraphHash,limitBounds,monitored,nonce,probes,version";
 
 /** Deterministic JSON: object keys sorted recursively, array order kept. */
 const canonical = (value: unknown): unknown =>
@@ -386,96 +472,147 @@ const canonical = (value: unknown): unknown =>
         )
       : value;
 
-/** \`document\` with probe: true on each requested existing numeric edge, revalidated. */
-function withProbes(document: syntax.JuncoDocument, probes: ProfileRun["probes"]): syntax.JuncoDocument {
-  const copy = structuredClone(document);
-  for (const { node, edgeId } of probes) {
-    let spec = copy.graph;
-    for (const segment of node === "" ? [] : node.split("/")) {
-      const wrapper = spec.nodes[segment];
-      if (wrapper?.kind !== "graph") throw new Error(\`probe path "\${node}" names no graph node\`);
-      spec = wrapper.graph;
-    }
-    const edges = (spec.edges ?? []).filter(
-      (edge) => (edge.id ?? \`\${edge.from}\${edge.kind === "message" ? "~>" : "->"}\${edge.to}\`) === edgeId,
-    );
-    const type = edges.length === 1 ? (edges[0].schema as { type?: unknown }).type : undefined;
-    if (type !== "number" && type !== "integer")
-      throw new Error(\`probe "\${node}" / "\${edgeId}" is not exactly one existing numeric edge\`);
-    edges[0].probe = true;
-  }
-  return syntax.parse(copy);
-}
+/** The optimizer's run request under JUNCO_PROFILE_RUN_DIR; inactive, both fields undefined, otherwise. */
+class OptimizerProfile {
+  private constructor(
+    readonly directory: string | undefined,
+    readonly request: ProfileRun | undefined,
+  ) {}
 
-/** The candidate's concrete ladder and extra limits stay inside the run's authorized domain. */
-function checkTuning(run: ProfileRun): void {
-  for (const [name, rung] of Object.entries(optimizerLadder ?? {}))
-    if (!run.allowedModels.some((allowed) => allowed.model === rung.model && allowed.thinking === rung.thinking))
-      throw new Error(\`ladder rung \${name} uses unauthorized \${rung.model}\`);
-  const bounds: Record<string, number | undefined> = {
-    memoryBytes: run.limitBounds.memoryBytes,
-    tokens: run.limitBounds.tokens,
-    tools: run.limitBounds.tools,
-  };
-  for (const [key, value] of Object.entries(optimizerLimits)) {
-    if (key === "scope") {
-      if (!["evaluation", "batch", "activation"].includes(String(value)))
-        throw new Error(\`invalid limit scope \${value}\`);
-      continue;
-    }
-    if (!Object.hasOwn(bounds, key)) throw new Error(\`unknown limit \${key}\`);
-    const bound = bounds[key];
+  static async load(directory = process.env.JUNCO_PROFILE_RUN_DIR): Promise<OptimizerProfile> {
+    if (directory === undefined) return new OptimizerProfile(undefined, undefined);
+    const run = JSON.parse(await readFile(join(directory, "request.json"), "utf8"));
     if (
-      typeof value !== "number" ||
-      !Number.isFinite(value) ||
-      value < 0 ||
-      (key === "tools" && !Number.isInteger(value)) ||
-      (bound !== undefined && value > bound)
+      Object.keys(run).sort().join() !== RUN_KEYS ||
+      run.version !== 1 ||
+      typeof run.nonce !== "string" ||
+      typeof run.monitored !== "boolean" ||
+      !Array.isArray(run.probes) ||
+      !Array.isArray(run.allowedModels)
     )
-      throw new Error(\`limit \${key}=\${value} is outside its bound \${bound}\`);
+      throw new Error("invalid profile run request");
+    return new OptimizerProfile(directory, run);
   }
-}
 
-/** The candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
-function tunedScheduler(label: string) {
-  let policy = optimizerScheduler(label);
-  if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
-  const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
-  if (memoryBytes !== undefined || tokenCap !== undefined || tools !== undefined)
-    policy = schedules.limit(
-      {
-        ...(memoryBytes === undefined ? {} : { memory: bytes(memoryBytes) }),
-        ...(tokenCap === undefined ? {} : { tokens: tokens(tokenCap) }),
-        ...(tools === undefined ? {} : { tools }),
-        ...(scope === undefined ? {} : { scope }),
-      },
-      policy,
+  /** The parsed document's canonical SHA-256; rejects drift and an out-of-domain candidate. */
+  validate(document: syntax.JuncoDocument): string {
+    const graphHash = createHash("sha256").update(JSON.stringify(canonical(document))).digest("hex");
+    if (this.request?.expectedGraphHash != null && this.request.expectedGraphHash !== graphHash)
+      throw new Error("the runtime graph document drifted from the baseline's");
+    if (this.request !== undefined) this.#checkTuning(this.request);
+    return graphHash;
+  }
+
+  /** \`document\` with probe: true on each requested existing numeric edge, revalidated. */
+  withProbes(document: syntax.JuncoDocument): syntax.JuncoDocument {
+    if (this.request === undefined) return document;
+    const copy = structuredClone(document);
+    for (const { node, edgeId } of this.request.probes) {
+      let spec = copy.graph;
+      for (const segment of node === "" ? [] : node.split("/")) {
+        const wrapper = spec.nodes[segment];
+        if (wrapper?.kind !== "graph") throw new Error(\`probe path "\${node}" names no graph node\`);
+        spec = wrapper.graph;
+      }
+      const edges = (spec.edges ?? []).filter(
+        (edge) => (edge.id ?? \`\${edge.from}\${edge.kind === "message" ? "~>" : "->"}\${edge.to}\`) === edgeId,
+      );
+      const type = edges.length === 1 ? (edges[0].schema as { type?: unknown }).type : undefined;
+      if (type !== "number" && type !== "integer")
+        throw new Error(\`probe "\${node}" / "\${edgeId}" is not exactly one existing numeric edge\`);
+      edges[0].probe = true;
+    }
+    return syntax.parse(copy);
+  }
+
+  /** A fresh candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
+  scheduler(label: string, graphPath: string) {
+    // Candidates may still ignore graphPath; the build passes both arguments.
+    const factory: syntax.BuildOptions["scheduler"] = optimizerScheduler;
+    let policy = factory(label, graphPath);
+    if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
+    const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
+    if (memoryBytes !== undefined || tokenCap !== undefined || tools !== undefined)
+      policy = schedules.limit(
+        {
+          ...(memoryBytes === undefined ? {} : { memory: bytes(memoryBytes) }),
+          ...(tokenCap === undefined ? {} : { tokens: tokens(tokenCap) }),
+          ...(tools === undefined ? {} : { tools }),
+          ...(scope === undefined ? {} : { scope }),
+        },
+        policy,
+      );
+    return HARD_LIMITS === undefined ? policy : schedules.limit(HARD_LIMITS, policy);
+  }
+
+  /** This run's profile recorder; undefined when inactive. */
+  createRecorder(costMode: "activation" | "usage" = "activation"): tracer.JsonlRecorder | undefined {
+    if (this.directory === undefined || this.request === undefined) return undefined;
+    return new tracer.JsonlRecorder({
+      path: join(this.directory, "samples.jsonl"),
+      monitored: this.request.monitored,
+      costMode,
+    });
+  }
+
+  /** Publish the completion receipt: only after the terminal check and every close succeeded. */
+  async complete(graphHash: string, resourceEvents: number, metrics?: Readonly<Record<string, number>>): Promise<void> {
+    if (this.directory === undefined || this.request === undefined) return;
+    const receipt = join(this.directory, "completion.json");
+    await writeFile(
+      \`\${receipt}.tmp\`,
+      JSON.stringify({ version: 1, nonce: ${p.nonce ?? "this.request.nonce"}, terminal: true, graphHash, resourceEvents, ...(metrics === undefined ? {} : { metrics }), ...(${p.receiptFields ?? "{}"}) }),
+      { flag: "wx" },
     );
-  return HARD_LIMITS === undefined ? policy : schedules.limit(HARD_LIMITS, policy);
+    await rename(\`\${receipt}.tmp\`, receipt);
+  }
+
+  /** The candidate's concrete ladder and extra limits stay inside the run's authorized domain. */
+  #checkTuning(run: ProfileRun): void {
+    for (const [name, rung] of Object.entries(optimizerLadder ?? {}))
+      if (!run.allowedModels.some((allowed) => allowed.model === rung.model && allowed.thinking === rung.thinking))
+        throw new Error(\`ladder rung \${name} uses unauthorized \${rung.model}\`);
+    const bounds: Record<string, number | undefined> = {
+      memoryBytes: run.limitBounds.memoryBytes,
+      tokens: run.limitBounds.tokens,
+      tools: run.limitBounds.tools,
+    };
+    for (const [key, value] of Object.entries(optimizerLimits)) {
+      if (key === "scope") {
+        if (!["evaluation", "batch", "activation"].includes(String(value)))
+          throw new Error(\`invalid limit scope \${value}\`);
+        continue;
+      }
+      if (!Object.hasOwn(bounds, key)) throw new Error(\`unknown limit \${key}\`);
+      const bound = bounds[key];
+      if (
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        value < 0 ||
+        (key === "tools" && !Number.isInteger(value)) ||
+        (bound !== undefined && value > bound)
+      )
+        throw new Error(\`limit \${key}=\${value} is outside its bound \${bound}\`);
+    }
+  }
 }
 
 ${p.code}
 
-const run = await profileRun();
+const profile = await OptimizerProfile.load();
 const yamlText = await readFile(new URL("./workflow.yml", import.meta.url), "utf8");
 const document = syntax.parse(yamlText, { params: PARAMS, sourceName: "workflow.yml" });
-const graphHash = createHash("sha256").update(JSON.stringify(canonical(document))).digest("hex");
-if (run?.expectedGraphHash != null && run.expectedGraphHash !== graphHash)
-  throw new Error("the runtime graph document drifted from the baseline's");
-if (run !== undefined) checkTuning(run);
+const graphHash = profile.validate(document);
 ${p.beforeBuild ?? ""}
-const recorder =
-  run === undefined
-    ? undefined
-    : new tracer.JsonlRecorder({ path: join(RUN_DIR as string, "samples.jsonl"), monitored: run.monitored, costMode: "usage" });
+const recorder = profile.createRecorder("usage");
 const observer = new tracer.DummyTracer();
 let resourceEvents = 0;
 const failures: unknown[] = [];
 let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
 try {
-  execution = await JuncoGraph.fromYaml(run === undefined ? document : withProbes(document, run.probes), {
+  execution = await JuncoGraph.fromYaml(profile.withProbes(document), {
     cwd: import.meta.dir,
-    scheduler: tunedScheduler,
+    scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
     tracer: observer,
     code: CODE,
     ...(recorder === undefined ? {} : { recorder }),
@@ -497,15 +634,7 @@ for (const close of [() => execution?.graph.close(), () => observer.flush(), () 
   }
 if (failures.length > 0) throw new AggregateError(failures, "workflow run failed");
 ${p.afterCleanup ?? ""}
-if (run !== undefined) {
-  const receipt = join(RUN_DIR as string, "completion.json");
-  await writeFile(
-    \`\${receipt}.tmp\`,
-    JSON.stringify({ version: 1, nonce: ${p.nonce ?? "run.nonce"}, terminal: true, graphHash, resourceEvents, ${p.metrics === undefined ? "" : `metrics: ${p.metrics},`} ...(${p.receiptFields ?? "{}"}) }),
-    { flag: "wx" },
-  );
-  await rename(\`\${receipt}.tmp\`, receipt);
-}
+await profile.complete(graphHash, resourceEvents${p.metrics === undefined ? "" : `, ${p.metrics}`});
 `;
 
 const NUMERIC_YAML = (description = "Reports peak concurrency.") => `graph:
@@ -525,7 +654,7 @@ const NUMERIC_YAML = (description = "Reports peak concurrency.") => `graph:
     - { id: score, from: Terminal, to: $sink, schema: { type: number } }
 `;
 
-const NUMERIC_CODE = (terminal = "peak") => `let active = 0;
+const NUMERIC_CODE = (terminal = "peak", quality = "0.95") => `let active = 0;
 let peak = 0;
 const worker: syntax.DeterministicNode = ({ policy }) => ({
   state: new Deterministic(async function* () {
@@ -559,13 +688,13 @@ const CODE: Record<string, syntax.DeterministicNode> = {
       const view = yield [];
       if (view.values.get("A->Quality") !== 1 || view.values.get("B->Quality") !== 1)
         throw new Error("Quality requires both inputs");
-      return 0.95;
+      return ${quality};
     }, policy),
   }),
   Terminal: ({ policy }) => ({
     state: new Deterministic(async function* () {
       const view = yield [];
-      if (view.values.get("quality") !== 0.95) throw new Error("quality check failed");
+      if (view.values.get("quality") !== ${quality}) throw new Error("quality check failed");
       return ${terminal};
     }, policy),
   }),
@@ -648,7 +777,7 @@ const requestFor = (
   workloadId: "fixed-numeric-workload",
   objective: { metric: SCORE, direction: "minimize" },
   constraints: [{ metric: QUALITY, op: ">=", threshold: 0.9 }],
-  repeats: 1,
+  repeats: 2,
   stop: { improvement: { kind: "relative", value: 0.5 } },
   axes: ["scheduler"],
   allowedModels: [],
@@ -852,13 +981,45 @@ const runDirs = async (sessionDir: string) =>
     ? (await readdir(join(sessionDir, "runs"))).length
     : 0;
 
-/** Every trial's identity reproduces its saved bytes and each ok run's summary its own profile. */
+/** One score-table row per attempted trial, in order: exactly its finalized history entry. */
+async function checkScores(sessionDir: string, state: State): Promise<void> {
+  const text = await readFile(join(sessionDir, "scores.jsonl"), "utf8");
+  const rows =
+    text === ""
+      ? []
+      : text
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    rows,
+    trials(state)
+      .filter((trial) => trial.runs.length > 0)
+      .map((trial) => ({ version: 1, key: trial.candidate.key, ...trial })),
+  );
+}
+
+/**
+ * Every trial's identity reproduces its saved bytes and normalized triplet, each ok run's summary
+ * its own profile, each complete batch its statistics and per-run feasibility, every batch fresh
+ * runs, and the score table the history.
+ */
 async function checkEvidence(target: Prepared, state: State): Promise<void> {
+  const { request } = state;
+  const numbers = trials(state).flatMap((trial) =>
+    trial.runs.map((run) => run.run),
+  );
+  assert.deepEqual(
+    numbers,
+    numbers.map((_, i) => i + 1),
+  );
   for (const trial of trials(state)) {
     assert.equal(
       sha256(withRegions(target.prepared, trial.candidate.sources)),
       trial.candidate.tsHash,
     );
+    const { triplet, key } = trial.candidate;
+    assert.deepEqual({ triplet, key }, identityOf(trial.candidate.sources));
     for (const run of trial.runs) {
       if (run.status !== "ok") continue;
       const samples = await readProfile(join(run.directory, "samples.jsonl"));
@@ -866,21 +1027,60 @@ async function checkEvidence(target: Prepared, state: State): Promise<void> {
         await readFile(join(run.directory, "completion.json"), "utf8"),
       );
       assert.deepEqual(
-        summarize(samples, state.request.objective.metric, metrics),
+        summarize(samples, request.objective.metric, metrics),
         run.objective,
       );
-      for (const [i, { metric }] of state.request.constraints.entries())
+      for (const [i, { metric }] of request.constraints.entries())
         assert.deepEqual(
           summarize(samples, metric, metrics),
           run.constraints[i],
         );
     }
+    if (trial.stats === null) {
+      assert.equal(trial.score, null);
+      assert.equal(trial.feasible, false);
+      continue;
+    }
+    const values = (pick: (run: Trial["runs"][number]) => number | undefined) =>
+      distribution(trial.runs.map((run) => pick(run) ?? Number.NaN));
+    assert.deepEqual(trial.stats, {
+      objective: values((run) => run.objective?.value),
+      constraints: request.constraints.map((_, i) =>
+        values((run) => run.constraints[i]?.value),
+      ),
+    });
+    assert.equal(trial.score, trial.stats.objective.mean);
+    assert.equal(
+      trial.feasible,
+      trial.runs.every((run) =>
+        request.constraints.every(({ op, threshold }, i) => {
+          const value = run.constraints[i]?.value as number;
+          return op === ">=" ? value >= threshold : value <= threshold;
+        }),
+      ),
+    );
   }
   assert.deepEqual(
     await readFile(target.yaml),
     await readFile(join(target.sessionDir, "original.yml")),
   );
   assert.deepEqual(await readState(target.sessionDir), state);
+  await checkScores(target.sessionDir, state);
+}
+
+/** Each accepted proposal changes only its assigned region of the incumbent it was handed. */
+function checkCoordinates(state: State, log: EditorLog): void {
+  for (const handed of log.states) {
+    const edit = state.history[handed.history.length];
+    if (edit?.kind !== "edit" || !edit.accepted) continue;
+    const trial = state.history[handed.history.length + 1];
+    assert.equal(trial?.kind === "trial" && trial.phase, "candidate");
+    const { sources } = (trial as Trial).candidate;
+    const incumbent = handed.anchor.candidate.sources;
+    for (const axis of AXES)
+      if (axis === edit.axis) assert.notEqual(sources[axis], incumbent[axis]);
+      else assert.equal(sources[axis], incumbent[axis]);
+  }
 }
 
 // --- numeric convergence -------------------------------------------------------------------------
@@ -967,8 +1167,18 @@ async function numericScenario(dir: string): Promise<void> {
   );
   for (const trial of trials(state)) {
     assert.ok(trial.feasible);
-    for (const run of trial.runs) assert.equal(run.constraints[0]?.value, 0.95);
+    // Repeats count batch executions; a run's summary count its in-run contributors.
+    assert.equal(trial.stats?.objective.repeats, 3);
+    for (const run of trial.runs) {
+      assert.equal(run.constraints[0]?.value, 0.95);
+      assert.equal(run.objective?.count, 1);
+    }
   }
+  // Host-owned remeasurement and confirmation repeat the incumbent's key.
+  const [, promoted, , remeasure, , , confirmation] = trials(state);
+  assert.equal(remeasure?.candidate.key, promoted?.candidate.key);
+  assert.equal(confirmation?.candidate.key, promoted?.candidate.key);
+  checkCoordinates(state, log);
   await checkEvidence(target, state);
   assert.equal(
     await readFile(target.ts, "utf8"),
@@ -1017,7 +1227,7 @@ const COST_HEADER = (
 const schedulerProvider = fauxProvider({ api: "cost-scheduler", provider: "target", models: [{ id: "cheap" }] });
 const schedulerSource = {};
 function optimizerPi(model: string, thinking?: schedules.LadderRung["thinking"]) {
-  if (run !== undefined && !run.allowedModels.some((allowed) => allowed.model === model && allowed.thinking === thinking))
+  if (profile.request !== undefined && !profile.request.allowedModels.some((allowed) => allowed.model === model && allowed.thinking === thinking))
     throw new Error(\`scheduler uses unauthorized \${model}/\${thinking ?? "default"}\`);
   const selected = schedulerProvider.getModel();
   if (model !== \`\${selected.provider}/\${selected.id}\`) throw new Error("unknown scheduler model");
@@ -1061,8 +1271,19 @@ const costTarget = (extra: Partial<TargetParts> = {}): TargetParts =>
 async function costResultScenario(dir: string): Promise<void> {
   const target = await prepare(dir, costTarget());
   const log: EditorLog = { states: [] };
+  // The promotion forces a second cycle; its two-wide round robin is infeasible like the baseline.
   const runtime = await editorRuntime(
-    editorTurn({ axis: "scheduler", source: PI_SCHED }, log),
+    [
+      ...editorTurn({ axis: "scheduler", source: PI_SCHED }, log),
+      ...editorTurn(
+        {
+          axis: "scheduler",
+          source:
+            "const optimizerScheduler = (_label: string) => schedules.roundRobin(undefined, 2);\n",
+        },
+        log,
+      ),
+    ],
     ["cheap"],
   );
   const state = await optimize(
@@ -1072,7 +1293,7 @@ async function costResultScenario(dir: string): Promise<void> {
       repeats: 2,
       stop: { target: 110 },
       allowedModels: [{ model: "target/cheap" }],
-      runBudget: 6,
+      runBudget: 10,
     }),
     runtime,
   );
@@ -1085,25 +1306,25 @@ async function costResultScenario(dir: string): Promise<void> {
     [
       ["baseline", false],
       ["candidate", true],
+      ["remeasure", true],
+      ["candidate", false],
       ["confirmation", true],
     ],
   );
-  assert.equal(await runDirs(target.sessionDir), 6);
+  assert.equal(await runDirs(target.sessionDir), 10);
   for (const trial of trials(state))
     for (const run of trial.runs) {
       assert.equal(run.status, "ok");
       assert.equal(run.objective?.unit, "USD");
-      assert.equal(
-        run.constraints[0]?.value,
-        trial.phase === "baseline" ? 59 : 60,
-      );
+      assert.equal(run.constraints[0]?.value, trial.feasible ? 60 : 59);
       const request = JSON.parse(
         await readFile(join(run.directory, "request.json"), "utf8"),
       );
       assert.deepEqual(request.allowedModels, [{ model: "target/cheap" }]);
       const samples = await readProfile(join(run.directory, "samples.jsonl"));
       const scheduler = samples.filter((sample) => sample.node === "Scheduler");
-      if (trial.phase === "baseline") assert.equal(scheduler.length, 0);
+      if (trial.candidate.sources.scheduler !== PI_SCHED)
+        assert.equal(scheduler.length, 0);
       else {
         assert.ok(scheduler.length > 0);
         assert.equal(
@@ -1113,6 +1334,7 @@ async function costResultScenario(dir: string): Promise<void> {
         assert.equal(run.objective?.value, 100 + scheduler.length * 0.25);
       }
     }
+  checkCoordinates(state, log);
   await checkEvidence(target, state);
   assert.equal(
     await readFile(target.ts, "utf8"),
@@ -1170,9 +1392,9 @@ const TOKEN_CODE = `const CODE: Record<string, syntax.DeterministicNode> = {
       const view = yield [];
       const report = view.values.get("Writer->Quality") as { content: Parameters<typeof contentText>[0] };
       let quality = Number(/quality=([0-9.]+)/.exec(contentText(report.content))?.[1]);
-      if (RUN_DIR !== undefined) {
+      if (profile.directory !== undefined) {
         // Synthetic flake for the fixture: the first confirmation batch reads lower quality.
-        const state = JSON.parse(await readFile(join(RUN_DIR, "..", "..", "state.json"), "utf8"));
+        const state = JSON.parse(await readFile(join(profile.directory, "..", "..", "state.json"), "utf8"));
         const phases = state.history.filter((item) => item.kind === "trial").map((item) => item.phase);
         if (phases.at(-1) === "confirmation" && phases.filter((phase) => phase === "confirmation").length === 1)
           quality = 0.85;
@@ -1191,6 +1413,8 @@ const TOKEN_CODE = `const CODE: Record<string, syntax.DeterministicNode> = {
 
 const ladderOf = (med: string) =>
   `const optimizerLadder: schedules.Ladder | undefined = {\n  ...schedules.uniformLadder({ model: "target/large" }),\n  med: { model: "target/${med}" },\n};\nconst optimizerStrength = undefined;\n`;
+const UNIFORM_SMALL =
+  'const optimizerLadder: schedules.Ladder | undefined = schedules.uniformLadder({ model: "target/small" });\nconst optimizerStrength = undefined;\n';
 
 async function tokenScenario(dir: string): Promise<void> {
   const target = await prepare(dir, {
@@ -1207,6 +1431,16 @@ async function tokenScenario(dir: string): Promise<void> {
   });
   const log: EditorLog = { states: [] };
   const tokenCap = (n: number) => limits(`{ tokens: ${n} }`);
+  const capEdit = (info: Info, n: number) =>
+    fauxToolCall("edit_tuning", {
+      ticket: info.ticket,
+      axis: "limits",
+      expectedTsHash: info.tsHash,
+      source: tokenCap(n),
+      reason: `cap tokens at ${n}`,
+    });
+  const repeated: { messages: string[]; unchanged: boolean }[] = [];
+  const runsBefore: number[] = [];
   const { models, editorRung } = await editorRuntime(
     [
       // Cycle 0: an equal scheduler, a cheaper used rung (promoted), a failing then an equal limit.
@@ -1214,14 +1448,38 @@ async function tokenScenario(dir: string): Promise<void> {
       ...editorTurn({ axis: "ladder", source: ladderOf("small") }, log),
       ...editorTurn({ axis: "limits", source: tokenCap(1_000) }, log),
       ...editorTurn({ axis: "limits", source: tokenCap(10_000) }, log),
-      // Cycle 1: no promotion; the cheapest rung fails quality; confirmation then flakes.
+      // Cycle 1: no promotion; the cheapest rung fails quality; confirmation then flakes. The same
+      // scheduler source beside the promoted ladder is a new triplet; the failed and the measured
+      // caps beside it are not, so the limits turn needs a third proposal.
       ...editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, log),
       ...editorTurn({ axis: "ladder", source: ladderOf("tiny") }, log),
-      ...editorTurn({ axis: "limits", source: tokenCap(10_000) }, log),
+      ...editorTurn(
+        {
+          axis: "limits",
+          rounds: [
+            async (info) => {
+              runsBefore.push(await runDirs(target.sessionDir));
+              return [capEdit(info, 1_000), capEdit(info, 10_000)];
+            },
+            async (info, previous) => {
+              repeated.push({
+                messages: previous.map((result) =>
+                  result.isError ? result.text : `accepted: ${result.text}`,
+                ),
+                unchanged:
+                  sha256(await readFile(target.ts)) === info.tsHash &&
+                  (await runDirs(target.sessionDir)) === runsBefore[0],
+              });
+              return [capEdit(info, 12_000)];
+            },
+          ],
+        },
+        log,
+      ),
       // Cycle 2: exploration resumes; confirmation passes on the saved 'small' configuration.
-      ...editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, log),
-      ...editorTurn({ axis: "ladder", source: ladderOf("large") }, log),
-      ...editorTurn({ axis: "limits", source: tokenCap(10_000) }, log),
+      ...editorTurn({ axis: "scheduler", source: SCHED.choose }, log),
+      ...editorTurn({ axis: "ladder", source: UNIFORM_SMALL }, log),
+      ...editorTurn({ axis: "limits", source: tokenCap(14_000) }, log),
     ],
     ["large", "small", "tiny"],
   );
@@ -1270,7 +1528,7 @@ async function tokenScenario(dir: string): Promise<void> {
     "confirmation:null:false:small",
     "remeasure:null:true:small",
     "candidate:scheduler:true:small",
-    "candidate:ladder:true:larger",
+    "candidate:ladder:true:small",
     "candidate:limits:true:small",
     "confirmation:null:true:small",
   ]);
@@ -1297,11 +1555,276 @@ async function tokenScenario(dir: string): Promise<void> {
     [0.95, 0.95, 0.95],
   );
   assert.equal(log.states.length, 10);
+  assert.equal(repeated.length, 1);
+  assert.equal(repeated[0]?.unchanged, true);
+  assert.equal(repeated[0]?.messages.length, 2);
+  for (const text of repeated[0]?.messages ?? [])
+    assert.match(
+      text,
+      /triplet [0-9a-f]{64} was already tried; propose a different limits configuration/,
+    );
+  // One scheduler source, two ladders: equal component hashes, distinct triplets.
+  assert.equal(
+    rest[0]?.candidate.triplet.scheduler,
+    rest[5]?.candidate.triplet.scheduler,
+  );
+  assert.notEqual(rest[0]?.candidate.key, rest[5]?.candidate.key);
+  checkCoordinates(state, log);
   await checkEvidence(target, state);
   assert.equal(
     await readFile(target.ts, "utf8"),
     withRegions(target.prepared, state.anchor.candidate.sources),
   );
+}
+
+// --- statistical promotion and the score table ------------------------------------------------------
+
+/** Synthetic per-run score and quality, indexed by child-run number, independent of the tuning. */
+const runTable = (
+  scores: readonly number[],
+  qualities: readonly number[],
+): TargetParts =>
+  numericTarget({
+    beforeBuild:
+      'const RUN = Number(profile.directory?.split("/").at(-1)) - 1;',
+    code: NUMERIC_CODE(
+      `${JSON.stringify(scores)}[RUN]`,
+      `${JSON.stringify(qualities)}[RUN]`,
+    ),
+    check: 'typeof value === "number"',
+  });
+
+async function statisticsScenario(dir: string): Promise<void> {
+  const batches: [scores: number[], qualities: number[]][] = [
+    [
+      [90, 100, 110],
+      [9, 10, 11],
+    ], // baseline
+    [
+      [60, 70, 80],
+      [12, 12, 6],
+    ], // C1: one run below the floor, though the mean passes
+    [
+      [80, 90, 100],
+      [8.999, 9.999, 10.999],
+    ], // C2: one-SD saving, slightly worse quality
+    [
+      [90, 100, 110],
+      [9, 10, 11],
+    ], // remeasure
+    [
+      [80, 90, 100],
+      [9, 10, 11],
+    ], // C3: exact one-SD saving
+    [
+      [80, 90, 100],
+      [10, 11, 12],
+    ], // C4: exact one-SD quality gain
+    [
+      [80, 90, 100],
+      [10, 11, 12],
+    ], // remeasure
+    [
+      [80, 90, 100],
+      [10, 11, 12],
+    ], // C5: unchanged
+    [
+      [70.001, 80.001, 90.001],
+      [10, 11, 12],
+    ], // C6: sub-SD saving
+    [
+      [80, 90, 100],
+      [10, 11, 12],
+    ], // confirmation
+  ];
+  const target = await prepare(
+    dir,
+    runTable(
+      batches.flatMap(([scores]) => scores),
+      batches.flatMap(([, qualities]) => qualities),
+    ),
+  );
+  const log: EditorLog = { states: [] };
+  const repeated: { messages: string[]; unchanged: boolean }[] = [];
+  const scheduler = (info: Info, source: string) =>
+    fauxToolCall("edit_tuning", {
+      ticket: info.ticket,
+      axis: "scheduler",
+      expectedTsHash: info.tsHash,
+      source,
+      reason: "try a scheduler",
+    });
+  let runsBefore = 0;
+  const { models, editor, editorRung } = await editorRuntime([
+    ...editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, log),
+    ...editorTurn(
+      { axis: "limits", source: limits("{ memoryBytes: 1 }") },
+      log,
+    ),
+    ...editorTurn(
+      {
+        axis: "scheduler",
+        rounds: [
+          // The infeasible triplet, then it and the baseline only reformatted or re-annotated.
+          async (info) => {
+            runsBefore = await runDirs(target.sessionDir);
+            return [
+              scheduler(info, SCHED.roundRobin),
+              scheduler(
+                info,
+                "// the earlier proposal, reformatted\nconst optimizerScheduler = (_label: string) =>\n  schedules.roundRobin( undefined, 1 ) ;\n",
+              ),
+              scheduler(
+                info,
+                "const optimizerScheduler = (_label: string): unknown => schedules.parallel();\n",
+              ),
+            ];
+          },
+          async (info, previous) => {
+            repeated.push({
+              messages: previous.map((result) =>
+                result.isError ? result.text : `accepted: ${result.text}`,
+              ),
+              unchanged:
+                sha256(await readFile(target.ts)) === info.tsHash &&
+                (await runDirs(target.sessionDir)) === runsBefore,
+            });
+            return [scheduler(info, SCHED.choose)];
+          },
+        ],
+      },
+      log,
+    ),
+    ...editorTurn(
+      { axis: "limits", source: limits("{ memoryBytes: 2 }") },
+      log,
+    ),
+    ...editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, log),
+    ...editorTurn(
+      { axis: "limits", source: limits("{ memoryBytes: 3 }") },
+      log,
+    ),
+  ]);
+  const state = await optimize(
+    requestFor(target, {
+      constraints: [{ metric: QUALITY, op: ">=", threshold: 8.5 }],
+      qualityConstraint: 0,
+      repeats: 3,
+      stop: { improvement: { kind: "relative", value: 0.05 } },
+      axes: ["scheduler", "limits"],
+    }),
+    { models, editorRung },
+  );
+  expectStop(state, "converged");
+  assert.equal(editor.getPendingResponseCount(), 0);
+  const all = trials(state);
+  assert.deepEqual(
+    all.map((trial) => `${trial.phase}:${trial.axis}:${trial.feasible}`),
+    [
+      "baseline:null:true",
+      "candidate:scheduler:false",
+      "candidate:limits:true",
+      "remeasure:null:true",
+      "candidate:scheduler:true",
+      "candidate:limits:true",
+      "remeasure:null:true",
+      "candidate:scheduler:true",
+      "candidate:limits:true",
+      "confirmation:null:true",
+    ],
+  );
+  assert.equal(all[1]?.stats?.constraints[0]?.mean, 10);
+  // The incumbent each assignment was handed: only C3 and C4 promoted, each from fresh evidence.
+  const [base, c1, , first, c3, c4, second, c5] = all as Trial[];
+  assert.deepEqual(
+    log.states.map((s) => s.anchor.candidate.key),
+    [base, base, base, c3, c4, c4].map((trial) => trial?.candidate.key),
+  );
+  assert.deepEqual(
+    log.states.map((s) => s.anchor.stats),
+    [base, base, first, c3, second, second].map((trial) => trial?.stats),
+  );
+  // The rejected infeasible candidate's bytes are gone before the next proposal.
+  assert.equal(log.states[1]?.current.key, base?.candidate.key);
+  assert.deepEqual(state.anchor.candidate.sources, {
+    scheduler: SCHED.choose,
+    ladder: NO_LADDER,
+    limits: limits("{ memoryBytes: 2 }"),
+  });
+  assert.deepEqual(state.anchor.stats?.objective, {
+    mean: 90,
+    standardDeviation: 10,
+    repeats: 3,
+  });
+  assert.equal(repeated.length, 1);
+  assert.equal(repeated[0]?.unchanged, true);
+  assert.equal(repeated[0]?.messages.length, 3);
+  for (const text of repeated[0]?.messages ?? [])
+    assert.match(
+      text,
+      /triplet [0-9a-f]{64} was already tried; propose a different scheduler configuration/,
+    );
+  assert.equal(
+    c5?.candidate.triplet.scheduler,
+    c1?.candidate.triplet.scheduler,
+  );
+  assert.notEqual(c5?.candidate.key, c1?.candidate.key);
+  checkCoordinates(state, log);
+  await checkEvidence(target, state);
+  // The promoted triplet's candidate, remeasurement and confirmation rows share its key.
+  const rows = (await readFile(join(target.sessionDir, "scores.jsonl"), "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    rows.filter((row) => row.key === c4?.candidate.key).map((row) => row.phase),
+    ["candidate", "remeasure", "confirmation"],
+  );
+  assert.equal(
+    await readFile(target.ts, "utf8"),
+    withRegions(target.prepared, state.anchor.candidate.sources),
+  );
+}
+
+/** A score-table append failure stops failed, never continues or converges, and restores. */
+async function scoreFailureScenario(dir: string): Promise<void> {
+  const target = await prepare(dir, numericTarget());
+  const scores = join(target.sessionDir, "scores.jsonl");
+  const { models, editorRung } = await editorRuntime(
+    editorTurn(
+      {
+        axis: "scheduler",
+        source: SCHED.roundRobin,
+        afterEdit: async () => {
+          await rename(scores, `${scores}.before-failure`);
+          await mkdir(scores);
+        },
+      },
+      { states: [] },
+    ),
+  );
+  const state = await optimize(requestFor(target, { stop: { target: 0 } }), {
+    models,
+    editorRung,
+  });
+  expectStop(state, "failed");
+  assert.match(state.stop?.reason ?? "", /cannot append to .*scores\.jsonl/);
+  assert.match(state.stop?.reason ?? "", /EISDIR/);
+  assert.deepEqual(
+    trials(state).map((trial) => [trial.phase, trial.runs.length]),
+    [
+      ["baseline", 2],
+      ["candidate", 2],
+    ],
+  );
+  assert.equal(edits(state).length, 1);
+  assert.equal(await readFile(target.ts, "utf8"), target.original);
+  const [baseline] = trials(state);
+  assert.deepEqual(
+    JSON.parse(await readFile(`${scores}.before-failure`, "utf8")),
+    { version: 1, key: baseline?.candidate.key, ...baseline },
+  );
+  assert.deepEqual(await readState(target.sessionDir), state);
 }
 
 // --- failures and ownership ------------------------------------------------------------------------
@@ -1334,7 +1857,7 @@ async function blockedScenario(
 
 async function resultFailureScenarios(dir: string): Promise<void> {
   const noHash = /no baseline run established/;
-  const missing = /no complete measurement for an improvement goal/;
+  const missing = /the baseline has no complete measurement/;
   const request: Partial<Request> = {
     objective: { metric: { kind: "cost" }, direction: "minimize" },
     constraints: [{ metric: RESOLVED, op: ">=", threshold: 60 }],
@@ -1358,8 +1881,8 @@ async function resultFailureScenarios(dir: string): Promise<void> {
     [
       "nonfinite",
       {
-        afterCleanup: `await writeFile(join(RUN_DIR, "completion.json"),
-      JSON.stringify({ version: 1, nonce: run.nonce, terminal: true, graphHash, resourceEvents, metrics: { resolved: "overflow" } }).replace('"overflow"', "1e309")); process.exit(0);`,
+        afterCleanup: `await writeFile(join(profile.directory as string, "completion.json"),
+      JSON.stringify({ version: 1, nonce: profile.request?.nonce, terminal: true, graphHash, resourceEvents, metrics: { resolved: "overflow" } }).replace('"overflow"', "1e309")); process.exit(0);`,
       },
       /finite numbers/,
       noHash,
@@ -1508,7 +2031,7 @@ async function resultFailureScenarios(dir: string): Promise<void> {
     editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, { states: [] }),
   );
   const state = await optimize(
-    requestFor(drift, { ...request, stop: { target: 0 }, runBudget: 2 }),
+    requestFor(drift, { ...request, stop: { target: 0 }, runBudget: 3 }),
     runtime,
   );
   expectStop(state, "budget");
@@ -1554,7 +2077,7 @@ async function failureScenarios(dir: string): Promise<void> {
     /no valid completion receipt/,
     noHash,
   );
-  const missing = /no complete measurement for an improvement goal/;
+  const missing = /the baseline has no complete measurement/;
   await blockedScenario(
     join(dir, "metric"),
     numericTarget(),
@@ -1614,20 +2137,24 @@ async function failureScenarios(dir: string): Promise<void> {
   assert.equal(maxState.anchor.candidate.sources.scheduler, SCHED.parallel);
   assert.equal(await readFile(max.ts, "utf8"), max.prepared);
 
-  // An explicit run budget stops non-converged and restores the original entrypoint.
+  // An explicit run budget stops non-converged mid-batch and restores the original entrypoint:
+  // the complete baseline and the partial candidate are each one score row.
   const budget = await prepare(join(dir, "budget"), numericTarget());
   const budgetRuntime = await editorRuntime(
     editorTurn({ axis: "scheduler", source: SCHED.roundRobin }, { states: [] }),
   );
   const budgetState = await optimize(
-    requestFor(budget, { stop: { target: 0 }, runBudget: 2 }),
+    requestFor(budget, { repeats: 3, stop: { target: 0 }, runBudget: 4 }),
     budgetRuntime,
   );
   assert.equal(budgetState.stop?.kind, "budget");
-  assert.match(budgetState.stop?.reason ?? "", /run budget of 2/);
+  assert.match(budgetState.stop?.reason ?? "", /run budget of 4/);
   assert.deepEqual(
-    trials(budgetState).map((trial) => trial.score),
-    [2, 1],
+    trials(budgetState).map((trial) => [trial.score, trial.runs.length]),
+    [
+      [2, 3],
+      [null, 1],
+    ],
   );
   assert.equal(await readFile(budget.ts, "utf8"), budget.original);
   await checkEvidence(budget, budgetState);
@@ -1774,7 +2301,7 @@ async function driftScenario(dir: string): Promise<void> {
     ),
   );
   const state = await optimize(
-    requestFor(target, { stop: { target: 0 }, runBudget: 2 }),
+    requestFor(target, { stop: { target: 0 }, runBudget: 3 }),
     {
       models,
       editorRung,
@@ -1797,9 +2324,9 @@ async function cancelScenario(dir: string): Promise<void> {
     dir,
     numericTarget({
       header: 'import { spawn } from "node:child_process";',
-      beforeBuild: `if (RUN_DIR !== undefined) {
+      beforeBuild: `if (profile.directory !== undefined) {
   const sleeper = spawn("sleep", ["60"], { stdio: "ignore" });
-  await writeFile(join(RUN_DIR, "sleeper.pid"), String(sleeper.pid));
+  await writeFile(join(profile.directory, "sleeper.pid"), String(sleeper.pid));
   await new Promise(() => setInterval(() => {}, 1000));
 }`,
     }),
@@ -1824,6 +2351,180 @@ async function cancelScenario(dir: string): Promise<void> {
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   assert.equal(await readFile(target.ts, "utf8"), target.original);
   assert.deepEqual(await readState(target.sessionDir), state);
+  await checkScores(target.sessionDir, state);
+
+  // Cancelled after its edit applied: the receipt keeps the edited identity and ownership, no
+  // unexecuted candidate becomes a measured trial or score row, and the original is restored.
+  const edited = await prepare(join(dir, "interrupted"), numericTarget());
+  const turn = new AbortController();
+  const runtime = await editorRuntime(
+    editorTurn(
+      {
+        axis: "scheduler",
+        source: SCHED.roundRobin,
+        afterEdit: () => turn.abort(new Error("cancelled by the fixture")),
+      },
+      { states: [] },
+    ),
+  );
+  const cut = await optimize(requestFor(edited), {
+    models: runtime.models,
+    editorRung: runtime.editorRung,
+    signal: turn.signal,
+  });
+  expectStop(cut, "cancelled");
+  const sources = {
+    ...cut.anchor.candidate.sources,
+    scheduler: SCHED.roundRobin,
+  };
+  assert.deepEqual(cut.current, {
+    sources,
+    ...identityOf(sources),
+    tsHash: sha256(withRegions(edited.prepared, sources)),
+  });
+  const last = cut.history.at(-1) as Edit;
+  assert.equal(last.kind, "edit");
+  assert.equal(last.accepted, false);
+  assert.equal(last.afterHash, cut.current.tsHash);
+  assert.match(last.error ?? "", /turn interrupted/);
+  assert.equal(trials(cut).length, 1);
+  assert.equal(await readFile(edited.ts, "utf8"), edited.original);
+  assert.deepEqual(await readState(edited.sessionDir), cut);
+  await checkScores(edited.sessionDir, cut);
+}
+
+/**
+ * Two overlapping campaigns on distinct targets whose edits share one triplet key: each keeps its
+ * own receipt, run numbering, evidence and restoration, and cancelling A never disturbs B.
+ */
+async function concurrentCampaignScenario(dir: string): Promise<void> {
+  const a = await prepare(join(dir, "a"), numericTarget());
+  const b = await prepare(
+    join(dir, "b"),
+    numericTarget({ code: `${NUMERIC_CODE()}\n// overlapping campaign B` }),
+  );
+  const cancelA = new AbortController();
+  const aEdited = Promise.withResolvers<void>();
+  const releaseA = Promise.withResolvers<void>();
+  const results: { a?: readonly Result[]; b?: readonly Result[] } = {};
+  const runtimeA = await editorRuntime(
+    editorTurn(
+      {
+        axis: "scheduler",
+        source: SCHED.roundRobin,
+        afterEdit: async (edit) => {
+          results.a = edit;
+          aEdited.resolve();
+          await releaseA.promise;
+        },
+      },
+      { states: [] },
+    ),
+  );
+  const runtimeB = await editorRuntime(
+    editorTurn(
+      {
+        axis: "scheduler",
+        source: SCHED.roundRobin,
+        afterEdit: (edit) => {
+          results.b = edit;
+          cancelA.abort(new Error("cancel overlapping campaign A"));
+          releaseA.resolve();
+        },
+      },
+      { states: [] },
+    ),
+  );
+  const runA = optimize(requestFor(a), {
+    models: runtimeA.models,
+    editorRung: runtimeA.editorRung,
+    signal: cancelA.signal,
+  });
+  let runB: Promise<State> | undefined;
+  try {
+    await Promise.race([
+      aEdited.promise,
+      runA.then((state) => {
+        throw new Error(
+          `campaign A stopped before its edit: ${state.stop?.reason}`,
+        );
+      }),
+    ]);
+    runB = optimize(requestFor(b, { repeats: 2, runBudget: 4 }), {
+      models: runtimeB.models,
+      editorRung: runtimeB.editorRung,
+    });
+    await runB;
+  } finally {
+    if (!cancelA.signal.aborted)
+      cancelA.abort(new Error("the overlapping campaign check failed"));
+    releaseA.resolve();
+    await Promise.allSettled([runA, runB]);
+  }
+  const stateA = await runA;
+  const stateB = await runB;
+
+  for (const edit of [results.a, results.b]) {
+    assert.equal(edit?.length, 1);
+    assert.equal(edit?.[0]?.name, "edit_tuning");
+    assert.equal(edit?.[0]?.isError, false, edit?.[0]?.text);
+  }
+  const sources = {
+    ...stateA.anchor.candidate.sources,
+    scheduler: SCHED.roundRobin,
+  };
+  const candidateOf = (target: Prepared) => ({
+    sources,
+    ...identityOf(sources),
+    tsHash: sha256(withRegions(target.prepared, sources)),
+  });
+
+  // A: cancelled after its applied edit; the unexecuted candidate is owned, restored, never scored.
+  expectStop(stateA, "cancelled");
+  assert.equal(await runDirs(a.sessionDir), 2);
+  assert.deepEqual(
+    trials(stateA).map((trial) => [trial.phase, trial.runs.length]),
+    [["baseline", 2]],
+  );
+  assert.deepEqual(stateA.current, candidateOf(a));
+  const lastA = stateA.history.at(-1) as Edit;
+  assert.equal(lastA.kind, "edit");
+  assert.equal(lastA.accepted, false);
+  assert.equal(lastA.afterHash, stateA.current.tsHash);
+  assert.match(lastA.error ?? "", /turn interrupted/);
+  assert.equal(await readFile(a.ts, "utf8"), a.original);
+
+  // B: the same triplet key is novel to its own session, measured and promoted.
+  expectStop(stateB, "budget");
+  assert.equal(await runDirs(b.sessionDir), 4);
+  const [baselineB, candidateB] = trials(stateB);
+  assert.deepEqual(
+    trials(stateB).map((trial) => [trial.phase, trial.runs.length]),
+    [
+      ["baseline", 2],
+      ["candidate", 2],
+    ],
+  );
+  assert.equal(baselineB?.stats?.objective.mean, 2);
+  assert.equal(candidateB?.stats?.objective.mean, 1);
+  assert.deepEqual(candidateB?.candidate, candidateOf(b));
+  assert.deepEqual(stateB.anchor.candidate, candidateOf(b));
+  assert.equal(candidateB?.candidate.key, stateA.current.key);
+  assert.notEqual(candidateB?.candidate.tsHash, stateA.current.tsHash);
+  assert.equal(await readFile(b.ts, "utf8"), b.original);
+
+  for (const [target, state] of [
+    [a, stateA],
+    [b, stateB],
+  ] as const) {
+    for (const trial of trials(state))
+      for (const run of trial.runs)
+        assert.ok(
+          run.directory.startsWith(join(target.sessionDir, "runs", "")),
+          run.directory,
+        );
+    await checkEvidence(target, state);
+  }
 }
 
 async function externalCleanupScenario(dir: string): Promise<void> {
@@ -1831,7 +2532,7 @@ async function externalCleanupScenario(dir: string): Promise<void> {
     dir,
     numericTarget({
       afterCleanup:
-        'await writeFile(join(RUN_DIR, "cleanup.pending"), "external resources may still be live");',
+        'await writeFile(join(profile.directory as string, "cleanup.pending"), "external resources may still be live");',
     }),
   );
   const { models, editorRung } = await editorRuntime([]);
@@ -1851,6 +2552,7 @@ async function externalCleanupScenario(dir: string): Promise<void> {
     existsSync(join(target.sessionDir, "runs", "0001", "cleanup.pending")),
   );
   assert.deepEqual(await readState(target.sessionDir), state);
+  await checkScores(target.sessionDir, state);
 }
 
 // --- package boundaries ----------------------------------------------------------------------------
@@ -1879,6 +2581,29 @@ async function exec(
   return { code, stdout, stderr };
 }
 
+/** Without JUNCO_PROFILE_RUN_DIR the prepared target runs as the ordinary workflow and writes no evidence. */
+async function inactiveInstrumentationScenario(dir: string): Promise<void> {
+  const target = await prepare(
+    dir,
+    numericTarget({
+      afterRun:
+        "console.log(JSON.stringify({ value, active: profile.request !== undefined }));",
+    }),
+  );
+  const result = await exec([process.execPath, "run", target.ts], {
+    ...process.env,
+    JUNCO_PROFILE_RUN_DIR: undefined,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { value: 2, active: false });
+  assert.equal(await readFile(target.ts, "utf8"), target.prepared);
+  assert.deepEqual((await readdir(target.sessionDir)).sort(), [
+    "original.ts",
+    "original.yml",
+    "prepared.ts",
+  ]);
+}
+
 async function boundaryChecks(dir: string): Promise<void> {
   const target = await prepare(dir, numericTarget());
   const request = requestFor(target);
@@ -1896,6 +2621,32 @@ async function boundaryChecks(dir: string): Promise<void> {
       } as Request),
       /invalid optimization request/,
     );
+  for (const [extra, pattern] of [
+    [{ repeats: 1 }, /invalid optimization request/],
+    [{ qualityConstraint: -1 }, /invalid optimization request/],
+    [{ qualityConstraint: 0.5 }, /invalid optimization request/],
+    [{ qualityConstraint: 1 }, /qualityConstraint 1 names no constraint/],
+    [
+      {
+        constraints: [{ metric: { kind: "tokens" }, op: "<=", threshold: 1 }],
+        qualityConstraint: 0,
+      },
+      /must name a probe or result constraint/,
+    ],
+  ] as const)
+    await assert.rejects(
+      schedules.runOptimizer({ ...request, ...extra } as Request),
+      pattern,
+    );
+  // A score table from an earlier invocation is never reused or overwritten.
+  const staleScores = join(target.sessionDir, "scores.jsonl");
+  await writeFile(staleScores, "kept\n");
+  await assert.rejects(
+    schedules.runOptimizer(request),
+    /scores\.jsonl belongs to a previous invocation/,
+  );
+  assert.equal(await readFile(staleScores, "utf8"), "kept\n");
+  await rm(staleScores);
   const portable = `
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -1946,15 +2697,20 @@ const main = async () => {
   let ok = false;
   try {
     await checkMetrics(join(root, "metrics"));
+    checkStatistics();
     await boundaryChecks(join(root, "boundaries"));
+    await inactiveInstrumentationScenario(join(root, "inactive"));
     await numericScenario(join(root, "numeric"));
     await tokenScenario(join(root, "tokens"));
+    await statisticsScenario(join(root, "statistics"));
+    await scoreFailureScenario(join(root, "score-failure"));
     await costResultScenario(join(root, "cost-results"));
     await resultFailureScenarios(join(root, "result-failures"));
     await failureScenarios(join(root, "failures"));
     await ownershipScenario(join(root, "ownership"));
     await driftScenario(join(root, "drift"));
     await cancelScenario(join(root, "cancel"));
+    await concurrentCampaignScenario(join(root, "concurrent"));
     await externalCleanupScenario(join(root, "external-cleanup"));
     ok = true;
   } finally {

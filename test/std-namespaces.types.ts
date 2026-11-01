@@ -1400,6 +1400,7 @@ export async function profileOptimizerIsAStandardWorkflow(signal: AbortSignal) {
         threshold: 0.9,
       },
     ],
+    qualityConstraint: 0,
     repeats: 3,
     stop: { improvement: { kind: "relative", value: 0.2 } },
     axes: ["scheduler", "ladder", "limits"],
@@ -1421,12 +1422,15 @@ export async function profileOptimizerIsAStandardWorkflow(signal: AbortSignal) {
     | "failed"
     | undefined = state.stop?.kind;
   const incumbent: number | null = state.anchor.score;
+  const spread: number | undefined =
+    state.anchor.stats?.objective.standardDeviation;
+  const key: string = state.anchor.candidate.key;
   const invalid: schedules.OptimizationRequest = {
     ...request,
     // @ts-expect-error an objective direction is "minimize" or "maximize"
     objective: { metric: { kind: "memory" }, direction: "lower" },
   };
-  return [yaml, kind, incumbent, invalid];
+  return [yaml, kind, incumbent, spread, key, invalid];
 }
 
 export function ralphSuccessModeTypes() {

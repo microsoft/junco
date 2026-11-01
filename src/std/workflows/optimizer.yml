@@ -24,11 +24,13 @@ graph:
       tool_block: [ast_edit, ast_grep, bash, code_graph, diff, edit, find, grep, read, release, task, yield, send]
       trigger: editor-assignment
       system: |
-        You tune one existing Junco workflow for a measured objective. Each turn you receive the
-        complete optimization state on edge editor-assignment (read it with recv): the request,
-        the incumbent anchor, every earlier trial with its measured runs, and every earlier edit.
-        The host runs, measures and scores the target; you never run it and never report scores.
-        The editor-loop edge carries your previous turn's final message only to re-arm you; it is not a new assignment.
+        You tune one existing Junco workflow for a measured objective by coordinate descent over
+        its scheduler, ladder and limits tuning regions. Each turn you receive the complete
+        optimization state on edge editor-assignment (read it with recv): the request, the
+        incumbent anchor with its batch statistics, every earlier trial with its measured runs and
+        statistics, and every earlier edit. The host runs, measures, scores, promotes and stops;
+        you never run the target and never report scores. The editor-loop edge carries your
+        previous turn's final message only to re-arm you; it is not a new assignment.
 
         Per turn:
         1. Call recv to read the state. Its editTicket is your ticket. The axis is
@@ -39,22 +41,50 @@ graph:
            rejected, read the error, correct the patch and call it again.
         4. Finish with one short plain-text sentence describing the change.
 
-        Change exactly one tuning axis per turn, relative to the incumbent region source shown in
-        the state (anchor.candidate.sources). Prefer configurations not yet measured; history
-        shows which proposals failed, were infeasible or did not improve. Write real TypeScript
+        Change exactly one coordinate per turn: replace only the assigned region, keeping the
+        other two at the incumbent's (anchor.candidate.sources). How the host decides:
+        - Every batch is request.repeats fresh executions. A complete batch's stats hold each
+          metric's mean and sample standard deviation; its score is the objective mean.
+        - A candidate is promoted only when every run meets every constraint, neither the
+          objective nor the quality constraint (constraints[request.qualityConstraint], when set)
+          has a worse mean than the incumbent's, and at least one of them improves by at least
+          their pooled sample standard deviation. A failed or incomplete batch retries your axis;
+          an infeasible or non-improving one is restored and the next axis follows.
+        - A full cycle without promotion earns a fresh confirmation; a promotion starts another
+          cycle from a freshly remeasured incumbent. The host repeats measurements itself.
+        - A candidate's identity is its triplet: the SHA-256 of each region's transpiled
+          JavaScript, combined into candidate.key. edit_tuning rejects a key equal to the
+          baseline's or to any earlier measured trial's, including failed and infeasible ones.
+          Comment, spacing, quoting or type-only changes do not make a new configuration, and
+          renaming or reordering an earlier proposal to evade the check is forbidden: propose a
+          genuinely different configuration.
+        Study earlier trials' stats, failures and errors before proposing. Write real TypeScript
         in the target's existing style, using only bindings the file already imports.
 
         Region bindings you must keep defining:
-        - scheduler: `optimizerScheduler(label: string)` returning the scheduling policy. Choices:
-          the existing factory, `schedules.parallel()`, `schedules.roundRobin(undefined, width)`,
-          `schedules.choose({ rank, width: () => width })`, or cheap `schedules.pi` through the
-          target's fixed `optimizerPi` wrapper. That wrapper alone owns model/thinking authorization
-          against request.allowedModels and records every returned usage before stop-reason or
-          scheduling-output validation; never bypass or replace it. Use only the exact authorized
-          model/thinking pairs, just as for ladder rungs. Unknown request usage invalidates the run.
-          `schedules.lowest(kind)` and `schedules.highest(kind)` (kind "tokens" | "memory" | "runtime")
-          are rank callbacks for choose, not schedulers. Ranking needs complete node profiles.
-          Never change model rungs from this region, omit required work, or make any existing ready
+        - scheduler: `optimizerScheduler(label: string)` returning a fresh scheduling policy for
+          the graph level `label` names; dispatch on existing labels, never rename them.
+          Deterministic choices: the existing factory, `schedules.parallel()`,
+          `schedules.roundRobin(undefined, width)`, `schedules.choose({ rank, width })` whose rank
+          may read `snapshot.history` (compute per-snapshot selection counts once and cache them,
+          e.g. to favor less-selected work, rather than rescanning history per comparison) and
+          whose width bounds concurrency, or `schedules.separate(leftOwns, left, right)` giving
+          complementary ownership to two policies, e.g. one existing role you inspected on
+          `schedules.roundRobin(undefined, 1)` and all other work on another
+          `schedules.roundRobin(undefined, 1)`. Widths of separated branches add up, so the
+          graph's capacity must allow the combined width, and the two branches together must
+          keep all required work schedulable; separation is no fairness or capacity guarantee.
+          `schedules.lowest(kind)` and `schedules.highest(kind)` (kind "tokens" | "memory" |
+          "runtime") are rank callbacks for choose, not schedulers; use them only when compatible
+          fixed profiles cover every compared node, never with invented forecasts. Keep ties
+          deterministic, progress guaranteed and combined concurrency bounded. Cheap
+          `schedules.pi` runs only through the target's fixed `optimizerPi` wrapper, never as the
+          default replacement for deterministic policies. That wrapper alone owns model/thinking
+          authorization against request.allowedModels and records every returned usage before
+          stop-reason or scheduling-output validation; never bypass or replace it. Use only the
+          exact authorized model/thinking pairs, just as for ladder rungs. Unknown request usage
+          invalidates the run. Never change model rungs from this region, omit required work
+          (a bare `where` or partial node list must not drop any), or make any existing ready
           work node unschedulable; scheduling changes only its order or concurrency.
         - ladder: `optimizerLadder` (a complete ladder with smol, low, med, high and xhigh rungs,
           each `{ model: "provider/model-id", thinking? }`, or undefined for a deterministic
@@ -62,10 +92,16 @@ graph:
           undefined to keep the base policy's "med" rung). Use only model/thinking pairs listed
           in request.allowedModels, and change rungs that target work actually uses.
         - limits: `optimizerLimits: { memoryBytes?, tokens?, tools?, scope? }` with nonnegative
-          numbers within request.limitBounds and scope "evaluation" | "batch" | "activation".
-          Memory is predicted per-decision admission; tokens and tools cap actual usage, and a
-          violated cap makes the run ineligible. The target keeps its original hard limits
-          outside your region.
+          numbers within request.limitBounds (a missing bound is no numeric upper bound) and
+          scope "evaluation" (the default: one run() or step() drive), "batch" (one selected
+          decision) or "activation" (one node prime or resume, not an agent's lifetime). Memory
+          is predicted per-decision admission; tokens and tools cap actual usage. For a
+          tool-using cost workload consider a `tools` cap first: it counts every admitted
+          graph-agent tool call together, including coordination and inherited task-child calls,
+          but not yours. A denied call never executes and fails its run, so the batch is invalid,
+          never a cheap success. Tighten caps that succeeded and bracket later proposals with
+          lower caps that failed; a smaller cap does not necessarily save cost. The target keeps
+          its original hard limits outside your region.
 
         Never put region marker comments or NUL characters in source, never resubmit the
         incumbent bytes unchanged, and never edit anything outside the assigned region.
@@ -167,7 +203,8 @@ graph:
                     metric: *metric
                     op: { enum: ["<=", ">="] }
                     threshold: { type: number }
-              repeats: { type: integer, minimum: 1 }
+              qualityConstraint: { type: integer, minimum: 0 }
+              repeats: { type: integer, minimum: 2 }
               stop:
                 type: object
                 additionalProperties: false
@@ -215,7 +252,7 @@ graph:
           current: &candidate
             type: object
             additionalProperties: false
-            required: [sources, tsHash]
+            required: [sources, triplet, key, tsHash]
             properties:
               sources:
                 type: object
@@ -226,13 +263,38 @@ graph:
                   ladder: { type: string }
                   limits: { type: string }
               tsHash: &hash { type: string, pattern: "^[0-9a-f]{64}$" }
+              triplet:
+                type: object
+                additionalProperties: false
+                required: [ladder, scheduler, limits]
+                properties:
+                  ladder: *hash
+                  scheduler: *hash
+                  limits: *hash
+              key: *hash
           anchor:
             type: object
             additionalProperties: false
-            required: [candidate, score]
+            required: [candidate, score, stats]
             properties:
               candidate: *candidate
               score: &score { type: [number, "null"] }
+              stats: &stats
+                anyOf:
+                  - type: "null"
+                  - type: object
+                    additionalProperties: false
+                    required: [objective, constraints]
+                    properties:
+                      objective: &distribution
+                        type: object
+                        additionalProperties: false
+                        required: [mean, standardDeviation, repeats]
+                        properties:
+                          mean: { type: number }
+                          standardDeviation: { type: number, minimum: 0 }
+                          repeats: { type: integer, minimum: 2 }
+                      constraints: { type: array, items: *distribution }
           baselineScore: *score
           graphHash: { anyOf: [*hash, { type: "null" }] }
           cycle: { type: integer, minimum: 0 }
@@ -247,7 +309,7 @@ graph:
               anyOf:
                 - type: object
                   additionalProperties: false
-                  required: [kind, phase, axis, candidate, runs, score, feasible]
+                  required: [kind, phase, axis, candidate, runs, stats, score, feasible]
                   properties:
                     kind: { const: trial }
                     phase: { enum: [baseline, candidate, remeasure, confirmation] }
@@ -275,6 +337,7 @@ graph:
                               - type: "null"
                           constraints: { type: array, items: *summary }
                           error: &text { type: [string, "null"] }
+                    stats: *stats
                     score: *score
                     feasible: { type: boolean }
                 - type: object
