@@ -1,4 +1,4 @@
-# Real Grafana Live smoke: nested leaves nodeId1::nodeId2::A and nodeId1::nodeId2::B.
+# Real retained-metrics smoke: nested leaves nodeId1::nodeId2::A and nodeId1::nodeId2::B.
 graph:
   nodes:
     nodeId1:

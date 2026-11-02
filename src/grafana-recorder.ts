@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type * as cog from "@grafana/grafana-foundation-sdk/cog";
+import type { VariableModel } from "@grafana/grafana-foundation-sdk/dashboard";
 import {
   type NativeResourceEvent,
   type ProfileEvent,
@@ -10,7 +10,9 @@ import {
 export type GrafanaRecorderOptions = {
   /** Grafana base URL, without credentials; default `http://localhost:8000`. */
   readonly url?: string;
-  /** Live push interval; default 1000 ms. */
+  /** Managed dashboard UID; default `junco-telemetry`. */
+  readonly dashboard?: string;
+  /** Metrics push interval; default 1000 ms. */
   readonly intervalMs?: number;
 };
 
@@ -35,7 +37,7 @@ type Pipeline = { readonly node: Node; last: Sample | undefined };
 type Rollup = { readonly path: string; peak: number };
 
 type Operation = {
-  readonly tags: string;
+  readonly attributes: ReturnType<typeof attribute>[];
   calls: number;
   inflight: number;
   success: number;
@@ -47,16 +49,22 @@ type Operation = {
   pendingCalls: number;
   readonly counters: Map<string, number>;
   readonly gauges: Map<string, number>;
+  exportedFields: Set<string>;
 };
 
 const DASHBOARD = "junco-telemetry";
+const BENCHMARK_DASHBOARDS = new Set([
+  "junco-cooperbench",
+  "junco-swebench",
+  "junco-msbench",
+]);
 const DASHBOARDS =
   "/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
-// ponytail: each Live push is capped at Grafana's 500 KiB; shard streams if a measured snapshot exceeds it.
+// ponytail: each request is capped at 500 KiB; shard streams if a measured snapshot exceeds it.
 const PUSH_LIMIT = 500 * 1024;
 const TIMEOUT_MS = 5000;
 const FIELD = /^[a-z][a-z0-9_]*$/;
-const GRAFANA = { type: "grafana", uid: "grafana" };
+const PROMETHEUS = { type: "prometheus", uid: "junco-prometheus" };
 
 /** Native sample fields and their wire names; `memory_bytes`/`pids` are current, others cumulative. */
 const SAMPLE_FIELDS = [
@@ -94,109 +102,94 @@ const COST_FIELDS = [
 const within = (path: string, node: Node) =>
   path === "" || node.path === path || node.path.startsWith(`${path}::`);
 const label = (path: string) => (path === "" ? "::" : path);
-const tag = (value: string) =>
-  value
-    .replace(/[\\,= ]/g, "\\$&")
-    .replaceAll("\r", "\\r")
-    .replaceAll("\n", "\\n");
+const attribute = (key: string, value: string) => ({
+  key,
+  value: { stringValue: value },
+});
 
-/** Streams profile events as Grafana Live measurements of one session `streamId`. */
-export class GrafanaRecorder implements ProfileRecorder<string> {
-  readonly root: object = this;
-  readonly path = "";
-  /** This session's Live stream; select it with the dashboard's `stream` variable. */
-  readonly streamId = `junco_${randomUUID().replaceAll("-", "")}`;
-  readonly dashboardUrl: string;
-  readonly #base: string;
-  readonly #intervalMs: number;
-  readonly #contexts = profileContexts(
-    this,
-    (_ids, path, event) => this.#reduce(path, event),
-    () => {
-      if (this.#closing !== undefined)
-        throw new Error("GrafanaRecorder: closed");
-    },
-  );
+export type ProfileMetricPoint = {
+  attributes: { key: string; value: { stringValue: string } }[];
+  timeUnixNano: string;
+  asDouble?: number;
+  flags?: number;
+};
+export type ProfileMetric = {
+  name: string;
+  gauge: { dataPoints: ProfileMetricPoint[] };
+};
+const payload = (metrics: readonly ProfileMetric[]) =>
+  JSON.stringify({ resourceMetrics: [{ scopeMetrics: [{ metrics }] }] });
+
+/** Shared validation for live recording and dashboard-only provisioning. */
+function configuration(options: GrafanaRecorderOptions) {
+  const { intervalMs = 1000, dashboard = DASHBOARD } = options;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0)
+    throw new Error("GrafanaRecorder: intervalMs must be positive");
+  if (typeof dashboard !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(dashboard))
+    throw new Error("GrafanaRecorder: dashboard must match ^[A-Za-z0-9_-]{1,40}$");
+  const url = URL.parse(options.url ?? "http://localhost:8000");
+  if (
+    url === null ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== ""
+  )
+    throw new Error(
+      "GrafanaRecorder: url must be an http(s) URL without credentials",
+    );
+  const base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  return { base, intervalMs, dashboard };
+}
+
+/** Provisions a managed dashboard without creating a telemetry session or recording metrics. */
+export async function provisionGrafanaDashboard(
+  options: GrafanaRecorderOptions = {},
+): Promise<void> {
+  const { base, dashboard } = configuration(options);
+  await provision(base, dashboard);
+}
+
+/** Clock-free accounting shared by live recording and offline receipt-time replay. */
+export class ProfileMetricState {
+  readonly #streamId: string;
+  readonly #dashboard: string;
   readonly #nodes = new Map<string, Node>();
   readonly #rollups = new Map<string, Rollup>();
   readonly #operations = new Map<string, Operation>();
   readonly #pipelines = new Map<object, Map<string, Pipeline>>();
   readonly #active = new Set<Pipeline>();
-  /** Probe points awaiting their own push, in record order. */
-  #probes: string[] = [];
+  readonly #probeTimes = new Map<string, number>();
+  #snapshotMs = 0;
   #peak = 0;
-  #clock: number | undefined;
-  #timer: ReturnType<typeof setInterval> | undefined;
-  #drain: Promise<void> = Promise.resolve();
-  #queued = 0;
-  #stopped = false;
-  #failure: unknown;
-  #closing: Promise<void> | undefined;
 
-  private constructor(base: string, intervalMs: number) {
-    this.#base = base;
-    this.#intervalMs = intervalMs;
-    this.dashboardUrl = `${base}/d/${DASHBOARD}?var-stream=${this.streamId}`;
+  constructor(streamId: string, dashboard: string) {
+    this.#streamId = streamId;
+    this.#dashboard = dashboard;
   }
 
-  /** Validates `options` and provisions the dashboard; rejects before any work on failure. */
-  static async create(
-    options: GrafanaRecorderOptions = {},
-  ): Promise<GrafanaRecorder> {
-    const { intervalMs = 1000 } = options;
-    if (!Number.isFinite(intervalMs) || intervalMs <= 0)
-      throw new Error("GrafanaRecorder: intervalMs must be positive");
-    const url = URL.parse(options.url ?? "http://localhost:8000");
-    if (
-      url === null ||
-      (url.protocol !== "http:" && url.protocol !== "https:") ||
-      url.username !== "" ||
-      url.password !== ""
-    )
-      throw new Error(
-        "GrafanaRecorder: url must be an http(s) URL without credentials",
-      );
-    const base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-    await provision(base);
-    return new GrafanaRecorder(base, intervalMs);
+  /** Reduces an event once; probe points are returned for immediate live delivery. */
+  record(
+    path: string,
+    event: ProfileEvent<string>,
+    receiptMs: number,
+  ): readonly ProfileMetric[] | undefined {
+    if (event.kind === "usage") this.#usage(path, event.resource, event.usage);
+    else if (event.kind === "resource")
+      this.#resource(path, event.source, event.event);
+    else if (event.kind === "probe")
+      return this.#probe(path, event.edgeId, event.value, receiptMs);
+    else this.#operation(path, event);
   }
 
-  readonly record = (event: ProfileEvent<string>): void =>
-    this.#reduce("", event);
-
-  add_context(nodeId: string): ProfileRecorder<string> {
-    return this.#contexts.add([], nodeId);
-  }
-
-  flush(): Promise<void> {
-    return this.#closing ?? this.#flush();
-  }
-
-  close(): Promise<void> {
-    this.#closing ??= (async () => {
-      clearInterval(this.#timer);
-      try {
-        await this.#flush();
-      } finally {
-        this.#contexts.clear();
-        this.#nodes.clear();
-        this.#rollups.clear();
-        this.#operations.clear();
-        this.#pipelines.clear();
-        this.#active.clear();
-        this.#probes = [];
-      }
-    })();
-    return this.#closing;
-  }
-
-  async #flush(): Promise<void> {
-    await this.#enqueue();
-    if (this.#failure !== undefined) throw this.#failure;
-  }
-
-  #fail(error: unknown): void {
-    this.#failure ??= error;
+  clear(): void {
+    this.#nodes.clear();
+    this.#rollups.clear();
+    this.#operations.clear();
+    this.#pipelines.clear();
+    this.#active.clear();
+    this.#probeTimes.clear();
+    this.#snapshotMs = 0;
+    this.#peak = 0;
   }
 
   #node(path: string): Node {
@@ -216,32 +209,37 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     return node;
   }
 
-  #reduce(path: string, event: ProfileEvent<string>): void {
-    if (this.#closing !== undefined) return;
-    if (this.#clock === undefined) {
-      this.#clock = performance.now();
-      this.#timer = setInterval(() => this.#tick(), this.#intervalMs);
-      this.#timer.unref();
-    }
-    if (event.kind === "usage") this.#usage(path, event.resource, event.usage);
-    else if (event.kind === "resource")
-      this.#resource(path, event.source, event.event);
-    else if (event.kind === "probe")
-      this.#probe(path, event.edgeId, event.value);
-    else this.#operation(path, event);
-  }
-
-  /** Queues one `junco_probe` point at receipt time; no later push could carry it once stopped. */
-  #probe(path: string, edgeId: string, value: number): void {
-    if (this.#stopped) return;
-    if (!Number.isFinite(value)) {
-      this.#fail(new Error("GrafanaRecorder: invalid probe value"));
-      return;
-    }
-    // Live keeps one point per series and millisecond of a push, so each point is pushed alone.
-    this.#probes.push(
-      `junco_probe,node=${tag(label(path))},edge_id=${tag(edgeId)} value=${value} ${BigInt(Date.now()) * 1_000_000n}`,
-    );
+  #probe(
+    path: string,
+    edgeId: string,
+    value: number,
+    receiptMs: number,
+  ): readonly ProfileMetric[] {
+    if (!Number.isFinite(value))
+      throw new Error("GrafanaRecorder: invalid probe value");
+    const key = JSON.stringify([path, edgeId]);
+    // ponytail: collision bursts advance this series by 1ms per point, without creating new series.
+    const ms = Math.max(receiptMs, (this.#probeTimes.get(key) ?? 0) + 1);
+    this.#probeTimes.set(key, ms);
+    return [
+      {
+        name: "junco_probe_value",
+        gauge: {
+          dataPoints: [
+            {
+              attributes: [
+                attribute("stream", this.#streamId),
+                attribute("dashboard", this.#dashboard),
+                attribute("node", label(path)),
+                attribute("edge_id", edgeId),
+              ],
+              timeUnixNano: String(BigInt(ms) * 1_000_000n),
+              asDouble: value,
+            },
+          ],
+        },
+      },
+    ];
   }
 
   #usage(
@@ -275,8 +273,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
           : !Number.isFinite(value),
       )
     ) {
-      this.#fail(new Error("GrafanaRecorder: invalid usage"));
-      return;
+      throw new Error("GrafanaRecorder: invalid usage");
     }
     const node = this.#node(path);
     node.usage ??= new Map();
@@ -294,8 +291,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
         ([key]) => !Number.isFinite(sample[key]) || sample[key] < 0,
       )
     ) {
-      this.#fail(new Error("GrafanaRecorder: invalid resource sample"));
-      return;
+      throw new Error("GrafanaRecorder: invalid resource sample");
     }
     let pipelines = this.#pipelines.get(source);
     if (pipelines === undefined) {
@@ -346,15 +342,13 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
   ): void {
     const { resource, category, tool, operation } = event;
     if (resource === "" || category === "" || operation === "") {
-      this.#fail(new Error("GrafanaRecorder: invalid operation labels"));
-      return;
+      throw new Error("GrafanaRecorder: invalid operation labels");
     }
     if (
       event.kind === "finish" &&
       (!Number.isFinite(event.durationMs) || event.durationMs < 0)
     ) {
-      this.#fail(new Error("GrafanaRecorder: invalid duration"));
-      return;
+      throw new Error("GrafanaRecorder: invalid duration");
     }
     if (event.kind === "metrics") {
       const entries = [
@@ -367,15 +361,20 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
             !FIELD.test(field) || (value !== null && !Number.isFinite(value)),
         )
       ) {
-        this.#fail(new Error("GrafanaRecorder: invalid metrics"));
-        return;
+        throw new Error("GrafanaRecorder: invalid metrics");
       }
     }
     const key = JSON.stringify([path, resource, category, tool, operation]);
     let op = this.#operations.get(key);
     if (op === undefined) {
       op = {
-        tags: `,node=${tag(label(path))},resource=${tag(resource)},category=${tag(category)}${tool === "" ? "" : `,tool=${tag(tool)}`},operation=${tag(operation)}`,
+        attributes: [
+          attribute("node", label(path)),
+          attribute("resource", resource),
+          attribute("category", category),
+          ...(tool === "" ? [] : [attribute("tool", tool)]),
+          attribute("operation", operation),
+        ],
         calls: 0,
         inflight: 0,
         success: 0,
@@ -387,6 +386,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
         pendingCalls: 0,
         counters: new Map(),
         gauges: new Map(),
+        exportedFields: new Set(),
       };
       this.#operations.set(key, op);
     }
@@ -470,38 +470,57 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     return fields;
   }
 
-  /** One Influx line-protocol snapshot; consumes the rate baselines it reports. */
-  #snapshot(): string {
-    const now = performance.now();
-    const seconds = this.#clock === undefined ? 0 : (now - this.#clock) / 1000;
-    const time = BigInt(Date.now()) * 1_000_000n;
-    const lines: string[] = [];
+  /** One OTLP snapshot; positive elapsed time consumes the rate baselines it reports. */
+  snapshot(receiptMs: number, elapsedMs: number): readonly ProfileMetric[] {
+    const seconds = elapsedMs / 1000;
+    this.#snapshotMs = Math.max(receiptMs, this.#snapshotMs + 1);
+    const timeUnixNano = String(BigInt(this.#snapshotMs) * 1_000_000n);
+    const metrics = new Map<string, ProfileMetric>();
+    const point = (
+      measurement: string,
+      field: string,
+      attributes: ReturnType<typeof attribute>[],
+      value?: number,
+    ) => {
+      const name = `${measurement}_${field}`;
+      let metric = metrics.get(name);
+      if (metric === undefined) {
+        metric = { name, gauge: { dataPoints: [] } };
+        metrics.set(name, metric);
+      }
+      metric.gauge.dataPoints.push({
+        attributes: [
+          attribute("stream", this.#streamId),
+          attribute("dashboard", this.#dashboard),
+          ...attributes,
+        ],
+        timeUnixNano,
+        ...(value === undefined ? { flags: 1 } : { asDouble: value }),
+      });
+    };
     const line = (
       measurement: string,
-      tags: string,
+      attributes: ReturnType<typeof attribute>[],
       fields: Map<string, number>,
     ) => {
-      // Grafana's labelled frame buffer cannot rebuild existing series after a field-schema change.
       for (const [field, value] of fields)
-        lines.push(
-          `${measurement}${tags},metric=${tag(field)} value=${value} ${time}`,
-        );
+        point(measurement, field, attributes, value);
     };
     line(
       "junco_total",
-      "",
+      [],
       this.#fields(() => true, this.#peak, seconds, true),
     );
     for (const node of this.#nodes.values())
       line(
         "junco_node",
-        `,node=${tag(label(node.path))}`,
+        [attribute("node", label(node.path))],
         this.#fields((other) => other === node, node.peak, seconds, false),
       );
     for (const rollup of this.#rollups.values())
       line(
         "junco_context",
-        `,node=${tag(label(rollup.path))}`,
+        [attribute("node", label(rollup.path))],
         this.#fields(
           (node) => within(rollup.path, node),
           rollup.peak,
@@ -511,34 +530,134 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
       );
     for (const op of this.#operations.values()) {
       const completed = op.success + op.errors + op.cancelled;
-      line(
-        "junco_operation",
-        op.tags,
-        new Map([
-          ["calls", op.calls],
-          ["inflight", op.inflight],
-          ["success", op.success],
-          ["errors", op.errors],
-          ["cancelled", op.cancelled],
-          ["duration_ms_sum", op.durationSum],
-          ["duration_ms_max", op.durationMax],
-          ["duration_ms_last", op.durationLast],
-          [
-            "duration_ms_mean",
-            completed === 0 ? 0 : op.durationSum / completed,
-          ],
-          ["calls_per_second", seconds > 0 ? op.pendingCalls / seconds : 0],
-          ...op.counters,
-          ...op.gauges,
-        ]),
-      );
+      const fields = new Map<string, number>([
+        ["calls", op.calls],
+        ["inflight", op.inflight],
+        ["success", op.success],
+        ["errors", op.errors],
+        ["cancelled", op.cancelled],
+        ["duration_ms_sum", op.durationSum],
+        ["duration_ms_max", op.durationMax],
+        ["duration_ms_last", op.durationLast],
+        ["duration_ms_mean", completed === 0 ? 0 : op.durationSum / completed],
+        ["calls_per_second", seconds > 0 ? op.pendingCalls / seconds : 0],
+        ...op.counters,
+        ...op.gauges,
+      ]);
+      line("junco_operation", op.attributes, fields);
+      for (const field of op.exportedFields)
+        if (!fields.has(field)) point("junco_operation", field, op.attributes);
+      op.exportedFields = new Set(fields.keys());
     }
     if (seconds > 0) {
-      this.#clock = now;
       for (const node of this.#nodes.values()) node.pendingTokens = 0;
       for (const op of this.#operations.values()) op.pendingCalls = 0;
     }
-    return `${lines.join("\n")}\n`;
+    return [...metrics.values()];
+  }
+}
+
+/** Persists profile events as metrics of one session `streamId`. */
+export class GrafanaRecorder implements ProfileRecorder<string> {
+  readonly root: object = this;
+  readonly path = "";
+  /** This session's metrics; select them with the dashboard's `stream` variable. */
+  readonly streamId = `junco_${randomUUID().replaceAll("-", "")}`;
+  readonly dashboardUrl: string;
+  readonly #base: string;
+  readonly #state: ProfileMetricState;
+  readonly #intervalMs: number;
+  readonly #contexts = profileContexts(
+    this,
+    (_ids, path, event) => this.#reduce(path, event),
+    () => {
+      if (this.#closing !== undefined)
+        throw new Error("GrafanaRecorder: closed");
+    },
+  );
+  /** Probe points awaiting their own push, in record order. */
+  #probes: string[] = [];
+  #clock: number | undefined;
+  #timer: ReturnType<typeof setInterval> | undefined;
+  #drain: Promise<void> = Promise.resolve();
+  #queued = 0;
+  #stopped = false;
+  #failure: unknown;
+  #closing: Promise<void> | undefined;
+
+  private constructor(base: string, intervalMs: number, dashboard: string) {
+    this.#base = base;
+    this.#state = new ProfileMetricState(this.streamId, dashboard);
+    this.#intervalMs = intervalMs;
+    this.dashboardUrl = `${base}/d/${dashboard}?var-stream=${this.streamId}`;
+  }
+
+  /** Validates `options` and provisions the dashboard; rejects before any work on failure. */
+  static async create(
+    options: GrafanaRecorderOptions = {},
+  ): Promise<GrafanaRecorder> {
+    const { base, intervalMs, dashboard } = configuration(options);
+    const recorder = new GrafanaRecorder(base, intervalMs, dashboard);
+    await provision(base, dashboard, recorder.streamId);
+    return recorder;
+  }
+
+  readonly record = (event: ProfileEvent<string>): void =>
+    this.#reduce("", event);
+
+  add_context(nodeId: string): ProfileRecorder<string> {
+    return this.#contexts.add([], nodeId);
+  }
+
+  flush(): Promise<void> {
+    return this.#closing ?? this.#flush();
+  }
+
+  close(): Promise<void> {
+    this.#closing ??= (async () => {
+      clearInterval(this.#timer);
+      try {
+        await this.#flush();
+      } finally {
+        this.#contexts.clear();
+        this.#state.clear();
+        this.#probes = [];
+      }
+    })();
+    return this.#closing;
+  }
+
+  async #flush(): Promise<void> {
+    await this.#enqueue();
+    if (this.#failure !== undefined) throw this.#failure;
+  }
+
+  #fail(error: unknown): void {
+    this.#failure ??= error;
+  }
+
+  #reduce(path: string, event: ProfileEvent<string>): void {
+    if (this.#closing !== undefined) return;
+    if (this.#clock === undefined) {
+      this.#clock = performance.now();
+      this.#timer = setInterval(() => this.#tick(), this.#intervalMs);
+      this.#timer.unref();
+    }
+    if (event.kind === "probe" && this.#stopped) return;
+    try {
+      const metrics = this.#state.record(path, event, Date.now());
+      if (metrics !== undefined) this.#probes.push(payload(metrics));
+    } catch (error) {
+      this.#fail(error);
+    }
+  }
+
+  #snapshot(): string {
+    const now = performance.now();
+    const elapsedMs = this.#clock === undefined ? 0 : now - this.#clock;
+    const metrics = this.#state.snapshot(Date.now(), elapsedMs);
+    if (elapsedMs > 0) this.#clock = now;
+    return payload(metrics);
   }
 
   #tick(): void {
@@ -561,8 +680,8 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     const probes = this.#probes;
     this.#probes = [];
     try {
-      // ponytail: one sequential request per probe point; batch points of distinct series/ms if probe rates outgrow it.
-      for (const line of probes) await this.#send("probe", `${line}\n`);
+      // ponytail: one sequential request per probe point; batch distinct series if probe rates outgrow it.
+      for (const body of probes) await this.#send("probe", body);
       await this.#send("snapshot", this.#snapshot());
     } catch (error) {
       this.#stopped = true;
@@ -576,18 +695,18 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     if (Buffer.byteLength(body) > PUSH_LIMIT)
       throw new Error(`GrafanaRecorder: ${kind} exceeds 500 KiB`);
     const response = await request(
-      `${this.#base}/api/live/push/${this.streamId}`,
+      `${this.#base}/api/telemetry/metrics`,
       {
         method: "POST",
         headers: {
-          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Type": "application/json",
         },
         body,
       },
-      "live push",
+      "metrics push",
     );
     await response.body?.cancel();
-    if (!response.ok) throw failure("live push", response);
+    if (!response.ok) throw failure("metrics push", response);
   }
 }
 
@@ -655,12 +774,16 @@ const matches = (actual: unknown, expected: unknown): boolean =>
  * Creates or updates the managed dashboard; an existing untagged or differing raced dashboard
  * at its UID is a conflict, never overwritten.
  */
-async function provision(base: string): Promise<void> {
-  const spec = JSON.parse(JSON.stringify(await dashboard())) as Record<
+async function provision(
+  base: string,
+  dashboardUid: string,
+  streamId = "junco_00000000000000000000000000000000",
+): Promise<void> {
+  const spec = JSON.parse(JSON.stringify(await dashboard(dashboardUid, streamId))) as Record<
     string,
     unknown
   >;
-  const item = `${base}${DASHBOARDS}/${DASHBOARD}`;
+  const item = `${base}${DASHBOARDS}/${dashboardUid}`;
   const lookup = {
     headers: { Accept: "application/json" },
   };
@@ -677,65 +800,87 @@ async function provision(base: string): Promise<void> {
           spec,
         }),
       },
-      method === "POST" ? "dashboard creation" : "dashboard update",
+      `${method === "POST" ? "dashboard creation" : "dashboard update"} (${dashboardUid})`,
     );
-  const found = await request(item, lookup, "dashboard lookup");
+  const lookupOperation = `dashboard lookup (${dashboardUid})`;
+  const found = await request(item, lookup, lookupOperation);
   if (found.status === 404) {
     await found.body?.cancel();
     const created = await write("POST", `${base}${DASHBOARDS}`, {
-      name: DASHBOARD,
+      name: dashboardUid,
     });
     await created.body?.cancel();
     if (created.ok) return;
-    if (created.status !== 409) throw failure("dashboard creation", created);
+    if (created.status !== 409)
+      throw failure(`dashboard creation (${dashboardUid})`, created);
     const raced = await readDashboard(
-      await request(item, lookup, "dashboard lookup"),
-      "dashboard lookup",
+      await request(item, lookup, lookupOperation),
+      lookupOperation,
     );
-    if (!tagged(raced) || !matches(raced.spec, spec))
+    // Only the generated stream textbox selection may differ between concurrent sessions.
+    const variable = (
+      raced.spec?.templating as { list?: Partial<VariableModel>[] } | undefined
+    )?.list?.[0];
+    const current = variable?.current;
+    if (
+      variable?.name === "stream" &&
+      variable.type === "textbox" &&
+      typeof variable.query === "string" &&
+      /^junco_[0-9a-f]{32}$/.test(variable.query) &&
+      current != null &&
+      current.text === variable.query &&
+      current.value === variable.query
+    ) {
+      variable.query = streamId;
+      current.text = streamId;
+      current.value = streamId;
+    }
+    if (
+      !tagged(raced) ||
+      !matches(raced.spec, spec) ||
+      !matches(spec.templating, raced.spec?.templating)
+    )
       throw new Error(
-        `GrafanaRecorder: dashboard ${DASHBOARD} was concurrently created with a different spec`,
+        `GrafanaRecorder: dashboard ${dashboardUid} was concurrently created with a different spec`,
       );
     return;
   }
-  const existing = await readDashboard(found, "dashboard lookup");
+  const existing = await readDashboard(found, lookupOperation);
   if (!tagged(existing))
     throw new Error(
-      `GrafanaRecorder: dashboard ${DASHBOARD} exists without tag ${DASHBOARD}`,
+      `GrafanaRecorder: dashboard ${dashboardUid} exists without tag ${DASHBOARD}`,
     );
   const updated = await write("PUT", item, existing.metadata);
   await updated.body?.cancel();
-  if (!updated.ok) throw failure("dashboard update", updated);
+  if (!updated.ok) throw failure(`dashboard update (${dashboardUid})`, updated);
 }
 
-/** The managed Live dashboard; queries read `stream/${stream}/<measurement>`. */
-async function dashboard() {
-  const [dashboard, stat, timeseries, table, common] = await Promise.all([
-    import("@grafana/grafana-foundation-sdk/dashboard"),
-    import("@grafana/grafana-foundation-sdk/stat"),
-    import("@grafana/grafana-foundation-sdk/timeseries"),
-    import("@grafana/grafana-foundation-sdk/table"),
-    import("@grafana/grafana-foundation-sdk/common"),
-  ]);
-  const query = (
-    measurement: string,
-    fields?: readonly string[],
-    refId = "A",
-  ): cog.Builder<cog.Dataquery> => ({
-    build: () => {
-      const target = {
-        refId,
-        datasource: GRAFANA,
-        queryType: "measurements",
-        channel: `stream/\${stream}/${measurement}`,
-        ...(fields === undefined
-          ? {}
-          : { filter: { fields: ["time", "value"] } }),
-        _implementsDataqueryVariant() {},
-      };
-      return target;
-    },
-  });
+/** The managed dashboard queries persisted session metrics. */
+async function dashboard(dashboardUid: string, streamId: string) {
+  const [dashboard, stat, timeseries, table, common, prometheus] =
+    await Promise.all([
+      import("@grafana/grafana-foundation-sdk/dashboard"),
+      import("@grafana/grafana-foundation-sdk/stat"),
+      import("@grafana/grafana-foundation-sdk/timeseries"),
+      import("@grafana/grafana-foundation-sdk/table"),
+      import("@grafana/grafana-foundation-sdk/common"),
+      import("@grafana/grafana-foundation-sdk/prometheus"),
+    ]);
+  const benchmark = BENCHMARK_DASHBOARDS.has(dashboardUid);
+  const selector = benchmark
+    ? `dashboard="${dashboardUid}",stream=~"\${stream:regex}"`
+    : `${dashboardUid === DASHBOARD ? "" : `dashboard="${dashboardUid}",`}stream="$stream"`;
+  const history =
+    "Historical backfills are reconstructed receipt-time snapshots and rates, not original Grafana Live samples. Missing memory, probes, and output observations are not recorded.";
+  const query = (expr: string, instant = false) => {
+    const builder = new prometheus.DataqueryBuilder()
+      .refId("A")
+      .datasource(PROMETHEUS)
+      .expr(expr)
+      .format(prometheus.PromQueryFormat.TimeSeries);
+    if (benchmark) builder.legendFormat("{{stream}} {{node}} {{__name__}}");
+    return instant ? builder.instant() : builder.range();
+  };
   const memoryScope =
     "Shell-pipeline cgroup memory sampled by the native monitor, not host heap.";
   const stats = [
@@ -801,120 +946,246 @@ async function dashboard() {
   const tables = [
     {
       title: "Tool and execution metrics",
-      targets: [query("junco_operation")],
+      targets: [
+        query(
+          `last_over_time({__name__=~"junco_operation_.+",${selector}}[$__range])`,
+          true,
+        ),
+      ],
       grid: { x: 0, y: 28, w: 24, h: 12 },
       description:
         "Latest operation counters and gauges by node, resource, category, tool and operation; metric names carry units.",
     },
     {
       title: "Resource and token details",
-      targets: [query("junco_node"), query("junco_total", undefined, "B")],
+      targets: [
+        query(
+          `last_over_time({__name__=~"junco_(node|total)_.+",${selector}}[$__range])`,
+          true,
+        ),
+      ],
       grid: { x: 0, y: 40, w: 24, h: 10 },
       description:
         "Direct per-node resource and token fields; rows without a node label are session totals.",
     },
     {
       title: "Graph context totals",
-      targets: [query("junco_context")],
+      targets: [
+        query(
+          `last_over_time({__name__=~"junco_context_.+",${selector}}[$__range])`,
+          true,
+        ),
+      ],
       grid: { x: 0, y: 50, w: 24, h: 10 },
       description:
         "Inclusive rollups of each evaluated graph context over its descendants.",
     },
   ];
-  const board = new dashboard.DashboardBuilder("Junco telemetry")
-    .uid(DASHBOARD)
+  const board = new dashboard.DashboardBuilder(
+    benchmark ? dashboardUid : "Junco telemetry",
+  )
+    .uid(dashboardUid)
     .tags([DASHBOARD])
-    .time({ from: "now-15m", to: "now" })
-    .liveNow(true)
-    .withVariable(
+    .time({ from: benchmark ? "now-15d" : "now-15m", to: "now" })
+    .refresh(benchmark ? "30s" : "1s");
+  let id = 0;
+  if (benchmark) {
+    const discovery = `query_result(last_over_time(junco_total_tokens_used{dashboard="${dashboardUid}"}[$__range]))`;
+    const lifetime =
+      "Recorded lifetime totals of sessions observed in the selected range, not usage increments earned only within that range.";
+    board
+      .description(`${lifetime} ${history}`)
+      .withVariable(
+        new dashboard.QueryVariableBuilder("stream")
+          .label("Telemetry session")
+          .datasource(PROMETHEUS)
+          .query(discovery)
+          .definition(discovery)
+          .regex('/stream="([^"]+)"/')
+          .multi(true)
+          .includeAll(true)
+          .allValue(".*")
+          .allowCustomValue(false)
+          .refresh(dashboard.VariableRefresh.OnTimeRangeChanged)
+          .sort(dashboard.VariableSort.AlphabeticalAsc)
+          .options([{ text: "All", value: "$__all", selected: true }])
+          .current({ text: "All", value: "$__all" }),
+      );
+    const overview = [
+      {
+        title: "Recorded sessions",
+        expr: `count(last_over_time(junco_total_tokens_used{${selector}}[$__range]))`,
+        unit: "short",
+        description: "Sessions with recorded committed-token totals observed in the selected range.",
+      },
+      {
+        title: "Committed lifetime tokens",
+        expr: `sum(last_over_time(junco_total_tokens_used{${selector}}[$__range]))`,
+        unit: "suffix:tokens",
+        description: lifetime,
+      },
+      {
+        title: "Recorded lifetime cost",
+        expr: `sum(last_over_time(junco_total_cost_total{${selector}}[$__range]))`,
+        unit: "currencyUSD",
+        description: `${lifetime} Recorded cost ledger, not inferred billed expenditure.`,
+      },
+      {
+        title: "Largest individual-session memory peak",
+        expr: `max(max_over_time(junco_total_peak_memory_bytes{${selector}}[$__range]))`,
+        unit: "bytes",
+        description: `${memoryScope} Largest measured individual-session peak, never a sum of session peaks or simultaneous campaign memory.`,
+      },
+    ];
+    for (const [index, panel] of overview.entries()) {
+      const builder = new stat.PanelBuilder()
+          .id(++id)
+          .title(panel.title)
+          .description(`${panel.description} ${history}`)
+          .datasource(PROMETHEUS)
+          .gridPos({ x: index * 6, y: 0, w: 6, h: 4 })
+          .unit(panel.unit)
+          .noValue(index === 0 ? "No recorded sessions" : "Not recorded")
+          .reduceOptions(
+            new common.ReduceDataOptionsBuilder()
+              .values(false)
+              .calcs(["lastNotNull"]),
+          )
+          .withTarget(query(panel.expr, true));
+      if (index === 2) builder.decimals(9);
+      board.withPanel(builder);
+    }
+    board.withPanel(
+      new table.PanelBuilder()
+        .id(++id)
+        .title("Per-session lifetime totals")
+        .description(
+          `${lifetime} Stream, campaign and completion labels identify reconstructed complete and partial sessions. Missing measurements stay absent. ${history}`,
+        )
+        .datasource(PROMETHEUS)
+        .gridPos({ x: 0, y: 4, w: 24, h: 10 })
+        .filterable(true)
+        .noValue("Not recorded")
+        .targets(
+          ["tokens_used", "cost_total", "peak_memory_bytes"].map((field, index) =>
+            query(
+              `last_over_time(junco_total_${field}{${selector}}[$__range])`,
+              true,
+            )
+              .refId(String.fromCharCode(65 + index))
+              .format(prometheus.PromQueryFormat.Table),
+          ),
+        )
+        .withTransformation({
+          id: "filterFieldsByName",
+          options: { include: { pattern: "^(?!__name__$).*" } },
+        })
+        .withTransformation({ id: "merge", options: {} })
+        .withTransformation({
+          id: "organize",
+          options: {
+            excludeByName: { Time: true },
+            renameByName: {
+              "Value #A": "Committed tokens",
+              "Value #B": "Recorded cost (USD)",
+              "Value #C": "Measured session peak (bytes)",
+            },
+          },
+        }),
+    );
+  } else {
+    board.withVariable(
       new dashboard.TextBoxVariableBuilder("stream")
         .label("Telemetry session")
-        .defaultValue("junco")
-        .current({ text: "junco", value: "junco" }),
+        .defaultValue(streamId)
+        .current({ text: streamId, value: streamId }),
     );
-  let id = 0;
+  }
+  const row = benchmark
+    ? new dashboard.RowBuilder("Session drill-down — select a session before expanding")
+        .id(++id)
+        .collapsed(true)
+        .gridPos({ x: 0, y: 14, w: 24, h: 1 })
+    : undefined;
+  const details = row ?? board;
+  const offset = benchmark ? 15 : 0;
   for (const panel of stats)
-    board.withPanel(
+    details.withPanel(
       new stat.PanelBuilder()
         .id(++id)
         .title(panel.title)
-        .description(panel.description)
-        .datasource(GRAFANA)
-        .gridPos(panel.grid)
+        .description(benchmark ? `${panel.description} ${history}` : panel.description)
+        .datasource(PROMETHEUS)
+        .gridPos({ ...panel.grid, y: panel.grid.y + offset })
         .unit(panel.unit)
-        .noValue(panel.unit === "bytes" ? "No measured pipelines" : "0")
+        .noValue(benchmark ? "Not recorded" : panel.unit === "bytes" ? "No measured pipelines" : "0")
         .reduceOptions(
           new common.ReduceDataOptionsBuilder()
             .values(false)
             .calcs(["lastNotNull"]),
         )
-        .withTarget(query("junco_total", [panel.field]))
-        .withTransformation({
-          id: "filterFieldsByName",
-          options: {
-            include: {
-              names: ["time", "Time"],
-              pattern: `/\\b${panel.field}\\b/`,
-            },
-          },
-        }),
+        .withTarget(query(
+          benchmark
+            ? `last_over_time(junco_total_${panel.field}{${selector}}[$__range])`
+            : `junco_total_${panel.field}{${selector}}`,
+          benchmark,
+        )),
     );
   for (const panel of series)
-    board.withPanel(
+    details.withPanel(
       new timeseries.PanelBuilder()
         .id(++id)
         .title(panel.title)
-        .description(panel.description)
-        .datasource(GRAFANA)
-        .gridPos(panel.grid)
+        .description(benchmark ? `${panel.description} ${history}` : panel.description)
+        .datasource(PROMETHEUS)
+        .gridPos({ ...panel.grid, y: panel.grid.y + offset })
         .unit(panel.unit)
-        .noValue(panel.unit === "bytes" ? "No measured pipelines" : "0")
+        .noValue(benchmark ? "Not recorded" : panel.unit === "bytes" ? "No measured pipelines" : "0")
         .displayName(
-          panel.measurement === "junco_node"
-            ? `\${__field.labels.node}`
-            : panel.title,
+          benchmark
+            ? `\${__field.labels.stream} \${__field.labels.node}`
+            : panel.measurement === "junco_node"
+              ? `\${__field.labels.node}`
+              : panel.title,
         )
-        .withTarget(query(panel.measurement, [panel.field]))
-        .withTransformation({
-          id: "filterFieldsByName",
-          options: {
-            include: {
-              names: ["time", "Time"],
-              pattern: `/\\b${panel.field}\\b/`,
-            },
-          },
-        }),
+        .withTarget(
+          query(`${panel.measurement}_${panel.field}{${selector}}`),
+        ),
     );
-  board.withPanel(
-    new timeseries.PanelBuilder()
+  const probes = new timeseries.PanelBuilder()
+    .id(++id)
+    .title("Edge probes")
+    .description(
+      `Numeric edge values at recorder receipt time, labeled by graph context and edge ID.${benchmark ? ` ${history}` : ""}`,
+    )
+    .datasource(PROMETHEUS)
+    .gridPos({ x: 0, y: 20 + offset, w: 24, h: 8 })
+    .displayName(
+      `${benchmark ? "\${__field.labels.stream} " : ""}\${__field.labels.node} \${__field.labels.edge_id}`,
+    )
+    .withTarget(query(`junco_probe_value{${selector}}[$__range]`, true));
+  if (benchmark) probes.noValue("Not recorded");
+  details.withPanel(probes);
+  for (const panel of tables) {
+    const builder = new table.PanelBuilder()
       .id(++id)
-      .title("Edge probes")
-      .description(
-        "Numeric edge values at recorder receipt time, labeled by graph context and edge ID.",
-      )
-      .datasource(GRAFANA)
-      .gridPos({ x: 0, y: 20, w: 24, h: 8 })
-      .displayName(`\${__field.labels.node} \${__field.labels.edge_id}`)
-      .withTarget(query("junco_probe", ["value"])),
-  );
-  for (const panel of tables)
-    board.withPanel(
-      new table.PanelBuilder()
-        .id(++id)
-        .title(panel.title)
-        .description(panel.description)
-        .datasource(GRAFANA)
-        .gridPos(panel.grid)
-        .filterable(true)
-        .targets(panel.targets)
-        .withTransformation({
-          id: "reduce",
-          options: {
-            reducers: ["lastNotNull"],
-            mode: "seriesToRows",
-            labelsToFields: true,
-          },
-        }),
-    );
+      .title(panel.title)
+      .description(benchmark ? `${panel.description} ${history}` : panel.description)
+      .datasource(PROMETHEUS)
+      .gridPos({ ...panel.grid, y: panel.grid.y + offset })
+      .filterable(true)
+      .targets(panel.targets)
+      .withTransformation({
+        id: "reduce",
+        options: {
+          reducers: ["lastNotNull"],
+          mode: "seriesToRows",
+          labelsToFields: true,
+        },
+      });
+    if (benchmark) builder.noValue("Not recorded");
+    details.withPanel(builder);
+  }
+  if (row !== undefined) board.withRow(row);
   return board.build();
 }

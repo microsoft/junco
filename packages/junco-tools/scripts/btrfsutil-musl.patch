@@ -1,0 +1,31 @@
+--- a/src/subvolume/subvol_info.rs
++++ b/src/subvolume/subvol_info.rs
+@@ -99,20 +99,20 @@
+                 stransid: 0,
+                 rtransid: 0,
+                 ctime: btrfsutil_sys::timespec {
+-                    tv_nsec: 0 as btrfsutil_sys::__time_t,
+-                    tv_sec: 0 as btrfsutil_sys::__syscall_slong_t,
++                    tv_nsec: 0,
++                    tv_sec: 0,
+                 },
+                 otime: btrfsutil_sys::timespec {
+-                    tv_nsec: 0 as btrfsutil_sys::__time_t,
+-                    tv_sec: 0 as btrfsutil_sys::__syscall_slong_t,
++                    tv_nsec: 0,
++                    tv_sec: 0,
+                 },
+                 stime: btrfsutil_sys::timespec {
+-                    tv_nsec: 0 as btrfsutil_sys::__time_t,
+-                    tv_sec: 0 as btrfsutil_sys::__syscall_slong_t,
++                    tv_nsec: 0,
++                    tv_sec: 0,
+                 },
+                 rtime: btrfsutil_sys::timespec {
+-                    tv_nsec: 0 as btrfsutil_sys::__time_t,
+-                    tv_sec: 0 as btrfsutil_sys::__syscall_slong_t,
++                    tv_nsec: 0,
++                    tv_sec: 0,
+                 },
+             }));
+ 

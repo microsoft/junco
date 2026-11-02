@@ -13,7 +13,7 @@ use proc_mounts::{MountInfo, MountIter};
 use crate::error::Error;
 
 /// `statfs.f_type` for btrfs (`BTRFS_SUPER_MAGIC`).
-const BTRFS_SUPER_MAGIC: i64 = 0x9123_683E;
+const BTRFS_SUPER_MAGIC: u32 = 0x9123_683E;
 
 /// The btrfs operations this crate performs: the one boundary a test replaces.
 ///
@@ -110,7 +110,7 @@ impl Subvolumes for LibBtrfs {
         }
         // SAFETY: `statfs(2)` returned success, so it initialized every field of `buf`.
         let fs_type = unsafe { buf.assume_init() }.f_type;
-        if fs_type == BTRFS_SUPER_MAGIC {
+        if fs_type == BTRFS_SUPER_MAGIC.into() {
             Ok(())
         } else {
             Err(Error::NotBtrfs(path.to_path_buf()))

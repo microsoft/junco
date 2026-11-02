@@ -4,12 +4,7 @@
  * runner (run-workflow.ts) supplies the problem, guarded models, container-bound bash tools and the Host
  * operations below. See ./README.md.
  *
- * Input → Lead → Assign → {Trace, Reproduce, Contracts} → JoinEvidence (all) → Planner (nested: Draft ⇄ CheckPlan,
- * at most three correction turns) → Dispatch (frozen checks) → {CandidateA, CandidateB} → {ValidateA, ValidateB}
- * → TournamentGate (first valid verdict, loser cancelled) → Apply → Integrator → Freeze → Verifier → Finish → sink.
- * Terminates when Finish returns the terminal report; protocol violations, a plan still rejected after three
- * correction turns, no valid candidate, a changed deliverable or a failed final check throw, so the run fails
- * explicitly instead of reporting unverified success.
+ * Topology and termination: see the ./wf.yml header.
  *
  * Junco runs each scheduler decision as one column and awaits all of it, so contenders that settle in the
  * same column are validated together and the gate's `any` rule consumes A's verdict before B's; a loser
@@ -73,7 +68,7 @@ export type Host = {
   };
   /** Writes `data` under the instance's artifact directory and returns the path. */
   save(name: string, data: string): string;
-  /** Aborts the branch's agent and stops its sandboxes; returns cleanup failures and never throws. */
+  /** Aborts every agent under the branch root and stops its sandboxes; returns cleanup failures and never throws. */
   cancel(branch: Branch): Promise<readonly string[]>;
 };
 
@@ -198,7 +193,7 @@ function list<T>(value: unknown, at: string, item: (entry: unknown, at: string) 
 }
 
 /** The Planner's single ```json plan, checked field by field; any deviation rejects the plan. */
-export function parsePlan(answer: string): Plan {
+function parsePlan(answer: string): Plan {
   const blocks = [...answer.matchAll(/```json[ \t]*\n([\s\S]*?)\n```/g)];
   const last = blocks.at(-1);
   if (last === undefined) throw new Error("plan: the Planner returned no ```json block");
@@ -276,7 +271,7 @@ const WORKERS = ["Trace", "Reproduce", "Contracts"] as const;
 type Worker = (typeof WORKERS)[number];
 
 /** The Lead's `## Trace` / `## Reproduce` / `## Contracts` sections: each exactly once and non-empty. */
-export function parseAssignments(answer: string): Record<Worker, string> {
+function parseAssignments(answer: string): Record<Worker, string> {
   const heading = /^##[ \t]+(\S+)[ \t]*$/gm;
   const marks = [...answer.matchAll(heading)].filter((m) => (WORKERS as readonly string[]).includes(m[1]));
   const sections = {} as Record<Worker, string>;
@@ -344,7 +339,7 @@ const DRAFT_RESULT = graph.EdgeId.create("Draft->CheckPlan");
  * regressions that pass are kept; at least one of each is required. A malformed plan or a missing kind is a
  * rejection with feedback for the next draft; a sandbox, cancellation or artifact failure throws.
  */
-async function validatePlan(host: Host, answer: string, attempt: number, signal: AbortSignal | undefined): Promise<PlanDecision> {
+async function validatePlan(host: Host, answer: string, attempt: number, signal: AbortSignal): Promise<PlanDecision> {
   const dir = `planning/attempt-${attempt}`;
   host.save(`${dir}/plan.md`, answer);
   let plan: Plan;
@@ -359,7 +354,7 @@ async function validatePlan(host: Host, answer: string, attempt: number, signal:
   if ((await sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed changed before plan validation");
   const baseline: Observed[] = [];
   for (const [index, check] of plan.checks.entries()) {
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
     let observed: Observed[] = [];
     let failure: { error: unknown } | undefined;
     try {
@@ -373,7 +368,7 @@ async function validatePlan(host: Host, answer: string, attempt: number, signal:
       throw failure === undefined ? error : new AggregateError([failure.error, error], `plan check ${check.name} and the canonical reset both failed`);
     }
     if (failure !== undefined) throw failure.error;
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
     if ((await sandbox.capture("canonical")) !== "") throw new Error(`canonical /testbed is not clean after plan check ${check.name}`);
     baseline.push(...observed);
   }

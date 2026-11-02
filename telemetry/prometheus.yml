@@ -1,0 +1,9 @@
+storage:
+  tsdb:
+    retention:
+      time: 15d
+
+otlp:
+  translation_strategy: NoTranslation
+
+scrape_configs: []

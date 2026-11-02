@@ -1,4 +1,4 @@
-// Interactive Grafana Live smoke: `bun run ./test/grafana-recorder.fixture.ts` (anonymous Grafana).
+// Interactive retained-metrics smoke: `bun run ./test/grafana-recorder.fixture.ts` (anonymous Grafana).
 // Real nested graph, real faux-provider JuncoAgents, real owner-bound shell pipelines holding touched
 // memory; every metric reaches Grafana only through the threaded recorder.
 import assert from "node:assert/strict";

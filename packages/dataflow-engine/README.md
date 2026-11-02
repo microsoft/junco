@@ -305,7 +305,7 @@ The workspace links `dataflow-engine` to this package for every consumer, the sc
 
 Every example is traced with Opik by default. The tracer is chosen at **build** time: `examples/run.ts` bundles all standalone and cookbook programs from workspace sources into `examples/dist/{opik,dummy}` and runs nothing unless that bundle succeeds, so a missing source or dependency fails before any example runs. Bundling does not typecheck: `bun run typecheck` checks every example with the Dummy tracer and `bun run examples:typecheck` checks the default Opik route. A traced program constructs the Opik SDK client when it starts, so an invalid Opik configuration fails that program before its graph runs. Append `--no-tracing` to select `DummyTracer`; that build never resolves Opik. There is no runtime fallback.
 
-The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; the engine and adapter are bundled from source, so neither needs a build. Configure the SDK the usual way (`OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`). The example commands export to a local Opik at `http://localhost:8888/api` (start one with `NGINX_PORT=8888 ./opik.sh` from the [Opik repository](https://github.com/comet-ml/opik); the UI is `http://localhost:8888`) unless `OPIK_URL_OVERRIDE` is set; because that default is applied as the environment variable, it also takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
+The Opik build needs the examples workspace's optional dependencies (`dataflow-engine`, `dataflow-engine-opik` and `opik`), which the workspace root install provides; the engine and adapter are bundled from source, so neither needs a build. Configure credentials, workspace and project with `OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` or `~/.opik.config`. The API defaults to `http://localhost:5173/api`; `OPIK_URL_OVERRIDE` overrides it and takes precedence over a `url_override` in `~/.opik.config`. A successful build does not prove that traces were ingested later.
 
 | Script | Purpose |
 |---|---|
@@ -328,11 +328,10 @@ Prerequisites: Bun, Docker with Compose, and the junco workspace, which holds th
    bun install --frozen-lockfile
    ```
 
-2. Start a local Opik with its UI and API on port 8888:
+2. Start the workspace's root telemetry deployment (see the [Junco setup](../../README.md#telemetry-deployment)); Opik UI/API is on port 5173:
 
    ```sh
-   git clone https://github.com/comet-ml/opik.git ../opik
-   (cd ../opik && NGINX_PORT=8888 ./opik.sh)
+   docker compose -f docker-compose.yml up -d --no-build
    ```
 
 3. Run the example:
@@ -344,9 +343,9 @@ Prerequisites: Bun, Docker with Compose, and the junco workspace, which holds th
 
    It prints `[0,1,1,2,3,5,8,13,21,34]`. Without `OPIK_PROJECT_NAME` the trace goes to Opik's "Default Project".
 
-4. Open <http://localhost:8888>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
+4. Open <http://localhost:5173>, choose project **dataflow-engine** → **Logs** → **Traces**, and open the `examples/fibonacci` row. The **Agent graph** panel below the span list shows nodes `0`, `1` and `2`, the `fibSeed` and `fibOut` edges and the `fibLoop` self-loop; each `1 #n` span holds one activation's delivered input and emitted output.
 
-5. Stop Opik when finished: `(cd <junco>/../opik && ./opik.sh --stop)`.
+5. On a disposable development deployment, stop the stack with `docker compose -f docker-compose.yml stop` from the workspace root. Leave shared services running.
 
 ## License
 

@@ -73,6 +73,9 @@ step "Typecheck and test dataflow-engine-opik and dataflow-profile"
 (cd packages/dataflow-engine-opik && bun run typecheck && bun run test)
 (cd packages/dataflow-profile && bun run typecheck && bun run test)
 
+step "Offline campaign replay regression (isolated process)"
+bun test test/backfill-cooperbench.test.ts
+
 step "Typecheck and test junco"
 bun run typecheck
 bun run smoke:profile-optimizer

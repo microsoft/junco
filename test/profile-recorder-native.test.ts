@@ -207,33 +207,54 @@ type Line = {
   readonly fields: Readonly<Record<string, number>>;
 };
 
-/** Parse one Live push of Influx line protocol (escaped tags, float fields). */
+/** Decode native-run OTLP gauges into accounting rows. */
 function parseLines(body: string): Line[] {
-  return body
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [series, fields] = line.split(/(?<!\\) /) as [string, string];
-      const [measurement, ...tags] = series.split(/(?<!\\),/);
-      return {
-        measurement: measurement!,
-        tags: Object.fromEntries(
-          tags.map((tag) => {
-            const [key, value] = tag.split(/(?<!\\)=/) as [string, string];
-            return [key, value.replace(/\\(.)/g, "$1")];
-          }),
-        ),
-        fields: Object.fromEntries(
-          fields.split(",").map((field) => {
-            const [key, value] = field.split("=") as [string, string];
-            return [key, Number(value)];
-          }),
-        ),
-      };
-    });
+  const decoded = JSON.parse(body) as {
+    resourceMetrics: {
+      scopeMetrics: {
+        metrics: {
+          name: string;
+          gauge: {
+            dataPoints: {
+              attributes: { key: string; value: { stringValue: string } }[];
+              asDouble?: number;
+              flags?: number;
+            }[];
+          };
+        }[];
+      }[];
+    }[];
+  };
+  const rows = new Map<string, Line>();
+  for (const resource of decoded.resourceMetrics)
+    for (const scope of resource.scopeMetrics)
+      for (const metric of scope.metrics) {
+        const match =
+          /^(junco_(?:total|node|context|operation|probe))_(.+)$/.exec(
+            metric.name,
+          );
+        assert.ok(match, metric.name);
+        for (const point of metric.gauge.dataPoints) {
+          const tags = Object.fromEntries(
+            point.attributes.map(({ key, value }) => [key, value.stringValue]),
+          );
+          assert.match(tags.stream ?? "", /^junco_[0-9a-f]{32}$/);
+          const key = JSON.stringify([match[1], tags]);
+          let row = rows.get(key);
+          if (row === undefined) {
+            row = { measurement: match[1]!, tags, fields: {} };
+            rows.set(key, row);
+          }
+          if (point.flags !== 1) {
+            assert.equal(typeof point.asDouble, "number");
+            (row.fields as Record<string, number>)[match[2]!] = point.asDouble!;
+          }
+        }
+      }
+  return [...rows.values()];
 }
 
-test("GrafanaRecorder exports the same real Worker run over Live push", async () => {
+test("GrafanaRecorder exports the same real Worker run over OTLP JSON", async () => {
   const pushes: string[] = [];
   const server = createServer(async (request, response) => {
     let body = "";
@@ -243,9 +264,11 @@ test("GrafanaRecorder exports the same real Worker run over Live push", async ()
       response.writeHead(404).end("{}");
     else if (request.method === "POST" && url.endsWith("/dashboards"))
       response.writeHead(200, { "content-type": "application/json" }).end(body);
-    else if (request.method === "POST" && url.startsWith("/api/live/push/")) {
+    else if (request.method === "POST" && url === "/api/telemetry/metrics") {
+      assert.equal(request.headers.authorization, undefined);
+      assert.equal(request.headers["content-type"], "application/json");
       pushes.push(body);
-      response.writeHead(200).end("{}");
+      response.writeHead(200).end();
     } else response.writeHead(500).end();
   });
   server.listen(0, "127.0.0.1");

@@ -1,0 +1,69 @@
+# syntax=docker/dockerfile:1
+# Build-only toolchains; final targets contain only the relocatable payload.
+FROM node:22.19.0-bullseye-slim@sha256:bf4ef0c41a3224fa8602a77e5ad02e67f81114fab5c61bd1fa9df47cb45e6c2f AS build-gnu
+ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
+RUN printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' 'deb http://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/* \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential pkg-config clang libclang-dev llvm-dev libbtrfsutil-dev \
+      btrfs-progs zlib1g-dev ca-certificates curl git unzip xz-utils \
+      python3 pax-utils patchelf binutils libxcb1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s ../lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js /usr/local/bin/node-gyp
+RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o /tmp/bun.zip \
+    && unzip -j /tmp/bun.zip bun-linux-x64/bun -d /usr/local/bin \
+    && rm /tmp/bun.zip \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.98.1
+WORKDIR /src
+COPY package.json bun.lock bunfig.toml tsconfig*.json rust-toolchain.toml ./
+COPY src/ ./src/
+COPY packages/ ./packages/
+COPY crates/ ./crates/
+RUN bun install --frozen-lockfile --ignore-scripts && bun run build
+
+FROM node:22.19.0-alpine3.21@sha256:d4760191131171132bb788c4fd0014ef07a5e4e79e5155e26068f3cc9fdffea4 AS build-musl
+ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
+RUN apk add --no-cache \
+      build-base pkgconf clang clang-dev llvm-dev btrfs-progs-dev btrfs-progs \
+      zlib-dev bash ca-certificates curl git unzip xz python3 lddtree patchelf binutils libxcb \
+    && ln -s ../lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js /usr/local/bin/node-gyp
+RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-musl.zip -o /tmp/bun.zip \
+    && unzip -j /tmp/bun.zip bun-linux-x64-musl/bun -d /usr/local/bin \
+    && rm /tmp/bun.zip \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.98.1
+# Host build scripts must also be dynamic so bindgen can load libclang.
+RUN printf '%s\n' '#!/bin/sh' 'exec /src/packages/junco-tools/scripts/rustc-bootstrap-shim.sh "$@" -C target-feature=-crt-static' > /opt/rustc-musl \
+    && chmod +x /opt/rustc-musl
+ENV RUSTC_WRAPPER=/opt/rustc-musl
+WORKDIR /src
+COPY package.json bun.lock bunfig.toml tsconfig*.json rust-toolchain.toml ./
+COPY src/ ./src/
+COPY packages/ ./packages/
+COPY crates/ ./crates/
+# btrfsutil 0.2.0's typed zeroes name glibc-private aliases absent on musl.
+RUN bun install --frozen-lockfile --ignore-scripts \
+    && node packages/junco-tools/scripts/with-junco-build-env.mjs cargo fetch --locked --target x86_64-unknown-linux-musl --manifest-path packages/junco-tools/Cargo.toml \
+    && set -- /opt/cargo/registry/src/*/btrfsutil-0.2.0/src/subvolume/subvol_info.rs \
+    && test "$#" -eq 1 \
+    && patch --batch --forward "$1" packages/junco-tools/scripts/btrfsutil-musl.patch \
+    && bun run build
+
+# Workflow edits invalidate packaging, not native or TypeScript compilation.
+FROM build-gnu AS assemble-gnu
+ARG RUNTIME_BUILD_HASH
+COPY examples/cooperbench/ ./examples/cooperbench/
+RUN RUNTIME_BUILD_HASH="$RUNTIME_BUILD_HASH" bash examples/cooperbench/package-runtime.sh gnu
+
+FROM build-musl AS assemble-musl
+ARG RUNTIME_BUILD_HASH
+COPY examples/cooperbench/ ./examples/cooperbench/
+RUN RUNTIME_BUILD_HASH="$RUNTIME_BUILD_HASH" bash examples/cooperbench/package-runtime.sh musl
+
+FROM scratch AS gnu
+COPY --from=assemble-gnu /opt/junco-runtime /opt/junco-runtime
+
+FROM scratch AS musl
+COPY --from=assemble-musl /opt/junco-runtime /opt/junco-runtime

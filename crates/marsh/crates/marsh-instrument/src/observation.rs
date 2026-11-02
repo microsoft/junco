@@ -26,6 +26,48 @@ use crate::Syscall;
 use crate::capture::{Captured, native_usize, proc_field};
 use crate::ring::Rings;
 
+// Linux UAPI <linux/ptrace.h>; libc exposes this kernel ABI only on GNU targets.
+const PTRACE_SYSCALL_INFO_NONE: u8 = 0;
+const PTRACE_SYSCALL_INFO_ENTRY: u8 = 1;
+const PTRACE_SYSCALL_INFO_EXIT: u8 = 2;
+
+#[repr(C)]
+struct PtraceSyscallInfo {
+    op: u8,
+    pad: [u8; 3],
+    arch: u32,
+    instruction_pointer: u64,
+    stack_pointer: u64,
+    u: PtraceSyscallData,
+}
+
+#[repr(C)]
+union PtraceSyscallData {
+    entry: PtraceSyscallEntry,
+    exit: PtraceSyscallExit,
+    seccomp: [u64; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PtraceSyscallEntry {
+    nr: u64,
+    args: [u64; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PtraceSyscallExit {
+    rval: i64,
+    is_error: u8,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<PtraceSyscallInfo>() == 88);
+    assert!(std::mem::offset_of!(PtraceSyscallInfo, u) == 24);
+    assert!(std::mem::offset_of!(PtraceSyscallExit, is_error) == 8);
+};
+
 #[cfg(target_arch = "x86_64")]
 const NATIVE_ARCH: u32 = 0xC000_003E;
 #[cfg(target_arch = "aarch64")]
@@ -563,7 +605,7 @@ impl Observer {
             )));
         }
         match info.op {
-            libc::PTRACE_SYSCALL_INFO_ENTRY => {
+            PTRACE_SYSCALL_INFO_ENTRY => {
                 // SAFETY: the kernel tagged this as the entry union member.
                 let number = unsafe { info.u.entry.nr };
                 #[cfg(target_arch = "x86_64")]
@@ -572,25 +614,25 @@ impl Observer {
                 }
                 self.entry(tid, status, number, observe)
             }
-            libc::PTRACE_SYSCALL_INFO_EXIT => {
+            PTRACE_SYSCALL_INFO_EXIT => {
                 // SAFETY: the kernel tagged this as the exit union member.
                 let exit = unsafe { info.u.exit };
                 let result = if exit.is_error != 0 {
-                    RetCode::Err(i32::try_from(exit.sval).map_err(io::Error::other)?)
-                } else if let Ok(value) = i32::try_from(exit.sval)
+                    RetCode::Err(i32::try_from(exit.rval).map_err(io::Error::other)?)
+                } else if let Ok(value) = i32::try_from(exit.rval)
                     && (0..=0x8000).contains(&value)
                 {
                     RetCode::Ok(value)
                 } else {
                     // Upstream Address is also a success: preserve all large values, not
                     // only addresses, and never infer errno from a signed-looking bit pattern.
-                    RetCode::Address(native_usize(exit.sval.cast_unsigned()))
+                    RetCode::Address(native_usize(exit.rval.cast_unsigned()))
                 };
                 self.exit(tid, status, result, observe)
             }
             // The kernel no longer holds this task at a syscall stop (it was killed or woken
             // between the wait and this query): nothing is left to record, only to release.
-            libc::PTRACE_SYSCALL_INFO_NONE => resume(tid, None),
+            PTRACE_SYSCALL_INFO_NONE => resume(tid, None),
             operation => Err(io::Error::other(format!(
                 "unexpected syscall stop kind {operation} for {tid}"
             ))),
@@ -840,15 +882,15 @@ fn resume_stop(tid: Pid, wait: WaitStatus) -> io::Result<()> {
 }
 
 /// Reads the current syscall stop, or `None` once its task has vanished.
-fn syscall_info(tid: Pid) -> io::Result<Option<libc::ptrace_syscall_info>> {
-    let mut info = std::mem::MaybeUninit::<libc::ptrace_syscall_info>::zeroed();
+fn syscall_info(tid: Pid) -> io::Result<Option<PtraceSyscallInfo>> {
+    let mut info = std::mem::MaybeUninit::<PtraceSyscallInfo>::zeroed();
     // SAFETY: unlike nix 0.30.1's syscall_info wrapper, this supplies the actual writable
     // buffer size. Kernel versions without this operation are errors, never a fallback.
     let Some(copied) = alive(Errno::result(unsafe {
         libc::ptrace(
-            libc::PTRACE_GET_SYSCALL_INFO,
+            0x420e, // PTRACE_GET_SYSCALL_INFO
             tid.as_raw(),
-            std::mem::size_of::<libc::ptrace_syscall_info>(),
+            std::mem::size_of::<PtraceSyscallInfo>(),
             info.as_mut_ptr(),
         )
     }))?
@@ -858,8 +900,8 @@ fn syscall_info(tid: Pid) -> io::Result<Option<libc::ptrace_syscall_info>> {
     // SAFETY: the zero-initialized structure and union contain only integer fields.
     let info = unsafe { info.assume_init() };
     let required = match info.op {
-        libc::PTRACE_SYSCALL_INFO_ENTRY => 80,
-        libc::PTRACE_SYSCALL_INFO_EXIT => 33,
+        PTRACE_SYSCALL_INFO_ENTRY => 80,
+        PTRACE_SYSCALL_INFO_EXIT => 33,
         _ => 24,
     };
     if copied < required {

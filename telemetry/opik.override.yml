@@ -1,0 +1,76 @@
+services:
+  mysql:
+    pull_policy: missing
+    restart: unless-stopped
+  redis:
+    pull_policy: missing
+    restart: unless-stopped
+  clickhouse-init:
+    image: alpine:3.22
+    pull_policy: missing
+  zookeeper:
+    pull_policy: missing
+    restart: unless-stopped
+  clickhouse:
+    pull_policy: missing
+    restart: unless-stopped
+  minio:
+    pull_policy: missing
+    restart: unless-stopped
+  mc:
+    pull_policy: missing
+  backend:
+    profiles: !reset []
+    build: !reset null
+    image: ${JUNCO_OPIK_BACKEND_IMAGE:-ghcr.io/comet-ml/opik/opik-backend@sha256:d57219b343e08ea103ae4faf8cfa23d3cfd21c05830be81b0ba89c6f6d084c43}
+    pull_policy: missing
+    restart: unless-stopped
+    ports: !reset []
+    depends_on:
+      mc:
+        condition: service_completed_successfully
+  frontend:
+    profiles: !reset []
+    build: !reset null
+    image: ${JUNCO_OPIK_FRONTEND_IMAGE:-ghcr.io/comet-ml/opik/opik-frontend@sha256:102795e402363ac1c5d04856dc407314b197ede2a9441f0ccae0171a240e4f82}
+    pull_policy: missing
+    restart: unless-stopped
+    ports: !override ["${JUNCO_BIND_ADDRESS:-127.0.0.1}:5173:5173"]
+    environment:
+      NGINX_PORT: "5173"
+      OPIK_VERSION: ${JUNCO_OPIK_VERSION:-2.2.99}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5173/health"]
+  python-backend:
+    profiles: !reset []
+    build: !reset null
+    image: ${JUNCO_OPIK_PYTHON_BACKEND_IMAGE:-ghcr.io/comet-ml/opik/opik-python-backend@sha256:2b4ef9c3ea9e526cae8e22d18515de4fd8d9e5b50405483996dc140cc7d75816}
+    pull_policy: missing
+    restart: unless-stopped
+    environment:
+      OPIK_VERSION: ${JUNCO_OPIK_VERSION:-2.2.99}
+      PYTHON_CODE_EXECUTOR_IMAGE_TAG: ${JUNCO_OPIK_VERSION:-2.2.99}
+      OPIK_REVERSE_PROXY_URL: http://frontend:5173/api
+
+volumes:
+  mysql:
+    external: true
+    name: opik-opik_mysql
+  redis-data:
+    external: true
+    name: opik-opik_redis-data
+  clickhouse:
+    external: true
+    name: opik-opik_clickhouse
+  clickhouse-server:
+    external: true
+    name: opik-opik_clickhouse-server
+  clickhouse-config:
+    external: true
+    name: opik-opik_clickhouse-config
+  zookeeper:
+    external: true
+    name: opik-opik_zookeeper
+  minio-data:
+    external: true
+    name: opik-opik_minio-data

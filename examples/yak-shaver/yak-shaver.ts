@@ -1609,7 +1609,7 @@ async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: Abo
     // Recorded only under a validated work-tree root; batch graphs all close before it does.
     const recorder = lifetime.adopt(await problemRecorder(root), (owned) => owned.close());
     const buildCollection = lifetime.adopt(await tools.ToolCollection.create(root, { policy: tools.EmptyPolicy, sandbox: "always" }), (collection) => collection.close());
-    const observer = new OpikTracer(new Opik(), "runYakShaver");
+    const observer = new OpikTracer(new Opik({ apiUrl: process.env.OPIK_URL_OVERRIDE ?? "http://localhost:5173/api" }), "runYakShaver");
     lifetime.defer(() => observer.flush());
     const resources = lifetime.use(new AsyncDisposableStack());
     const graft = mcp.JuncoMcpTools.add({
