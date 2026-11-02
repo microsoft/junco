@@ -1,8 +1,9 @@
 #![deny(missing_docs)]
-//! Ownership-lock policies backed by the shared `history-semantics` engine.
+//! Ownership-lock and information-flow policies backed by the shared `history-semantics` engine.
 //!
-//! [`LockEvent`] carries the caller's compact principal and resource identities. [`LockPolicy`]
-//! retains the compiled seven-rule ownership-lock table; [`lock_decision`] evaluates it once.
+//! [`LockEvent`] carries compact identities; [`LockPolicy`] retains the ownership-lock table.
+//! [`FlowEvent`] carries capability facts; [`FlowPolicy`] retains the information-flow table.
+//! [`lock_decision`] and [`flow_decision`] evaluate their respective tables once.
 //! Generic DSL APIs come from `history_syntax`, histories from `history_store`, and validators from `history_semantics`.
 //!
 //! # Example
@@ -67,5 +68,6 @@
 mod model;
 mod policy;
 
-pub use model::{Action, LockEvent};
+pub use model::{Action, Flow, FlowEvent, LockEvent};
+pub use policy::flow::{FlowPolicy, flow_decision};
 pub use policy::lock::{LockPolicy, lock_decision};

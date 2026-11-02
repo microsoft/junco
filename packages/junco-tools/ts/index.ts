@@ -5,6 +5,8 @@ export type {
 } from "@earendil-works/pi-coding-agent";
 export type {
   EditStore,
+  NativeFlowDecision,
+  NativeFlowEvent,
   NativeMux,
   NativeProcess,
   NativeProcessOptions,
@@ -46,6 +48,7 @@ export {
   type MarshPolicyDeniedError,
 } from "./errors.js";
 export { FindTool } from "./find.js";
+export { flowDecision } from "./flow.js";
 export {
   type CodeGraphAction,
   type CodeGraphResult,

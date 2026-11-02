@@ -8,6 +8,10 @@ The file-tool engines (`pi-ast`, `pi-diff`, `pi-walker`, and `pi-edit`) and thei
 
 `LspTool` uses the standalone [`junco-lsp`](crates/junco-lsp) Rust crate, which does not depend on Oh My Pi or the file-tool engines above. Its protocol behavior and vendored server defaults were ported from 18.13.3; Oh My Pi is attribution, not an LSP runtime dependency. Node and Bun use the same native implementation, with no JavaScript LSP client, Bun worker, or marsh CLI subprocess.
 
+## Information-flow decisions
+
+`flowDecision(history, candidate)` is a native-backed, one-shot `junco-policy` check, separate from ShellMux's ownership-lock `Policy`. Events have `{ principal, action, resource }`, with `action` one of `Reader`, `Public`, `Trusted`, or `Send`. A `Send` grants when its resource has a `Public` fact, the principal has a `Reader` fact for that resource, or the principal has a `Trusted` fact. Other candidates grant; decisions never append facts. The caller must compute capability closure and assert only trustworthy facts. Denials return `{ granted: false, failedPrecondition, allowedFixes }`; grants return `{ granted: true }`. Unknown actions and operational failures throw. See the [CaMeL example](../../examples/camel/camel.ts) for source/readers propagation and body-before-subject checks across all recipients.
+
 ## Build the local package
 
 Requirements:

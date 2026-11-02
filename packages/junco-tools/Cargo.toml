@@ -24,6 +24,9 @@ napi-derive = "=3.6.13"
 marsh-core = { path = "../../crates/marsh/crates/marsh-core" }
 marsh-btrfs = { path = "../../crates/marsh/crates/marsh-btrfs" }
 junco-lsp = { path = "crates/junco-lsp" }
+junco-policy = { path = "../../crates/junco-policy" }
+history-store = { path = "../../crates/junco-policy/crates/history-store", default-features = false, features = ["runtime", "std"] }
+history-semantics = { path = "../../crates/junco-policy/crates/history-semantics", default-features = false, features = ["runtime", "std", "cache"] }
 brush-core = "=0.5.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }

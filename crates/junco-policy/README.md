@@ -4,8 +4,8 @@ The workspace has five library packages: `history-syntax` owns the generic Rust 
 DSL and event projections; `junco-core` owns shared IR, encoding, errors, and contracts;
 `history-store` owns histories, interning, graph storage, and cache containers;
 `history-semantics` owns compilation, evaluation, and generic policy facades;
-`junco-policy` is their ownership-lock consumer. Import APIs directly from their owners.
-The root package exports only `Action`, `LockEvent`, `LockPolicy`, and `lock_decision`;
+`junco-policy` is their ownership-lock and information-flow consumer. Import APIs directly from their owners.
+The root package exports `Action`, `LockEvent`, `LockPolicy`, `lock_decision`, `Flow`, `FlowEvent`, `FlowPolicy`, and `flow_decision`;
 there are no generic compatibility re-exports. The fuzz harness retains an independent
 no-surprise oracle, not another production evaluator.
 
@@ -35,7 +35,7 @@ head for resumable consumers; compiler helpers remain private.
 their store and history: foreign checkpoints return `WrongCheckpointOwner`, and a
 checkpoint beyond the current length returns `CheckpointBeyondHistory`, without mutation.
 Compilation returns `CompileError`; evaluation and history operations return
-`HistoryError`; `PolicyError` wraps these for the one-shot lock helper. Errors are not
+`HistoryError`; `PolicyError` wraps these for the one-shot policy helpers. Errors are not
 denials and never become a successful append.
 
 `TracePolicy` compiles ordered `TraceRule`s once and decides against caller-owned history

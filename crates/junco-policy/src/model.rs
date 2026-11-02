@@ -1,4 +1,4 @@
-//! Compact ownership-lock events for the shared [`Event`](history_syntax::Event) interface.
+//! Compact lock and information-flow events for the shared [`Event`](history_syntax::Event) interface.
 
 use core::fmt::{self, Debug};
 use core::hash::Hash;
@@ -83,6 +83,63 @@ where
     }
 
     fn action(self) -> Action {
+        self.action
+    }
+
+    fn resource(self) -> R {
+        self.resource
+    }
+}
+
+/// Information-flow capability action over the values one tool call carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Flow {
+    /// `principal` may read `resource`.
+    Reader,
+    /// `resource` is readable by everyone; the principal asserts the fact.
+    Public,
+    /// `principal` is a recipient named by trusted data in `resource`.
+    Trusted,
+    /// `resource` flows to `principal` through a side-effecting tool.
+    Send,
+}
+
+/// Built-in compact information-flow event; [`LockEvent`]'s shape over [`Flow`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlowEvent<P, R> {
+    /// Reader, recipient or asserting actor.
+    pub principal: P,
+    /// Capability fact or candidate kind.
+    pub action: Flow,
+    /// The value (variable or tool argument) the fact is about.
+    pub resource: R,
+}
+
+impl<P, R> FlowEvent<P, R> {
+    /// Creates an information-flow event.
+    pub fn new(principal: P, action: Flow, resource: R) -> Self {
+        Self {
+            principal,
+            action,
+            resource,
+        }
+    }
+}
+
+impl<P, R> Event for FlowEvent<P, R>
+where
+    P: Copy + Debug + Eq + Hash,
+    R: Copy + Debug + Eq + Hash,
+{
+    type Principal = P;
+    type Action = Flow;
+    type Resource = R;
+
+    fn principal(self) -> P {
+        self.principal
+    }
+
+    fn action(self) -> Flow {
         self.action
     }
 

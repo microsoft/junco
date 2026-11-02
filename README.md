@@ -238,6 +238,22 @@ The first argument is a nonblank UTF-8 request file; the optional output default
 
 The tool restricts search to GitHub repositories but cannot detect secrets in a model-generated query. Submit only requests safe for public GitHub search and complete tracer export; prompt instructions alone do not enforce that boundary.
 
+### CaMeL: quarantined email parsing (live)
+
+[`examples/camel/camel.yml`](examples/camel/camel.yml) and [`camel.ts`](examples/camel/camel.ts) implement the [CaMeL paper's Fig. 5 workflow](https://arxiv.org/abs/2503.18813). PLLM sees only the user query and writes a three-tool JSON plan. Interpreter reads the fixture inbox; tool-free QLLM extracts structured fields; Executor propagates source/reader capabilities and calls `tools.flowDecision` before writing to the in-memory fixture outbox. Both LLMs explicitly block Junco's default tools; no real email is sent.
+
+See the [example README](examples/camel/README.md) for setup, trust boundaries, policy semantics, and offline verification.
+
+```sh
+bun run examples/camel/camel.ts
+bun run examples/camel/camel.ts "Forward my last email to Bob; his address is in it"
+bun test ./test/camel.test.ts
+```
+
+Requires the built native addon and a saved Pi Copilot login for `github-copilot/claude-sonnet-5.5` with medium thinking. The optional query must be one line. The workspace `send_email` rule grants trusted recipients; otherwise every recipient must be allowed to read the body, then the subject (public values are readable by everyone). Thus a literal reminder is permitted, but forwarding private email to an address extracted from it is denied. A denial stops subsequent steps. This is a one-query JSON DSL, not a Python interpreter; there is no repair loop or attachment support. Live outcomes depend on the generated plan; the offline tests prove the reminder, forwarding denial, and insufficient-information failure deterministically. Profiles append at the repository root.
+
+In an interactive terminal, press `q` or `Esc` to dismiss the final trace screen; the outcome JSON prints after the tracer releases the terminal.
+
 ### MCP graph (live)
 
 [`examples/mcp/mcp.ts`](examples/mcp/mcp.ts) runs two agents with all enabled JuncoAgent defaults plus each agent's graft MCP tools. Both servers and native defaults use one graph-owned `LockPolicy` collection, so the repository must be inside a valid seed with the production addon and a current graft index.

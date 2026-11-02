@@ -3,6 +3,7 @@
 mod ast;
 mod diff;
 mod edit;
+mod flow;
 mod frontend;
 mod glob;
 mod glob_util;
