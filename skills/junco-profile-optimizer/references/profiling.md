@@ -285,7 +285,7 @@ try {
 } catch (error) {
   failures.push(error);
 }
-for (const close of [() => execution?.graph.close(), () => observer.flush(), () => recorder?.close()])
+for (const close of [() => execution?.graph.close(), () => recorder?.close()])
   try {
     await close();
   } catch (error) {
@@ -299,7 +299,7 @@ Integration notes:
 
 - **Recorder ownership.** Attach the recorder where the runner already builds: `fromYaml`'s `recorder` (agents created by `createAgent` receive it through their spec), or `JuncoGraph.create`'s collection options. An existing recorder must be integrated consistently or reported as an ownership conflict — never silently replaced. If the runner passes `recorderNodeId`, prefix probe `node` paths with it.
 - **Caller-owned resources.** With caller-owned `collection`, `createAgent` or `agents`, monitoring is configured where that collection is constructed, never through conflicting `BuildOptions.resources`.
-- **Cleanup order.** Graph and owned resources close first, the tracer flushes next, the recorder closes last; build failures still close. Run and cleanup failures are reported together.
+- **Cleanup order.** Evaluation joins tracer delivery before settling. Graph and owned resources close first, a retained interactive TUI is finished next (if selected), and the recorder closes last; build failures still close. Run and cleanup failures are reported together.
 - **Cost mode.** An all-request USD objective needs `profile.createRecorder("usage")`; semantics under [cost](#metrics-and-measurement-coverage).
 - **Scheduler USD.** `optimizerPi` wraps only the scheduler's `completeSimple`. On every returned response, record `{ resource: "cost", kind: "usage", source: schedulerSource, usage: response.usage }` through a scheduler recorder context before `schedules.pi` checks cancellation, stop reason or scheduling output. Missing/nonfinite/negative cost invalidates the run. A thrown request with unknown usage is an accounting error, never a free request or a fallback. Agentic scheduling may order ready work, not omit required consultations or choose work-agent rungs.
 - **External results.** A fixed workload adapter can publish finite `metrics` in the same completion receipt after validating its complete official outcomes, cost coverage, source hash and cleanup. Keep these out of the solving agents' environment; no YAML edge or invented judge is needed. A solver failure with complete accounting and official outcomes remains a scored, quality-infeasible run; infrastructure or accounting failures leave no receipt.

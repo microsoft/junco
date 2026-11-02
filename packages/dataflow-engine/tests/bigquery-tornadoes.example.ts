@@ -145,19 +145,15 @@ test("cookbook: bigquery tornadoes count per month", async () => {
   graph.addEdge(filterAndPairId, combinePerKeyId, pairsEdge);
   graph.addEdge(combinePerKeyId, sinkId, resultsEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(results, [
-      { kind: "result", month: 1, tornado_count: 2 },
-      { kind: "result", month: 2, tornado_count: 1 },
-    ]);
-    assert.equal(completed.get(sourceId), "source done");
-    assert.equal(completed.has(filterAndPairId), false);
-    assert.equal(completed.has(combinePerKeyId), false);
-    assert.equal(completed.has(sinkId), false);
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(results, [
+    { kind: "result", month: 1, tornado_count: 2 },
+    { kind: "result", month: 2, tornado_count: 1 },
+  ]);
+  assert.equal(completed.get(sourceId), "source done");
+  assert.equal(completed.has(filterAndPairId), false);
+  assert.equal(completed.has(combinePerKeyId), false);
+  assert.equal(completed.has(sinkId), false);
 });

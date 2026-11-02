@@ -27,6 +27,7 @@ export type RalphPredicate = (
   },
 ) => boolean;
 
+/** Round control of `schedules.ralph`: a fixed `rounds` count, or an `until` success check with an optional `rounds` cap. */
 export type RalphOptions = {
   /**
    * A positive safe integer. Without `until`: the full-assignment rounds to run, two when omitted.

@@ -189,17 +189,19 @@ class RecorderBridge implements DataflowTracer {
         );
         return {
           end: (result) => {
-            observe(() => step?.end(result));
+            const pending = observe(() => step?.end(result));
             observe(() => activation?.(result));
+            return pending;
           },
           fail: (error) => {
-            observe(() => step?.fail(error));
+            const pending = observe(() => step?.fail(error));
             observe(() => activation?.(outcome(error)));
+            return pending;
           },
         };
       },
       end: (results) => {
-        observe(() => run?.end(results));
+        const pending = observe(() => run?.end(results));
         observe(() => {
           view?.record({
             kind: "metrics",
@@ -208,16 +210,14 @@ class RecorderBridge implements DataflowTracer {
           });
           finish?.("success");
         });
+        return pending;
       },
       fail: (error) => {
-        observe(() => run?.fail(error));
+        const pending = observe(() => run?.fail(error));
         observe(() => finish?.(outcome(error)));
+        return pending;
       },
     };
-  }
-
-  flush(): Promise<void> {
-    return this.delegate.flush();
   }
 }
 

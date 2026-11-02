@@ -219,36 +219,32 @@ test("cookbook: multiple output pardo split lines to words", async () => {
   graph.addEdge(shortCountId, shortSinkId, shortCountsEdge);
   graph.addEdge(longCountId, longSinkId, longCountsEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(totalChars, [46]);
-    assert.deepEqual(
-      [...shortCounts].sort(),
-      (
-        [
-          ["A", 2],
-          ["new", 2],
-          ["of", 1],
-        ] as [string, number][]
-      ).sort(),
-    );
-    assert.deepEqual(
-      [...longCounts].sort(),
-      (
-        [
-          ["whole", 1],
-          ["world", 1],
-          ["fantastic", 1],
-          ["point", 1],
-          ["view", 1],
-        ] as [string, number][]
-      ).sort(),
-    );
-    assert.deepEqual(splitterFirings, [12]);
-    assert.equal(completed.get(sourceId), "source done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(totalChars, [46]);
+  assert.deepEqual(
+    [...shortCounts].sort(),
+    (
+      [
+        ["A", 2],
+        ["new", 2],
+        ["of", 1],
+      ] as [string, number][]
+    ).sort(),
+  );
+  assert.deepEqual(
+    [...longCounts].sort(),
+    (
+      [
+        ["whole", 1],
+        ["world", 1],
+        ["fantastic", 1],
+        ["point", 1],
+        ["view", 1],
+      ] as [string, number][]
+    ).sort(),
+  );
+  assert.deepEqual(splitterFirings, [12]);
+  assert.equal(completed.get(sourceId), "source done");
 });

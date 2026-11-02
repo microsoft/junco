@@ -1304,7 +1304,7 @@ describe("candidate batch graph", () => {
         return {
           ...run,
           end: (results) => {
-            run.end(results);
+            const pending = run.end(results);
             lastProposer = results.get(graph.NodeId.create("Proposer:4"));
             finalized = results.get(graph.NodeId.create("FinalizeBatch"));
             sink = results.get(graph.NodeId.create("$sink"));
@@ -1320,10 +1320,10 @@ describe("candidate batch graph", () => {
               ].some((id) => !results.has(graph.NodeId.create(id)))
             )
               earlySink = true;
+            return pending;
           },
         };
       },
-      flush: () => inner.flush(),
     };
     const outcomes = await runCandidateBatch({
       snapshot: laneSnapshot,
@@ -1514,17 +1514,17 @@ describe("candidate batch graph", () => {
             return {
               ...node,
               end: (step) => {
-                node.end(step);
+                const pending = node.end(step);
                 if (String(id) === "Judge:1" && step.done)
                   queueMicrotask(() =>
                     controller.abort(new DOMException("stop", "AbortError")),
                   );
+                return pending;
               },
             };
           },
         };
       },
-      flush: () => inner.flush(),
     };
     const recorder = recordingApplier();
     await assert.rejects(

@@ -77,10 +77,6 @@ export async function runMultiplier(tracer?: DataflowTracer) {
 
 if (import.meta.main) {
   const tracer = ExampleTracer.create("examples/multiplier");
-  try {
-    const r = await runMultiplier(tracer);
-    console.log(JSON.stringify(r.results));
-  } finally {
-    await tracer.flush();
-  }
+  const r = await runMultiplier(tracer);
+  console.log(JSON.stringify(r.results));
 }

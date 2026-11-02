@@ -324,7 +324,7 @@ try {
 } catch (error) {
   failures.push(error);
 }
-for (const close of [() => execution?.graph.close(), () => observer.flush(), () => recorder?.close()])
+for (const close of [() => execution?.graph.close(), () => recorder?.close()])
   try {
     await close();
   } catch (error) {

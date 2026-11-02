@@ -5,6 +5,7 @@ import { DataflowDefinitionError } from "./errors.js";
 export type UsageLimitScope = "evaluation" | "batch" | "activation";
 /** Caps on committed model tokens and admitted tool calls; an omitted cap is unlimited, `0` denies all. */
 export type UsageLimits = Readonly<{ tokens?: number; tools?: number }>;
+/** What a `UsageLimitError` carries: which budget, its scope and limit, the usage that hit it, and the node path. */
 export type UsageLimitDetails = Readonly<{
   resource: "tokens" | "tools";
   scope: UsageLimitScope;

@@ -166,15 +166,11 @@ export async function runCombinePerKey(tracer?: DataflowTracer) {
 
 if (import.meta.main) {
   const tracer = ExampleTracer.create("examples/combine-per-key");
-  try {
-    const r = await runCombinePerKey(tracer);
-    console.log(
-      JSON.stringify({
-        sums: r.sums.map((r) => [r.key, r.value]),
-        products: r.products.map((r) => [r.key, r.value]),
-      }),
-    );
-  } finally {
-    await tracer.flush();
-  }
+  const r = await runCombinePerKey(tracer);
+  console.log(
+    JSON.stringify({
+      sums: r.sums.map((r) => [r.key, r.value]),
+      products: r.products.map((r) => [r.key, r.value]),
+    }),
+  );
 }

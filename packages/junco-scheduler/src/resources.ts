@@ -107,6 +107,7 @@ export function highest(kind: ResourceKind): Rank {
   return ranked(kind, -1, "highest");
 }
 
+/** Allowances for `limit`: a per-decision memory admission bound and token/tool budgets per `scope`. */
 export type LimitOptions = {
   /** Predicted peak memory of one decision's batch. */
   readonly memory?: ResourceQuantity<"memory">;

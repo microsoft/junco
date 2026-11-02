@@ -18,20 +18,14 @@ const RUN: DataflowRunTrace<TSchema, unknown> = {
   fail: noop,
 };
 
-const FLUSHED: Promise<void> = Promise.resolve();
-
 /**
  * A {@link DataflowTracer} that deliberately traces nothing: no serialization, timestamps, retained
- * payloads, logging or I/O, and no allocation per run, activation or flush.
+ * payloads, logging or I/O, and no allocation per run or activation.
  */
 export class DummyTracer implements DataflowTracer {
   startRun<S, N extends TSchema, T, EH>(
     _graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T> {
     return RUN;
-  }
-
-  flush(): Promise<void> {
-    return FLUSHED;
   }
 }

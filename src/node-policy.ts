@@ -38,6 +38,7 @@ export type LadderRung = {
 /** Every strength's model; all five rungs are required. */
 export type Ladder = Readonly<Record<ModelStrengthName, LadderRung>>;
 
+/** Reject a ladder unless all five rungs name a `"provider/model-id"` model; throws `DataflowDefinitionError`. */
 export function validateLadder(ladder: Ladder): void {
   for (const name of MODEL_STRENGTHS) {
     const rung = ladder?.[name];

@@ -17,6 +17,7 @@ import {
 import { anyFanIn } from "./any-fan-in.js";
 import { createRalphController, type RalphOptions } from "./ralph.js";
 
+/** Options of `schedules.memory`: the borrowed `JuncoMemory` store and the Ralph round options of the memory Ralph loop. */
 export interface MemoryScheduleOptions {
   readonly memory: JuncoMemory;
   readonly ralph?: RalphOptions;

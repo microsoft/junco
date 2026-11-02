@@ -872,11 +872,7 @@ async function preflight(): Promise<void> {
       if (terminal._tag !== "Some") throw new Error("preflight sink produced no result");
       text = syntax.finalText(terminal.value, "preflight sink");
     } finally {
-      try {
-        await execution.graph.close();
-      } finally {
-        await execution.graph.tracer.flush();
-      }
+      await execution.graph.close();
     }
   } finally {
     const failures = await closeRecording(acquired, repo, env, recorder);

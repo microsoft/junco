@@ -813,7 +813,7 @@ test(
 
 for (const lazy of [false, true]) {
   test(
-    `interactive missing binding ${lazy ? "lazy flush/close" : "explicit create"} rejects without Dummy recovery and releases logger/terminal`,
+    `interactive missing binding ${lazy ? "lazy finish/close" : "explicit create"} rejects without Dummy recovery and releases logger/terminal`,
     async () => {
       await withPty(
         [lazy ? "--missing-lazy" : "--missing"],
@@ -890,7 +890,6 @@ const id = flow.addNode({ id: graph.NodeId.create("quiet"), trigger: trigger.Tri
 flow.addEdge(id, sink.id, resultEdge);
 assert.equal((await execution.run()).get(id), "done");
 await flow.close();
-await tracer.TuiTracer.shared().flush();
 await assert.rejects(tracer.TuiTracer.create(), (error) => error instanceof Error && error.message === ${JSON.stringify(terminalError)});
 assert.deepEqual(Object.keys(require.cache).filter((path) => path.endsWith(".node")), addons);
 // The loader is real and configured with an absent binary: no stub or mocked native module.

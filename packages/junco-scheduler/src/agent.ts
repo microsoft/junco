@@ -17,6 +17,7 @@ import { Value } from "typebox/value";
 import type { parallel } from "./parallel.js";
 import { agent, type Decision, type Snapshot } from "./scheduler.js";
 
+/** What `pi` needs: a Pi `models` runtime, the `model` to ask, and optional system prompt, prompt and stream options. */
 export type PiOptions = {
   readonly models: Pick<Models, "completeSimple">;
   readonly model: Model<Api>;

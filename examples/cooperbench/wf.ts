@@ -197,7 +197,6 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
   } catch (error) {
     const failures: unknown[] = [error];
     try { await execution.graph.close(); } catch (failure) { failures.push(failure); }
-    try { await execution.graph.tracer.flush(); } catch (failure) { failures.push(failure); }
     throw new AggregateError(failures, "Pair assignment setup failed");
   }
   return { execution, stats };
@@ -551,7 +550,7 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
   let completed = false;
   let pair: Pair | undefined;
   try {
-    // LIFO: graph/agents, collection, Opik, final container peak, then recorder sinks.
+    // LIFO: graph/agents, collection, final container peak, then recorder sinks.
     await using lifetime = new AsyncDisposableStack();
     const live = await tracer.GrafanaRecorder.create({ url: grafanaUrl, dashboard: "junco-cooperbench" });
     const recorder = lifetime.adopt(
@@ -560,7 +559,6 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
     );
     lifetime.adopt(await createContainerMemorySampler(join(request.problem_dir, ".junco"), request.run_id, recorder), (owned) => owned.close());
     const observer = new OpikTracer(new Opik({ apiUrl: opikUrl, projectName: process.env.OPIK_PROJECT_NAME ?? "cooperbench" }), request.problem_dir);
-    lifetime.defer(() => observer.flush());
     const collection = lifetime.adopt(
       await tools.ToolCollection.create(process.cwd(), marshOptions),
       (owned) => owned.close(),

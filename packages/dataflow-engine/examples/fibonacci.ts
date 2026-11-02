@@ -96,10 +96,6 @@ export async function runFibonacci(tracer?: DataflowTracer) {
 
 if (import.meta.main) {
   const tracer = ExampleTracer.create("examples/fibonacci");
-  try {
-    const r = await runFibonacci(tracer);
-    console.log(JSON.stringify(r.results));
-  } finally {
-    await tracer.flush();
-  }
+  const r = await runFibonacci(tracer);
+  console.log(JSON.stringify(r.results));
 }

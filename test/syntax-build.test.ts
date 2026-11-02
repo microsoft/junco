@@ -3815,13 +3815,9 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
       await execution?.graph.close();
     } finally {
       try {
-        await trace.flush();
+        memory.close();
       } finally {
-        try {
-          memory.close();
-        } finally {
-          await rm(directory, { recursive: true, force: true });
-        }
+        await rm(directory, { recursive: true, force: true });
       }
     }
   }

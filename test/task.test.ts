@@ -544,7 +544,6 @@ describe("native tasks on a graph-driven caller", () => {
           fail() {},
         };
       },
-      async flush() {},
     };
     const { execution, ports } = taskExecution(observer);
     const outer = execution.graph;
@@ -2713,7 +2712,6 @@ describe("graph recorder bridge", () => {
           fail: check,
         };
       },
-      flush: async () => {},
     };
     return { observer, seen };
   }

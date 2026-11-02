@@ -996,10 +996,6 @@ export async function run(config: RunOptions): Promise<string> {
     if (terminal._tag !== "Some") throw new Error(`workflow stopped without a terminal report; unfinished: ${unfinished(execution.graph)}`);
     return syntax.finalText(terminal.value, "Finish");
   } finally {
-    try {
-      await execution.graph.close();
-    } finally {
-      await execution.graph.tracer.flush();
-    }
+    await execution.graph.close();
   }
 }

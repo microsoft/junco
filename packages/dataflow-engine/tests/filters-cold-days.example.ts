@@ -163,19 +163,15 @@ test("cookbook: filters cold days with global mean AND-trigger", async () => {
   graph.addEdge(meanCombineId, belowMeanFilterId, meanEdge);
   graph.addEdge(belowMeanFilterId, sinkId, outEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(
-      results.map((r) => [r.year, r.month, r.day]),
-      [
-        [2010, 1, 1],
-        [2012, 1, 2],
-      ],
-    );
-    assert.equal(completed.get(sourceId), "source done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(
+    results.map((r) => [r.year, r.month, r.day]),
+    [
+      [2010, 1, 1],
+      [2012, 1, 2],
+    ],
+  );
+  assert.equal(completed.get(sourceId), "source done");
 });

@@ -143,16 +143,12 @@ test("cookbook: group with coder — parse and sum by player name", async () => 
   graph.addEdge(parseId, sumByPlayerId, pairsEdge);
   graph.addEdge(sumByPlayerId, sinkId, totalsEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(results, [
-      ["Alice", 33],
-      ["Bob", 20],
-    ]);
-    assert.equal(completed.get(sourceId), "source done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(results, [
+    ["Alice", 33],
+    ["Bob", 20],
+  ]);
+  assert.equal(completed.get(sourceId), "source done");
 });

@@ -156,6 +156,7 @@ export type DataflowRunOptions = {
   readonly signal?: AbortSignal;
 };
 
+/** A policy's read-only view of the graph: node status/state/profiles, links, pending inputs, results and a change `version`. */
 export type DataflowObservation<S, N extends TSchema, T> = {
   readonly nodes: ReadonlyMap<
     NodeId,
@@ -176,6 +177,7 @@ export type DataflowObservation<S, N extends TSchema, T> = {
   readonly version: number;
 };
 
+/** Executes one planned `Schedule` inside `evaluate`; options resolve each entry's inputs, observe columns and add per-node usage budgets. */
 export type DataflowExecution<N extends TSchema, T> = (
   schedule: Schedule,
   options?: {
@@ -206,6 +208,7 @@ export class DataflowGraph<
   readonly #results = new Map<NodeId, T>();
   #nextNodeIndex = 0;
   #evaluation: Promise<void> | undefined;
+  #pending: Promise<void>[] = [];
   #version = 0;
   #observation: DataflowObservation<S, N, T> | undefined;
 
@@ -636,14 +639,15 @@ export class DataflowGraph<
       }
       if (drained?.status === "rejected") throw drained.reason;
       const run = trace;
-      if (run !== undefined) this.#observe(() => run.end(this.#results));
+      if (run !== undefined) this.#settle(() => run.end(this.#results));
       return outcome.value;
     } catch (error) {
       const run = trace;
-      if (run !== undefined) this.#observe(() => run.fail(error));
+      if (run !== undefined) this.#settle(() => run.fail(error));
       throw error;
     } finally {
       active = false;
+      await Promise.all(this.#pending.splice(0));
       this.#evaluation = undefined;
       gate.resolve();
     }
@@ -705,6 +709,20 @@ export class DataflowGraph<
       console.warn("[dataflow-engine] DataflowTracer callback failed", error);
       return undefined;
     }
+  }
+
+  /**
+   * Invoke one tracer completion like {@link #observe}, additionally retaining a returned promise so
+   * {@link evaluate} settles only after it does; a rejection is reported exactly like a throw.
+   */
+  #settle(callback: () => void | Promise<void>): void {
+    const delivery = this.#observe(callback);
+    if (delivery instanceof Promise)
+      this.#pending.push(
+        delivery.then(undefined, (error) => {
+          console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+        }),
+      );
   }
 
   /**
@@ -857,11 +875,11 @@ export class DataflowGraph<
         for (const message of step.value) this.emit(id, message);
       }
       const finished = activation;
-      if (finished !== undefined) this.#observe(() => finished.end(step));
+      if (finished !== undefined) this.#settle(() => finished.end(step));
     } catch (cause) {
       node.status = "done";
       const failed = activation;
-      if (failed !== undefined) this.#observe(() => failed.fail(cause));
+      if (failed !== undefined) this.#settle(() => failed.fail(cause));
       // A wiring violation raised while routing a yield is a graph bug, not a node error; an
       // exhausted usage budget is no failure to recover from.
       if (cause instanceof DataflowDefinitionError || holdsUsageFailure(cause))

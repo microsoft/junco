@@ -7,21 +7,27 @@ import {
 import type { TSchema } from "typebox";
 import { copyUsageLimits } from "./usage-limits.js";
 
+/** The five model strengths, weakest first; a `Ladder` names one model per strength. */
 export const MODEL_STRENGTHS = ["smol", "low", "med", "high", "xhigh"] as const;
+/** A strength by name, `"smol"` … `"xhigh"`. */
 export type ModelStrengthName = (typeof MODEL_STRENGTHS)[number];
 /** Index into MODEL_STRENGTHS: 0 = smol … 4 = xhigh. */
 export type ModelStrength = 0 | 1 | 2 | 3 | 4;
+/** `2` (`"med"`): the strength work-only policies select at. */
 export const DEFAULT_MODEL_STRENGTH: ModelStrength = 2;
+/** One selected node and the strength it runs at. */
 export type NodeModel = {
   readonly nodeId: NodeIdType;
   readonly modelStrength: ModelStrength;
 };
+/** One scheduler answer: the nodes that run together in the next column, each at a strength. */
 export type Decision = { readonly selected: readonly NodeModel[] };
 /** Work-only policies select at the default strength. */
 export const select = (
   ids: Iterable<NodeIdType>,
   modelStrength: ModelStrength = DEFAULT_MODEL_STRENGTH,
 ): NodeModel[] => [...ids].map((nodeId) => ({ nodeId, modelStrength }));
+/** The node ids of `selected`, in order. */
 export const nodeIds = (selected: readonly NodeModel[]): NodeIdType[] =>
   selected.map((entry) => entry.nodeId);
 
@@ -40,6 +46,7 @@ export type Snapshot<S, N extends TSchema, T, C> = DataflowObservation<
   readonly threads: number;
 };
 
+/** A policy: from a `Snapshot` of the graph (and an optional cancellation signal) to one `Decision`. */
 export type Scheduler<S, N extends TSchema, T, C> = (
   snapshot: Snapshot<S, N, T, C>,
   signal?: AbortSignal,

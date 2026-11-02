@@ -11,12 +11,14 @@ export const RESOURCES = {
   tokens: Tokens,
   cost: Money,
 } as const;
+/** A profiled resource: `"memory"`, `"runtime"`, `"tokens"` or `"cost"`. */
 export type ResourceKind = keyof typeof RESOURCES;
 export const RESOURCE_KINDS = Object.freeze(
   Object.keys(RESOURCES) as ResourceKind[],
 );
 export type DimensionOf<R extends ResourceKind> = (typeof RESOURCES)[R];
 export type ResourceUnit<R extends ResourceKind> = Unit<number, DimensionOf<R>>;
+/** An amount of resource `R` in a unit of its dimension (e.g. `bytes(…)`, `tokens(…)`). */
 export type ResourceQuantity<R extends ResourceKind> = Quantity<
   number,
   DimensionOf<R>
@@ -61,6 +63,7 @@ export type Estimate = {
   readonly source: "model" | "fallback";
   readonly reason?: "out_of_range" | "low_r2" | "few_samples" | "constant";
 };
+/** A per-node cost model for one resource: its unit, the port features it reads, and `predict` for a batch. */
 export interface ProfileData<R extends ResourceKind = ResourceKind> {
   readonly resource: R;
   readonly unit: ResourceUnit<R>;

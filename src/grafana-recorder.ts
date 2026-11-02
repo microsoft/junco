@@ -7,6 +7,7 @@ import {
   profileContexts,
 } from "junco-tools";
 
+/** Options of `GrafanaRecorder.create`. */
 export type GrafanaRecorderOptions = {
   /** Grafana base URL, without credentials; default `http://localhost:8000`. */
   readonly url?: string;

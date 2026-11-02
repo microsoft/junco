@@ -60,6 +60,7 @@ import {
 type Axis = "scheduler" | "ladder" | "limits";
 const AXES: readonly Axis[] = ["scheduler", "ladder", "limits"];
 
+/** What `runOptimizer` optimizes: the prepared target, objective, constraints, stop predicates, tuning axes and budgets. */
 export type OptimizationRequest = {
   /** The prepared pair and the existing invocation, run without a shell in `cwd`. */
   target: {
@@ -150,6 +151,7 @@ type Edit = {
 };
 type Stop = NonNullable<OptimizationState["stop"]>;
 
+/** `runOptimizer`'s result and resumable state: current and anchor candidates, trial/edit history and the stop reason (`null` while running). */
 export type OptimizationState = {
   request: OptimizationRequest;
   current: Candidate;

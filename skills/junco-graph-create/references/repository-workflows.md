@@ -104,14 +104,13 @@ export async function run(config: syntax.FromYamlOptions): Promise<string> {
     terminalText = contentText(terminal.value.content).trim();
     if (!terminalText) throw new Error("Terminal returned an empty report");
   } finally {
-    try { await execution.graph.close(); }
-    finally { await execution.graph.tracer.flush(); }
+    await execution.graph.close();
   }
   console.log(terminalText);
   return terminalText;
 }
 ```
 
-In the delivered pair, supply `cwd: "<repo>"`, the chosen scheduler, verified shared models/ladder and required `code` definitions to `run`; guard live acquisition/invocation with `if (import.meta.main)` when exporting for tests. Do not leave illustrative placeholders in delivered files. Execute `bun run <name>.ts` only when permissions and prerequisites allow. Keep operational prints after tracer flush, including when the automatic TUI owns the terminal.
+In the delivered pair, supply `cwd: "<repo>"`, the chosen scheduler, verified shared models/ladder and required `code` definitions to `run`; guard live acquisition/invocation with `if (import.meta.main)` when exporting for tests. Do not leave illustrative placeholders in delivered files. Execute `bun run <name>.ts` only when permissions and prerequisites allow. The helper leaves caller-supplied tracer lifetime to the caller. For an interactive runner, retain `const observer = tracer.TuiTracer.shared()` before construction, pass it as `tracer: observer`, and after graph close call `observer.finish()` in a nested `finally` only if `observer instanceof tracer.TuiTracer` (import `tracer` from `junco`). Keep operational prints after terminal restoration; never retrieve the observer through `graph.tracer`, which a recorder may wrap.
 
 Return the pair and run command, concise authoring source evidence and coverage limits, the requested permission/concurrency choices, and actual output or the exact missing prerequisite. Distinguish runtime graph exploration assigned in prompts from queries actually executed by Junco agents. Never substitute a CLI summary or unobserved success for the requested result.

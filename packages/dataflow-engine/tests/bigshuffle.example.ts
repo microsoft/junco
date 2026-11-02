@@ -225,20 +225,16 @@ test("cookbook: bigshuffle with input and output checksums", async () => {
   graph.addEdge(inputCsumId, inputCsumSinkId, inputCsumEdge);
   graph.addEdge(outputCsumId, outputCsumSinkId, outputCsumEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(mainOutput, [
-      "AAAAAAAAAAvalue-1a",
-      "AAAAAAAAAAvalue-2a",
-      "BBBBBBBBBBvalue-1b",
-      "CCCCCCCCCCvalue-1c",
-    ]);
-    assert.deepEqual(inputSum, [72]);
-    assert.deepEqual(outputSum, [72]);
-    assert.equal(completed.get(sourceId), "source done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(mainOutput, [
+    "AAAAAAAAAAvalue-1a",
+    "AAAAAAAAAAvalue-2a",
+    "BBBBBBBBBBvalue-1b",
+    "CCCCCCCCCCvalue-1c",
+  ]);
+  assert.deepEqual(inputSum, [72]);
+  assert.deepEqual(outputSum, [72]);
+  assert.equal(completed.get(sourceId), "source done");
 });

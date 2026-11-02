@@ -9,7 +9,7 @@
  * github-copilot/gpt-6.1-sol high thinking enabled. The output must be new/empty;
  * SIGINT exits 130 and retains that copy. Paid model turns continue after successful diagnostics.
  * Advanced callers prepare once, provide persistent MCP-enabled members to runVerusLoop,
- * then close them and flush their observer. Importing acquires nothing.
+ * then close them and finish any TUI observer. Importing acquires nothing.
  *
  * Command/trust guidance:
  * https://verus-lang.github.io/verus/guide/getting_started_cmd_line.html
@@ -200,7 +200,7 @@ export const VerusRound = {
   },
 };
 
-/** Success never terminates; caller owns members, observer and recorder, including disposal/flush. */
+/** Success never terminates; caller owns members, observer and recorder, including disposal and TUI finish. */
 export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMembers,
   signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder,
   recorder?: syntax.BuildOptions["recorder"]): Promise<void> {
@@ -237,7 +237,7 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   const workspace = await prepareVerusSource(request, signal);
   const observer = tracer.TuiTracer.shared();
   await using resources = new AsyncDisposableStack();
-  resources.defer(() => observer.flush());
+  resources.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
   const recorder = resources.adopt(await problemRecorder(workspace.outputDir), (owned) => owned.close());
   const bridgeDir = await mkdtemp(join(workspace.outputDir, ".junco-verus-mcp-"));
   resources.defer(() => rm(bridgeDir, { recursive: true, force: true }));

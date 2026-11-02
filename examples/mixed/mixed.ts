@@ -9,7 +9,7 @@
 // The exports exist for the offline tests in test/mixed.test.ts.
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, JuncoGraph, schedules, syntax } from "junco";
+import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { problemRecorder, runCli, type YamlExecution } from "../support.ts";
 import source from "./mixed.yml" with { type: "text" };
 
@@ -42,11 +42,12 @@ async function main(signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   let review: string;
   {
-    // LIFO: close the graph, flush the tracer it shares with the nested Ralph graph, then close the recorder.
+    // LIFO: close the graph, finish the TUI it shares with the nested Ralph graph, then close the recorder.
     await using lifetime = new AsyncDisposableStack();
     const recorder = lifetime.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
-    const { execution, reviewerId } = await MixedGraph.create({ models, ladder: LADDER, recorder });
-    lifetime.defer(() => execution.graph.tracer.flush());
+    const observer = tracer.TuiTracer.shared();
+    const { execution, reviewerId } = await MixedGraph.create({ models, ladder: LADDER, recorder, tracer: observer });
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (graph) => graph.close());
     signal?.throwIfAborted();
     const results = await execution.run({ signal });

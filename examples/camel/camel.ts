@@ -8,7 +8,7 @@
 
 import { basename, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { graph, JuncoGraph, schedules, syntax, tools } from "junco";
+import { graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { problemRecorder, runCli, verifiedModels } from "../support.ts";
@@ -271,13 +271,15 @@ async function main(signal: AbortSignal): Promise<void> {
     const models = await verifiedModels(LADDER.med, signal);
     signal.throwIfAborted();
     const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
+    const observer = tracer.TuiTracer.shared();
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot, models, ladder: LADDER, code: { Interpreter, Executor },
       // Avoid the default builder's ShellMux: neither LLM can use tools.
       createAgent: (spec) => syntax.createJuncoAgent(spec, LADDER, models),
       scheduler: () => schedules.parallel(), recorder, context, params: { query }, signal,
+      tracer: observer,
     });
-    lifetime.defer(() => execution.graph.tracer.flush());
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (owned) => owned.close());
     const results = await execution.run({ signal });
     outcome = results.get(execution.graph.sink.id) as Outcome;

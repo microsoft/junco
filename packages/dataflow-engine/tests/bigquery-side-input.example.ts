@@ -145,22 +145,18 @@ test("cookbook: bigquery side inputs attach corpus and word", async () => {
   graph.addEdge(ignoreWordSourceId, attachId, ignoreWordEdge);
   graph.addEdge(attachId, sinkId, resultsEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(
-      groups.map((g) => [g.id, g.corpus, g.word]),
-      [
-        ["A", "corpus2", "word2"],
-        ["B", "corpus2", "word2"],
-        ["C", "corpus2", "word2"],
-      ],
-    );
-    assert.equal(completed.get(groupIdsSourceId), "groupIds done");
-    assert.equal(completed.get(corpusSourceId), "corpus done");
-    assert.equal(completed.get(wordSourceId), "word done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(
+    groups.map((g) => [g.id, g.corpus, g.word]),
+    [
+      ["A", "corpus2", "word2"],
+      ["B", "corpus2", "word2"],
+      ["C", "corpus2", "word2"],
+    ],
+  );
+  assert.equal(completed.get(groupIdsSourceId), "groupIds done");
+  assert.equal(completed.get(corpusSourceId), "corpus done");
+  assert.equal(completed.get(wordSourceId), "word done");
 });

@@ -195,57 +195,53 @@ describe("Verus loop", () => {
           }),
         )
       ).agent;
-      try {
-        await assert.rejects(
-          runVerusLoop(
-            workspace,
-            { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-            controller.signal,
-            observer,
-          ),
-          (error: unknown) => rootCause(error) === reason,
-        );
-        const expected = [
-          "Verifier",
-          "Reviewer",
-          "Cleanup",
-          "Verifier",
-          "Reviewer",
-          "Cleanup",
-        ];
-        // The first output sink completes before the next round; cancellation at the second
-        // Cleanup prevents that round's sink from being admitted.
-        assert.deepEqual(observer.completed, [
-          "Verifier",
-          "PrepareReviewer",
-          "Reviewer",
-          "PrepareCleanup",
-          "Cleanup",
-          "$sink",
-          "Verifier",
-          "PrepareReviewer",
-          "Reviewer",
-          "PrepareCleanup",
-          "Cleanup",
-        ]);
-        assert.deepEqual(activated, expected);
-        assert.deepEqual(verification.observed, [0, 1]);
-        assert.match(reviewerResults[0]!, /1 verified, 0 errors/);
-        assert.match(reviewerResults[1]!, /postcondition not satisfied/);
-        assert.match(cleanupPrompts[1]!, /nonzero proof failure/);
-        assert.match(
-          verifierPrompts[1]!,
-          /strengthen membership specification/,
-        );
-        assert.match(
-          verifierPrompts[1]!,
-          /cleanup round 1; preserve both lower-bound obligations/,
-        );
-        for (const member of [verifier, reviewer, cleanup])
-          assert.notEqual(member.status, "closed");
-      } finally {
-        await observer.flush();
-      }
+      await assert.rejects(
+        runVerusLoop(
+          workspace,
+          { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
+          controller.signal,
+          observer,
+        ),
+        (error: unknown) => rootCause(error) === reason,
+      );
+      const expected = [
+        "Verifier",
+        "Reviewer",
+        "Cleanup",
+        "Verifier",
+        "Reviewer",
+        "Cleanup",
+      ];
+      // The first output sink completes before the next round; cancellation at the second
+      // Cleanup prevents that round's sink from being admitted.
+      assert.deepEqual(observer.completed, [
+        "Verifier",
+        "PrepareReviewer",
+        "Reviewer",
+        "PrepareCleanup",
+        "Cleanup",
+        "$sink",
+        "Verifier",
+        "PrepareReviewer",
+        "Reviewer",
+        "PrepareCleanup",
+        "Cleanup",
+      ]);
+      assert.deepEqual(activated, expected);
+      assert.deepEqual(verification.observed, [0, 1]);
+      assert.match(reviewerResults[0]!, /1 verified, 0 errors/);
+      assert.match(reviewerResults[1]!, /postcondition not satisfied/);
+      assert.match(cleanupPrompts[1]!, /nonzero proof failure/);
+      assert.match(
+        verifierPrompts[1]!,
+        /strengthen membership specification/,
+      );
+      assert.match(
+        verifierPrompts[1]!,
+        /cleanup round 1; preserve both lower-bound obligations/,
+      );
+      for (const member of [verifier, reviewer, cleanup])
+        assert.notEqual(member.status, "closed");
     },
     TIMEOUT_MS,
   );
@@ -287,30 +283,26 @@ describe("Verus loop", () => {
           },
         ])
       ).agent;
-      try {
-        await assert.rejects(
-          runVerusLoop(
-            workspace,
-            { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
-            undefined,
-            observer,
-          ),
-          (error: unknown) =>
-            rootCause(error) instanceof Error &&
-            (rootCause(error) as Error).message ===
-              "Reviewer did not obtain Verus MCP diagnostics in this round",
-        );
-        assert.deepEqual(verification.observed, [0]);
-        assert.equal(reviewerActivations, 1);
-        assert.equal(cleanupActivations, 0);
-        assert.deepEqual(observer.completed, [
-          "Verifier",
-          "PrepareReviewer",
-          "Reviewer",
-        ]);
-      } finally {
-        await observer.flush();
-      }
+      await assert.rejects(
+        runVerusLoop(
+          workspace,
+          { Verifier: verifier, Reviewer: reviewer, Cleanup: cleanup },
+          undefined,
+          observer,
+        ),
+        (error: unknown) =>
+          rootCause(error) instanceof Error &&
+          (rootCause(error) as Error).message ===
+            "Reviewer did not obtain Verus MCP diagnostics in this round",
+      );
+      assert.deepEqual(verification.observed, [0]);
+      assert.equal(reviewerActivations, 1);
+      assert.equal(cleanupActivations, 0);
+      assert.deepEqual(observer.completed, [
+        "Verifier",
+        "PrepareReviewer",
+        "Reviewer",
+      ]);
     },
     TIMEOUT_MS,
   );
@@ -700,7 +692,6 @@ describe("Verus loop", () => {
         controller.abort(reason);
         hold.release();
         await running;
-        await observer.flush();
       }
     },
     TIMEOUT_MS,

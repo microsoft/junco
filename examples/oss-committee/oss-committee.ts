@@ -307,7 +307,7 @@ export async function convene(
   recorder?: syntax.BuildOptions["recorder"],
 ): Promise<string> {
   let feedback: string | undefined;
-  // Rounds share the automatically selected tracer: flush it once, however the committee ends.
+  // Rounds share the selected tracer; finish its TUI once, however the committee ends.
   const selected = observer ?? tracer.TuiTracer.shared();
   try {
     for (;;) {
@@ -322,7 +322,7 @@ export async function convene(
       feedback = verdict.feedback;
     }
   } finally {
-    await selected.flush();
+    if (selected instanceof tracer.TuiTracer) await selected.finish();
   }
 }
 

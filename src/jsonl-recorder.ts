@@ -7,6 +7,7 @@ import {
   profileContexts,
 } from "junco-tools";
 
+/** Options of `new JsonlRecorder`. */
 export type JsonlRecorderOptions = {
   /** JSONL file appended at every graph evaluation end and `flush()`. */
   readonly path: string;

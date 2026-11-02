@@ -932,11 +932,7 @@ const memoryCalls = (fixture: RealMemory, name: string) =>
 const underlying = (error: unknown): unknown =>
   error instanceof graph.DataflowNodeError ? underlying(error.error) : error;
 async function closeWorkflow(execution: Execution) {
-  try {
-    await execution.graph.close();
-  } finally {
-    await execution.graph.tracer.flush();
-  }
+  await execution.graph.close();
 }
 async function driveUntil(execution: Execution, predicate: () => boolean) {
   for (let steps = 0; !predicate(); steps++) {

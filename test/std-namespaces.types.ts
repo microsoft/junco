@@ -412,10 +412,6 @@ class CountingTracer implements tracer.DataflowTracer {
       },
     };
   }
-
-  async flush(): Promise<void> {
-    this.events.length = 0;
-  }
 }
 
 export async function tracerHandlesRetainPayloadTypes(
@@ -428,7 +424,7 @@ export async function tracerHandlesRetainPayloadTypes(
 ) {
   const counting = new CountingTracer();
   const tui: tracer.TuiTracer = await tracer.TuiTracer.create();
-  const shared: tracer.DataflowTracer = tracer.TuiTracer.shared();
+  const shared: tracer.TuiTracer | tracer.DummyTracer = tracer.TuiTracer.shared();
   const tracers: tracer.DataflowTracer[] = [
     counting,
     new tracer.DummyTracer(),
@@ -461,16 +457,18 @@ export async function tracerHandlesRetainPayloadTypes(
     graph.UNBOUNDED,
     counting,
   );
-  await Promise.all(tracers.map((each) => each.flush()));
-  // A factory-built agency graph always holds a tracer, flushable without optional access.
-  await new graph.JuncoGraph(
+  await tui.finish();
+  // The caller retains the shared default it hands a factory-built graph, and narrows it to finish.
+  const selected = tracer.TuiTracer.shared();
+  new graph.JuncoGraph(
     source,
     sink,
     graph.Width.create(1),
     graph.UNBOUNDED,
-    undefined,
+    selected,
     tools.LockPolicy,
-  ).tracer.flush();
+  );
+  if (selected instanceof tracer.TuiTracer) await selected.finish();
   await tui.close();
   await tui[Symbol.asyncDispose]();
   return traced;

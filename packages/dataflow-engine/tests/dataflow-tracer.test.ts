@@ -95,10 +95,6 @@ class RecordingTracer implements DataflowTracer {
       },
     };
   }
-
-  flush(): Promise<void> {
-    return Promise.resolve();
-  }
 }
 
 /** Read `count` off every edge named by the selected node's trigger. */
@@ -208,7 +204,6 @@ test("a throwing observer can neither replace a node's return nor its failure", 
           throw new Error("observer run fail");
         },
       }),
-      flush: () => Promise.resolve(),
     };
 
     const ok = new DataflowGraph<void, typeof NumberSchema, number, Error>(
@@ -446,7 +441,6 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   const dummy = new DummyTracer();
   const untraced = await execute(undefined);
   const traced = await execute(dummy);
-  await dummy.flush();
   assert.deepEqual(traced, untraced);
   assert.deepEqual(untraced.consumed, [1, 2]);
   assert.deepEqual(
@@ -486,7 +480,6 @@ test("DummyTracer runs exactly like an untraced graph and never touches payloads
   });
   graph.addEdge(src, sink, feed);
   const results = await context({ graph, scheduler: parallel() }).run();
-  await dummy.flush();
   assert.equal(received, cyclic);
   assert.deepEqual(
     results,
@@ -580,7 +573,6 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
   const dummy = new DummyTracer();
   const untraced = await execute(undefined);
   const traced = await execute(dummy);
-  await dummy.flush();
   assert.deepEqual(traced, untraced);
   assert.equal(untraced.cause, sentinel);
   assert.equal(untraced.error, sentinel);
@@ -589,20 +581,57 @@ test("a throwing node fails identically with no tracer and with DummyTracer", as
   assert.ok(O.isNone(untraced.result));
 });
 
-test("run() never flushes the tracer; the caller's explicit flush delivers buffered results", async () => {
-  const tracer = new (class extends RecordingTracer {
-    readonly delivered: ReadonlyMap<NodeIdType, unknown>[] = [];
-    override flush(): Promise<void> {
-      for (const run of this.runs.splice(0))
-        if (run.results !== undefined) this.delivered.push(run.results);
-      return Promise.resolve();
-    }
-  })();
-  const { graph, answer } = answerGraph(tracer);
-  await context({ graph, scheduler: parallel() }).run();
-  assert.deepEqual(tracer.delivered, []);
-  await tracer.flush();
-  assert.deepEqual(tracer.delivered, [new Map([[answer, 42]])]);
+test("run() settles only after every promise a completion returned; a rejecting one is warned and ignored", async () => {
+  await quietly(async () => {
+    const settled: string[] = [];
+    const later = (label: string, reject = false) =>
+      new Promise<void>((resolve, fail) =>
+        setTimeout(() => {
+          settled.push(label);
+          if (reject) fail(new Error(label));
+          else resolve();
+        }, 10),
+      );
+    const tracer: DataflowTracer = {
+      startRun: () => ({
+        startNode: () => ({
+          end: () => later("step end"),
+          fail: () => later("step fail"),
+        }),
+        end: () => later("run end", true),
+        fail: () => later("run fail", true),
+      }),
+    };
+    const { graph, answer } = answerGraph(tracer);
+    const results = await context({ graph, scheduler: parallel() }).run();
+    assert.equal(results.get(answer), 42);
+    assert.deepEqual(settled, ["step end", "run end"]);
+
+    settled.length = 0;
+    const boom = new Error("boom");
+    const bad = new DataflowGraph<void, typeof NumberSchema, number, Error>(
+      Width.create(1),
+      UNBOUNDED,
+      tracer,
+    );
+    bad.addNode({
+      state: undefined,
+      trigger: TriggerRule.always(),
+      // biome-ignore lint/correctness/useYield: the body must throw before its first yield.
+      step: async function* (): NodeGenerator<typeof NumberSchema, number> {
+        throw boom;
+      },
+    });
+    const rejection = await context({ graph: bad, scheduler: parallel() })
+      .run()
+      .then(
+        () => assert.fail("run() must reject"),
+        (error: unknown) => error,
+      );
+    assert.ok(rejection instanceof DataflowNodeError);
+    assert.equal(rejection.error, boom);
+    assert.deepEqual(settled, ["step fail", "run fail"]);
+  });
 });
 
 test("a handled failure traces one raw activation fail and a normal run end without the failed node", async () => {

@@ -15,7 +15,7 @@ export function grafanaUrl(value = process.env.GRAFANA_URL ?? "http://localhost:
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
-/** The caller owns the recorder and flushes the tracer after its graph finishes. */
+/** The caller owns the recorder; graph evaluation joins the tracer's completion promises. */
 export async function benchmarkTelemetry(
   projectName: string,
   name: string,

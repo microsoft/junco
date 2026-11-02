@@ -132,7 +132,7 @@ export class TuiTracer implements DataflowTracer {
   static #shared: TuiTracer | undefined;
 
   /** Select Dummy off-terminal; selecting the lazy interactive default performs no I/O. */
-  static shared(): DataflowTracer {
+  static shared(): TuiTracer | DummyTracer {
     if (!interactive()) return quiet;
     if (TuiTracer.#shared === undefined || TuiTracer.#shared.#released) {
       TuiTracer.#shared = new TuiTracer("JuncoGraph.run");
@@ -903,7 +903,7 @@ export class TuiTracer implements DataflowTracer {
   }
 
   /** After every shared graph stops, retain its final screen until q/Esc restores the terminal. */
-  flush(): Promise<void> {
+  finish(): Promise<void> {
     if (this.#finishPromise !== undefined) return this.#finishPromise;
     if (!this.#started) {
       this.#release();

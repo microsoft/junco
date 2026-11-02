@@ -34,6 +34,7 @@ export type ProfileActivation = {
   readonly owner: string | undefined;
 };
 
+/** Labels of one recorded operation: resource, category, tool, operation name, and the activation it ran in. */
 export type ProfileOperation<R extends string> = {
   readonly resource: R;
   readonly category: string;
@@ -51,6 +52,7 @@ export type ProfileMetrics = {
   readonly gauges?: Readonly<Record<string, number | null>>;
 };
 
+/** One event a `ProfileRecorder` records: a usage increment, a native resource event, a probe value, or an operation's start/finish/metrics. */
 export type ProfileEvent<R extends string> =
   | {
       readonly resource: R & ("tokens" | "cost");

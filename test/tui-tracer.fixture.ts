@@ -112,7 +112,7 @@ async function restored(before: string, marker: string) {
 
 async function finish(tui: tracer.TuiTracer) {
   let settled = false;
-  const pending = tui.flush();
+  const pending = tui.finish();
   phase("awaiting-dismissal", { settled });
   pending.then(
     () => {
@@ -168,7 +168,7 @@ async function missingBinding(before: string, lazy: boolean) {
         "display startup must not affect computation",
       );
       await graph.close().finally(forgetGraph);
-      await assert.rejects(tui.flush(), (error: unknown) => {
+      await assert.rejects(tui.finish(), (error: unknown) => {
         assert.ok(
           error instanceof Error &&
             error.message === "failed to initialize TuiTracer",
@@ -608,7 +608,7 @@ async function quietTerminal(before: string, dumb: boolean) {
     );
     assert.equal(modes(), before);
     await graph.close();
-    await selected.flush();
+    await selected.finish();
     await selected.close();
     const fresh = tracer.TuiTracer.shared();
     assert.ok(fresh instanceof tracer.TuiTracer && fresh !== selected);

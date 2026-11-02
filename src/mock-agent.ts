@@ -196,6 +196,7 @@ const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
 const invalidTranscript = () =>
   new JuncoAgentError("invalid_argument", "Invalid MockAgent transcript");
 
+/** Declared constant memory and token usage of a mock activation. */
 export type MockUsage = {
   readonly [R in "memory" | "tokens"]?: ResourceQuantity<R>;
 };
@@ -218,6 +219,7 @@ export function constantProfiles(usage: MockUsage): ProfileSet {
   });
 }
 
+/** Zero memory and zero tokens: the profiles of a mock that declares no usage. */
 export const NO_USAGE: ProfileSet = constantProfiles({
   memory: bytes(0),
   tokens: tokens(0),
@@ -235,6 +237,7 @@ function validateRun(run: MockRun): void {
   });
 }
 
+/** A scripted `JuncoAgentProtocol` replaying its {@link MockTranscript}: no model requests; profiles come from declared usage. */
 export class MockAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,

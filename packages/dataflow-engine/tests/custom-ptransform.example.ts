@@ -147,23 +147,19 @@ test("cookbook: custom-ptransform reusable count helper", async () => {
   graph.addEdge(count1Id, sink1Id, count1OutEdge);
   graph.addEdge(count2Id, sink2Id, count2OutEdge);
 
-  try {
-    const execution = context({ scheduler: parallel(), graph });
-    const completed = await execution.run();
+  const execution = context({ scheduler: parallel(), graph });
+  const completed = await execution.run();
 
-    assert.deepEqual(counts1, [
-      ["apple", 3],
-      ["banana", 2],
-      ["cherry", 1],
-    ]);
-    assert.deepEqual(counts2, [
-      ["apple", 6],
-      ["banana", 4],
-      ["cherry", 2],
-    ]);
-    assert.notEqual(count1Id, count2Id);
-    assert.equal(completed.get(sourceId), "source done");
-  } finally {
-    await tracer.flush();
-  }
+  assert.deepEqual(counts1, [
+    ["apple", 3],
+    ["banana", 2],
+    ["cherry", 1],
+  ]);
+  assert.deepEqual(counts2, [
+    ["apple", 6],
+    ["banana", 4],
+    ["cherry", 2],
+  ]);
+  assert.notEqual(count1Id, count2Id);
+  assert.equal(completed.get(sourceId), "source done");
 });

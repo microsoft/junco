@@ -18,6 +18,7 @@ import {
 } from "./scheduler.js";
 import { type UsageLimitDefinition, usageBudgets } from "./usage-limits.js";
 
+/** A graph paired with its policy: `step()` runs one decision, `run()` repeats decisions to quiescence; both resolve to the results map. */
 export type SchedulerContext<
   S,
   N extends TSchema,

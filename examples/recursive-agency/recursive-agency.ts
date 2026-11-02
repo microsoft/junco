@@ -16,7 +16,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax } from "junco";
+import { AssistantMessageSchema, agent, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { problemRecorder, runCli, type YamlAgent } from "../support.ts";
@@ -149,12 +149,14 @@ async function main(signal: AbortSignal) {
       return runAvailable(request);
     },
   };
+  const observer = tracer.TuiTracer.shared();
   const root = {
     context: await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
       code: { Start, Join },
       recorder,
+      tracer: observer,
       createAgent: async (spec) => {
         const { faux, options } = await nativeOptions(spec.node === "0" ? leafResponses : siblingResponses);
         const agent: YamlAgent = await JuncoAgent.fromResolved({
@@ -184,9 +186,9 @@ async function main(signal: AbortSignal) {
   const leaf = actors.get("0")!;
   const sibling = actors.get("1")!;
   {
-    // LIFO: join a pending abort, then close the graph, then flush its tracer.
+    // LIFO: join a pending abort, then close the graph, then finish the TUI.
     await using lifetime = new AsyncDisposableStack();
-    lifetime.defer(() => root.context.graph.tracer.flush());
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(root.context.graph, (graph) => graph.close());
     let abortWork: Promise<void> | undefined;
     const interrupt = () => {

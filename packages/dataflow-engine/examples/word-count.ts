@@ -167,17 +167,13 @@ export async function runWordCount(tracer?: DataflowTracer) {
 
 if (import.meta.main) {
   const tracer = ExampleTracer.create("examples/word-count");
-  try {
-    const r = await runWordCount(tracer);
-    console.log(
-      JSON.stringify({
-        counts: [...r.unifiedCounts.entries()].sort(([a], [b]) =>
-          a < b ? -1 : a > b ? 1 : 0,
-        ),
-        totalCharacters: r.totalChars.reduce((acc, n) => acc + n, 0),
-      }),
-    );
-  } finally {
-    await tracer.flush();
-  }
+  const r = await runWordCount(tracer);
+  console.log(
+    JSON.stringify({
+      counts: [...r.unifiedCounts.entries()].sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      ),
+      totalCharacters: r.totalChars.reduce((acc, n) => acc + n, 0),
+    }),
+  );
 }

@@ -34,7 +34,7 @@
  * Ownership: the runner owns two `sandbox: "always"` tool collections — the protected `tools.LockPolicy`
  * one (agents, research, applier) and the trusted-build `tools.EmptyPolicy` one (`graft build`, index
  * refresh) — the shared model runtime, and an OpikTracer configured by the SDK's OPIK_*
- * environment/config. Batch graph traces are exported to Opik and flushed before collections close.
+ * environment/config. Batch graph evaluation joins Opik delivery before collections close.
  * Generated-cache writes may retain the build owner's claims; a failed build may publish partial
  * cache changes, but rejects before admitting a stale snapshot. Each agent factory checks its pinned
  * model's account eligibility before the batch runs; both roles reuse the shared model runtime.
@@ -1610,7 +1610,6 @@ async function runYakShaver(repositoryRoot: string = process.cwd(), signal?: Abo
     const recorder = lifetime.adopt(await problemRecorder(root), (owned) => owned.close());
     const buildCollection = lifetime.adopt(await tools.ToolCollection.create(root, { policy: tools.EmptyPolicy, sandbox: "always" }), (collection) => collection.close());
     const observer = new OpikTracer(new Opik({ apiUrl: process.env.OPIK_URL_OVERRIDE ?? "http://localhost:5173/api" }), "runYakShaver");
-    lifetime.defer(() => observer.flush());
     const resources = lifetime.use(new AsyncDisposableStack());
     const graft = mcp.JuncoMcpTools.add({
       name: "graft",

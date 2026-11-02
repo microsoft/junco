@@ -10,7 +10,7 @@
 //    every one of those five classes itself with outbound all-depth
 //    `mcp__graft__graft_trace_calls`.
 // 4. The runner closes the graph (and with it both agents, their graft servers and, last, the
-//    collection's ShellMux), then flushes the tracer.
+//    collection's ShellMux), then holds the final TUI screen until dismissed.
 //
 // Prerequisites: junco-tools' Rust toolchain and system libraries (packages/junco-tools/README.md),
 // so that `bun install --frozen-lockfile` at the root also builds the production native addon
@@ -21,7 +21,7 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agent, graph, JuncoGraph, schedules, syntax, tools } from "junco";
+import { agent, graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { problemRecorder, runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
@@ -82,12 +82,13 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
   let researchText: string;
   let dependencyText: string;
   {
-    // LIFO: close the graph (its agents, their graft servers and the collection), flush the tracer, then close the recorder.
+    // LIFO: close the graph (its agents, their graft servers and the collection), finish the TUI, then close the recorder.
     await using lifetime = new AsyncDisposableStack();
     signal?.throwIfAborted();
     const models = await verifiedModels(LADDER.med, signal);
     signal?.throwIfAborted();
     const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
+    const observer = tracer.TuiTracer.shared();
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
       models,
@@ -96,9 +97,10 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
       scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,
       recorder,
+      tracer: observer,
       signal,
     });
-    lifetime.defer(() => execution.graph.tracer.flush());
+    lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (g) => g.close());
     for (const id of ["Research", "Dependencies"]) {
       signal?.throwIfAborted();

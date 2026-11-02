@@ -95,7 +95,7 @@ A `JuncoGraph` takes fresh source and sink nodes, window and thread bounds, a tr
 
 For explicit acquisition, use `const tui = await tracer.TuiTracer.create("My workflow")` (the name is optional), then pass it to your graphs. It rejects unsuitable terminals before loading native bindings; native initialization failures surface rather than falling back to another backend. Only one session may own the terminal. The ratatui display is one full-terminal bordered `Agent traces` pane. Its title carries the session name, completion state, active scoped-node badges, omitted-record count, and following/paused state. Stable identity colors and scoped `[g<serial>:<NodeId>]` badges distinguish repeated local IDs in trace history. Agent messages, tool progress and lifecycle outcomes appear independently of `LOG_LEVEL`. A task-calling caller stays one node: its `task` calls and report follow-ups appear in its own traces, and return records show outcomes and stop reasons, not another copy of streamed messages. Payloads are snapshotted without application getters or custom inspection and may contain sensitive data; retained display history is bounded, not a durable transcript.
 
-Share one tracer across child graphs: Ralph graphs inherit their parent's observer; separately constructed children must receive the same explicit tracer from their caller. Close all graphs before calling `await observer.flush()` once for the shared observer. TUI `flush()` draws the final state and waits for `q`/Esc before restoring the terminal; `q`/Esc can also dismiss early without cancelling computation. `await tui.close()` or async disposal restores without waiting for dismissal. Flushing or closing an unused lazy instance performs no terminal I/O. While the screen is owned, do not write directly to stdout/stderr; capture MCP stderr (`stderr: "pipe"`) and print final results only after restoration. Arrows (Left/Right included), PageUp/PageDown, and Home/End navigate trace history immediately; End resumes tail-follow. Tab has no display action.
+Share one tracer across child graphs: Ralph graphs inherit their parent's observer; separately constructed children must receive the same explicit tracer from their caller. Retain the selected tracer outside the graph (a recorder may wrap `graph.tracer`). Close all graphs, then use `if (observer instanceof tracer.TuiTracer) await observer.finish()` once for the shared observer. `finish()` draws the final state and waits for `q`/Esc before restoring the terminal; `q`/Esc can also dismiss early without cancelling computation. `await tui.close()` or async disposal restores without waiting for dismissal. Finishing or closing an unused lazy instance performs no terminal I/O. While the screen is owned, do not write directly to stdout/stderr; capture MCP stderr (`stderr: "pipe"`) and print final results only after restoration. Arrows (Left/Right included), PageUp/PageDown, and Home/End navigate trace history immediately; End resumes tail-follow. Tab has no display action.
 
 Profiling uses a separate `recorder` dependency, never a tracer: one application-owned `tools.ProfileRecorder<R>` session whose resource union `R` is a set of singleton strings. Graphs, agents and collections take `recorder?: tools.ProfileRecorder<"memory" | "tokens" | "cost" | "edits" | "operations" | "probe">` (graphs and agents also `recorderNodeId`); narrowing to a producer's singleton, such as `ProfileRecorder<"memory">` for `ShellMuxLease.create(cwd, { recorder })`, is plain assignment, and `add_context(nodeId)` derives the `::`-joined node context of the same session (`.root`). Every graph, agent and collection in one hierarchy must share that root, else construction rejects with `ProfileRecorder instance mismatch`. Two sinks implement it:
 
@@ -142,6 +142,8 @@ import { Opik } from "opik";
 const tracer = new OpikTracer(new Opik(), "JuncoGraph.run");
 ```
 
+`evaluate()`/`run()` joins tracer completion promises before settling; there is no tracer `flush()`. `OpikTracer` sends direct REST requests in FIFO order without SDK batch timers or retries. Export failures warn and do not change the computation: a settled run proves attempted delivery, not ingestion. `OPIK_TRACK_DISABLE` suppresses requests. SDK queue payload truncation (`maxPayloadSizeMb`) and attachment extraction are not applied; an oversized payload may be rejected with a warning.
+
 
 ### Telemetry deployment
 
@@ -187,7 +189,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { LockPolicy, YieldTool } from "junco-tools";
-import { graph as graphApi, schedules } from "junco";
+import { graph as graphApi, schedules, tracer } from "junco";
 
 // Resolve member options and schedulerOptions.models/model beforehand.
 // Only member agents own sessions; scheduling makes one completeSimple call per decision.
@@ -210,8 +212,9 @@ const sink = new graphApi.nodes.Sink<graphApi.nodes.AgenticInput, AssistantMessa
   if (!O.isSome(result)) throw new Error("Writer did not produce a result");
   return result.value;
 }, { id: graphApi.NodeId.create("$sink"), trigger: graphApi.trigger.TriggerRule.when(final) });
+const observer = tracer.TuiTracer.shared();
 const execution = schedules.context({
-  graph: new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1), graphApi.UNBOUNDED, undefined, LockPolicy),
+  graph: new graphApi.JuncoGraph(source, sink, graphApi.Width.create(1), graphApi.UNBOUNDED, observer, LockPolicy),
   scheduler: schedules.pi({
     models: schedulerOptions.models, model: schedulerOptions.model,
     systemPrompt: "Coordinate the team.", prompt: "Produce the report.",
@@ -231,7 +234,8 @@ try {
   outcome = result.value;
 } finally {
   try {
-    try { await execution.graph.close(); } finally { await execution.graph.tracer.flush(); }
+    try { await execution.graph.close(); }
+    finally { if (observer instanceof tracer.TuiTracer) await observer.finish(); }
   } finally { await sessions.close(BACKGROUND_CONTEXT); }
 }
 console.log(outcome); // the terminal has been restored
@@ -255,7 +259,7 @@ Before running the live example, start `pi`, use `/login`, and select GitHub Cop
 bun run examples/oss-committee/oss-committee.ts ./request.txt ./plan.md
 ```
 
-The first argument is a nonblank UTF-8 request file; the optional output defaults to `plan.md` in the current working directory. Existing outputs are rejected before credentials are read, and publication uses exclusive creation (`wx`): a failed/aborted run or concurrent writer cannot overwrite a plan. Each member's exact model ID **and** reasoning level must be in the installed Copilot catalog before its saved login is checked; per-account model access can still fail, with no plan published. Each GitHub lookup returns at most five repository URLs and GitHub-reported metadata, not a bound on the number of requests. The search fetch is unauthenticated; Pi's saved Copilot login authenticates the model runtime, not GitHub repository search. Yield is a scheduling handoff, not an HTTP retry or a quota increase. `incomplete_results=true` means partial research, a valid empty result is reported as no matching library, and a failed lookup remains disclosed as unavailable research. A missing/`NOASSERTION` SPDX identifier means unknown license. GitHub-reported SPDX identifiers, stars and push times do not verify full license terms or quality; versions and API compatibility are likewise unverified. Never place secrets, private identifiers, or private endpoints in a GitHub query or the request/reports exported to a tracer. `convene` flushes the rounds' shared automatic tracer once, and all members close, **before** the approved titled plan is written. In an interactive terminal, dismiss the final TUI with `q`/Esc before publication; redirected execution uses Dummy and emits no trace output. When you explicitly supply Opik, inspect each review round's three node results and activation spans in its project → Logs → Traces; successful `flush()` alone does not prove remote ingestion.
+The first argument is a nonblank UTF-8 request file; the optional output defaults to `plan.md` in the current working directory. Existing outputs are rejected before credentials are read, and publication uses exclusive creation (`wx`): a failed/aborted run or concurrent writer cannot overwrite a plan. Each member's exact model ID **and** reasoning level must be in the installed Copilot catalog before its saved login is checked; per-account model access can still fail, with no plan published. Each GitHub lookup returns at most five repository URLs and GitHub-reported metadata, not a bound on the number of requests. The search fetch is unauthenticated; Pi's saved Copilot login authenticates the model runtime, not GitHub repository search. Yield is a scheduling handoff, not an HTTP retry or a quota increase. `incomplete_results=true` means partial research, a valid empty result is reported as no matching library, and a failed lookup remains disclosed as unavailable research. A missing/`NOASSERTION` SPDX identifier means unknown license. GitHub-reported SPDX identifiers, stars and push times do not verify full license terms or quality; versions and API compatibility are likewise unverified. Never place secrets, private identifiers, or private endpoints in a GitHub query or the request/reports exported to a tracer. `convene` finishes the rounds' shared automatic TUI once, and all members close, **before** the approved titled plan is written. In an interactive terminal, dismiss the final TUI with `q`/Esc before publication; redirected execution uses Dummy and emits no trace output. When you explicitly supply Opik, inspect each review round's three node results and activation spans in its project → Logs → Traces; a settled run proves attempted export, not remote ingestion.
 
 The tool restricts search to GitHub repositories but cannot detect secrets in a model-generated query. Submit only requests safe for public GitHub search and complete tracer export; prompt instructions alone do not enforce that boundary.
 
@@ -295,7 +299,7 @@ For a scripted end-to-end run without model credentials, run `bun run test/oss-c
 
 Each proposer sends progress and final summaries on its lane's `summary:r` message edge; its judge calls `recv` first to drain these as evidence, never instructions. The `proposal:r` value edge still gates review on completed proposals, so missing summaries never stall a lane and summaries alone never start its judge.
 
-`junco-tools` owns baseline capture, confined source reads, Git-root validation, and managed `applySourceEdits`/release; the example supplies refactor policy and edits. `AsyncDisposableStack` handles resource lifetime in research-close, tracer-flush, trusted-build-close, protected-close order, preserving `SuppressedError` chains. Prepared-agent ownership and `await using` close each batch and every supplied agent on failure. `schedules.drain(execution, { signal })` drives separate scheduler steps to preserve trace and cancellation boundaries before application; finalization remains in the scheduled code node, and the sink publishes only after all outcomes exist.
+`junco-tools` owns baseline capture, confined source reads, Git-root validation, and managed `applySourceEdits`/release; the example supplies refactor policy and edits. `AsyncDisposableStack` handles resource lifetime in research-close, trusted-build-close, protected-close order, preserving `SuppressedError` chains. Each settled graph evaluation has already joined tracer delivery. Prepared-agent ownership and `await using` close each batch and every supplied agent on failure. `schedules.drain(execution, { signal })` drives separate scheduler steps to preserve trace and cancellation boundaries before application; finalization remains in the scheduled code node, and the sink publishes only after all outcomes exist.
 
 Prerequisites: `graft` 0.28.0-compatible on `PATH` (`bun run` supplies the pinned development CLI), the production native addon, the Git working-tree root inside a Btrfs seed, and the Copilot login. A later failure keeps earlier applied and released refactors and says so. `bun test test/yak-shaver.test.ts` exercises ranking, evidence checks, gates, admission, and real four-lane batch graphs with incremental application offline on faux models.
 

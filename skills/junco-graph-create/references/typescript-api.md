@@ -392,13 +392,13 @@ try {
   await childContext.run();
   // childContext.graph.result(childContext.graph.sink.id) is the final round's message.
 } finally {
-  try { await childContext.graph.close(); } finally { await observer.flush(); }
+  await childContext.graph.close();
 }
 ```
 
 `fromYaml(source, { ...config, params })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` returns availability factories for Ralph and $sink; factories decline levels without Ralph->Ralph. Rounds must be positive safe integers (default two). Admit exactly one image-free prompt on the assignment source route. The first prompt is the assignment; later rounds retain it and only the immediately preceding complete draft. Blank or non-normal intermediate drafts fail before the next round; the controller does not validate the final draft. Native yields continue the current round. Only the final round reaches the sink. `schedules.ralph({ until, rounds? })` instead stops at the first draft a synchronous `schedules.RalphPredicate` `(result, { assignment, round, label }) => boolean` accepts, called once per completed draft (validated first); no cap unless `rounds` is given, and a rejected draft at that cap fails without publishing.
 
-For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, build a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. If final output must be sent on a parent message edge, configure a nested Sink that sends the validated final prompt on that edge before returning the exact final message; the stock Ralph sink only returns its value. Close through the owning root recursively, then flush shared tracing once after all users stop. Do not stage the Ralph worker yourself: its availability hooks stage each round.
+For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, build a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. If final output must be sent on a parent message edge, configure a nested Sink that sends the validated final prompt on that edge before returning the exact final message; the stock Ralph sink only returns its value. Close through the owning root recursively, then finish a retained shared TUI once after all users stop, guarded by `instanceof tracer.TuiTracer`; caller-supplied observers need no final call. Do not stage the Ralph worker yourself: its availability hooks stage each round.
 
 ### graph.trigger
 
@@ -986,7 +986,7 @@ For a model-driven agency with an already-acquired `worker` and resolved `models
 ```ts
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools } from "junco";
+import { graph, schedules, tools, tracer } from "junco";
 
 const terminal = graph.NodeId.create("worker");
 const final = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>("worker->$sink");
@@ -999,8 +999,9 @@ const sink = new graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>(as
   if (!O.isSome(result)) throw new Error("Worker did not produce a result");
   return result.value;
 }, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.when(final) });
+const observer = tracer.TuiTracer.shared();
 const execution = schedules.context({
-  graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, tools.LockPolicy),
+  graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, tools.LockPolicy),
   scheduler: schedules.pi({ models, model, systemPrompt: "Coordinate the work.", prompt: "Complete the assignment." }),
 });
 execution.graph.addNode({ id: terminal, state: worker, policy: tools.LockPolicy,
@@ -1008,11 +1009,12 @@ execution.graph.addNode({ id: terminal, state: worker, policy: tools.LockPolicy,
 execution.graph.addEdge(terminal, sink.id, final);
 try { await execution.run(); }
 finally {
-  try { await execution.graph.close(); } finally { await execution.graph.tracer.flush(); }
+  try { await execution.graph.close(); }
+  finally { if (observer instanceof tracer.TuiTracer) await observer.finish(); }
 }
 ```
 
-Use `schedules.parallel()` in the same external pair for deterministic select-all; `schedules.roundRobin()` with thread bound 1 for one-at-a-time fairness. Never pass policies to graph constructors. Manually orchestrated persistent-agent rounds may use fresh graph/context/ports and reuse members; close round graphs only after members' final owning use. The Ralph workflow instead re-arms one agent in the same graph/session through its value self-edge and `schedules.ralph` hooks. Compact only the requested settled round graph; close resources and flush shared tracing once at orchestration end. Scheduling needs no session acquisition/close.
+Use `schedules.parallel()` in the same external pair for deterministic select-all; `schedules.roundRobin()` with thread bound 1 for one-at-a-time fairness. Never pass policies to graph constructors. Manually orchestrated persistent-agent rounds may use fresh graph/context/ports and reuse members; close round graphs only after members' final owning use. The Ralph workflow instead re-arms one agent in the same graph/session through its value self-edge and `schedules.ralph` hooks. Compact only the requested settled round graph; close resources and finish a retained shared TUI once at orchestration end, guarded by `instanceof tracer.TuiTracer`. Scheduling needs no session acquisition/close.
 
 ### Resource profiles and schedules
 
@@ -1089,7 +1091,7 @@ For an agency whose members `a`–`d` (already-acquired `agent.JuncoAgent`s with
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { constantProfile, gigabytes, megabytes } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools } from "junco";
+import { graph, schedules, tools, tracer } from "junco";
 
 type Policy = schedules.Scheduler<graph.nodes.Agentic, graph.nodes.AgenticInput, AssistantMessage, schedules.AgencyNodeMetadata>;
 const costs = { a: 3000, b: 3000, c: 2000, d: 1000 } as const;
@@ -1110,8 +1112,9 @@ const scheduler: Policy = schedules.separate(
   schedules.parallel(),
   schedules.limit({ memory: gigabytes(4) }, schedules.parallel()),
 );
+const observer = tracer.TuiTracer.shared();
 const execution = schedules.context({
-  graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, undefined, tools.LockPolicy),
+  graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, tools.LockPolicy),
   scheduler,
 });
 for (const [name, megabyteCost] of Object.entries(costs) as [keyof typeof costs, number][]) {
@@ -1124,7 +1127,8 @@ for (const [name, megabyteCost] of Object.entries(costs) as [keyof typeof costs,
 execution.graph.addEdge(terminal, sink.id, final);
 try { await execution.run(); }
 finally {
-  try { await execution.graph.close(); } finally { await execution.graph.tracer.flush(); }
+  try { await execution.graph.close(); }
+  finally { if (observer instanceof tracer.TuiTracer) await observer.finish(); }
 }
 ```
 
@@ -1168,8 +1172,6 @@ export interface DataflowTracer {
   startRun<S, N, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
-  complain(nodeId: NodeId, complaint: string): void;
-  flush(): Promise<void>;
 }
 
 export type DataflowRunTrace<N, T> = {
@@ -1178,29 +1180,27 @@ export type DataflowRunTrace<N, T> = {
     phase: "prime" | "resume",
     inputs: ParentView<N, T> | undefined,
   ): DataflowStepTrace<N, T>;
-  end(results: ReadonlyMap<NodeId, T>): void;
-  fail(error: unknown): void;
+  end(results: ReadonlyMap<NodeId, T>): void | Promise<void>;
+  fail(error: unknown): void | Promise<void>;
 };
 
 export type DataflowStepTrace<N, T> = {
-  end(step: IteratorResult<readonly Message<N>[], T>): void;
-  fail(error: unknown): void;
+  end(step: IteratorResult<readonly Message<N>[], T>): void | Promise<void>;
+  fail(error: unknown): void | Promise<void>;
 };
 
 export class DummyTracer implements DataflowTracer
   startRun<S, N, T, EH>(
     _graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>
-  complain(_nodeId: NodeId, _complaint: string): void
-  flush(): Promise<void>
 
 export class TuiTracer implements DataflowTracer
   private constructor(name: string)
-  static shared(): DataflowTracer
+  static shared(): TuiTracer | DummyTracer
   static create(name: string = "JuncoGraph.run"): Promise<TuiTracer>
   startRun<S, N, T, EH>(graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T>
   complain(nodeId: NodeIdType, complaint: string): void
-  flush(): Promise<void>
+  finish(): Promise<void>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 ```
@@ -1211,10 +1211,10 @@ export class TuiTracer implements DataflowTracer
 - **Backend selection and acquisition.** `tracer.TuiTracer.shared()` returns a lazy shared `JuncoGraph.run` TUI only with TTY stdin/stdout and `TERM !== "dumb"`; otherwise a silent stateless Dummy. Passive construction/`spawn` are synchronous, acquiring no terminal/native resources and emitting nothing; the first callback initializes. Explicit `await tracer.TuiTracer.create("My workflow")` rejects unsuitable terminals before native import; initialization errors surface, never fall back. Only one TUI owns the terminal. Later acquisition may create a fresh shared instance; old callbacks never reopen it.
 - **Display and children.** One full-terminal bordered `Agent traces` pane shows the session name, completion, active scoped badges, omitted count, and following/paused state in its title. Stable identity colors and scoped `[g<serial>:<NodeId>]` badges distinguish duplicate local IDs in history. Live member text, thinking, tool progress, outcomes and complaints ignore `LOG_LEVEL`. Snapshotted payloads may be sensitive; bounded display history is not persisted history. Ralph children inherit parent tracing; task subagents appear only through their caller's traces. Share the explicit instance with separately constructed nested graphs; explicitly different child observers remain unchanged.
 - **Terminal ownership and operational logs.** Never write directly to stdout/stderr under TUI ownership. Capture MCP stderr (`stderr: "pipe"`, after config spreads); print final results after restoration. Admitted `junco-tools/log` records go exclusively to the trace pane. `LOG_LEVEL` controls operational/policy logs, not TUI lifecycle/agent records: default INFO; trimmed case-insensitive `SILLY`, `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`; invalid/numeric names reject at startup. Policy violations stay INFO, tentative grants DEBUG. `flushLog()` is a draw barrier, not interactive completion: tool cleanup never waits for dismissal.
-- **Callbacks** are synchronous readonly observers. `startRun` fires once/native `evaluate` scope, including complete context drives/planning; `startNode` per activation, phase `"prime"` (no input view) or `"resume"` (delivered view). `end` receives cumulative results; `fail` the exact rejection/raw activation cause. `complain` reports agent issues independently of drives. Unlike detached policy containers, tracer views/result maps are live: snapshot retained data. Observer exceptions warn without changing computation.
-- **Flushing** is caller-owned, separate from disposal:
-  `try { await execution.run(); } finally { try { await execution.graph.close(); } finally { await execution.graph.tracer.flush(); } }`.
-  Share observers across children; flush each distinct observer once after all users stop (collect in a `Set`). TUI `flush()` draws the final frame, awaiting `q`/Esc to restore the terminal. Early `q`/Esc dismisses without cancellation; Ctrl-C restores before application cancellation. `await tui.close()`/async disposal restores without keyboard dismissal. Unused lazy flush/close is I/O-free; dismissed tracers never reopen. Arrows (including Left/Right), PageUp/PageDown, and Home/End scroll trace history immediately; End restores tail-follow; Tab has no display action. Successful flush does not prove remote ingestion. `bun run smoke:tui` is a credential-free production-addon smoke (no Btrfs mount). Real Linux PTY coverage: `test/tui-tracer.test.ts` in `test:native`, not ordinary Dummy-backed runtime tests.
+- **Callbacks** are readonly observers invoked synchronously. `startRun` fires once/native `evaluate` scope, including complete context drives/planning; `startNode` per activation, phase `"prime"` (no input view) or `"resume"` (delivered view). Both return handles synchronously. `end` receives cumulative results; `fail` the exact rejection/raw activation cause. Run/step `end` and `fail` may return `void | Promise<void>`: `evaluate` joins every returned promise before settling, not inline, so a settled `run()` means delivery finished. Throws and promise rejections warn without changing computation. Unlike detached policy containers, tracer views/result maps are live: snapshot retained data before returning. TUI `complain` reports agent issues independently of drives; it is not part of `DataflowTracer`.
+- **Interactive completion** is caller-owned, separate from disposal. Retain `const observer = tracer.TuiTracer.shared()` before construction and pass it explicitly as `tracer: observer` (or constructor argument five). Never retrieve it from `graph.tracer`, which a recorder may wrap:
+  `try { await execution.run(); } finally { try { await execution.graph.close(); } finally { if (observer instanceof tracer.TuiTracer) await observer.finish(); } }`.
+  Share observers across children; finish each distinct TUI once after all users stop (collect in a `Set`). Dummy/custom/Opik tracers need no final call. TUI `finish()` draws the final frame, awaiting `q`/Esc to restore the terminal. Early `q`/Esc dismisses without cancellation; Ctrl-C restores before application cancellation. `await tui.close()`/async disposal restores without keyboard dismissal. Unused lazy finish/close is I/O-free; dismissed tracers never reopen. Arrows (including Left/Right), PageUp/PageDown, and Home/End scroll trace history immediately; End restores tail-follow; Tab has no display action. Settled delivery does not prove remote ingestion. `bun run smoke:tui` is a credential-free production-addon smoke (no Btrfs mount). Real Linux PTY coverage: `test/tui-tracer.test.ts` in `test:native`, not ordinary Dummy-backed runtime tests.
 
 ### Supporting Pi APIs
 
@@ -1264,9 +1264,9 @@ close(context: Context): Promise<void>;
 
 **Feedback recurrence.** Seed with `new EmitOnce(…)`, `TriggerRule.always()`; receive seed/feedback with `TriggerRule.anyOf(TriggerEntry.on(seed), TriggerEntry.on(loop))`; wire `addEdge(id, id, loop)`. The task's finite count ends with `return`: emitting the last value still sends feedback because emit/return require separate activations; the next activation checks the count and returns. Assert the result in the `run()` map. A `new StepNode(…)` sink drains and quiesces without returning. Read the pair with `graph.from`; validate length/types, not non-null assertions. Ten Fibonacci values from `0, 1`: `[0,1,1,2,3,5,8,13,21,34]`.
 
-**Research/review committee.** Persist agents/sessions; each round uses fresh Source/Sink ports and a passive graph with `schedules.parallel()`. Reject source ingress; return final work through the sink. Value edges feed reports to validating staged assignment callbacks. Keep artifact requirements in prompts. For partial handoff, find the explicit edge ID with kind `message` in `info`, `send` by that ID, then `yield`; consume with `anyOf(partial,final)`. A typed verdict tool records `{ approved,feedback }`: take-and-clear once per round; missing verdict fails, prose is not approval. Preserve the requested stop rule without a round cap. Close persistent members after their last owning use, not per-round graphs; flush shared tracing once afterward.
+**Research/review committee.** Persist agents/sessions; each round uses fresh Source/Sink ports and a passive graph with `schedules.parallel()`. Reject source ingress; return final work through the sink. Value edges feed reports to validating staged assignment callbacks. Keep artifact requirements in prompts. For partial handoff, find the explicit edge ID with kind `message` in `info`, `send` by that ID, then `yield`; consume with `anyOf(partial,final)`. A typed verdict tool records `{ approved,feedback }`: take-and-clear once per round; missing verdict fails, prose is not approval. Preserve the requested stop rule without a round cap. Close persistent members after their last owning use, not per-round graphs; finish a retained shared TUI once afterward, if selected. Evaluation already joins tracer delivery.
 
-**Mixed nested work.** Emit one `{ kind: "prompt", text }` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on required finals and a validating staged assignment callback. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then flush separately.
+**Mixed nested work.** Emit one `{ kind: "prompt", text }` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on required finals and a validating staged assignment callback. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then finish a retained TUI if selected; evaluation already joins delivery.
 
 ## Executable example
 
@@ -1284,7 +1284,7 @@ import { context } from "junco-scheduler";
  * Termination: sources and collector return; the sink never returns, so `run()` ends at valid
  * quiescence with the sink unfinished.
  *
- * @param observer Optional tracer; flushed here because graphs never flush it.
+ * @param observer Optional caller-owned tracer; evaluation joins its completion promises.
  * @returns The collected numbers, `[9, 7]`.
  */
 async function collectPair(observer?: tracer.DataflowTracer): Promise<number[]> {
@@ -1327,12 +1327,8 @@ async function collectPair(observer?: tracer.DataflowTracer): Promise<number[]> 
     .addEdge(right, collector, rightEdge)
     .addEdge(collector, sink, collectedEdge);
 
-  try {
-    await execution.run();
-    return captured;
-  } finally {
-    await observer?.flush();
-  }
+  await execution.run();
+  return captured;
 }
 
 console.log(JSON.stringify(await collectPair()));

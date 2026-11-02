@@ -1,9 +1,10 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import * as E from "fp-ts/lib/Either.js";
 import { context } from "junco-scheduler";
 import { Type } from "typebox";
-import { graph, schedules, tracer, trigger } from "../src/index.ts";
+import { graph, schedules, tracer, trigger, workflows } from "../src/index.ts";
 
 // The root `graph`, `schedules`, `tracer` and `trigger` namespaces compose into one runnable graph:
 // constant fan-out sources feed an ordered fan-in, a persistent sink and a one-shot marker.
@@ -70,5 +71,24 @@ test("root namespaces compose a fan-out/fan-in graph that runs once to quiescenc
   const again = await execution.run();
   assert.deepEqual(seen, [[2, 1]]);
   assert.deepEqual([...again], [...results]);
-  await observer.flush();
+});
+
+// Every runtime export of the std namespaces has a row in the AGENTS.md index (type-only exports
+// are listed by hand). `graph.trigger` is the `trigger` module and is covered by its rows.
+test("every runtime std export is indexed in AGENTS.md", () => {
+  const index = readFileSync(new URL("../AGENTS.md", import.meta.url), "utf8");
+  const namespaces: Record<string, object> = {
+    graph,
+    "graph.nodes": graph.nodes,
+    trigger,
+    schedules,
+    tracer,
+    workflows,
+  };
+  const missing = Object.entries(namespaces).flatMap(([namespace, members]) =>
+    Object.keys(members)
+      .filter((name) => !index.includes(`\`${namespace}.${name}\``))
+      .map((name) => `${namespace}.${name}`),
+  );
+  assert.deepEqual(missing, []);
 });

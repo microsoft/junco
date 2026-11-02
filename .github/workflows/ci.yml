@@ -161,11 +161,12 @@ jobs:
           bun run typecheck
           bun run test
 
-      - name: Build and typecheck dataflow-engine-opik
+      - name: Build, typecheck and test dataflow-engine-opik
         working-directory: junco/packages/dataflow-engine-opik
         run: |
           bun run build
           bun run typecheck
+          bun run test
 
       # The parent config checks every example with the Dummy tracer; examples:typecheck checks
       # the default Opik route against the engine, scheduler-core and adapter declarations.
@@ -249,43 +250,40 @@ jobs:
           import { DataflowGraph, NodeId, TriggerRule, Width } from "dataflow-engine";
           import { OpikTracer } from "dataflow-engine-opik";
           import { context, parallel } from "junco-scheduler";
-          const traces = [];
-          const client = {
-            trace(options) {
-              const record = { options, spans: [], updates: [] };
-              traces.push(record);
-              return {
-                span(options) {
-                  const span = { options, updates: [] };
-                  record.spans.push(span);
-                  return { update(value) { span.updates.push(value); } };
-                },
-                update(value) { record.updates.push(value); },
-              };
+          const requests = [];
+          const api = {
+            requestOptions: {},
+            traces: {
+              async createTraces(request) { requests.push(["createTraces", request]); },
+              async updateTrace(id, request) { requests.push(["updateTrace", id, request.body]); },
             },
-            async flush() {},
+            spans: {
+              async createSpans(request) { requests.push(["createSpans", request]); },
+              async updateSpan(id, request) { requests.push(["updateSpan", id, request.body]); },
+            },
           };
+          const client = { api, config: { projectName: "monorepo-smoke" } };
           const tracer = new OpikTracer(client, "monorepo-smoke");
           const graph = new DataflowGraph(Width.create(1), Width.create(1), tracer);
           const execution = context({ scheduler: parallel(), graph });
           graph.addNode({ id: NodeId.create("only"), state: undefined, trigger: TriggerRule.always(), step: async function* () { return 42; } });
           const results = await execution.run();
-          await tracer.flush();
           assert.deepEqual([...results], [["only", 42]]);
-          assert.equal(traces.length, 1);
-          const [run] = traces;
-          assert.equal(run.options.name, "monorepo-smoke");
-          assert.equal(run.options.metadata._opik_graph_definition.format, "mermaid");
-          assert.equal(run.spans.length, 1);
-          const [span] = run.spans;
-          assert.equal(span.options.name, "only #1");
-          assert.deepEqual(span.options.input, { messages: [], values: [] });
-          assert.equal(span.updates.length, 1);
-          assert.deepEqual(span.updates[0].output, { value: 42 });
-          assert.deepEqual(span.updates[0].metadata, { outcome: "return", nodeStatus: "done" });
-          assert.equal(run.updates.length, 1);
-          assert.deepEqual(run.updates[0].output, { results: [{ id: "only", value: 42 }] });
-          assert.deepEqual(run.updates[0].metadata, { nodes: [{ id: "only", status: "done" }] });
+          assert.deepEqual(requests.map(([kind]) => kind), ["createTraces", "createSpans", "updateSpan", "updateTrace"]);
+          const [trace] = requests[0][1].traces;
+          assert.equal(trace.name, "monorepo-smoke");
+          assert.equal(trace.projectName, "monorepo-smoke");
+          assert.equal(trace.metadata._opik_graph_definition.format, "mermaid");
+          const [span] = requests[1][1].spans;
+          assert.equal(span.name, "only #1");
+          assert.equal(span.traceId, trace.id);
+          assert.deepEqual(span.input, { messages: [], values: [] });
+          assert.equal(requests[2][1], span.id);
+          assert.deepEqual(requests[2][2].output, { value: 42 });
+          assert.deepEqual(requests[2][2].metadata, { outcome: "return", nodeStatus: "done" });
+          assert.equal(requests[3][1], trace.id);
+          assert.deepEqual(requests[3][2].output, { results: [{ id: "only", value: 42 }] });
+          assert.deepEqual(requests[3][2].metadata, { nodes: [{ id: "only", status: "done" }] });
           console.log("monorepo-opik: ok");
           '
           bun --no-install --eval "$smoke"

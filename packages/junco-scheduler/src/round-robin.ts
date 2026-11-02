@@ -3,7 +3,11 @@ import type { TSchema } from "typebox";
 import type { parallel } from "./parallel.js";
 import { choose, type Snapshot } from "./scheduler.js";
 
-/** A history-derived cursor: the same policy can serve independent contexts safely. */
+/**
+ * Up to `width` available nodes per decision, in rotation order (`order`, or sorted owned node ids)
+ * starting after the last selected node. A history-derived cursor: the same policy can serve
+ * independent contexts safely.
+ */
 export function roundRobin(
   order?: readonly NodeIdType[],
   width = 1,
