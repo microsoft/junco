@@ -1,8 +1,8 @@
 // CooperBench shared-worktree pair driver. Two leaders and native task descendants share one
 // caller-owned Marsh collection. Stdout contains native message/usage JSONL and a terminal result.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
-import { type FileHandle, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { type FileHandle, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -205,6 +205,14 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
 
 // ## Benchmark telemetry
 
+function telemetryUrl(value: string, name: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${name} must be a nonempty http(s) URL without credentials, query or fragment`); }
+  if (!value.trim() || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || value.includes("?") || value.includes("#"))
+    throw new Error(`${name} must be a nonempty http(s) URL without credentials, query or fragment`);
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
 /** The public recorder exposes its canonical base through its dashboard link, not a URL accessor. */
 const grafanaBase = (live: tracer.GrafanaRecorder): string =>
   live.dashboardUrl.slice(0, live.dashboardUrl.lastIndexOf("/d/"));
@@ -226,6 +234,86 @@ function telemetryError(error: unknown): string {
   } catch {
     return "unreadable recorder failure";
   }
+}
+
+export const containerMemorySupport = { scope: "container", source: "cgroup_v2", metric: "memory.peak" } as const;
+
+/** Read only the private Docker cgroup root, never resolve host or sibling cgroup paths. */
+export async function readContainerMemoryPeak(
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<number> {
+  try {
+    await read("/.dockerenv");
+    for (const path of ["/proc/self/cgroup", "/proc/1/cgroup"]) {
+      if ((await read(path)).trim() !== "0::/") throw new Error("a private Docker cgroup v2 namespace is required");
+    }
+    const mounts = (await read("/proc/self/mountinfo")).trim().split("\n");
+    if (!mounts.some((line) => {
+      const [mount, filesystem] = line.split(" - ");
+      const fields = mount!.split(" ");
+      return fields[3] === "/" && fields[4] === "/sys/fs/cgroup" && filesystem?.startsWith("cgroup2 ");
+    })) throw new Error("the private cgroup v2 root must be mounted at /sys/fs/cgroup");
+    const value = (await read("/sys/fs/cgroup/memory.peak")).trim();
+    const bytes = Number(value);
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(bytes) || bytes < 0)
+      throw new Error("memory.peak must contain finite nonnegative safe-integer bytes");
+    return bytes;
+  } catch (error) {
+    throw new Error(`Container memory prerequisite failed: ${telemetryError(error)}`);
+  }
+}
+
+/** Own this after the recorder, before Opik/collection/agents, so its final read covers shutdown. */
+export async function createContainerMemorySampler(
+  directory: string,
+  runId: string,
+  recorder: tracer.ProfileRecorder<string>,
+  read: () => Promise<number> = readContainerMemoryPeak,
+): Promise<{ close(): Promise<void> }> {
+  const metadata = {
+    version: 1, run_id: runId, scope: "container", source: "cgroup_v2",
+    peak_memory_bytes: null as number | null, complete: false, errors: [] as string[],
+  };
+  const path = join(directory, "memory.json");
+  const fail = (error: unknown): void => {
+    const message = telemetryError(error);
+    if (!metadata.errors.includes(message)) metadata.errors.push(message);
+  };
+  const sample = async (): Promise<void> => {
+    try {
+      const bytes = await read();
+      if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("invalid container memory peak bytes");
+      if (metadata.peak_memory_bytes !== null && bytes < metadata.peak_memory_bytes)
+        throw new Error("container memory.peak decreased; cgroup changed or peak was reset");
+      metadata.peak_memory_bytes = bytes;
+      recorder.record({ resource: "memory", kind: "metrics", category: "benchmark", tool: "",
+        operation: "container_memory", gauges: { peak_memory_bytes: bytes } });
+    } catch (error) { fail(error); }
+  };
+  const save = async (): Promise<void> => {
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(metadata)}\n`, { flag: "wx" });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
+  };
+  await sample();
+  await writeFile(path, `${JSON.stringify(metadata)}\n`, { flag: "wx" });
+  if (metadata.errors.length) throw new AggregateError(metadata.errors.map((message) => new Error(message)), "Container memory incomplete");
+  let pending: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    if (pending === undefined) pending = sample().then(save).catch(fail).finally(() => { pending = undefined; });
+  }, 1000);
+  timer.unref();
+  let closing: Promise<void> | undefined;
+  return { close: () => closing ??= (async () => {
+    clearInterval(timer);
+    await pending;
+    await sample();
+    metadata.complete = metadata.errors.length === 0;
+    try { await save(); } catch (error) { fail(error); }
+    if (metadata.errors.length) throw new AggregateError(metadata.errors.map((message) => new Error(message)), "Container memory incomplete");
+  })() };
 }
 
 /** One owning session: durable receipt-time events plus usage-mode samples and optional retained metrics. */
@@ -454,7 +542,7 @@ async function verifiedModels(
 
 type Outcome = { status: "Submitted" | "LimitsExceeded" | "Error"; error: string | null };
 
-async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl: string): Promise<Outcome> {
+async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl: string, opikUrl: string): Promise<Outcome> {
   const deadline = AbortSignal.timeout(request.timeout_ms);
   const signal = AbortSignal.any([interrupt, deadline]);
   const nodes = { agent1: graph.NodeId.create("Agent1"), agent2: graph.NodeId.create("Agent2") } as const;
@@ -463,14 +551,15 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
   let completed = false;
   let pair: Pair | undefined;
   try {
-    // LIFO: close graph and agents, drop the collection hold, flush Opik, then close sinks.
+    // LIFO: graph/agents, collection, Opik, final container peak, then recorder sinks.
     await using lifetime = new AsyncDisposableStack();
     const live = await tracer.GrafanaRecorder.create({ url: grafanaUrl, dashboard: "junco-cooperbench" });
     const recorder = lifetime.adopt(
       await createBenchmarkRecorder(join(request.problem_dir, ".junco"), request.run_id, live),
       (owned) => owned.close(),
     );
-    const observer = new OpikTracer(new Opik({ apiUrl: process.env.OPIK_URL_OVERRIDE ?? "http://localhost:5173/api", projectName: process.env.OPIK_PROJECT_NAME ?? "cooperbench" }), request.problem_dir);
+    lifetime.adopt(await createContainerMemorySampler(join(request.problem_dir, ".junco"), request.run_id, recorder), (owned) => owned.close());
+    const observer = new OpikTracer(new Opik({ apiUrl: opikUrl, projectName: process.env.OPIK_PROJECT_NAME ?? "cooperbench" }), request.problem_dir);
     lifetime.defer(() => observer.flush());
     const collection = lifetime.adopt(
       await tools.ToolCollection.create(process.cwd(), marshOptions),
@@ -552,6 +641,96 @@ export function pairOutcome(
   return { status, error, agents };
 }
 
+const RuntimeManifest = Type.Object({
+  version: Type.Literal(1),
+  libc: Type.Union([Type.Literal("gnu"), Type.Literal("musl")]),
+  bun_version: Type.String({ minLength: 1 }),
+  rust_version: Type.String({ minLength: 1 }),
+  node_version: Type.String({ minLength: 1 }),
+  native_version: Type.String({ minLength: 1 }),
+  native_target: Type.Union([Type.Literal("x86_64-unknown-linux-gnu"), Type.Literal("x86_64-unknown-linux-musl")]),
+  builder_image_digest: Type.String({ pattern: "^sha256:[a-f0-9]{64}$" }),
+  runtime_build_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  source_hashes: Type.Object({
+    wf_ts: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+    wf_yml: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+    bun_lock: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  }, strict),
+}, strict);
+
+async function runtimeMetadata() {
+  const runtime = "/opt/junco-runtime";
+  const manifest: unknown = await Bun.file(join(runtime, "manifest.json")).json();
+  if (!Value.Check(RuntimeManifest, manifest)) {
+    const [error] = Value.Errors(RuntimeManifest, manifest);
+    throw new Error(`invalid runtime manifest: ${error?.instancePath || "/"} ${error?.message || "schema mismatch"}`);
+  }
+  if (process.arch !== "x64" || process.platform !== "linux" || Bun.version !== manifest.bun_version ||
+      manifest.native_target !== `x86_64-unknown-linux-${manifest.libc}`)
+    throw new Error("runtime platform, Bun version or native target does not match its manifest");
+  const entry = fileURLToPath(import.meta.url);
+  if (entry !== join(runtime, "app/examples/cooperbench/wf.ts"))
+    throw new Error("native preflight must use the packaged canonical workflow entry");
+  for (const [key, file] of Object.entries({ wf_ts: entry, wf_yml: join(runtime, "app/examples/cooperbench/wf.yml"), bun_lock: join(runtime, "app/bun.lock") })) {
+    const hash = createHash("sha256").update(new Uint8Array(await Bun.file(file).arrayBuffer())).digest("hex");
+    if (hash !== manifest.source_hashes[key as keyof typeof manifest.source_hashes])
+      throw new Error(`packaged source hash does not match manifest: ${key}`);
+  }
+  return { ...manifest, runtime_entry: entry };
+}
+
+/** Proves real Btrfs publication, including repeated ignored cache writes, before model discovery. */
+export async function probeRuntime(worktree: string): Promise<void> {
+  await import("junco-tools/native");
+  const seed = worktree;
+  const initialized = Bun.spawnSync(["git", "init", "--quiet", seed]);
+  if (initialized.exitCode !== 0) throw new Error(`native probe git initialization failed: ${initialized.stderr.toString()}`);
+  await writeFile(join(seed, ".gitignore"), ".cache/\n");
+  {
+    await using lifetime = new AsyncDisposableStack();
+    const collection = lifetime.adopt(await tools.ToolCollection.create(seed, marshOptions), (owned) => owned.close());
+    const first = lifetime.adopt(collection.bind(), (owned) => owned.close());
+    const second = lifetime.adopt(collection.bind(), (owned) => owned.close());
+    const bash = collection.tools.find((tool) => tool.name === "bash")!;
+    const release = collection.tools.find((tool) => tool.name === "release")!;
+    const a = first.tools.get(bash)!;
+    const b = second.tools.get(bash)!;
+    await a.execute("probe-write", { command: "printf original > shared.txt" });
+    let denied = false;
+    try { await b.execute("probe-denied", { command: "printf stolen > shared.txt" }); }
+    catch (error) { if (!tools.isMarshPolicyDenied(error)) throw error; denied = true; }
+    if (!denied || await Bun.file(join(seed, "shared.txt")).text() !== "original")
+      throw new Error("native probe did not deny a competing write and preserve committed bytes");
+    await b.execute("probe-disjoint", { command: "printf independent > other.txt" });
+    if (await Bun.file(join(seed, "other.txt")).text() !== "independent")
+      throw new Error("native probe disjoint write did not publish");
+    await first.tools.get(release)!.execute("probe-release", { file: "shared.txt" });
+    await b.execute("probe-handoff", { command: "cat shared.txt; printf handed-off > shared.txt" });
+    if (await Bun.file(join(seed, "shared.txt")).text() !== "handed-off")
+      throw new Error("native probe owner-released handoff did not publish");
+    const cache = "mkdir -p .cache && (test ! -f .cache/native-probe || cat .cache/native-probe) && printf cached > .cache/native-probe";
+    await a.execute("probe-cache", { command: cache });
+    let cacheDenied = false;
+    try { await b.execute("probe-cache-denied", { command: cache }); }
+    catch (error) { if (!tools.isMarshPolicyDenied(error)) throw error; cacheDenied = true; }
+    if (!cacheDenied || await Bun.file(join(seed, ".cache/native-probe")).text() !== "cached")
+      throw new Error("native probe did not deny a competing ignored cache write");
+    await first.tools.get(release)!.execute("probe-cache-release", { file: ".cache/native-probe" });
+    await b.execute("probe-cache-handoff", { command: cache });
+    if (await Bun.file(join(seed, ".cache/native-probe")).text() !== "cached")
+      throw new Error("native probe released cache command did not publish");
+  }
+}
+
+/** A first real shell acquires the seed lease and replays its WAL before patch harvesting. */
+export async function recoverWorkspace(worktree: string): Promise<void> {
+  await using lifetime = new AsyncDisposableStack();
+  const collection = lifetime.adopt(await tools.ToolCollection.create(worktree, marshOptions), (owned) => owned.close());
+  const binding = lifetime.adopt(collection.bind(), (owned) => owned.close());
+  const bash = collection.tools.find((tool) => tool.name === "bash")!;
+  await binding.tools.get(bash)!.execute("recover-workspace", { command: "/bin/true" });
+}
+
 async function main(signal: AbortSignal): Promise<void> {
   const release = redirectLog({
     write(line) { writeSync(2, `${line}\n`); },
@@ -565,16 +744,19 @@ async function main(signal: AbortSignal): Promise<void> {
   ];
   try {
     const request = parseRequest(await Bun.stdin.text());
-    const configuredUrl = process.env.GRAFANA_URL ?? "http://localhost:8000";
-    let url: URL;
-    try { url = new URL(configuredUrl); } catch { throw new Error("GRAFANA_URL must be a nonempty http(s) URL without credentials, query or fragment"); }
-    if (!configuredUrl.trim() || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || configuredUrl.includes("?") || configuredUrl.includes("#"))
-      throw new Error("GRAFANA_URL must be a nonempty http(s) URL without credentials, query or fragment");
-    const grafanaUrl = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+    const grafanaUrl = telemetryUrl(process.env.GRAFANA_URL ?? "http://localhost:8000", "GRAFANA_URL");
+    const opikUrl = telemetryUrl(process.env.OPIK_URL_OVERRIDE ?? "http://localhost:5173/api", "OPIK_URL_OVERRIDE");
+    const native = request.mode === "preflight" ? await runtimeMetadata() : undefined;
+    await readContainerMemoryPeak();
     if (request.mode === "preflight") {
+      await probeRuntime(process.cwd());
       {
         await using lifetime = new AsyncDisposableStack();
         const live = lifetime.adopt(await tracer.GrafanaRecorder.create({ url: grafanaUrl, dashboard: "junco-cooperbench" }), (owned) => owned.close());
+        lifetime.defer(async () => {
+          live.record({ resource: "memory", kind: "metrics", category: "benchmark", tool: "", operation: "container_memory",
+            gauges: { peak_memory_bytes: await readContainerMemoryPeak() } });
+        });
         const view = live.add_context("preflight");
         const operation = { resource: "operations", category: "benchmark", tool: "", operation: "grafana_health" } as const;
         const started = performance.now();
@@ -591,17 +773,25 @@ async function main(signal: AbortSignal): Promise<void> {
         } finally {
           view.record({ kind: "finish", ...operation, outcome, durationMs: performance.now() - started });
         }
+        const opik = new Opik({ apiUrl: opikUrl, projectName: process.env.OPIK_PROJECT_NAME ?? "cooperbench" });
+        const projects = await opik.api.projects.findProjects({ size: 1 }, { timeoutInSeconds: 5, maxRetries: 0, abortSignal: signal });
+        if (projects === null || typeof projects !== "object" || !Array.isArray(projects.content))
+          throw new Error("Opik project API did not return a valid project page");
+        await opik.flush();
         await verifiedModels(request.models, request.thinking, signal);
       }
       emit({
         type: "ready",
         models: request.models,
         thinking: request.thinking,
-        runtime_entry: fileURLToPath(import.meta.resolve("junco")),
+        ...native,
+        native_probe: { denied_overwrite: true, disjoint_write: true, released_handoff: true, cache_write_denied: true, cache_released_handoff: true },
+        memory: containerMemorySupport,
+        telemetry: { grafana: true, opik: true },
       });
       return;
     }
-    const { status } = await runPair(request, signal, grafanaUrl);
+    const { status } = await runPair(request, signal, grafanaUrl, opikUrl);
     if (status !== "Submitted") process.exitCode = 1;
   } finally {
     opikLogger.settings.type = type;
@@ -616,7 +806,9 @@ if (import.meta.main) {
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
   try {
-    await main(controller.signal);
+    if (process.argv.length === 2) await main(controller.signal);
+    else if (process.argv.length === 3 && process.argv[2] === "--recover-workspace") await recoverWorkspace(process.cwd());
+    else throw new Error("unsupported workflow arguments");
   } catch (error) {
     console.error(error instanceof Error && error.constructor === Error && error.cause === undefined ? error.message : error);
     process.exitCode = 1;

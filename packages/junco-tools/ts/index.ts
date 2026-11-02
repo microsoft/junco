@@ -31,13 +31,16 @@ export {
   type ToolCollectionOptions,
 } from "./collection.js";
 export {
+  type ComplainBackend,
   ComplainTool,
   type ComplainToolHost,
+  type Complaint,
   type ComplaintContext,
   type Issue,
   invokeComplainTool,
   isComplainTool,
   issueLog,
+  JsonlComplainBackend,
   type Prompt,
 } from "./complain.js";
 export { DiffTool } from "./diff.js";

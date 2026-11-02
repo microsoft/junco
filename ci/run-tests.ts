@@ -112,6 +112,20 @@ async function main(argv: string[]): Promise<number> {
         join(repository, "ci"),
       ]);
       if (build.status !== 0) return build.status;
+      if (scope === "junco") {
+        const fixture =
+          "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest";
+        const cached = await run(
+          "docker",
+          ["image", "inspect", fixture],
+          process.env,
+          true,
+        );
+        if (cached.status !== 0) {
+          const pulled = await run("docker", ["pull", fixture]);
+          if (pulled.status !== 0) return pulled.status;
+        }
+      }
       const args = [
         "run",
         "--rm",
@@ -119,6 +133,11 @@ async function main(argv: string[]): Promise<number> {
         "--volume",
         `${repository}:/src:ro`,
       ];
+      if (scope === "junco")
+        args.push(
+          "--mount",
+          "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+        );
       for (const name of ["CARGO_BUILD_JOBS", "BTRFS_SIZE"]) {
         if (process.env[name] !== undefined)
           args.push("--env", `${name}=${process.env[name]}`);

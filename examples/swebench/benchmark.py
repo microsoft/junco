@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""SWE-bench Verified benchmark of the shared Junco workflow junco/examples/swebench/wf.{yml,ts} (Sonnet 5 workers, Opus 5.5 leads).
+"""SWE-bench Verified benchmark of the shared Junco workflow junco/examples/swebench/wf.{yml,ts} by default.
 
 prepare: pinned dataset -> <instance_id>/problem.json + base-source repo/ (workflow inputs only).
 validate: every problem record checked, and the shared pair checked offline once by run-workflow.ts --check.
-run: serial workflow execution, each instance in its own nine disposable containers (six agent sandboxes,
-     three pristine acceptance sandboxes), official grading of the canonical patch, JSONL results.
+run: workflow execution (--parallel defaults to 1), each instance in its own nine disposable containers
+     (six agent sandboxes, three pristine acceptance sandboxes), official grading of the canonical patch, JSONL results.
 
-  .venv/bin/python benchmark.py run [--instance-id <id> ...] [--output <fresh-file.jsonl>]
+  .venv/bin/python benchmark.py run [--parallel N] [--instance-id <id> ...] [--output <fresh-file.jsonl>]
 
 Without --instance-id the whole corpus runs; repeat it to select several. --output defaults to swebench-cb.jsonl
 (under the junco profile optimizer: .swebench/runs/<run>/results.jsonl) and is never overwritten.
 Under the junco profile optimizer (JUNCO_PROFILE_RUN_DIR=<dir>), <dir>/cleanup.pending exists while the run may own
 containers, and a complete run publishes <dir>/samples.jsonl (every instance's profile.jsonl) and
 <dir>/completion.json with metrics `passed` (workflows whose Finish check passed) and `resolved` (official grades).
-Predictions are labelled junco-cb.
+SWEBENCH_PAIR selects a bare workflow file stem (default wf); predictions are labelled junco-cb for wf, otherwise junco-<stem>.
 
 Models: Pi's saved logins (~/.pi/agent). Telemetry: the worker traces to Opik project `swebench` (API defaults to
 localhost:5173/api, overridden by OPIK_URL_OVERRIDE) and persists metrics through Grafana (GRAFANA_URL, default localhost:8000). Per-instance artifacts under
@@ -33,10 +33,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from pathlib import Path
+
+class BenchmarkError(Exception):
+    pass
+
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / ".swebench"
@@ -50,8 +55,11 @@ PROBLEM_FIELDS = ("instance_id", "repo", "base_commit", "problem_statement")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 SAFE_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
 SHA = re.compile(r"[0-9a-f]{40}")
-MODEL_NAME = "junco-cb"
-PAIR = (Path(".junco-snapshot", "examples", "swebench", "wf.yml"), Path(".junco-snapshot", "examples", "swebench", "wf.ts"))
+PAIR_NAME = os.environ.get("SWEBENCH_PAIR", "wf")
+if re.fullmatch(r"[A-Za-z0-9_-]+", PAIR_NAME) is None:
+    raise BenchmarkError("SWEBENCH_PAIR must be a bare file stem")
+MODEL_NAME = "junco-cb" if PAIR_NAME == "wf" else f"junco-{PAIR_NAME}"
+PAIR = (Path(".junco-snapshot", "examples", "swebench", f"{PAIR_NAME}.yml"), Path(".junco-snapshot", "examples", "swebench", f"{PAIR_NAME}.ts"))
 # Container roles of wf.ts ROLES (the worker rejects a manifest that differs): agents work in the
 # first six; the acceptance sandboxes are reachable only by the workflow's deterministic code.
 AGENT_ROLES = ("canonical", "trace", "reproduce", "contracts", "candidateA", "candidateB")
@@ -60,10 +68,6 @@ EVAL_TIMEOUT = 1800
 WORKER_EXIT = {"completed": 0, "error": 1, "cancelled": 130}
 ACTIVATE = "source /opt/miniconda3/bin/activate && conda activate testbed"
 GIT = ("git", "-c", "safe.directory=/testbed", "-C", "/testbed")
-
-
-class BenchmarkError(Exception):
-    pass
 
 
 def write_json(path: Path, data: object) -> None:
@@ -251,7 +255,7 @@ def worker_env(tool_output: Path | None) -> dict[str, str]:
     """Minimal worker environment: Pi's saved login under HOME, telemetry settings (GRAFANA_URL, OPIK_*; the worker
     keeps them from agents), instance-owned shell-output TMPDIR."""
     keep = ("PATH", "HOME", "LANG", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
-            "JUNCO_PROFILE_RUN_DIR", "GRAFANA_URL")
+            "SWEBENCH_PAIR", "JUNCO_PROFILE_RUN_DIR", "JUNCO_GRAPH_RUN_DIR", "GRAFANA_URL")
     env = {k: v for k, v in os.environ.items() if k in keep or k.startswith("OPIK_")}
     if tool_output is not None:
         env["TMPDIR"] = str(tool_output)
@@ -382,7 +386,8 @@ def official_grade(report: Path, instance_id: str) -> bool:
     return resolved
 
 
-def run_one(record: dict, run_id: str, run_dir: Path, client) -> tuple[dict, bool]:
+def run_one(record: dict, run_id: str, run_dir: Path, client, stop: threading.Event,
+            workers: list[subprocess.Popen], workers_lock: threading.Lock) -> tuple[dict, bool]:
     """One instance end to end; returns (result row, cancelled). Never raises for per-instance failures."""
     import docker
 
@@ -403,24 +408,31 @@ def run_one(record: dict, run_id: str, run_dir: Path, client) -> tuple[dict, boo
         containers, baseline = start_sandboxes(client, image.id, f"junco-cb.{iid.lower()}.{run_id}", tool_output, base, owned)
         write_json(artifacts / "baseline.json", {"base_commit": base, "baseline": baseline})
         write_json(artifacts / "manifest.json", {"baseline": baseline, "containers": {role: c.id for role, c in containers.items()}})
-        worker_ran = True
         with open(artifacts / "worker.log", "wb") as log:
-            worker = subprocess.Popen(["bun", "run", "run-workflow.ts", str(ROOT / iid), str(artifacts / "manifest.json"), str(artifacts)],
-                                      cwd=ROOT, env=worker_env(tool_output), stdout=log, stderr=subprocess.STDOUT)
-            try:
-                code = worker.wait()
-            except KeyboardInterrupt:
-                cancelled = True
-                worker.send_signal(signal.SIGTERM)
-                code = worker.wait()
-        workflow_status, error = read_outcome(artifacts, code)
-        cancelled = cancelled or workflow_status == "cancelled"
-        if error:
-            errors.append(error)
-    except KeyboardInterrupt:
-        cancelled, workflow_status = True, "cancelled"
-        errors.append("cancelled by operator during setup")
+            with workers_lock:
+                if stop.is_set():
+                    cancelled, workflow_status = True, "cancelled"
+                    errors.append("cancelled by operator during setup")
+                else:
+                    worker = subprocess.Popen(["bun", "run", "run-workflow.ts", str(ROOT / iid), str(artifacts / "manifest.json"), str(artifacts)],
+                                              cwd=ROOT, env=worker_env(tool_output), stdout=log, stderr=subprocess.STDOUT)
+                    workers.append(worker)
+                    worker_ran = True
+            if worker_ran:
+                try:
+                    code = worker.wait()
+                    cancelled = stop.is_set()
+                finally:
+                    with workers_lock:
+                        workers.remove(worker)
+                workflow_status, error = read_outcome(artifacts, code)
+                cancelled = cancelled or workflow_status == "cancelled"
+                if error:
+                    errors.append(error)
     except Exception as failure:
+        cancelled = stop.is_set()
+        if cancelled:
+            workflow_status = "cancelled"
         errors.append(f"setup: {failure}" if not str(failure).startswith("setup:") else str(failure))
     try:
         if worker_ran:  # the deliverable is the canonical sandbox; candidate and acceptance sandboxes are scratch
@@ -437,6 +449,7 @@ def run_one(record: dict, run_id: str, run_dir: Path, client) -> tuple[dict, boo
     prediction = {"instance_id": iid, "model_name_or_path": MODEL_NAME, "model_patch": patch}
     write_json(artifacts / "prediction.json", prediction)
     report_path = None
+    cancelled = cancelled or stop.is_set()
     if cancelled:
         evaluation_status, resolved = "error", None
         errors.append("evaluation: skipped after cancellation")
@@ -463,7 +476,7 @@ def run_one(record: dict, run_id: str, run_dir: Path, client) -> tuple[dict, boo
         "recordings_path": produced("recordings"),
         "profile_path": produced("profile.jsonl"),
     }
-    return row, cancelled
+    return row, cancelled or stop.is_set()
 
 
 def publish_profile(directory: Path, run_dir: Path, run_id: str, rows: list[dict], client, complete: bool) -> bool:
@@ -508,6 +521,11 @@ def publish_profile(directory: Path, run_dir: Path, run_id: str, rows: list[dict
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if args.parallel < 1:
+        raise BenchmarkError("--parallel must be at least 1")
+    if os.environ.get("JUNCO_PROFILE_RUN_DIR") is not None and os.environ.get("JUNCO_GRAPH_RUN_DIR") is not None:
+        raise BenchmarkError("JUNCO_PROFILE_RUN_DIR and JUNCO_GRAPH_RUN_DIR are both set")
+    profile = os.environ.get("JUNCO_PROFILE_RUN_DIR") or os.environ.get("JUNCO_GRAPH_RUN_DIR")
     import docker
     from swebench.harness.reporting import make_run_report
 
@@ -518,7 +536,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     unknown = sorted(set(wanted or ()) - {r["instance_id"] for r in selected})
     if unknown:
         raise BenchmarkError(f"unknown instance_id {', '.join(unknown)}")
-    profile = os.environ.get("JUNCO_PROFILE_RUN_DIR")
     run_id = uuid.uuid4().hex
     run_dir = STATE / "runs" / run_id
     if args.output:
@@ -540,35 +557,81 @@ def cmd_run(args: argparse.Namespace) -> int:
         Path(profile, "cleanup.pending").touch(exist_ok=False)  # held while this run may own containers
     print(f"run {run_id}: {len(ids)} instances -> {output}", flush=True)
 
-    def interrupt(signum, frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, interrupt)
+    stop = threading.Event()
+    workers: list[subprocess.Popen] = []
+    workers_lock = threading.Lock()
+    rows_lock = threading.Lock()
     rows: list[dict] = []
-    with open(output, "x") as out:
-        for record in selected:
-            row, cancelled = run_one(record, run_id, run_dir, client)
-            out.write(json.dumps(row) + "\n")
-            out.flush()
-            os.fsync(out.fileno())
-            rows.append(row)
-            print(f"[{len(rows)}/{len(ids)}] {row['instance_id']}: workflow={row['workflow_status']} "
-                  f"evaluation={row['evaluation_status']} error={row['error']}", flush=True)
-            if cancelled:
-                break
-    predictions = {row["instance_id"]: {k: row[k] for k in ("instance_id", "model_name_or_path", "model_patch")} for row in rows}
-    make_run_report(predictions, selected, run_id, client, report_dir=str(run_dir))
-    resolved = sum(row["resolved"] is True for row in rows)
-    counts = {status: sum(row["evaluation_status"] == status for row in rows) for status in ("resolved", "unresolved", "empty_patch", "error")}
-    print(f"completed {len(rows)}/{len(ids)}; {counts}; workflow errors {sum(r['workflow_status'] != 'completed' for r in rows)}; "
-          f"rows with errors {sum(r['error'] is not None for r in rows)}")
-    print(f"resolved {resolved}/{len(ids)}")
-    accounting_ok = len(rows) == len(ids) and len({r["instance_id"] for r in rows}) == len(rows)
-    infrastructure_ok = counts["error"] == 0 and not any(
-        r["error"] and ("setup:" in r["error"] or "cleanup" in r["error"] or "extraction:" in r["error"]) for r in rows)
-    ok = accounting_ok and infrastructure_ok
-    if profile:
-        ok = publish_profile(Path(profile), run_dir, run_id, rows, client, ok)
-    return 0 if ok else 1
+    signalled = False
+
+    def interrupt(signum, frame):
+        nonlocal signalled
+        if signalled:  # repeated signals must not re-enter workers_lock
+            return
+        signalled = True
+        stop.set()
+        with workers_lock:
+            for worker in workers:
+                try:
+                    worker.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+    previous_handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        with open(output, "x") as out:
+            def run(record):
+                if stop.is_set():
+                    return
+                row, cancelled = run_one(record, run_id, run_dir, client, stop, workers, workers_lock)
+                with rows_lock:
+                    out.write(json.dumps(row) + "\n")
+                    out.flush()
+                    os.fsync(out.fileno())
+                    rows.append(row)
+                    print(f"[{len(rows)}/{len(ids)}] {row['instance_id']}: workflow={row['workflow_status']} "
+                          f"evaluation={row['evaluation_status']} error={row['error']}", flush=True)
+                if cancelled:
+                    interrupt(None, None)
+
+            executor = ThreadPoolExecutor(max_workers=args.parallel)
+            try:
+                futures = []
+                for record in selected:
+                    if stop.is_set():
+                        break
+                    futures.append(executor.submit(run, record))
+                pending_cancelled = False
+                for future in futures:
+                    if stop.is_set() and not pending_cancelled:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        pending_cancelled = True
+                    try:
+                        future.result()
+                    except CancelledError:
+                        pass
+            except BaseException:
+                interrupt(None, None)
+                raise
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+        predictions = {row["instance_id"]: {k: row[k] for k in ("instance_id", "model_name_or_path", "model_patch")} for row in rows}
+        make_run_report(predictions, selected, run_id, client, report_dir=str(run_dir))
+        resolved = sum(row["resolved"] is True for row in rows)
+        counts = {status: sum(row["evaluation_status"] == status for row in rows) for status in ("resolved", "unresolved", "empty_patch", "error")}
+        print(f"completed {len(rows)}/{len(ids)}; {counts}; workflow errors {sum(r['workflow_status'] != 'completed' for r in rows)}; "
+              f"rows with errors {sum(r['error'] is not None for r in rows)}")
+        print(f"resolved {resolved}/{len(ids)}")
+        accounting_ok = len(rows) == len(ids) and len({r["instance_id"] for r in rows}) == len(rows)
+        infrastructure_ok = counts["error"] == 0 and not any(
+            r["error"] and ("setup:" in r["error"] or "cleanup" in r["error"] or "extraction:" in r["error"]) for r in rows)
+        ok = accounting_ok and infrastructure_ok and not stop.is_set()
+        if profile:
+            ok = publish_profile(Path(profile), run_dir, run_id, rows, client, ok)
+        return 0 if ok else 1
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -578,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("validate").set_defaults(func=cmd_validate)
     run = sub.add_parser("run")
     run.add_argument("--instance-id", action="append")
+    run.add_argument("--parallel", type=int, default=1)
     run.add_argument("--output")
     run.set_defaults(func=cmd_run)
     args = parser.parse_args(argv)

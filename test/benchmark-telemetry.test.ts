@@ -21,7 +21,8 @@ type Otlp = {
 test.each(["junco-telemetry", "junco-swebench"])(
   "benchmark telemetry links and metrics select %s without provider requests",
   async (dashboard) => {
-    const collection = "/grafana/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
+    const collection =
+      "/grafana/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
     const pushes: Otlp[] = [];
     const created: string[] = [];
     let unexpected = 0;
@@ -45,33 +46,64 @@ test.each(["junco-telemetry", "junco-swebench"])(
         return new Response(null, { status: 404 });
       },
     });
-    const previous = { GRAFANA_URL: process.env.GRAFANA_URL, OPIK_URL_OVERRIDE: process.env.OPIK_URL_OVERRIDE };
+    const previous = {
+      GRAFANA_URL: process.env.GRAFANA_URL,
+      OPIK_URL_OVERRIDE: process.env.OPIK_URL_OVERRIDE,
+    };
     process.env.GRAFANA_URL = `${server.url.origin}/grafana/`;
     process.env.OPIK_URL_OVERRIDE = `${server.url.origin}/api`;
     let live: tracer.GrafanaRecorder | undefined;
     try {
       // The generic case deliberately uses the unchanged two-argument API.
-      const telemetry = dashboard === "junco-telemetry"
-        ? await benchmarkTelemetry("benchmark-test", "test-session")
-        : await benchmarkTelemetry("swebench", "test-session", dashboard);
+      const telemetry =
+        dashboard === "junco-telemetry"
+          ? await benchmarkTelemetry("benchmark-test", "test-session")
+          : await benchmarkTelemetry("swebench", "test-session", dashboard);
       live = telemetry.recorder;
-      expect(live.dashboardUrl).toBe(`${server.url.origin}/grafana/d/${dashboard}?var-stream=${live.streamId}`);
+      expect(live.dashboardUrl).toBe(
+        `${server.url.origin}/grafana/d/${dashboard}?var-stream=${live.streamId}`,
+      );
       live.record({
-        kind: "usage", resource: "tokens", source: {},
-        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        kind: "usage",
+        resource: "tokens",
+        source: {},
+        usage: {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
       });
-      live.record({ kind: "probe", resource: "probe", edgeId: "route", value: 7 });
+      live.record({
+        kind: "probe",
+        resource: "probe",
+        edgeId: "route",
+        value: 7,
+      });
       await live.close();
       expect(created).toEqual([dashboard]);
-      const metrics = pushes.flatMap((payload) => payload.resourceMetrics.flatMap((resource) =>
-        resource.scopeMetrics.flatMap((scope) => scope.metrics)));
-      expect(metrics.some((metric) => metric.name === "junco_total_tokens_used" &&
-        metric.gauge.dataPoints.some((point) => point.asDouble === 3))).toBe(true);
-      expect(metrics.some((metric) => metric.name.startsWith("junco_probe_"))).toBe(true);
+      const metrics = pushes.flatMap((payload) =>
+        payload.resourceMetrics.flatMap((resource) =>
+          resource.scopeMetrics.flatMap((scope) => scope.metrics),
+        ),
+      );
+      expect(
+        metrics.some(
+          (metric) =>
+            metric.name === "junco_total_tokens_used" &&
+            metric.gauge.dataPoints.some((point) => point.asDouble === 3),
+        ),
+      ).toBe(true);
+      expect(
+        metrics.some((metric) => metric.name.startsWith("junco_probe_")),
+      ).toBe(true);
       for (const metric of metrics)
         for (const point of metric.gauge.dataPoints) {
-          const labels = Object.fromEntries(point.attributes.map(({ key, value }) => [key, value.stringValue]));
+          const labels = Object.fromEntries(
+            point.attributes.map(({ key, value }) => [key, value.stringValue]),
+          );
           expect(labels.dashboard).toBe(dashboard);
           expect(labels.stream).toBe(live.streamId);
         }

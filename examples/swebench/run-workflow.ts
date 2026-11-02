@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Junco runtime for the shared SWE-bench workflow junco/examples/swebench/wf.{yml,ts}: ./wf.{yml,ts} link into the
- * frozen .junco-snapshot (benchmark.py is the corpus CLI). junco/examples/swebench keeps this file's source.
+ * Junco runtime for the shared SWE-bench workflow pairs in junco/examples/swebench: ./<pair>.{yml,ts} link into
+ * the frozen .junco-snapshot (benchmark.py is the corpus CLI). SWEBENCH_PAIR selects the pair (default wf).
  *
  *   bun run run-workflow.ts --preflight                      live smoke: both models, a real tool call, a code-relayed handoff
  *   bun run run-workflow.ts --check <problem-directory>      offline validation of the shared pair against one problem
@@ -37,6 +37,8 @@ import { benchmarkTelemetry, grafanaUrl } from "../benchmark-telemetry.ts";
 import type * as Pair from "./wf.ts";
 
 const ROOT = import.meta.dir;
+const PAIR = process.env.SWEBENCH_PAIR ?? "wf";
+if (!/^[A-Za-z0-9_-]+$/.test(PAIR)) throw new Error("SWEBENCH_PAIR must be a bare file stem");
 process.env.PI_TELEMETRY = "0";
 process.env.PI_SKIP_VERSION_CHECK = "1";
 
@@ -85,11 +87,16 @@ const IMPORTS: Record<string, true> = {
   "@earendil-works/pi-agent-core": true,
   "@earendil-works/pi-coding-agent": true,
   "dataflow-engine": true,
-  "./wf.yml": true,
+  [`./${PAIR}.yml`]: true,
 };
 
 /** The pair; a profile-optimizer candidate module also exports its run's nonce and graph hash. */
-type Workflow = typeof Pair & { readonly profileRun?: { readonly nonce: string }; readonly graphHash?: string };
+type Workflow = Pick<typeof Pair, "document" | "ladder" | "strengthOf" | "run" | "ROLES" | "SANDBOX"> & {
+  readonly code: Readonly<Record<string, unknown>>;
+  readonly BRANCHES: Readonly<Partial<typeof Pair.BRANCHES>>;
+  readonly profileRun?: { readonly nonce: string };
+  readonly graphHash?: string;
+};
 // Junco exports no name for the YAML agent instantiation createJuncoAgent returns.
 type Agent = Awaited<ReturnType<typeof syntax.createJuncoAgent>>;
 type Manifest = { baseline: string; containers: Record<Pair.Role, string> };
@@ -503,16 +510,16 @@ function readManifest(path: string, roles: readonly string[]): Manifest {
 /** The shared pair, imported only after its imports passed the allowlist. */
 async function loadWorkflow(): Promise<Workflow> {
   const transpiler = new Bun.Transpiler({ loader: "ts" });
-  for (const { path } of transpiler.scanImports(readFileSync(join(ROOT, "wf.ts"), "utf8")))
+  for (const { path } of transpiler.scanImports(readFileSync(join(ROOT, `${PAIR}.ts`), "utf8")))
     if (!Object.hasOwn(IMPORTS, path) && !path.startsWith("node:") && !builtinModules.includes(path))
-      throw new Error(`wf.ts imports ${path}; only junco, Pi packages, dataflow-engine, Node built-ins and ./wf.yml are permitted`);
-  const module = await import(join(ROOT, "wf.ts"));
+      throw new Error(`${PAIR}.ts imports ${path}; only junco, Pi packages, dataflow-engine, Node built-ins and ./${PAIR}.yml are permitted`);
+  const module = await import(join(ROOT, `${PAIR}.ts`));
   for (const name of ["run", "strengthOf"])
-    if (typeof module[name] !== "function") throw new Error(`wf.ts must export ${name}`);
-  if (typeof module.document?.graph !== "object") throw new Error("wf.ts must export document = syntax.parse(source)");
+    if (typeof module[name] !== "function") throw new Error(`${PAIR}.ts must export ${name}`);
+  if (typeof module.document?.graph !== "object") throw new Error(`${PAIR}.ts must export document = syntax.parse(source)`);
   for (const name of ["code", "SANDBOX", "BRANCHES"])
-    if (typeof module[name] !== "object" || module[name] === null) throw new Error(`wf.ts must export ${name}`);
-  if (!Array.isArray(module.ROLES)) throw new Error("wf.ts must export ROLES");
+    if (typeof module[name] !== "object" || module[name] === null) throw new Error(`${PAIR}.ts must export ${name}`);
+  if (!Array.isArray(module.ROLES)) throw new Error(`${PAIR}.ts must export ROLES`);
   checkLadder(module.ladder);
   return module as Workflow;
 }
@@ -595,8 +602,8 @@ async function check(problemDir: string): Promise<{ problem: string; models: Rec
   grafanaUrl(); // benchmark.py's validate step: a bad GRAFANA_URL fails before any instance starts
   const problem = readProblem(dir);
   const workflow = await loadWorkflow();
-  if (!Bun.deepEquals(syntax.parse(readFileSync(join(ROOT, "wf.yml"), "utf8")), workflow.document))
-    throw new Error("document is not syntax.parse(wf.yml)");
+  if (!Bun.deepEquals(syntax.parse(readFileSync(join(ROOT, `${PAIR}.yml`), "utf8")), workflow.document))
+    throw new Error(`document is not syntax.parse(${PAIR}.yml)`);
   checkDocument(workflow);
   const specs = await syntax.resolveAgents(workflow.document, { cwd: dir, tools: { bash: UNBOUND_BASH } });
   const models = Object.fromEntries(specs.map((spec) => [spec.path, workflow.ladder[workflow.strengthOf(spec.path)].model]));
@@ -636,11 +643,11 @@ export function sandboxBash(
   return (path) => {
     const role = workflow.SANDBOX[path];
     if (role === undefined) throw new Error(`${path} has no sandbox`);
-    const branch = (Object.keys(workflow.BRANCHES) as Pair.Branch[]).find((b) => within(path, workflow.BRANCHES[b].agent));
+    const branch = Object.entries(workflow.BRANCHES).find(([, config]) => within(path, config.agent));
     return containerBash(containers[role], (reason) => {
       if (branch === undefined) return fatal(reason);
-      const root = workflow.BRANCHES[branch].agent;
-      console.error(`candidate ${branch}: ${reason.message}; aborting ${root}`);
+      const [name, { agent: root }] = branch;
+      console.error(`candidate ${name}: ${reason.message}; aborting ${root}`);
       // Not awaited: an abort may wait on this very tool call.
       for (const [member, instance] of acquired) if (within(member, root)) instance.abort().catch(() => {});
     });
@@ -654,7 +661,9 @@ export function cancelBranch(
   acquired: ReadonlyMap<string, Abortable>,
 ): Pair.Host["cancel"] {
   return async (branch) => {
-    const { agent: root, sandboxes } = branches[branch];
+    const config = branches[branch];
+    if (config === undefined) return [`unknown candidate branch ${branch}`];
+    const { agent: root, sandboxes } = config;
     const members = [...acquired].filter(([path]) => within(path, root));
     // Every abort starts before any is awaited; async turns a synchronous throw into a recorded rejection.
     const settled = await Promise.allSettled(members.map(async ([, instance]) => instance.abort()));
@@ -687,8 +696,8 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
   const acquired = new Map<string, Agent>();
   const env = new NodeExecutionEnv({ cwd: artifacts });
   const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: recordings });
-  // Under the profile optimizer, cost is recorded per provider request, failed and cancelled ones included.
-  const profiling = process.env.JUNCO_PROFILE_RUN_DIR !== undefined;
+  // Both optimizers record per-provider-request cost, failed and cancelled requests included.
+  const profiling = process.env.JUNCO_PROFILE_RUN_DIR !== undefined || process.env.JUNCO_GRAPH_RUN_DIR !== undefined;
   const profile = new tracer.JsonlRecorder({ path: join(artifacts, "profile.jsonl"), ...(profiling ? { costMode: "usage" } : {}) });
   let recorder: tracer.ProfileRecorder<string> = profile;
   let receipt: { nonce: string; graphHash: string } | undefined;

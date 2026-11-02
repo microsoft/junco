@@ -5,7 +5,6 @@ import {
 } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import {
-  type DataflowTracer,
   NodeId,
   runWithUsageBudgets,
   runWithUsageContext,
@@ -35,7 +34,7 @@ export type TaskNotice =
   | (TaskResult & { readonly type: "task_result" })
   | { readonly type: "task_batch_complete"; readonly ids: readonly string[] };
 
-/** Where an admission placed its work: the ledgers, recorder and complaint tracer it captured. */
+/** Where an admission placed its work: the ledgers and recorder it captured. */
 export type TaskPlacement = {
   readonly usage: UsageContext | undefined;
   readonly recorder:
@@ -43,7 +42,6 @@ export type TaskPlacement = {
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
       >
     | undefined;
-  readonly tracer: Pick<DataflowTracer, "complain"> | undefined;
 };
 
 /** The tasks one launch admitted, in admission order, and how many are not yet resolved. */
@@ -439,14 +437,14 @@ export class TaskScope {
     }
   }
 
-  /** The child's final message, run under its admission's ledgers, recorder and complaint tracer. */
+  /** The child's final message, run under its admission's ledgers and recorder. */
   #execute({
     id,
     record,
     child,
     placement,
   }: Attempt): Promise<AssistantMessage> {
-    const { usage, recorder, tracer } = placement;
+    const { usage, recorder } = placement;
     const nodeId = NodeId.create(id);
     return runWithUsageContext(usage, () =>
       runWithUsageBudgets([], id, () =>
@@ -454,11 +452,7 @@ export class TaskScope {
           {
             nodeId,
             ...(recorder === undefined ? {} : { recorder, recorderNodeId: id }),
-            complaint: {
-              nodeId,
-              messages: [],
-              ...(tracer === undefined ? {} : { tracer }),
-            },
+            complaint: { nodeId, messages: [] },
           },
           async () => {
             child.stagePrompt(record.prompt);

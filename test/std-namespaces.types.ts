@@ -413,10 +413,6 @@ class CountingTracer implements tracer.DataflowTracer {
     };
   }
 
-  complain(nodeId: graph.NodeIdType, complaint: string): void {
-    this.events.push(`complain ${nodeId} ${complaint}`);
-  }
-
   async flush(): Promise<void> {
     this.events.length = 0;
   }
@@ -677,11 +673,12 @@ export async function agentProtocolNarrowsSteps(
       described.push(code);
     }
   }
+  const complaint: tools.Complaint = "blocked";
   const issue: tools.Issue<Num> = {
     nodeId: graph.NodeId.create("n"),
     messages: [],
     prompt: { messages: [] },
-    complaint: "blocked",
+    complaint,
   };
   const complained = protocol.complain(issue);
   // @ts-expect-error a complaint string alone is not an issue

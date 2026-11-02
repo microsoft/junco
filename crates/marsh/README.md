@@ -58,9 +58,10 @@ records in the same vocabulary. A launch the tracer cannot seize never runs, and
 observation fails closed. No trace spool, sysctl changes or fallback tracer is involved.
 
 During whole-tree exit, a newborn may reach its terminal ptrace stop before its adoption event.
-Marsh drains that stop only after every task is exiting and retains the newborn's bookkeeping
-until the tree is reaped. Tombstones with pending, deferred or application records still fail
-observation.
+Marsh consumes already-queued lifecycle events before declaring held tasks unclassifiable, so a
+replacement EXIT is not mistaken for a stalled attachment stop. It drains that stop only after
+every task is exiting and retains the newborn's bookkeeping until the tree is reaped. Tombstones
+with pending, deferred or application records still fail observation.
 
 A nonleader `exec` reports its EXEC stop under the group leader's TID, naming the caller's former
 TID. If SIGKILL replaces that stop before its message is read, Marsh never treats the stale

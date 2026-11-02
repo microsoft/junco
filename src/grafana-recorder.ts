@@ -60,7 +60,6 @@ const BENCHMARK_DASHBOARDS = new Set([
 ]);
 const DASHBOARDS =
   "/apis/dashboard.grafana.app/v1/namespaces/default/dashboards";
-// ponytail: each request is capped at 500 KiB; shard streams if a measured snapshot exceeds it.
 const PUSH_LIMIT = 500 * 1024;
 const TIMEOUT_MS = 5000;
 const FIELD = /^[a-z][a-z0-9_]*$/;
@@ -117,8 +116,43 @@ export type ProfileMetric = {
   name: string;
   gauge: { dataPoints: ProfileMetricPoint[] };
 };
-const payload = (metrics: readonly ProfileMetric[]) =>
-  JSON.stringify({ resourceMetrics: [{ scopeMetrics: [{ metrics }] }] });
+function* payload(
+  metrics: readonly ProfileMetric[],
+  kind: "probe" | "snapshot",
+): Generator<string> {
+  const start = '{"resourceMetrics":[{"scopeMetrics":[{"metrics":[';
+  const end = "]}]}]}";
+  const metricEnd = "]}}";
+  const envelopeBytes = start.length + end.length;
+  let chunks: string[] = [];
+  let bytes = envelopeBytes;
+  for (const metric of metrics) {
+    const head = `{"name":${JSON.stringify(metric.name)},"gauge":{"dataPoints":[`;
+    const metricBytes = Buffer.byteLength(head) + metricEnd.length;
+    let points: string[] = [];
+    for (const point of metric.gauge.dataPoints) {
+      const text = JSON.stringify(point);
+      const pointBytes = Buffer.byteLength(text);
+      let extra =
+        pointBytes +
+        (points.length === 0 ? metricBytes + Number(chunks.length > 0) : 1);
+      if (bytes + extra > PUSH_LIMIT) {
+        if (points.length > 0) chunks.push(head + points.join(",") + metricEnd);
+        if (chunks.length > 0) yield start + chunks.join(",") + end;
+        chunks = [];
+        points = [];
+        bytes = envelopeBytes;
+        extra = metricBytes + pointBytes;
+        if (bytes + extra > PUSH_LIMIT)
+          throw new Error(`GrafanaRecorder: ${kind} exceeds 500 KiB`);
+      }
+      points.push(text);
+      bytes += extra;
+    }
+    if (points.length > 0) chunks.push(head + points.join(",") + metricEnd);
+  }
+  yield start + chunks.join(",") + end;
+}
 
 /** Shared validation for live recording and dashboard-only provisioning. */
 function configuration(options: GrafanaRecorderOptions) {
@@ -126,7 +160,9 @@ function configuration(options: GrafanaRecorderOptions) {
   if (!Number.isFinite(intervalMs) || intervalMs <= 0)
     throw new Error("GrafanaRecorder: intervalMs must be positive");
   if (typeof dashboard !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(dashboard))
-    throw new Error("GrafanaRecorder: dashboard must match ^[A-Za-z0-9_-]{1,40}$");
+    throw new Error(
+      "GrafanaRecorder: dashboard must match ^[A-Za-z0-9_-]{1,40}$",
+    );
   const url = URL.parse(options.url ?? "http://localhost:8000");
   if (
     url === null ||
@@ -576,7 +612,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     },
   );
   /** Probe points awaiting their own push, in record order. */
-  #probes: string[] = [];
+  #probes: (readonly ProfileMetric[])[] = [];
   #clock: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   #drain: Promise<void> = Promise.resolve();
@@ -646,18 +682,18 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     if (event.kind === "probe" && this.#stopped) return;
     try {
       const metrics = this.#state.record(path, event, Date.now());
-      if (metrics !== undefined) this.#probes.push(payload(metrics));
+      if (metrics !== undefined) this.#probes.push(metrics);
     } catch (error) {
       this.#fail(error);
     }
   }
 
-  #snapshot(): string {
+  #snapshot(): readonly ProfileMetric[] {
     const now = performance.now();
     const elapsedMs = this.#clock === undefined ? 0 : now - this.#clock;
     const metrics = this.#state.snapshot(Date.now(), elapsedMs);
     if (elapsedMs > 0) this.#clock = now;
-    return payload(metrics);
+    return metrics;
   }
 
   #tick(): void {
@@ -681,7 +717,7 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     this.#probes = [];
     try {
       // ponytail: one sequential request per probe point; batch distinct series if probe rates outgrow it.
-      for (const body of probes) await this.#send("probe", body);
+      for (const metrics of probes) await this.#send("probe", metrics);
       await this.#send("snapshot", this.#snapshot());
     } catch (error) {
       this.#stopped = true;
@@ -691,22 +727,27 @@ export class GrafanaRecorder implements ProfileRecorder<string> {
     }
   }
 
-  async #send(kind: "probe" | "snapshot", body: string): Promise<void> {
-    if (Buffer.byteLength(body) > PUSH_LIMIT)
-      throw new Error(`GrafanaRecorder: ${kind} exceeds 500 KiB`);
-    const response = await request(
-      `${this.#base}/api/telemetry/metrics`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+  async #send(
+    kind: "probe" | "snapshot",
+    metrics: readonly ProfileMetric[],
+  ): Promise<void> {
+    for (const body of payload(metrics, kind)) {
+      if (Buffer.byteLength(body) > PUSH_LIMIT)
+        throw new Error(`GrafanaRecorder: ${kind} exceeds 500 KiB`);
+      const response = await request(
+        `${this.#base}/api/telemetry/metrics`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body,
         },
-        body,
-      },
-      "metrics push",
-    );
-    await response.body?.cancel();
-    if (!response.ok) throw failure("metrics push", response);
+        "metrics push",
+      );
+      await response.body?.cancel();
+      if (!response.ok) throw failure("metrics push", response);
+    }
   }
 }
 
@@ -779,10 +820,9 @@ async function provision(
   dashboardUid: string,
   streamId = "junco_00000000000000000000000000000000",
 ): Promise<void> {
-  const spec = JSON.parse(JSON.stringify(await dashboard(dashboardUid, streamId))) as Record<
-    string,
-    unknown
-  >;
+  const spec = JSON.parse(
+    JSON.stringify(await dashboard(dashboardUid, streamId)),
+  ) as Record<string, unknown>;
   const item = `${base}${DASHBOARDS}/${dashboardUid}`;
   const lookup = {
     headers: { Accept: "application/json" },
@@ -883,20 +923,26 @@ async function dashboard(dashboardUid: string, streamId: string) {
   };
   const memoryScope =
     "Shell-pipeline cgroup memory sampled by the native monitor, not host heap.";
+  const containerPeak = `junco_operation_peak_memory_bytes{${selector},resource="memory",category="benchmark",operation="container_memory",node="::"}`;
+  const pipelinePeak = `junco_total_peak_memory_bytes{${selector}}`;
+  // Select the whole-container HWM before aggregation; pipeline peaks overlap it.
+  const sessionPeak = `(max without (node, resource, category, tool, operation) (${benchmark ? `max_over_time(${containerPeak}[$__range])` : containerPeak}) or on (dashboard, stream) ${benchmark ? `max_over_time(${pipelinePeak}[$__range])` : pipelinePeak})`;
+  const peakScope =
+    "Kernel-measured whole-container high-water mark when recorded, including all processes and cache; not attributable to nodes. Otherwise the sampled pipeline aggregate: maximum active-pipeline sum or single-pipeline high-water mark, with independently timed samples.";
   const stats = [
     {
-      title: "Total memory",
+      title: "Current pipeline memory",
       field: "memory_bytes",
       unit: "bytes",
       grid: { x: 0, y: 0, w: 8, h: 4 },
       description: `${memoryScope} Sum of current memory of the session's active pipelines.`,
     },
     {
-      title: "Peak memory",
+      title: "Session memory peak",
       field: "peak_memory_bytes",
       unit: "bytes",
       grid: { x: 8, y: 0, w: 8, h: 4 },
-      description: `${memoryScope} Sampled peak: the maximum active-pipeline sum or single-pipeline high-water mark; samples are independently timed.`,
+      description: peakScope,
     },
     {
       title: "Total tokens used",
@@ -993,30 +1039,29 @@ async function dashboard(dashboardUid: string, streamId: string) {
     const discovery = `query_result(last_over_time(junco_total_tokens_used{dashboard="${dashboardUid}"}[$__range]))`;
     const lifetime =
       "Recorded lifetime totals of sessions observed in the selected range, not usage increments earned only within that range.";
-    board
-      .description(`${lifetime} ${history}`)
-      .withVariable(
-        new dashboard.QueryVariableBuilder("stream")
-          .label("Telemetry session")
-          .datasource(PROMETHEUS)
-          .query(discovery)
-          .definition(discovery)
-          .regex('/stream="([^"]+)"/')
-          .multi(true)
-          .includeAll(true)
-          .allValue(".*")
-          .allowCustomValue(false)
-          .refresh(dashboard.VariableRefresh.OnTimeRangeChanged)
-          .sort(dashboard.VariableSort.AlphabeticalAsc)
-          .options([{ text: "All", value: "$__all", selected: true }])
-          .current({ text: "All", value: "$__all" }),
-      );
+    board.description(`${lifetime} ${history}`).withVariable(
+      new dashboard.QueryVariableBuilder("stream")
+        .label("Telemetry session")
+        .datasource(PROMETHEUS)
+        .query(discovery)
+        .definition(discovery)
+        .regex('/stream="([^"]+)"/')
+        .multi(true)
+        .includeAll(true)
+        .allValue(".*")
+        .allowCustomValue(false)
+        .refresh(dashboard.VariableRefresh.OnTimeRangeChanged)
+        .sort(dashboard.VariableSort.AlphabeticalAsc)
+        .options([{ text: "All", value: "$__all", selected: true }])
+        .current({ text: "All", value: "$__all" }),
+    );
     const overview = [
       {
         title: "Recorded sessions",
         expr: `count(last_over_time(junco_total_tokens_used{${selector}}[$__range]))`,
         unit: "short",
-        description: "Sessions with recorded committed-token totals observed in the selected range.",
+        description:
+          "Sessions with recorded committed-token totals observed in the selected range.",
       },
       {
         title: "Committed lifetime tokens",
@@ -1032,26 +1077,26 @@ async function dashboard(dashboardUid: string, streamId: string) {
       },
       {
         title: "Largest individual-session memory peak",
-        expr: `max(max_over_time(junco_total_peak_memory_bytes{${selector}}[$__range]))`,
+        expr: `max(${sessionPeak})`,
         unit: "bytes",
-        description: `${memoryScope} Largest measured individual-session peak, never a sum of session peaks or simultaneous campaign memory.`,
+        description: `${peakScope} Largest individual-session peak, never a sum of session peaks or simultaneous campaign memory.`,
       },
     ];
     for (const [index, panel] of overview.entries()) {
       const builder = new stat.PanelBuilder()
-          .id(++id)
-          .title(panel.title)
-          .description(`${panel.description} ${history}`)
-          .datasource(PROMETHEUS)
-          .gridPos({ x: index * 6, y: 0, w: 6, h: 4 })
-          .unit(panel.unit)
-          .noValue(index === 0 ? "No recorded sessions" : "Not recorded")
-          .reduceOptions(
-            new common.ReduceDataOptionsBuilder()
-              .values(false)
-              .calcs(["lastNotNull"]),
-          )
-          .withTarget(query(panel.expr, true));
+        .id(++id)
+        .title(panel.title)
+        .description(`${panel.description} ${history}`)
+        .datasource(PROMETHEUS)
+        .gridPos({ x: index * 6, y: 0, w: 6, h: 4 })
+        .unit(panel.unit)
+        .noValue(index === 0 ? "No recorded sessions" : "Not recorded")
+        .reduceOptions(
+          new common.ReduceDataOptionsBuilder()
+            .values(false)
+            .calcs(["lastNotNull"]),
+        )
+        .withTarget(query(panel.expr, true));
       if (index === 2) builder.decimals(9);
       board.withPanel(builder);
     }
@@ -1060,20 +1105,23 @@ async function dashboard(dashboardUid: string, streamId: string) {
         .id(++id)
         .title("Per-session lifetime totals")
         .description(
-          `${lifetime} Stream, campaign and completion labels identify reconstructed complete and partial sessions. Missing measurements stay absent. ${history}`,
+          `${lifetime} Stream, campaign and completion labels identify reconstructed complete and partial sessions. Missing measurements stay absent. ${peakScope} ${history}`,
         )
         .datasource(PROMETHEUS)
         .gridPos({ x: 0, y: 4, w: 24, h: 10 })
         .filterable(true)
         .noValue("Not recorded")
         .targets(
-          ["tokens_used", "cost_total", "peak_memory_bytes"].map((field, index) =>
-            query(
-              `last_over_time(junco_total_${field}{${selector}}[$__range])`,
-              true,
-            )
-              .refId(String.fromCharCode(65 + index))
-              .format(prometheus.PromQueryFormat.Table),
+          ["tokens_used", "cost_total", "peak_memory_bytes"].map(
+            (field, index) =>
+              query(
+                field === "peak_memory_bytes"
+                  ? sessionPeak
+                  : `last_over_time(junco_total_${field}{${selector}}[$__range])`,
+                true,
+              )
+                .refId(String.fromCharCode(65 + index))
+                .format(prometheus.PromQueryFormat.Table),
           ),
         )
         .withTransformation({
@@ -1102,7 +1150,9 @@ async function dashboard(dashboardUid: string, streamId: string) {
     );
   }
   const row = benchmark
-    ? new dashboard.RowBuilder("Session drill-down — select a session before expanding")
+    ? new dashboard.RowBuilder(
+        "Session drill-down — select a session before expanding",
+      )
         .id(++id)
         .collapsed(true)
         .gridPos({ x: 0, y: 14, w: 24, h: 1 })
@@ -1114,33 +1164,55 @@ async function dashboard(dashboardUid: string, streamId: string) {
       new stat.PanelBuilder()
         .id(++id)
         .title(panel.title)
-        .description(benchmark ? `${panel.description} ${history}` : panel.description)
+        .description(
+          benchmark ? `${panel.description} ${history}` : panel.description,
+        )
         .datasource(PROMETHEUS)
         .gridPos({ ...panel.grid, y: panel.grid.y + offset })
         .unit(panel.unit)
-        .noValue(benchmark ? "Not recorded" : panel.unit === "bytes" ? "No measured pipelines" : "0")
+        .noValue(
+          benchmark
+            ? "Not recorded"
+            : panel.unit === "bytes"
+              ? panel.field === "peak_memory_bytes"
+                ? "No memory measurement"
+                : "No measured pipelines"
+              : "0",
+        )
         .reduceOptions(
           new common.ReduceDataOptionsBuilder()
             .values(false)
             .calcs(["lastNotNull"]),
         )
-        .withTarget(query(
-          benchmark
-            ? `last_over_time(junco_total_${panel.field}{${selector}}[$__range])`
-            : `junco_total_${panel.field}{${selector}}`,
-          benchmark,
-        )),
+        .withTarget(
+          query(
+            panel.field === "peak_memory_bytes"
+              ? sessionPeak
+              : benchmark
+                ? `last_over_time(junco_total_${panel.field}{${selector}}[$__range])`
+                : `junco_total_${panel.field}{${selector}}`,
+            benchmark,
+          ),
+        ),
     );
   for (const panel of series)
     details.withPanel(
       new timeseries.PanelBuilder()
         .id(++id)
         .title(panel.title)
-        .description(benchmark ? `${panel.description} ${history}` : panel.description)
+        .description(
+          benchmark ? `${panel.description} ${history}` : panel.description,
+        )
         .datasource(PROMETHEUS)
         .gridPos({ ...panel.grid, y: panel.grid.y + offset })
         .unit(panel.unit)
-        .noValue(benchmark ? "Not recorded" : panel.unit === "bytes" ? "No measured pipelines" : "0")
+        .noValue(
+          benchmark
+            ? "Not recorded"
+            : panel.unit === "bytes"
+              ? "No measured pipelines"
+              : "0",
+        )
         .displayName(
           benchmark
             ? `\${__field.labels.stream} \${__field.labels.node}`
@@ -1148,9 +1220,7 @@ async function dashboard(dashboardUid: string, streamId: string) {
               ? `\${__field.labels.node}`
               : panel.title,
         )
-        .withTarget(
-          query(`${panel.measurement}_${panel.field}{${selector}}`),
-        ),
+        .withTarget(query(`${panel.measurement}_${panel.field}{${selector}}`)),
     );
   const probes = new timeseries.PanelBuilder()
     .id(++id)
@@ -1161,7 +1231,7 @@ async function dashboard(dashboardUid: string, streamId: string) {
     .datasource(PROMETHEUS)
     .gridPos({ x: 0, y: 20 + offset, w: 24, h: 8 })
     .displayName(
-      `${benchmark ? "\${__field.labels.stream} " : ""}\${__field.labels.node} \${__field.labels.edge_id}`,
+      `${benchmark ? `\${__field.labels.stream} ` : ""}\${__field.labels.node} \${__field.labels.edge_id}`,
     )
     .withTarget(query(`junco_probe_value{${selector}}[$__range]`, true));
   if (benchmark) probes.noValue("Not recorded");
@@ -1170,7 +1240,9 @@ async function dashboard(dashboardUid: string, streamId: string) {
     const builder = new table.PanelBuilder()
       .id(++id)
       .title(panel.title)
-      .description(benchmark ? `${panel.description} ${history}` : panel.description)
+      .description(
+        benchmark ? `${panel.description} ${history}` : panel.description,
+      )
       .datasource(PROMETHEUS)
       .gridPos({ ...panel.grid, y: panel.grid.y + offset })
       .filterable(true)

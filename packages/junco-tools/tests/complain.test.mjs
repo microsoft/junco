@@ -1,23 +1,35 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { after } from "node:test";
 import {
   ComplainTool,
   invokeComplainTool,
   isComplainTool,
   issueLog,
+  JsonlComplainBackend,
 } from "../dist/complain.js";
 
 // Native-free: only dist/complain.js. issueLog is process-global and append-only, so every
 // assertion inspects the delta after a recorded starting length.
+
+const initial = issueLog.backend;
+const dir = mkdtempSync(join(tmpdir(), "complaints-"));
+issueLog.backend = new JsonlComplainBackend(join(dir, "complaints.jsonl"));
+after(() => {
+  issueLog.backend = initial;
+  rmSync(dir, { recursive: true });
+});
 
 /** A host delegating to the singleton exactly like JuncoAgent/MockAgent, counting its calls. */
 function loggingHost() {
   const calls = [];
   return {
     calls,
-    complain(issue, tracer) {
-      calls.push({ issue, tracer });
-      issueLog.append(issue, tracer);
+    complain(issue) {
+      calls.push({ issue });
+      issueLog.append(issue);
     },
   };
 }
@@ -192,32 +204,73 @@ test("mutating caller-owned prompt and messages after recording leaves the issue
   assert.ok(Object.isFrozen(issue.messages));
 });
 
-test("observer receives node and complaint; a throwing observer cannot prevent recording", async (t) => {
+test("the backend receives node and complaint; a throwing backend cannot prevent recording", async (t) => {
   const seen = [];
   const host = loggingHost();
   const good = {
     complain: (nodeId, complaint) => seen.push([nodeId, complaint]),
   };
-  const before = issueLog.length;
-  await call(new ComplainTool(host, () => context("obs", { tracer: good })), {
-    complaint: "ok",
-  });
-  assert.deepEqual(seen, [["obs", "ok"]]);
-  // Silences the shared logger's warning; only the domain outcome is asserted.
-  t.mock.method(console, "log", () => {});
   const bad = {
     complain() {
-      throw new Error("observer down");
+      throw new Error("backend down");
     },
   };
-  await call(new ComplainTool(host, () => context("obs", { tracer: bad })), {
-    complaint: "kept",
-  });
-  assert.deepEqual(
-    since(before).map((i) => i.complaint),
-    ["ok", "kept"],
-  );
-  assert.equal("tracer" in since(before)[1], false);
+  const before = issueLog.length;
+  const file = issueLog.backend;
+  try {
+    issueLog.backend = good;
+    await call(new ComplainTool(host, () => context("obs")), {
+      complaint: "ok",
+    });
+    assert.deepEqual(seen, [["obs", "ok"]]);
+    t.mock.method(console, "log", () => {});
+    issueLog.backend = bad;
+    await call(new ComplainTool(host, () => context("obs")), {
+      complaint: "kept",
+    });
+    assert.deepEqual(
+      since(before).map((i) => i.complaint),
+      ["ok", "kept"],
+    );
+  } finally {
+    issueLog.backend = file;
+  }
+});
+
+test("the default backend is complaints.jsonl in the current directory", () => {
+  assert.ok(initial instanceof JsonlComplainBackend);
+  assert.equal(initial.path, join(process.cwd(), "complaints.jsonl"));
+});
+
+test("JsonlComplainBackend appends one { at, nodeId, complaint } line per complaint", async () => {
+  const path = join(dir, "lines.jsonl");
+  const file = issueLog.backend;
+  try {
+    issueLog.backend = new JsonlComplainBackend(path);
+    const host = loggingHost();
+    await call(new ComplainTool(host, () => context("node-a")), {
+      complaint: " first ",
+    });
+    await call(new ComplainTool(host, () => context("")), {
+      complaint: "second",
+    });
+    const lines = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(lines.length, 2);
+    assert.deepEqual(Object.keys(lines[0]), ["at", "nodeId", "complaint"]);
+    assert.deepEqual(
+      lines.map((line) => [line.nodeId, line.complaint]),
+      [
+        ["node-a", " first "],
+        ["", "second"],
+      ],
+    );
+    assert.equal(Number.isNaN(Date.parse(lines[0].at)), false);
+  } finally {
+    issueLog.backend = file;
+  }
 });
 
 test("invokeComplainTool rejects non-genuine tools", async () => {

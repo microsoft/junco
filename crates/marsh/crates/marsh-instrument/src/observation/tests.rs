@@ -497,6 +497,55 @@ fn memory_at_page_edges() {
     observer.run(&mut ignore).unwrap();
 }
 
+fn queued_exit_before_deadlock() {
+    use nix::sys::wait::{Id, WaitPidFlag, waitid};
+
+    let child = Command::new("/bin/sh")
+        .args(["-c", "read _"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let mut observer = Observer::new(
+        Observer::selection().unwrap(),
+        Arc::new(Sequence::default()),
+        pid,
+    );
+    let stopped = observer.seize(pid).unwrap().unwrap();
+    let mut terminal = None;
+    let mut observe =
+        |_sequence, tid, status, _event, call: Option<Syscall>, entry: Option<EntryInfo<'_>>| {
+            assert!(call.is_none() && entry.is_none());
+            let wait = WaitStatus::from_raw(tid, status)?;
+            let ended = matches!(wait, WaitStatus::Exited(..) | WaitStatus::Signaled(..));
+            if ended {
+                terminal = Some(wait);
+            }
+            Ok(Resume {
+                hold_current: !ended,
+                ..Resume::default()
+            })
+        };
+    observer.stop(pid, stopped, &mut observe).unwrap();
+    nix::sys::signal::kill(pid, Signal::SIGKILL).unwrap();
+    // Leave the real EXIT queued while the observer still holds the replaced attachment stop.
+    assert!(matches!(
+        waitid(Id::Pid(pid), WaitPidFlag::WSTOPPED | WaitPidFlag::WNOWAIT).unwrap(),
+        WaitStatus::PtraceEvent(_, _, code) if code == Event::PTRACE_EVENT_EXIT as i32
+    ));
+    let result = observer.run(&mut observe);
+    if result.is_err() {
+        observer.abandon(|_, _| {});
+    }
+    result.unwrap();
+    assert_eq!(
+        terminal,
+        Some(WaitStatus::Signaled(pid, Signal::SIGKILL, false))
+    );
+    assert_eq!(observer.unexecuted_exits(), [pid]);
+}
+
 fn held_stops() {
     // A child whose first stop arrives before its creator's creation event is held until that
     // event: nothing of it is delivered in between, and the tree still completes.
@@ -646,6 +695,7 @@ fn native_observer_regressions() {
             missing_upstream_roles(directory.path());
             memory_at_page_edges();
             held_stops();
+            queued_exit_before_deadlock();
             println!("native observer scenarios completed");
             return;
         }

@@ -1,4 +1,4 @@
-import { afterEach, describe, test } from "bun:test";
+import { afterEach, beforeEach, describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import {
   type AssistantMessage,
@@ -24,27 +24,35 @@ import { terminalPorts } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
 
 // Real JuncoAgents on faux providers inside real graphs: the always-on complain tool records the
-// activation's node, delivered batch and full request in the one shared issue log, and only the
-// owning graph's tracer observes it.
+// activation's node, delivered batch and full request in the one shared issue log, which hands each
+// to the process-wide issueLog.backend.
 
 const closers: (() => Promise<unknown>)[] = [];
+let recorded: RecordingBackend;
+let previousBackend: tools.ComplainBackend;
+beforeEach(() => {
+  previousBackend = tools.issueLog.backend;
+  recorded = new RecordingBackend();
+  tools.issueLog.backend = recorded;
+});
 afterEach(async () => {
   for (const close of closers.splice(0).reverse())
     await close().catch(() => {});
+  tools.issueLog.backend = previousBackend;
 });
 
-class RecordingTracer extends DummyTracer {
+class RecordingBackend implements tools.ComplainBackend {
   readonly complaints: [NodeIdType, string][] = [];
-  override complain(nodeId: NodeIdType, complaint: string): void {
+  complain(nodeId: NodeIdType, complaint: string): void {
     this.complaints.push([nodeId, complaint]);
   }
 }
 
-class ThrowingTracer extends DummyTracer {
-  override complain(): void {
-    throw new Error("observer failed");
-  }
-}
+const throwingBackend: tools.ComplainBackend = {
+  complain() {
+    throw new Error("backend failed");
+  },
+};
 
 const input: AgenticInput = {
   kind: "prompt",
@@ -121,14 +129,14 @@ function wire(
   return { edge, workerId };
 }
 
-function newGraph(tracer: DummyTracer = new RecordingTracer()) {
+function newGraph() {
   const ports = terminalPorts();
   const flow = new JuncoGraph(
     ports.source,
     ports.sink,
     graph.Width.create(1),
     graph.UNBOUNDED,
-    tracer,
+    new DummyTracer(),
     LockPolicy,
   );
   const execution = schedules.context({
@@ -146,8 +154,7 @@ const resultText = (
 
 describe("complaints through real graphs", () => {
   test("a worker's complaint records its node, delivered batch and full request", async () => {
-    const tracer = new RecordingTracer();
-    const { execution: flowContext, ports: flowPorts } = newGraph(tracer);
+    const { execution: flowContext, ports: flowPorts } = newGraph();
     const flow = flowContext.graph;
     const member = await worker("I cannot reach the coordinator.");
     const { edge, workerId } = wire(
@@ -180,7 +187,7 @@ describe("complaints through real graphs", () => {
       "task",
       "yield",
     ]);
-    assert.deepEqual(tracer.complaints, [
+    assert.deepEqual(recorded.complaints, [
       [workerId, "I cannot reach the coordinator."],
     ]);
 
@@ -242,12 +249,10 @@ describe("complaints through real graphs", () => {
     assert.equal(emptyWorker.workerId, "");
   }, 5_000);
 
-  test("concurrent graphs with the same local node id keep their batches, requests and tracers apart", async () => {
-    const tracerA = new RecordingTracer();
-    const tracerB = new RecordingTracer();
-    const { execution: aContext, ports: aPorts } = newGraph(tracerA);
+  test("concurrent graphs with the same local node id keep their batches and requests apart", async () => {
+    const { execution: aContext, ports: aPorts } = newGraph();
     const a = aContext.graph;
-    const { execution: bContext, ports: bPorts } = newGraph(tracerB);
+    const { execution: bContext, ports: bPorts } = newGraph();
     const b = bContext.graph;
     const id = graph.NodeId.create("worker");
     const inputA = {
@@ -266,8 +271,13 @@ describe("complaints through real graphs", () => {
     const [ra, rb] = await Promise.all([aContext.run(), bContext.run()]);
     assert.equal(resultText(ra, id), "continued");
     assert.equal(resultText(rb, id), "continued");
-    assert.deepEqual(tracerA.complaints, [[id, "from A"]]);
-    assert.deepEqual(tracerB.complaints, [[id, "from B"]]);
+    assert.deepEqual(
+      [...recorded.complaints].sort((x, y) => x[1].localeCompare(y[1])),
+      [
+        [id, "from A"],
+        [id, "from B"],
+      ],
+    );
     const issues = tools.issueLog.snapshot().slice(before);
     const byComplaint = new Map(
       issues.map((issue) => [issue.complaint, issue]),
@@ -292,10 +302,9 @@ describe("complaints through real graphs", () => {
     }
   }, 5_000);
 
-  test("a throwing complaint observer leaves the graph result and issue intact", async () => {
-    const { execution: flowContext, ports: flowPorts } = newGraph(
-      new ThrowingTracer(),
-    );
+  test("a throwing complaint backend leaves the graph result and issue intact", async () => {
+    const { execution: flowContext, ports: flowPorts } = newGraph();
+    tools.issueLog.backend = throwingBackend;
     const flow = flowContext.graph;
     const { workerId } = wire(flow, await worker("observer throws"));
     const before = tools.issueLog.length;
@@ -317,19 +326,15 @@ describe("complaints through real graphs", () => {
     );
   }, 5_000);
 
-  test("a nested graph's complaint reaches only its inner node id and tracer", async () => {
-    const innerTracer = new RecordingTracer();
-    const outerTracer = new RecordingTracer();
-    const { execution: innerContext, ports: innerPorts } =
-      newGraph(innerTracer);
+  test("a nested graph's complaint records its inner node id", async () => {
+    const { execution: innerContext, ports: innerPorts } = newGraph();
     const inner = innerContext.graph;
     const { workerId } = wire(
       inner,
       await worker("nested"),
       graph.NodeId.create("inner-worker"),
     );
-    const { execution: outerContext, ports: outerPorts } =
-      newGraph(outerTracer);
+    const { execution: outerContext, ports: outerPorts } = newGraph();
     const outer = outerContext.graph;
     innerPorts.connect(inner, workerId);
     const wrapper = outer.addNode({
@@ -341,8 +346,7 @@ describe("complaints through real graphs", () => {
     outerPorts.connect(outer, wrapper);
     const results = await outerContext.run();
     assert.equal(resultText(results, wrapper), "continued");
-    assert.deepEqual(innerTracer.complaints, [[workerId, "nested"]]);
-    assert.deepEqual(outerTracer.complaints, []);
+    assert.deepEqual(recorded.complaints, [[workerId, "nested"]]);
     assert.deepEqual(
       tools.issueLog
         .snapshot()
@@ -352,9 +356,7 @@ describe("complaints through real graphs", () => {
     );
   }, 5_000);
 
-  test("a spec registered in two graphs reports only to the graph that runs it", async () => {
-    const tracerA = new RecordingTracer();
-    const tracerB = new RecordingTracer();
+  test("a spec registered in two graphs records one complaint", async () => {
     const member = await worker("shared spec");
     member.stagePrompt("go");
     const spec = {
@@ -363,9 +365,9 @@ describe("complaints through real graphs", () => {
       policy: LockPolicy,
       trigger: trigger.TriggerRule.always(),
     };
-    const { execution: aContext, ports: aPorts } = newGraph(tracerA);
+    const { execution: aContext, ports: aPorts } = newGraph();
     const a = aContext.graph;
-    const { execution: bContext, ports: bPorts } = newGraph(tracerB);
+    const { execution: bContext, ports: bPorts } = newGraph();
     const b = bContext.graph;
     const id = a.addNode(spec);
     b.addNode(spec);
@@ -373,8 +375,7 @@ describe("complaints through real graphs", () => {
     bPorts.connect(b, id);
     const results = await aContext.run();
     assert.equal(resultText(results, id), "continued");
-    assert.deepEqual(tracerA.complaints, [[id, "shared spec"]]);
-    assert.deepEqual(tracerB.complaints, []);
+    assert.deepEqual(recorded.complaints, [[id, "shared spec"]]);
   }, 5_000);
 });
 
@@ -402,14 +403,15 @@ describe("direct Agentic.complain", () => {
     };
     const promptMessages: tools.Prompt["messages"][number][] = [original];
     const prompt = { systemPrompt: "supplied", messages: promptMessages };
-    const observer = new RecordingTracer();
     const before = tools.issueLog.length;
 
     const returned = [
-      protocols[0]!.complain(
-        { nodeId, messages, prompt, complaint: "real direct" },
-        observer,
-      ),
+      protocols[0]!.complain({
+        nodeId,
+        messages,
+        prompt,
+        complaint: "real direct",
+      }),
       protocols[1]!.complain({
         nodeId,
         messages,
@@ -435,17 +437,23 @@ describe("direct Agentic.complain", () => {
         messages: [{ role: "user", content: "original", timestamp: 1 }],
       });
     }
-    assert.deepEqual(observer.complaints, [[nodeId, "real direct"]]);
+    assert.deepEqual(recorded.complaints, [
+      [nodeId, "real direct"],
+      [nodeId, "mock direct"],
+    ]);
     assert.equal(real.status, "idle");
     assert.deepEqual(mock.requests, []);
 
     const print = console.log;
     console.log = () => {};
     try {
-      real.complain(
-        { nodeId, messages: [], prompt, complaint: "observer throws" },
-        new ThrowingTracer(),
-      );
+      tools.issueLog.backend = throwingBackend;
+      real.complain({
+        nodeId,
+        messages: [],
+        prompt,
+        complaint: "observer throws",
+      });
     } finally {
       console.log = print;
     }

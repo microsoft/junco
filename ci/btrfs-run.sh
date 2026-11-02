@@ -39,12 +39,18 @@ btrfs -q subvolume create /workspace/.ci-btrfs
 chown ci:ci /workspace/.ci-btrfs
 chmod 700 /workspace/.ci-btrfs
 
+# Docker-backed regressions use the caller's daemon through its socket as the unprivileged ci user.
+groups=(--init-groups)
+if [ -S /var/run/docker.sock ]; then
+  groups=(--groups "$(id -G ci | tr ' ' ','),$(stat -c '%g' /var/run/docker.sock)")
+fi
+
 status=0
 (
   echo "$BASHPID" >"$cg/ci/cgroup.procs"
   HOME=/workspace/.ci-home BTRFS_ROOT=/workspace/.ci-btrfs \
     JUNCO_BTRFS_TEST_ROOT=/workspace/.ci-fixtures JUNCO_TEST_CONTAINER=1 \
-    exec setpriv --reuid=ci --regid=ci --init-groups "$@"
+    exec setpriv --reuid=ci --regid=ci "${groups[@]}" "$@"
 ) || status=$?
 
 if [ -w /artifacts ]; then

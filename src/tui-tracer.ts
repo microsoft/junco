@@ -10,7 +10,6 @@ import {
   type DataflowTracer,
   DummyTracer,
   type Node,
-  type NodeIdType,
 } from "dataflow-engine";
 import type { JuncoAgent } from "junco-agent";
 import { flushLog, redirectLog } from "junco-tools/log";
@@ -887,31 +886,6 @@ export class TuiTracer implements DataflowTracer {
       }
     });
     return detach;
-  }
-
-  complain(nodeId: NodeIdType, complaint: string): void {
-    this.#guard(() => {
-      this.#initialize();
-      if (this.#closed) return;
-      const matching = Array.from(this.#metadata, ([key, metadata]) => ({
-        key,
-        metadata,
-      })).filter(({ metadata }) => metadata.rawId === nodeId);
-      const active = matching.filter(({ key }) => this.#active.has(key));
-      const key =
-        active.length === 1
-          ? active[0].key
-          : matching.length === 1
-            ? matching[0].key
-            : undefined;
-      this.#record({
-        nodeKey: key,
-        text:
-          key === undefined
-            ? `complaint ${escapeTuiLabel(nodeId)} (scope unknown): ${complaint}`
-            : `complaint: ${complaint}`,
-      });
-    });
   }
 
   #beginFinish(): Promise<void> {

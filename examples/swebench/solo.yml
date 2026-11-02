@@ -1,0 +1,40 @@
+# Frontier single-agent SWE-bench baseline: one Opus agent in its own sandbox.
+# Input sends the issue to Solo; Deliver moves its patch to canonical and returns the terminal report.
+graph:
+  name: SoloBaseline
+  threads: unbounded
+  sink:
+    trigger: Deliver->$sink
+    returns: Deliver
+  nodes:
+    Input:
+      kind: code
+      description: Publishes the problem once to Solo.
+      trigger: always
+    Solo:
+      description: Resolves the issue in one sandbox as the frontier single-agent baseline.
+      tools: [bash]
+      trigger: Input~>Solo
+      system: >-
+        You are an expert software engineer resolving one GitHub issue in an open-source Python repository. Your bash tool runs in your own sandbox: the repository at /testbed at the issue's base commit, inside the official SWE-bench image with the `testbed` conda environment active and no network. Your deliverable is the change you leave in /testbed: it is captured automatically as a git diff against the baseline (new and deleted files included), so ignored files, build artefacts and anything outside /testbed are not carried over. Keep scratch files under /tmp.
+      prompt: |-
+        <issue>
+        {{Input~>Solo}}
+        </issue>
+
+        Resolve this issue:
+        1. Explore the repository to locate the code responsible, every sibling code path sharing the faulty logic, and the callers and public interfaces a fix must preserve.
+        2. Reproduce the reported behaviour with a self-contained script before changing anything.
+        3. Implement a complete, minimal fix covering the issue's cases and their siblings; preserve public signatures, defaults, return types and error messages. Never edit, delete or weaken existing tests; you may add tests.
+        4. Verify: rerun your reproduction, then run the existing focused tests and the complete test modules covering the changed code; fix regressions in your change, never in the tests.
+        5. Leave no scratch files in /testbed (`git status --short` shows only intended changes).
+
+        Final reply: the files and functions you changed and why, and the observed results of your verification.
+    Deliver:
+      kind: code
+      description: Captures Solo's patch even after an abnormal stop and applies it to canonical.
+      trigger: Solo->Deliver
+  edges:
+    - {from: Input, to: Solo, kind: message, schema: {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string, pattern: "\\S"}}}}
+    - {from: Solo, to: Deliver, schema: {}}
+    - {from: Deliver, to: $sink, schema: {}}

@@ -255,7 +255,7 @@ test("LOG_LEVEL defaults to INFO, accepts trimmed case-insensitive names, and re
   }
 });
 
-test("complaint observer failures keep issues and admit warnings at WARN but not ERROR", async () => {
+test("complaint backend failures keep issues and admit warnings at WARN but not ERROR", async () => {
   const source = `
     const { NodeId } = await import("dataflow-engine");
     const { issueLog } = await import("./dist/index.js");
@@ -263,10 +263,8 @@ test("complaint observer failures keep issues and admit warnings at WARN but not
     const records = [];
     log.settings.pretty.levelMethod = { "*": () => {} };
     log.attachTransport((record) => records.push({ level: record._meta.logLevelName, marker: record[0] }));
-    issueLog.append(
-      { nodeId: NodeId.create("warning-check"), messages: [], prompt: { systemPrompt: "check", messages: [] }, complaint: "kept" },
-      { complain() { throw new Error("complaint-observer-smoke"); } },
-    );
+    issueLog.backend = { complain() { throw new Error("complaint-backend-smoke"); } };
+    issueLog.append({ nodeId: NodeId.create("warning-check"), messages: [], prompt: { systemPrompt: "check", messages: [] }, complaint: "kept" });
     assert.equal(issueLog.snapshot().at(-1).complaint, "kept");
     await flushLog();
     process.stdout.write(JSON.stringify(records));
@@ -274,7 +272,7 @@ test("complaint observer failures keep issues and admit warnings at WARN but not
   assert.deepEqual(await loggerScenario(source, "WARN"), [
     {
       level: "WARN",
-      marker: "[dataflow-engine] DataflowTracer callback failed",
+      marker: "[junco-tools] ComplainBackend failed",
     },
   ]);
   assert.deepEqual(await loggerScenario(source, "ERROR"), []);

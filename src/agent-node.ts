@@ -171,7 +171,7 @@ export class AgentDriver<N extends TSchema, V> {
   /**
    * One activation: advance the run at most once, returning its final message once it settled. A
    * real agent does this with one node context bound: its messaging host, and complaints
-   * attributed to `node`'s id, its delivered `messages` and its graph's tracer, if any.
+   * attributed to `node`'s id and its delivered `messages`.
    */
   async #activate(
     node: Node<Agentic<N, V>, N, V>,
@@ -191,11 +191,7 @@ export class AgentDriver<N extends TSchema, V> {
           nodeId: node.id,
           messaging: this.#messaging(),
           briefing: () => this.#briefing(node.trigger),
-          complaint: {
-            nodeId: node.id,
-            messages,
-            ...(tracer === undefined ? {} : { tracer }),
-          },
+          complaint: { nodeId: node.id, messages },
           ...(recorder === undefined
             ? {}
             : { recorder, recorderNodeId: String(node.id) }),

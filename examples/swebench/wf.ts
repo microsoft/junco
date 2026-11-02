@@ -5,14 +5,46 @@
  * operations below. See ./README.md.
  *
  * Topology and termination: see the ./wf.yml header.
+ * Models: Lead and Planner use Sonnet 5.5/high on xhigh; Integrator uses the same model on high. CandidateA,
+ * Reproduce and Verifier use Haiku 5.5/medium on med; CandidateB and Contracts use GPT-6 Luna/medium on low,
+ * and Trace uses it on smol. The runner checks live availability and thinking support before acquiring agents.
  *
  * Junco runs each scheduler decision as one column and awaits all of it, so contenders that settle in the
  * same column are validated together and the gate's `any` rule consumes A's verdict before B's; a loser
  * still running when the gate decides (for example after a `yield`) is aborted and its sandboxes stopped.
  */
+import { createHash } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { bytes, tokens } from "dataflow-engine";
 import type { AssistantMessage, TSchema } from "@earendil-works/pi-ai";
-import { agent, graph, JuncoGraph, MockAgent, schedules, syntax } from "junco";
+import { agent, graph, JuncoGraph, MockAgent, schedules, syntax, tracer } from "junco";
 import source from "./wf.yml" with { type: "text" };
+
+export const document = syntax.parse(source);
+
+/** The agent feeding CheckPlan owns the correction loop at its graph level. */
+export function planProducer(document: syntax.JuncoDocument): string {
+  const find = (level: syntax.GraphSpec): syntax.GraphSpec | undefined => {
+    if (Object.hasOwn(level.nodes, "CheckPlan")) return level;
+    for (const node of Object.values(level.nodes)) {
+      if (node.kind !== "graph") continue;
+      const found = find(node.graph);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  const level = find(document.graph);
+  const inputs = (level?.edges ?? []).filter((wire) => wire.to === "CheckPlan" && wire.kind !== "message");
+  if (
+    inputs.length !== 1 ||
+    !(level?.edges ?? []).some((wire) => wire.from === inputs[0].from && wire.to === inputs[0].from && wire.kind !== "message")
+  )
+    throw new Error("wf.yml: CheckPlan needs exactly one value in-edge whose producer has a self-edge");
+  return inputs[0].from;
+}
+
+const PLAN_PRODUCER = planProducer(document);
 
 export type Problem = { instance_id: string; repo: string; base_commit: string; problem_statement: string };
 export type Branch = "A" | "B";
@@ -33,17 +65,19 @@ export type Role = (typeof ROLES)[number];
 
 /**
  * The sandbox of each bash-using agent, keyed by its root-relative path (`CandidateA`, or `Child/Worker` when
- * nested). No agent reaches an acceptance sandbox; Lead and Planner have no shell.
+ * nested). No agent reaches an acceptance sandbox; Lead and Planner have no shell. Absent root nodes have no binding.
  */
-export const SANDBOX: Readonly<Record<string, Role>> = {
-  Trace: "trace",
-  Reproduce: "reproduce",
-  Contracts: "contracts",
-  CandidateA: "candidateA",
-  CandidateB: "candidateB",
-  Integrator: "canonical",
-  Verifier: "canonical",
-};
+export const SANDBOX: Readonly<Record<string, Role>> = Object.fromEntries(
+  Object.entries({
+    Trace: "trace",
+    Reproduce: "reproduce",
+    Contracts: "contracts",
+    CandidateA: "candidateA",
+    CandidateB: "candidateB",
+    Integrator: "canonical",
+    Verifier: "canonical",
+  } satisfies Record<string, Role>).filter(([path]) => Object.hasOwn(document.graph.nodes, path)),
+);
 
 /** Each contender's branch root (an agent or nested-graph path) and the sandboxes that cancelling it stops. */
 export const BRANCHES: Readonly<Record<Branch, { readonly agent: string; readonly sandboxes: readonly Role[] }>> = {
@@ -76,24 +110,227 @@ export type Host = {
 export type Context = Host & { readonly race: { winner?: Branch }; acceptedPlan?: ValidatedPlan };
 type Code = syntax.DeterministicNode<Context>;
 
-// User-requested: Opus 5.5 for Lead, Planner and Integrator; Sonnet 5 for every other agent. Verified
-// 2026-10-30: both exact IDs are in ~/.pi/agent/models-store.json (anthropic-messages, 1,000,000-token
-// context), Pi holds a saved github-copilot OAuth login, and GitHub's supported-models page
-// (https://docs.github.com/en/copilot/reference/ai-models/supported-models) lists both. The runner checks
-// live availability and thinking support before acquiring agents. getSupportedThinkingLevels: Sonnet 5
-// off..max, so it keeps Pi's default (off); Opus 5.5 low..max only (no off), so its rungs think at high.
-const SONNET = { model: "github-copilot/claude-sonnet-5" } as const;
-const OPUS = { model: "github-copilot/claude-opus-5.5", thinking: "high" } as const;
-export const ladder: schedules.Ladder = { smol: SONNET, low: SONNET, med: SONNET, high: OPUS, xhigh: OPUS };
+const SONNET = { model: "github-copilot/claude-sonnet-5.5", thinking: "high" } as const;
+const HAIKU = { model: "github-copilot/claude-haiku-5.5", thinking: "medium" } as const;
+const LUNA = { model: "github-copilot/gpt-6-luna", thinking: "medium" } as const;
+type OptimizerLimits = {
+  memoryBytes?: number;
+  tokens?: number;
+  tools?: number;
+  scope?: "evaluation" | "batch" | "activation";
+};
 
-const LEADS = new Set(["Lead", "Planner", "Integrator"]);
-/**
- * Each agent's rung by root-relative path: the original role is the first segment, so `Planner/Draft` keeps the
- * Planner's model. Also the model the runner creates it with, so no agent switches models mid-run.
- */
-export const strengthOf = (path: string): schedules.ModelStrengthName => (LEADS.has(path.split("/", 1)[0]) ? "xhigh" : "med");
-export const scheduler: syntax.BuildOptions["scheduler"] = (_label, graphPath) =>
-  schedules.strength((_snapshot, id) => strengthOf(graphPath === "" ? id : `${graphPath}/${id}`), schedules.parallel());
+// junco-profile-optimizer:start scheduler
+const optimizerScheduler = (_label: string, graphPath: string) =>
+  schedules.strength((_snapshot, id) => optimizerStrengthOf(graphPath === "" ? id : `${graphPath}/${id}`), schedules.parallel());
+// junco-profile-optimizer:end scheduler
+// junco-profile-optimizer:start ladder
+const optimizerLadder: schedules.Ladder = { smol: LUNA, low: LUNA, med: HAIKU, high: SONNET, xhigh: SONNET };
+
+const STRENGTHS: Readonly<Record<string, schedules.ModelStrengthName>> = {
+  Lead: "xhigh",
+  Planner: "xhigh",
+  Integrator: "high",
+  CandidateA: "med",
+  Reproduce: "med",
+  Verifier: "med",
+  CandidateB: "low",
+  Contracts: "low",
+  Trace: "smol",
+};
+/** Root-relative role classes retain separate rungs even where their incumbent models are equal. */
+const optimizerStrengthOf = (path: string): schedules.ModelStrengthName => STRENGTHS[path.split("/", 1)[0]] ?? "med";
+const optimizerStrength = undefined;
+// junco-profile-optimizer:end ladder
+// junco-profile-optimizer:start limits
+const optimizerLimits: OptimizerLimits = {};
+// junco-profile-optimizer:end limits
+
+export const ladder = optimizerLadder;
+export const strengthOf = optimizerStrengthOf;
+export const scheduler: syntax.BuildOptions["scheduler"] = (label, graphPath) => profile.scheduler(label, graphPath);
+
+/** The workflow's original hard ceilings, outermost around every candidate (or undefined). */
+const HARD_LIMITS: schedules.LimitOptions | undefined = undefined;
+const PARAMS: Record<string, string> = {};
+
+interface ProfileRun {
+  version: 1;
+  nonce: string;
+  monitored: boolean;
+  probes: { node: string; edgeId: string }[];
+  expectedGraphHash: string | null;
+  allowedModels: { model: string; thinking?: string }[];
+  limitBounds: { memoryBytes?: number; tokens?: number; tools?: number };
+}
+const RUN_KEYS = "allowedModels,expectedGraphHash,limitBounds,monitored,nonce,probes,version";
+
+/** Deterministic JSON: object keys sorted recursively, array order kept. */
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(canonical)
+    : value !== null && typeof value === "object"
+      ? Object.fromEntries(
+          Object.entries(value)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([key, child]) => [key, canonical(child)]),
+        )
+      : value;
+
+/** sha256 of the parsed document with object keys sorted recursively: a topology's identity. */
+function hashDocument(document: syntax.JuncoDocument): string {
+  return createHash("sha256").update(JSON.stringify(canonical(document))).digest("hex");
+}
+
+export type GraphRun = { dir: string; nonce: string; expectedGraphHash: string };
+
+/** The measurement request of `JUNCO_GRAPH_RUN_DIR`; undefined outside measurement. */
+export async function readGraphRun(): Promise<GraphRun | undefined> {
+  const dir = process.env.JUNCO_GRAPH_RUN_DIR;
+  if (dir === undefined) return undefined;
+  const request = JSON.parse(await readFile(join(dir, "request.json"), "utf8"));
+  if (
+    Object.keys(request).sort().join() !== "expectedGraphHash,nonce,version" ||
+    request.version !== 1 ||
+    typeof request.nonce !== "string" ||
+    typeof request.expectedGraphHash !== "string"
+  )
+    throw new Error("invalid graph run request");
+  return { dir, nonce: request.nonce, expectedGraphHash: request.expectedGraphHash };
+}
+
+/** The optimizer's run request under JUNCO_PROFILE_RUN_DIR; inactive, both fields undefined, otherwise. */
+class OptimizerProfile {
+  private constructor(
+    readonly directory: string | undefined,
+    readonly request: ProfileRun | undefined,
+  ) {}
+
+  static async load(directory = process.env.JUNCO_PROFILE_RUN_DIR): Promise<OptimizerProfile> {
+    if (directory === undefined) return new OptimizerProfile(undefined, undefined);
+    const run = JSON.parse(await readFile(join(directory, "request.json"), "utf8"));
+    if (
+      Object.keys(run).sort().join() !== RUN_KEYS ||
+      run.version !== 1 ||
+      typeof run.nonce !== "string" ||
+      typeof run.monitored !== "boolean" ||
+      !Array.isArray(run.probes) ||
+      !Array.isArray(run.allowedModels)
+    )
+      throw new Error("invalid profile run request");
+    return new OptimizerProfile(directory, run);
+  }
+
+  /** The parsed document's canonical SHA-256; rejects drift and an out-of-domain candidate. */
+  validate(document: syntax.JuncoDocument): string {
+    const graphHash = createHash("sha256").update(JSON.stringify(canonical(document))).digest("hex");
+    if (this.request?.expectedGraphHash != null && this.request.expectedGraphHash !== graphHash)
+      throw new Error("the runtime graph document drifted from the baseline's");
+    if (this.request !== undefined) this.#checkTuning(this.request);
+    return graphHash;
+  }
+
+  /** `document` with probe: true on each requested existing numeric edge, revalidated. */
+  withProbes(document: syntax.JuncoDocument): syntax.JuncoDocument {
+    if (this.request === undefined) return document;
+    const copy = structuredClone(document);
+    for (const { node, edgeId } of this.request.probes) {
+      let spec = copy.graph;
+      for (const segment of node === "" ? [] : node.split("/")) {
+        const wrapper = spec.nodes[segment];
+        if (wrapper?.kind !== "graph") throw new Error(`probe path "${node}" names no graph node`);
+        spec = wrapper.graph;
+      }
+      const edges = (spec.edges ?? []).filter(
+        (edge) => (edge.id ?? `${edge.from}${edge.kind === "message" ? "~>" : "->"}${edge.to}`) === edgeId,
+      );
+      const schema = edges.length === 1 ? edges[0].schema : undefined;
+      const type = schema !== null && typeof schema === "object" && "type" in schema ? schema.type : undefined;
+      if (type !== "number" && type !== "integer")
+        throw new Error(`probe "${node}" / "${edgeId}" is not exactly one existing numeric edge`);
+      edges[0].probe = true;
+    }
+    return syntax.parse(copy);
+  }
+
+  /** A fresh candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
+  scheduler(label: string, graphPath: string) {
+    // Candidates may still ignore graphPath; the build passes both arguments.
+    const factory: syntax.BuildOptions["scheduler"] = optimizerScheduler;
+    let policy = factory(label, graphPath);
+    if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
+    const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
+    if (memoryBytes !== undefined || tokenCap !== undefined || tools !== undefined)
+      policy = schedules.limit(
+        {
+          ...(memoryBytes === undefined ? {} : { memory: bytes(memoryBytes) }),
+          ...(tokenCap === undefined ? {} : { tokens: tokens(tokenCap) }),
+          ...(tools === undefined ? {} : { tools }),
+          ...(scope === undefined ? {} : { scope }),
+        },
+        policy,
+      );
+    return HARD_LIMITS === undefined ? policy : schedules.limit(HARD_LIMITS, policy);
+  }
+
+  /** This run's profile recorder; undefined when inactive. Pass "usage" for request-level USD. */
+  createRecorder(costMode: "activation" | "usage" = "activation"): tracer.JsonlRecorder | undefined {
+    if (this.directory === undefined || this.request === undefined) return undefined;
+    return new tracer.JsonlRecorder({
+      path: join(this.directory, "samples.jsonl"),
+      monitored: this.request.monitored,
+      costMode,
+    });
+  }
+
+  /** Publish the completion receipt: only after the terminal check and every close succeeded. */
+  async complete(graphHash: string, resourceEvents: number, metrics?: Readonly<Record<string, number>>): Promise<void> {
+    if (this.directory === undefined || this.request === undefined) return;
+    const receipt = join(this.directory, "completion.json");
+    await writeFile(
+      `${receipt}.tmp`,
+      JSON.stringify({ version: 1, nonce: this.request.nonce, terminal: true, graphHash, resourceEvents, ...(metrics === undefined ? {} : { metrics }) }),
+      { flag: "wx" },
+    );
+    await rename(`${receipt}.tmp`, receipt);
+  }
+
+  /** The candidate's concrete ladder and extra limits stay inside the run's authorized domain. */
+  #checkTuning(run: ProfileRun): void {
+    for (const [name, rung] of Object.entries(optimizerLadder ?? {}))
+      if (!run.allowedModels.some((allowed) => allowed.model === rung.model && allowed.thinking === rung.thinking))
+        throw new Error(`ladder rung ${name} uses unauthorized ${rung.model}`);
+    const bounds: Record<string, number | undefined> = {
+      memoryBytes: run.limitBounds.memoryBytes,
+      tokens: run.limitBounds.tokens,
+      tools: run.limitBounds.tools,
+    };
+    for (const [key, value] of Object.entries(optimizerLimits)) {
+      if (key === "scope") {
+        if (!["evaluation", "batch", "activation"].includes(String(value))) throw new Error(`invalid limit scope ${value}`);
+        continue;
+      }
+      if (!Object.hasOwn(bounds, key)) throw new Error(`unknown limit ${key}`);
+      const bound = bounds[key];
+      if (
+        typeof value !== "number" || !Number.isFinite(value) || value < 0 ||
+        (key === "tools" && !Number.isInteger(value)) || (bound !== undefined && value > bound)
+      )
+        throw new Error(`limit ${key}=${value} is outside its bound ${bound}`);
+    }
+  }
+}
+
+const profile = await OptimizerProfile.load();
+const graphRun = await readGraphRun();
+if (profile.request !== undefined && graphRun !== undefined)
+  throw new Error("JUNCO_PROFILE_RUN_DIR and JUNCO_GRAPH_RUN_DIR are both set");
+export const graphHash = profile.validate(document);
+if (graphRun !== undefined && graphRun.expectedGraphHash !== graphHash)
+  throw new Error("the candidate graph differs from its run request");
+export const profileRun = profile.request !== undefined
+  ? { nonce: profile.request.nonce }
+  : graphRun !== undefined ? { nonce: graphRun.nonce } : undefined;
 
 /** Seconds each acceptance check may run before it is killed (and counts as failed). */
 export const CHECK_TIMEOUT = 900;
@@ -108,7 +345,7 @@ type Observed = Check & {
   readonly tail: string;
 };
 export type Verdict = { branch: Branch; valid: boolean; reason: string; patch: string; checks: Observed[] };
-type Selection = { winner: Branch; verdicts: Verdict[]; cleanup: string[] };
+type Selection = { winner: Branch; verdicts: Verdict[]; cleanup: string[]; degraded?: string };
 type Plan = {
   root_cause: string;
   interfaces: string[];
@@ -123,8 +360,9 @@ type ValidatedPlan = {
   baseline: Observed[];
   kept: Observed[];
   excluded: { name: string; reason: string }[];
+  degraded?: string;
 };
-type PlanDecision = { accepted: true; value: ValidatedPlan } | { accepted: false; feedback: string };
+type PlanDecision = { accepted: true; value: ValidatedPlan } | { accepted: false; feedback: string; partial?: ValidatedPlan };
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const prompt = (text: string) => ({ kind: "prompt", text }) as const;
@@ -251,16 +489,18 @@ function briefing(problem: Problem, evidence: string, plan: Plan, baseline: read
 const issueText = ({ repo, base_commit, problem_statement }: Problem): string =>
   `Repository: ${repo} (base commit ${base_commit})\n\n${problem_statement}`;
 
-/** Publishes the problem once to the lead (no instance ID: it would invite recall of published fixes). */
+/** Publishes the problem once to every wired recipient (no instance ID: it would invite recall of published fixes). */
 export const Input: Code = ({ context, edges, policy }) => {
-  const output = edge(edges, "Input~>Lead");
+  const outputs = [...edges].filter(([id, wire]) => id.startsWith("Input~>") && wire.transport._tag === "Left").map(([, wire]) => wire);
+  if (!outputs.length) throw new Error("wf.yml: Input needs at least one message out-edge");
   let published = false;
   return {
     state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
       while (true) {
+        const issue = prompt(issueText(context.problem));
         signal.throwIfAborted();
         published = true;
-        yield [graph.Message.create(output, prompt(issueText(context.problem)))];
+        yield outputs.map((output) => graph.Message.create(output, issue));
       }
     }, policy),
     is_available: () => !published,
@@ -328,10 +568,30 @@ export const JoinEvidence: Code = ({ context, edges, policy }) => {
   };
 };
 
-/** Planner corrections after its first draft; a fourth rejected draft fails the run. */
+/** Joins independent normal drafts in edge-id order and forwards them once to the plan producer. */
+export const JoinDrafts: Code = ({ context, edges, policy }) => {
+  const inputs = [...edges].filter(([id, wire]) => /^(.+)->JoinDrafts$/.test(id) && wire.transport._tag === "Right").map(([id]) => id).sort();
+  const outputs = [...edges].filter(([id, wire]) => /^JoinDrafts~>.+$/.test(id) && wire.transport._tag === "Left").map(([, wire]) => wire);
+  if (inputs.length < 2) throw new Error("wf.yml: JoinDrafts needs at least two value in-edges");
+  if (outputs.length !== 1) throw new Error("wf.yml: JoinDrafts needs exactly one message out-edge");
+  let published = false;
+  return {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const view = yield [];
+      const drafts = inputs.map((id, index) => {
+        const producer = id.slice(0, -"->JoinDrafts".length);
+        return `# Plan ${index + 1} (${producer})\n\n${syntax.finalText(value(view, id), producer)}`;
+      }).join("\n\n");
+      context.save("planning/drafts.md", drafts);
+      published = true;
+      yield [graph.Message.create(outputs[0], prompt(drafts))];
+    }, policy),
+    is_available: (_view, triggered) => triggered && !published,
+  };
+};
+
+/** Planner corrections after its first draft; a fourth parsed draft keeps the surviving checks. */
 const MAX_PLAN_CORRECTIONS = 3;
-const DRAFT = graph.NodeId.create("Draft");
-const DRAFT_RESULT = graph.EdgeId.create("Draft->CheckPlan");
 
 /**
  * Parses one complete Planner draft and runs each check alone on the clean canonical baseline, resetting after
@@ -395,25 +655,26 @@ async function validatePlan(host: Host, answer: string, attempt: number, signal:
     details.length ? `Excluded on the baseline:\n${details.join("\n\n")}` : `The plan has no ${missing.join(" or ")} check.`,
   ].join("\n\n");
   host.save(`${dir}/rejection.txt`, feedback);
-  return { accepted: false, feedback };
+  return { accepted: false, feedback, partial: { answer, plan, checks, baseline, kept, excluded } };
 }
 
-/** Draft's agent, the one CheckPlan stages corrections on. */
-function draftAgent(level: JuncoGraph<TSchema, unknown>): agent.JuncoAgent | MockAgent {
-  const state = level.getNode(DRAFT)?.state;
-  if (!(state instanceof agent.JuncoAgent || state instanceof MockAgent)) throw new TypeError("Planner/Draft must be an agent node");
+/** The plan producer's agent, the one CheckPlan stages corrections on. */
+function producerAgent(level: JuncoGraph<TSchema, unknown>): agent.JuncoAgent | MockAgent {
+  const state = level.getNode(graph.NodeId.create(PLAN_PRODUCER))?.state;
+  if (!(state instanceof agent.JuncoAgent || state instanceof MockAgent)) throw new TypeError(`Planner/${PLAN_PRODUCER} must be an agent node`);
   return state;
 }
 
 /**
- * Validates each new Draft result once, in order. Accepted: records the plan for Dispatch and returns that exact
- * result, the only one Planner's sink publishes. Rejected: stages a complete-plan correction on the idle Draft
- * and waits for its next result; a rejected fourth draft fails the run.
+ * Validates each new producer result once, in order. Accepted: records the plan for Dispatch and returns that exact
+ * result, the only one Planner's sink publishes. Rejected: stages a complete-plan correction on the idle producer;
+ * after three corrections a parsed draft degrades to its surviving checks, while malformed data still fails.
  */
 export const CheckPlan: Code = ({ context, graph: level, policy, signal }) => {
-  /** The latest Draft result taken for validation, recorded before it is awaited. */
+  /** The latest producer result taken for validation, recorded before it is awaited. */
   let checked: unknown;
-  const current = (view: graph.ParentView<TSchema, unknown>): unknown => view.values.get(DRAFT_RESULT);
+  const result = graph.EdgeId.create(`${PLAN_PRODUCER}->CheckPlan`);
+  const current = (view: graph.ParentView<TSchema, unknown>): unknown => view.values.get(result);
   return {
     state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (own) {
       const stop = signal === undefined ? own : AbortSignal.any([own, signal]);
@@ -421,15 +682,20 @@ export const CheckPlan: Code = ({ context, graph: level, policy, signal }) => {
       for (let attempt = 1; ; attempt++) {
         const draft = current(view);
         checked = draft;
-        const decision = await validatePlan(context, syntax.finalText(draft, "Planner/Draft"), attempt, stop);
+        const decision = await validatePlan(context, syntax.finalText(draft, `Planner/${PLAN_PRODUCER}`), attempt, stop);
         if (decision.accepted) {
           context.acceptedPlan = decision.value;
           return draft;
         }
-        if (attempt > MAX_PLAN_CORRECTIONS)
-          throw new Error(`plan rejected after ${MAX_PLAN_CORRECTIONS} correction turns: ${decision.feedback}`);
+        if (attempt > MAX_PLAN_CORRECTIONS) {
+          if (decision.partial === undefined)
+            throw new Error(`plan rejected after ${MAX_PLAN_CORRECTIONS} correction turns: ${decision.feedback}`);
+          context.acceptedPlan = { ...decision.partial, degraded: decision.feedback };
+          context.save("planning/degraded.txt", decision.feedback);
+          return draft;
+        }
         stop.throwIfAborted();
-        draftAgent(level).stagePrompt(
+        producerAgent(level).stagePrompt(
           [
             `Correction turn ${attempt} of ${MAX_PLAN_CORRECTIONS}. The automatic baseline run rejected your plan:`,
             decision.feedback,
@@ -444,13 +710,13 @@ export const CheckPlan: Code = ({ context, graph: level, policy, signal }) => {
 };
 
 /**
- * Draft's gate: its Draft->Draft self-edge rearms it after every draft, but it runs again only to resume a native
- * yield or for a correction CheckPlan staged, never while CheckPlan is still validating.
+ * The producer's self-edge rearms it after every draft, but it runs again only to resume a native yield or for a
+ * correction CheckPlan staged, never while CheckPlan is still validating.
  */
 export const plannerAvailability: NonNullable<syntax.BuildOptions["available"]> = {
-  Draft: ({ graph: level, edges }) =>
-    edges.has("Draft->Draft")
-      ? (_view, triggered) => level.getNode(DRAFT)?.status === "running" || (triggered && draftAgent(level).status === "ready")
+  [PLAN_PRODUCER]: ({ graph: level, edges }) =>
+    edges.has(`${PLAN_PRODUCER}->${PLAN_PRODUCER}`)
+      ? (_view, triggered) => level.getNode(graph.NodeId.create(PLAN_PRODUCER))?.status === "running" || (triggered && producerAgent(level).status === "ready")
       : undefined,
 };
 
@@ -474,7 +740,8 @@ export const Dispatch: Code = ({ context, edges, policy }) => {
       const { plan, checks, baseline, kept, excluded } = accepted;
       context.save("plan.md", answer);
       context.save("acceptance.json", JSON.stringify({ checks, baseline, excluded }, null, 2));
-      const brief = briefing(context.problem, evidence, plan, kept);
+      const brief = briefing(context.problem, evidence, plan, kept) + (accepted.degraded === undefined ? "" :
+        `\n\n# Degraded plan\nThe automatic baseline run rejected the last draft; the checks below are the ones that survived (possibly none of one kind). Rejection:\n${accepted.degraded}`);
       const assignment = (branch: Branch) => {
         const { approach, steps } = plan.candidates[branch];
         const ordered = steps.map((s, i) => `${i + 1}. ${s.target}: ${s.change}\n   Check: ${s.check}`).join("\n");
@@ -559,13 +826,18 @@ export const TournamentGate: Code = ({ context, edges, policy }) => {
             verdicts.set(branch, payload as Verdict);
           }
         const summary = () => [...verdicts.values()].map(({ patch: _patch, ...v }) => v);
-        const winner = [...verdicts.values()].find((v) => v.valid)?.branch;
-        if (winner !== undefined) {
+        let chosen = [...verdicts.values()].find((v) => v.valid);
+        if (chosen === undefined && verdicts.size === 2)
+          chosen = [...verdicts.values()].filter((v) => v.checks.length > 0).sort((a, b) =>
+            a.checks.filter((c) => c.exit_code !== 0).length - b.checks.filter((c) => c.exit_code !== 0).length || a.branch.localeCompare(b.branch))[0];
+        if (chosen !== undefined) {
+          const winner = chosen.branch;
+          const degraded = chosen.valid ? undefined : chosen.reason;
           context.race.winner = winner;
           decided = true;
           const cleanup = [...(await context.cancel(other(winner)))];
-          context.save("tournament.json", JSON.stringify({ winner, verdicts: summary(), cleanup }, null, 2));
-          const selection: Selection = { winner, verdicts: [...verdicts.values()], cleanup };
+          context.save("tournament.json", JSON.stringify({ winner, verdicts: summary(), cleanup, degraded }, null, 2));
+          const selection: Selection = { winner, verdicts: [...verdicts.values()], cleanup, degraded };
           yield [graph.Message.create(output, selection)];
           return;
         }
@@ -583,7 +855,7 @@ export const TournamentGate: Code = ({ context, edges, policy }) => {
 
 /** Applies the selected patch to the untouched canonical /testbed and briefs the Integrator. */
 export const Apply: Code = ({ context, edges, policy }) => {
-  const integrator = edge(edges, "Apply~>Integrator");
+  const integrator = edges.get("Apply~>Integrator");
   const freeze = edge(edges, "Apply~>Freeze");
   let published = false;
   return {
@@ -591,8 +863,8 @@ export const Apply: Code = ({ context, edges, policy }) => {
       const view = yield [];
       const selection = single(view, "TournamentGate~>Apply") as Selection;
       const { brief, checks } = single(view, "Dispatch~>Apply") as { brief: string; checks: Check[] };
-      const chosen = selection.verdicts.find((v) => v.branch === selection.winner && v.valid);
-      if (chosen === undefined) throw new Error(`selection carries no valid verdict for candidate ${selection.winner}`);
+      const chosen = selection.verdicts.find((v) => v.branch === selection.winner);
+      if (chosen === undefined) throw new Error(`selection carries no verdict for candidate ${selection.winner}`);
       if ((await context.sandbox.capture("canonical")) !== "") throw new Error("canonical /testbed is not at the baseline before apply");
       const applied = await context.sandbox.apply("canonical", chosen.patch);
       if (applied.exit_code !== 0) throw new Error(`selected patch does not apply to canonical /testbed: ${tail(applied.output, 2000)}`);
@@ -611,11 +883,12 @@ export const Apply: Code = ({ context, edges, policy }) => {
         fence("diff", chosen.patch),
         "# Acceptance results of the selected patch (pristine sandbox)",
         results(chosen.checks),
+        ...(selection.degraded === undefined ? [] : ["# Selected patch failed acceptance checks", `${chosen.checks.filter((c) => c.exit_code !== 0).map((c) => `${c.name} (exit ${c.exit_code})`).join("; ")}; resolve them.`]),
         "# Rejected candidate",
         `Candidate ${loser}: ${rejected}`,
       ].join("\n\n");
       published = true;
-      yield [graph.Message.create(integrator, prompt(body)), graph.Message.create(freeze, { brief, checks, summary })];
+      yield [...(integrator === undefined ? [] : [graph.Message.create(integrator, prompt(body))]), graph.Message.create(freeze, { brief, checks, summary })];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -623,21 +896,21 @@ export const Apply: Code = ({ context, edges, policy }) => {
 
 /** Captures the integrated deliverable once, before verification, so Finish can prove it unchanged. */
 export const Freeze: Code = ({ context, edges, policy }) => {
-  const verifier = edge(edges, "Freeze~>Verifier");
+  const verifier = edges.get("Freeze~>Verifier");
   const finish = edge(edges, "Freeze~>Finish");
   let published = false;
   return {
     state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
       const view = yield [];
-      const report = syntax.finalText(value(view, "Integrator->Freeze"), "Integrator");
-      context.save("integrator.md", report);
+      const report = edges.has("Integrator->Freeze") ? syntax.finalText(value(view, "Integrator->Freeze"), "Integrator") : "(no integrator)";
+      if (edges.has("Integrator->Freeze")) context.save("integrator.md", report);
       const { brief, checks, summary } = single(view, "Apply~>Freeze") as { brief: string; checks: Check[]; summary: string };
       const patch = await context.sandbox.capture("canonical");
       if (!patch.trim()) throw new Error("the Integrator left no change in canonical /testbed");
       context.save("integrated.patch", patch);
       published = true;
       yield [
-        graph.Message.create(
+        ...(verifier === undefined ? [] : [graph.Message.create(
           verifier,
           prompt(
             [
@@ -648,7 +921,7 @@ export const Freeze: Code = ({ context, edges, policy }) => {
               fence("diff", patch),
             ].join("\n\n"),
           ),
-        ),
+        )]),
         graph.Message.create(finish, { patch, checks, summary }),
       ];
     }, policy),
@@ -657,18 +930,18 @@ export const Freeze: Code = ({ context, edges, policy }) => {
 };
 
 /**
- * Requires the Verifier's normal `VERDICT: PASS`, an unchanged deliverable and every frozen check passing on
- * the final patch in the pristine final sandbox; returns the terminal report, otherwise throws every failure.
+ * Requires the wired Verifier's normal `VERDICT: PASS`, an unchanged deliverable and every frozen check passing
+ * on the final patch in the pristine final sandbox; returns the terminal report, otherwise throws every failure.
  */
-export const Finish: Code = ({ context, policy }) => ({
+export const Finish: Code = ({ context, edges, policy }) => ({
   state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
     const view = yield [];
-    const verification = syntax.finalText(value(view, "Verifier->Finish"), "Verifier");
-    context.save("verifier.md", verification);
+    const verification = edges.has("Verifier->Finish") ? syntax.finalText(value(view, "Verifier->Finish"), "Verifier") : undefined;
+    if (verification !== undefined) context.save("verifier.md", verification);
     const frozen = single(view, "Freeze~>Finish") as { patch: string; checks: Check[]; summary: string };
     const failures: string[] = [];
-    const verdict = verification.split("\n").at(-1)?.trim() ?? "";
-    if (verdict !== "VERDICT: PASS")
+    const verdict = verification?.split("\n").at(-1)?.trim() ?? "none";
+    if (verification !== undefined && verdict !== "VERDICT: PASS")
       failures.push(verdict.startsWith("VERDICT: FAIL") ? `Verifier: ${verdict}` : "Verifier did not end with a VERDICT line");
     const final = await context.sandbox.capture("canonical");
     if (final !== frozen.patch) failures.push("the deliverable changed during verification");
@@ -698,8 +971,7 @@ export const Finish: Code = ({ context, policy }) => ({
   }, policy),
 });
 
-export const document = syntax.parse(source);
-export const code = { Input, Assign, JoinEvidence, CheckPlan, Dispatch, ValidateA, ValidateB, TournamentGate, Apply, Freeze, Finish };
+export const code = { Input, Assign, JoinEvidence, CheckPlan, JoinDrafts, Dispatch, ValidateA, ValidateB, TournamentGate, Apply, Freeze, Finish };
 
 /** Nodes that never finished, for a run that quiesced without a terminal report. */
 function unfinished(g: JuncoGraph<TSchema, unknown>): string {
@@ -710,14 +982,14 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
   return pending.join(", ") || "none";
 }
 
-/** The runner's options; this module supplies the ladder, scheduler and code itself, and adds Draft's gate to `available`. */
+/** The runner's options; this module supplies the ladder, scheduler and code itself, and adds the producer's gate to `available`. */
 export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "ladder" | "scheduler" | "code" | "context"> & { readonly context: Host };
 
-/** Builds and runs the workflow with this module's ladder, scheduler, code and Draft gate; returns Finish's report. */
+/** Builds and runs the workflow with this module's ladder, scheduler, code and producer gate; returns Finish's report. */
 export async function run(config: RunOptions): Promise<string> {
   const context: Context = { ...config.context, race: {} };
   const available = { ...config.available, ...plannerAvailability };
-  const execution = await JuncoGraph.fromYaml<Context>(document, { ...config, ladder, scheduler, code, context, available });
+  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, ladder, scheduler, code, context, available });
   try {
     await execution.run({ signal: config.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);

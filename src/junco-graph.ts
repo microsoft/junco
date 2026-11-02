@@ -216,10 +216,6 @@ class RecorderBridge implements DataflowTracer {
     };
   }
 
-  complain(nodeId: NodeIdType, complaint: string): void {
-    this.delegate.complain(nodeId, complaint);
-  }
-
   flush(): Promise<void> {
     return this.delegate.flush();
   }

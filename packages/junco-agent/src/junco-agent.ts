@@ -41,7 +41,6 @@ import {
   assertUsageAllowed,
   captureUsageContext,
   chargeTokenUsage,
-  type DataflowTracer,
   isUsageLimitError,
   NodeId,
   type NodeIdType,
@@ -1509,7 +1508,6 @@ export class JuncoAgent<
                   this.#taskScope(run).request(input, admission, {
                     usage,
                     recorder,
-                    tracer: node?.complaint?.tracer,
                   }));
               const assigned = AssignedTaskTool.is(tool);
               return await tool.invoke(
@@ -2284,13 +2282,10 @@ export class JuncoAgent<
     this.#subagentObserver = observer;
   }
 
-  /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
-  complain<N extends TSchema>(
-    issue: Issue<N>,
-    tracer?: Pick<DataflowTracer, "complain">,
-  ): void {
+  /** Append a complete `issue` to the shared {@link issueLog}. */
+  complain<N extends TSchema>(issue: Issue<N>): void {
     if (this.#closing) throw closedError();
-    issueLog.append(issue, tracer);
+    issueLog.append(issue);
   }
 
   /** The process-wide complaint history every agent and graph shares. */

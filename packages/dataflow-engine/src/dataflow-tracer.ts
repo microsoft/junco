@@ -6,9 +6,9 @@ import type { Message, ParentView } from "./node.js";
 /**
  * Pluggable execution observer. {@link DataflowGraph.evaluate} calls `startRun` once around the
  * complete planning/execution scope and reports every actual generator activation through the
- * returned handle. `complain` receives complaints recorded on behalf of a node, at any time.
+ * returned handle.
  *
- * CONTRACT: every run/step/complain callback is a SYNCHRONOUS observer. It MUST NOT mutate the graph,
+ * CONTRACT: every run/step callback is a SYNCHRONOUS observer. It MUST NOT mutate the graph,
  * the views, the messages or the results it receives; anything retained past the callback must be
  * snapshotted before it returns. A throwing callback is reported with `console.warn` and otherwise
  * ignored, so an observer can never alter the computation or mask its failure. `flush` is the only
@@ -19,11 +19,6 @@ export interface DataflowTracer {
   startRun<S, N extends TSchema, T, EH>(
     graph: DataflowGraph<S, N, T, EH>,
   ): DataflowRunTrace<N, T>;
-  /**
-   * A complaint was recorded for node `nodeId`, before, during or after any run. The producer
-   * isolates a throwing implementation.
-   */
-  complain(nodeId: NodeId, complaint: string): void;
   /** Deliver whatever the tracer has buffered. Never called by the graph. */
   flush(): Promise<void>;
 }

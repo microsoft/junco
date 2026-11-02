@@ -1,10 +1,8 @@
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Context } from "@earendil-works/pi-ai";
-import type {
-  DataflowTracer,
-  Message,
-  NodeIdType as NodeId,
-} from "dataflow-engine";
+import type { Message, NodeIdType as NodeId } from "dataflow-engine";
 import { type TSchema, Type } from "typebox";
 import { log } from "./log.js";
 import {
@@ -40,16 +38,28 @@ export type Issue<N extends TSchema = TSchema> = {
 export type ComplaintContext<N extends TSchema = TSchema> = Omit<
   Issue<N>,
   "complaint"
-> & {
-  readonly tracer?: Pick<DataflowTracer, "complain">;
-};
+>;
 
 /** The owner a complaint tool records through; `JuncoAgent` and `MockAgent` implement it. */
 export interface ComplainToolHost {
-  complain<N extends TSchema>(
-    issue: Issue<N>,
-    tracer?: Pick<DataflowTracer, "complain">,
-  ): void;
+  complain<N extends TSchema>(issue: Issue<N>): void;
+}
+
+/** Where every appended complaint goes besides the in-memory log; `issueLog.backend` holds the process-wide one. */
+export interface ComplainBackend {
+  complain(nodeId: NodeId, complaint: Complaint): void;
+}
+
+/** The default backend: one `{ at, nodeId, complaint }` JSON line per complaint appended to `path`. */
+export class JsonlComplainBackend implements ComplainBackend {
+  constructor(readonly path: string) {}
+
+  complain(nodeId: NodeId, complaint: Complaint): void {
+    appendFileSync(
+      this.path,
+      `${JSON.stringify({ at: new Date().toISOString(), nodeId, complaint })}\n`,
+    );
+  }
 }
 
 /** Recursively freeze `value`, visiting each object once so shared or cyclic graphs terminate. */
@@ -86,6 +96,9 @@ function snapshotIssue<N extends TSchema>(issue: Issue<N>): Issue {
 }
 
 const issues: Issue[] = [];
+let backend: ComplainBackend = new JsonlComplainBackend(
+  join(process.cwd(), "complaints.jsonl"),
+);
 
 /**
  * The process-wide, append-only complaint history shared by every graph, node and agent. Entries are
@@ -93,30 +106,30 @@ const issues: Issue[] = [];
  */
 export const issueLog: {
   readonly length: number;
-  append<N extends TSchema>(
-    issue: Issue<N>,
-    tracer?: Pick<DataflowTracer, "complain">,
-  ): void;
+  backend: ComplainBackend;
+  append<N extends TSchema>(issue: Issue<N>): void;
   snapshot(): readonly Issue[];
 } = Object.freeze({
   get length(): number {
     return issues.length;
   },
+  get backend(): ComplainBackend {
+    return backend;
+  },
+  set backend(value: ComplainBackend) {
+    backend = value;
+  },
   /**
-   * Commit a detached snapshot of `issue`, then notify `tracer`. A snapshot failure throws before
-   * insertion; an observer failure is reported and the committed issue kept.
+   * Commit a detached snapshot of `issue`, then hand the snapshot to `backend`. A snapshot failure
+   * throws before insertion; a backend failure is warned and the committed issue kept.
    */
-  append<N extends TSchema>(
-    issue: Issue<N>,
-    tracer?: Pick<DataflowTracer, "complain">,
-  ): void {
+  append<N extends TSchema>(issue: Issue<N>): void {
     const stored = snapshotIssue(issue);
     issues.push(stored);
-    if (tracer === undefined) return;
     try {
-      tracer.complain(stored.nodeId, stored.complaint);
+      backend.complain(stored.nodeId, stored.complaint);
     } catch (error) {
-      log.warn("[dataflow-engine] DataflowTracer callback failed", error);
+      log.warn("[junco-tools] ComplainBackend failed", error);
     }
   },
   snapshot(): readonly Issue[] {
@@ -226,11 +239,8 @@ function record<N extends TSchema>(
     async () => {
       checkToolInput("complain", complainParameters, input);
       signal.throwIfAborted();
-      const { nodeId, messages, prompt, tracer } = context();
-      host.complain(
-        { nodeId, messages, prompt, complaint: input.complaint },
-        tracer,
-      );
+      const { nodeId, messages, prompt } = context();
+      host.complain({ nodeId, messages, prompt, complaint: input.complaint });
       return {
         content: [{ type: "text", text: "Complaint recorded." }],
         details: undefined,

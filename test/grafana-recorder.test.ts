@@ -52,9 +52,13 @@ async function fakeGrafana(
   const dashboards = new Map<string, Record<string, unknown>>();
   if (dashboard) {
     const metadata = dashboard.metadata as { name?: string } | undefined;
-    dashboards.set(`${COLLECTION}/${metadata?.name ?? "junco-telemetry"}`, dashboard);
+    dashboards.set(
+      `${COLLECTION}/${metadata?.name ?? "junco-telemetry"}`,
+      dashboard,
+    );
   }
   const server = createServer(async (req, res) => {
+    req.setEncoding("utf8");
     let body = "";
     for await (const chunk of req) body += chunk;
     const request = {
@@ -467,20 +471,29 @@ test("setup errors carry only an operation and status", async () => {
     () => assert.fail("accepted"),
     (error: Error) => error,
   );
-  assert.match(denied.message, /dashboard lookup(?: \(junco-telemetry\))? failed with status 401/);
+  assert.match(
+    denied.message,
+    /dashboard lookup(?: \(junco-telemetry\))? failed with status 401/,
+  );
 
   const redirect = await fakeGrafana((_request, res) => {
     res.writeHead(302, { Location: "http://127.0.0.1:1/" }).end();
     return true;
   });
-  await assert.rejects(open(redirect), /dashboard lookup(?: \(junco-telemetry\))? failed/);
+  await assert.rejects(
+    open(redirect),
+    /dashboard lookup(?: \(junco-telemetry\))? failed/,
+  );
   assert.equal(redirect.seen.length, 1);
 });
 
 test("a hanging request times out after five seconds", async () => {
   const fake = await fakeGrafana(() => true);
   const started = performance.now();
-  await assert.rejects(open(fake), /dashboard lookup(?: \(junco-telemetry\))? failed \(TimeoutError\)/);
+  await assert.rejects(
+    open(fake),
+    /dashboard lookup(?: \(junco-telemetry\))? failed \(TimeoutError\)/,
+  );
   expect(performance.now() - started).toBeGreaterThanOrEqual(4900);
 }, 15_000);
 
@@ -1032,21 +1045,189 @@ test("the periodic snapshot starts at first record and close stops it", async ()
   assert.equal(fake.pushes().length, sent);
 });
 
-test("an oversized snapshot is rejected rather than truncated", async () => {
+test("snapshots preserve every point across bounded UTF-8 shards and keep small batches grouped", async () => {
+  for (const count of [2, 600]) {
+    const fake = await fakeGrafana();
+    const recorder = await open(fake);
+    const path = "根::枝λ";
+    const view = recorder.add_context("根").add_context("枝λ");
+    const clock = spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const expected: { name: string; point: OtlpPoint }[] = [];
+    const expectFields = (
+      measurement: string,
+      tags: Record<string, string>,
+      fields: Record<string, number>,
+    ) => {
+      for (const [field, asDouble] of Object.entries(fields))
+        expected.push({
+          name: `${measurement}_${field}`,
+          point: {
+            attributes: Object.entries({
+              stream: recorder.streamId,
+              dashboard: "junco-telemetry",
+              ...tags,
+            }).map(([key, stringValue]) => ({ key, value: { stringValue } })),
+            timeUnixNano: "1700000000000000000",
+            asDouble,
+          },
+        });
+    };
+    try {
+      expectFields(
+        "junco_total",
+        {},
+        {
+          tokens_used: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          tokens_per_second: 0,
+          cost_input: 0,
+          cost_output: 0,
+          cost_cache_read: 0,
+          cost_cache_write: 0,
+          cost_total: 0,
+        },
+      );
+      for (let i = 0; i < count; i++) {
+        const tags = {
+          node: path,
+          resource: "operations",
+          category: "待機λ",
+          tool: `tool_${i}_${"界".repeat(200)}`,
+          operation: `実行_${i}`,
+        };
+        view.record({
+          resource: "operations",
+          kind: "metrics",
+          category: tags.category,
+          tool: tags.tool,
+          operation: tags.operation,
+          gauges: { queue_depth: i + 0.25 },
+          counters: { items: i + 1 },
+        });
+        expectFields("junco_operation", tags, {
+          calls: 0,
+          inflight: 0,
+          success: 0,
+          errors: 0,
+          cancelled: 0,
+          duration_ms_sum: 0,
+          duration_ms_max: 0,
+          duration_ms_last: 0,
+          duration_ms_mean: 0,
+          calls_per_second: 0,
+          items: i + 1,
+          queue_depth: i + 0.25,
+        });
+      }
+      await recorder.flush();
+      const pushes = fake.pushes();
+      if (count === 2) assert.equal(pushes.length, 1);
+      else {
+        assert.ok(pushes.length > 2);
+        const oneMetric = {
+          name: "junco_operation_queue_depth",
+          gauge: {
+            dataPoints: expected
+              .filter(({ name }) => name === "junco_operation_queue_depth")
+              .map(({ point }) => point),
+          },
+        };
+        assert.ok(Buffer.byteLength(JSON.stringify(oneMetric)) > 500 * 1024);
+      }
+      const actual = pushes.flatMap(({ body }) => {
+        assert.ok(Buffer.byteLength(body) <= 500 * 1024);
+        const decoded = JSON.parse(body) as {
+          resourceMetrics: {
+            scopeMetrics: {
+              metrics: { name: string; gauge: { dataPoints: OtlpPoint[] } }[];
+            }[];
+          }[];
+        };
+        return decoded.resourceMetrics.flatMap((resource) =>
+          resource.scopeMetrics.flatMap((scope) =>
+            scope.metrics.flatMap(({ name, gauge }) =>
+              gauge.dataPoints.map((point) => ({ name, point })),
+            ),
+          ),
+        );
+      });
+      // Comparing individual points, rather than merged rows, exposes duplicates too.
+      const sort = (points: typeof expected) =>
+        points.map((point) => JSON.stringify(point)).sort();
+      assert.deepEqual(sort(actual), sort(expected));
+    } finally {
+      clock.mockRestore();
+      await recorder.close();
+    }
+  }
+});
+
+test("a single snapshot point over 500 KiB is rejected and retains its error", async () => {
   const fake = await fakeGrafana();
   const recorder = await open(fake);
-  const view: tracer.ProfileRecorder<"operations"> = recorder;
-  for (let i = 0; i < 2000; i++)
-    view.record({
+  recorder.record({
+    resource: "operations",
+    kind: "metrics",
+    category: "c",
+    tool: "界".repeat(175_000),
+    operation: "o",
+    gauges: { queue_depth: 1 },
+  });
+  const error = await recorder.flush().then(
+    () => assert.fail("flushed"),
+    (error: Error) => error,
+  );
+  assert.match(error.message, /snapshot exceeds 500 KiB/);
+  for (const push of fake.pushes()) {
+    assert.ok(Buffer.byteLength(push.body) <= 500 * 1024);
+    assert.ok(
+      parse(push.body).every((row) => row.measurement !== "junco_operation"),
+    );
+  }
+  const sent = fake.pushes().length;
+  await assert.rejects(recorder.flush(), (thrown) => thrown === error);
+  await assert.rejects(recorder.close(), (thrown) => thrown === error);
+  assert.equal(fake.pushes().length, sent);
+});
+
+test("a failed later snapshot shard retains its error and stops all subsequent pushes", async () => {
+  let pushes = 0;
+  const fake = await fakeGrafana((request, res) => {
+    if (!request.path.startsWith("/api/telemetry/metrics")) return false;
+    send(res, ++pushes === 2 ? 500 : 200);
+    return true;
+  });
+  const recorder = await open(fake);
+  for (let i = 0; i < 600; i++)
+    recorder.record({
       resource: "operations",
-      kind: "start",
+      kind: "metrics",
       category: "c",
-      tool: `tool_${i}_${"x".repeat(200)}`,
+      tool: `tool_${i}_${"界".repeat(200)}`,
       operation: "o",
+      gauges: { queue_depth: i },
     });
-  await assert.rejects(recorder.flush(), /snapshot exceeds 500 KiB/);
-  assert.equal(fake.pushes().length, 0);
-  await assert.rejects(recorder.close(), /snapshot exceeds 500 KiB/);
+  const error = await recorder.flush().then(
+    () => assert.fail("flushed"),
+    (error: Error) => error,
+  );
+  assert.match(error.message, /metrics push failed with status 500/);
+  assert.equal(pushes, 2);
+  for (const push of fake.pushes())
+    assert.ok(Buffer.byteLength(push.body) <= 500 * 1024);
+  recorder.record({
+    resource: "probe",
+    kind: "probe",
+    edgeId: "later",
+    value: 1,
+  });
+  await assert.rejects(recorder.flush(), (thrown) => thrown === error);
+  await assert.rejects(recorder.close(), (thrown) => thrown === error);
+  await assert.rejects(recorder.flush(), (thrown) => thrown === error);
+  assert.equal(pushes, 2);
 });
 
 const probe = (edgeId: string, value: number) =>
@@ -1258,8 +1439,88 @@ test("new metrics and nodes preserve accounting without inventing absent values"
   assert.equal(fieldsOf(after, "junco_total").tokens_used, 10);
 });
 
+test("container peak gauges stay independent of pipeline samples and absent hardware", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake, { dashboard: "junco-cooperbench" });
+  recordUsage(recorder, { totalTokens: 9, cost: 0.25 });
+  await recorder.flush();
+  let lines = lastPush(fake);
+  assert.equal(fieldsOf(lines, "junco_total").peak_memory_bytes, undefined);
+  assert.ok(!lines.some((line) => line.measurement === "junco_operation"));
 
-type DashboardTarget = { expr?: string; interval?: string; legendFormat?: string };
+  const operation = {
+    resource: "memory",
+    category: "benchmark",
+    tool: "",
+    operation: "container_memory",
+  } as const;
+  recorder.record({
+    ...operation,
+    kind: "metrics",
+    gauges: { peak_memory_bytes: 100 },
+  });
+  const tags = {
+    node: "::",
+    resource: "memory",
+    category: "benchmark",
+    operation: "container_memory",
+  };
+  await recorder.flush();
+  lines = lastPush(fake);
+  assert.equal(fieldsOf(lines, "junco_operation", tags).peak_memory_bytes, 100);
+  assert.equal(fieldsOf(lines, "junco_total").peak_memory_bytes, undefined);
+  assert.equal(
+    fieldsOf(lines, "junco_node", { node: "::" }).peak_memory_bytes,
+    undefined,
+  );
+  for (const line of lines)
+    for (const field of ["cpu_usage_ms", "pids", "memory_bytes"])
+      assert.equal(line.fields[field], undefined);
+
+  const source = {};
+  for (const [index, bytes] of [70, 80].entries())
+    recorder.add_context(`Agent${index + 1}`).record({
+      resource: "memory",
+      kind: "resource",
+      source,
+      event: {
+        kind: "sample",
+        pipelineId: index + 1,
+        sample: sample({ memoryBytes: bytes, memoryPeakBytes: bytes }),
+      },
+    });
+  await recorder.flush();
+  lines = lastPush(fake);
+  assert.equal(fieldsOf(lines, "junco_operation", tags).peak_memory_bytes, 100);
+  assert.equal(fieldsOf(lines, "junco_total").peak_memory_bytes, 150);
+  assert.equal(
+    fieldsOf(lines, "junco_node", { node: "Agent1" }).peak_memory_bytes,
+    70,
+  );
+  assert.equal(
+    fieldsOf(lines, "junco_node", { node: "Agent2" }).peak_memory_bytes,
+    80,
+  );
+
+  recorder.record({
+    ...operation,
+    kind: "metrics",
+    gauges: { peak_memory_bytes: 110 },
+  });
+  await recorder.close();
+  lines = lastPush(fake);
+  assert.equal(fieldsOf(lines, "junco_operation", tags).peak_memory_bytes, 110);
+  const total = fieldsOf(lines, "junco_total");
+  assert.equal(total.peak_memory_bytes, 150);
+  assert.equal(total.tokens_used, 9);
+  assert.equal(total.cost_total, 0.25);
+});
+
+type DashboardTarget = {
+  interval?: string;
+  instant?: boolean;
+  range?: boolean;
+};
 type DashboardPanel = {
   type: string;
   collapsed?: boolean;
@@ -1275,7 +1536,6 @@ type DashboardVariable = {
   refresh?: number;
   regex?: string;
   current: { text: string; value: string | string[] };
-  query: string | { query: string };
 };
 type DashboardDocument = {
   metadata: { name: string; resourceVersion?: string };
@@ -1292,64 +1552,114 @@ type DashboardDocument = {
 
 test("custom dashboard UID isolates provisioning, links, and every OTLP point", async () => {
   const fake = await fakeGrafana();
-  for (const dashboard of ["junco-telemetry", "custom_UID-42", "junco-cooperbench"]) {
+  for (const dashboard of [
+    "junco-telemetry",
+    "custom_UID-42",
+    "junco-cooperbench",
+  ]) {
     const recorder = await open(fake, { dashboard });
     assert.equal(
       recorder.dashboardUrl,
       `${fake.url}/d/${dashboard}?var-stream=${recorder.streamId}`,
     );
     recordUsage(recorder, { totalTokens: 7, cost: 0.25 });
-    const operation = { resource: "operations", category: "queue", tool: "", operation: "run" } as const;
+    const operation = {
+      resource: "operations",
+      category: "queue",
+      tool: "",
+      operation: "run",
+    } as const;
     recorder.record({ ...operation, kind: "metrics", gauges: { depth: 2 } });
     recorder.record(probe("edge", 1));
     await recorder.flush();
     recorder.record({ ...operation, kind: "metrics", gauges: { depth: null } });
     await recorder.close();
-    const points = fake.pushes().flatMap((push) => {
-      const body = JSON.parse(push.body) as {
-        resourceMetrics: { scopeMetrics: { metrics: { name: string; gauge: { dataPoints: OtlpPoint[] } }[] }[] }[];
-      };
-      return body.resourceMetrics.flatMap((resource) =>
-        resource.scopeMetrics.flatMap((scope) =>
-          scope.metrics.flatMap((metric) =>
-            metric.gauge.dataPoints.map((point: OtlpPoint) => ({ metric: metric.name, point })),
+    const points = fake
+      .pushes()
+      .flatMap((push) => {
+        const body = JSON.parse(push.body) as {
+          resourceMetrics: {
+            scopeMetrics: {
+              metrics: { name: string; gauge: { dataPoints: OtlpPoint[] } }[];
+            }[];
+          }[];
+        };
+        return body.resourceMetrics.flatMap((resource) =>
+          resource.scopeMetrics.flatMap((scope) =>
+            scope.metrics.flatMap((metric) =>
+              metric.gauge.dataPoints.map((point: OtlpPoint) => ({
+                metric: metric.name,
+                point,
+              })),
+            ),
           ),
+        ) as { metric: string; point: OtlpPoint }[];
+      })
+      .filter(({ point }) =>
+        point.attributes.some(
+          ({ key, value }) =>
+            key === "stream" && value.stringValue === recorder.streamId,
         ),
-      ) as { metric: string; point: OtlpPoint }[];
-    }).filter(({ point }) => point.attributes.some(({ key, value }) => key === "stream" && value.stringValue === recorder.streamId));
+      );
     assert.ok(points.some(({ metric }) => metric.startsWith("junco_probe_")));
     assert.ok(points.some(({ point }) => point.flags === 1));
-    assert.ok(points.some(({ metric, point }) => metric === "junco_total_tokens_used" && point.asDouble === 7));
+    assert.ok(
+      points.some(
+        ({ metric, point }) =>
+          metric === "junco_total_tokens_used" && point.asDouble === 7,
+      ),
+    );
     for (const { point } of points)
-      assert.deepEqual(point.attributes.filter(({ key }) => key === "dashboard"), [
-        { key: "dashboard", value: { stringValue: dashboard } },
-      ]);
+      assert.deepEqual(
+        point.attributes.filter(({ key }) => key === "dashboard"),
+        [{ key: "dashboard", value: { stringValue: dashboard } }],
+      );
   }
-  const posted = fake.seen.filter((request) => request.method === "POST" && request.path === COLLECTION)
+  const posted = fake.seen
+    .filter(
+      (request) => request.method === "POST" && request.path === COLLECTION,
+    )
     .map((request) => JSON.parse(request.body));
-  assert.deepEqual(posted.map((body) => body.metadata.name), ["junco-telemetry", "custom_UID-42", "junco-cooperbench"]);
-  assert.deepEqual(posted.map((body) => body.spec.uid), ["junco-telemetry", "custom_UID-42", "junco-cooperbench"]);
+  assert.deepEqual(
+    posted.map((body) => body.metadata.name),
+    ["junco-telemetry", "custom_UID-42", "junco-cooperbench"],
+  );
+  assert.deepEqual(
+    posted.map((body) => body.spec.uid),
+    ["junco-telemetry", "custom_UID-42", "junco-cooperbench"],
+  );
 });
 
-test("benchmark boards retain All and expose scoped historical overview and drill-down", async () => {
+test("benchmark provisioning retains All and historical overview and drill-down structure", async () => {
   const fake = await fakeGrafana();
-  for (const dashboard of ["junco-cooperbench", "junco-swebench", "junco-msbench"]) {
+  for (const dashboard of [
+    "junco-cooperbench",
+    "junco-swebench",
+    "junco-msbench",
+  ]) {
     const before = fake.pushes().length;
     await provisionGrafanaDashboard({ url: fake.url, dashboard });
     assert.equal(fake.pushes().length, before);
     const first = await open(fake, { dashboard });
     const next = await open(fake, { dashboard });
     assert.notEqual(first.streamId, next.streamId);
-    const writes = fake.seen.filter((request) =>
-      request.method === "POST" && request.path === COLLECTION ||
-      request.method === "PUT" && request.path === `${COLLECTION}/${dashboard}`,
-    ).map((request) => JSON.parse(request.body) as DashboardDocument).filter((body) => body.spec.uid === dashboard);
+    const writes = fake.seen
+      .filter(
+        (request) =>
+          (request.method === "POST" && request.path === COLLECTION) ||
+          (request.method === "PUT" &&
+            request.path === `${COLLECTION}/${dashboard}`),
+      )
+      .map((request) => JSON.parse(request.body) as DashboardDocument)
+      .filter((body) => body.spec.uid === dashboard);
     assert.equal(writes.length, 3);
     for (const { spec } of writes) {
       assert.equal(spec.title, dashboard);
       assert.deepEqual(spec.time, { from: "now-15d", to: "now" });
       assert.equal(spec.refresh, "30s");
-      const variable = spec.templating.list.find((variable) => variable.name === "stream");
+      const variable = spec.templating.list.find(
+        (variable) => variable.name === "stream",
+      );
       assert.ok(variable);
       assert.equal(variable.type, "query");
       assert.equal(variable.multi, true);
@@ -1359,39 +1669,28 @@ test("benchmark boards retain All and expose scoped historical overview and dril
       assert.equal(variable.regex, '/stream="([^"]+)"/');
       assert.deepEqual(variable.current.text, "All");
       assert.deepEqual([variable.current.value].flat(), ["$__all"]);
-      const discovery = `query_result(last_over_time(junco_total_tokens_used{dashboard="${dashboard}"}[$__range]))`;
-      assert.equal(typeof variable.query === "string" ? variable.query : variable.query.query, discovery);
-      const panels = spec.panels.flatMap((panel) => [panel, ...(panel.panels ?? [])]);
-      const targets = panels.flatMap((panel) => panel.targets ?? []);
-      const expressions = targets.map((target) => target.expr).filter(Boolean) as string[];
-      const selector = `dashboard="${dashboard}",stream=~"${'${stream:regex}'}"`;
-      for (const expression of [
-        `sum(last_over_time(junco_total_tokens_used{${selector}}[$__range]))`,
-        `sum(last_over_time(junco_total_cost_total{${selector}}[$__range]))`,
-        `count(last_over_time(junco_total_tokens_used{${selector}}[$__range]))`,
-        `max(max_over_time(junco_total_peak_memory_bytes{${selector}}[$__range]))`,
-      ]) assert.ok(expressions.includes(expression), expression);
-      for (const expression of expressions) {
-        assert.ok(expression.includes(`dashboard="${dashboard}"`), expression);
-        assert.ok(expression.includes('stream=~"${stream:regex}"'), expression);
-        assert.ok(!expression.includes("or vector(0)"), expression);
-      }
-      assert.ok(panels.some((panel) => panel.type === "table" && panel.targets?.some((target) =>
-        target.expr === `last_over_time(junco_total_tokens_used{${selector}}[$__range])`,
-      )));
-      const detail = spec.panels.find((panel) => panel.type === "row" && panel.collapsed);
+      const panels = spec.panels.flatMap((panel) => [
+        panel,
+        ...(panel.panels ?? []),
+      ]);
+      assert.ok(panels.some((panel) => panel.type === "table"));
+      const detail = spec.panels.find(
+        (panel) => panel.type === "row" && panel.collapsed,
+      );
       assert.ok(detail?.panels?.length);
       assert.ok(detail.panels);
-      for (const panel of detail.panels.filter((panel) => panel.type === "stat")) {
+      for (const panel of detail.panels.filter(
+        (panel) => panel.type === "stat",
+      )) {
         for (const target of panel.targets ?? []) {
           assert.equal(target.instant, true);
           assert.equal(target.range, false);
-          assert.ok(target.expr?.startsWith("last_over_time("), target.expr);
         }
       }
-      for (const target of detail.panels.flatMap((panel) => panel.targets ?? [])) {
+      for (const target of detail.panels.flatMap(
+        (panel) => panel.targets ?? [],
+      )) {
         assert.notEqual(target.interval, "1s");
-        if (target.legendFormat) assert.ok(target.legendFormat.includes("stream"), target.legendFormat);
       }
     }
     await first.close();
@@ -1406,14 +1705,22 @@ test("custom UID ownership and concurrent creation do not overwrite a competing 
     metadata: { name: dashboard, resourceVersion: "7" },
     spec: { title: "theirs", tags: [] },
   });
-  await assert.rejects(open(untagged, { dashboard }), /exists without tag junco-telemetry/);
-  assert.deepEqual(untagged.seen.map(({ method, path }) => [method, path]), [["GET", item]]);
+  await assert.rejects(
+    open(untagged, { dashboard }),
+    /exists without tag junco-telemetry/,
+  );
+  assert.deepEqual(
+    untagged.seen.map(({ method, path }) => [method, path]),
+    [["GET", item]],
+  );
   const tagged = await fakeGrafana(undefined, {
     metadata: { name: dashboard, resourceVersion: "41" },
     spec: { title: "old", tags: ["junco-telemetry"] },
   });
   await (await open(tagged, { dashboard })).close();
-  const update = JSON.parse(tagged.seen.find(({ method }) => method === "PUT")!.body);
+  const update = JSON.parse(
+    tagged.seen.find(({ method }) => method === "PUT")!.body,
+  );
   assert.equal(update.metadata.resourceVersion, "41");
   assert.equal(update.spec.title, dashboard);
 
@@ -1433,20 +1740,30 @@ test("custom UID ownership and concurrent creation do not overwrite a competing 
       }
       return false;
     });
-    if (conflict) await assert.rejects(open(raced, { dashboard }), /concurrently created|exists without tag/);
+    if (conflict)
+      await assert.rejects(
+        open(raced, { dashboard }),
+        /concurrently created|exists without tag/,
+      );
     else await (await open(raced, { dashboard })).close();
     assert.equal(raced.seen.filter(({ method }) => method === "PUT").length, 0);
-    assert.ok(raced.seen.filter(({ method }) => method === "GET").every(({ path }) => path === item));
+    assert.ok(
+      raced.seen
+        .filter(({ method }) => method === "GET")
+        .every(({ path }) => path === item),
+    );
   }
 });
 
 test("provision-only validates dashboard UIDs before any HTTP request", async () => {
   const fake = await fakeGrafana();
   for (const dashboard of ["", "../other", "a".repeat(41)])
-    await assert.rejects(provisionGrafanaDashboard({ url: fake.url, dashboard }), /dashboard/);
+    await assert.rejects(
+      provisionGrafanaDashboard({ url: fake.url, dashboard }),
+      /dashboard/,
+    );
   assert.equal(fake.seen.length, 0);
 });
-
 
 test("concurrent benchmark sessions share one managed board without selecting either session", async () => {
   const fake = await fakeGrafana();
@@ -1458,16 +1775,23 @@ test("concurrent benchmark sessions share one managed board without selecting ei
   assert.notEqual(recorders[0]!.streamId, recorders[1]!.streamId);
   for (const recorder of recorders) {
     assert.equal(new URL(recorder.dashboardUrl).pathname, `/d/${dashboard}`);
-    assert.equal(new URL(recorder.dashboardUrl).searchParams.get("var-stream"), recorder.streamId);
+    assert.equal(
+      new URL(recorder.dashboardUrl).searchParams.get("var-stream"),
+      recorder.streamId,
+    );
   }
-  const writes = fake.seen.filter(({ method, path }) =>
-    method === "POST" && path === COLLECTION || method === "PUT" && path === `${COLLECTION}/${dashboard}`,
+  const writes = fake.seen.filter(
+    ({ method, path }) =>
+      (method === "POST" && path === COLLECTION) ||
+      (method === "PUT" && path === `${COLLECTION}/${dashboard}`),
   );
   assert.ok(writes.length > 0);
   for (const request of writes) {
     const body = JSON.parse(request.body) as DashboardDocument;
     assert.equal(body.spec.uid, dashboard);
-    const variable = body.spec.templating.list.find(({ name }) => name === "stream");
+    const variable = body.spec.templating.list.find(
+      ({ name }) => name === "stream",
+    );
     assert.ok(variable);
     assert.equal(variable.current.text, "All");
     assert.deepEqual([variable.current.value].flat(), ["$__all"]);

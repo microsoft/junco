@@ -237,7 +237,7 @@ export type AgenticStep =
  * without a Context argument; the native lane is deliberately not public because a subclass can
  * constrain tool configuration. `next(inputs?)` is the scheduling plane: its optional graph view
  * only feeds a staged prompt function and is never a command payload.
- * `complain(issue, tracer?)` synchronously appends a complete issue to the shared `issueLog`.
+ * `complain(issue)` synchronously appends a complete issue to the shared `issueLog`.
  */
 export interface Agentic<
   S extends Skill = Skill,

@@ -1323,7 +1323,6 @@ describe("candidate batch graph", () => {
           },
         };
       },
-      complain: () => {},
       flush: () => inner.flush(),
     };
     const outcomes = await runCandidateBatch({
@@ -1525,7 +1524,6 @@ describe("candidate batch graph", () => {
           },
         };
       },
-      complain: () => {},
       flush: () => inner.flush(),
     };
     const recorder = recordingApplier();

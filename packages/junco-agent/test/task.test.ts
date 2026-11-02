@@ -1939,7 +1939,6 @@ test(
     const placement = {
       usage: undefined,
       recorder: undefined,
-      tracer: undefined,
     };
     try {
       const [handle] = await scope.request(

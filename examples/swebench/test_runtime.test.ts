@@ -3,7 +3,7 @@
 // sandbox operations on real containers.
 import { afterAll, beforeAll, describe as group, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -13,6 +13,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { graph, JuncoGraph, MockAgent, type MockRun, schedules, syntax, tracer } from "junco";
 import { grafanaUrl } from "../benchmark-telemetry.ts";
 import * as cb from "./wf.ts";
+import * as solo from "./solo.ts";
 import {
   BLOCKED_DEFAULTS,
   cancelBranch,
@@ -127,11 +128,8 @@ test("a timed-out command stops its own container and leaves other containers ru
   expect(running(sentinel)).toBe(true);
 }, 60_000);
 
-// ---- Coordination: the real wf.yml topology and code nodes, with every agent but Planner/Draft (a MockAgent)
-// replaced by a scripted code node.
-
-/** The root agents the coordination scenarios script as code nodes; Planner/Draft stays a real (mock) agent. */
-const AGENTS = ["Lead", "Trace", "Reproduce", "Contracts", "CandidateA", "CandidateB", "Integrator", "Verifier"] as const;
+// ---- Coordination: the real workflow topology and code nodes, with root agents scripted as code nodes
+// and Planner agents kept as real MockAgents so their YAML prompt placeholders are rendered.
 type Fake = {
   files: Record<string, string>;
   log: string[];
@@ -237,12 +235,13 @@ function fake(): Fake {
 }
 
 function participant(id: string, script: Script, h: Fake): syntax.DeterministicNode<cb.Context> {
-  return ({ policy }) => {
+  return ({ policy, edges }) => {
     let started = false;
     let done = false;
     return {
       state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-        yield [];
+        const view = yield [];
+        h.saved.set(`scripted/${id}.prompt`, [...edges].flatMap(([edgeId]) => [...(view.messages.get(graph.EdgeId.create(edgeId)) ?? [])]).map((payload) => (payload as { text?: string }).text ?? "").join("\n\n"));
         started = true;
         h.log.push(`${id}:start`);
         for (let i = 0; i < (script.columns ?? 0); i++) yield [];
@@ -258,28 +257,23 @@ function participant(id: string, script: Script, h: Fake): syntax.DeterministicN
   };
 }
 
-/** cb.document with every agent node but Planner/Draft, at any depth, turned into a code node of the same id and trigger. */
-function scriptedDocument(): syntax.JuncoDocument {
-  const document = structuredClone(cb.document);
-  const script = (level: syntax.GraphSpec, prefix: string) => {
-    for (const [id, node] of Object.entries(level.nodes)) {
-      if (node.kind === "graph") script(node.graph, `${prefix}${id}/`);
-      else if (node.kind !== "code" && node.kind !== "emit" && `${prefix}${id}` !== "Planner/Draft")
-        level.nodes[id] = { kind: "code", description: node.description, trigger: node.trigger };
-    }
-  };
-  script(document.graph, "");
+/** Script only root agents; every nested Planner agent keeps its real prompt and trigger. */
+function scriptedDocument(source: syntax.JuncoDocument = cb.document): syntax.JuncoDocument {
+  const document = structuredClone(source);
+  for (const [id, node] of Object.entries(document.graph.nodes))
+    if (node.kind === undefined || node.kind === "agent")
+      document.graph.nodes[id] = { kind: "code", description: node.description, trigger: node.trigger };
   return document;
 }
 
 type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
-/** Planner/Draft: a mock agent that logs every request it is asked for. */
+/** A Planner mock that logs every request, including staged corrections. */
 class Draft extends MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown> {
-  constructor(runs: readonly MockRun[], readonly h: Fake) {
+  constructor(runs: readonly MockRun[], readonly h: Fake, readonly id = "Draft") {
     super({ runs });
   }
   override next(...args: Parameters<YamlMock["next"]>) {
-    this.h.log.push("Draft:next");
+    this.h.log.push(`${this.id}:next`);
     return super.next(...args);
   }
 }
@@ -290,7 +284,7 @@ const drafts = (...runs: (string | MockRun["frames"])[]): MockRun[] =>
     frames: typeof run === "string" ? [settled(run)] : run,
     interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
   }));
-/** The user text of each Draft request after the first: the correction prompts CheckPlan staged. */
+/** The user text of each Planner request after the first: the correction prompts CheckPlan staged. */
 const corrections = (agent: Draft): string[] =>
   agent.requests.slice(1).map(({ messages }) => {
     const last = messages.at(-1);
@@ -298,10 +292,12 @@ const corrections = (agent: Draft): string[] =>
   });
 
 async function scenario(
-  overrides: Partial<Record<(typeof AGENTS)[number], Script>> = {},
-  runs: MockRun[] = drafts(plan(CHECKS)),
+  overrides: Record<string, Script> = {},
+  runs: MockRun[] | Record<string, MockRun[]> = drafts(plan(CHECKS)),
   code: (h: Fake) => Record<string, syntax.DeterministicNode<cb.Context>> = () => ({}),
   recorder?: tracer.ProfileRecorder<string>,
+  workflow: typeof cb = cb,
+  document: syntax.JuncoDocument = workflow.document,
 ) {
   const h = fake();
   const scripts: Record<string, Script> = {
@@ -311,16 +307,22 @@ async function scenario(
     Verifier: { text: "ran every check\nVERDICT: PASS" },
     ...overrides,
   };
-  const participants = Object.fromEntries(AGENTS.map((id) => [id, participant(id, scripts[id] ?? {}, h)]));
-  const draft = new Draft(runs, h);
-  const execution = await JuncoGraph.fromYaml<cb.Context>(scriptedDocument(), {
+  const participants = Object.fromEntries(Object.entries(document.graph.nodes)
+    .filter(([, node]) => node.kind === undefined || node.kind === "agent")
+    .map(([id]) => [id, participant(id, scripts[id] ?? {}, h)]));
+  const agents = new Map<string, Draft>();
+  const execution = await JuncoGraph.fromYaml<cb.Context>(scriptedDocument(document), {
     cwd: tmpdir(),
-    scheduler: cb.scheduler,
-    code: { ...cb.code, ...participants, ...code(h) },
-    available: cb.plannerAvailability,
+    scheduler: workflow.scheduler,
+    code: { ...workflow.code, ...participants, ...code(h) },
+    available: workflow.plannerAvailability,
     createAgent: async (spec) => {
-      if (spec.path !== "Planner/Draft") throw new Error(`unexpected agent ${spec.path}`);
-      return draft;
+      if (!spec.path.startsWith("Planner/")) throw new Error(`unexpected agent ${spec.path}`);
+      const transcript = Array.isArray(runs) ? runs : runs[spec.path];
+      if (transcript === undefined) throw new Error(`no scripted runs for ${spec.path}`);
+      const agent = new Draft(transcript, h, spec.path.split("/").at(-1));
+      agents.set(spec.path, agent);
+      return agent;
     },
     context: { ...h.host, race: {} },
     signal: h.abort.signal,
@@ -340,8 +342,53 @@ async function scenario(
   }
   const at = (entry: string) => h.log.indexOf(entry);
   const count = (entry: string) => h.log.filter((e) => e === entry).length;
-  return { ...h, report, error, at, count, draft, corrections: corrections(draft) };
+  const draft = agents.get("Planner/Draft")!;
+  return { ...h, report, error, at, count, draft, agents, corrections: draft === undefined ? [] : corrections(draft) };
 }
+
+/** Import the real module against alternate YAML so module-load topology decisions are exercised. */
+async function withWorkflow<T>(document: syntax.JuncoDocument, act: (workflow: typeof cb) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(import.meta.dir, ".topology-"));
+  try {
+    copyFileSync(join(import.meta.dir, "wf.ts"), join(dir, "wf.ts"));
+    writeFileSync(join(dir, "wf.yml"), JSON.stringify(document));
+    return await act(await import(join(dir, "wf.ts")) as typeof cb);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+group("solo baseline", () => {
+  const runSolo = (h: Fake, stop: AssistantMessage["stopReason"] = "stop") => solo.run({
+    cwd: tmpdir(),
+    context: h.host,
+    tools: { bash: containerBash("unused", () => {}) },
+    createAgent: async () => new MockAgent({ runs: [{
+      frames: [{ step: { kind: "settled", message: message("solo report", stop) } }],
+      interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
+    }] }),
+    tracer: new tracer.DummyTracer(),
+  });
+
+  test("a solo patch reaches canonical after either a normal or abnormal agent stop", async () => {
+    checkDocument(solo);
+    for (const stop of ["stop", "error"] as const) {
+      const h = fake();
+      h.files.candidateA = diff("FIX solo");
+      const report = await runSolo(h, stop);
+      expect(h.files.canonical).toBe(diff("FIX solo"));
+      expect(h.saved.get("solo.patch")).toBe(diff("FIX solo"));
+      expect(h.saved.get("solo.md")).toContain("solo report");
+      expect(report).toContain("Solo patch delivered");
+    }
+  });
+
+  test("an empty solo sandbox never claims a delivered patch", async () => {
+    const h = fake();
+    await expect(runSolo(h).catch((failure) => { throw new Error(describe(failure)); })).rejects.toThrow(/Solo left no change in \/testbed/);
+    expect(h.files.canonical).toBe("");
+  });
+});
 
 group("coordination", () => {
   test("the planner starts only after every evidence report has settled", async () => {
@@ -386,7 +433,7 @@ group("coordination", () => {
     expect(run.corrections[2]).toContain("The plan has no regression check");
   });
 
-  test("a plan still rejected after three correction turns fails the run before any patch work", async () => {
+  test("a parsed fourth rejected plan dispatches surviving checks and reaches Finish", async () => {
     // No reclassification: a reproduction that passes and a regression that fails stay excluded, never swapped.
     const swapped = plan([
       { kind: "reproduction", name: "swapped-r", command: "regress" },
@@ -394,12 +441,15 @@ group("coordination", () => {
     ]);
     const importError = plan([{ kind: "reproduction", name: "repro", command: "import-error" }, CHECKS[1]]);
     const run = await scenario({}, drafts("```json\n{not json\n```", importError, swapped, plan([CHECKS[0], MISSING_REGRESSION])));
-    expect(run.error).toMatch(/plan rejected after 3 correction turns: No regression check survived/);
+    expect(run.error).toBeUndefined();
+    expect(run.report).toContain("Final patch verified");
     expect(run.draft.requests).toHaveLength(4);
-    expect(run.at("CandidateA:start")).toBe(-1);
-    expect(run.at("CandidateB:start")).toBe(-1);
-    expect(run.at("save:plan.md")).toBe(-1);
-    expect(run.files.canonical).toBe("");
+    expect(run.files.canonical).toBe(diff("FIX A"));
+    for (const candidate of ["CandidateA", "CandidateB"]) {
+      expect(run.at(`${candidate}:start`)).toBeGreaterThan(run.at("save:planning/degraded.txt"));
+      expect(run.saved.get(`scripted/${candidate}.prompt`)).toContain("# Degraded plan");
+      expect(run.saved.get(`scripted/${candidate}.prompt`)).toContain("No regression check survived");
+    }
     for (const attempt of [1, 2, 3, 4]) {
       expect(run.saved.has(`planning/attempt-${attempt}/plan.md`)).toBe(true);
       expect(run.saved.has(`planning/attempt-${attempt}/rejection.txt`)).toBe(true);
@@ -412,6 +462,23 @@ group("coordination", () => {
       { name: "swapped-g", reason: "fails on the baseline (exit 1)" },
     ]);
     expect(run.corrections[1]).toContain("ImportError: No module named pkg");
+  });
+
+  test("a malformed fourth plan still fails before any patch work", async () => {
+    const run = await scenario({}, drafts("not JSON", "not JSON", "not JSON", "not JSON"));
+    expect(run.error).toMatch(/plan rejected after 3 correction turns: plan: the Planner returned no/);
+    expect(run.at("CandidateA:start")).toBe(-1);
+    expect(run.at("CandidateB:start")).toBe(-1);
+    expect(run.files.canonical).toBe("");
+  });
+
+  test("a degraded plan with no surviving checks still submits an applying patch", async () => {
+    const bad = plan([{ kind: "reproduction", name: "bad", command: "import-error" }]);
+    const run = await scenario({}, drafts(bad, bad, bad, bad));
+    expect(run.error).toBeUndefined();
+    expect(run.report).toContain("Final patch verified");
+    expect(JSON.parse(run.saved.get("acceptance.json")!).checks).toEqual([]);
+    expect(run.files.canonical).toBe(diff("FIX A"));
   });
 
   test("a slow checker validates each distinct draft once and a native yield costs no correction turn", async () => {
@@ -489,12 +556,27 @@ group("coordination", () => {
     expect(JSON.parse(run.saved.get("tournament.json") ?? "{}").winner).toBe("A");
   });
 
-  test("two invalid contenders end the run without a winner or an applied patch", async () => {
-    const run = await scenario({
-      CandidateA: { act: (f) => { f.files.candidateA = diff("FIX A BREAK"); } },
-      CandidateB: { stop: "aborted" },
-    });
-    expect(run.error).toMatch(/no valid candidate: A: failed acceptance checks: regress.*B: CandidateB did not finish normally/);
+  test("failed acceptance selects the applying patch with fewest failures, ties to A", async () => {
+    for (const [a, b, winner] of [["FIX A BREAK", undefined, "A"], ["BAD A BREAK", "FIX B BREAK", "B"], ["FIX A BREAK", "FIX B BREAK", "A"]] as const) {
+      const run = await scenario({
+        CandidateA: { act: (f) => { f.files.candidateA = diff(a); } },
+        CandidateB: b === undefined ? { stop: "aborted" } : { act: (f) => { f.files.candidateB = diff(b); } },
+        Integrator: { act: (f) => { f.files.canonical = diff("FIX integrated"); } },
+      });
+      expect(run.error).toBeUndefined();
+      expect(run.report).toContain("Final patch verified");
+      expect(JSON.parse(run.saved.get("tournament.json")!).winner).toBe(winner);
+      expect(JSON.parse(run.saved.get("tournament.json")!).degraded).toContain("regress");
+      expect(run.saved.get("selected.patch")).toBe(diff(winner === "A" ? a : b!));
+      expect(run.saved.get("scripted/Integrator.prompt")).toContain("# Selected patch failed acceptance checks");
+      expect(run.saved.get("scripted/Integrator.prompt")).toContain("regress (exit 1)");
+      expect(run.files.canonical).toBe(diff("FIX integrated"));
+    }
+  });
+
+  test("two abnormal contenders still fail without an applied patch", async () => {
+    const run = await scenario({ CandidateA: { stop: "error" }, CandidateB: { stop: "aborted" } });
+    expect(run.error).toMatch(/no valid candidate/);
     expect(run.at("Integrator:start")).toBe(-1);
     expect(run.files.canonical).toBe("");
   });
@@ -523,6 +605,176 @@ group("coordination", () => {
     const run = await scenario({ Integrator: { act: (f) => { f.files.canonical = diff("FIX A BREAK"); } } });
     expect(run.error).toMatch(/final acceptance checks failed: regress/);
     expect(run.report).toBeUndefined();
+  });
+});
+
+group("dormant topology capabilities", () => {
+  test("the incumbent routes every role to its non-Opus model and thinking level", async () => {
+    const agents = await syntax.resolveAgents(cb.document, { cwd: tmpdir(), tools: { bash: containerBash("unused", () => {}) } });
+    const sonnet = { model: "github-copilot/claude-sonnet-5.5", thinking: "high" } as const;
+    const haiku = { model: "github-copilot/claude-haiku-5.5", thinking: "medium" } as const;
+    const luna = { model: "github-copilot/gpt-6-luna", thinking: "medium" } as const;
+    expect(Object.fromEntries(agents.map(({ path }) => [path, cb.ladder[cb.strengthOf(path)]]))).toEqual({
+      Lead: sonnet, "Planner/Draft": sonnet, Integrator: sonnet,
+      CandidateA: haiku, Reproduce: haiku, Verifier: haiku,
+      CandidateB: luna, Contracts: luna, Trace: luna,
+    });
+    expect(["Lead", "Planner/Critic", "Integrator", "CandidateA", "Reproduce", "Verifier", "CandidateB", "Contracts", "Trace", "Other"]
+      .map((path) => cb.strengthOf(path))).toEqual(["xhigh", "xhigh", "high", "med", "med", "med", "low", "low", "smol", "med"]);
+  });
+
+  test("an alternate producer receives corrections while Draft runs only once", async () => {
+    const document = structuredClone(cb.document);
+    const planner = document.graph.nodes.Planner;
+    if (planner.kind !== "graph") throw new Error("expected Planner graph");
+    const level = planner.graph;
+    const promptSchema = level.edges!.find((edge) => edge.from === "$source")!.schema;
+    level.source = { routes: { "JoinEvidence~>Planner": ["$source~>Draft", "$source~>Critic"] } };
+    level.nodes.Draft.trigger = "$source~>Draft";
+    level.nodes.Critic = {
+      trigger: { any: ["Draft->Critic", "Critic->Critic"] },
+      prompt: "{{$source~>Critic}}\n\n# Draft plan\n{{Draft->Critic}}",
+    };
+    level.nodes.CheckPlan.trigger = "Critic->CheckPlan";
+    level.edges = [
+      { from: "$source", to: "Draft", kind: "message", schema: promptSchema },
+      { from: "$source", to: "Critic", kind: "message", schema: promptSchema },
+      { from: "Draft", to: "Critic", schema: {} },
+      { from: "Critic", to: "Critic", schema: {} },
+      { from: "Critic", to: "CheckPlan", schema: {} },
+      { from: "CheckPlan", to: "$sink", schema: {} },
+    ];
+    await withWorkflow(document, async (workflow) => {
+      checkDocument(workflow);
+      const run = await scenario({}, {
+        "Planner/Draft": drafts("initial draft based on evidence"),
+        "Planner/Critic": drafts(plan([CHECKS[0]]), plan(CHECKS)),
+      }, undefined, undefined, workflow);
+      expect(run.error).toBeUndefined();
+      expect(run.report).toContain("Final patch verified");
+      expect(run.draft.requests).toHaveLength(1);
+      const critic = run.agents.get("Planner/Critic")!;
+      expect(critic.requests).toHaveLength(2);
+      expect(corrections(critic)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
+      expect(corrections(critic)[0]).toContain("The plan has no regression check");
+      const first = JSON.stringify(critic.requests[0].messages);
+      expect(first).toContain("initial draft based on evidence");
+      expect(first).toContain("f(1) is wrong");
+      expect(first).toContain("Trace report");
+      expect(first).not.toContain("{{$source~>Critic}}");
+    });
+  });
+
+  test("two value producers into CheckPlan are rejected when the pair is imported", async () => {
+    const document = structuredClone(cb.document);
+    const planner = document.graph.nodes.Planner;
+    if (planner.kind !== "graph") throw new Error("expected Planner graph");
+    planner.graph.nodes.Other = { trigger: "Draft->Other", prompt: "another plan" };
+    planner.graph.nodes.CheckPlan.trigger = { any: ["Draft->CheckPlan", "Other->CheckPlan"] };
+    planner.graph.edges!.push(
+      { from: "Draft", to: "Other", schema: {} },
+      { from: "Other", to: "Other", schema: {} },
+      { from: "Other", to: "CheckPlan", schema: {} },
+    );
+    await expect(withWorkflow(document, async () => {})).rejects.toThrow("wf.yml: CheckPlan needs exactly one value in-edge whose producer has a self-edge");
+  });
+
+  test("Input publishes the same issue once on both outgoing message edges", async () => {
+    const document = structuredClone(cb.document);
+    document.graph.nodes.Observer = { trigger: "Input~>Observer", prompt: "{{Input~>Observer}}" };
+    document.graph.edges!.push({
+      ...document.graph.edges!.find((edge) => edge.from === "Input")!, to: "Observer",
+    });
+    document.graph.edges!.push({ from: "Observer", to: "$sink", schema: {} });
+    await withWorkflow(document, async (workflow) => {
+      const run = await scenario({}, undefined, undefined, undefined, workflow);
+      expect(run.error).toBeUndefined();
+      expect(run.report).toContain("Final patch verified");
+      const issue = "Repository: o/r (base commit " + "0".repeat(40) + ")\n\nf(1) is wrong";
+      for (const id of ["Lead", "Observer"]) {
+        expect(run.count(`${id}:start`)).toBe(1);
+        expect(run.saved.get(`scripted/${id}.prompt`)).toBe(issue);
+      }
+    });
+  });
+
+  test("JoinDrafts forwards two ordered named reports once and rejects an abnormal draft", async () => {
+    const document = structuredClone(cb.document);
+    const planner = document.graph.nodes.Planner;
+    if (planner.kind !== "graph") throw new Error("expected Planner graph");
+    const level = planner.graph;
+    const promptSchema = level.edges!.find((edge) => edge.from === "$source")!.schema;
+    level.source = { routes: { "JoinEvidence~>Planner": ["$source~>DraftA", "$source~>DraftB", "$source~>Merge"] } };
+    level.nodes = {
+      DraftA: { trigger: "$source~>DraftA", prompt: "{{$source~>DraftA}}" },
+      DraftB: { trigger: "$source~>DraftB", prompt: "{{$source~>DraftB}}" },
+      JoinDrafts: { kind: "code", trigger: { all: ["DraftA->JoinDrafts", "DraftB->JoinDrafts"] } },
+      Merge: { trigger: { any: ["JoinDrafts~>Merge", "Merge->Merge"] }, prompt: "{{$source~>Merge}}\n\n{{JoinDrafts~>Merge}}" },
+      CheckPlan: { ...level.nodes.CheckPlan, trigger: "Merge->CheckPlan" },
+    };
+    level.edges = [
+      ...["DraftA", "DraftB", "Merge"].map((to): syntax.EdgeSpec => ({ from: "$source", to, kind: "message", schema: promptSchema })),
+      { from: "DraftB", to: "JoinDrafts", schema: {} },
+      { from: "DraftA", to: "JoinDrafts", schema: {} },
+      { from: "JoinDrafts", to: "Merge", kind: "message", schema: promptSchema },
+      { from: "Merge", to: "Merge", schema: {} },
+      { from: "Merge", to: "CheckPlan", schema: {} },
+      { from: "CheckPlan", to: "$sink", schema: {} },
+    ];
+    await withWorkflow(document, async (workflow) => {
+      checkDocument(workflow);
+      const run = await scenario({}, {
+        "Planner/DraftA": drafts("first independent draft"),
+        "Planner/DraftB": drafts("second independent draft"),
+        "Planner/Merge": drafts(plan([CHECKS[0]]), plan(CHECKS)),
+      }, undefined, undefined, workflow);
+      expect(run.error).toBeUndefined();
+      expect(run.report).toContain("Final patch verified");
+      expect(run.saved.get("planning/drafts.md")).toBe("# Plan 1 (DraftA)\n\nfirst independent draft\n\n# Plan 2 (DraftB)\n\nsecond independent draft");
+      expect(run.count("save:planning/drafts.md")).toBe(1);
+      for (const path of ["Planner/DraftA", "Planner/DraftB"]) expect(run.agents.get(path)!.requests).toHaveLength(1);
+      const merge = run.agents.get("Planner/Merge")!;
+      expect(merge.requests).toHaveLength(2);
+      const first = JSON.stringify(merge.requests[0].messages);
+      for (const text of ["Plan 1 (DraftA)", "first independent draft", "Plan 2 (DraftB)", "second independent draft", "Trace report", "f(1) is wrong"]) expect(first).toContain(text);
+      expect(first).not.toContain("{{$source~>Merge}}");
+      expect(corrections(merge)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
+
+      const abnormal = await scenario({}, {
+        "Planner/DraftA": drafts([{ step: { kind: "settled", message: message("broken draft", "error") } }]),
+        "Planner/DraftB": drafts("second independent draft"),
+        "Planner/Merge": drafts(plan(CHECKS)),
+      }, undefined, undefined, workflow);
+      expect(abnormal.error).toMatch(/DraftA did not finish normally/);
+      expect(abnormal.agents.get("Planner/Merge")!.requests).toHaveLength(0);
+      expect(abnormal.saved.has("planning/drafts.md")).toBe(false);
+      expect(abnormal.at("CandidateA:start")).toBe(-1);
+    });
+  });
+
+  test("removing Integrator, Verifier, or both still reaches Finish with final acceptance checks", async () => {
+    for (const removed of [["Integrator"], ["Verifier"], ["Integrator", "Verifier"]]) {
+      const document = structuredClone(cb.document);
+      for (const id of removed) delete document.graph.nodes[id];
+      document.graph.edges = document.graph.edges!.filter((edge) => !removed.includes(edge.from) && !removed.includes(edge.to));
+      if (removed.includes("Integrator")) document.graph.nodes.Freeze.trigger = "Apply~>Freeze";
+      if (removed.includes("Verifier")) document.graph.nodes.Finish.trigger = "Freeze~>Finish";
+      await withWorkflow(document, async (workflow) => {
+        checkDocument(workflow);
+        const run = await scenario({}, undefined, undefined, undefined, workflow);
+        expect(run.error).toBeUndefined();
+        expect(run.report).toContain("Final patch verified");
+        expect(run.files.canonical).toBe(diff("FIX A"));
+        expect(run.files.acceptFinal).toBe(diff("FIX A"));
+        for (const id of removed) {
+          expect(run.at(`${id}:start`)).toBe(-1);
+          expect(run.saved.has(`${id.toLowerCase()}.md`)).toBe(false);
+        }
+        if (removed.includes("Integrator") && !removed.includes("Verifier")) expect(run.saved.get("scripted/Verifier.prompt")).toContain("(no integrator)");
+        if (removed.includes("Verifier")) expect(run.report).toContain("Verifier: none");
+        expect(JSON.parse(run.saved.get("final-checks.json")!).observed.map((check: cb.Check) => check.name)).toEqual(["repro", "regress"]);
+      });
+    }
   });
 });
 

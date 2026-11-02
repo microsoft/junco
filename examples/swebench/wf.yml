@@ -1,20 +1,21 @@
 # Shared divide-and-conquer SWE-bench workflow: one pair (wf.yml + wf.ts) for every prepared problem.
 #
 # Topology:
-#   Input (code) --> Lead (Opus) --> Assign (code: exactly one assignment per worker) --> Trace | Reproduce |
-#   Contracts (Sonnet, own sandboxes) --final reports--> JoinEvidence (code, all) --> Planner (nested graph:
-#   Draft (Opus) <-> CheckPlan (code: runs the plan's checks on the baseline, at most three correction turns))
-#   --accepted plan--> Dispatch (code: freezes the accepted checks) --> CandidateA | CandidateB
-#   (Sonnet, own sandboxes) --> ValidateA | ValidateB (code: capture patch, pristine acceptance sandbox)
-#   --verdicts--> TournamentGate (code, any: first valid verdict wins, loser cancelled) --> Apply (code)
-#   --> Integrator (Opus, canonical /testbed) --> Freeze (code) --> Verifier (Sonnet, canonical, read-only)
+#   Input (code) --> Lead (Sonnet) --> Assign (code: one assignment per worker) --> Trace | Reproduce |
+#   Contracts (Luna/Haiku, own sandboxes) --final reports--> JoinEvidence (code, all) --> Planner (nested graph:
+#   Draft (Sonnet) <-> CheckPlan (code: baseline checks, at most three correction turns))
+#   --accepted plan--> Dispatch (code: freezes surviving checks) --> CandidateA (Haiku) | CandidateB (Luna)
+#   (own sandboxes) --> ValidateA | ValidateB (code: capture patch, pristine acceptance sandbox)
+#   --verdicts--> TournamentGate (code, any: first valid or least-bad applying patch) --> Apply (code)
+#   --> Integrator (Sonnet, canonical /testbed) --> Freeze (code) --> Verifier (Haiku, canonical, read-only)
 #   --> Finish (code: unchanged deliverable, final checks in a pristine sandbox) --> $sink.
 # Agents hand off only through their final answers (value edges); code nodes publish every message. (Live
 # preflight: Sonnet 5 on Copilot passes `send`'s untyped payload as a JSON string, which the edge rejects.)
-# Termination: Finish returns the terminal report. A missing or abnormal report or assignment, a plan still
-# rejected after three correction turns, two invalid candidates, a changed deliverable or a failed final check
-# throws: the run fails explicitly.
-# Models and strengths live in wf.ts (ladder + strength scheduler); sandboxes are bound by the runner.
+# Termination: Finish returns the terminal report. After three corrections a parsed plan keeps surviving
+# checks; if both patches fail acceptance, an applying patch with the fewest failed checks reaches Integrator.
+# Malformed plans, two non-applying candidates, changed deliverables and failed final checks still fail explicitly.
+# Models: Sonnet 5.5 high for Lead/Planner/Integrator; Haiku 5.5 medium for CandidateA/Reproduce/Verifier;
+# GPT-6 Luna medium for CandidateB/Contracts/Trace. Rungs and sandboxes live in wf.ts.
 graph:
   name: SweBenchCB
   threads: unbounded
@@ -147,9 +148,8 @@ graph:
     Planner:
       kind: graph
       description: >-
-        Turns the joined evidence into one structured plan with frozen checks and two candidate assignments;
-        CheckPlan returns rejected drafts to Draft for at most three correction turns, and only the accepted
-        plan reaches Dispatch.
+        Turns joined evidence into a structured plan with frozen checks and two candidate assignments;
+        CheckPlan corrects rejected drafts at most three times, then keeps a parsed draft's surviving checks.
       trigger: JoinEvidence~>Planner
       graph:
         name: Planner
@@ -216,8 +216,8 @@ graph:
           CheckPlan:
             kind: code
             description: >-
-              Parses each new draft and runs its checks one by one on the clean canonical baseline; returns the
-              first accepted plan, otherwise stages a correction turn on Draft, failing after the third.
+              Runs draft checks on the clean baseline; stages at most three corrections, then submits a parsed
+              plan with its surviving checks. A malformed fourth draft still fails.
             trigger: Draft->CheckPlan
         edges:
           - {from: $source, to: Draft, kind: message, schema: &prompt {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string, pattern: "\\S"}}}}
@@ -365,18 +365,18 @@ graph:
     - {from: Planner, to: Dispatch, schema: {}}
     - {from: Dispatch, to: CandidateA, kind: message, schema: *prompt}
     - {from: Dispatch, to: CandidateB, kind: message, schema: *prompt}
-    - {from: Dispatch, to: ValidateA, kind: message, schema: &acceptance {type: object, required: [checks], properties: {checks: {type: array, minItems: 2}}}}
+    - {from: Dispatch, to: ValidateA, kind: message, schema: &acceptance {type: object, required: [checks], properties: {checks: {type: array}}}}
     - {from: Dispatch, to: ValidateB, kind: message, schema: *acceptance}
-    - {from: Dispatch, to: Apply, kind: message, schema: {type: object, required: [brief, checks], properties: {brief: {type: string}, checks: {type: array, minItems: 2}}}}
+    - {from: Dispatch, to: Apply, kind: message, schema: {type: object, required: [brief, checks], properties: {brief: {type: string}, checks: {type: array}}}}
     - {from: CandidateA, to: ValidateA, schema: {}}
     - {from: CandidateB, to: ValidateB, schema: {}}
     - {from: ValidateA, to: TournamentGate, kind: message, schema: &verdict {type: object, required: [branch, valid, reason, patch, checks], properties: {branch: {enum: [A, B]}, valid: {type: boolean}, reason: {type: string}, patch: {type: string}, checks: {type: array}}}}
     - {from: ValidateB, to: TournamentGate, kind: message, schema: *verdict}
     - {from: TournamentGate, to: Apply, kind: message, schema: {type: object, required: [winner, verdicts, cleanup], properties: {winner: {enum: [A, B]}, verdicts: {type: array}, cleanup: {type: array, items: {type: string}}}}}
     - {from: Apply, to: Integrator, kind: message, schema: *prompt}
-    - {from: Apply, to: Freeze, kind: message, schema: {type: object, required: [brief, checks, summary], properties: {brief: {type: string}, checks: {type: array, minItems: 2}, summary: {type: string}}}}
+    - {from: Apply, to: Freeze, kind: message, schema: {type: object, required: [brief, checks, summary], properties: {brief: {type: string}, checks: {type: array}, summary: {type: string}}}}
     - {from: Integrator, to: Freeze, schema: {}}
     - {from: Freeze, to: Verifier, kind: message, schema: *prompt}
-    - {from: Freeze, to: Finish, kind: message, schema: {type: object, required: [patch, checks, summary], properties: {patch: {type: string, pattern: "\\S"}, checks: {type: array, minItems: 2}, summary: {type: string}}}}
+    - {from: Freeze, to: Finish, kind: message, schema: {type: object, required: [patch, checks, summary], properties: {patch: {type: string, pattern: "\\S"}, checks: {type: array}, summary: {type: string}}}}
     - {from: Verifier, to: Finish, schema: {}}
     - {from: Finish, to: $sink, schema: {}}

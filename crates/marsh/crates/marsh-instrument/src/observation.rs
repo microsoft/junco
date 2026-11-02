@@ -342,6 +342,11 @@ impl Observer {
                     .iter()
                     .all(|(tid, task)| task.exiting || self.held.contains_key(tid))
             {
+                // A held attachment stop may already have a successor EXIT queued.
+                if let Waited::Stop(tid, status) = wait_ready(true)? {
+                    self.stop(tid, status, observe)?;
+                    continue;
+                }
                 // exit_group/SIGKILL can replace a newborn's attachment stop with EXIT before
                 // its creator's event message can be read. An exit stop must reach its final
                 // wait, but only after every possible creator is exiting: otherwise its late

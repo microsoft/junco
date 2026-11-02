@@ -466,10 +466,6 @@ test("the saved prompt is the final converted request, unaffected by later reque
 });
 
 test("a bound complaint context is cleared after normal and thrown work", async () => {
-  const observed: [string, string][] = [];
-  const tracer = {
-    complain: (id: string, complaint: string) => observed.push([id, complaint]),
-  };
   const { agent } = await newAgent(
     [
       toolTurn(complainCall("bound", "c-bound")),
@@ -485,9 +481,8 @@ test("a bound complaint context is cleared after normal and thrown work", async 
       { id: EdgeId.create("source->worker"), payload: { kind: "prompt" } },
     ];
     const before = issueLog.length;
-    await agent.runWithNodeContext(
-      { complaint: { nodeId, messages, tracer } },
-      () => promptSettles(agent, "bound"),
+    await agent.runWithNodeContext({ complaint: { nodeId, messages } }, () =>
+      promptSettles(agent, "bound"),
     );
     await assert.rejects(
       agent.runWithNodeContext(
@@ -514,7 +509,6 @@ test("a bound complaint context is cleared after normal and thrown work", async 
         [agent.nodeId, [], "standalone"],
       ],
     );
-    assert.deepEqual(observed, [["bound-node", "bound"]]);
   } finally {
     await agent.return();
   }

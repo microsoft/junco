@@ -10,7 +10,7 @@ ARG RUST_VERSION=1.98.1
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     build-essential pkg-config clang libclang-dev llvm-dev libbtrfsutil-dev zlib1g-dev \
-    btrfs-progs ca-certificates curl git mount python3 util-linux unzip xz-utils \
+    btrfs-progs ca-certificates curl docker.io git mount python3 util-linux unzip xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
 # Bun's temporary node-gyp shim is not found by install scripts that spawn node-gyp themselves

@@ -30,7 +30,6 @@ import type {
 import {
   bytes,
   constantProfile,
-  type DataflowTracer,
   type ParentView,
   type ProfileSet,
   type ResourceQuantity,
@@ -685,14 +684,11 @@ export class MockAgent<
 
   // Complaints -------------------------------------------------------------------------------------
 
-  /** Append a complete `issue` to the shared {@link issueLog}, then notify `tracer`. */
-  complain<C extends TSchema>(
-    issue: Issue<C>,
-    tracer?: Pick<DataflowTracer, "complain">,
-  ): void {
-    this.#record("complain", tracer === undefined ? [issue] : [issue, tracer]);
+  /** Append a complete `issue` to the shared {@link issueLog}. */
+  complain<C extends TSchema>(issue: Issue<C>): void {
+    this.#record("complain", [issue]);
     if (this.#closing) throw closedError();
-    issueLog.append(issue, tracer);
+    issueLog.append(issue);
   }
 
   /** The process-wide complaint history every agent and graph shares. */

@@ -96,8 +96,6 @@ class RecordingTracer implements DataflowTracer {
     };
   }
 
-  complain(): void {}
-
   flush(): Promise<void> {
     return Promise.resolve();
   }
@@ -210,9 +208,6 @@ test("a throwing observer can neither replace a node's return nor its failure", 
           throw new Error("observer run fail");
         },
       }),
-      complain() {
-        throw new Error("observer complain");
-      },
       flush: () => Promise.resolve(),
     };
 

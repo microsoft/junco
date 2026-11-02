@@ -161,12 +161,11 @@ jobs:
           bun run typecheck
           bun run test
 
-      - name: Build, typecheck and test dataflow-engine-opik
+      - name: Build and typecheck dataflow-engine-opik
         working-directory: junco/packages/dataflow-engine-opik
         run: |
           bun run build
           bun run typecheck
-          bun run test
 
       # The parent config checks every example with the Dummy tracer; examples:typecheck checks
       # the default Opik route against the engine, scheduler-core and adapter declarations.

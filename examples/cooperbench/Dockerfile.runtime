@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build-only toolchains; final targets contain only the relocatable payload.
 FROM node:22.19.0-bullseye-slim@sha256:bf4ef0c41a3224fa8602a77e5ad02e67f81114fab5c61bd1fa9df47cb45e6c2f AS build-gnu
 ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
@@ -8,7 +7,7 @@ RUN printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' 'deb http
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential pkg-config clang libclang-dev llvm-dev libbtrfsutil-dev \
       btrfs-progs zlib1g-dev ca-certificates curl git unzip xz-utils \
-      python3 pax-utils patchelf binutils libxcb1 \
+      python3 pax-utils patchelf binutils libxcb1 libblkid-dev uuid-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s ../lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js /usr/local/bin/node-gyp
 RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o /tmp/bun.zip \
@@ -16,6 +15,15 @@ RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-l
     && rm /tmp/bun.zip \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.98.1
+# 5.10's async snapshot ioctl was removed; build the current synchronous ABI on the same Bullseye libc.
+RUN curl -fsSL https://www.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/btrfs-progs-v6.12.tar.xz -o /tmp/btrfs.tar.xz \
+    && echo '9a7d9651ffd52fbe5212a8e4852a3cdb079e3d223fc5504e6a50b0ba96cd20a1  /tmp/btrfs.tar.xz' | sha256sum --check - \
+    && tar -xJf /tmp/btrfs.tar.xz -C /tmp \
+    && cd /tmp/btrfs-progs-v6.12 \
+    && ./configure --disable-programs --disable-documentation --disable-convert --disable-python \
+      --disable-zoned --disable-libudev --disable-lzo --disable-zstd --disable-backtrace --disable-static \
+    && make -j2 && make install && ldconfig \
+    && rm -rf /tmp/btrfs.tar.xz /tmp/btrfs-progs-v6.12
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig*.json rust-toolchain.toml ./
 COPY src/ ./src/
