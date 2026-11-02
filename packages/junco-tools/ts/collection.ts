@@ -12,6 +12,7 @@ import { EditTool } from "./edit.js";
 import { FindTool } from "./find.js";
 import { CodeGraphTool } from "./graph.js";
 import { GrepTool } from "./grep.js";
+import type { JuncoMemory } from "./memory.js";
 import type { NativeModule } from "./native.js";
 import { ShellMuxOperations } from "./operations.js";
 import type { Policy } from "./policy.js";
@@ -28,6 +29,8 @@ import { resolveToolPath, trackPromise } from "./tool-support.js";
 
 export interface ToolCollectionOptions {
   bash?: BashToolOptions;
+  /** Caller-owned optional memory; collection teardown never closes it. */
+  memory?: JuncoMemory;
   /** The addon to open this collection's mux with; loaded on demand when omitted. */
   native?: NativeModule;
   /** Routing mode of this collection's mux (default "shared"). */
@@ -270,6 +273,7 @@ export class ToolCollection {
         AstEditTool.create(root, native, mux, recorder),
         DiffTool.create(native, recorder),
         CodeGraphTool.create(root, native, mux, recorder),
+        ...(options.memory?.tools(recorder) ?? []),
       ];
       return new ToolCollection(
         mux,

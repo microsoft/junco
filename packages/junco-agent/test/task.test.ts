@@ -1,5 +1,10 @@
+import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type AgentTool,
   BACKGROUND_CONTEXT,
@@ -16,8 +21,11 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
+import { NodeId } from "dataflow-engine";
 import {
   AssignedTaskTool,
+  invokeMemoryTool,
+  JuncoMemory,
   type TaskInput,
   TaskTool,
   type TaskToolDetails,
@@ -1565,6 +1573,199 @@ function childrenOf(agent: JuncoAgent): JuncoAgent[] {
   agent.setSubagentObserver({ acquired: (child) => children.push(child) });
   return children;
 }
+
+test(
+  "memory: hosted tasks use their returned task NodeId, isolated from their parent",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "junco-task-memory-"));
+    const memory = new JuncoMemory({ directory });
+    const tools = memory.tools();
+    const r = providers("caller", "worker");
+    const parentNode = NodeId.create("Parent");
+    const parentText = "Parent sharedsentinel";
+    const childText = "Child sharedsentinel";
+    let parentRecord: { id: string; text: string };
+    let childRecord: { id: string; text: string };
+    let handle: TaskToolDetails["tasks"][number] | undefined;
+    let parent: JuncoAgent | undefined;
+    let checkedParent = false;
+    let checkedChild = false;
+    let requestedParentSearch = false;
+    try {
+      r.script("worker", [
+        toolTurn(
+          fauxToolCall(
+            "save_memory",
+            { text: childText },
+            { id: "child-save" },
+          ),
+        ),
+        (context) => {
+          const saved = toolResultOf(context.messages, "child-save");
+          assert.equal(saved.isError, false);
+          childRecord = saved.details as typeof childRecord;
+          assert.equal(childRecord.text, childText);
+          assert.notEqual(childRecord.id, parentRecord.id);
+          return toolTurn(
+            fauxToolCall(
+              "search_memory",
+              { query: "sharedsentinel" },
+              { id: "child-search" },
+            ),
+            fauxToolCall(
+              "forget_memory",
+              { id: parentRecord.id },
+              { id: "child-forget-parent" },
+            ),
+          );
+        },
+        (context) => {
+          const search = toolResultOf(context.messages, "child-search");
+          assert.equal(search.isError, false);
+          assert.deepEqual(search.details, { memories: [childRecord] });
+          const forgotten = toolResultOf(
+            context.messages,
+            "child-forget-parent",
+          );
+          assert.equal(forgotten.isError, false);
+          assert.deepEqual(forgotten.details, {
+            id: parentRecord.id,
+            forgotten: false,
+          });
+          checkedChild = true;
+          return fauxAssistantMessage(JSON.stringify(childRecord));
+        },
+      ]);
+      r.script("caller", [
+        toolTurn(
+          fauxToolCall(
+            "save_memory",
+            { text: parentText },
+            { id: "parent-save" },
+          ),
+        ),
+        (context) => {
+          const saved = toolResultOf(context.messages, "parent-save");
+          assert.equal(saved.isError, false);
+          parentRecord = saved.details as typeof parentRecord;
+          assert.equal(parentRecord.text, parentText);
+          return toolTurn(
+            taskCall("launch", {
+              context: "shared assignment",
+              tasks: [
+                {
+                  name: "DisplayWorker",
+                  task: "save and check memory",
+                  model: r.model("worker"),
+                  tools: tools.map(({ name }) => name),
+                },
+              ],
+            }),
+          );
+        },
+        ...Array.from({ length: 8 }, () => (context: Context) => {
+          const launched = toolResultOf(context.messages, "launch");
+          assert.equal(launched.isError, false);
+          handle = (launched.details as TaskToolDetails).tasks[0];
+          assert.ok(handle);
+          const report = reportsIn(context).find(({ id }) => id === handle!.id);
+          if (report !== undefined && !requestedParentSearch) {
+            assert.equal(report.status, "completed");
+            assert.deepEqual(JSON.parse(report.output!), childRecord);
+            requestedParentSearch = true;
+            return toolTurn(
+              fauxToolCall(
+                "search_memory",
+                { query: "sharedsentinel" },
+                { id: "parent-search" },
+              ),
+              fauxToolCall(
+                "forget_memory",
+                { id: childRecord.id },
+                { id: "parent-forget-child" },
+              ),
+            );
+          }
+          if (requestedParentSearch && !checkedParent) {
+            const search = toolResultOf(context.messages, "parent-search");
+            assert.equal(search.isError, false);
+            assert.deepEqual(search.details, { memories: [parentRecord] });
+            const forgotten = toolResultOf(
+              context.messages,
+              "parent-forget-child",
+            );
+            assert.equal(forgotten.isError, false);
+            assert.deepEqual(forgotten.details, {
+              id: childRecord.id,
+              forgotten: false,
+            });
+            checkedParent = true;
+          }
+          return fauxAssistantMessage(
+            markersIn(context).length > 0 && checkedParent
+              ? "isolated final"
+              : "waiting",
+          );
+        }),
+      ]);
+      parent = await caller(r, [new TaskTool(), ...tools]);
+      const active = parent;
+      const children = childrenOf(active);
+      const result = await active.runWithNodeContext(
+        { nodeId: parentNode },
+        () => active.prompt("save then delegate"),
+      );
+      assert.equal(blockText(result.content), "isolated final");
+      assert.equal(checkedParent, true);
+      assert.equal(checkedChild, true);
+      assert.equal(children.length, 1);
+      for (const tool of tools)
+        assert.ok(children[0]!.getTools().includes(tool));
+      assert.ok(handle);
+      assert.notEqual(handle.id, parentNode);
+      assert.notEqual(handle.id, "DisplayWorker");
+      assert.equal(active.getTaskResults()[0]!.id, handle.id);
+      memory.close();
+      const reopened = new JuncoMemory({ directory });
+      try {
+        const search = reopened
+          .tools()
+          .find(({ name }) => name === "search_memory")!;
+        for (const [node, record] of [
+          [parentNode, parentRecord!],
+          [NodeId.create(handle.id), childRecord!],
+        ] as const) {
+          const found = await invokeMemoryTool(search, node, "durable", {
+            query: "sharedsentinel",
+          });
+          assert.deepEqual(found.details, { memories: [record] });
+          const filename = `${createHash("sha256").update(node, "utf8").digest("hex")}.sqlite`;
+          const database = new Database(join(directory, filename), {
+            readonly: true,
+          });
+          try {
+            assert.deepEqual(
+              database.query("SELECT key, value, source FROM semantic").all(),
+              [{ key: record.id, value: record.text, source: node }],
+            );
+          } finally {
+            database.close();
+          }
+        }
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        await parent?.return();
+      } finally {
+        memory.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  },
+  TIMEOUT,
+);
 
 test(
   "native tasks start at admission while the caller works; its run settles after their reports",

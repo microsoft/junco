@@ -141,6 +141,43 @@ For deterministic offline SDK tests, pass `modelRuntime: await ModelRuntime.crea
 
 Each collection owns one snapshot store, so `read`, `grep`, and `edit` share anchors, seen-line provenance, and named clipboard registers; two collections share none of it, and each has its own mux. The store is in-memory only. Its readonly `policy`, `mux`, and `native` let explicit borrowers reuse it. Lifetime is reference-counted: `close()` releases the creator's hold once; `lease()` takes another hold and returns a handle whose idempotent `close()` releases it. Borrowers close their handle, never the collection. Only the final release aborts and joins the collection's tool calls and default bash commands, rejects every retained tool, and closes its mux; other collections are untouched. Pass `sandbox: "always"` to sandbox every shell command and writing file tool. New files are still created with Pi's built-in `write`.
 
+### Optional NodeId-scoped memory
+
+`JuncoMemory` adds only `save_memory`, `search_memory`, and `forget_memory`; it is not enabled by the global Pi extension. Configure its directory in trusted workflow TypeScript, then pass the caller-owned wrapper to `ToolCollection.create(cwd, { memory })`. Without that option, the collection keeps its current ten tools. Importing the package, constructing the wrapper, or denying an unbound call opens no memory database.
+
+```ts
+import { join } from "node:path";
+import { NodeId } from "dataflow-engine";
+import { invokeMemoryTool, JuncoMemory, ToolCollection } from "junco-tools";
+
+const cwd = process.cwd();
+const memory = new JuncoMemory({ directory: join(cwd, ".junco", "memory") });
+try {
+  const collection = await ToolCollection.create(cwd, { memory });
+  try {
+    // Explicit trusted host dispatch; Junco's graph/task hosts bind their actual NodeIds automatically.
+    const save = collection.tools.find((tool) => tool.name === "save_memory")!;
+    await invokeMemoryTool(save, NodeId.create("Worker"), "save-1", { text: "Project Junco uses SQLite for durable memory" });
+  } finally { await collection.close(); }
+} finally { memory.close(); }
+```
+
+| Tool | Input | JSON `details` / `structuredContent` |
+|---|---|---|
+| `save_memory` | `{ text: string }` | `{ id, text }`; each save has a distinct UUID |
+| `search_memory` | `{ query: string, k?: integer }` | `{ memories: [{ id, text }, ...] }` in backend relevance order; default 5, range 1–20; no hits is an empty array |
+| `forget_memory` | `{ id: string }` | `{ id, forgotten: boolean }`; only exact keys, unknown/foreign/already-deleted is `false` |
+
+Fields must contain non-whitespace text and extra properties are rejected, including a model-supplied `nodeId`, scope or database. The tool's calling NodeId is captured from the host, never inferred from its name, policy owner, constructor identity or input. It is exact and case-sensitive: `Worker` and `worker` cannot search/delete each other's records, even with a known foreign record ID. Equal IDs across graphs/runs intentionally share when the configured directory is the same; another directory is isolated. Each exact NodeId selects a SHA-256-named SQLite file, and saved rows retain the exact ID as `source`.
+
+`JuncoAgentNodeContext.nodeId` is optional for existing profiling/messaging hosts, but its absence denies memory access. Graph activations supply their registration/YAML ID; hosted tasks supply their actual task ID. Other trusted hosts must bind it explicitly. Standalone runners call `invokeMemoryTool` with a branded `NodeId`; direct `execute` or an undefined identity rejects with `JuncoMemory requires a NodeId-bound agent context`. `isMemoryTool` recognizes genuine objects, not copies or same-named custom tools. Dispatch still passes through the tool's existing collection fences, cancellation and profile admission. Each real operation records once under resource `operations`, category `memory`; resource `memory` continues to mean process memory usage.
+
+Every `memory.tools(recorder?)` returns fresh genuine objects sharing the wrapper's stores. Bindings with the same host NodeId share records. Closing a binding fences only its calls; final collection release fences its tools but **never closes memory**. Close graph → flush tracer → close collection → `memory.close()`, with nested `finally` blocks; also close memory if collection construction fails. `close()` is synchronous/idempotent, closes all opened stores, preserves files/records and fences retained direct tools. Storage errors propagate rather than becoming empty searches or successful writes. No automatic forgetting, migration from Pi's global store, retention policy or system-prompt injection is performed; recalled text is untrusted reference data, not instructions.
+
+The adapter lazily uses only the named `MemoryStore` from pinned MIT `@samfp/pi-memory@1.6.1`, through its published JavaScript bundle, on Node ≥22.19 or Bun. It does not activate the extension lifecycle, embeddings, consolidation, extra model calls, AWS integrations or credentials; ordinary Pi agents keep their existing `auth.json` behavior. SQLite is local and synchronous: a pre-aborted write cannot mutate, but in-flight cancellation cannot interrupt/undo committed SQL. This API's NodeId boundary is not an OS sandbox, and its files are not Marsh-owned: filesystem-capable tools can read the configured directory unless restricted separately.
+
+For `workflows.memoryRalphLoop`, `workflows.memoryFanIn`, `workflows.memoryFanOut`, and `schedules.memory({ memory, ralph? })`, see the [root workflow documentation](../../README.md#optional-durable-memory). The dedicated `Memory` component owns shared workflow records. Streaming fan-in retains best-so-far (unlike base anyFanIn's latest batch); fan-out broadcasts assignments and persisted updates over **message edges only**. All/any wrapper triggers synchronize/stream worker candidate messages without cancelling racers. Workers, shards and termination remain caller-owned; close/abort ends parked streaming components.
+
 ### Bare Agent: individual tools
 
 Every tool also has its own factory. The file tools take the native module and the mux explicitly, so a missing or mismatched addon fails at your `import`, not inside a tool call. Construct one `EditStore` and pass that same store to every `read`, `grep`, and `edit` you create: `edit` only accepts anchors that a tool sharing its store displayed.

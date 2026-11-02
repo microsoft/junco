@@ -12,3 +12,4 @@ export const optimizer: string = optimizerSource;
 export const allFanIn: string = allFanInSource;
 /** One streamed selection per newly delivered candidate batch; drive with `schedules.anyFanIn`. */
 export const anyFanIn: string = anyFanInSource;
+export { memoryFanIn, memoryFanOut, memoryRalphLoop } from "./memory.js";

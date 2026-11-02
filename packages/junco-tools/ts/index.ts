@@ -73,6 +73,12 @@ export {
   type LspToolOptions,
 } from "./lsp.js";
 export {
+  invokeMemoryTool,
+  isMemoryTool,
+  JuncoMemory,
+  type JuncoMemoryOptions,
+} from "./memory.js";
+export {
   InfoTool,
   RecvTool,
   type RecvToolHost,

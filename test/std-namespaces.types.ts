@@ -1468,3 +1468,74 @@ export function fanInSelectorTypes() {
   };
   return [all, any, merged];
 }
+
+export function scopedMemoryTypes(tool: AgentTool, nodeId: graph.NodeIdType) {
+  const options: tools.JuncoMemoryOptions = { directory: ".junco/memory" };
+  const memory = new tools.JuncoMemory(options);
+  const collection: tools.ToolCollectionOptions = { memory };
+  const context: agent.JuncoAgentNodeContext = { nodeId };
+  const unrelated: agent.JuncoAgentNodeContext = {};
+  const genuine: boolean = tools.isMemoryTool(tool);
+  const result = tools.invokeMemoryTool(tool, nodeId, "call", {
+    text: "memory",
+  });
+  tools.invokeMemoryTool(tool, undefined, "unbound", {});
+  // @ts-expect-error directory is required
+  new tools.JuncoMemory({});
+  // @ts-expect-error directory must be a string
+  new tools.JuncoMemory({ directory: 1 });
+  // @ts-expect-error host identities must be branded
+  tools.invokeMemoryTool(tool, "Worker", "call", {});
+  // @ts-expect-error context identities must be branded
+  const invalid: agent.JuncoAgentNodeContext = { nodeId: "Worker" };
+  return { memory, collection, context, unrelated, genuine, result, invalid };
+}
+
+export function memoryWorkflowTypes(memory: tools.JuncoMemory) {
+  const ralph: string = workflows.memoryRalphLoop;
+  const fanIn: string = workflows.memoryFanIn;
+  const fanOut: string = workflows.memoryFanOut;
+  const options: schedules.MemoryScheduleOptions = {
+    memory,
+    ralph: {
+      rounds: 3,
+      until: (result, context) => {
+        const assignment: string = context.assignment;
+        const round: number = context.round;
+        return (
+          result.stopReason === "stop" && assignment.length > 0 && round > 0
+        );
+      },
+    },
+  };
+  const controller = schedules.memory(options);
+  const available: NonNullable<syntax.BuildOptions["available"]> =
+    controller.available;
+  const code: {
+    readonly Memory: syntax.DeterministicNode;
+    readonly AnyFanInPublish: syntax.DeterministicNode;
+  } = controller.code;
+  const exactCodeKeys: keyof typeof controller.code = "Memory";
+  const hooks: Pick<syntax.FromYamlOptions, "available" | "code"> = controller;
+  schedules.memory({ memory });
+  // @ts-expect-error a caller-owned memory wrapper is required
+  schedules.memory({});
+  // @ts-expect-error memory options are required
+  schedules.memory();
+  // @ts-expect-error a directory is not a JuncoMemory wrapper
+  schedules.memory({ memory: { directory: ".junco/memory" } });
+  // @ts-expect-error memory Ralph predicates must decide synchronously
+  schedules.memory({ memory, ralph: { until: async () => true } });
+  // @ts-expect-error the helper does not generate worker code nodes
+  const worker: keyof typeof controller.code = "Worker";
+  return {
+    ralph,
+    fanIn,
+    fanOut,
+    available,
+    code,
+    exactCodeKeys,
+    hooks,
+    worker,
+  };
+}

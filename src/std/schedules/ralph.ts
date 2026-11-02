@@ -3,7 +3,12 @@
 // round (or, with `until`, the first successful one) reaches $sink. A native yield resumes the
 // running node without counting as a round.
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { EdgeId, NodeId, type ParentView } from "dataflow-engine";
+import {
+  EdgeId,
+  type EdgeIdType,
+  NodeId,
+  type ParentView,
+} from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { AgenticInputSchema, JuncoAgent } from "junco-agent";
 import type { TSchema } from "typebox";
@@ -54,25 +59,16 @@ const LOOP = "Ralph->Ralph";
  * @throws {RangeError} when `rounds` is not a positive safe integer.
  * @throws {TypeError} when `until` is not a function.
  */
-export function ralph(options: RalphOptions = {}): {
-  readonly available: Availability;
-} {
+export function createRalphController(options: RalphOptions = {}) {
   const { until } = options;
   const rounds = options.rounds ?? (until === undefined ? 2 : undefined);
   if (rounds !== undefined && !(Number.isSafeInteger(rounds) && rounds >= 1))
     throw new RangeError("Ralph rounds must be a positive safe integer");
   if (until !== undefined && typeof until !== "function")
     throw new TypeError("Ralph until must be a function");
-  const progress = new WeakMap<JuncoGraph<TSchema, unknown>, Progress>();
-  /**
-   * Every distinct retained result of Ralph completes one round on this graph level and is decided
-   * once; a success-mode failure is cached so later probes rethrow it without another call.
-   */
-  const track = (
-    graph: JuncoGraph<TSchema, unknown>,
-    label: string,
-  ): Progress => {
-    let p = progress.get(graph);
+  const levels = new WeakMap<JuncoGraph<TSchema, unknown>, Progress>();
+  const progress = (graph: JuncoGraph<TSchema, unknown>): Progress => {
+    let p = levels.get(graph);
     if (p === undefined) {
       p = {
         completed: 0,
@@ -81,8 +77,20 @@ export function ralph(options: RalphOptions = {}): {
         done: false,
         failure: undefined,
       };
-      progress.set(graph, p);
+      levels.set(graph, p);
     }
+    if (p.failure !== undefined) throw p.failure.error;
+    return p;
+  };
+  /**
+   * Every distinct retained result of Ralph completes one round on this graph level and is decided
+   * once; a success-mode failure is cached so later probes rethrow it without another call.
+   */
+  const track = (
+    graph: JuncoGraph<TSchema, unknown>,
+    label: string,
+  ): Progress => {
+    const p = progress(graph);
     const current = O.toUndefined(graph.result(NODE));
     if (
       p.failure === undefined &&
@@ -116,12 +124,12 @@ export function ralph(options: RalphOptions = {}): {
     return p;
   };
   const first =
-    (p: Progress): Prompt =>
+    (p: Progress, input: EdgeIdType): Prompt =>
     (inputs) => {
-      const batch = inputs.messages.get(INPUT) ?? [];
+      const batch = inputs.messages.get(input) ?? [];
       const foreign =
         [...inputs.messages.keys()].some(
-          (id) => id !== INPUT && (inputs.messages.get(id)?.length ?? 0) > 0,
+          (id) => id !== input && (inputs.messages.get(id)?.length ?? 0) > 0,
         ) || [...inputs.values.keys()].length > 0;
       const [assignment] = batch;
       if (
@@ -143,6 +151,14 @@ export function ralph(options: RalphOptions = {}): {
       const previous = finalText(p.last, "Ralph");
       return `${p.assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
     };
+  return { progress, track, first, revision };
+}
+
+/** Availability hooks for the original, non-memory Ralph workflow. */
+export function ralph(options: RalphOptions = {}): {
+  readonly available: Availability;
+} {
+  const { track, first, revision } = createRalphController(options);
   return {
     available: {
       Ralph: ({ graph, edges, label }) =>
@@ -158,7 +174,9 @@ export function ralph(options: RalphOptions = {}): {
                 throw new TypeError("Ralph must be an agent node");
               // Only an idle agent is staged, once per round; repeated availability probes are safe.
               if (agent.status === "idle")
-                agent.stagePrompt(p.completed === 0 ? first(p) : revision(p));
+                agent.stagePrompt(
+                  p.completed === 0 ? first(p, INPUT) : revision(p),
+                );
               return agent.status === "ready";
             }
           : undefined,

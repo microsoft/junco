@@ -64,7 +64,9 @@ import {
   InfoTool,
   type Issue,
   invokeComplainTool,
+  invokeMemoryTool,
   isComplainTool,
+  isMemoryTool,
   issueLog,
   isYieldTool,
   type ProfileOperation,
@@ -193,6 +195,8 @@ export type TaskResult = {
  * outgoing routes and topology for recv/send/info, and complaint attribution.
  */
 export type JuncoAgentNodeContext<N extends TSchema = TSchema, T = unknown> = {
+  /** The host's authoritative NodeId for this activation; absence denies memory access. */
+  readonly nodeId?: NodeIdType;
   readonly messaging?: NonNullable<
     ConstructorParameters<typeof RecvTool<N, T>>[0]
   > &
@@ -1494,9 +1498,9 @@ export class JuncoAgent<
         const recorder = this.#currentRecorder();
         // Captured before any await: the activation bound now, never a stale ambient context.
         const usage = this.#usageOf(run);
+        const node = this.#nodeContext;
         const dispatch = async (): Promise<AgentToolResult<unknown>> => {
           try {
-            const node = this.#nodeContext;
             if (TaskTool.is(tool)) {
               // A tool's own explicit host, else this run's native tasks.
               const host: TaskToolHost =
@@ -1576,6 +1580,15 @@ export class JuncoAgent<
                 signal,
               );
             }
+            if (isMemoryTool(tool))
+              return await invokeMemoryTool(
+                selected,
+                node?.nodeId,
+                id,
+                params,
+                signal,
+                (update) => onUpdate(update),
+              );
             return await selected.execute(id, params, signal, (update) =>
               onUpdate(update),
             );

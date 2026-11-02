@@ -25,17 +25,22 @@ import {
   type ImageContent,
   InMemoryCredentialStore,
   type Model,
+  type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   EdgeId,
   isUsageLimitError,
+  NodeId,
   runWithUsageBudgets,
   UsageBudget,
   type UsageLimitError,
 } from "dataflow-engine";
 import {
+  invokeMemoryTool,
+  isMemoryTool,
   issueLog,
+  JuncoMemory,
   type ProfileEvent,
   type ProfileRecorder,
   profileContexts,
@@ -428,6 +433,236 @@ test("shared send/recv tools advertise each bound activation's live edge schemas
     await b.agent.return();
   }
 });
+
+function memoryResult(context: Context, id: string): ToolResultMessage {
+  const result = context.messages.findLast(
+    (message): message is ToolResultMessage =>
+      message.role === "toolResult" && message.toolCallId === id,
+  );
+  assert.ok(result, `missing memory tool result ${id}`);
+  return result;
+}
+
+test(
+  "memory: overlapping agents retain their exact host scopes across awaits",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "junco-agent-memory-"));
+    const memory = new JuncoMemory({ directory });
+    const tools = memory.tools();
+    const save = tools.find(({ name }) => name === "save_memory")!;
+    const execute = save.execute;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let arrivals = 0;
+    save.execute = async (...args) => {
+      if (++arrivals === 2) entered.resolve();
+      await release.promise;
+      return execute(...args);
+    };
+    const agents: JuncoAgent[] = [];
+    const runs: Promise<AssistantMessage>[] = [];
+    const records = new Map<string, { id: string; text: string }>();
+    try {
+      assert.equal(isMemoryTool(save), true);
+      for (const scope of ["Worker", "worker"]) {
+        const { agent } = await newAgent(
+          [
+            toolTurn(
+              fauxToolCall(
+                "save_memory",
+                { text: `${scope} sharedsentinel` },
+                { id: "save" },
+              ),
+            ),
+            (context) => {
+              const result = memoryResult(context, "save");
+              assert.equal(result.isError, false);
+              const saved = result.details as { id: string; text: string };
+              assert.equal(saved.text, `${scope} sharedsentinel`);
+              records.set(scope, saved);
+              return toolTurn(
+                fauxToolCall(
+                  "search_memory",
+                  { query: "sharedsentinel" },
+                  { id: "search" },
+                ),
+              );
+            },
+            (context) => {
+              const result = memoryResult(context, "search");
+              assert.equal(result.isError, false);
+              assert.deepEqual(result.details, {
+                memories: [records.get(scope)],
+              });
+              return fauxAssistantMessage(`${scope} done`);
+            },
+            toolTurn(
+              fauxToolCall(
+                "save_memory",
+                { text: "unbound must not persist" },
+                { id: "unbound" },
+              ),
+            ),
+            (context) => {
+              const result = memoryResult(context, "unbound");
+              assert.equal(result.isError, true);
+              assert.match(
+                JSON.stringify(result.content),
+                /JuncoMemory requires a NodeId-bound agent context/,
+              );
+              return fauxAssistantMessage("unbound denied");
+            },
+          ],
+          { tools },
+        );
+        agents.push(agent);
+        assert.ok(agent.getTools().includes(save));
+        runs.push(
+          agent.runWithNodeContext({ nodeId: NodeId.create(scope) }, () =>
+            agent.prompt("save and recall"),
+          ),
+        );
+      }
+      await entered.promise;
+      assert.equal(arrivals, 2);
+      assert.equal(records.size, 0);
+      release.resolve();
+      assert.deepEqual(
+        (await Promise.all(runs)).map(({ content }) => content),
+        [
+          fauxAssistantMessage("Worker done").content,
+          fauxAssistantMessage("worker done").content,
+        ],
+      );
+      assert.notEqual(records.get("Worker")!.id, records.get("worker")!.id);
+      assert.deepEqual(
+        (await agents[0]!.prompt("unbound")).content,
+        fauxAssistantMessage("unbound denied").content,
+      );
+      memory.close();
+      const reopened = new JuncoMemory({ directory });
+      try {
+        const search = reopened
+          .tools()
+          .find(({ name }) => name === "search_memory")!;
+        for (const scope of ["Worker", "worker"]) {
+          const result = await invokeMemoryTool(
+            search,
+            NodeId.create(scope),
+            "durable",
+            { query: "sharedsentinel" },
+          );
+          assert.deepEqual(result.details, { memories: [records.get(scope)] });
+        }
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      release.resolve();
+      await Promise.allSettled(runs);
+      try {
+        await Promise.all(agents.map((agent) => agent.return()));
+      } finally {
+        memory.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "memory: a reused agent follows First then Second then First, never its constructor identity",
+  async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "junco-agent-memory-reuse-"),
+    );
+    const memory = new JuncoMemory({ directory });
+    let agent: JuncoAgent | undefined;
+    let first: { id: string; text: string };
+    try {
+      ({ agent } = await newAgent(
+        [
+          toolTurn(
+            fauxToolCall(
+              "save_memory",
+              { text: "First reusemarker" },
+              { id: "first-save" },
+            ),
+          ),
+          (context) => {
+            const result = memoryResult(context, "first-save");
+            assert.equal(result.isError, false);
+            first = result.details as typeof first;
+            assert.equal(first.text, "First reusemarker");
+            return fauxAssistantMessage("saved First");
+          },
+          toolTurn(
+            fauxToolCall(
+              "search_memory",
+              { query: "reusemarker" },
+              { id: "second-search" },
+            ),
+          ),
+          (context) => {
+            const result = memoryResult(context, "second-search");
+            assert.equal(result.isError, false);
+            assert.deepEqual(result.details, { memories: [] });
+            return toolTurn(
+              fauxToolCall(
+                "save_memory",
+                { text: "Second reusemarker" },
+                { id: "second-save" },
+              ),
+            );
+          },
+          (context) => {
+            const result = memoryResult(context, "second-save");
+            assert.equal(result.isError, false);
+            assert.notEqual((result.details as typeof first).id, first.id);
+            return fauxAssistantMessage("saved Second");
+          },
+          toolTurn(
+            fauxToolCall(
+              "search_memory",
+              { query: "reusemarker" },
+              { id: "first-search" },
+            ),
+          ),
+          (context) => {
+            const result = memoryResult(context, "first-search");
+            assert.equal(result.isError, false);
+            assert.deepEqual(result.details, { memories: [first] });
+            return fauxAssistantMessage("recalled First");
+          },
+        ],
+        { tools: memory.tools() },
+      ));
+      const active = agent;
+      assert.notEqual(active.nodeId, NodeId.create("First"));
+      assert.notEqual(active.nodeId, NodeId.create("Second"));
+      for (const [scope, text] of [
+        ["First", "saved First"],
+        ["Second", "saved Second"],
+        ["First", "recalled First"],
+      ]) {
+        const result = await active.runWithNodeContext(
+          { nodeId: NodeId.create(scope!) },
+          () => active.prompt("continue"),
+        );
+        assert.deepEqual(result.content, fauxAssistantMessage(text!).content);
+      }
+    } finally {
+      try {
+        await agent?.return();
+      } finally {
+        memory.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  },
+  TIMEOUT,
+);
 
 test("a callback prompt without inputs fails invalid_state; a later string stage recovers", async () => {
   let calls = 0;

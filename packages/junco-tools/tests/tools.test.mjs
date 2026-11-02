@@ -23,6 +23,7 @@ import {
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { NodeId } from "dataflow-engine";
 import {
   BashTool,
   DiffTool,
@@ -33,6 +34,7 @@ import {
   ShellMuxOperations,
   ToolCollection,
 } from "../dist/index.js";
+import { invokeMemoryTool, JuncoMemory } from "../dist/memory.js";
 import {
   cleanup,
   closeFixture,
@@ -64,7 +66,10 @@ import {
  * the seed; its marsh state lives beside it, inside the disposable scratch root, as does the
  * empty directory `outside`. `dispose` closes the collection, then removes the tree.
  */
-async function workspace(files = {}, { sandbox = "shared", recorder } = {}) {
+async function workspace(
+  files = {},
+  { sandbox = "shared", recorder, memory } = {},
+) {
   const { root: scratch, seed: root } = await seedFixture({ files });
   const outside = join(scratch, "outside");
   try {
@@ -75,6 +80,7 @@ async function workspace(files = {}, { sandbox = "shared", recorder } = {}) {
       sandbox,
       policy: LockPolicy,
       recorder,
+      memory,
     });
     const byName = new Map(collection.tools.map((tool) => [tool.name, tool]));
     return {
@@ -2304,5 +2310,199 @@ test("bound, direct and invocation-scoped tools record in exactly one view", {
     ]);
   } finally {
     await ws.dispose();
+  }
+});
+
+test("memory: bindings share only their host NodeId and keep caller-owned storage alive", {
+  timeout: 60_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-collection-memory-"));
+  const memory = new JuncoMemory({ directory });
+  let ws;
+  let first;
+  let second;
+  let lease;
+  const call = async (tool, node, params) =>
+    (
+      await invokeMemoryTool(
+        tool,
+        NodeId.create(node),
+        "collection-memory",
+        params,
+      )
+    ).details;
+  try {
+    ws = await workspace({}, { memory });
+    const original = (name) =>
+      ws.collection.tools.find((tool) => tool.name === name);
+    first = ws.collection.bind();
+    second = ws.collection.bind();
+    lease = ws.collection.lease();
+    const bound = (binding, name) => binding.tools.get(original(name));
+    const save = bound(first, "save_memory");
+    assert.notEqual(save, original("save_memory"));
+    assert.notEqual(save, bound(second, "save_memory"));
+    const saved = await call(save, "Worker", {
+      text: "binding durable sentinel",
+    });
+    assert.deepEqual(
+      await call(bound(second, "search_memory"), "Worker", {
+        query: "sentinel",
+      }),
+      { memories: [saved] },
+    );
+    const foreign = await call(bound(second, "save_memory"), "worker", {
+      text: "foreign sentinel",
+    });
+    assert.deepEqual(
+      await call(bound(first, "search_memory"), "Worker", {
+        query: "sentinel",
+      }),
+      { memories: [saved] },
+    );
+    assert.deepEqual(
+      await call(bound(first, "forget_memory"), "Worker", { id: foreign.id }),
+      { id: foreign.id, forgotten: false },
+    );
+    assert.deepEqual(
+      await call(bound(second, "search_memory"), "worker", {
+        query: "sentinel",
+      }),
+      { memories: [foreign] },
+    );
+
+    await first.close();
+    await assert.rejects(
+      () => call(save, "Worker", { text: "closed binding" }),
+      /ToolBinding is closed/,
+    );
+    assert.deepEqual(
+      await call(bound(second, "search_memory"), "Worker", {
+        query: "sentinel",
+      }),
+      { memories: [saved] },
+    );
+    await ws.collection.close();
+    assert.deepEqual(
+      await call(original("search_memory"), "Worker", { query: "sentinel" }),
+      { memories: [saved] },
+    );
+    assert.deepEqual(
+      await call(bound(second, "search_memory"), "Worker", {
+        query: "sentinel",
+      }),
+      { memories: [saved] },
+    );
+    await second.close();
+    assert.deepEqual(
+      await call(original("search_memory"), "Worker", { query: "sentinel" }),
+      { memories: [saved] },
+    );
+    await lease.close();
+    for (const [name, params] of [
+      ["save_memory", { text: "closed collection" }],
+      ["search_memory", { query: "sentinel" }],
+      ["forget_memory", { id: saved.id }],
+    ]) {
+      await assert.rejects(
+        () => call(original(name), "Worker", params),
+        /ToolCollection is closed/,
+      );
+    }
+    const direct = memory.tools();
+    assert.deepEqual(
+      await call(
+        direct.find((tool) => tool.name === "search_memory"),
+        "Worker",
+        { query: "sentinel" },
+      ),
+      { memories: [saved] },
+    );
+    const directSave = direct.find((tool) => tool.name === "save_memory");
+    await call(directSave, "Worker", { text: "wrapper still owned by caller" });
+    memory.close();
+    await assert.rejects(
+      () => call(directSave, "Worker", { text: "closed wrapper" }),
+      /JuncoMemory is closed/,
+    );
+  } finally {
+    await cleanup(
+      () => first?.close(),
+      () => second?.close(),
+      () => lease?.close(),
+      () => ws?.dispose(),
+      () => memory.close(),
+      () => rm(directory, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("memory: a genuine bound save records one memory operation in its owning view", {
+  timeout: 60_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-profile-memory-"));
+  const memory = new JuncoMemory({ directory });
+  const recorder = testRecorder();
+  let ws;
+  let binding;
+  try {
+    ws = await workspace({}, { memory, recorder });
+    binding = ws.collection.bind(() => recorder.add_context("agent"));
+    const original = ws.collection.tools.find(
+      (tool) => tool.name === "save_memory",
+    );
+    const result = await invokeMemoryTool(
+      binding.tools.get(original),
+      NodeId.create("Worker"),
+      "profile-memory",
+      { text: "profile sentinel" },
+    );
+    assert.equal(result.details.text, "profile sentinel");
+    const events = recorder.root.events.filter(
+      (event) => event.tool === "save_memory",
+    );
+    assert.equal(events.filter((event) => event.kind === "start").length, 1);
+    assert.deepEqual(outcomes(events, "save_memory"), ["success"]);
+    assert.ok(
+      events.every(
+        (event) =>
+          event.at === "agent" &&
+          event.resource === "operations" &&
+          event.category === "memory" &&
+          event.operation === "execute",
+      ),
+    );
+  } finally {
+    await cleanup(
+      () => binding?.close(),
+      () => ws?.dispose(),
+      () => memory.close(),
+      () => rm(directory, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("memory: an unconfigured collection exposes no memory tools", {
+  timeout: 60_000,
+}, async () => {
+  const ws = await workspace();
+  let binding;
+  try {
+    binding = ws.collection.bind();
+    for (const tools of [ws.collection.tools, [...binding.tools.values()]]) {
+      assert.ok(
+        tools.every(
+          (tool) =>
+            !["save_memory", "search_memory", "forget_memory"].includes(
+              tool.name,
+            ),
+        ),
+      );
+    }
+  } finally {
+    await cleanup(
+      () => binding?.close(),
+      () => ws.dispose(),
+    );
   }
 });

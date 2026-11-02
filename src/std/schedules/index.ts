@@ -50,6 +50,7 @@ export {
   validateLadder,
 } from "../../node-policy.js";
 export { anyFanIn } from "./any-fan-in.js";
+export { type MemoryScheduleOptions, memory } from "./memory.js";
 export {
   type OptimizationRequest,
   type OptimizationState,

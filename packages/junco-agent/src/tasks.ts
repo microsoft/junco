@@ -447,13 +447,15 @@ export class TaskScope {
     placement,
   }: Attempt): Promise<AssistantMessage> {
     const { usage, recorder, tracer } = placement;
+    const nodeId = NodeId.create(id);
     return runWithUsageContext(usage, () =>
       runWithUsageBudgets([], id, () =>
         child.runWithNodeContext(
           {
+            nodeId,
             ...(recorder === undefined ? {} : { recorder, recorderNodeId: id }),
             complaint: {
-              nodeId: NodeId.create(id),
+              nodeId,
               messages: [],
               ...(tracer === undefined ? {} : { tracer }),
             },

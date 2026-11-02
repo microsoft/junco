@@ -14,6 +14,7 @@ import {
   contentText,
   fauxAssistantMessage,
   fauxToolCall,
+  type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
 import { megabytes } from "dataflow-engine";
@@ -3681,5 +3682,147 @@ test("an agent reads a numeric code value with recv and sends a number through i
     ]);
   } finally {
     await execution.graph.close();
+  }
+});
+
+test("memory: YAML host NodeIds isolate Worker from worker through real agent calls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "junco-yaml-memory-"));
+  const memory = new tools.JuncoMemory({ directory });
+  const trace = new tracer.DummyTracer();
+  const names = ["Worker", "worker"] as const;
+  const saved = new Map<string, { id: string; text: string }>();
+  const completed = new Set<string>();
+  const bothSaved = Promise.withResolvers<void>();
+  const bothSearched = Promise.withResolvers<void>();
+  const searched = new Set<string>();
+  const respond = async (context: Context): Promise<AssistantMessage> => {
+    const name = names.find((name) =>
+      userTexts(context.messages).includes(`scope:${name}`),
+    );
+    assert.ok(name, "each request retains its YAML node's assignment");
+    const other = name === "Worker" ? "worker" : "Worker";
+    const text = `Junco SQLite durable memory owned by ${name}`;
+    const results = context.messages.filter(
+      (message) => message.role === "toolResult",
+    );
+    const result = results.at(-1);
+    const call = (toolName: string, args: JsonObject) =>
+      fauxAssistantMessage(
+        fauxToolCall(toolName, args, { id: `${name}-${results.length}` }),
+        { stopReason: "toolUse" },
+      );
+    if (!result) return call("save_memory", { text });
+    assert.equal(result.isError, false, contentText(result.content));
+    const details = JSON.parse(contentText(result.content));
+    switch (results.length) {
+      case 1:
+        assert.equal(result.toolName, "save_memory");
+        assert.equal(details.text, text);
+        assert.equal(typeof details.id, "string");
+        assert.ok(details.id.length > 0);
+        saved.set(name, { id: details.id, text });
+        if (saved.size === 2) bothSaved.resolve();
+        await bothSaved.promise;
+        assert.notEqual(saved.get(name)!.id, saved.get(other)!.id);
+        return call("search_memory", { query: "Junco SQLite", k: 20 });
+      case 2:
+        assert.equal(result.toolName, "search_memory");
+        assert.deepEqual(details, { memories: [saved.get(name)] });
+        searched.add(name);
+        if (searched.size === 2) bothSearched.resolve();
+        await bothSearched.promise;
+        return call("forget_memory", { id: saved.get(other)!.id });
+      case 3:
+        assert.equal(result.toolName, "forget_memory");
+        assert.deepEqual(details, {
+          id: saved.get(other)!.id,
+          forgotten: false,
+        });
+        return call("forget_memory", { id: saved.get(name)!.id });
+      case 4:
+        assert.equal(result.toolName, "forget_memory");
+        assert.deepEqual(details, { id: saved.get(name)!.id, forgotten: true });
+        return call("search_memory", { query: "Junco SQLite" });
+      case 5:
+        assert.equal(result.toolName, "search_memory");
+        assert.deepEqual(details, { memories: [] });
+        completed.add(name);
+        return fauxAssistantMessage(`finished:${name}`);
+      default:
+        assert.fail(`unexpected extra request for ${name}`);
+    }
+  };
+  let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
+  try {
+    const { models, faux } = await fauxRuntime(
+      Array.from({ length: 12 }, () => respond),
+    );
+    execution = await JuncoGraph.fromYaml(
+      JSON.stringify({
+        graph: {
+          sink: {
+            returns: "Worker",
+            trigger: { all: ["Worker->$sink", "worker->$sink"] },
+          },
+          nodes: {
+            Start: { kind: "emit", text: "Exercise scoped memory" },
+            ...Object.fromEntries(
+              names.map((name) => [
+                name,
+                {
+                  prompt: `scope:${name}`,
+                  tools: ["save_memory", "search_memory", "forget_memory"],
+                  tool_block: NATIVE_TOOL_BLOCK,
+                },
+              ]),
+            ),
+          },
+          edges: [
+            ...names.map((to) => ({
+              from: "Start",
+              to,
+              kind: "message",
+              schema: prompt,
+            })),
+            ...names.map((from) => ({ from, to: "$sink", schema: reply })),
+          ],
+        },
+      }),
+      {
+        ...options(),
+        tracer: trace,
+        ladder: fauxLadder,
+        tools: Object.fromEntries(
+          memory.tools().map((tool) => [tool.name, tool]),
+        ),
+        createAgent: (spec) => createJuncoAgent(spec, fauxLadder, models),
+      },
+    );
+    await execution.run();
+    assert.deepEqual([...completed].sort(), [...names].sort());
+    for (const name of names) {
+      const result = execution.graph.result(graph.NodeId.create(name));
+      assert.ok(O.isSome(result));
+      const message = result.value as AssistantMessage;
+      assert.equal(message.stopReason, "stop");
+      assert.equal(contentText(message.content), `finished:${name}`);
+    }
+    assert.equal(resultText(execution.graph), "finished:Worker");
+    assert.equal(faux.state.callCount, 12);
+    assert.equal(faux.getPendingResponseCount(), 0);
+  } finally {
+    try {
+      await execution?.graph.close();
+    } finally {
+      try {
+        await trace.flush();
+      } finally {
+        try {
+          memory.close();
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
+    }
   }
 });
