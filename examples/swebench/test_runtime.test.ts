@@ -19,7 +19,6 @@ import {
   cancelBranch,
   checkDocument,
   checkLadder,
-  checkThinking,
   containerBash,
   describe,
   guardedModels,
@@ -77,19 +76,19 @@ test("a ladder may only use the benchmark models, at thinking levels their catal
   expect(() => checkLadder({ ...sonnet, xhigh: { model: "github-copilot/claude-opus-5.5" } })).not.toThrow();
   expect(() => checkLadder({ ...sonnet, xhigh: { model: "decoy/m" } })).toThrow(/xhigh/);
   // The decoy model has no reasoning, so only "off" (an omitted level) is supported.
-  expect(() => checkThinking(decoyModels, schedules.uniformLadder({ model: "decoy/m" }))).not.toThrow();
-  expect(() => checkThinking(decoyModels, { ...schedules.uniformLadder({ model: "decoy/m" }), xhigh: { model: "decoy/m", thinking: "high" } })).toThrow(/xhigh.*high/);
+  expect(() => new schedules.ModelLadder(decoyModels, schedules.uniformLadder({ model: "decoy/m" }))).not.toThrow();
+  expect(() => new schedules.ModelLadder(decoyModels, { ...schedules.uniformLadder({ model: "decoy/m" }), xhigh: { model: "decoy/m", thinking: "high" } })).toThrow(/xhigh.*high/);
 });
 
 test("a guarded agent sends no request to a model other than its role's", async () => {
   const dir = mkdtempSync(join(tmpdir(), "guard-"));
-  const ladder = schedules.uniformLadder({ model: "decoy/m" });
   const log = join(dir, "requests.jsonl");
   writeFileSync(log, "");
+  const ladder = new schedules.ModelLadder(guardedModels(decoyModels, log, "Worker", "decoy/other"), schedules.uniformLadder({ model: "decoy/m" }));
   const document = syntax.parse(`graph:\n  nodes:\n    Worker:\n      prompt: Say hi.\n      tool_block: ${JSON.stringify(BLOCKED_DEFAULTS)}\n  edges:\n    - from: Worker\n      to: $sink\n      schema: {}\n`);
   const execution = await JuncoGraph.fromYaml(document, {
-    cwd: dir, models: decoyModels, scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(),
-    createAgent: (spec) => syntax.createJuncoAgent(spec, ladder, guardedModels(decoyModels, log, "Worker", "decoy/other")),
+    cwd: dir, scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(),
+    createAgent: (spec) => syntax.createJuncoAgent(spec, ladder),
   });
   let value: unknown;
   try {

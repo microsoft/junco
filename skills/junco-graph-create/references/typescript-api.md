@@ -375,10 +375,9 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
 ```ts
 import { graph, JuncoGraph, schedules, workflows } from "junco";
 
-// ladder has all five authoring-verified rungs; share acquired models/observer.
+// ladder is a ModelLadder pairing the runtime and five authoring-verified rungs.
 const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
   cwd,
-  models,
   ladder,
   tracer: observer,
   scheduler: () => schedules.parallel(),
@@ -954,6 +953,8 @@ export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
 ```
 
 `Ladder` is `Readonly<Record<ModelStrengthName, LadderRung>>`; each rung is `{ readonly model: string; readonly thinking?: ThinkingLevel }`. `validateLadder` checks all five model identities. Selected prompt agents receive their rung before execution; omitted thinking means `"off"`. Without a ladder the context leaves models untouched.
+
+`schedules.ModelLadder` pairs `readonly models: ModelRuntime` with `readonly rungs: Ladder`. Its constructor validates all five identities, catalog presence and supported thinking levels; it does not acquire credentials or check entitlement. `syntax.BuildOptions.ladder` takes this pair, with no separate `models` option; `syntax.createJuncoAgent(spec, ladder)` uses its runtime. The low-level `schedules.context({ ladder })` still takes bare `Ladder` rungs because its agents already own runtimes.
 
 **Stateless model oracle.** `junco-scheduler/agent` exports only `pi`, `PiOptions`, `SchedulerRequest`; `schedules.pi` reexports them for agency callers. `Models`, `Model`, `Api` and stream option types come from `@earendil-works/pi-ai`:
 

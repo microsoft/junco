@@ -156,37 +156,58 @@ test("default agents require a ladder", async () => {
   );
 });
 
-for (const high of [{ model: "nope" }, undefined])
-  test(`build validates every ladder rung even with a custom factory: ${JSON.stringify(high)}`, async () => {
-    let created = 0;
-    await assert.rejects(
-      build(document(), {
-        ...options(),
-        ladder: { ...fauxLadder, high } as unknown as schedules.Ladder,
-        createAgent: async () => {
-          created++;
-          return mock("unused");
-        },
-      }),
+test("ModelLadder rejects rungs outside the runtime's catalog", async () => {
+  const { models } = await fauxRuntime([], "p", [
+    { id: "s", reasoning: true },
+    { id: "n" },
+  ]);
+  const base = schedules.uniformLadder({ model: "p/s" });
+  const rejects = (high: unknown, message: string) =>
+    assert.throws(
+      () =>
+        new schedules.ModelLadder(models, {
+          ...base,
+          high,
+        } as unknown as schedules.Ladder),
       (error) =>
         error instanceof graph.DataflowDefinitionError &&
-        error.message === 'ladder.high.model must be "provider/model-id"',
+        error.message === message,
     );
-    assert.equal(created, 0);
+  rejects({ model: "nope" }, 'ladder.high.model must be "provider/model-id"');
+  rejects(undefined, 'ladder.high.model must be "provider/model-id"');
+  rejects(
+    { model: "p/missing" },
+    "ladder.high.model p/missing is not in the model catalog",
+  );
+  rejects(
+    { model: "p/n", thinking: "high" },
+    "ladder.high.thinking high is not supported by p/n (supported: off)",
+  );
+  const ladder = new schedules.ModelLadder(models, {
+    ...base,
+    high: { model: "p/s", thinking: "high" },
   });
+  assert.equal(ladder.models, models);
+  assert.equal(ladder.rungs.high.thinking, "high");
+});
 
 test("decision strength switches each selected agent's model and thinking", async () => {
   const worker = mock("WORKER-OUT", "work");
   const final = mock("FINAL-OUT");
+  const { models } = await fauxRuntime(
+    [],
+    "p",
+    ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
+  );
   const execution = await build(document(), {
     ...options(),
-    ladder: {
+    ladder: new schedules.ModelLadder(models, {
       smol: { model: "p/s", thinking: "low" },
       low: { model: "p/l" },
       med: { model: "p/m" },
       high: { model: "p/h", thinking: "high" },
       xhigh: { model: "p/x" },
-    },
+    }),
     scheduler: () =>
       schedules.strength(
         (_, id) => (id === "Final" ? "high" : "smol"),
@@ -463,10 +484,10 @@ test("named aliases replace builtin definitions and execute without builtin disp
       return fauxAssistantMessage("done");
     },
   ]);
+  const ladder = new schedules.ModelLadder(runtime.models, fauxLadder);
   const instance = await createJuncoAgent(
     { ...selected!, tool_block: NATIVE_TOOL_BLOCK },
-    fauxLadder,
-    runtime.models,
+    ladder,
   );
   try {
     assert.equal(
@@ -487,11 +508,7 @@ test("named aliases replace builtin definitions and execute without builtin disp
     tools: { first: replacement, second: replacement },
   });
   await assert.rejects(
-    createJuncoAgent(
-      { ...duplicate!, tool_block: NATIVE_TOOL_BLOCK },
-      fauxLadder,
-      runtime.models,
-    ),
+    createJuncoAgent({ ...duplicate!, tool_block: NATIVE_TOOL_BLOCK }, ladder),
     /Duplicate tool name: yield/,
   );
 });
@@ -558,7 +575,6 @@ test("tool blocks filter helpers and reject literal or resolved-name conflicts",
   let received: typeof spec | undefined;
   const execution = await build(disjoint, {
     ...options(),
-    ladder: fauxLadder,
     createAgent: async (candidate) => {
       received = candidate;
       return mock("ok");
@@ -1420,6 +1436,11 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     ]),
   );
   const levels: [string, string][] = [];
+  const { models } = await fauxRuntime(
+    [],
+    "p",
+    ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
+  );
   const execution = await build(
     parse({
       graph: {
@@ -1458,13 +1479,13 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     }),
     {
       ...options(),
-      ladder: {
+      ladder: new schedules.ModelLadder(models, {
         smol: { model: "p/s" },
         low: { model: "p/l" },
         med: { model: "p/m" },
         high: { model: "p/h" },
         xhigh: { model: "p/x" },
-      },
+      }),
       scheduler: (label, graphPath) => {
         levels.push([label, graphPath]);
         return schedules.strength(
@@ -2160,7 +2181,11 @@ test("default build uses real offline agents and releases only borrowed collecti
         edges: [{ from: "A", to: "$sink", schema: reply }],
       },
     }),
-    { ...options(), models, collection, ladder: fauxLadder },
+    {
+      ...options(),
+      collection,
+      ladder: new schedules.ModelLadder(models, fauxLadder),
+    },
   );
   try {
     assert.deepEqual(active, { leases: 1, bindings: 1, creatorCloses: 0 });
@@ -2196,9 +2221,8 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
         }),
         {
           ...options(),
-          models,
           collection,
-          ladder: fauxLadder,
+          ladder: new schedules.ModelLadder(models, fauxLadder),
           signal: AbortSignal.abort(reason),
         },
       ),
@@ -2306,8 +2330,7 @@ for (const row of [
       const execution = await build(doc, {
         ...options(),
         cwd,
-        models,
-        ladder: fauxLadder,
+        ladder: new schedules.ModelLadder(models, fauxLadder),
         collection: counted.collection,
       });
       try {
@@ -2395,7 +2418,11 @@ test("builtin info exposes routes without receiver contracts", async () => {
           ],
         },
       }),
-      { ...options(), models, collection, ladder: fauxLadder },
+      {
+        ...options(),
+        collection,
+        ladder: new schedules.ModelLadder(models, fauxLadder),
+      },
     );
     await execution.run();
     assert.equal(inspected, true);
@@ -2474,9 +2501,8 @@ for (const nested of [false, true])
         await assert.rejects(
           build(doc, {
             ...options(),
-            models,
             collection,
-            ladder: fauxLadder,
+            ladder: new schedules.ModelLadder(models, fauxLadder),
             available: {
               Missing: () => {
                 throw primary;
@@ -3641,7 +3667,8 @@ test("an agent reads a numeric code value with recv and sends a number through i
     {
       ...options(),
       code: { Seven: Constant(7), Tail: Increment("Worker~>Tail") },
-      createAgent: (spec) => createJuncoAgent(spec, fauxLadder, models),
+      createAgent: (spec) =>
+        createJuncoAgent(spec, new schedules.ModelLadder(models, fauxLadder)),
       recorder,
     },
   );
@@ -3757,6 +3784,7 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
     const { models, faux } = await fauxRuntime(
       Array.from({ length: 12 }, () => respond),
     );
+    const ladder = new schedules.ModelLadder(models, fauxLadder);
     execution = await JuncoGraph.fromYaml(
       JSON.stringify({
         graph: {
@@ -3791,11 +3819,11 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
       {
         ...options(),
         tracer: trace,
-        ladder: fauxLadder,
+        ladder,
         tools: Object.fromEntries(
           memory.tools().map((tool) => [tool.name, tool]),
         ),
-        createAgent: (spec) => createJuncoAgent(spec, fauxLadder, models),
+        createAgent: (spec) => createJuncoAgent(spec, ladder),
       },
     );
     await execution.run();

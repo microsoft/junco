@@ -25,7 +25,7 @@ export interface MixedGraph {
 }
 
 export const MixedGraph = {
-  async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "models" | "ladder" | "recorder">): Promise<MixedGraph> {
+  async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "ladder" | "recorder">): Promise<MixedGraph> {
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: () => schedules.parallel(),
@@ -46,7 +46,7 @@ async function main(signal?: AbortSignal): Promise<void> {
     await using lifetime = new AsyncDisposableStack();
     const recorder = lifetime.adopt(await problemRecorder(process.cwd()), (owned) => owned.close());
     const observer = tracer.TuiTracer.shared();
-    const { execution, reviewerId } = await MixedGraph.create({ models, ladder: LADDER, recorder, tracer: observer });
+    const { execution, reviewerId } = await MixedGraph.create({ ladder: new schedules.ModelLadder(models, LADDER), recorder, tracer: observer });
     lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     lifetime.adopt(execution.graph, (graph) => graph.close());
     signal?.throwIfAborted();

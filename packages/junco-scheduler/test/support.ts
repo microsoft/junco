@@ -2,6 +2,7 @@ import {
   type Context,
   contentText,
   createModels,
+  type FauxModelDefinition,
   type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
@@ -18,11 +19,13 @@ let providers = 0;
 export function scripted(
   responses: readonly FauxResponseStep[] = [],
   provider = `faux-${++providers}`,
+  definitions?: readonly FauxModelDefinition[],
 ) {
   const faux = fauxProvider({
     api: provider,
     provider,
     tokenSize: { min: 4, max: 4 },
+    ...(definitions === undefined ? {} : { models: [...definitions] }),
   });
   faux.setResponses([...responses]);
   const models = createModels();

@@ -91,8 +91,7 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
     const observer = tracer.TuiTracer.shared();
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
-      models,
-      ladder: LADDER,
+      ladder: new schedules.ModelLadder(models, LADDER),
       code: { Reports },
       scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,

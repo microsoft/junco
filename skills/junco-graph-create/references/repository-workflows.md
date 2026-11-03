@@ -88,12 +88,11 @@ Adapt SKILL.md's runner with the authored scheduler, verified models/ladder and 
 
 ```ts
 import { contentText } from "@earendil-works/pi-ai";
-import { JuncoGraph, schedules, syntax } from "junco";
+import { JuncoGraph, syntax } from "junco";
 import source from "./<name>.yml" with { type: "text" };
 
 export async function run(config: syntax.FromYamlOptions): Promise<string> {
   const document = syntax.parse(source);
-  if (config.ladder) schedules.validateLadder(config.ladder);
   const execution = await JuncoGraph.fromYaml(document, config);
   let terminalText: string;
   try {

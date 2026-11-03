@@ -1,5 +1,5 @@
-// CooperBench shared-worktree pair driver. Two leaders and native task descendants share one
-// caller-owned Marsh collection. Stdout contains native message/usage JSONL and a terminal result.
+// CooperBench shared-worktree driver. Seven small-model roles share one caller-owned Marsh collection.
+// Stdout contains native message/usage JSONL and a terminal result.
 import { createHash, randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 import { type FileHandle, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -112,18 +112,29 @@ export const ladderOf = (
   const leaderRung = rung(leader, thinking);
   return { smol: workerRung, low: workerRung, med: workerRung, high: leaderRung, xhigh: leaderRung };
 };
-/** Every graph level: native parallel selection, leaders on the leader rung, workers on the worker rung. */
-const scheduler = () =>
-  schedules.strength(
-    (_snapshot, node) => (node === "Agent1" || node === "Agent2" ? "high" : "med"),
-    schedules.parallel(),
-  );
+/** Every graph level uses parallel selection at the uniform med rung. */
+const scheduler = () => schedules.parallel();
 
-/** Assignments are routed only to their designated leader; the worktree and process are shared. */
+/** The Architect receives both assignments; each feature team receives only its own. */
 export const document = syntax.parse(source, {
   sourceName: "wf.yml",
   params: { assistant_schema: JSON.stringify(AssistantMessageSchema) },
 });
+
+const TEST_DIR = /\/(tests?|__tests__|spec|testdata)\//;
+const TEST_FILE = /(^|\/)(test_[^/]+|[^/]+_test\.[A-Za-z0-9]+|[^/]+\.(test|spec)\.[A-Za-z0-9]+|[^/]*Tests?\.(java|kt|cs|scala)|tests?\.py)$/;
+/** Mirrors CooperBench `sandbox._is_test_path`: files the grader strips from the patch. */
+export const isTestPath = (path: string): boolean => TEST_DIR.test(`/${path}`) || TEST_FILE.test(path);
+/** Synchronous structural checks of a role's final report (graph-optimizer Ralph stop rules). */
+// shortcut: self-reported verdict lines, upgrade to a gate script if Ralph candidates pass while failing the evaluator.
+export const verdicts = {
+  Architect: (text: string) =>
+    ["## Interfaces", "## Ownership", "## Shared-file protocol", "## Conflicts", "## Test setup", "## Risks"].every((h) => text.includes(h)),
+  Tester: (text: string) =>
+    /^RED: yes$/m.test(text) && /^TEST_COMMAND: \S/m.test(text) && /^SUITE_COMMAND: \S/m.test(text) &&
+    [...text.matchAll(/^- (\S+)/gm)].some(([, path]) => isTestPath(path!)),
+  Implementer: (text: string) => /^TEST_COMMAND: .+ exit=0$/m.test(text) && /^SUITE_COMMAND: .+ exit=0$/m.test(text),
+} satisfies Record<string, (text: string) => boolean>;
 
 // ## Shared-worktree pair
 
@@ -138,50 +149,40 @@ export type YamlExecution = schedules.SchedulerContext<
   JuncoGraph<TSchema, unknown>
 >;
 
-export type PairOptions = Pick<syntax.BuildOptions, "models" | "tracer" | "recorder"> & {
+export type PairOptions = Pick<syntax.BuildOptions, "tracer" | "recorder"> & {
+  readonly ladder: schedules.ModelLadder;
   readonly cwd?: string;
   readonly collection: tools.ToolCollection;
   readonly createAgent: (spec: syntax.AgentSpec, owner: Owner) => Promise<YamlAgent>;
   readonly signal: AbortSignal;
 };
 
-export type Pair = { readonly execution: YamlExecution; readonly stats: { workers: number } };
+export type Pair = { readonly execution: YamlExecution; readonly stats: { agents: number; workers: number } };
 
 /** Build the pair over the caller's collection, leaving collection ownership with the caller. */
 export async function createPair(request: PairRequest, options: PairOptions): Promise<Pair> {
-  const stats = { workers: 0 };
-  const slash = request.models.worker.indexOf("/");
-  const provider = request.models.worker.slice(0, slash);
-  const modelId = request.models.worker.slice(slash + 1);
+  const stats = { agents: 0, workers: 0 };
+  const ownerOf = (spec: syntax.AgentSpec): Owner => ({ team: /2$/.test(spec.path.split("/")[0]!) ? "agent2" : "agent1", node_id: spec.path });
   const install = (created: Parameters<NonNullable<agent.SubagentObserver["acquired"]>>[0], owner: Owner): void => {
     observe(created, owner);
-    created.setTaskPolicy(({ tasks }) => {
-      for (const task of tasks) {
-        if (task.model?.provider !== provider || task.model.modelId !== modelId)
-          throw new Error(`task model must be ${request.models.worker}`);
-      }
-    });
     created.setSubagentObserver({ acquired(child) {
       stats.workers++;
       install(child, { team: owner.team, node_id: child.nodeId });
     } });
   };
-  const { models, tracer: observer, recorder } = options;
+  const { ladder, tracer: observer, recorder } = options;
   const execution = await JuncoGraph.fromYaml(document, {
     cwd: options.cwd ?? process.cwd(),
     scheduler,
-    ladder: ladderOf(request.models, request.thinking),
-    ...(models === undefined ? {} : { models }),
+    ladder,
     ...(observer === undefined ? {} : { tracer: observer }),
     ...(recorder === undefined ? {} : { recorder }),
     collection: options.collection,
     signal: options.signal,
     createAgent: async (spec) => {
-      const owner: Owner = { team: spec.node === "Agent1" ? "agent1" : "agent2", node_id: spec.node };
-      const created = await options.createAgent({
-        ...spec,
-        systemPrompt: `${spec.systemPrompt ?? ""}\nEvery task must explicitly request model ${JSON.stringify({ provider, modelId })}; task model must be ${request.models.worker}.`,
-      }, owner);
+      stats.agents++;
+      const owner = ownerOf(spec);
+      const created = await options.createAgent(spec, owner);
       install(created, owner);
       return created;
     },
@@ -189,8 +190,8 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
   try {
     execution.graph.source.enqueue({
       messages: new Map([
-        [graph.EdgeId.create("assignment-1"), [{ kind: "prompt", text: request.agents.agent1.task }]],
-        [graph.EdgeId.create("assignment-2"), [{ kind: "prompt", text: request.agents.agent2.task }]],
+        [graph.EdgeId.create("assignment-1"), [{ kind: "prompt", text: "## Feature assigned to Team 1\n\n" + request.agents.agent1.task }]],
+        [graph.EdgeId.create("assignment-2"), [{ kind: "prompt", text: "## Feature assigned to Team 2\n\n" + request.agents.agent2.task }]],
       ]),
       values: new Map(),
     });
@@ -487,8 +488,10 @@ export async function createBenchmarkRecorder(
 // ## CLI
 
 /** JSONL to stdout; synchronous so the terminal record is complete before exit. */
-function emit(record: Record<string, unknown>): void {
-  writeSync(1, `${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
+export function emit(record: Record<string, unknown>): void {
+  const bytes = Buffer.from(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
+  for (let offset = 0; offset < bytes.length;)
+    offset += writeSync(1, bytes, offset, bytes.length - offset);
 }
 
 function describe(error: unknown): string {
@@ -564,17 +567,16 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
       (owned) => owned.close(),
     );
     const agents = lifetime.adopt(new AsyncDisposableStack(), (owned) => owned.disposeAsync());
-    const models = await verifiedModels(request.models, request.thinking, signal);
-    const ladder = ladderOf(request.models, request.thinking);
+    const ladder = new schedules.ModelLadder(await verifiedModels(request.models, request.thinking, signal), ladderOf(request.models, request.thinking));
     signal.throwIfAborted();
     pair = await createPair(request, {
-      models,
+      ladder,
       tracer: observer,
       recorder,
       collection,
       signal,
       createAgent: async (spec) =>
-        agents.adopt(await syntax.createJuncoAgent(spec, ladder, models), async (owned) => { await owned.return(); }),
+        agents.adopt(await syntax.createJuncoAgent(spec, ladder), async (owned) => { await owned.return(); }),
     });
     const { execution } = pair;
     let closing: Promise<void> | undefined;
@@ -603,7 +605,7 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
   if (interrupt.aborted) errors.unshift("interrupted");
   const { status, error, agents } = pairOutcome(values, { completed, errors, limited });
   const workers = pair?.stats.workers ?? 0;
-  emit({ type: "result", status, agents, error, worker_count: workers, agent_count: 2 + workers });
+  emit({ type: "result", status, agents, error, worker_count: workers, agent_count: (pair?.stats.agents ?? 0) + workers });
   return { status, error };
 }
 

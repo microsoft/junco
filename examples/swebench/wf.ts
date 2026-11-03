@@ -982,14 +982,14 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
   return pending.join(", ") || "none";
 }
 
-/** The runner's options; this module supplies the ladder, scheduler and code itself, and adds the producer's gate to `available`. */
-export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "ladder" | "scheduler" | "code" | "context"> & { readonly context: Host };
+/** The runner's options; this module supplies the scheduler and code, and adds the producer's gate to `available`. */
+export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
 
-/** Builds and runs the workflow with this module's ladder, scheduler, code and producer gate; returns Finish's report. */
+/** Builds and runs the workflow with the runner's ladder and this module's scheduler, code and producer gate; returns Finish's report. */
 export async function run(config: RunOptions): Promise<string> {
   const context: Context = { ...config.context, race: {} };
   const available = { ...config.available, ...plannerAvailability };
-  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, ladder, scheduler, code, context, available });
+  const execution = await JuncoGraph.fromYaml<Context>(profile.withProbes(document), { ...config, scheduler, code, context, available });
   try {
     await execution.run({ signal: config.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);

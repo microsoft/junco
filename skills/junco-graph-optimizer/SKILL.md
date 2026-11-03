@@ -13,6 +13,7 @@ Templates, helper code, recipes and measurement: [references/optimization.md](re
 
 - Quality comes from a fixed authoritative producer outside the editable region: an existing external evaluator, or a protected evaluator node/edge with all its dependencies. Never invent a judge, quality floor, workload, model or credential; a tournament reviewer is never the benchmark judge.
 - Every candidate keeps the original inputs, outputs, terminal contract, permissions, YAML `window`/`threads`, profiles and resource ceilings. New nodes get the replaced node's tools or fewer. Concurrent mutable workers need already-safe independent artifacts/workspaces, else the candidate is inapplicable.
+- Consult the [standard library index in junco's root AGENTS.md](../../AGENTS.md#standard-library-index) before inventing replacement topology or helper code. Prefer indexed building blocks whose contracts fit the allowed transformation and prepared runner; reuse never permits changing frozen schedulers, adding unrequested persistence, bypassing reserved helpers or weakening the evaluator.
 - One transformation per candidate, measured against the same saved incumbent; never stack unmeasured changes.
 - Recorded cost is catalog-priced usage, not invoices; offline/faux runs are wiring evidence, never savings. Paid runs need the user's explicit authorization at invocation.
 - No hidden iteration cap. Exhausted ideas, inapplicable patterns, budgets and cancellation are stops, not convergence. Never claim a global optimum.
@@ -20,10 +21,11 @@ Templates, helper code, recipes and measurement: [references/optimization.md](re
 
 ## 1. Inspect before asking
 
-Read the pair, its actual invocation (scripts, README, CI) and its TS build options. Record:
+Read the pair, its actual invocation (scripts, README, CI), its TS build options and the standard library index. Record:
 
 - Graph: nodes, edge IDs (`edge.id ?? from + ("~>" message | "->" value) + to`), nested wrapper paths and labels (`name ?? node id`), triggers, `source.routes`, `sink.returns`, which agents `send` on message edges.
 - Everything TS pins: node/edge IDs used by code nodes, `agents` maps (by node path), profiles, terminal checks, label dispatch in `scheduler(label)`/ladder/limits, existing `available` hooks (including any `schedules.ralph`), recorder/tracer/collection ownership, `config.code` keys.
+- Matching indexed building blocks (such as `workflows.ralph`, fan-in workflows and graph node bodies), their input routes, edge transports, outputs and required controller hooks. Read the definition's JSDoc before reuse; establish compatibility during preparation, then use only what the frozen runner supports.
 - The existing authoritative whole-workload evaluator and, per candidate Ralph target, an existing synchronous checker that can judge one completed result. Do not create either.
 - Tools/MCP/skills per agent, and whether repeated runs are safe or need an existing reset command.
 - Any text `__junco_` in either file: a reserved-namespace collision — stop and report it.

@@ -8,10 +8,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
-import {
-  loadSkillsFromDir,
-  type ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import * as graph from "dataflow-engine";
 import { type ProfilesFile, profilesOf, unitOf } from "dataflow-profile";
 import * as O from "fp-ts/lib/Option.js";
@@ -32,11 +29,10 @@ import type { MockAgent } from "../mock-agent.js";
 import {
   type AgencyNodeMetadata,
   context,
-  type Ladder,
+  type ModelLadder,
   type NodePolicy,
   nodePolicies,
   resolveRung,
-  validateLadder,
 } from "../node-policy.js";
 import type * as tracer from "../std/tracer.js";
 import {
@@ -141,11 +137,10 @@ export type BuildOptions<C = unknown> = {
   readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
   /** Fitted profiles keyed by id or parentNodeId/id; a present node overrides its YAML profiles. */
   readonly profiles?: ProfilesFile;
-  readonly models?: ModelRuntime;
   /** Code-node definitions by node id, exported by the same-named workflow module. */
   readonly code?: Readonly<Record<string, DeterministicNode<C>>>;
-  /** Models per strength; required when build creates agents. */
-  readonly ladder?: Ladder;
+  /** The runtime and the rungs agents may use; required when build creates agents, optional otherwise (model switching only). */
+  readonly ladder?: ModelLadder;
   readonly tracer?: tracer.DataflowTracer;
   /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
   readonly recorder?: tools.ProfileRecorder<
@@ -348,17 +343,16 @@ export async function resolveAgents(
 
 export function createJuncoAgent(
   spec: AgentSpec,
-  ladder: Ladder,
-  models?: ModelRuntime,
+  ladder: ModelLadder,
 ): Promise<YamlAgent> {
   const { provider, modelId, thinking } = resolveRung(
-    ladder,
+    ladder.rungs,
     DEFAULT_MODEL_STRENGTH,
   );
   return agent.JuncoAgent.create({
     provider,
     model: modelId,
-    models,
+    models: ladder.models,
     thinkingLevel: thinking,
     systemPrompt: spec.systemPrompt,
     cwd: spec.cwd,
@@ -633,7 +627,7 @@ async function registerAgent(
         throw new graph.DataflowDefinitionError(
           "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
         );
-      const created = await createJuncoAgent(spec, ladder, c.options.models);
+      const created = await createJuncoAgent(spec, ladder);
       c.acquired.push(created);
       instance = created;
     }
@@ -731,7 +725,9 @@ async function buildGraph(
   const execution = context({
     scheduler: c.options.scheduler(label, path),
     graph: g,
-    ...(c.options.ladder === undefined ? {} : { ladder: c.options.ladder }),
+    ...(c.options.ladder === undefined
+      ? {}
+      : { ladder: c.options.ladder.rungs }),
   });
   for (const [id, node] of Object.entries(spec.nodes)) {
     c.options.signal?.throwIfAborted();
@@ -961,7 +957,6 @@ export async function build<C = unknown>(
         throw new graph.DataflowDefinitionError(
           `junco-syntax: code node "${id}" has no definition in options.code`,
         );
-    if (options.ladder !== undefined) validateLadder(options.ladder);
     if (
       hasAgents(doc.graph) &&
       !agents &&

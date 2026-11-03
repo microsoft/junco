@@ -82,6 +82,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.drain` | fn | `packages/junco-scheduler/src/context.ts` | Run to quiescence as separate steps, retaining trace and cancellation boundaries between them. |
 | `schedules.triggerInputs` | const | `packages/dataflow-engine/src/scheduler.ts` | The default read plan for a node: every edge an `"all"` rule fires on, or only the first satisfied edge of an `"any"` rule, each read WHOLE. |
 | `schedules.uniformLadder` | const | `src/node-policy.ts` | The same rung at every strength. |
+| `schedules.ModelLadder` | class | `src/node-policy.ts` | Every available model (`models`) and the five rungs this ladder allows (`rungs`), checked against the catalog. |
 | `schedules.validateLadder` | fn | `src/node-policy.ts` | Reject a ladder unless all five rungs name a `"provider/model-id"` model; throws `DataflowDefinitionError`. |
 | `schedules.ralph` | fn | `src/std/schedules/ralph.ts` | Availability hooks for the original, non-memory Ralph workflow. |
 | `schedules.anyFanIn` | fn | `src/std/schedules/any-fan-in.ts` | Hooks and code for `JuncoGraph.fromYaml(workflows.anyFanIn, { ...options, ...anyFanIn() })`. |

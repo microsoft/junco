@@ -274,7 +274,7 @@ try {
   execution = await JuncoGraph.fromYaml(profile.withProbes(document), {
     /* the existing options, unchanged, except: */
     scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
-    ladder: optimizerLadder,
+    ...(optimizerLadder === undefined ? {} : { ladder: new schedules.ModelLadder(models, optimizerLadder) }),
     tracer: observer,
     ...(recorder === undefined ? {} : { recorder }),
     // Only when this build creates its collection and monitors (resources.monitorIntervalMs):

@@ -6,6 +6,7 @@ import {
 import {
   type AssistantMessage,
   contentText,
+  type FauxModelDefinition,
   type FauxProviderHandle,
   type FauxResponseFactory,
   type FauxResponseStep,
@@ -76,8 +77,9 @@ export const NATIVE_TOOL_BLOCK = [
 export async function fauxRuntime(
   responses: readonly FauxResponseStep[],
   provider = "faux",
+  definitions?: readonly FauxModelDefinition[],
 ) {
-  const { faux } = scripted(responses, provider);
+  const { faux } = scripted(responses, provider, definitions);
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(provider, async () => ({
     type: "api_key",

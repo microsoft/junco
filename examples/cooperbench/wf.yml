@@ -1,78 +1,228 @@
-# CooperBench shared worktree: designated assignments, two parallel leaders and native tasks.
-# Leaders coordinate over peer edges; the sink requires both normally finished reports.
+# CooperBench shared worktree, small-model teams. One Architect reads both specs and writes the joint
+# plan; per feature, Tester → Implementer → Agent (reviewer/integrator) run in sequence while the two
+# teams run concurrently in one Marsh-managed tree. Agent1/Agent2 exchange DONE reports on the peer
+# edges; the sink requires both integrators' normally finished reports.
 graph:
-  name: CooperBenchSharedWorktree
+  name: CooperBenchSmallTeams
   threads: 2
   source:
-    description: Feature assignments, routed to their designated leaders.
+    description: Feature assignments; each goes to the Architect and to its team.
     routes:
-      assignment-1: [assignment-1]
-      assignment-2: [assignment-2]
+      assignment-1: [arch-specs, team1-spec, team1-spec-impl, team1-spec-agent]
+      assignment-2: [arch-specs, team2-spec, team2-spec-impl, team2-spec-agent]
   sink:
-    description: Both teams' final reports; Agent1's is the graph result.
+    description: Both integrators' final reports; Agent1's is the graph result.
     trigger: { all: [agent1-result, agent2-result] }
     returns: Agent1
   nodes:
-    Agent1:
-      description: Lead of feature team 1; implements and coordinates integration in the shared tree.
+    Architect:
+      description: Reads both specs and the repository; returns the joint interface/ownership plan. Edits nothing.
       system: &common |-
-        You work in one shared repository with two feature leaders and their native task descendants. All agents see the same files; assignment routing is not confidentiality within the shared process, container or accessible logs.
-        Read the repository's conventions and affected code before editing. Stay within your assignment; identify downstream callers, tests and interfaces, and use focused executable checks of the requested behaviour. Keep intended changes in the repository; do not reset the base, remove .git or write submission patch files.
-        Delegate with native task only when work is independently useful. Give every task self-contained context: its goal, exact files, interfaces, conventions, constraints and acceptance checks. Children inherit these common instructions, not a leader's initial assignment or peer routing instructions.
-        Marsh authorizes managed command and file-tool publication, not arbitrary operating-system or network effects. An ownership denial is an actionable tool error: coordinate with the owner, never bypass it using unmanaged commands. Independent files can be edited concurrently.
-        Release every file you edited with release({file}) before handing it off or completing, including generated cache and build files. Reading a file does not authorize releasing somebody else's claim. Generated-output conflicts require the owning agent's explicit release just like source conflicts; ignored files are not exempt.
-        If a worker ends without releasing its edited paths, those paths remain owned for the rest of the pair. Leaders, peers and retries can read them but cannot edit, remove or release them. The harness will not force-release, roll back or repair abandoned ownership; the resulting shared tree is graded as-is.
-        Before finishing, run the relevant consumer-level and integrated checks, release your edited files, and report files changed, exact check commands and exit codes, and any blocker. Do not claim a check succeeded without executing it.
+        You work in one shared repository checkout with another feature team; every role of both teams sees the same files. A Marsh collection governs edits: the first agent to edit a file owns it until it calls release({file}); another owner's edit is denied with an actionable tool error — coordinate or wait, never bypass it with unmanaged commands. Reading a file never grants release rights. Release every file you edited, including generated or ignored files, before you finish; abandoned ownership blocks other agents for the rest of the run and the tree is graded as-is. Marsh authorizes managed command and file-tool publication, not arbitrary operating-system or network effects.
+        There is no dedicated write tool. Create new files through the managed bash tool using a heredoc; this is Marsh-governed publication, not an ownership bypass. Use edit for existing files and release every new file afterward.
+        Read the repository's conventions and the affected code before editing. Keep all intended changes in the working tree; do not reset the base, remove .git, commit, or write patch files. The grader takes the tree's diff with every test-path file removed, then runs hidden tests for each feature: production code must live outside test paths, and nothing under a test path reaches grading.
+        Never claim a command succeeded without running it; paste exact commands and exit codes. Do not poll or wait indefinitely for other agents.
       prompt: |-
-        You are Agent1, leader of feature team 1. Your outgoing peer edge is "agent1-to-agent2". Start by calling recv to read your designated feature assignment.
-        Plan your feature, delegate independent work and integrate it in the shared tree. Before broad edits send your peer a concise plan with files, interfaces and overlap risks, using send with your outgoing edge id and a plain string payload, then yield. On resumption recv peer updates and continue even if none arrived; do not poll or wait indefinitely.
-        Coordinate shared interfaces and release({file}) handoffs with your peer. Peer reports are not proof: inspect shared changes and check integration. Before finishing send a closing summary of changes and checks, yield once, recv final updates, then finish without waiting for acknowledgement.
-      tools: &native [read, bash, edit, grep, find, ast_grep, ast_edit, diff, code_graph, release]
-      trigger: assignment-1
-    Agent2:
-      description: Lead of feature team 2; implements and coordinates integration in the shared tree.
+        You are the Architect. Two features will be implemented concurrently in this repository by two teams sharing one working tree: Team 1 implements the feature headed "Team 1", Team 2 the one headed "Team 2". You implement nothing and never edit files.
+
+        Specifications:
+        {{arch-specs}}
+
+        If only one specification is present above, call recv once to collect the other before planning.
+        Read the repository (conventions, affected modules, existing tests, how tests run — also /usr/local/bin/runner.sh if it exists) and return one plan in exactly these sections:
+        ## Interfaces — per team: every public name the spec requires (module/package path, class, function, method, parameter, CLI flag, error type, config key) with its exact spelling and signature as the spec states or implies, and the file where it belongs. Where the spec leaves a name or shape open, choose one and state it.
+        ## Ownership — three lists of repository paths: Team 1 only, Team 2 only, Shared (both must touch). Make a shared file unshared by moving one team's change to a new file whenever the design allows.
+        ## Shared-file protocol — per shared path: who edits first, exactly which regions/symbols each team changes, the final combined signature of any symbol both touch, and the release handoff order.
+        ## Conflicts — behaviours where the features interact (same function, config, default, or test module) and the combined behaviour that satisfies both specs.
+        ## Test setup — the project's test command(s) for the affected packages and the directory/naming pattern for new test files, as observed in the repository.
+        ## Risks — existing tests likely affected, compatibility obligations, and spec statements that are easy to miss: exact representations (counts, shapes, ordering, case), nested/recursive application, lifecycle/reset semantics, immutability of inputs, error types and messages.
+        Be concrete: paths, symbols, signatures. No prose outside these sections.
+      tools: [read, bash, grep, find, code_graph, ast_grep]
+      tool_block: [task]
+      trigger: arch-specs
+    Tester1:
+      description: Turns Team 1's spec into failing acceptance tests and an interface contract.
       system: *common
       prompt: |-
-        You are Agent2, leader of feature team 2. Your outgoing peer edge is "agent2-to-agent1". Start by calling recv to read your designated feature assignment.
-        Plan your feature, delegate independent work and integrate it in the shared tree. Before broad edits send your peer a concise plan with files, interfaces and overlap risks, using send with your outgoing edge id and a plain string payload, then yield. On resumption recv peer updates and continue even if none arrived; do not poll or wait indefinitely.
-        Coordinate shared interfaces and release({file}) handoffs with your peer. Peer reports are not proof: inspect shared changes and check integration. Before finishing send a closing summary of changes and checks, yield once, recv final updates, then finish without waiting for acknowledgement.
+        You are Tester1 of Team 1. Team 1 implements this feature:
+        {{team1-spec}}
+
+        Architect plan (both teams; follow its Interfaces, Ownership and Test setup for your team):
+        {{Architect->Tester1}}
+
+        Turn the specification into executable acceptance tests BEFORE the implementation exists, so the Implementer has an objective target.
+        1. Read the affected code and existing tests for conventions (framework, fixtures, layout, how the suite runs).
+        2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
+        3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
+        4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
+        5. Release every file you created with release({file}).
+        Return exactly:
+        ## Checklist — the AC list.
+        ## Interface contract — the public names/signatures your tests assume.
+        ## Tests — one line per new test file: "- <path> — <AC ids>".
+        ## Commands
+        TEST_COMMAND: <command that runs only your new tests>
+        SUITE_COMMAND: <command that runs the affected package's existing tests>
+        RED: yes|no   (yes = your tests currently fail only for the missing feature)
+      tools: &native [read, bash, edit, grep, find, ast_grep, ast_edit, diff, code_graph, release]
+      tool_block: [task]
+      trigger: { all: [team1-spec, Architect->Tester1] }
+    Implementer1:
+      description: Implements Team 1's feature until the acceptance tests and the existing suite pass.
+      system: *common
+      prompt: |-
+        You are Implementer1 of Team 1. Implement this feature in the shared working tree:
+        {{team1-spec-impl}}
+
+        Architect plan (follow Ownership and the Shared-file protocol; the other team edits concurrently):
+        {{Architect->Implementer1}}
+
+        Tester1's acceptance tests and contract (your objective target):
+        {{Tester1->Implementer1}}
+
+        1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
+        2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
+        3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
+        4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+        Return exactly:
+        ## Changes — files changed and what each change does.
+        ## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
+        ## Verdict
+        TEST_COMMAND: <cmd> exit=<n>
+        SUITE_COMMAND: <cmd> exit=<n>
       tools: *native
-      trigger: assignment-2
+      tool_block: [task]
+      trigger: { all: [team1-spec-impl, Architect->Implementer1, Tester1->Implementer1] }
+    Agent1:
+      description: Team 1 reviewer/integrator; independent spec audit, combined checks with the peer, final report.
+      system: *common
+      prompt: |-
+        You are Agent1, reviewer and integrator of Team 1; your outgoing peer edge is "agent1-to-agent2". Team 1's feature:
+        {{team1-spec-agent}}
+
+        Architect plan:
+        {{Architect->Agent1}}
+
+        Implementer1's report:
+        {{Implementer1->Agent1}}
+
+        Work in this order:
+        1. Independent checklist: before reading Tester1's tests, derive your own numbered list of every testable claim in the spec (exact representation, nested/repeated inputs, lifecycle/reset, no mutation, defaults/compat, error paths). Then read the Tester's tests and the diff (git diff) and mark each claim covered-by-test, verified-by-you, or missing.
+        2. Probe every missing or doubtful claim: add a test in a NEW test-path file (same rule as the Tester) or run a focused script, and fix the implementation yourself when it is wrong.
+        3. Run the team's TEST_COMMAND and SUITE_COMMAND; fix failures your team caused.
+        4. Peer sync: send on your outgoing edge one plain-string message "DONE team 1: files=<paths>; interfaces=<public symbols added/changed>; tests=<TEST_COMMAND>", then yield once, then recv. If the peer's DONE arrived, run the peer's TEST_COMMAND and the full existing suite on the combined tree; fix breakage inside your team's files; for breakage inside the peer's files send one message describing it, yield once more, recv, and re-run. If no peer DONE arrived, continue without waiting: the peer runs the combined check when it finishes.
+        5. Release every file you edited with release({file}); do not finish while you own files.
+        Return exactly:
+        ## Review — your checklist with each claim's final status and what you changed.
+        ## Integration — peer messages received, combined checks run, remaining blockers.
+        ## Verdict
+        TEST_COMMAND: <cmd> exit=<n>
+        SUITE_COMMAND: <cmd> exit=<n>
+        PEER_TESTS: <cmd> exit=<n> | not-run
+      tools: *native
+      tool_block: [task]
+      trigger: { all: [team1-spec-agent, Architect->Agent1, Implementer1->Agent1] }
+    Tester2:
+      description: Turns Team 2's spec into failing acceptance tests and an interface contract.
+      system: *common
+      prompt: |-
+        You are Tester2 of Team 2. Team 2 implements this feature:
+        {{team2-spec}}
+
+        Architect plan (both teams; follow its Interfaces, Ownership and Test setup for your team):
+        {{Architect->Tester2}}
+
+        Turn the specification into executable acceptance tests BEFORE the implementation exists, so the Implementer has an objective target.
+        1. Read the affected code and existing tests for conventions (framework, fixtures, layout, how the suite runs).
+        2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
+        3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
+        4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
+        5. Release every file you created with release({file}).
+        Return exactly:
+        ## Checklist — the AC list.
+        ## Interface contract — the public names/signatures your tests assume.
+        ## Tests — one line per new test file: "- <path> — <AC ids>".
+        ## Commands
+        TEST_COMMAND: <command that runs only your new tests>
+        SUITE_COMMAND: <command that runs the affected package's existing tests>
+        RED: yes|no   (yes = your tests currently fail only for the missing feature)
+      tools: *native
+      tool_block: [task]
+      trigger: { all: [team2-spec, Architect->Tester2] }
+    Implementer2:
+      description: Implements Team 2's feature until the acceptance tests and the existing suite pass.
+      system: *common
+      prompt: |-
+        You are Implementer2 of Team 2. Implement this feature in the shared working tree:
+        {{team2-spec-impl}}
+
+        Architect plan (follow Ownership and the Shared-file protocol; the other team edits concurrently):
+        {{Architect->Implementer2}}
+
+        Tester2's acceptance tests and contract (your objective target):
+        {{Tester2->Implementer2}}
+
+        1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
+        2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
+        3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
+        4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+        Return exactly:
+        ## Changes — files changed and what each change does.
+        ## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
+        ## Verdict
+        TEST_COMMAND: <cmd> exit=<n>
+        SUITE_COMMAND: <cmd> exit=<n>
+      tools: *native
+      tool_block: [task]
+      trigger: { all: [team2-spec-impl, Architect->Implementer2, Tester2->Implementer2] }
+    Agent2:
+      description: Team 2 reviewer/integrator; independent spec audit, combined checks with the peer, final report.
+      system: *common
+      prompt: |-
+        You are Agent2, reviewer and integrator of Team 2; your outgoing peer edge is "agent2-to-agent1". Team 2's feature:
+        {{team2-spec-agent}}
+
+        Architect plan:
+        {{Architect->Agent2}}
+
+        Implementer2's report:
+        {{Implementer2->Agent2}}
+
+        Work in this order:
+        1. Independent checklist: before reading Tester2's tests, derive your own numbered list of every testable claim in the spec (exact representation, nested/repeated inputs, lifecycle/reset, no mutation, defaults/compat, error paths). Then read the Tester's tests and the diff (git diff) and mark each claim covered-by-test, verified-by-you, or missing.
+        2. Probe every missing or doubtful claim: add a test in a NEW test-path file (same rule as the Tester) or run a focused script, and fix the implementation yourself when it is wrong.
+        3. Run the team's TEST_COMMAND and SUITE_COMMAND; fix failures your team caused.
+        4. Peer sync: send on your outgoing edge one plain-string message "DONE team 2: files=<paths>; interfaces=<public symbols added/changed>; tests=<TEST_COMMAND>", then yield once, then recv. If the peer's DONE arrived, run the peer's TEST_COMMAND and the full existing suite on the combined tree; fix breakage inside your team's files; for breakage inside the peer's files send one message describing it, yield once more, recv, and re-run. If no peer DONE arrived, continue without waiting: the peer runs the combined check when it finishes.
+        5. Release every file you edited with release({file}); do not finish while you own files.
+        Return exactly:
+        ## Review — your checklist with each claim's final status and what you changed.
+        ## Integration — peer messages received, combined checks run, remaining blockers.
+        ## Verdict
+        TEST_COMMAND: <cmd> exit=<n>
+        SUITE_COMMAND: <cmd> exit=<n>
+        PEER_TESTS: <cmd> exit=<n> | not-run
+      tools: *native
+      tool_block: [task]
+      trigger: { all: [team2-spec-agent, Architect->Agent2, Implementer2->Agent2] }
   edges:
-    - from: $source
-      to: Agent1
-      kind: message
-      id: assignment-1
-      schema: &prompt
-        type: object
-        additionalProperties: false
-        required: [kind, text]
-        properties:
-          kind: { const: prompt }
-          text: { type: string, pattern: '\S' }
-    - from: $source
-      to: Agent2
-      kind: message
-      id: assignment-2
-      schema: *prompt
-    # Peer payloads are plain strings: Copilot-served models encode send's untyped payload as a string.
-    - from: Agent1
-      to: Agent2
-      kind: message
-      id: agent1-to-agent2
-      schema: &peer { type: string, minLength: 1 }
-    - from: Agent2
-      to: Agent1
-      kind: message
-      id: agent2-to-agent1
-      schema: *peer
-    - from: Agent1
-      to: $sink
-      kind: value
-      id: agent1-result
-      schema: {{ params.assistant_schema }}
-    - from: Agent2
-      to: $sink
-      kind: value
-      id: agent2-result
-      schema: {{ params.assistant_schema }}
+    - { from: $source, to: Architect, kind: message, id: arch-specs, schema: &prompt { type: object, additionalProperties: false, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string, pattern: '\S' } } } }
+    - { from: $source, to: Tester1, kind: message, id: team1-spec, schema: *prompt }
+    - { from: $source, to: Implementer1, kind: message, id: team1-spec-impl, schema: *prompt }
+    - { from: $source, to: Agent1, kind: message, id: team1-spec-agent, schema: *prompt }
+    - { from: Architect, to: Tester1, schema: {{ params.assistant_schema }} }
+    - { from: Architect, to: Implementer1, schema: {{ params.assistant_schema }} }
+    - { from: Architect, to: Agent1, schema: {{ params.assistant_schema }} }
+    - { from: Tester1, to: Implementer1, schema: {{ params.assistant_schema }} }
+    - { from: Implementer1, to: Agent1, schema: {{ params.assistant_schema }} }
+    - { from: $source, to: Tester2, kind: message, id: team2-spec, schema: *prompt }
+    - { from: $source, to: Implementer2, kind: message, id: team2-spec-impl, schema: *prompt }
+    - { from: $source, to: Agent2, kind: message, id: team2-spec-agent, schema: *prompt }
+    - { from: Architect, to: Tester2, schema: {{ params.assistant_schema }} }
+    - { from: Architect, to: Implementer2, schema: {{ params.assistant_schema }} }
+    - { from: Architect, to: Agent2, schema: {{ params.assistant_schema }} }
+    - { from: Tester2, to: Implementer2, schema: {{ params.assistant_schema }} }
+    - { from: Implementer2, to: Agent2, schema: {{ params.assistant_schema }} }
+    - { from: Agent1, to: Agent2, kind: message, id: agent1-to-agent2, schema: &peer { type: string, minLength: 1 } }
+    - { from: Agent2, to: Agent1, kind: message, id: agent2-to-agent1, schema: *peer }
+    - { from: Agent1, to: $sink, kind: value, id: agent1-result, schema: {{ params.assistant_schema }} }
+    - { from: Agent2, to: $sink, kind: value, id: agent2-result, schema: {{ params.assistant_schema }} }

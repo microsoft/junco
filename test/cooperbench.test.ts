@@ -17,12 +17,14 @@ import {
   type Message,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, syntax, tools, tracer } from "junco";
+import { graph, schedules, syntax, tools, tracer } from "junco";
 import type { NativeModule } from "junco-tools";
 import {
   createBenchmarkRecorder,
   createContainerMemorySampler,
   createPair,
+  document,
+  isTestPath,
   ladderOf,
   marshOptions,
   type Owner,
@@ -30,6 +32,7 @@ import {
   pairOutcome,
   parseRequest,
   readContainerMemoryPeak,
+  verdicts,
   type YamlAgent,
 } from "../examples/cooperbench/wf.ts";
 
@@ -89,8 +92,8 @@ const firstUser = (context: Context) => {
 /** Who a transcript belongs to: the leader its first user message names, or the worker's job (`name@ROUND` when its task names a round). */
 function agentOf(context: Context): string {
   const text = firstUser(context);
-  const leader = /You are (Agent[12])/.exec(text);
-  if (leader) return leader[1]!;
+  const member = /You are (?:the )?(Architect|Tester[12]|Implementer[12]|Agent[12])/.exec(text);
+  if (member) return member[1]!;
   const child = /CHILD-[a-z]+/.exec(text);
   if (child) return child[0];
   throw new Error(`unknown agent: ${text.slice(0, 200)}`);
@@ -204,7 +207,14 @@ async function pair(
   signal = new AbortController().signal,
   recorder?: tracer.ProfileRecorder<string>,
 ) {
-  const { models, calls } = await fauxModels(scripts);
+  const { models, calls } = await fauxModels({
+    ...Object.fromEntries(["Architect", "Tester1", "Tester2", "Implementer1", "Implementer2"].map((name) => [name, steps(() => done(`${name} report`))])),
+    ...scripts,
+  });
+  const ladder = new schedules.ModelLadder(
+    models,
+    ladderOf(req.models, req.thinking),
+  );
   const owners: Owner[] = [];
   const leaders = new Map<string, YamlAgent>();
   const directory = mkdtempSync(join(tmpdir(), "cooperbench-native-"));
@@ -213,7 +223,7 @@ async function pair(
     native: copyTree,
   });
   const created = await createPair(req, {
-    models,
+    ladder,
     tracer: new tracer.DummyTracer(),
     recorder,
     signal,
@@ -221,11 +231,11 @@ async function pair(
     cwd: directory,
     createAgent: async (spec, owner) => {
       owners.push(owner);
-      const created = await syntax.createJuncoAgent(
-        spec,
-        ladderOf(req.models, req.thinking),
-        models,
-      );
+      // Descendant lifecycle fixtures deliberately enable task; the canonical graph blocks it.
+      const fixtureSpec = Object.keys(scripts).some((name) => name.startsWith("CHILD-"))
+        ? { ...spec, tool_block: [] }
+        : spec;
+      const created = await syntax.createJuncoAgent(fixtureSpec, ladder);
       leaders.set(spec.node, created);
       return created;
     },
@@ -743,6 +753,25 @@ test("a raw serialization failure still forwards the original usage once and red
   }
 });
 
+test("large UTF-8 event records remain complete and ordered through stdout pipes", () => {
+  const module = new URL("../examples/cooperbench/wf.ts", import.meta.url).pathname;
+  const result = spawnSync(process.execPath, ["-e", `
+    import { emit } from ${JSON.stringify(module)};
+    const text = "λ🙂".repeat(40000);
+    await Promise.all(Array.from({ length: 8 }, (_, id) =>
+      new Promise(resolve => setTimeout(() => { emit({ type: "message", id, text }); resolve(); }, 0))));
+    emit({ type: "result" });
+    process.exit();
+  `], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 10000 });
+  expect(result.status).toBe(0);
+  expect(result.stdout.endsWith("\n")).toBe(true);
+  const records = result.stdout.trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(records.slice(0, -1).map(({ id, text }) => [id, text])).toEqual(
+    Array.from({ length: 8 }, (_, id) => [id, "λ🙂".repeat(40000)]),
+  );
+  expect(records.at(-1).type).toBe("result");
+});
+
 test.each([
   "",
   " ",
@@ -781,7 +810,7 @@ const NOTE = {
   agent2: "PEER-NOTE-FROM-TWO",
 } as const;
 
-test("initial assignments are routed only to their designated leaders, and peer notes arrive by send, yield and recv", async () => {
+test("the Architect receives both assignments, teams receive only theirs, and peer notes arrive by send, yield and recv", async () => {
   const seen: Record<string, Record<string, ToolResult>> = {
     Agent1: {},
     Agent2: {},
@@ -797,8 +826,7 @@ test("initial assignments are routed only to their designated leaders, and peer 
     return steps(
       () => call("recv", {}),
       keep("assignment", () => call("info", {})),
-      keep("info", () => call("task", { assignment: "spawn a helper" })),
-      keep("task", () => call("send", { id: out, payload: NOTE[key] })),
+      keep("info", () => call("send", { id: out, payload: NOTE[key] })),
       keep("send", () => call("yield", { reason: "await peer plan" })),
       () => call("recv", {}),
       keep("peer", () => done(`${name} done`)),
@@ -808,7 +836,7 @@ test("initial assignments are routed only to their designated leaders, and peer 
     agent1: { task: `Implement ${SENTINEL.agent1}.` },
     agent2: { task: `Implement ${SENTINEL.agent2}.` },
   });
-  const { execution, calls, owners } = await pair(req, {
+  const { execution, calls, owners, stats } = await pair(req, {
     Agent1: leader("agent1"),
     Agent2: leader("agent2"),
   });
@@ -821,24 +849,43 @@ test("initial assignments are routed only to their designated leaders, and peer 
       syntax.finalText(results.get(graph.NodeId.create("Agent2")), "Agent2"),
     ).toBe("Agent2 done");
   });
+  const architect = calls.filter((c) => c.agent === "Architect");
+  expect(architect.length).toBeGreaterThan(0);
+  for (const sentinel of Object.values(SENTINEL))
+    expect(JSON.stringify(architect[0]!.messages)).toContain(sentinel);
+  for (const name of ["Architect", "Tester1", "Implementer1", "Agent1", "Tester2", "Implementer2", "Agent2"]) {
+    const mine = calls.filter((c) => c.agent === name);
+    expect(mine.length).toBeGreaterThan(0);
+    expect(new Set(mine.map((c) => c.model))).toEqual(new Set(["worker"]));
+    expect(document.graph.nodes[name]).toMatchObject({ tool_block: ["task"] });
+    if (name !== "Architect") {
+      const [own, other] = name.endsWith("1") ? [SENTINEL.agent1, SENTINEL.agent2] : [SENTINEL.agent2, SENTINEL.agent1];
+      expect(JSON.stringify(mine[0]!.messages)).toContain(own);
+      for (const c of mine) expect(JSON.stringify(c.messages)).not.toContain(other);
+    }
+  }
+  expect(stats).toEqual({ agents: 7, workers: 0 });
   for (const [name, key, other] of [
     ["Agent1", "agent1", "agent2"],
     ["Agent2", "agent2", "agent1"],
   ] as const) {
     const mine = calls.filter((c) => c.agent === name);
-    expect(new Set(mine.map((c) => c.model))).toEqual(new Set(["leader"]));
     expect(seen[name]!.assignment!.text).toContain(SENTINEL[key]);
     for (const c of mine)
       expect(JSON.stringify(c.messages)).not.toContain(SENTINEL[other]);
     expect(seen[name]!.info!.text).not.toContain(SENTINEL[key]);
-    expect(seen[name]!.task!.isError).toBe(true); // missing explicit worker model is rejected
     expect(seen[name]!.send!.isError).toBe(false);
     const delivered = seen[name]!.peer!.text;
     expect(delivered.split(NOTE[other]).length - 1).toBe(1);
     expect(delivered).not.toContain(NOTE[key]);
   }
   expect(owners.map((o) => [o.team, o.node_id])).toEqual([
+    ["agent1", "Architect"],
+    ["agent1", "Tester1"],
+    ["agent1", "Implementer1"],
     ["agent1", "Agent1"],
+    ["agent2", "Tester2"],
+    ["agent2", "Implementer2"],
     ["agent2", "Agent2"],
   ]);
 }, 20_000);
@@ -977,6 +1024,25 @@ test("one thinking level reaches both model rungs; off omits thinking", () => {
   }
 });
 
+test.each([
+  ["tests/test_x.py", true],
+  ["pkg/foo_test.go", true],
+  ["src/a.spec.ts", true],
+  ["src/tests_util.py", false],
+  ["pkg/testing.go", false],
+])("grader test path %s is %s", (path, expected) => {
+  expect(isTestPath(path)).toBe(expected);
+});
+
+test("role verdict checks require structural completion evidence", () => {
+  expect(verdicts.Architect("## Interfaces\n## Ownership\n## Shared-file protocol\n## Conflicts\n## Test setup\n## Risks")).toBe(true);
+  expect(verdicts.Architect("## Interfaces\n## Ownership")).toBe(false);
+  expect(verdicts.Tester("- tests/test_x.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes")).toBe(true);
+  expect(verdicts.Tester("- src/main.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes")).toBe(false);
+  expect(verdicts.Implementer("TEST_COMMAND: pytest -q exit=0\nSUITE_COMMAND: pytest exit=0")).toBe(true);
+  expect(verdicts.Implementer("TEST_COMMAND: pytest -q exit=1\nSUITE_COMMAND: pytest exit=0")).toBe(false);
+});
+
 const task = (name: string, model = { provider: "faux", modelId: "worker" }) =>
   call("task", {
     context: "Self-contained fixture context.",
@@ -1042,7 +1108,7 @@ test("leaders deny competing writes, keep disjoint files, and release permits ha
     if (agent.status === "idle")
       agent.stagePrompt(`You are ${name}; exercise the ownership boundary.`);
     for (;;) {
-      const step = await agent.next();
+      const step = await agent.next({ values: new Map(), messages: new Map() });
       assert.equal(step.done, false);
       if (step.value?.kind === "failed") throw step.value.error;
       if (step.value?.kind === "settled")
@@ -1085,13 +1151,6 @@ test("native descendants use the worker model and common thinking, inherit polic
       () => bash("printf overwritten > owned.txt"),
       (context) => {
         childDenied = lastResult(context.messages).isError;
-        return task("CHILD-forbidden", { provider: "faux", modelId: "leader" });
-      },
-      (context) => {
-        expect(lastResult(context.messages).isError).toBe(true);
-        expect(lastResult(context.messages).text).toContain(
-          "task model must be faux/worker",
-        );
         return task("CHILD-grandchild");
       },
       () => done("child interim"),
@@ -1124,7 +1183,6 @@ test("native descendants use the worker model and common thinking, inherit polic
       expect(new Set(calls.map((call) => call.reasoning))).toEqual(
         new Set([THINKING]),
       );
-      expect(calls[0]!.system).toContain("faux/worker");
     }
   });
 }, 30_000);
@@ -1134,7 +1192,7 @@ test.each([
   { provider: "faux", modelId: "leader" },
   { provider: "other", modelId: "worker" },
 ])(
-  "native task admission rejects missing or different worker model %j without acquiring a child",
+  "canonical task blocking rejects task model %j without acquiring a child",
   async (model) => {
     let rejection: ToolResult | undefined;
     const run = await pair(request(), {
@@ -1157,13 +1215,10 @@ test.each([
         },
       ),
       Agent2: idleLeader,
-      "CHILD-forbidden": () => {
-        throw new Error("forbidden child was launched");
-      },
     });
     await closed(run.execution, () => run.execution.run());
     expect(rejection?.isError).toBe(true);
-    expect(rejection?.text).toContain("task model must be faux/worker");
+    expect(rejection?.text).toMatch(/task|unknown tool/i);
     expect(run.calls.some((call) => call.agent === "CHILD-forbidden")).toBe(
       false,
     );

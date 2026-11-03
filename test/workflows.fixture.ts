@@ -124,9 +124,10 @@ const { models, faux } = await fauxRuntime(
   "ralph-workflow-smoke",
 );
 const model = faux.getModel();
-const ladder = schedules.uniformLadder({
-  model: `${model.provider}/${model.id}`,
-});
+const ladder = new schedules.ModelLadder(
+  models,
+  schedules.uniformLadder({ model: `${model.provider}/${model.id}` }),
+);
 // createAgent keeps the smoke collection-free: no ShellMux, so no Btrfs seed is needed.
 const judged: number[] = [];
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
@@ -141,7 +142,6 @@ const execution = await JuncoGraph.fromYaml(workflows.ralph, {
         ],
       },
       ladder,
-      models,
     ),
   ladder,
   tracer: new tracerApi.DummyTracer(),
@@ -208,9 +208,10 @@ const fanIn = await fauxRuntime(
   "fan-in-workflow-smoke",
 );
 const fanInModel = fanIn.faux.getModel();
-const fanInLadder = schedules.uniformLadder({
-  model: `${fanInModel.provider}/${fanInModel.id}`,
-});
+const fanInLadder = new schedules.ModelLadder(
+  fanIn.models,
+  schedules.uniformLadder({ model: `${fanInModel.provider}/${fanInModel.id}` }),
+);
 const fanInOptions = {
   cwd: process.cwd(),
   scheduler: () => schedules.parallel(),
@@ -223,7 +224,6 @@ const fanInOptions = {
         ],
       },
       fanInLadder,
-      fanIn.models,
     ),
   ladder: fanInLadder,
   tracer: new tracerApi.DummyTracer(),

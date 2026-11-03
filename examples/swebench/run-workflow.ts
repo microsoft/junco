@@ -30,7 +30,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import { type Api, getSupportedThinkingLevels, lazyStream, type Model, type TSchema, Type } from "@earendil-works/pi-ai";
+import { type Api, lazyStream, type Model, type TSchema, Type } from "@earendil-works/pi-ai";
 import { type BashOperations, createBashTool, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { agent, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { benchmarkTelemetry, grafanaUrl } from "../benchmark-telemetry.ts";
@@ -117,27 +117,15 @@ export const describe = (error: unknown): string =>
       : String(error);
 const tail = (text: string, size = 2000): string => (text.length <= size ? text : `…${text.slice(-size)}`);
 
-/** Every rung is one of MODELS (thinking support needs the model catalog: see checkThinking). */
+/** Every rung is one of MODELS. */
 export function checkLadder(ladder: unknown): asserts ladder is schedules.Ladder {
   schedules.validateLadder(ladder as schedules.Ladder);
   for (const [name, rung] of Object.entries(ladder as schedules.Ladder))
     if (!MODELS.includes(rung.model)) throw new Error(`ladder rung ${name} must be one of ${MODELS.join(", ")}, got ${rung.model}`);
 }
 
-/** Every rung's thinking level (omitted = off) is one its model supports, so Pi never silently clamps it. */
-export function checkThinking(models: ModelRuntime, ladder: schedules.Ladder): void {
-  for (const [name, { model, thinking = "off" }] of Object.entries(ladder)) {
-    const slash = model.indexOf("/");
-    const resolved = models.getModel(model.slice(0, slash), model.slice(slash + 1));
-    if (resolved === undefined) throw new Error(`ladder rung ${name}: ${model} is not in the model catalog`);
-    const supported = getSupportedThinkingLevels(resolved);
-    if (!supported.includes(thinking))
-      throw new Error(`ladder rung ${name}: ${model} does not support thinking ${thinking} (supported: ${supported.join(", ")})`);
-  }
-}
-
-/** Pi's saved-login runtime; fails unless every ladder model is credentialed, available and supports its thinking level. */
-async function copilotModels(ladder: schedules.Ladder): Promise<ModelRuntime> {
+/** Pi's saved-login runtime paired with `ladder`; fails unless every ladder model is credentialed, available and supports its thinking level. */
+async function copilotLadder(ladder: schedules.Ladder): Promise<schedules.ModelLadder> {
   const models = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
   // Pi's cached catalog (~/.pi/agent/models-store.json) holds MODELS newer than the built-in one; no network.
   await models.refresh({ allowNetwork: false });
@@ -151,8 +139,7 @@ async function copilotModels(ladder: schedules.Ladder): Promise<ModelRuntime> {
     for (const model of wanted.filter((m) => m.startsWith(`${providerId}/`)))
       if (!available.some((m) => `${m.provider}/${m.id}` === model)) throw new Error(`${model} is not available through the saved login`);
   }
-  checkThinking(models, ladder);
-  return models;
+  return new schedules.ModelLadder(models, ladder);
 }
 
 /** Rejects a request to any model but `allowed` before it is sent; records accepted requests. */
@@ -205,8 +192,7 @@ export function guardedModels(models: ModelRuntime, log: string, role: string, a
 }
 
 type AgentFactory = {
-  readonly models: ModelRuntime;
-  readonly ladder: schedules.Ladder;
+  readonly ladder: schedules.ModelLadder;
   /** The rung of a root-relative agent path (`Lead`, `Planner/Draft`). */
   readonly strengthOf: (path: string) => schedules.ModelStrengthName;
   readonly log: string;
@@ -235,7 +221,7 @@ async function createAgent(factory: AgentFactory, spec: syntax.AgentSpec): Promi
     if (bound === undefined) throw new Error(`${path}: tool ${tool.name} is not permitted`);
     return [bound(path)];
   });
-  const { model, thinking = "off" } = factory.ladder[factory.strengthOf(path)];
+  const { model, thinking = "off" } = factory.ladder.rungs[factory.strengthOf(path)];
   const slash = model.indexOf("/");
   // Junco owns the session from here on, including when creation fails.
   const session = await factory.repo.create({ cwd: spec.cwd }, BACKGROUND_CONTEXT);
@@ -243,7 +229,7 @@ async function createAgent(factory: AgentFactory, spec: syntax.AgentSpec): Promi
   const instance = await agent.JuncoAgent.create<Skill, PromptTemplate, TSchema, unknown>({
     provider: model.slice(0, slash),
     model: model.slice(slash + 1),
-    models: guardedModels(factory.models, factory.log, path, model),
+    models: guardedModels(factory.ladder.models, factory.log, path, model),
     thinkingLevel: thinking,
     session,
     systemPrompt: spec.systemPrompt,
@@ -721,13 +707,13 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
       cancel: cancelBranch(workflow.BRANCHES, containers, acquired),
     };
     const bash = sandboxBash(workflow, containers, acquired, (reason) => controller.abort(reason));
-    const models = await copilotModels(workflow.ladder);
+    const ladder = await copilotLadder(workflow.ladder);
     const observers = await telemetry(profile, problem.instance_id);
     recorder = observers.recorder;
-    const factory: AgentFactory = { models, ladder: workflow.ladder, strengthOf: workflow.strengthOf, log, repo, index, bind: { bash }, acquired };
+    const factory: AgentFactory = { ladder, strengthOf: workflow.strengthOf, log, repo, index, bind: { bash }, acquired };
     const text = await workflow.run({
       cwd: dir,
-      models,
+      ladder,
       createAgent: (spec) => createAgent(factory, spec),
       tools: { bash: UNBOUND_BASH },
       tracer: observers.tracer,
@@ -842,14 +828,14 @@ async function preflight(): Promise<void> {
       return { content: [{ type: "text", text: sentinel }], details: undefined };
     },
   };
-  const { ladder } = await loadWorkflow();
-  const models = await copilotModels(ladder);
+  const { ladder: rungs } = await loadWorkflow();
+  const ladder = await copilotLadder(rungs);
   const acquired = new Map<string, Agent>();
   const env = new NodeExecutionEnv({ cwd: artifacts });
   const repo = new JsonlSessionRepo({ fileSystem: env, sessionsRoot: recordings });
   const profilePath = join(artifacts, "profile.jsonl");
   const profile = new tracer.JsonlRecorder({ path: profilePath });
-  const factory: AgentFactory = { models, ladder, strengthOf: PREFLIGHT_STRENGTH, log, repo, index, bind: { probe: () => probe }, acquired };
+  const factory: AgentFactory = { ladder, strengthOf: PREFLIGHT_STRENGTH, log, repo, index, bind: { probe: () => probe }, acquired };
   let recorder: tracer.ProfileRecorder<string> = profile;
   let text: string;
   try {
@@ -857,7 +843,6 @@ async function preflight(): Promise<void> {
     recorder = observers.recorder;
     const execution = await JuncoGraph.fromYaml(syntax.parse(PREFLIGHT), {
       cwd: ROOT,
-      models,
       ladder,
       scheduler: () => schedules.strength((_snapshot, id) => PREFLIGHT_STRENGTH(id), schedules.parallel()),
       createAgent: (spec) => createAgent(factory, spec),
@@ -908,7 +893,7 @@ async function preflight(): Promise<void> {
   console.log(JSON.stringify(result, null, 2));
   if (probes < 1 || !text.includes(sentinel)) throw new Error("preflight: the probe value did not reach the final answer");
   for (const role of ["Probe", "Echo"])
-    if (!requests.some((r) => r.role === role)) throw new Error(`preflight: no recorded ${ladder[PREFLIGHT_STRENGTH(role)].model} request for ${role}`);
+    if (!requests.some((r) => r.role === role)) throw new Error(`preflight: no recorded ${ladder.rungs[PREFLIGHT_STRENGTH(role)].model} request for ${role}`);
   const probeRecord = recorded.Probe;
   if (!probeRecord?.tool_calls.includes("probe") || !probeRecord.tool_results.includes("probe"))
     throw new Error("preflight: the durable Probe session lacks the committed probe call and its result");

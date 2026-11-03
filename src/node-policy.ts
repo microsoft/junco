@@ -3,6 +3,8 @@ import type {
   ModelThinkingLevel,
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type {
   DataflowTracer,
   EdgeIdType as EdgeId,
@@ -58,6 +60,33 @@ export function validateLadder(ladder: Ladder): void {
 /** The same rung at every strength. */
 export const uniformLadder = (rung: LadderRung): Ladder =>
   Object.fromEntries(MODEL_STRENGTHS.map((name) => [name, rung])) as Ladder;
+
+/** Every available model (`models`) and the five rungs this ladder allows (`rungs`), checked against the catalog. */
+export class ModelLadder {
+  constructor(
+    readonly models: ModelRuntime,
+    readonly rungs: Ladder,
+  ) {
+    validateLadder(rungs);
+    for (const name of MODEL_STRENGTHS) {
+      const { model, thinking = "off" } = rungs[name];
+      const slash = model.indexOf("/");
+      const resolved = models.getModel(
+        model.slice(0, slash),
+        model.slice(slash + 1),
+      );
+      if (resolved === undefined)
+        throw new DataflowDefinitionError(
+          `ladder.${name}.model ${model} is not in the model catalog`,
+        );
+      const supported = getSupportedThinkingLevels(resolved);
+      if (!supported.includes(thinking))
+        throw new DataflowDefinitionError(
+          `ladder.${name}.thinking ${thinking} is not supported by ${model} (supported: ${supported.join(", ")})`,
+        );
+    }
+  }
+}
 
 /** The provider, model and thinking level `strength` selects in `ladder` (`thinking` defaults to `"off"`). */
 export function resolveRung(

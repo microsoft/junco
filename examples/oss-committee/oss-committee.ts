@@ -252,7 +252,7 @@ export interface ReviewRound {
 }
 
 export const ReviewRound = {
-  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder, recorder?: syntax.BuildOptions["recorder"]): Promise<ReviewRound> {
+  async create(request: string, members: Members, search: SearchCounts, feedback?: string, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder, recorder?: syntax.BuildOptions["recorder"]): Promise<ReviewRound> {
     const context: RoundContext = {
       request, feedback, members, search, failuresBefore: search.failures(), architectStarted: false,
     };
@@ -303,7 +303,7 @@ export async function convene(
   review: Pick<ReviewTool, "takeVerdict">,
   signal?: AbortSignal,
   observer?: tracer.DataflowTracer,
-  ladder?: schedules.Ladder,
+  ladder?: schedules.ModelLadder,
   recorder?: syntax.BuildOptions["recorder"],
 ): Promise<string> {
   let feedback: string | undefined;
@@ -356,6 +356,7 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
 
   // One Pi runtime, holding the saved login, is shared by every member.
   const models = await ModelRuntime.create();
+  const ladder = new schedules.ModelLadder(models, LADDER);
   signal?.throwIfAborted();
   const search = new OssSearchTool();
   const review = new ReviewTool();
@@ -369,9 +370,9 @@ async function main([requestPath, namedOutput, ...extra]: readonly string[], sig
     for (const spec of specs) {
       signal?.throwIfAborted();
       // Members outlive each round's graph; every round's graph requires their recorder.
-      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent({ ...spec, recorder, recorderNodeId: spec.node }, LADDER, models));
+      members[spec.node as MemberId] = resources.use(await syntax.createJuncoAgent({ ...spec, recorder, recorderNodeId: spec.node }, ladder));
     }
-    plan = await convene(request, members, search, review, signal, undefined, LADDER, recorder);
+    plan = await convene(request, members, search, review, signal, undefined, ladder, recorder);
   }
   signal?.throwIfAborted();
   await writeFile(outputPath, `${plan}\n`, { encoding: "utf8", flag: "wx" });

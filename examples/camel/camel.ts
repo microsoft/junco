@@ -269,13 +269,14 @@ async function main(signal: AbortSignal): Promise<void> {
     await using lifetime = new AsyncDisposableStack();
     signal.throwIfAborted();
     const models = await verifiedModels(LADDER.med, signal);
+    const ladder = new schedules.ModelLadder(models, LADDER);
     signal.throwIfAborted();
     const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
     const observer = tracer.TuiTracer.shared();
     const execution = await JuncoGraph.fromYaml(source, {
-      cwd: repositoryRoot, models, ladder: LADDER, code: { Interpreter, Executor },
+      cwd: repositoryRoot, ladder, code: { Interpreter, Executor },
       // Avoid the default builder's ShellMux: neither LLM can use tools.
-      createAgent: (spec) => syntax.createJuncoAgent(spec, LADDER, models),
+      createAgent: (spec) => syntax.createJuncoAgent(spec, ladder),
       scheduler: () => schedules.parallel(), recorder, context, params: { query }, signal,
       tracer: observer,
     });

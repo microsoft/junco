@@ -1242,7 +1242,7 @@ type CandidateBatchRunOptions = {
   readonly taskFailurePolicy?: agent.TaskFailurePolicy;
   readonly apply: RefactorApplier;
   readonly collection?: tools.ToolCollection;
-  readonly ladder?: schedules.Ladder;
+  readonly ladder?: schedules.ModelLadder;
   readonly recorder?: syntax.BuildOptions["recorder"];
 };
 
@@ -1551,6 +1551,7 @@ function liveRunner(options: {
 
   const runBatch: BatchRunner = async (snapshot, batch, signal) => {
     const { models, research } = await acquireShared(signal);
+    const ladder = new schedules.ModelLadder(models, LADDER);
     const byNode = new Map((await syntax.resolveAgents(document, { cwd: root, collection })).map((spec) => [spec.node, spec]));
     const baseline = await tools.captureBaseline(root, snapshot.files);
     const readSource = tools.repositorySourceReader(root, baseline);
@@ -1562,10 +1563,10 @@ function liveRunner(options: {
       const verdict = new VerdictRecorder();
       const proposerSpec = byNode.get("Proposer")!;
       // Prepared agents join the batch graph, which requires their recorder at their lane node.
-      const proposer = pending.use(await syntax.createJuncoAgent({ ...proposerSpec, tools: [...proposerSpec.tools, ...research, proposal.tool], recorder, recorderNodeId: `Proposer:${work.rank}` }, LADDER, models));
+      const proposer = pending.use(await syntax.createJuncoAgent({ ...proposerSpec, tools: [...proposerSpec.tools, ...research, proposal.tool], recorder, recorderNodeId: `Proposer:${work.rank}` }, ladder));
       signal?.throwIfAborted();
       const judgeSpec = byNode.get("Judge")!;
-      const judge = pending.use(await syntax.createJuncoAgent({ ...judgeSpec, tools: [...judgeSpec.tools, ...research, verdict.tool], recorder, recorderNodeId: `Judge:${work.rank}` }, LADDER, models));
+      const judge = pending.use(await syntax.createJuncoAgent({ ...judgeSpec, tools: [...judgeSpec.tools, ...research, verdict.tool], recorder, recorderNodeId: `Judge:${work.rank}` }, ladder));
       lanes.push({ work, proposer, judge, proposal, verdict });
     }
     const apply: RefactorApplier = async (refactor, applySignal) => {
@@ -1580,7 +1581,7 @@ function liveRunner(options: {
       return files;
     };
     pending.move();
-    return runCandidateBatch({ snapshot, lanes, observer, collection, apply, taskFailurePolicy: "ignore", ladder: LADDER, recorder }, signal);
+    return runCandidateBatch({ snapshot, lanes, observer, collection, apply, taskFailurePolicy: "ignore", ladder, recorder }, signal);
   };
 
   return {

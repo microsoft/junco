@@ -183,7 +183,7 @@ export type VerusRound = Readonly<{
 /** Fresh one-shot nodes borrow idle agents; LockPolicy does not confine host filesystem writes. */
 export const VerusRound = {
   async create(workspace: VerusWorkspace, members: VerusMembers, verification: { runs(): number },
-    feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder,
+    feedback?: VerusFeedback, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder,
     recorder?: syntax.BuildOptions["recorder"]): Promise<VerusRound> {
     const assignment = `Original natural-language specification:\n${workspace.spec}\n\nOriginal source (read-only): ${workspace.source}\nOutput directory: ${workspace.outputDir}\nOutput target: ${workspace.target}\nPath mapping: source-directory relative paths are preserved under output; a file maps to output/basename with only required neighboring module context materialized.\nSource-relative Rust inventory: ${JSON.stringify(workspace.rustFiles)}\nCopied Cargo manifests: ${JSON.stringify(workspace.cargoManifests)}\n\nPrevious Reviewer feedback:\n${feedback?.review ?? "First round; none."}\n\nPrevious Cleanup observations:\n${feedback?.cleanup ?? "First round; none."}\n\n`;
     members.Verifier.stagePrompt(assignment + "Translate/repair the current output and address both feedback reports. Write actual source, then report evidence and unresolved obligations.");
@@ -202,7 +202,7 @@ export const VerusRound = {
 
 /** Success never terminates; caller owns members, observer and recorder, including disposal and TUI finish. */
 export async function runVerusLoop(workspace: VerusWorkspace, members: VerusMembers,
-  signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.Ladder,
+  signal?: AbortSignal, observer?: tracer.DataflowTracer, ladder?: schedules.ModelLadder,
   recorder?: syntax.BuildOptions["recorder"]): Promise<void> {
   let runs = 0;
   let failure: Error | undefined;
@@ -243,15 +243,15 @@ async function runVerus(request: VerusRequest, signal?: AbortSignal): Promise<vo
   resources.defer(() => rm(bridgeDir, { recursive: true, force: true }));
   const verus = await loadVerusMcp(bridgeDir);
   signal?.throwIfAborted();
-  const models = await verifiedModels(LADDER.med, signal);
+  const ladder = new schedules.ModelLadder(await verifiedModels(LADDER.med, signal), LADDER);
   signal?.throwIfAborted();
   // ponytail: default session history stays in memory; pass caller-managed agents to runVerusLoop if long-run memory use matters.
   const members = {} as Record<VerusRole, YamlAgent>;
   for (const spec of await syntax.resolveAgents(document, { cwd: workspace.outputDir })) {
     signal?.throwIfAborted();
-    members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus], recorder, recorderNodeId: spec.node }, LADDER, models));
+    members[spec.node as VerusRole] = resources.use(await syntax.createJuncoAgent({ ...spec, tools: [...spec.tools, verus], recorder, recorderNodeId: spec.node }, ladder));
   }
-  await runVerusLoop(workspace, members, signal, observer, LADDER, recorder);
+  await runVerusLoop(workspace, members, signal, observer, ladder, recorder);
 }
 
 if (import.meta.main) await runCli(async (signal) => {

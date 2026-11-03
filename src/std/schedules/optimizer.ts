@@ -38,7 +38,11 @@ import { Value } from "typebox/value";
 import { Deterministic } from "../../deterministic.js";
 import { JsonlRecorder } from "../../jsonl-recorder.js";
 import { JuncoGraph } from "../../junco-graph.js";
-import { type LadderRung, uniformLadder } from "../../node-policy.js";
+import {
+  type LadderRung,
+  ModelLadder,
+  uniformLadder,
+} from "../../node-policy.js";
 import {
   createJuncoAgent,
   type DeterministicNode,
@@ -2071,7 +2075,7 @@ class OptimizerCampaign implements SessionServices {
       session,
       new ChildRunner(session),
     );
-    const ladder = uniformLadder(editorRung);
+    const ladder = new ModelLadder(models, uniformLadder(editorRung));
     const recorder = new JsonlRecorder({
       path: join(request.sessionDir, "optimizer.jsonl"),
       costMode: "usage",
@@ -2102,9 +2106,8 @@ class OptimizerCampaign implements SessionServices {
         tracer: new DummyTracer(),
         recorder,
         ladder,
-        models,
         tools: controller.tools(),
-        createAgent: (spec) => createJuncoAgent(spec, ladder, models),
+        createAgent: (spec) => createJuncoAgent(spec, ladder),
         code: {
           Init: controller.init,
           Evaluate: controller.evaluate,

@@ -1425,8 +1425,10 @@ async function tokenScenario(dir: string): Promise<void> {
     limits: limits("{}"),
     hardLimits: "{ tokens: tokens(100_000) }",
     code: TOKEN_CODE,
+    beforeBuild:
+      "const ladder = new schedules.ModelLadder(models, optimizerLadder!);",
     options:
-      'createAgent: (spec) => syntax.createJuncoAgent({ ...spec, tool_block: [...new Set(["read", "bash", "edit", "release", "grep", "find", "ast_grep", "ast_edit", "diff", "code_graph", ...(spec.tool_block ?? [])])] }, optimizerLadder!, models), ladder: optimizerLadder, models,',
+      'ladder, createAgent: (spec) => syntax.createJuncoAgent({ ...spec, tool_block: [...new Set(["read", "bash", "edit", "release", "grep", "find", "ast_grep", "ast_edit", "diff", "code_graph", ...(spec.tool_block ?? [])])] }, ladder),',
     check: "value === 1",
   });
   const log: EditorLog = { states: [] };

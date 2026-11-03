@@ -143,11 +143,11 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
   return pending.join(", ") || "none";
 }
 
-export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "ladder" | "scheduler" | "code" | "context"> & { readonly context: Host };
+export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
 
 /** Builds and runs the baseline, returning Deliver's terminal report after closing graph resources. */
 export async function run(config: RunOptions): Promise<string> {
-  const execution = await JuncoGraph.fromYaml<Host>(document, { ...config, ladder, scheduler, code });
+  const execution = await JuncoGraph.fromYaml<Host>(document, { ...config, scheduler, code });
   try {
     await execution.run({ signal: config.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);
