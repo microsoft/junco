@@ -5,6 +5,7 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair once, author topolo
 ## Contents
 
 - [Execution boundary](#execution-boundary)
+- [Inspection and intake](#inspection-and-intake)
 - [Session directory](#session-directory)
 - [Helper module](#helper-module)
 - [Runner integration](#runner-integration)
@@ -14,18 +15,57 @@ How to prepare an existing `workflow.yml`/`workflow.ts` pair once, author topolo
 - [Redundant-node ablation](#redundant-node-ablation)
 - [Measurement](#measurement)
 - [Comparison and stopping](#comparison-and-stopping)
+- [Report](#report)
 
 ## Execution boundary
 
-- Only the YAML topology changes between trials. `workflow.ts` is instrumented once, saved as `prepared.ts`, hashed, and then frozen: scheduler factory and label dispatch, model ladders and strength, hard limits, code bodies the workflow already owns, evaluator, tools, permissions, profiles and terminal checks never change during the search.
+- Deliver the confirmed optimized YAML at the user-selected original path. Candidate copies or a recommendation alone are not completion. If no candidate qualifies, retain the original graph; never force an unmeasured or degrading rewrite.
+- Instrument the runner once and save immutable `prepared.ts`. Thereafter keep TS byte-identical unless geometry requires an identity/binding adaptation. Every TS edit needs a short old→new binding list and corresponding YAML change; preserve unrelated bytes. No scheduler rewrite or general-purpose binding abstraction.
+- Preserve every provider/model identifier, model setting (including thinking), all five ladder rungs in order, and original rung selection/escalation for corresponding work. Keep model acquisition and agent construction/ownership unchanged. New agents inherit the replaced agent's effective model/strength policy; never choose a default rung or cheaper model. If mapping requires inventing a decision, the candidate is inapplicable.
+- Preserve scheduler algorithms, combinator composition, priorities/widths, unaffected label branches, and every limit dimension/value, scope, nesting order and existing enclosing enforcement boundary, including YAML `window`/`threads`, resource ceilings and caller-fixed Ralph caps. Binding-only adaptations are detailed under Runner integration.
+- Keep authoritative evaluator/check logic, helper bodies, original assignment text, tools/permissions, input/output contracts, accounting and paid-run authorization unchanged. A reference-only evaluator/terminal rekey may observe the same authoritative value; semantic evaluator/check/code changes are inapplicable.
+- Quality must come from an existing authoritative producer outside the editable region: an external evaluator or protected evaluator node/edge and all dependencies. Never invent a judge, quality floor, workload, model or credential. A tournament reviewer is not the benchmark judge.
 - The skill is not an optimizer engine: no `schedules.runOptimizer`, no `junco-profile-optimizer` binary, no outer controller. `measure.ts` runs one candidate `R` times and reports evidence; the agent decides.
 - Concurrency: YAML `window`/`threads` and every resource ceiling stay as they are. A candidate adds parallel workers only when they write independent, already-safe artifacts or workspaces; otherwise the candidate is inapplicable (never add isolation infrastructure to make it fit).
+
+
+## Inspection and intake
+
+Read the pair, actual invocation (scripts, README, CI), TS build options and the standard library index before asking. Record:
+
+- Nodes, edge IDs (`edge.id ?? from + ("~>" message | "->" value) + to`), nested wrapper paths, labels (`name ?? node id`), triggers, `source.routes`, `sink.returns`, and agents that `send` on message edges.
+- TS bindings: code node/edge IDs, prepared `agents` maps keyed by exact agent paths, profiles, terminal checks, `scheduler(label)` dispatch, ladder/limits, `available` hooks (including `schedules.ralph`), `config.code` keys, recorder/tracer/collection ownership.
+- Matching indexed building blocks (such as `workflows.ralph`, fan-in workflows and graph node bodies), their input routes, edge transports, outputs and required controller hooks. Read the definition's JSDoc before reuse; establish compatibility during preparation, then use only what the prepared runner supports.
+- Existing authoritative whole-workload evaluator; for each Ralph target, an existing synchronous checker of one completed result. Do not invent either. Inspect tools/MCP/skills and repeat safety/reset requirements. Apply the Helper module's reserved-namespace collision refusal before preparation.
+
+Ask only unresolved intake, batching questions. Before measurement require all six:
+
+1. Fixed corpus/invocation (`argv`, `cwd`), `workloadId`, repeat count `R > 0`, and `resetArgv` or confirmation repeats are safe.
+2. Authoritative numeric quality metric, direction and producer, yielding a finite receipt metric.
+3. Secondary metric to reduce: recorded USD (`cost`, default), or another named receipt metric.
+4. Absolute/relative tolerances for quality equivalence and secondary improvement; both zero unless specified.
+5. Target and/or plateau window `W >= 2` with tolerances; optional run/time/spend budgets (spend caps require complete attempt accounting).
+6. Explicit paid-run authorization at invocation; a Ralph round cap only if caller-requested, fixed at preparation.
+
+Missing intent → ask. Missing prerequisite (no evaluator, async-only checker, unrecordable usage, unsafe repetition) → report exactly; never fabricate a substitute.
+Cost alone is not difficulty; require corroborating failures, retries or activation evidence when choosing a replacement target.
+
 
 ## Session directory
 
 Create `/tmp/junco-graph-optimizer-workspace/` if absent (mode `0700`, this literal path), then `mkdtemp` with prefix `/tmp/junco-graph-optimizer-workspace/session-`. An existing parent must be a writable directory owned by the current user, not a symlink, with no group/other access. On any conflict report the exact path and error and stop: never chmod, empty, follow or replace it, never fall back elsewhere.
 
 The session holds metadata only: `original.yml`, `original.ts` (saved before any change), `prepared.ts`, `campaign.json`, `measure.ts`, `candidates/`, `runs/NNNN/`, `ledger.jsonl`. The runnable project, its cwd, native/Btrfs workspaces and reset command stay where they are; the target files are edited in place.
+
+Save the baseline pair as `candidates/incumbent-0.yml` and `candidates/incumbent-0.ts` after offline preparation succeeds; keep `original.yml`, `original.ts` and instrumented-baseline `prepared.ts` immutable. Record the prepared hash separately from the staged variant's expected hash. On preparation failure restore only skill-written files still matching their last writes; never overwrite an outside edit.
+
+Pair lifecycle (including unchanged-TS trials):
+
+1. Derive every alternative from the same saved incumbent pair and its fresh profile, never stack unmeasured changes. Archive both `candidates/<name>.yml` and `candidates/<name>.ts`. Authorize a TS variant only after its old→new binding audit passes the preserved-policy boundary. Hash the archived TS, never bless arbitrary current target bytes.
+2. Before changing either target, compare **both** current file hashes with the last pair written by the skill. Any mismatch stops the operation without overwriting either file. Stage the archived pair at the original target paths. On partial write failure restore only the successfully skill-written file, and only if it still matches that write; report any conflict. Never launch a child or continue with a mixed pair.
+3. Only after successful pair staging, set campaign `expectedTsSha256` to the archived variant's hash, before checking/running. Offline-check every changed TS variant using the target's existing typecheck or `bun build --no-bundle <workflow>.ts`, then run `measure.ts check` before paid authorization/execution. The baseline uses the archived `incumbent-0.ts` hash.
+4. On rejection, failed confirmation, cancellation or stop, first wait for owned child resources to be gone. Precheck both live target hashes against the last skill-written pair before restoring either. If either has an outside edit, restore neither file nor campaign metadata; report both paths and the conflict. Otherwise restore the last confirmed pair, not `original.ts` or `prepared.ts` when a later incumbent exists. Reset `expectedTsSha256` only after successful restoration; apply the same partial-write safety as staging.
+5. Freshly confirm a prospective winner using its exact archived pair, not regenerated files. Promotion saves both files as `incumbent-<n+1>.yml/.ts`. On any stop leave the confirmed pair at the original paths; without a confirmed improvement keep the original graph. If no geometry required bindings, retained TS equals `prepared.ts`.
 
 ## Helper module
 
@@ -341,8 +381,11 @@ Integration rules:
 - **Code.** `withOptimizerCode` merges into the existing `config.code` and throws on collisions.
 - **Availability.** `mergeAvailable` keeps existing hooks on every level and adds the success-mode Ralph controller only on prepared `__junco_ralph_*` labels. If the runner already spreads a fixed-round `schedules.ralph(...)`, wrap that existing factory so it declines prepared labels (`(context) => prepared.has(context.label) ? undefined : old(context)`): its round policy stays as it is everywhere else and never caps the new loop.
 - **Checks.** `RALPH_CHECKS` entries call an existing deterministic checker or authoritative host-state probe synchronously and judge the current result, assignment and round — never a stale flag, never the model's own claim. An async-only evaluator is a prerequisite to report: a Promise is not a decision (`until` throws on one). A whole-workload metric does not validate an intermediate node.
-- **Labels.** Labels feed the fixed `scheduler(label)` and limits. A candidate whose new labels would be scheduled differently than its replaced node's work (for example a factory that throws on unknown labels) is inapplicable; never rename labels to steer scheduling.
-- Check the prepared file once without paid execution (project typecheck or `bun build --no-bundle workflow.ts`), save it as `prepared.ts`, record its sha256, then validate the unchanged baseline with it.
+- **Geometry bindings.** Allow only necessary local-ID membership/order changes, graph-label dispatch entries, prepared-agent path keys, profile keys, availability/code registry keys and edge/path references. Remove bindings for deleted geometry. One-to-one profile rekeys retain fitted values; never fabricate profiles for new work. Reuse an existing factory for new agents; do not share one prepared agent across workers or add ownership infrastructure.
+- **Per-level policy.** Graph labels, local IDs and slash-joined wrapper paths are distinct. Every nested graph calls `scheduler(label)` separately; parent strength does not propagate to child agents. Audit each new level and explicitly give it the containing graph's effective `window`/`threads`, rather than accidentally becoming unbounded. Rebind custom readiness only if its original meaning is preserved; never drop a gate in favor of native readiness.
+- **Limits.** New contexts may reuse inherited policy with identical limits, but local ledgers add constraints, not allowance. Keep existing parent enforcement: never divide a shared allowance among branches, multiply it, move it inward or relax it. Parent token/tool budgets cover child work; predicted memory sees the wrapper. If wrapping evades an existing predicted-memory constraint or lacks a valid existing profile, report the candidate inapplicable rather than inventing estimates or changing limits.
+- **Audit.** For every TS variant, list old→new bindings alongside the YAML change and verify unchanged effective model/strength/escalation, scheduling, limits, ownership and gates. Hash identity alone does not establish policy equivalence. Reference-only evaluator/terminal rekeys must still read the same authoritative value.
+- Check the prepared file without paid execution (existing typecheck or `bun build --no-bundle workflow.ts`), save immutable `prepared.ts` and its sha256, and validate the unchanged baseline. Prepare frozen `ASSIGNMENTS` entries for eligible original targets and `RALPH_CHECKS` only where an existing synchronous checker applies. Missing checker/label is a prerequisite, never an always-true fallback.
 
 ## Run protocol
 
@@ -356,7 +399,7 @@ Eligible target: one agent node whose task can be carried as text. The replaceme
 - the original system prompt, tools, MCP, skills and `tool_block` on every new agent (equal or narrower, never broader).
 - the original task: each parent edge `<id>` is routed by `source.routes` to `__junco_assignment:input:<id>`, and `ASSIGNMENTS[label]` is the original `prompt` text verbatim. A no-input target uses `trigger: always` on `__junco_assignment` and its literal prompt.
 
-Inapplicable (report the reason): an `any`/partial trigger, a re-armed or multi-activation target, image/structured/raw payloads the original read through `recv` or code, inputs the prompt does not reference, message out-edges, TS-pinned IDs/paths (prepared `agents` maps, profiles, code, terminal checks, label dispatch), or tools a new node would need beyond the original's.
+Inapplicable (report the reason): an `any`/partial trigger, a re-armed or multi-activation target, image/structured/raw payloads the original read through `recv` or code, inputs the prompt does not reference, message out-edges, bindings that cannot preserve the Runner integration policy, or tools a new node would need beyond the original's.
 
 Labels: replacement graph `name: __junco_opt_<encodeURIComponent(originalNodePath)>`; inner Ralph `name: __junco_ralph_<encodeURIComponent(originalNodePath)>`. Reserve both in `ASSIGNMENTS`/`RALPH_CHECKS` during preparation.
 
@@ -649,11 +692,11 @@ graph:
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
-Before running any alternative: `measure.ts check` (parse, resolve agents, hash), confirm every new label has its `ASSIGNMENTS`/`RALPH_CHECKS` entry and fixed scheduling, and that no new agent has broader tools than the original. A pattern that cannot run under the frozen runner is reported with that exact reason.
+Before running any alternative: audit bindings and per-level inherited policy, offline-check every changed TS variant, then `measure.ts check` (parse, resolve agents, hashes). Confirm every new label has its required `ASSIGNMENTS`/`RALPH_CHECKS` entry and preserved scheduling, and no new agent has broader tools. Report exact inapplicability reasons; measure every applicable alternative before confirming and promoting at most the best eligible one.
 
 ## Redundant-node ablation
 
-Pick a node from its actual duties and artifacts — duplicate analysis, a pass-through relay, work no required output uses — never from low cost or degree alone. Never remove security/validation/side-effect duties, the quality evaluator and its dependencies, or anything TS pins (code, prepared agents, profiles, label dispatch, terminal checks).
+Pick a node from its actual duties and artifacts — duplicate analysis, a pass-through relay, work no required output uses — never from low cost or degree alone. Never remove security/validation/side-effect duties or the quality evaluator and its dependencies. TS bindings alone do not forbid removal: remove/rekey only the geometry bindings allowed under Runner integration, preserving the same policy and authoritative values.
 
 Original, with a pass-through `Relay`:
 
@@ -709,7 +752,7 @@ graph:
     - { from: Final, to: $sink, schema: *assistant }
 ```
 
-Rewiring rules: update every affected placeholder, `send` route, `trigger`, `source.routes` and `sink.returns`; keep explicitly referenced IDs only where their contract still holds; no dummy compatibility nodes. Reject the bypass when it would need new TS, incompatible schemas, weaker validation, an unrepresentable nested all/any trigger, an unintended cycle, duplicate edge IDs, a wrong source/sink direction, a parent×child cross-product, or loss of the unique entry/terminal path. A node that transforms its payload is not a pass-through.
+Rewiring rules: update every affected placeholder, `send` route, `trigger`, `source.routes` and `sink.returns`; keep explicitly referenced IDs only where their contract still holds; no dummy compatibility nodes. Reject bypasses requiring semantic TS changes, incompatible schemas, weaker validation, an unrepresentable nested all/any trigger, an unintended cycle, duplicate edge IDs, a wrong source/sink direction, a parent×child cross-product, or loss of the unique entry/terminal path. A node that transforms its payload is not a pass-through.
 
 ## Measurement
 
@@ -717,11 +760,13 @@ Copy this block to `<sessionDir>/measure.ts` and create `<sessionDir>/campaign.j
 
 ```json
 { "target": { "yaml": "/abs/project/workflow.yml", "ts": "/abs/project/workflow.ts", "cwd": "/abs/project", "argv": ["bun", "run", "workflow.ts"] },
-  "workloadId": "fixed-corpus-v1", "preparedTsSha256": "<sha256 of prepared.ts>", "parse": { "sourceName": "workflow.yml" },
+  "workloadId": "fixed-corpus-v1", "expectedTsSha256": "<sha256 of the staged archived candidate TS>", "parse": { "sourceName": "workflow.yml" },
   "quality": "quality", "secondary": "cost" }
 ```
 
 `target.resetArgv` is optional; `parse` mirrors the runner's `params`/`sourceName`; `quality` names the receipt metric; `secondary` is `"cost"` (recorded USD) or another receipt metric. The session lives outside the project, so resolve packages through it: `NODE_PATH=<project>/node_modules bun run <sessionDir>/measure.ts check` validates the target's current YAML without running it; `... measure.ts run <name> <R>` measures it `R` times in fresh children.
+
+`expectedTsSha256` binds the successfully staged archived TS variant, not campaign-wide `prepared.ts`. There is no compatibility alias: an old campaign without this field fails the same hash guard. Leave existing sessions untouched; do not auto-migrate them. `check` verifies TS identity as well as parsing/resolving YAML; it never executes the target. Identity is not a substitute for the binding-policy audit.
 
 ```ts measure.ts
 import { spawn } from "node:child_process";
@@ -735,7 +780,7 @@ import { syntax } from "junco";
 type Campaign = {
   target: { yaml: string; ts: string; cwd: string; argv: string[]; resetArgv?: string[] };
   workloadId: string;
-  preparedTsSha256: string;
+  expectedTsSha256: string;
   parse?: syntax.ParseOptions;
   quality: string;
   secondary: string;
@@ -823,14 +868,17 @@ const yaml = await readFile(c.target.yaml, "utf8");
 const document = syntax.parse(yaml, c.parse);
 const hash = graphHash(document);
 if (command === "check") {
+  const tsSha256 = sha256(await readFile(c.target.ts, "utf8"));
+  if (tsSha256 !== c.expectedTsSha256)
+    throw new Error("candidate TS differs from its expected hash");
   const agents = await syntax.resolveAgents(document, { cwd: c.target.cwd });
-  console.log(JSON.stringify({ graphHash: hash, yamlSha256: sha256(yaml), agents: agents.map((a) => `${a.graph}/${a.node}`) }));
+  console.log(JSON.stringify({ graphHash: hash, yamlSha256: sha256(yaml), tsSha256, agents: agents.map((a) => `${a.graph}/${a.node}`) }));
 } else if (command === "run" && name && Number.isSafeInteger(Number(repeats)) && Number(repeats) > 0) {
   const results: Record<string, unknown>[] = [];
   for (let repeat = 1; repeat <= Number(repeats); repeat++) {
     const tsBefore = sha256(await readFile(c.target.ts, "utf8"));
-    let result: Record<string, unknown> = { ok: false, error: "prepared TS changed" };
-    if (tsBefore === c.preparedTsSha256) {
+    let result: Record<string, unknown> = { ok: false, error: "candidate TS differs from its expected hash" };
+    if (tsBefore === c.expectedTsSha256) {
       const runs = join(SESSION, "runs");
       await mkdir(runs, { recursive: true });
       const runDir = join(runs, String((await readdir(runs)).length + 1).padStart(4, "0"));
@@ -844,7 +892,7 @@ if (command === "check") {
     }
     const tsAfter = sha256(await readFile(c.target.ts, "utf8"));
     const yamlAfter = await readFile(c.target.yaml, "utf8");
-    if (result.ok === true && (tsAfter !== c.preparedTsSha256 || yamlAfter !== yaml))
+    if (result.ok === true && (tsAfter !== c.expectedTsSha256 || yamlAfter !== yaml))
       result = { ...result, ok: false, error: "target files changed during the run" };
     const row = { name, repeat, workloadId: c.workloadId, yamlSha256: sha256(yaml), graphHash: hash, tsBefore, tsAfter, argv: c.target.argv, cwd: c.target.cwd, ...result };
     await appendFile(join(SESSION, "ledger.jsonl"), `${JSON.stringify(row)}\n`);
@@ -873,6 +921,13 @@ Coverage notes:
 
 - Same workload, same `R`, same invocation for incumbent and candidate; fresh children; the reset command when required. A batch is valid only if every run is valid; a partial, failed or stale run never wins by being cheap.
 - Tolerance for a metric: `absolute + relative * abs(incumbentMedian)`; both default to zero unless the caller authorizes them.
-- Quality first: a candidate whose median quality beats the incumbent's by more than its tolerance (in the quality direction) may cost more; otherwise it needs quality within tolerance (never worse beyond it) **and** a secondary median lower by more than its tolerance. Ablations always need nondegrading quality and a strictly lower median recorded USD. Every repeat satisfies every fixed hard constraint.
-- Confirm a prospective winner with `R` fresh repeats before promotion; a failed confirmation keeps the previous confirmed incumbent.
-- Plateau window `W >= 2`: fresh feasible cycle-start incumbent medians; reset on promotion or invalid measurement; stable when `max - min <= absolute + relative * max(abs(values))` for quality and the secondary metric. Plateau convergence also needs a completed no-promotion cycle, every caller target met and fresh confirmation. Run/time/spend budgets are stops, not convergence; a spend cap needs complete attempt accounting.
+- Quality first: a candidate whose median quality beats the incumbent's by more than its tolerance (in the quality direction) may cost more; otherwise it needs quality within tolerance (never worse beyond it) **and** a secondary median lower by more than its tolerance. Ablations always need nondegrading quality and strictly lower median recorded USD, plus secondary improvement beyond tolerance when the secondary metric is not USD. Every repeat satisfies every fixed hard constraint.
+- Confirm a prospective winner's exact archived pair with `R` fresh repeats before promotion; a failed confirmation restores the previous confirmed pair under Session directory's two-file ownership checks. Re-profile after every promotion before choosing the next hypothesis.
+- No hidden iteration cap. Stop on a met caller target or confirmed plateau: window `W >= 2` of fresh feasible cycle-start incumbent medians; reset on promotion or invalid measurement; stable when `max - min <= absolute + relative * max(abs(values))` for quality and the secondary metric. Plateau convergence also needs a completed no-promotion cycle, every caller target met and fresh confirmation. Budget exhaustion, cancellation, exhausted ideas or no remaining eligible hypothesis are stops, not convergence. A spend cap needs complete attempt accounting. Retain/restore the confirmed pair after child cleanup, or report outside-edit conflicts without overwriting either target. Never claim a global optimum.
+
+## Report
+
+Report baseline and confirmed median quality, secondary metric and recorded USD, with units and coverage. Identify catalog-priced usage versus invoices; include invalid/failed/aborted/subagent requests in attempt accounting and name anything unrecorded. Disclose authoring/model overhead separately when known; unknown overhead is not zero. Offline/faux or supplied synthetic numbers are wiring evidence, never measured savings.
+
+List every tested replacement/removal and its decision, every inapplicable pattern and exact constraint, actual child-run count, actual stop reason, retained YAML and TS paths/hashes, immutable `prepared.ts` hash, and geometry-required binding changes (none means retained TS equals `prepared.ts`). Give the absolute session directory, ledger, run directories, receipts and stdout/stderr. Warn that `/tmp` evidence can disappear on cleanup/reboot; never automatically delete the session.
+
