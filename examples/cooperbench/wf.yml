@@ -20,6 +20,7 @@ graph:
       system: &common |-
         You work in one shared repository checkout with another feature team; every role of both teams sees the same files. A Marsh collection governs edits: the first agent to edit a file owns it until it calls release({file}); another owner's edit is denied with an actionable tool error — coordinate or wait, never bypass it with unmanaged commands. Reading a file never grants release rights. Release every file you edited, including generated or ignored files, before you finish; abandoned ownership blocks other agents for the rest of the run and the tree is graded as-is. Marsh authorizes managed command and file-tool publication, not arbitrary operating-system or network effects.
         There is no dedicated write tool. Create new files through the managed bash tool using a heredoc; this is Marsh-governed publication, not an ownership bypass. Use edit for existing files and release every new file afterward.
+        Before editing an existing file, obtain its current snapshot with read, then run managed bash `cat -- <path> > /dev/null` immediately before edit: direct read-tool calls supply snapshots but do not record Marsh read grants. A "must read it before it may edit it" denial means repeat that managed read, not wait for an owner. Only an explicit "owned by" denial requires the owner's release. Run available test commands: if a convention uses optional flags unsupported by the container (for example Go -race with cgo disabled), report that limitation and run the same suite without those optional flags.
         Read the repository's conventions and the affected code before editing. Keep all intended changes in the working tree; do not reset the base, remove .git, commit, or write patch files. The grader takes the tree's diff with every test-path file removed, then runs hidden tests for each feature: production code must live outside test paths, and nothing under a test path reaches grading.
         Never claim a command succeeded without running it; paste exact commands and exit codes. Do not poll or wait indefinitely for other agents.
       prompt: |-
@@ -150,31 +151,182 @@ graph:
       tool_block: [task]
       trigger: { all: [team2-spec, Architect->Tester2] }
     Implementer2:
-      description: Implements Team 2's feature until the acceptance tests and the existing suite pass.
-      system: *common
-      prompt: |-
-        You are Implementer2 of Team 2. Implement this feature in the shared working tree:
-        {{team2-spec-impl}}
-
-        Architect plan (follow Ownership and the Shared-file protocol; the other team edits concurrently):
-        {{Architect->Implementer2}}
-
-        Tester2's acceptance tests and contract (your objective target):
-        {{Tester2->Implementer2}}
-
-        1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
-        2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
-        3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
-        4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
-        Return exactly:
-        ## Changes — files changed and what each change does.
-        ## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
-        ## Verdict
-        TEST_COMMAND: <cmd> exit=<n>
-        SUITE_COMMAND: <cmd> exit=<n>
-      tools: *native
-      tool_block: [task]
-      trigger: { all: [team2-spec-impl, Architect->Implementer2, Tester2->Implementer2] }
+      kind: graph
+      description: Team 2 implementation revised until its frozen verdict check succeeds (cap 3).
+      trigger:
+        all:
+          - team2-spec-impl
+          - Architect->Implementer2
+          - Tester2->Implementer2
+      graph:
+        name: __junco_opt_Implementer2
+        window: 1
+        threads: 2
+        source:
+          routes:
+            team2-spec-impl:
+              - __junco_assignment:input:team2-spec-impl
+            Architect->Implementer2:
+              - __junco_assignment:input:Architect->Implementer2
+            Tester2->Implementer2:
+              - __junco_assignment:input:Tester2->Implementer2
+        sink:
+          returns: Ralph
+        nodes:
+          __junco_assignment:
+            kind: code
+            description: Re-renders the unchanged Implementer2 assignment.
+          Ralph:
+            kind: graph
+            graph:
+              name: __junco_ralph_Implementer2
+              source:
+                routes:
+                  __junco_assignment:output:
+                    - $source~>Ralph
+              nodes:
+                Ralph:
+                  description: Implements Team 2's feature until the acceptance tests and the existing suite pass.
+                  trigger:
+                    any:
+                      - $source~>Ralph
+                      - Ralph->Ralph
+                  system: *common
+                  tools: *native
+                  tool_block: [ task ]
+              edges:
+                - from: $source
+                  to: Ralph
+                  kind: message
+                  schema:
+                    type: object
+                    required:
+                      - kind
+                      - text
+                    properties:
+                      kind:
+                        enum:
+                          - prompt
+                          - steer
+                          - followUp
+                          - nextTurn
+                          - error
+                      text:
+                        type: string
+                      images:
+                        type: array
+                        items:
+                          type: object
+                          required:
+                            - type
+                            - data
+                            - mimeType
+                          properties:
+                            type:
+                              const: image
+                            data:
+                              type: string
+                            mimeType:
+                              type: string
+                - from: Ralph
+                  to: Ralph
+                  schema: &a1
+                    type: object
+                    required:
+                      - role
+                      - content
+                      - stopReason
+                    properties:
+                      role:
+                        const: assistant
+                      content:
+                        type: array
+                        items:
+                          anyOf:
+                            - type: object
+                              required:
+                                - type
+                                - text
+                              properties:
+                                type:
+                                  const: text
+                                text:
+                                  type: string
+                            - type: object
+                              required:
+                                - type
+                                - thinking
+                              properties:
+                                type:
+                                  const: thinking
+                                thinking:
+                                  type: string
+                            - type: object
+                              required:
+                                - type
+                                - id
+                                - name
+                                - arguments
+                              properties:
+                                type:
+                                  const: toolCall
+                                id:
+                                  type: string
+                                name:
+                                  type: string
+                                arguments:
+                                  type: object
+                      stopReason:
+                        enum:
+                          - pending
+                          - stop
+                          - length
+                          - toolUse
+                          - error
+                          - aborted
+                          - deferred
+                      errorMessage:
+                        type: string
+                - from: Ralph
+                  to: $sink
+                  schema: *a1
+              window: 1
+              threads: 2
+        edges:
+          - from: $source
+            to: __junco_assignment
+            kind: message
+            id: __junco_assignment:input:team2-spec-impl
+            schema: &a2
+              type: object
+              additionalProperties: false
+              required:
+                - kind
+                - text
+              properties:
+                kind:
+                  const: prompt
+                text:
+                  type: string
+                  pattern: \S
+          - from: $source
+            to: __junco_assignment
+            kind: message
+            id: __junco_assignment:input:Architect->Implementer2
+            schema: {{ params.assistant_schema }}
+          - from: $source
+            to: __junco_assignment
+            kind: message
+            id: __junco_assignment:input:Tester2->Implementer2
+            schema: {{ params.assistant_schema }}
+          - from: __junco_assignment
+            to: Ralph
+            kind: message
+            id: __junco_assignment:output
+            schema: *a2
+          - from: Ralph
+            to: $sink
+            schema: {{ params.assistant_schema }}
     Agent2:
       description: Team 2 reviewer/integrator; independent spec audit, combined checks with the peer, final report.
       system: *common

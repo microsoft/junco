@@ -232,10 +232,7 @@ describe("Verus loop", () => {
       assert.match(reviewerResults[0]!, /1 verified, 0 errors/);
       assert.match(reviewerResults[1]!, /postcondition not satisfied/);
       assert.match(cleanupPrompts[1]!, /nonzero proof failure/);
-      assert.match(
-        verifierPrompts[1]!,
-        /strengthen membership specification/,
-      );
+      assert.match(verifierPrompts[1]!, /strengthen membership specification/);
       assert.match(
         verifierPrompts[1]!,
         /cleanup round 1; preserve both lower-bound obligations/,

@@ -720,7 +720,10 @@ export class DataflowGraph<
     if (delivery instanceof Promise)
       this.#pending.push(
         delivery.then(undefined, (error) => {
-          console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+          console.warn(
+            "[dataflow-engine] DataflowTracer callback failed",
+            error,
+          );
         }),
       );
   }

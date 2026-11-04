@@ -424,13 +424,15 @@ export async function tracerHandlesRetainPayloadTypes(
 ) {
   const counting = new CountingTracer();
   const tui: tracer.TuiTracer = await tracer.TuiTracer.create();
-  const shared: tracer.TuiTracer | tracer.DummyTracer = tracer.TuiTracer.shared();
+  const shared: tracer.TuiTracer | tracer.DummyTracer =
+    tracer.TuiTracer.shared();
   const tracers: tracer.DataflowTracer[] = [
     counting,
     new tracer.DummyTracer(),
     tui,
     shared,
   ];
+  void tracers;
   const run: tracer.DataflowRunTrace<Num, string> = counting.startRun(g);
   const primed: tracer.DataflowStepTrace<Num, string> = run.startNode(
     id,

@@ -24,6 +24,8 @@ All seven roles use `models.worker` on the uniform med rung under `schedules.par
 
 All agents share one caller-owned collection with `sandbox: "always"` and `tools.LockPolicy`. The Architect has read/search/managed-shell tools; feature teams also have editing, diff, and release tools. Native messaging remains enabled, but delegation is blocked. Owners must explicitly `release({file})` before handing off edited paths, including ignored/generated caches. A failed agent that does not release leaves its paths owned for the rest of the pair; other agents may read but cannot edit, remove, or release them. The harness neither force-releases nor rolls back that state.
 
+New files are created through managed bash heredocs; no dedicated write tool is exposed. Before editing an existing file, agents obtain its hashline snapshot with `read`, then run managed `cat -- <path> >/dev/null` immediately before `edit`. Direct read tools provide snapshots but do not publish Marsh read grants; a read-freshness denial differs from an ownership denial.
+
 Marsh authorizes command/file-tool publication, not arbitrary OS or network effects. Agents can access copied credentials, outbound networking, and container paths outside the managed worktree.
 
 ## Running
@@ -55,6 +57,10 @@ The packaged entry is `/opt/junco-runtime/bin/bun run /opt/junco-runtime/app/exa
 Unknown fields, obsolete image/container fields, role-specific thinking objects, nonpositive/noninteger deadlines, equal feature IDs, and blank assignments are rejected. Worktree deployment is fixed at `/workspace/repo`; fixtures supply their collection/cwd through `createPair`, not another request path.
 
 Every role emits native `message` and committed `usage` rows under its team's `agent_id` and root-relative `node_id`; the Architect belongs to `agent1`. One terminal `result` follows graph/agent/collection shutdown and Opik/profile/raw/Grafana flush, with team outcomes, `worker_count` (acquired child attempts, normally zero with delegation blocked), and `agent_count` (built graph agents plus acquired children). `Submitted` requires both normal, nonempty integrator reports and no run or close error. Any native descendants must finish or be cancelled before shutdown. The generation deadline is 7,200 seconds; the launcher backstop is 7,260 seconds. INT gets a 30-second grace before KILL.
+
+Node's stdout writable queue serializes UTF-8 JSONL records under pipe backpressure. The CLI awaits its final write callback before exiting, so large records and the terminal result are not truncated or interleaved.
+
+With `JUNCO_GRAPH_RUN_DIR` set, the driver validates its nonce/hash request before acquiring agents, then exposes the closed usage log as `samples.jsonl` and atomically publishes `completion.json` after successful cleanup. A fully accounted solver failure or cooperative deadline can produce this measurement receipt while its terminal result remains `Error` or `LimitsExceeded`; the CooperBench adapter supplies the official `resolved` metric afterward. Setup/cleanup failures and external cancellation produce no receipt.
 
 `{"mode":"preflight","models":{...},"thinking":"medium"}` returns one `ready` record only after all gates pass, including a private Docker cgroup v2 namespace with readable kernel `memory.peak`. Ready metadata records only stable memory support, never varying byte values. `probeRuntime(worktree)` uses the fresh probe subvolume and production options. `--recover-workspace` forces a real managed `/bin/true` before harvest because opening a collection alone does not replay its lazy durable session.
 

@@ -1,8 +1,8 @@
 // CooperBench shared-worktree driver. Seven small-model roles share one caller-owned Marsh collection.
 // Stdout contains native message/usage JSONL and a terminal result.
 import { createHash, randomUUID } from "node:crypto";
-import { writeSync } from "node:fs";
-import { type FileHandle, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants, writeSync } from "node:fs";
+import { type FileHandle, copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -26,10 +26,238 @@ import {
 import * as tools from "junco-tools";
 import { redirectLog } from "junco-tools/log";
 import { logger as opikLogger, Opik } from "opik";
-import { type Static, type TSchema, Type } from "typebox";
+import { type Static, type TArray, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import source from "./wf.yml" with { type: "text" };
 
+type Edges = syntax.CodeContext["edges"];
+type Available = NonNullable<syntax.BuildOptions["available"]>;
+const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
+
+/** Locally declared edges whose IDs start with `prefix`, in YAML declaration order. */
+const declared = (edges: Edges, prefix: string) =>
+  [...edges].filter(([id]) => id.startsWith(prefix)).map(([, edge]) => edge);
+
+/** The payloads one activation received on `edge`: its value, or its delivered messages. */
+function delivered(
+  view: graph.ParentView<TSchema, unknown>,
+  edge: graph.Edge<TSchema, unknown>,
+): unknown[] {
+  return view.values.has(edge.id)
+    ? [view.values.get(edge.id)]
+    : [...(view.messages.get(edge.id) ?? [])];
+}
+
+/** A plain text prompt input, or a normally finished, non-empty assistant report; anything else throws. */
+function textOf(payload: unknown, edgeId: string): string {
+  if (typeof payload === "object" && payload !== null && "kind" in payload) {
+    const { kind, text, images } = payload as Record<string, unknown>;
+    if (
+      kind !== "prompt" ||
+      typeof text !== "string" ||
+      !text.trim() ||
+      (Array.isArray(images) && images.length > 0)
+    )
+      throw new TypeError(`${edgeId} carries an input that is not a non-empty text prompt`);
+    return text;
+  }
+  return syntax.finalText(payload, edgeId);
+}
+
+/** Sends `{ kind: "prompt", text }` once on `outputs` through the standard primitive, then returns. */
+function broadcast(text: string, outputs: graph.Edge<TSchema, unknown>[]) {
+  return new graph.nodes.ConstFanout<undefined, TSchema, unknown>(
+    { kind: "prompt", text },
+    outputs,
+    { state: undefined, ret: undefined },
+  ).step();
+}
+
+/** `__junco_fanout`: one payload on `__junco_fanout:input`, broadcast to every `__junco_fanout:worker:*` edge. */
+export const fanout: syntax.DeterministicNode = ({ node, edges, policy }) => {
+  const input = edges.get("__junco_fanout:input");
+  const outputs = declared(edges, "__junco_fanout:worker:");
+  if (input === undefined || outputs.length === 0)
+    throw new Error(`${node} needs edge "__junco_fanout:input" and "__junco_fanout:worker:*" edges`);
+  let emitting = false;
+  return {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      const payloads = delivered(yield [], input);
+      if (payloads.length !== 1)
+        throw new Error(`${node} needs exactly one payload on "${input.id}"`);
+      const text = textOf(payloads[0], input.id);
+      emitting = true;
+      return yield* broadcast(text, outputs);
+    }, policy),
+    // Priming reads nothing; stay available through the emission's terminal-return activation.
+    is_available: (_view, triggered) => emitting || triggered,
+  };
+};
+
+/** `__junco_fanin`: `ConstFanin` over `__junco_fanin:input:*` (declaration order) onto `__junco_fanin:output`. */
+export const fanin: syntax.DeterministicNode = ({ node, edges, policy }) => {
+  const inputs = declared(edges, "__junco_fanin:input:");
+  const output = edges.get("__junco_fanin:output");
+  if (inputs.length < 2 || output === undefined)
+    throw new Error(`${node} needs two or more "__junco_fanin:input:*" edges and "__junco_fanin:output"`);
+  const collector = new graph.nodes.ConstFanin<undefined, TSchema, unknown>(
+    inputs,
+    output as graph.Edge<TArray<TSchema>, unknown>,
+    { state: undefined, ret: undefined },
+  );
+  return {
+    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+      return yield* collector.step();
+    }, policy),
+    is_available: (view, triggered) => {
+      // Every candidate is a normally finished, non-empty report before the primitive keeps it.
+      for (const edge of inputs)
+        for (const payload of view.messages.get(edge.id) ?? []) syntax.finalText(payload, edge.id);
+      return collector.is_available(view, triggered);
+    },
+  };
+};
+
+/**
+ * `__junco_assignment`: re-renders the replaced agent's original prompt template (frozen per
+ * replacement graph label) from `__junco_assignment:input:<originalEdgeId>`, then sends it once as
+ * `{ kind: "prompt", text }` on every `__junco_assignment:output*` edge.
+ */
+export const assignment =
+  (templates: Readonly<Record<string, string>>): syntax.DeterministicNode =>
+  ({ node, label, edges, policy }) => {
+    if (!Object.hasOwn(templates, label))
+      throw new Error(`${node}: no frozen assignment template for graph label "${label}"`);
+    const template = templates[label];
+    const inputs = declared(edges, "__junco_assignment:input:");
+    const names = inputs.map((edge) => edge.id.slice("__junco_assignment:input:".length));
+    const outputs = declared(edges, "__junco_assignment:output");
+    const used = [...template.matchAll(PLACEHOLDER)].map(([, id]) => id);
+    // Every original input is rendered and every placeholder has one: nothing dropped or invented.
+    if (
+      outputs.length === 0 ||
+      used.some((id) => !names.includes(id)) ||
+      names.some((id) => !used.includes(id))
+    )
+      throw new Error(
+        `${node}: template placeholders ${JSON.stringify(used)} must match inputs ${JSON.stringify(names)}, with an output`,
+      );
+    let emitting = false;
+    return {
+      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+        const view = yield [];
+        const texts = new Map<string, string>();
+        for (const [index, edge] of inputs.entries()) {
+          const payloads = delivered(view, edge);
+          if (payloads.length === 0)
+            throw new Error(`${node}: required input "${names[index]}" is missing`);
+          texts.set(names[index], payloads.map((p) => textOf(p, names[index])).join("\n\n"));
+        }
+        const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
+        if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
+        emitting = true;
+        return yield* broadcast(text, outputs);
+      }, policy),
+      is_available: (_view, triggered) => emitting || triggered,
+    };
+  };
+
+/** `config.code` plus the three reserved helpers; a same-named existing entry is a collision. */
+export function withOptimizerCode<C>(
+  existing: Readonly<Record<string, syntax.DeterministicNode<C>>> | undefined,
+  templates: Readonly<Record<string, string>>,
+): Record<string, syntax.DeterministicNode<C>> {
+  const added = {
+    __junco_fanout: fanout,
+    __junco_fanin: fanin,
+    __junco_assignment: assignment(templates),
+  };
+  for (const id of Object.keys(added))
+    if (existing !== undefined && Object.hasOwn(existing, id))
+      throw new Error(`config.code already defines reserved "${id}"`);
+  return { ...existing, ...added };
+}
+
+/** `schedules.ralph` judged by the fixed authoritative check of each prepared `__junco_ralph_*` label. */
+export function ralphUntil(
+  checks: Readonly<Record<string, schedules.RalphPredicate>>,
+  rounds?: number,
+) {
+  return schedules.ralph({
+    rounds,
+    until: (result, context) => {
+      if (!Object.hasOwn(checks, context.label))
+        throw new Error(`no authoritative Ralph check for graph label "${context.label}"`);
+      return checks[context.label](result, context);
+    },
+  });
+}
+
+/** Existing hooks on every level; on a prepared label also `added`, conjoined with an existing gate. */
+export function mergeAvailable(
+  existing: Available | undefined,
+  added: Available,
+  prepared: ReadonlySet<string>,
+): Available {
+  const merged: Record<string, Available[string]> = {};
+  for (const id of new Set([...Object.keys(existing ?? {}), ...Object.keys(added)]))
+    merged[id] = (context) => {
+      const old = existing?.[id]?.(context);
+      const extra = prepared.has(context.label) ? added[id]?.(context) : undefined;
+      return old && extra ? (view, triggered) => old(view, triggered) && extra(view, triggered) : (extra ?? old);
+    };
+  return merged;
+}
+
+/** sha256 of the parsed document with object keys sorted recursively: a topology's identity. */
+export function graphHash(document: syntax.JuncoDocument): string {
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value !== null && typeof value === "object"
+        ? Object.fromEntries(
+            Object.entries(value)
+              .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+              .map(([key, child]) => [key, canonical(child)]),
+          )
+        : value;
+  return createHash("sha256").update(JSON.stringify(canonical(document))).digest("hex");
+}
+
+export type GraphRun = { dir: string; nonce: string; expectedGraphHash: string };
+
+/** The measurement request of `JUNCO_GRAPH_RUN_DIR`; undefined outside measurement. */
+export async function readGraphRun(): Promise<GraphRun | undefined> {
+  const dir = process.env.JUNCO_GRAPH_RUN_DIR;
+  if (dir === undefined) return undefined;
+  const request = JSON.parse(await readFile(join(dir, "request.json"), "utf8"));
+  if (
+    Object.keys(request).sort().join() !== "expectedGraphHash,nonce,version" ||
+    request.version !== 1 ||
+    typeof request.nonce !== "string" ||
+    typeof request.expectedGraphHash !== "string"
+  )
+    throw new Error("invalid graph run request");
+  return { dir, nonce: request.nonce, expectedGraphHash: request.expectedGraphHash };
+}
+
+/** Publishes the run's receipt atomically; call only after complete outcomes and successful cleanup. */
+export async function writeCompletion(
+  run: GraphRun,
+  hash: string,
+  metrics: Readonly<Record<string, number>>,
+): Promise<void> {
+  for (const [name, value] of Object.entries(metrics))
+    if (typeof value !== "number" || !Number.isFinite(value))
+      throw new TypeError(`metric ${name} is not a finite number`);
+  const receipt = join(run.dir, "completion.json");
+  await writeFile(
+    `${receipt}.tmp`,
+    JSON.stringify({ version: 1, nonce: run.nonce, terminal: true, graphHash: hash, metrics }),
+    { flag: "wx" },
+  );
+  await rename(`${receipt}.tmp`, receipt);
+}
 export const marshOptions = { sandbox: "always", policy: tools.LockPolicy } as const;
 
 // ## Request boundary
@@ -136,6 +364,110 @@ export const verdicts = {
   Implementer: (text: string) => /^TEST_COMMAND: .+ exit=0$/m.test(text) && /^SUITE_COMMAND: .+ exit=0$/m.test(text),
 } satisfies Record<string, (text: string) => boolean>;
 
+/** Original prompts frozen for eligible replacement graph labels; Agent1/Agent2 remain pinned. */
+const ASSIGNMENTS: Record<string, string> = {
+  __junco_opt_Architect: `You are the Architect. Two features will be implemented concurrently in this repository by two teams sharing one working tree: Team 1 implements the feature headed "Team 1", Team 2 the one headed "Team 2". You implement nothing and never edit files.
+
+Specifications:
+{{arch-specs}}
+
+If only one specification is present above, call recv once to collect the other before planning.
+Read the repository (conventions, affected modules, existing tests, how tests run — also /usr/local/bin/runner.sh if it exists) and return one plan in exactly these sections:
+## Interfaces — per team: every public name the spec requires (module/package path, class, function, method, parameter, CLI flag, error type, config key) with its exact spelling and signature as the spec states or implies, and the file where it belongs. Where the spec leaves a name or shape open, choose one and state it.
+## Ownership — three lists of repository paths: Team 1 only, Team 2 only, Shared (both must touch). Make a shared file unshared by moving one team's change to a new file whenever the design allows.
+## Shared-file protocol — per shared path: who edits first, exactly which regions/symbols each team changes, the final combined signature of any symbol both touch, and the release handoff order.
+## Conflicts — behaviours where the features interact (same function, config, default, or test module) and the combined behaviour that satisfies both specs.
+## Test setup — the project's test command(s) for the affected packages and the directory/naming pattern for new test files, as observed in the repository.
+## Risks — existing tests likely affected, compatibility obligations, and spec statements that are easy to miss: exact representations (counts, shapes, ordering, case), nested/recursive application, lifecycle/reset semantics, immutability of inputs, error types and messages.
+Be concrete: paths, symbols, signatures. No prose outside these sections.`,
+  __junco_opt_Tester1: `You are Tester1 of Team 1. Team 1 implements this feature:
+{{team1-spec}}
+
+Architect plan (both teams; follow its Interfaces, Ownership and Test setup for your team):
+{{Architect->Tester1}}
+
+Turn the specification into executable acceptance tests BEFORE the implementation exists, so the Implementer has an objective target.
+1. Read the affected code and existing tests for conventions (framework, fixtures, layout, how the suite runs).
+2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
+3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
+4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
+5. Release every file you created with release({file}).
+Return exactly:
+## Checklist — the AC list.
+## Interface contract — the public names/signatures your tests assume.
+## Tests — one line per new test file: "- <path> — <AC ids>".
+## Commands
+TEST_COMMAND: <command that runs only your new tests>
+SUITE_COMMAND: <command that runs the affected package's existing tests>
+RED: yes|no   (yes = your tests currently fail only for the missing feature)`,
+  __junco_opt_Tester2: `You are Tester2 of Team 2. Team 2 implements this feature:
+{{team2-spec}}
+
+Architect plan (both teams; follow its Interfaces, Ownership and Test setup for your team):
+{{Architect->Tester2}}
+
+Turn the specification into executable acceptance tests BEFORE the implementation exists, so the Implementer has an objective target.
+1. Read the affected code and existing tests for conventions (framework, fixtures, layout, how the suite runs).
+2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
+3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
+4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
+5. Release every file you created with release({file}).
+Return exactly:
+## Checklist — the AC list.
+## Interface contract — the public names/signatures your tests assume.
+## Tests — one line per new test file: "- <path> — <AC ids>".
+## Commands
+TEST_COMMAND: <command that runs only your new tests>
+SUITE_COMMAND: <command that runs the affected package's existing tests>
+RED: yes|no   (yes = your tests currently fail only for the missing feature)`,
+  __junco_opt_Implementer1: `You are Implementer1 of Team 1. Implement this feature in the shared working tree:
+{{team1-spec-impl}}
+
+Architect plan (follow Ownership and the Shared-file protocol; the other team edits concurrently):
+{{Architect->Implementer1}}
+
+Tester1's acceptance tests and contract (your objective target):
+{{Tester1->Implementer1}}
+
+1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
+2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
+3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
+4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+Return exactly:
+## Changes — files changed and what each change does.
+## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
+## Verdict
+TEST_COMMAND: <cmd> exit=<n>
+SUITE_COMMAND: <cmd> exit=<n>`,
+  __junco_opt_Implementer2: `You are Implementer2 of Team 2. Implement this feature in the shared working tree:
+{{team2-spec-impl}}
+
+Architect plan (follow Ownership and the Shared-file protocol; the other team edits concurrently):
+{{Architect->Implementer2}}
+
+Tester2's acceptance tests and contract (your objective target):
+{{Tester2->Implementer2}}
+
+1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
+2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
+3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
+4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+Return exactly:
+## Changes — files changed and what each change does.
+## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
+## Verdict
+TEST_COMMAND: <cmd> exit=<n>
+SUITE_COMMAND: <cmd> exit=<n>`,
+};
+
+const RALPH_CHECKS: Record<string, schedules.RalphPredicate> = {
+  __junco_ralph_Architect: (result) => verdicts.Architect(syntax.finalText(result, "Ralph")),
+  __junco_ralph_Tester1: (result) => verdicts.Tester(syntax.finalText(result, "Ralph")),
+  __junco_ralph_Tester2: (result) => verdicts.Tester(syntax.finalText(result, "Ralph")),
+  __junco_ralph_Implementer1: (result) => verdicts.Implementer(syntax.finalText(result, "Ralph")),
+  __junco_ralph_Implementer2: (result) => verdicts.Implementer(syntax.finalText(result, "Ralph")),
+};
+
 // ## Shared-worktree pair
 
 export type Owner = { readonly team: AgentKey; readonly node_id: string };
@@ -175,6 +507,8 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
     cwd: options.cwd ?? process.cwd(),
     scheduler,
     ladder,
+    code: withOptimizerCode(undefined, ASSIGNMENTS),
+    available: mergeAvailable(undefined, ralphUntil(RALPH_CHECKS, 3).available, new Set(Object.keys(RALPH_CHECKS))),
     ...(observer === undefined ? {} : { tracer: observer }),
     ...(recorder === undefined ? {} : { recorder }),
     collection: options.collection,
@@ -487,12 +821,15 @@ export async function createBenchmarkRecorder(
 
 // ## CLI
 
-/** JSONL to stdout; synchronous so the terminal record is complete before exit. */
+/** Node's writable queue serializes complete JSONL records under pipe backpressure. */
 export function emit(record: Record<string, unknown>): void {
-  const bytes = Buffer.from(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
-  for (let offset = 0; offset < bytes.length;)
-    offset += writeSync(1, bytes, offset, bytes.length - offset);
+  process.stdout.write(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
 }
+
+/** Join every queued record before the explicit exit that releases idle model sockets. */
+export const flushEvents = (): Promise<void> => new Promise((resolve, reject) => {
+  process.stdout.write("", (error) => error ? reject(error) : resolve());
+});
 
 function describe(error: unknown): string {
   if (error instanceof AggregateError) return [error.message, ...error.errors.map(describe)].join("; ");
@@ -552,13 +889,27 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
   const errors: string[] = [];
   let completed = false;
   let pair: Pair | undefined;
+  let graphRun: GraphRun | undefined;
+  let hash: string | undefined;
+  let setupOrCleanupFailed = false;
   try {
+    graphRun = await readGraphRun();
+    if (graphRun !== undefined) {
+      hash = graphHash(document);
+      if (graphRun.expectedGraphHash !== hash)
+        throw new Error("the candidate graph differs from its run request");
+    }
     // LIFO: graph/agents, collection, final container peak, then recorder sinks.
     await using lifetime = new AsyncDisposableStack();
     const live = await tracer.GrafanaRecorder.create({ url: grafanaUrl, dashboard: "junco-cooperbench" });
     const recorder = lifetime.adopt(
       await createBenchmarkRecorder(join(request.problem_dir, ".junco"), request.run_id, live),
-      (owned) => owned.close(),
+      async (owned) => {
+        await owned.close();
+        // Reuse the closed usage-mode log, including failed attempts, without double accounting.
+        if (graphRun !== undefined)
+          await copyFile(join(request.problem_dir, ".junco", "log.jsonl"), join(graphRun.dir, "samples.jsonl"), constants.COPYFILE_EXCL);
+      },
     );
     lifetime.adopt(await createContainerMemorySampler(join(request.problem_dir, ".junco"), request.run_id, recorder), (owned) => owned.close());
     const observer = new OpikTracer(new Opik({ apiUrl: opikUrl, projectName: process.env.OPIK_PROJECT_NAME ?? "cooperbench" }), request.problem_dir);
@@ -598,12 +949,23 @@ async function runPair(request: PairRequest, interrupt: AbortSignal, grafanaUrl:
       }
     }
   } catch (error) {
+    setupOrCleanupFailed = true;
     // Setup or cleanup failure: keep it beside any run failure.
     errors.push(describe(error));
   }
   const limited = deadline.aborted && !interrupt.aborted;
   if (interrupt.aborted) errors.unshift("interrupted");
-  const { status, error, agents } = pairOutcome(values, { completed, errors, limited });
+  let outcome = pairOutcome(values, { completed, errors, limited });
+  // Measurement completion requires a closed attempt, not a successful solver verdict.
+  if (graphRun !== undefined && pair !== undefined && !setupOrCleanupFailed && !interrupt.aborted) {
+    try {
+      await writeCompletion(graphRun, hash!, {});
+    } catch (failure) {
+      errors.push(describe(failure));
+      outcome = pairOutcome(values, { completed, errors, limited });
+    }
+  }
+  const { status, error, agents } = outcome;
   const workers = pair?.stats.workers ?? 0;
   emit({ type: "result", status, agents, error, worker_count: workers, agent_count: (pair?.stats.agents ?? 0) + workers });
   return { status, error };
@@ -814,6 +1176,6 @@ if (import.meta.main) {
     process.exitCode = 1;
   }
   if (controller.signal.aborted) process.exitCode = 130;
-  // Model clients may hold idle sockets; the terminal record is already written synchronously.
+  await flushEvents();
   process.exit();
 }

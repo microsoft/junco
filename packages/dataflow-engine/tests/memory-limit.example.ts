@@ -15,9 +15,7 @@ test("cookbook: memory limit never pairs two 3000 MB sinks under 4 GB", async ()
     ["C"],
     ["C"],
   ]);
-  assert.ok(
-    waves.every((wave) => !(wave.includes("A") && wave.includes("B"))),
-  );
+  assert.ok(waves.every((wave) => !(wave.includes("A") && wave.includes("B"))));
   assert.deepEqual(consumed, ["A", "D", "B", "C"]);
   assert.equal(sourceResult, "source done");
 });

@@ -92,7 +92,10 @@ const firstUser = (context: Context) => {
 /** Who a transcript belongs to: the leader its first user message names, or the worker's job (`name@ROUND` when its task names a round). */
 function agentOf(context: Context): string {
   const text = firstUser(context);
-  const member = /You are (?:the )?(Architect|Tester[12]|Implementer[12]|Agent[12])/.exec(text);
+  const member =
+    /You are (?:the )?(Architect|Tester[12]|Implementer[12]|Agent[12])/.exec(
+      text,
+    );
   if (member) return member[1]!;
   const child = /CHILD-[a-z]+/.exec(text);
   if (child) return child[0];
@@ -208,7 +211,11 @@ async function pair(
   recorder?: tracer.ProfileRecorder<string>,
 ) {
   const { models, calls } = await fauxModels({
-    ...Object.fromEntries(["Architect", "Tester1", "Tester2", "Implementer1", "Implementer2"].map((name) => [name, steps(() => done(`${name} report`))])),
+    ...Object.fromEntries(
+      ["Architect", "Tester1", "Tester2", "Implementer1", "Implementer2"].map(
+        (name) => [name, steps(() => done(`${name} report`))],
+      ),
+    ),
     ...scripts,
   });
   const ladder = new schedules.ModelLadder(
@@ -232,7 +239,9 @@ async function pair(
     createAgent: async (spec, owner) => {
       owners.push(owner);
       // Descendant lifecycle fixtures deliberately enable task; the canonical graph blocks it.
-      const fixtureSpec = Object.keys(scripts).some((name) => name.startsWith("CHILD-"))
+      const fixtureSpec = Object.keys(scripts).some((name) =>
+        name.startsWith("CHILD-"),
+      )
         ? { ...spec, tool_block: [] }
         : spec;
       const created = await syntax.createJuncoAgent(fixtureSpec, ladder);
@@ -753,19 +762,30 @@ test("a raw serialization failure still forwards the original usage once and red
   }
 });
 
-test("large UTF-8 event records remain complete and ordered through stdout pipes", () => {
-  const module = new URL("../examples/cooperbench/wf.ts", import.meta.url).pathname;
-  const result = spawnSync(process.execPath, ["-e", `
-    import { emit } from ${JSON.stringify(module)};
+test("large UTF-8 stdout records remain ordered and drain before exit", () => {
+  const module = new URL("../examples/cooperbench/wf.ts", import.meta.url)
+    .pathname;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      `
+    const { emit, flushEvents } = await import(${JSON.stringify(module)});
     const text = "λ🙂".repeat(40000);
-    await Promise.all(Array.from({ length: 8 }, (_, id) =>
-      new Promise(resolve => setTimeout(() => { emit({ type: "message", id, text }); resolve(); }, 0))));
+    for (let id = 0; id < 8; id++) emit({ type: "message", id, text });
     emit({ type: "result" });
+    await flushEvents();
     process.exit();
-  `], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 10000 });
-  expect(result.status).toBe(0);
+  `,
+    ],
+    { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 10000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
   expect(result.stdout.endsWith("\n")).toBe(true);
-  const records = result.stdout.trimEnd().split("\n").map(line => JSON.parse(line));
+  const records = result.stdout
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
   expect(records.slice(0, -1).map(({ id, text }) => [id, text])).toEqual(
     Array.from({ length: 8 }, (_, id) => [id, "λ🙂".repeat(40000)]),
   );
@@ -853,15 +873,26 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
   expect(architect.length).toBeGreaterThan(0);
   for (const sentinel of Object.values(SENTINEL))
     expect(JSON.stringify(architect[0]!.messages)).toContain(sentinel);
-  for (const name of ["Architect", "Tester1", "Implementer1", "Agent1", "Tester2", "Implementer2", "Agent2"]) {
+  for (const name of [
+    "Architect",
+    "Tester1",
+    "Implementer1",
+    "Agent1",
+    "Tester2",
+    "Implementer2",
+    "Agent2",
+  ]) {
     const mine = calls.filter((c) => c.agent === name);
     expect(mine.length).toBeGreaterThan(0);
     expect(new Set(mine.map((c) => c.model))).toEqual(new Set(["worker"]));
     expect(document.graph.nodes[name]).toMatchObject({ tool_block: ["task"] });
     if (name !== "Architect") {
-      const [own, other] = name.endsWith("1") ? [SENTINEL.agent1, SENTINEL.agent2] : [SENTINEL.agent2, SENTINEL.agent1];
+      const [own, other] = name.endsWith("1")
+        ? [SENTINEL.agent1, SENTINEL.agent2]
+        : [SENTINEL.agent2, SENTINEL.agent1];
       expect(JSON.stringify(mine[0]!.messages)).toContain(own);
-      for (const c of mine) expect(JSON.stringify(c.messages)).not.toContain(other);
+      for (const c of mine)
+        expect(JSON.stringify(c.messages)).not.toContain(other);
     }
   }
   expect(stats).toEqual({ agents: 7, workers: 0 });
@@ -1035,12 +1066,32 @@ test.each([
 });
 
 test("role verdict checks require structural completion evidence", () => {
-  expect(verdicts.Architect("## Interfaces\n## Ownership\n## Shared-file protocol\n## Conflicts\n## Test setup\n## Risks")).toBe(true);
+  expect(
+    verdicts.Architect(
+      "## Interfaces\n## Ownership\n## Shared-file protocol\n## Conflicts\n## Test setup\n## Risks",
+    ),
+  ).toBe(true);
   expect(verdicts.Architect("## Interfaces\n## Ownership")).toBe(false);
-  expect(verdicts.Tester("- tests/test_x.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes")).toBe(true);
-  expect(verdicts.Tester("- src/main.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes")).toBe(false);
-  expect(verdicts.Implementer("TEST_COMMAND: pytest -q exit=0\nSUITE_COMMAND: pytest exit=0")).toBe(true);
-  expect(verdicts.Implementer("TEST_COMMAND: pytest -q exit=1\nSUITE_COMMAND: pytest exit=0")).toBe(false);
+  expect(
+    verdicts.Tester(
+      "- tests/test_x.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes",
+    ),
+  ).toBe(true);
+  expect(
+    verdicts.Tester(
+      "- src/main.py — AC-1\nTEST_COMMAND: pytest -q\nSUITE_COMMAND: pytest\nRED: yes",
+    ),
+  ).toBe(false);
+  expect(
+    verdicts.Implementer(
+      "TEST_COMMAND: pytest -q exit=0\nSUITE_COMMAND: pytest exit=0",
+    ),
+  ).toBe(true);
+  expect(
+    verdicts.Implementer(
+      "TEST_COMMAND: pytest -q exit=1\nSUITE_COMMAND: pytest exit=0",
+    ),
+  ).toBe(false);
 });
 
 const task = (name: string, model = { provider: "faux", modelId: "worker" }) =>
