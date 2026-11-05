@@ -1,0 +1,10 @@
+# CooperBench core (10 pairs): USD per solved pair and wall time. Junco run `junco-core`: two agents on
+# github-copilot/claude-sonnet-5, thinking off, 2026-10-29, 6/10 solved for $3.31 (Pi catalog estimate,
+# not an invoice), 9.7 min (CooperBench/logs/junco-comparison/comparison.md:7-22).
+# Baselines: CooperBench docs/BENCHMARK_RESULTS.md:18-26 (gpt-5.5 / claude-sonnet-4-5, May 2026),
+# cost divided by solved pairs: 13.37/6, ~8.5/5, 31.90/4; wall minutes from the same table.
+# key usd_per_solved_pair label solved minutes
+junco 0.55 "$0.55" "6/10" 9.7
+claude_code 1.70 "~$1.70" "5/10" 21
+mini_swe_agent_v2 2.23 "$2.23" "6/10" 24
+openhands_sdk 7.98 "$7.98" "4/10" 16

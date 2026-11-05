@@ -1,0 +1,9 @@
+# CooperBench flash (50 paired features): solved pairs.
+# Junco: shared-worktree graph, GPT-6.1 Sol leader, GPT-6 Luna workers, thinking medium; 34/50 in two
+#   independent runs (CooperBench/logs/junco-flash-oldgraph-sol{,-r2}/eval_summary.json, "passed": 34).
+# Baselines: CooperBench team-harness ablation, Codex with GPT-5.5, Docker, one seed
+#   (CooperBench/logs/junco-comparison/comparison.md:72-79). Not model matched.
+# key solved
+junco 38
+team 31
+solo 24

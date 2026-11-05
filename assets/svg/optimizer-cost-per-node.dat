@@ -1,0 +1,14 @@
+# Junco profile-optimizer session session-mUZhgQ7U on the CooperBench pair (examples/cooperbench):
+# mean catalog USD per run per runtime-role bucket, by optimizer iteration (poster.js:496-512).
+# C = top-level Agent1, R1 = top-level Agent2, R2 = Agent1-owned workers, R3 = Agent2-owned workers.
+# Iteration 6 failed (no measurement: NaN, which breaks the lines); zero = complete runs emitted no delegated-worker cost rows.
+# Optimizer-editor cost excluded; not an invoice.
+# iteration C R1 R2 R3
+1 0.57621275 0.52475755 0 0
+2 0.5612961 0.4683806 0 0
+3 0.49130645 0.463262125 0.19176665 0.15816005
+4 0.5623001 0.5002896 0 0
+5 0.6180546 0.5083271 0 0
+6 NaN NaN NaN NaN
+7 0.50249555 0.451327175 0.01767392 0.014753665
+8 0.4936853666666667 0.3839837666666666 0.017391605 0.013909225

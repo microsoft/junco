@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 190" width="720" height="214" color="#fff" role="img" aria-labelledby="junco-policy-svg-title junco-policy-svg-desc">
+  <title id="junco-policy-svg-title">Policy validator rejects C's stale edit after R1 changes the file</title>
+  <desc id="junco-policy-svg-desc">The final rewritten graph: Start feeds green C and three green subtasks R1, R2, R3 inside R, then Result. C reads package.json; R1 then edits the file, invalidating C's context. C's subsequent edit is rejected at the validator and C must re-read package.json. Only R1's accepted write reaches the file; R2 and R3 make no file request. Green node checks indicate progress, not file permission. Junco uses a formally Verus-verified policy evaluation/history core and is being integrated into Regorus, Azure's policy tool. Illustrative policy flow, not a running verifier or whole-runtime proof.</desc>
+  <defs><marker id="junco-policy-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="currentColor"/></marker></defs>
+  <rect width="640" height="190" fill="#101827"/>
+  <style>
+    text { fill: #fff; font-family: "Segoe UI", system-ui, sans-serif; font-size: 16.5px; text-anchor: middle; }
+    .junco-edges { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .junco-node > rect, .junco-node > path { fill: #101827; stroke: currentColor; stroke-width: 1.5; }
+    .junco-good { color: #59d499; fill: #59d499; }
+    .junco-bad { color: #ff7b86; fill: #ff7b86; }
+    .junco-requests { stroke-dasharray: 4 4; }
+    .junco-rewrite-boundary { fill: none; stroke: rgba(255,255,255,.62); stroke-width: 1; }
+    .junco-validator-label { font-size: 15.5px; fill: #80c4ff; }
+    [data-policy-event] { font-size: 14px; text-anchor: start; }
+    [data-policy-event="c-edit"], #junco-policy-error { fill: #ff7b86; }
+    #junco-policy-error { text-anchor: start; }
+  </style>
+  <g class="junco-policy-graph" transform="scale(.8)">
+    <g class="junco-edges" marker-end="url(#junco-policy-arrow)">
+      <path d="M180 40 L278 58 M278 158 L180 184 M180 40 L110 85 M110 115 L180 184 M278 58 L225 90 M278 58 L272 90 M278 58 L319 90 M225 120 L278 158 M272 120 L278 158 M319 120 L278 158"/>
+    </g>
+    <g class="junco-node"><rect x="155" y="12" width="50" height="28" rx="6"/><text x="180" y="31">Start</text></g>
+    <g class="junco-node junco-good"><rect x="77" y="85" width="66" height="30" rx="6"/><text x="110" y="105">C ✓</text></g>
+    <rect class="junco-rewrite-boundary" x="201" y="67" width="143" height="76" rx="6"/><text x="213" y="85">R</text>
+    <g class="junco-node junco-good"><rect x="205" y="90" width="40" height="30" rx="5"/><text x="225" y="110">R1 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="252" y="90" width="40" height="30" rx="5"/><text x="272" y="110">R2 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="299" y="90" width="40" height="30" rx="5"/><text x="319" y="110">R3 ✓</text></g>
+    <g class="junco-node"><rect x="150" y="184" width="60" height="28" rx="6"/><text x="180" y="203">Result</text></g>
+  </g>
+  <g class="junco-requests junco-edges" marker-end="url(#junco-policy-arrow)">
+    <path class="junco-policy-read-c" d="M114.4 76 C185 12 260 30 330 60"/>
+    <path class="junco-policy-edit-r1" d="M180 96 C235 138 285 125 330 82"/>
+    <path class="junco-policy-stale-c" d="M114.4 88 C195 200 270 150 330 104"/>
+    <path class="junco-policy-accepted" d="M530 82 L562 92"/>
+  </g>
+  <g id="junco-policy-validator" class="junco-node">
+    <rect x="330" y="12" width="200" height="164" rx="6"/>
+    <text x="430" y="34" class="junco-validator-label">Policy validator</text>
+    <text class="junco-good" data-policy-event="c-read" x="346" y="60">(C, read, package.json)</text>
+    <text class="junco-good" data-policy-event="r1-edit" x="346" y="82">(R1, edit, package.json)</text>
+    <text data-policy-event="c-edit" x="346" y="104">(C, edit, package.json)</text>
+    <text id="junco-policy-error"><tspan x="346" y="124">Error: File package.json</tspan><tspan x="346" y="140"> has been edited by R1,</tspan><tspan x="346" y="156"> please re-read</tspan></text>
+    <g id="junco-policy-verus" class="junco-node"><rect x="454" y="160" width="76" height="28" rx="4"/><text x="480" y="181">Verus</text><text class="junco-good" x="516" y="181">✓</text></g>
+  </g>
+  <g class="junco-node"><path d="M562 74 H590 L606 90 V133 H562Z M590 74 V90 H606"/><text x="584" y="164">package.json</text></g>
+</svg>

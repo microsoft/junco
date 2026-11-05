@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 220" width="720" height="440" color="#fff" role="img" aria-labelledby="junco-rewrite-svg-title junco-rewrite-svg-desc">
+  <title id="junco-rewrite-svg-title">Merge two progressing nodes; split one struggling node</title>
+  <desc id="junco-rewrite-svg-desc">Illustrative rewrite. Start feeds green A and B and red R, then Result. A and B become one C worker. R becomes three green subtasks R1, R2, R3 with a fan-out and join, preserving the inputs and outputs. Quality improvement is qualitative, not a measured outcome.</desc>
+  <defs><marker id="junco-rewrite-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="currentColor"/></marker></defs>
+  <rect width="360" height="220" fill="#101827"/>
+  <style>
+    text { fill: #fff; font-family: "Segoe UI", system-ui, sans-serif; font-size: 16.5px; text-anchor: middle; }
+    .junco-edges { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .junco-node > rect, .junco-node > path { fill: #101827; stroke: currentColor; stroke-width: 1.5; }
+    .junco-good { color: #59d499; fill: #59d499; }
+    .junco-bad { color: #ff7b86; fill: #ff7b86; }
+    .junco-requests { stroke-dasharray: 4 4; }
+    .junco-rewrite-boundary { fill: none; stroke: rgba(255,255,255,.62); stroke-width: 1; }
+  </style>
+  <g class="junco-edges" marker-end="url(#junco-rewrite-arrow)">
+    <path d="M180 40 L278 58 M278 158 L180 184"/>
+    <g class="junco-rewrite-merged"><path d="M180 40 L110 85 M110 115 L180 184"/></g>
+    <g class="junco-rewrite-split"><path d="M278 58 L225 90 M278 58 L272 90 M278 58 L319 90 M225 120 L278 158 M272 120 L278 158 M319 120 L278 158"/></g>
+  </g>
+  <g class="junco-node"><rect x="155" y="12" width="50" height="28" rx="6"/><text x="180" y="31">Start</text></g>
+  <g class="junco-node junco-good junco-rewrite-merged"><rect x="77" y="85" width="66" height="30" rx="6"/><text x="110" y="105">C ✓</text></g>
+  <g class="junco-rewrite-split">
+    <rect class="junco-rewrite-boundary" x="201" y="67" width="143" height="76" rx="6"/><text x="213" y="85">R</text>
+    <g class="junco-node junco-good"><rect x="205" y="90" width="40" height="30" rx="5"/><text x="225" y="110">R1 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="252" y="90" width="40" height="30" rx="5"/><text x="272" y="110">R2 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="299" y="90" width="40" height="30" rx="5"/><text x="319" y="110">R3 ✓</text></g>
+  </g>
+  <g class="junco-node"><rect x="150" y="184" width="60" height="28" rx="6"/><text x="180" y="203">Result</text></g>
+  <text class="junco-rewrite-quality junco-good" x="85" y="157">Quality metric ↑</text>
+</svg>

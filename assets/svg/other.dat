@@ -1,0 +1,11 @@
+# Source: junco-policy/fuzz/target/criterion/dogwood_replay/{junco,dogwood,verimon}/{16,64,256,1024}/new/estimates.json
+# J, D, and V are Criterion median.point_estimate; sJ, sD, and sV are median.standard_error.
+# Speedup R = B/J; SE(R) = R * sqrt((sB/B)^2 + (sJ/J)^2).
+# Error bars are +/-1 SE, using first-order propagation for independent engine measurements.
+# Cold lock-policy replay; benchmark-specific setup excluded.
+# VeriMon: jshs/monpoly 025a142321e4cd9174164568e38c399ec336a076, -verified; timed region is monitoring of the streamed log, process start-up excluded.
+# events dogwood_speedup dogwood_se verimon_speedup verimon_se
+"16 events" 86.67707528487527 0.1644751059524047 168.83103101650818 0.27984501097898046
+"64 events" 56.253469907332544 0.11047632241447357 94.33271101146853 0.23391223112614104
+"256 events" 81.31682958343889 0.10612619210695372 69.87818580922382 0.2799027308307245
+"1024 events" 189.54772310300248 0.31940551386588495 46.923484758223495 0.5616804485027116

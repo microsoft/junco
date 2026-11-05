@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"  standalone="no"?>
+<svg 
+ viewBox="0 0 720 420"
+ xmlns="http://www.w3.org/2000/svg"
+ xmlns:xlink="http://www.w3.org/1999/xlink"
+>
+
+<title>Gnuplot</title>
+<desc>Produced by GNUPLOT 6.0 patchlevel 0 </desc>
+
+<g id="gnuplot_canvas">
+
+<rect x="0" y="0" width="720" height="420" fill="#101827"/>
+<defs>
+
+	<circle id='gpDot' r='0.5' stroke-width='0.5' stroke='currentColor'/>
+	<path id='gpPt0' stroke-width='0.190' stroke='currentColor' d='M-1,0 h2 M0,-1 v2'/>
+	<path id='gpPt1' stroke-width='0.190' stroke='currentColor' d='M-1,-1 L1,1 M1,-1 L-1,1'/>
+	<path id='gpPt2' stroke-width='0.190' stroke='currentColor' d='M-1,0 L1,0 M0,-1 L0,1 M-1,-1 L1,1 M-1,1 L1,-1'/>
+	<rect id='gpPt3' stroke-width='0.190' stroke='currentColor' x='-1' y='-1' width='2' height='2'/>
+	<rect id='gpPt4' stroke-width='0.190' stroke='currentColor' fill='currentColor' x='-1' y='-1' width='2' height='2'/>
+	<circle id='gpPt5' stroke-width='0.190' stroke='currentColor' cx='0' cy='0' r='1'/>
+	<use xlink:href='#gpPt5' id='gpPt6' fill='currentColor' stroke='none'/>
+	<path id='gpPt7' stroke-width='0.190' stroke='currentColor' d='M0,-1.33 L-1.33,0.67 L1.33,0.67 z'/>
+	<use xlink:href='#gpPt7' id='gpPt8' fill='currentColor' stroke='none'/>
+	<use xlink:href='#gpPt7' id='gpPt9' stroke='currentColor' transform='rotate(180)'/>
+	<use xlink:href='#gpPt9' id='gpPt10' fill='currentColor' stroke='none'/>
+	<use xlink:href='#gpPt3' id='gpPt11' stroke='currentColor' transform='rotate(45)'/>
+	<use xlink:href='#gpPt11' id='gpPt12' fill='currentColor' stroke='none'/>
+	<path id='gpPt13' stroke-width='0.190' stroke='currentColor' d='M0,1.330 L1.265,0.411 L0.782,-1.067 L-0.782,-1.076 L-1.265,0.411 z'/>
+	<use xlink:href='#gpPt13' id='gpPt14' fill='currentColor' stroke='none'/>
+	<filter id='textbox' filterUnits='objectBoundingBox' x='0' y='0' height='1' width='1'>
+	  <feFlood flood-color='#101827' flood-opacity='1' result='bgnd'/>
+	  <feComposite in='SourceGraphic' in2='bgnd' operator='atop'/>
+	</filter>
+	<filter id='greybox' filterUnits='objectBoundingBox' x='0' y='0' height='1' width='1'>
+	  <feFlood flood-color='lightgrey' flood-opacity='1' result='grey'/>
+	  <feComposite in='SourceGraphic' in2='grey' operator='atop'/>
+	</filter>
+</defs>
+<g fill="none" color="#101827" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,352.80 L95.13,352.80  '/>	<g transform="translate(74.84,357.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 0</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,286.44 L95.13,286.44  '/>	<g transform="translate(74.84,290.99)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 20</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,220.08 L95.13,220.08  '/>	<g transform="translate(74.84,224.63)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 40</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,153.73 L95.13,153.73  '/>	<g transform="translate(74.84,158.28)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 60</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,87.37 L95.13,87.37  '/>	<g transform="translate(74.84,91.92)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 80</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,21.01 L95.13,21.01  '/>	<g transform="translate(74.84,25.56)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="end">
+		<text> 100</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,352.80 L84.63,342.30  '/>	<g transform="translate(84.63,378.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>0.01</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M130.24,352.80 L130.24,347.55 M156.91,352.80 L156.91,347.55 M175.84,352.80 L175.84,347.55 M190.52,352.80 L190.52,347.55
+		M202.52,352.80 L202.52,347.55 M212.66,352.80 L212.66,347.55 M221.45,352.80 L221.45,347.55 M229.20,352.80 L229.20,347.55
+		M236.13,352.80 L236.13,342.30  '/>	<g transform="translate(236.13,378.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>0.1</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M281.73,352.80 L281.73,347.55 M308.41,352.80 L308.41,347.55 M327.34,352.80 L327.34,347.55 M342.02,352.80 L342.02,347.55
+		M354.02,352.80 L354.02,347.55 M364.16,352.80 L364.16,347.55 M372.94,352.80 L372.94,347.55 M380.69,352.80 L380.69,347.55
+		M387.63,352.80 L387.63,342.30  '/>	<g transform="translate(387.63,378.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>1</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M433.23,352.80 L433.23,347.55 M459.91,352.80 L459.91,347.55 M478.84,352.80 L478.84,347.55 M493.52,352.80 L493.52,347.55
+		M505.51,352.80 L505.51,347.55 M515.66,352.80 L515.66,347.55 M524.44,352.80 L524.44,347.55 M532.19,352.80 L532.19,347.55
+		M539.12,352.80 L539.12,342.30  '/>	<g transform="translate(539.12,378.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>10</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M584.73,352.80 L584.73,347.55 M611.41,352.80 L611.41,347.55 M630.33,352.80 L630.33,347.55 M645.01,352.80 L645.01,347.55
+		M657.01,352.80 L657.01,347.55 M667.15,352.80 L667.15,347.55 M675.94,352.80 L675.94,347.55 M683.69,352.80 L683.69,347.55
+		M690.62,352.80 L690.62,342.30  '/>	<g transform="translate(690.62,378.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>100</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,21.01 L84.63,352.80 L690.62,352.80 M690.62,21.01 M84.63,21.01  '/></g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+	<g id="gnuplot_plot_1"  fill="none"><title>gnuplot_plot_1</title>
+<g fill="none" color="#101827" stroke="rgb(138, 147, 166)" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<g transform="translate(416.50,315.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="start">
+		<text>sat (90): inclusion fails</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(128, 196, 255)'  d='M376.63,310.80 L406.71,310.80 M84.63,352.80 L202.48,352.80 L245.46,352.80 L245.46,349.11 L248.44,349.11 L260.81,349.11
+		L260.81,345.43 L264.99,345.43 L268.77,345.43 L272.28,345.43 L272.28,341.74 L297.36,341.74 L297.36,338.05 L306.64,338.05
+		L311.83,338.05 L311.83,334.37 L315.14,334.37 L315.14,330.68 L323.98,330.68 L323.98,326.99 L339.81,326.99 L339.81,323.31
+		L345.55,323.31 L345.55,319.62 L347.02,319.62 L347.02,315.93 L348.97,315.93 L348.97,312.25 L350.08,312.25 L350.08,308.56
+		L350.09,308.56 L350.09,304.87 L360.88,304.87 L360.88,301.19 L365.24,301.19 L365.24,297.50 L368.30,297.50 L368.30,293.82
+		L372.08,293.82 L372.08,290.13 L372.27,290.13 L373.83,290.13 L373.83,286.44 L374.04,286.44 L375.02,286.44 L375.02,282.76
+		L377.26,282.76 L377.26,279.07 L378.04,279.07 L378.04,275.38 L378.27,275.38 L378.27,271.70 L397.04,271.70 L397.04,268.01
+		L397.83,268.01 L397.83,264.32 L399.08,264.32 L399.08,260.64 L399.47,260.64 L399.47,256.95 L405.18,256.95 L405.18,253.26
+		L410.66,253.26 L410.66,249.58 L411.90,249.58 L411.90,245.89 L412.39,245.89 L412.39,242.20 L417.87,242.20 L417.87,238.52
+		L418.38,238.52 L418.38,234.83 L424.68,234.83 L424.68,231.14 L425.10,231.14 L425.10,227.46 L431.10,227.46 L431.10,223.77
+		L431.64,223.77 L431.64,220.08 L444.38,220.08 L444.38,216.40 L447.85,216.40 L447.85,212.71 L451.00,212.71 L453.93,212.71
+		L453.93,209.02 L454.21,209.02 L454.21,205.34 L463.11,205.34 L463.11,201.65 L468.06,201.65 L468.06,197.96 L473.53,197.96
+		L473.53,194.28 L475.10,194.28 L475.10,190.59 L478.06,190.59 L478.06,186.90 L481.11,186.90 L481.11,183.22 L481.47,183.22
+		L481.47,179.53 L482.01,179.53 L482.01,175.85 L482.32,175.85 L482.32,172.16 L482.70,172.16 L482.70,168.47 L482.87,168.47
+		L482.87,164.79 L483.13,164.79 L483.13,161.10 L483.29,161.10 L483.29,157.41 L484.66,157.41 L484.66,153.73 L486.20,153.73
+		L486.20,150.04 L488.09,150.04 L488.09,146.35 L488.19,146.35 L488.19,142.67 L488.62,142.67 L488.62,138.98 L489.35,138.98
+		L489.35,135.29 L489.39,135.29 L489.39,131.61 L490.61,131.61 L490.61,127.92 L493.06,127.92 L493.06,124.23 L494.87,124.23
+		L494.87,120.55 L499.78,120.55 L499.78,116.86 L501.39,116.86 L502.77,116.86 L502.77,113.17 L503.77,113.17 L503.77,109.49
+		L504.56,109.49 L504.56,105.80 L505.24,105.80 L505.24,102.11 L505.59,102.11 L505.59,98.43 L510.95,98.43 L510.95,94.74
+		L513.56,94.74 L513.56,91.05 L513.69,91.05 L514.65,91.05 L514.65,87.37 L515.96,87.37 L515.96,83.68 L517.06,83.68
+		L517.06,79.99 L517.08,79.99 L517.08,76.31 L519.74,76.31 L519.74,72.62 L523.86,72.62 L523.86,68.94 L532.62,68.94
+		L532.62,65.25 L533.10,65.25 L533.10,61.56 L539.06,61.56 L539.06,57.88 L541.55,57.88 L541.55,54.19 L552.51,54.19
+		L552.51,50.50 L553.39,50.50 L553.39,46.82 L556.10,46.82 L556.10,43.13 L562.55,43.13 L562.55,39.44 L564.75,39.44
+		L564.75,35.76 L580.51,35.76 L580.51,32.07 L588.70,32.07 L588.70,28.38 L619.90,28.38 L619.90,24.70 L638.82,24.70
+		L638.82,21.01 L690.62,21.01  '/></g>
+	</g>
+	<g id="gnuplot_plot_2"  fill="none"><title>gnuplot_plot_2</title>
+<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<g transform="translate(416.50,336.35)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="start">
+		<text>unsat (10): inclusion holds</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb( 89, 212, 153)'  d='M376.63,331.80 L406.71,331.80 M84.63,352.80 L202.48,352.80 L202.48,319.62 L245.46,319.62 L248.44,319.62 L248.44,286.44
+		L260.81,286.44 L264.99,286.44 L264.99,253.26 L268.77,253.26 L268.77,220.08 L272.28,220.08 L297.36,220.08 L306.64,220.08
+		L306.64,186.90 L311.83,186.90 L315.14,186.90 L323.98,186.90 L339.81,186.90 L345.55,186.90 L347.02,186.90 L348.97,186.90
+		L350.08,186.90 L350.09,186.90 L360.88,186.90 L365.24,186.90 L368.30,186.90 L372.08,186.90 L372.27,186.90 L372.27,153.73
+		L373.83,153.73 L374.04,153.73 L374.04,120.55 L375.02,120.55 L377.26,120.55 L378.04,120.55 L378.27,120.55 L397.04,120.55
+		L397.83,120.55 L399.08,120.55 L399.47,120.55 L405.18,120.55 L410.66,120.55 L411.90,120.55 L412.39,120.55 L417.87,120.55
+		L418.38,120.55 L424.68,120.55 L425.10,120.55 L431.10,120.55 L431.64,120.55 L444.38,120.55 L447.85,120.55 L451.00,120.55
+		L451.00,87.37 L453.93,87.37 L454.21,87.37 L463.11,87.37 L468.06,87.37 L473.53,87.37 L475.10,87.37 L478.06,87.37
+		L481.11,87.37 L481.47,87.37 L482.01,87.37 L482.32,87.37 L482.70,87.37 L482.87,87.37 L483.13,87.37 L483.29,87.37
+		L484.66,87.37 L486.20,87.37 L488.09,87.37 L488.19,87.37 L488.62,87.37 L489.35,87.37 L489.39,87.37 L490.61,87.37
+		L493.06,87.37 L494.87,87.37 L499.78,87.37 L501.39,87.37 L501.39,54.19 L502.77,54.19 L503.77,54.19 L504.56,54.19
+		L505.24,54.19 L505.59,54.19 L510.95,54.19 L513.56,54.19 L513.69,54.19 L513.69,21.01 L514.65,21.01 L515.96,21.01
+		L517.06,21.01 L517.08,21.01 L519.74,21.01 L523.86,21.01 L532.62,21.01 L533.10,21.01 L539.06,21.01 L541.55,21.01
+		L552.51,21.01 L553.39,21.01 L556.10,21.01 L562.55,21.01 L564.75,21.01 L580.51,21.01 L588.70,21.01 L619.90,21.01
+		L638.82,21.01 L690.62,21.01  '/></g>
+	</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="black" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<path stroke='rgb(138, 147, 166)'  d='M84.63,21.01 L84.63,352.80 L690.62,352.80 M690.62,21.01 M84.63,21.01  '/>	<g transform="translate(22.38,186.91) rotate(270.00)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>Cumulative cases (%)</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+	<g transform="translate(387.62,409.85)" stroke="none" fill="rgb(255,255,255)" font-family="Segoe UI" font-size="14.00"  text-anchor="middle">
+		<text>Latency (ms)</text>
+	</g>
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+<g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+</g>
+</g>
+</svg>
+

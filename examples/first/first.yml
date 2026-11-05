@@ -1,0 +1,31 @@
+mcp:
+  playwright:
+    command: npx
+    args: ["-y", "@playwright/mcp@latest", "--headless"]
+graph:
+  name: First
+  nodes:
+    Goals:
+      kind: emit
+      text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
+    Bun:
+      mcp: [playwright]
+      prompt: Call recv once, then answer for Bun only, browsing from https://bun.sh with the playwright tools.
+    Rust:
+      mcp: [playwright]
+      prompt: Call recv once, then answer for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
+    Reviewer:
+      prompt: |-
+        Merge the two answers below into one table of tool, version, release date and source URL. Keep a claim only if it cites a page.
+
+        Bun:
+        {{Bun->Reviewer}}
+
+        Rust:
+        {{Rust->Reviewer}}
+  edges:
+    - {from: Goals, to: Bun, kind: message, schema: {}}
+    - {from: Goals, to: Rust, kind: message, schema: {}}
+    - {from: Bun, to: Reviewer, schema: {}}
+    - {from: Rust, to: Reviewer, schema: {}}
+    - {from: Reviewer, to: $sink, schema: {}}

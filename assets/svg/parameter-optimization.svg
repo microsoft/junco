@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 220" width="720" height="440" color="#fff" role="img" aria-labelledby="junco-parameters-svg-title junco-parameters-svg-desc">
+  <title id="junco-parameters-svg-title">Parameter search checks cost and quality</title>
+  <desc id="junco-parameters-svg-desc">Clockwise loop: try parameters, run the final rewritten graph with one C worker and three R subtasks, profile cost and quality, then repeat. The graph is illustrative; the costs replay measured configuration groups, not live execution. File-access limits are conceptual; measured permissions stayed fixed.</desc>
+  <defs><marker id="junco-parameters-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="currentColor"/></marker></defs>
+  <rect width="360" height="220" fill="#101827"/>
+  <style>
+    text { fill: #fff; font-family: "Segoe UI", system-ui, sans-serif; font-size: 16.5px; text-anchor: middle; }
+    .junco-edges { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .junco-node > rect, .junco-node > path { fill: #101827; stroke: currentColor; stroke-width: 1.5; }
+    .junco-good { color: #59d499; fill: #59d499; }
+    .junco-bad { color: #ff7b86; fill: #ff7b86; }
+    .junco-requests { stroke-dasharray: 4 4; }
+    .junco-rewrite-boundary { fill: none; stroke: rgba(255,255,255,.62); stroke-width: 1; }
+    #junco-profile-cost { fill: #ffd76e; font-weight: 750; }
+  </style>
+  <g class="junco-edges" marker-end="url(#junco-parameters-arrow)"><path d="M136 38 H168 M260 155 L205 174 M40 174 Q10 100 65 55"/></g>
+  <g class="junco-node"><rect class="junco-station junco-propose" x="10" y="20" width="126" height="35" rx="6"/><text x="73" y="42">Try parameters</text></g>
+  <g class="junco-node">
+    <rect class="junco-station junco-run" x="168" y="6" width="190" height="149" rx="6"/><text x="259" y="26">Run graph</text>
+    <g class="junco-edges" marker-end="url(#junco-parameters-arrow)">
+      <path d="M238 57 L197 76 M197 100 L238 123 M238 57 L290 65 M290 65 L249 87 M290 65 L290 87 M290 65 L331 87 M249 111 L290 121 M290 111 V121 M331 111 L290 121 M290 121 L238 123"/>
+    </g>
+    <g class="junco-node"><rect x="216" y="31" width="44" height="26" rx="4"/><text x="238" y="50">Start</text></g>
+    <g class="junco-node junco-good"><rect x="170" y="76" width="54" height="24" rx="4"/><text x="197" y="93">C ✓</text></g>
+    <rect class="junco-rewrite-boundary" x="226" y="61" width="129" height="54" rx="4"/><text x="239" y="79">R</text>
+    <g class="junco-node junco-good"><rect x="229" y="87" width="40" height="24" rx="3"/><text x="249" y="105">R1 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="270" y="87" width="40" height="24" rx="3"/><text x="290" y="105">R2 ✓</text></g>
+    <g class="junco-node junco-good"><rect x="311" y="87" width="40" height="24" rx="3"/><text x="331" y="105">R3 ✓</text></g>
+    <g class="junco-node"><rect x="213" y="123" width="50" height="26" rx="4"/><text x="238" y="141">Result</text></g>
+  </g>
+  <g id="junco-profile-trigger" class="junco-node">
+    <rect class="junco-station junco-profile" x="10" y="174" width="270" height="38" rx="6"/><text x="93" y="198">Profile cost + quality</text><text id="junco-profile-cost" x="230" y="198">$0.986</text>
+  </g>
+</svg>

@@ -1,0 +1,16 @@
+# Recorded problem events per CooperBench run, transcribed from two CooperBench figures
+# (poster.js:363-371); these are not Junco runs. Labels as in the source figures.
+# label lost_update stale_state other
+"High R1" 1 1 0
+"High R2" 1 1 3
+"High R3" 1 1 2
+"Low R1" 1 1 0
+"Low R2" 1 1 0
+"Low R3" 1 0 0
+
+
+"Solo R1" 0 0 0
+"MAS R1" 1 1 0
+"MAS R2" 1 1 0
+"MAS R3" 1 1 0
+"MAS R4" 2 2 1
