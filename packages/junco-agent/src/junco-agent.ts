@@ -74,9 +74,9 @@ import {
   type Prompt,
   profileOperationOf,
   profileToolCall,
-  RecvTool,
   runWithRecorder,
   SendTool,
+  type SendToolHost,
   type TaskCall,
   type TaskInput,
   TaskTool,
@@ -190,19 +190,14 @@ export type TaskResult = {
 };
 
 /**
- * What one graph activation binds while a {@link JuncoAgent} runs: the node's retained inbox,
- * outgoing routes and topology for recv/send/info, and complaint attribution.
+ * What one graph activation binds while a {@link JuncoAgent} runs: outgoing routes,
+ * topology for send/info, and complaint attribution.
  */
 export type JuncoAgentNodeContext<N extends TSchema = TSchema, T = unknown> = {
   /** The host's authoritative NodeId for this activation; absence denies memory access. */
   readonly nodeId?: NodeIdType;
-  readonly messaging?: NonNullable<
-    ConstructorParameters<typeof RecvTool<N, T>>[0]
-  > &
-    NonNullable<ConstructorParameters<typeof SendTool<N>>[0]> &
+  readonly messaging?: SendToolHost<N> &
     NonNullable<ConstructorParameters<typeof InfoTool>[0]>;
-  /** One line the graph wants in the model's next request about this node's inbox; undefined when nothing needs reading. Read per request, never persisted. */
-  readonly briefing?: () => string | undefined;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
   /** The graph's own view of the profiling session; the agent records under its node ID there. */
   readonly recorder?: ProfileRecorder<
@@ -455,7 +450,6 @@ function withDefaultTools(
   };
   append("task", TaskTool.is, () => new TaskTool());
   append("yield", isYieldTool, () => new YieldTool());
-  append("recv", RecvTool.is, () => new RecvTool());
   append("send", SendTool.is, () => new SendTool());
   append("info", InfoTool.is, () => new InfoTool());
   result.push(...tools.filter((tool) => !consumed.has(tool.name)));
@@ -510,7 +504,7 @@ function withRequiredNames(
 
 /** The text every model request's system prompt carries: team guidance, then the release rule. */
 export const SYSTEM_INSTRUCTION =
-  "You are an expert in a collaborative team. You have tools send, recv for communicating with collaborators, yield if you receive a resource-in-use error or if you want to wait for other collaborators to make progress. Summarize your work (send) to your downstream collaborator before yielding and read messages (recv) before a new task.\n\n" +
+  "You are an expert in a collaborative team. You have the tool send for messaging collaborators and yield if you receive a resource-in-use error or if you want to wait for other collaborators to make progress; messages from collaborators arrive as user messages when the scheduler delivers them. Summarize your work (send) to your downstream collaborator before yielding.\n\n" +
   "After you write to a file use release to relinquish ownership";
 
 function valueOrThrow<T, E>(
@@ -1252,11 +1246,16 @@ export class JuncoAgent<
         }
         return undefined;
       });
-      harness.hooks.on("before_request", async ({ lane, runId }) => {
-        if (lane !== "main") return undefined;
+      // Pause before Pi drains steering and snapshots the next request.
+      harness.hooks.on("after_tool_batch", async ({ lane, runId }) => {
+        if (lane !== "main") return;
         const run = this.#runForOperation(runId);
         this.#readyYield(run);
         if (run?.held !== undefined) await run.held.gate.promise;
+      });
+      harness.hooks.on("before_request", async ({ lane, runId }) => {
+        if (lane !== "main") return undefined;
+        const run = this.#runForOperation(runId);
         if (run?.taskFailure !== undefined) {
           // Its abort's commit makes Pi skip this request.
           await run.taskAbort;
@@ -1383,21 +1382,18 @@ export class JuncoAgent<
 
   /**
    * `models` with `streamSimple` giving each request's system prompt {@link SYSTEM_INSTRUCTION}
-   * (once) and the current node's inbox briefing suffix, without mutating the supplied context.
+   * once, without mutating the supplied context.
    * Snapshots that outgoing request of the current run after every native context hook and provider
    * conversion. `completeSimple` (compaction and summaries) uses the same wrapper; others pass through.
    */
   #captureRequests(models: Models): Models {
     const streamSimple: Models["streamSimple"] = (model, supplied, options) => {
       const prompt = supplied.systemPrompt ?? "";
-      const base = prompt.includes(SYSTEM_INSTRUCTION)
+      const systemPrompt = prompt.includes(SYSTEM_INSTRUCTION)
         ? prompt
         : prompt === ""
           ? SYSTEM_INSTRUCTION
           : `${prompt}\n\n${SYSTEM_INSTRUCTION}`;
-      const briefing = this.#nodeContext?.briefing?.();
-      const systemPrompt =
-        briefing === undefined ? base : `${base}\n\n${briefing}`;
       const context =
         systemPrompt === supplied.systemPrompt
           ? supplied
@@ -1533,14 +1529,6 @@ export class JuncoAgent<
             const messaging = node?.messaging;
             if (messaging !== undefined) {
               // Each agent's own bound node, whatever host a shared tool was constructed with.
-              if (RecvTool.is(tool))
-                return await RecvTool.invoke(
-                  tool,
-                  messaging,
-                  id,
-                  params as Parameters<typeof RecvTool.invoke>[3],
-                  signal,
-                );
               if (SendTool.is(tool))
                 return await SendTool.invoke(
                   tool,
@@ -1631,16 +1619,6 @@ export class JuncoAgent<
         enumerable: true,
         get: () =>
           this.#nodeContext?.messaging?.sendParameters ?? tool.parameters,
-      });
-    } else if (RecvTool.is(tool)) {
-      const outputSchema = () =>
-        this.#nodeContext?.messaging?.recvOutputSchema ?? tool.outputSchema;
-      Object.defineProperties(adapter, {
-        outputSchema: { enumerable: true, get: outputSchema },
-        description: {
-          enumerable: true,
-          get: () => RecvTool.describe(outputSchema()),
-        },
       });
     }
     return adapter;
@@ -2144,7 +2122,7 @@ export class JuncoAgent<
 
   // Subagents ------------------------------------------------------------------------------------
   /**
-   * Run `work` with one graph activation bound: `messaging` serves this agent's recv/send/info
+   * Run `work` with one graph activation bound: `messaging` serves this agent's send/info
    * calls and `complaint` attributes its complaints (each adds the
    * model request it arose in). Outside a binding, complaints use this agent's own {@link nodeId}
    * and no delivered messages, and graph tools fall back to their own hosts. Binding neither
@@ -2333,7 +2311,6 @@ export class JuncoAgent<
         ...(this.collection?.tools.map((tool) => tool.name) ?? []),
         "task",
         "yield",
-        "recv",
         "send",
         "info",
         "complain",

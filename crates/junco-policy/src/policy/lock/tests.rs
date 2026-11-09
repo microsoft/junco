@@ -313,3 +313,26 @@ fn retained_policy_rejects_a_foreign_store_without_mutating_history() {
         PolicyDecision::Grant,
     );
 }
+
+#[test]
+fn owned_resources_tracks_only_the_last_owner_change() {
+    for action in ACTIONS {
+        for who in [Who::Me, Who::Other] {
+            let history = [
+                on_x(Who::Me, Action::Edit),
+                LockEvent::new(Who::Me, Action::Edit, Path::Y),
+                on_x(who, action),
+            ];
+            let owner = match action {
+                Action::Read => Some(Who::Me),
+                Action::Edit => Some(who),
+                Action::Release | Action::Remove => None,
+            };
+            for principal in [Who::Me, Who::Other] {
+                let owned = super::owned_resources(history, principal);
+                assert_eq!(owned.contains(&Path::X), owner == Some(principal));
+                assert_eq!(owned.contains(&Path::Y), principal == Who::Me);
+            }
+        }
+    }
+}

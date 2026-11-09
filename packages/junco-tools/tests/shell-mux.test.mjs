@@ -887,6 +887,63 @@ test("a release in shared mode publishes without a live peer", {
   }
 });
 
+test("bulk release in shared mode publishes without a peer and is source scoped", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const native = await testNative();
+  const mux = await native.NativeMux.openCopyTree(seed);
+  try {
+    const owner = mux.forkOwner();
+    const foreign = mux.forkOwner();
+    const live = await mux.spawn(
+      { command: "cat", cwd: seed, principal: "peer", env: nativeEnv(seed) },
+      () => {},
+      () => {},
+    );
+    assert.equal(
+      await managed(
+        owner,
+        seed,
+        "printf a > src/bulk-a.txt; printf b > src/bulk-b.txt",
+        "owner",
+      ),
+      0,
+    );
+    assert.equal(
+      await managed(
+        foreign,
+        seed,
+        "printf foreign > src/bulk-foreign.txt",
+        "foreign",
+      ),
+      0,
+    );
+    assert.equal((await live.finish()).exitCode, 0);
+
+    // Cwd validates the call, but selection and reported paths cover the whole source.
+    assert.deepEqual(await owner.releaseOwned(join(seed, "src")), [
+      "src/bulk-a.txt",
+      "src/bulk-b.txt",
+    ]);
+    assert.deepEqual(await owner.releaseOwned(seed), []);
+    await assert.rejects(
+      owner.release(seed, "src/bulk-foreign.txt"),
+      isMarshPolicyDenied,
+    );
+    assert.equal(await readFile(join(seed, "src/bulk-a.txt"), "utf8"), "a");
+    assert.equal(await readFile(join(seed, "src/bulk-b.txt"), "utf8"), "b");
+    assert.deepEqual(await foreign.releaseOwned(seed), [
+      "src/bulk-foreign.txt",
+    ]);
+  } finally {
+    await cleanup(
+      () => mux.close(),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
 test("a recorder lease pins each pipeline's view and composes with onResourceEvent", {
   timeout: 30_000,
 }, async () => {

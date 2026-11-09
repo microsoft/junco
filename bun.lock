@@ -55,6 +55,7 @@
       "name": "dataflow-engine-opik",
       "version": "0.1.0",
       "dependencies": {
+        "@earendil-works/pi-agent-core": "0.99.2",
         "typebox": "1.4.3",
       },
       "devDependencies": {
@@ -180,6 +181,9 @@
         "@earendil-works/pi-coding-agent": "0.99.2",
       },
     },
+  },
+  "patchedDependencies": {
+    "@earendil-works/pi-agent-core@0.99.2": "patches/@earendil-works%2Fpi-agent-core@0.99.2.patch",
   },
   "overrides": {
     "@earendil-works/pi-agent-core": "0.99.2",

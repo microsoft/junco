@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
 import type {
-  AgentMessage,
   AgentTool,
   PromptTemplate,
   Skill,
 } from "@earendil-works/pi-agent-core";
 import {
-  type AssistantMessage,
-  type FauxResponseFactory,
   fauxAssistantMessage,
   fauxToolCall,
   type Message,
@@ -21,7 +18,6 @@ import {
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
-  type AgenticInput,
   AgenticInputSchema,
   AssistantMessageSchema,
   agent,
@@ -40,41 +36,22 @@ import {
   type Strategy,
   terminalPorts,
   textOf,
+  userTexts,
 } from "./deterministic-support.ts";
 import { leaf, nativeOptions } from "./support.ts";
 import { Constant, Forward } from "./syntax-code-nodes.fixture.ts";
 
-// Directly executable deterministic smoke: one producer/worker JuncoGraph per policy over real
-// faux-backed JuncoAgents. The producer sends on its declared edge; the worker consumes its
-// retained inbox through `recv`. No credentials.
+// Directly executable deterministic smoke: real faux-backed JuncoAgents, no credentials.
+// The worker reads producer messages from its user transcript and values from its prompt callback.
 
 export type DeterministicSummary = {
   readonly scheduler: Strategy;
   readonly producer: string;
   readonly worker: string;
   readonly inputs: readonly string[];
+  readonly consumerUserTexts: readonly string[];
   readonly closed: boolean;
 };
-
-type Received = {
-  readonly messages: { id: string; payload: AgenticInput }[];
-  readonly values: { id: string; payload: AssistantMessage }[];
-};
-
-/** Parsed JSON results of every `name` tool call in `context`, in order. */
-function results<R>(messages: readonly AgentMessage[], name: string): R[] {
-  return messages.flatMap((message) =>
-    message.role === "toolResult" && message.toolName === name
-      ? [
-          JSON.parse(
-            message.content
-              .map((c) => (c.type === "text" ? c.text : ""))
-              .join(""),
-          ) as R,
-        ]
-      : [],
-  );
-}
 
 /** Run the producer/worker agency on `strategy` to quiescence, close it, and summarize it. */
 export async function runDeterministicFixture(
@@ -108,30 +85,21 @@ export async function runDeterministicFixture(
     { prompt: "produce", tools: [new tools.SendTool()] },
   );
 
-  let received: Received[] = [];
-  const work: FauxResponseFactory = (context) => {
-    const got = results<Received>(context.messages, "recv");
-    const messages = got.flatMap((r) => r.messages);
-    const values = got.flatMap((r) => r.values);
-    if (messages.length >= 2 && values.length >= 1) {
-      received = got;
+  let consumerUserTexts: string[] = [];
+  let upstream: string | undefined;
+  const worker = await leaf([
+    (context) => {
+      consumerUserTexts = userTexts(context.messages);
       return fauxAssistantMessage("done");
-    }
-    return fauxAssistantMessage(
-      context.messages.at(-1)?.role === "toolResult" &&
-        (context.messages.at(-1) as { toolName?: string }).toolName === "recv"
-        ? fauxToolCall("yield", { reason: "waiting for the seed" })
-        : fauxToolCall("recv", {}),
-      { stopReason: "toolUse" },
-    );
-  };
-  const worker = await leaf(
-    Array.from({ length: 12 }, () => work),
-    {
-      prompt: "work",
-      tools: [new tools.RecvTool()],
     },
-  );
+  ]);
+  await worker.agent.setSteeringMode("all");
+  worker.agent.stagePrompt((view) => {
+    const result = view.values.get(value.id);
+    assert.ok(Value.Check(AssistantMessageSchema, result));
+    upstream = textOf(result);
+    return `upstream: ${upstream}`;
+  });
 
   const ports = terminalPorts();
   const graphContext = policyContext(ports.source, ports.sink, strategy);
@@ -148,7 +116,7 @@ export async function runDeterministicFixture(
     state: worker.agent,
     policy: tools.LockPolicy,
     description: "works from the seed",
-    trigger: TriggerRule.anyOf(
+    trigger: TriggerRule.allOf(
       TriggerEntry.on(handoff),
       TriggerEntry.on(value),
     ),
@@ -165,16 +133,13 @@ export async function runDeterministicFixture(
   });
   assert.deepEqual(outputs, ["seed", "done"]);
 
-  // Parent result first, then message FIFO, from what recv actually returned.
-  const inputs = [
-    ...received
-      .flatMap((r) => r.values)
-      .map((v) => `upstream: ${textOf(v.payload)}`),
-    ...received
-      .flatMap((r) => r.messages)
-      .map((m) => ("text" in m.payload ? m.payload.text : "")),
-  ];
-  assert.deepEqual(inputs, ["upstream: seed", "context first", "then work"]);
+  assert.equal(upstream, "seed");
+  assert.deepEqual(consumerUserTexts, [
+    "upstream: seed",
+    "context first",
+    "then work",
+  ]);
+  const inputs = consumerUserTexts;
 
   await graph.close();
   const closed =
@@ -186,6 +151,7 @@ export async function runDeterministicFixture(
     producer: outputs[0]!,
     worker: outputs[1]!,
     inputs,
+    consumerUserTexts,
     closed,
   };
 }
@@ -232,15 +198,13 @@ const latest = (messages: readonly Message[], name: string) =>
     .at(-1);
 
 /**
- * A producer agent sends on its numeric `numbers` route; a consumer agent receives it with `recv`.
- * The model-visible `send` schema is the route's: a non-number fails as a tool error before the
- * numeric send succeeds, and the consumer's `recv` description advertises the same schema.
+ * A producer agent sends on its numeric `numbers` route; the consumer reads the steered JSON.
+ * The model-visible `send` schema rejects a non-number before the numeric send succeeds.
  */
 export async function runNumericMessagingFixture(): Promise<NumericMessagingSummary> {
   let rejectedString = false;
   let sendSchema: TSchema | undefined;
-  let recvDescription: string | undefined;
-  let received: unknown;
+  let consumerUserTexts: string[] = [];
   const producer = await nativeOptions([
     fauxAssistantMessage(
       // Pi coerces a numeric string such as "7" to the route's number, so the model sends a word.
@@ -260,15 +224,7 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   ]);
   const consumer = await nativeOptions([
     (context) => {
-      recvDescription = declared(context.messages, "recv")?.description;
-      return fauxAssistantMessage(fauxToolCall("recv", {}, { id: "r" }), {
-        stopReason: "toolUse",
-      });
-    },
-    (context) => {
-      const result = latest(context.messages, "recv");
-      assert.ok(result?.role === "toolResult" && !result.isError);
-      received = result.details;
+      consumerUserTexts = userTexts(context.messages);
       return fauxAssistantMessage("consumed");
     },
   ]);
@@ -327,22 +283,17 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
     await execution.graph.close();
   }
   assert.equal(rejectedString, true);
-  assert.ok(sendSchema && recvDescription);
+  assert.ok(sendSchema);
   assert.ok(Value.Check(sendSchema, { id: "numbers", payload: 7 }));
   assert.ok(!Value.Check(sendSchema, { id: "numbers", payload: "7" }));
-  const output = JSON.parse(
-    recvDescription.slice(recvDescription.indexOf("{")),
-  );
-  const inbox = { messages: [{ id: "numbers", payload: 7 }], values: [] };
-  assert.ok(Value.Check(output, inbox));
-  assert.ok(
-    !Value.Check(output, {
-      ...inbox,
-      messages: [{ id: "numbers", payload: "7" }],
-    }),
-  );
-  // Raw details: the retained payload is the number itself, not a wrapper or text.
-  assert.deepEqual(received, inbox);
+  assert.deepEqual(consumerUserTexts, [
+    "Receive your numbers.",
+    '{"id":"numbers","payload":7}',
+  ]);
+  const received = consumerUserTexts
+    .slice(1)
+    .map((text) => JSON.parse(text).payload);
+  assert.deepEqual(received, [7]);
   const result = execution.graph.result(execution.graph.sink.id);
   assert.ok(O.isSome(result));
   assert.ok(Value.Check(AssistantMessageSchema, result.value));
@@ -352,7 +303,7 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   assert.ok(closed);
   return {
     scenario: "numeric-messaging",
-    received: inbox.messages.map((message) => message.payload),
+    received,
     rejectedString,
     closed,
   };

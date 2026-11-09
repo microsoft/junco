@@ -1,0 +1,64 @@
+diff --git a/node_modules/@earendil-works/pi-agent-core/.bun-tag-dda4d1386e1a1374 b/.bun-tag-dda4d1386e1a1374
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/harness/agent-harness.d.ts b/dist/harness/agent-harness.d.ts
+index 2144ccfedc1496e3c4c8f1d701c00015354ae1df..592aaf2a710d2954406e025d51d3a75013093e3e 100644
+--- a/dist/harness/agent-harness.d.ts
++++ b/dist/harness/agent-harness.d.ts
+@@ -579,6 +579,13 @@ export interface HookMap {
+             terminate?: boolean;
+         } | undefined;
+     };
++    /** After turn_end delivery, before the next boundary consumes queued input. */
++    after_tool_batch: {
++        event: {
++            toolResults: ToolResultMessage[];
++        };
++        result: VoidHookResult;
++    };
+     before_compaction: {
+         event: {
+             reason: "manual" | "threshold" | "overflow";
+diff --git a/dist/harness/hooks.js b/dist/harness/hooks.js
+index 8844566a5db1c0f9a93f3f1e1a257928ad503b67..2f858da2861264305d8381f1f715f1fd354f34c6 100644
+--- a/dist/harness/hooks.js
++++ b/dist/harness/hooks.js
+@@ -59,6 +59,7 @@ export class HookRegistry {
+             case "before_run":
+                 return this.beforeRun(event, context);
+             case "before_drive":
++            case "after_tool_batch":
+                 await this.invokeAllFailClosed(name, event, context);
+                 return undefined;
+             case "before_run_end": {
+diff --git a/dist/harness/runtime/drive/tool-placement.js b/dist/harness/runtime/drive/tool-placement.js
+index d281b9b674b08cceaf1e2e7a71f4c7855ac8e90a..b39512868839b6b4a5842f5c581399984c0aa0d3 100644
+--- a/dist/harness/runtime/drive/tool-placement.js
++++ b/dist/harness/runtime/drive/tool-placement.js
+@@ -214,6 +214,11 @@ export async function materializeReady(lane, drive, capability, sources, recover
+                 ...(recovery ? { recovery: true } : {}),
+             },
+         ], drive.context);
++        await lane.hooks.runWithGate("after_tool_batch", {
++            lane: lane.name,
++            runId: drive.operationId,
++            toolResults: read.turnResults,
++        }, drive.gate, drive.context);
+     }
+ }
+ //# sourceMappingURL=tool-placement.js.map
+\ No newline at end of file
+diff --git a/dist/harness/runtime/lane.js b/dist/harness/runtime/lane.js
+index 5f825ef82e091cf09cfe2ce4e123320be367dfbb..1a3a67bd3249c391c7d17f3d7f177d6a0d5ac2be 100644
+--- a/dist/harness/runtime/lane.js
++++ b/dist/harness/runtime/lane.js
+@@ -429,8 +429,8 @@ export class Lane {
+                 };
+             }
+             const entries = chainEntries(state.tipId, [
+-                ...captured.map(({ item, pending }) => pendingEntryWrite(item.entryId, pending)),
+                 ...prompt.map(({ id, message }) => ({ id, parentId: null, type: "message", message })),
++                ...captured.map(({ item, pending }) => pendingEntryWrite(item.entryId, pending)),
+             ]);
+             const parentId = entries[entries.length - 1].id;
+             const meta = {

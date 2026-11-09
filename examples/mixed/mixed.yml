@@ -12,7 +12,7 @@ graph:
       system: Complete every goal in the user's list in one response.
       description: Completes every goal in one response.
       trigger: Goals~>Direct
-      prompt: Call recv once and complete every goal in the single received message in one response.
+      prompt: Complete every goal in the following user message in one response.
     Ralph:
       kind: graph
       description: Runs two full-assignment rounds and sends only the final answer.
@@ -89,10 +89,9 @@ graph:
         Direct answer:
         {{Direct->Reviewer}}
 
-        Ralph answer:
-        {{Ralph~>Reviewer}}
-
-        Direct's input is its normally completed, non-empty final answer. Ralph's input is exactly one message carrying its raw, normally completed, non-empty final assistant draft.
+        Ralph's answer is in the following user message as JSON { id, payload } on edge
+        "Ralph~>Reviewer". Its payload is the raw, normally completed, non-empty final
+        assistant draft. Direct's answer above is its normally completed, non-empty final answer.
   edges:
     - from: Goals
       to: Direct

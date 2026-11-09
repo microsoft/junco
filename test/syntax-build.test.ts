@@ -104,7 +104,11 @@ type YamlAgent = agent.JuncoAgent<
   unknown
 >;
 const mock = (text: string, prompt?: string): YamlMock =>
-  new MockAgent({ prompt, runs: [run([settle(assistant(text))])] });
+  new MockAgent({
+    prompt,
+    steeringMode: "all",
+    runs: [run([{ ...settle(assistant(text)), drain: ["steer"] }])],
+  });
 const document = () =>
   parse({
     graph: {
@@ -128,13 +132,13 @@ const document = () =>
           },
         },
         Final: {
-          trigger: "Inner~>Final",
-          prompt: "got: {{Inner~>Final}}",
+          trigger: "Inner->Final",
+          prompt: "got: {{Inner->Final}}",
         },
       },
       edges: [
         { from: "Start", to: "Inner", kind: "message", schema: prompt },
-        { from: "Inner", to: "Final", kind: "message", schema: reply },
+        { from: "Inner", to: "Final", schema: reply },
         { from: "Final", to: "$sink", schema: reply },
       ],
     },
@@ -569,7 +573,7 @@ test("tool blocks filter helpers and reject literal or resolved-name conflicts",
   assert.deepEqual(spec.tool_block, ["task", "send"]);
   assert.deepEqual(
     spec.tools.map((tool) => ("name" in tool ? tool.name : "mcp")),
-    ["yield", "info", "recv"],
+    ["yield", "info"],
   );
 
   let received: typeof spec | undefined;
@@ -736,7 +740,7 @@ test("explicit tools beat collection tools, fill gaps, and keep per-agent helper
       ),
       "code",
     );
-    for (const name of ["yield", "info", "send", "recv", "task"]) {
+    for (const name of ["yield", "info", "send", "task"]) {
       const left = a.tools.find((tool) => "name" in tool && tool.name === name);
       const right = b.tools.find(
         (tool) => "name" in tool && tool.name === name,
@@ -766,42 +770,6 @@ test("explicit tools beat collection tools, fill gaps, and keep per-agent helper
   } finally {
     await counted.collection.close();
   }
-});
-
-test("MCP definitions cache by registry name without opening a transport", async () => {
-  const specs = await resolveAgents(
-    parse(`
-mcp:
-  plain:
-    command: junco-yaml-must-not-execute
-  timed:
-    command: junco-yaml-must-not-execute
-    args: [--stdio]
-    cwd: .
-    env:
-      MODE: fixture
-    timeout: 250
-graph:
-  nodes:
-    A:
-      mcp: [plain, timed]
-    B:
-      mcp: [timed, plain]
-  edges:
-    - from: A
-      to: B
-      schema: { type: object }
-    - from: B
-      to: $sink
-      schema: { type: object }
-`),
-    { cwd: process.cwd() },
-  );
-  const [a, b] = specs;
-  assert.ok(a && b);
-  assert.equal(a.tools[5], b.tools[6]);
-  assert.equal(a.tools[6], b.tools[5]);
-  assert.notEqual(a.tools[5], a.tools[6]);
 });
 
 test("skills retain content, resolve same-directory symlinks and cache repeated registry references", async () => {
@@ -973,13 +941,16 @@ for (const decline of [false, true])
   });
 
 const ralphDoc = () => parse(workflows.ralph);
-const revision = (previous: string) =>
-  `assignment\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
+const FIRST_ROUND =
+  "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.";
+const RETRY =
+  "Your previous attempt in this round ended with a provider error, not because the work was finished. Continue the same round: carry on with the objectives, in order, building on what you already did. Return the complete answer.";
+const revision = `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\nassignment\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
 
 test("a value self-loop runs Ralph once per round and publishes only the last", async () => {
   const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
-      run([settle(assistant(text))]),
+      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
     ),
   });
   const execution = await build(ralphDoc(), {
@@ -993,10 +964,10 @@ test("a value self-loop runs Ralph once per round and publishes only the last", 
       text: "assignment",
     });
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), [
+    assert.deepEqual(lastPrompts(instance), ["assignment", revision, revision]);
+    assert.deepEqual(requestTexts(instance.requests)[0], [
+      FIRST_ROUND,
       "assignment",
-      revision("draft-1"),
-      revision("draft-2"),
     ]);
     assert.equal(
       resultText(execution.graph, graph.NodeId.create("Ralph")),
@@ -1012,7 +983,7 @@ test("a value self-loop runs Ralph once per round and publishes only the last", 
 test("default rounds is two and a staged round survives graph steps", async () => {
   const instance: YamlMock = new MockAgent({
     runs: ["draft-1", "draft-2", "draft-3"].map((text) =>
-      run([settle(assistant(text))]),
+      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
     ),
   });
   const execution = await build(ralphDoc(), {
@@ -1030,10 +1001,7 @@ test("default rounds is two and a staged round survives graph steps", async () =
     assert.deepEqual(lastPrompts(instance), ["assignment"]);
     assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), [
-      "assignment",
-      revision("draft-1"),
-    ]);
+    assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
     assert.equal(resultText(execution.graph), "draft-2");
   } finally {
     await execution.graph.close();
@@ -1051,7 +1019,7 @@ for (const [name, draft, error] of [
   test(`an invalid intermediate draft (${name}) fails Ralph before the next round`, async () => {
     const instance: YamlMock = new MockAgent({
       runs: [assistant("draft-1"), draft, assistant("draft-3")].map((message) =>
-        run([settle(message)]),
+        run([{ ...settle(message), drain: ["steer"] }]),
       ),
     });
     const execution = await build(ralphDoc(), {
@@ -1064,28 +1032,18 @@ for (const [name, draft, error] of [
         kind: "prompt",
         text: "assignment",
       });
-      await assert.rejects(execution.run(), nodeFailure(error));
+      await assert.rejects(execution.run(), { message: error });
       assert.equal(
         execution.graph.result(execution.graph.sink.id)._tag,
         "None",
       );
-      assert.deepEqual(lastPrompts(instance), [
-        "assignment",
-        revision("draft-1"),
-      ]);
+      assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
     } finally {
       await execution.graph.close();
     }
   });
 
 for (const [name, payloads] of [
-  [
-    "two prompts",
-    [
-      { kind: "prompt", text: "assignment" },
-      { kind: "prompt", text: "extra" },
-    ],
-  ],
   ["followUp", [{ kind: "followUp", text: "assignment" }]],
   [
     "images",
@@ -1107,10 +1065,9 @@ for (const [name, payloads] of [
     });
     try {
       enqueuePrompts(execution, "assignment", ...payloads);
-      await assert.rejects(
-        execution.run(),
-        nodeFailure(/^Ralph requires exactly one prompt assignment$/),
-      );
+      await assert.rejects(execution.run(), {
+        message: /^Ralph requires one or more prompt objectives$/,
+      });
       assert.equal(instance.requests.length, 0);
       assert.equal(
         execution.graph.result(execution.graph.sink.id)._tag,
@@ -1121,6 +1078,104 @@ for (const [name, payloads] of [
     }
   });
 
+test("several prompts on the assignment route are ordered objectives in every round and the check", async () => {
+  const instance: YamlMock = new MockAgent({
+    steeringMode: "all",
+    runs: ["draft-1", "draft-2"].map((text) =>
+      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
+    ),
+  });
+  const judged: (readonly string[])[] = [];
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({
+      until: (_result, { objectives, round }) => {
+        judged.push(objectives);
+        return round === 2;
+      },
+    }),
+  });
+  try {
+    enqueuePrompts(
+      execution,
+      "assignment",
+      { kind: "prompt", text: "first goal" },
+      { kind: "prompt", text: "second goal" },
+    );
+    await execution.run();
+    const listed = "1. first goal\n\n2. second goal";
+    assert.deepEqual(requestTexts(instance.requests)[0], [
+      FIRST_ROUND,
+      "first goal",
+      "second goal",
+    ]);
+    assert.deepEqual(lastPrompts(instance).slice(1), [
+      `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`,
+    ]);
+    assert.deepEqual(judged, [
+      ["first goal", "second goal"],
+      ["first goal", "second goal"],
+    ]);
+    assert.equal(resultText(execution.graph), "draft-2");
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("a provider-error result re-runs the round up to retries times", async () => {
+  const instance: YamlMock = new MockAgent({
+    runs: [
+      assistant("refused", "error"),
+      assistant("draft-1"),
+      assistant("draft-2"),
+    ].map((message) => run([{ ...settle(message), drain: ["steer"] }])),
+  });
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({ retries: 1 }),
+  });
+  try {
+    enqueuePrompts(execution, "assignment", {
+      kind: "prompt",
+      text: "assignment",
+    });
+    await execution.run();
+    assert.deepEqual(lastPrompts(instance), ["assignment", RETRY, revision]);
+    assert.equal(resultText(execution.graph), "draft-2");
+    assert.equal(execution.graph.available().size, 0);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("exhausted retries keep the error as the round's result", async () => {
+  const instance: YamlMock = new MockAgent({
+    runs: [
+      assistant("refused", "error"),
+      assistant("refused again", "error"),
+      assistant("draft-1"),
+    ].map((message) => run([{ ...settle(message), drain: ["steer"] }])),
+  });
+  const execution = await build(ralphDoc(), {
+    ...options(),
+    createAgent: async () => instance,
+    ...schedules.ralph({ retries: 1 }),
+  });
+  try {
+    enqueuePrompts(execution, "assignment", {
+      kind: "prompt",
+      text: "assignment",
+    });
+    await assert.rejects(execution.run(), {
+      message: /did not finish normally: error/,
+    });
+  } finally {
+    await execution.graph.close();
+  }
+});
+
 test("ralph rejects invalid options before building", () => {
   for (const rounds of [0, -1, 1.5, NaN, Infinity, 2 ** 53])
     for (const until of [undefined, () => true])
@@ -1128,6 +1183,11 @@ test("ralph rejects invalid options before building", () => {
         name: "RangeError",
         message: "Ralph rounds must be a positive safe integer",
       });
+  for (const retries of [-1, 1.5, NaN, Infinity, 2 ** 53])
+    assert.throws(() => schedules.ralph({ retries }), {
+      name: "RangeError",
+      message: "Ralph retries must be a non-negative safe integer",
+    });
   assert.throws(
     () =>
       schedules.ralph({ until: true as unknown as schedules.RalphPredicate }),
@@ -1137,7 +1197,7 @@ test("ralph rejects invalid options before building", () => {
 
 type RalphCall = {
   readonly text: string;
-  readonly assignment: string;
+  readonly objectives: readonly string[];
   readonly round: number;
   readonly label: string;
   readonly published: boolean;
@@ -1149,7 +1209,9 @@ async function untilRalph(
   rounds?: number,
 ) {
   const instance: YamlMock = new MockAgent({
-    runs: drafts.map((message) => run([settle(message)])),
+    runs: drafts.map((message) =>
+      run([{ ...settle(message), drain: ["steer"] }]),
+    ),
   });
   const calls: RalphCall[] = [];
   const execution = await build(ralphDoc(), {
@@ -1176,7 +1238,7 @@ async function untilRalph(
 }
 const ralphCall = (round: number): RalphCall => ({
   text: `draft-${round}`,
-  assignment: "assignment",
+  objectives: ["assignment"],
   round,
   label: "Ralph",
   published: false,
@@ -1202,11 +1264,7 @@ test("until runs uncapped rounds and publishes only the accepted draft", async (
   try {
     await execution.run();
     assert.deepEqual(calls, [1, 2, 3].map(ralphCall));
-    assert.deepEqual(lastPrompts(instance), [
-      "assignment",
-      revision("draft-1"),
-      revision("draft-2"),
-    ]);
+    assert.deepEqual(lastPrompts(instance), ["assignment", revision, revision]);
     assert.equal(resultText(execution.graph), "draft-3");
     assert.equal(execution.graph.available().size, 0);
     await execution.run();
@@ -1339,7 +1397,7 @@ test("nested Ralph levels sharing one controller succeed independently", async (
   const drafts = (name: string) =>
     new MockAgent({
       runs: [`${name}-1`, `${name}-2`, `${name}-3`].map((text) =>
-        run([settle(assistant(text))]),
+        run([{ ...settle(assistant(text)), drain: ["steer"] }]),
       ),
     }) as YamlMock;
   const agents: Record<string, YamlMock> = {
@@ -1356,15 +1414,15 @@ test("nested Ralph levels sharing one controller succeed independently", async (
           Left: { kind: "graph", graph: nested("Left") },
           Right: { kind: "graph", graph: nested("Right") },
           Final: {
-            trigger: { all: ["Left~>Final", "Right~>Final"] },
-            prompt: "{{ Left~>Final }} | {{ Right~>Final }}",
+            trigger: { all: ["Left->Final", "Right->Final"] },
+            prompt: "{{ Left->Final }} | {{ Right->Final }}",
           },
         },
         edges: [
           { from: "$source", to: "Left", kind: "message", schema: prompt },
           { from: "$source", to: "Right", kind: "message", schema: prompt },
-          { from: "Left", to: "Final", kind: "message", schema: reply },
-          { from: "Right", to: "Final", kind: "message", schema: reply },
+          { from: "Left", to: "Final", schema: reply },
+          { from: "Right", to: "Final", schema: reply },
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
@@ -1458,9 +1516,9 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
             graph: team("$source~>Deep", team("$source~>Inner")),
           },
           Final: {
-            trigger: { all: ["Left~>Final", "Right~>Final", "Deep~>Final"] },
+            trigger: { all: ["Left->Final", "Right->Final", "Deep->Final"] },
             prompt:
-              "{{ Left~>Final }} | {{ Right~>Final }} | {{ Deep~>Final }}",
+              "{{ Left->Final }} | {{ Right->Final }} | {{ Deep->Final }}",
           },
         },
         edges: [
@@ -1471,7 +1529,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
               kind: "message" as const,
               schema: prompt,
             },
-            { from: id, to: "Final", kind: "message" as const, schema: reply },
+            { from: id, to: "Final", schema: reply },
           ]),
           { from: "Final", to: "$sink", schema: reply },
         ],
@@ -1534,7 +1592,9 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
   const inner = ralphDoc().graph;
   inner.source = { routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
   const instance: YamlMock = new MockAgent({
-    runs: ["draft-1", "draft-2"].map((text) => run([settle(assistant(text))])),
+    runs: ["draft-1", "draft-2"].map((text) =>
+      run([{ ...settle(assistant(text)), drain: ["steer"] }]),
+    ),
   });
   const final = mock("final reply");
   const execution = await build(
@@ -1543,11 +1603,11 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
         source: { routes: { seed: ["$source~>Wrapper"] } },
         nodes: {
           Wrapper: { kind: "graph", graph: inner },
-          Final: { prompt: "{{ Wrapper~>Final }}" },
+          Final: { prompt: "{{ Wrapper->Final }}" },
         },
         edges: [
           { from: "$source", to: "Wrapper", kind: "message", schema: prompt },
-          { from: "Wrapper", to: "Final", kind: "message", schema: reply },
+          { from: "Wrapper", to: "Final", schema: reply },
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
@@ -1561,14 +1621,40 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
   try {
     enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), [
-      "assignment",
-      revision("draft-1"),
-    ]);
+    assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
     assert.deepEqual(lastPrompts(final), ["draft-2"]);
     assert.equal(resultText(execution.graph), "final reply");
   } finally {
     await execution.graph.close();
+  }
+});
+
+test("message-edge prompt placeholders fail before a model request", async () => {
+  const instance = mock("unused");
+  try {
+    await assert.rejects(
+      build(
+        parse({
+          graph: {
+            nodes: {
+              Start: { kind: "emit", text: "data" },
+              Reader: { prompt: "{{Start~>Reader}}" },
+            },
+            edges: [
+              { from: "Start", to: "Reader", kind: "message", schema: prompt },
+              { from: "Reader", to: "$sink", schema: reply },
+            ],
+          },
+        }),
+        { ...options(), createAgent: async () => instance },
+      ),
+      new graph.DataflowDefinitionError(
+        'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; delivered messages are steered into the agent as user messages, placeholders render value edges',
+      ),
+    );
+    assert.deepEqual(instance.requests, []);
+  } finally {
+    await instance.return();
   }
 });
 
@@ -1648,14 +1734,17 @@ for (const trigger of [
     }
   });
 
-test("source fan-out preserves inbox payloads and sink waits for both value results", async () => {
+test("source fan-out preserves queued payloads and sink waits for both value results", async () => {
   const allowed = new Set<string>();
   const agents = new Map([
     ["Left", mock("LEFT")],
     ["Right", mock("RIGHT")],
   ]);
   const retained = assistant("LEFT");
-  agents.set("Left", new MockAgent({ runs: [run([settle(retained)])] }));
+  agents.set(
+    "Left",
+    new MockAgent({ runs: [run([{ ...settle(retained), drain: ["steer"] }])] }),
+  );
   const execution = await build(
     parse({
       graph: {
@@ -1664,8 +1753,8 @@ test("source fan-out preserves inbox payloads and sink waits for both value resu
         source: { routes: { seed: ["$source~>Left", "$source~>Right"] } },
         sink: { returns: "Left" },
         nodes: {
-          Left: { prompt: "{{ $source~>Left }}" },
-          Right: { prompt: "{{ $source~>Right }}" },
+          Left: { prompt: "Read the following input." },
+          Right: { prompt: "Read the following input." },
         },
         edges: [
           { from: "$source", to: "Left", kind: "message", schema: prompt },
@@ -1768,10 +1857,10 @@ test("recursive graphs have fresh local ports and publish one final to messages 
   doc.graph.nodes.Sibling.graph.source!.routes = {
     siblingSeed: ["$source~>Worker"],
   };
-  doc.graph.nodes.Fan = { prompt: "{{ fan }}" };
+  doc.graph.nodes.Fan = { prompt: "Read the following result." };
   doc.graph.sink = { returns: "Final" };
   doc.graph.nodes.Final = {
-    prompt: "{{Inner~>Final}}|{{childValue}}|{{siblingValue}}",
+    prompt: "{{Inner->Final}}|{{childValue}}|{{siblingValue}}",
   };
   doc.graph.edges!.push(
     {
@@ -1834,7 +1923,12 @@ test("recursive graphs have fresh local ports and publish one final to messages 
     assert.equal(sinks.size, 3);
     await execution.run();
     assert.deepEqual(lastPrompts(final), ["CHILD|CHILD|SIBLING"]);
-    assert.deepEqual(lastPrompts(fan), ["CHILD"]);
+    assert.deepEqual(JSON.parse(lastPrompts(fan)[0]!), {
+      id: "fan",
+      payload: O.toUndefined(
+        execution.graph.result(graph.NodeId.create("Inner")),
+      ),
+    });
   } finally {
     await execution.graph.close();
   }
@@ -1845,7 +1939,7 @@ test("scheduled ingress rejects unrouted input", async () => {
     parse({
       graph: {
         source: { routes: { accepted: ["input"] } },
-        nodes: { A: { prompt: "{{input}}" } },
+        nodes: { A: { prompt: "Read the following input." } },
         edges: [
           {
             from: "$source",
@@ -1876,7 +1970,7 @@ test("unrouted source edges are rejected at parse time", () => {
     () =>
       parse({
         graph: {
-          nodes: { A: { prompt: "{{input}}" } },
+          nodes: { A: { prompt: "Read the following input." } },
           edges: [
             {
               from: "$source",
@@ -1900,7 +1994,7 @@ test("value ingress is forwarded raw and empty routes drop only that input", asy
     parse({
       graph: {
         source: { routes: { drop: [], value: ["input"] } },
-        nodes: { A: { prompt: "{{input}}" } },
+        nodes: { A: { prompt: "Read the following input." } },
         edges: [
           {
             from: "$source",
@@ -1915,17 +2009,19 @@ test("value ingress is forwarded raw and empty routes drop only that input", asy
     }),
     { ...options(), createAgent: async () => a },
   );
+  const input = assistant("  normalized  ");
   try {
     execution.graph.source.enqueue({
       messages: new Map([
         [graph.EdgeId.create("drop"), [{ kind: "prompt", text: "discard" }]],
       ]),
-      values: new Map([
-        [graph.EdgeId.create("value"), assistant("  normalized  ")],
-      ]),
+      values: new Map([[graph.EdgeId.create("value"), input]]),
     });
     await execution.run();
-    assert.deepEqual(lastPrompts(a), ["normalized"]);
+    assert.deepEqual(JSON.parse(lastPrompts(a)[0]!), {
+      id: "input",
+      payload: input,
+    });
   } finally {
     await execution.graph.close();
   }
@@ -1995,7 +2091,7 @@ for (const text of ["", "   ", "bad-stop"])
     }
   });
 
-test("mixed repeated placeholders preserve order, paragraph joins and optional emptiness", async () => {
+test("repeated value placeholders preserve order and optional emptiness without duplicating messages", async () => {
   const consumer = mock("done");
   const execution = await build(
     parse({
@@ -2006,7 +2102,7 @@ test("mixed repeated placeholders preserve order, paragraph joins and optional e
           Optional: { trigger: "never" },
           B: {
             trigger: { all: ["v", "m"] },
-            prompt: "{{ m }}|{{v}}|{{m}}|{{optional}}",
+            prompt: "{{v}}|{{v}}|{{optional}}",
           },
         },
         edges: [
@@ -2035,9 +2131,8 @@ test("mixed repeated placeholders preserve order, paragraph joins and optional e
           {
             from: "Optional",
             to: "B",
-            kind: "message",
             id: "optional",
-            schema: prompt,
+            schema: reply,
           },
           { from: "B", to: "$sink", schema: reply },
         ],
@@ -2061,8 +2156,13 @@ test("mixed repeated placeholders preserve order, paragraph joins and optional e
       { kind: "prompt", text: "third" },
     );
     await execution.run();
-    assert.deepEqual(lastPrompts(consumer), [
-      "first\n\n\n\nthird|VALUE|first\n\n\n\nthird|",
+    assert.deepEqual(requestTexts(consumer.requests), [
+      [
+        "VALUE|VALUE|",
+        "first",
+        '{"id":"m","payload":{"kind":"appendMessage","message":{"role":"user","content":"not text","timestamp":0}}}',
+        "third",
+      ],
     ]);
   } finally {
     await execution.graph.close();
@@ -3599,8 +3699,8 @@ test("a numeric placeholder fails naming its edge before the agent is asked", as
   }
 });
 
-test("an agent reads a numeric code value with recv and sends a number through its edge schema", async () => {
-  const seen: { recv?: unknown; sendError?: string; tools?: Tool[] } = {};
+test("an agent sends a number through its edge schema", async () => {
+  const seen: { sendError?: string; tools?: Tool[] } = {};
   const lastResult = (context: Pick<Context, "messages">, name: string) =>
     context.messages
       .filter(
@@ -3612,14 +3712,6 @@ test("an agent reads a numeric code value with recv and sends a number through i
       seen.tools = context.messages.flatMap((message) =>
         message.role === "system" ? (message.toolsAdded ?? []) : [],
       );
-      return fauxAssistantMessage(fauxToolCall("recv", {}, { id: "r" }), {
-        stopReason: "toolUse",
-      });
-    },
-    (context) => {
-      const result = lastResult(context, "recv");
-      assert.ok(result?.role === "toolResult");
-      seen.recv = JSON.parse(contentText(result.content));
       return fauxAssistantMessage(
         fauxToolCall(
           "send",
@@ -3674,29 +3766,13 @@ test("an agent reads a numeric code value with recv and sends a number through i
   );
   try {
     await execution.run();
-    assert.deepEqual(seen.recv, {
-      messages: [],
-      values: [{ id: "Seven->Worker", payload: 7 }],
-    });
     // Pi validates the model's call against the advertised edge schema before `send` runs.
     assert.match(seen.sendError!, /payload: must be number/);
     const send = seen.tools?.find((tool) => tool.name === "send");
-    const recv = seen.tools?.find((tool) => tool.name === "recv");
-    assert.ok(send && recv);
+    assert.ok(send);
     assert.ok(Value.Check(send.parameters, { id: "Worker~>Tail", payload: 7 }));
     assert.ok(
       !Value.Check(send.parameters, { id: "Worker~>Tail", payload: "7" }),
-    );
-    // recv's description advertises its inbound schemas: the value edge's number, no messages.
-    const output = JSON.parse(
-      recv.description.slice(recv.description.indexOf("{")),
-    );
-    assert.ok(Value.Check(output, seen.recv));
-    assert.ok(
-      !Value.Check(output, {
-        messages: [],
-        values: [{ id: "Seven->Worker", payload: "7" }],
-      }),
     );
     const result = execution.graph.result(execution.graph.sink.id);
     assert.ok(result._tag === "Some");

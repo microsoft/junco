@@ -60,7 +60,8 @@ const document = () =>
         },
         Final: {
           trigger: "Inner~>Final",
-          prompt: "got: {{Inner~>Final}}",
+          prompt:
+            "Process the report in the user message following this prompt.",
         },
       },
       edges: [
@@ -71,7 +72,6 @@ const document = () =>
     },
   });
 
-/** YAML agents read runtime-loaded inbox schemas and unknown parent values. */
 const mock = (transcript: ConstructorParameters<typeof MockAgent>[0]) =>
   new MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>(transcript);
 const text = (value: unknown) => {
@@ -82,7 +82,11 @@ const createAgent = async ({ node }: AgentSpec) =>
   mock({
     prompt: node === "Worker" ? "work" : undefined,
     runs: [
-      run([settle(assistant(node === "Worker" ? "WORKER-OUT" : "FINAL-OUT"))]),
+      run([
+        settle(assistant(node === "Worker" ? "WORKER-OUT" : "FINAL-OUT"), {
+          drain: ["steer"],
+        }),
+      ]),
     ],
   });
 const options = (cwd: string) => ({
@@ -172,7 +176,7 @@ test("failed activations are excluded while successful activations survive a fai
       recorder,
       createAgent: async (spec) =>
         spec.node === "Final"
-          ? mock({ runs: [run([{ step: failed(cause) }])] })
+          ? mock({ runs: [run([{ step: failed(cause), drain: ["steer"] }])] })
           : createAgent(spec),
     });
     try {

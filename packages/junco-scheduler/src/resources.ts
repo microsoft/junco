@@ -205,13 +205,7 @@ export function limit<S, N extends TSchema, T, C>(
     );
   }
   const admit = (entry: NodeModel): NodeModel =>
-    usage === undefined
-      ? entry
-      : copyUsageLimits(
-          entry,
-          { nodeId: entry.nodeId, modelStrength: entry.modelStrength },
-          usage,
-        );
+    usage === undefined ? entry : copyUsageLimits(entry, { ...entry }, usage);
   const limitBase =
     memory === undefined ? undefined : memory.amount * memory.unit.scale;
   return async (snapshot, signal) => {

@@ -29,9 +29,12 @@ import {
   choose,
   context,
   type Decision,
+  limit,
   type NodeModel,
   nodeIds,
   parallel,
+  plannedReads,
+  reads,
   roundRobin,
   type Scheduler,
   type Snapshot,
@@ -39,6 +42,7 @@ import {
   separate,
   strength,
 } from "../src/index.ts";
+import { validateDecision } from "../src/scheduler.ts";
 
 const NumberSchema = Type.Number();
 const StringSchema = Type.String();
@@ -113,12 +117,161 @@ function snapshot(
     plans: new Map(),
     history: Object.freeze(
       (options.history ?? []).map((event) =>
-        Object.freeze({ selected: Object.freeze(select(ids(event))) }),
+        Object.freeze({
+          selected: Object.freeze(
+            ids(event).map((nodeId) => ({
+              nodeId,
+              modelStrength: 2 as const,
+              readEdges: [],
+            })),
+          ),
+        }),
       ),
     ),
     threads: Infinity,
   });
 }
+
+test("planned reads select only queued message edges and survive policy composition", async () => {
+  const node = id("a");
+  const first = EdgeId.create("first");
+  const second = EdgeId.create("second");
+  const empty = EdgeId.create("empty");
+  const held = EdgeId.create("held");
+  const value = EdgeId.create("value");
+  const view: View = {
+    ...snapshot(["a"]),
+    plans: new Map([
+      [
+        node,
+        new Map<EdgeIdType, MessageSchedule>([
+          [empty, "all"],
+          [second, 1],
+          [held, "none"],
+          [value, "all"],
+          [first, "all"],
+        ]),
+      ],
+    ]),
+    inputs: new Map([
+      [
+        node,
+        {
+          messages: new Map([
+            [first, [1]],
+            [second, [2, 3]],
+            [held, [4]],
+            [empty, []],
+          ]),
+          values: new Map([[value, "result"]]),
+        },
+      ],
+    ]),
+  };
+  assert.deepEqual(plannedReads(view, node), [second, first]);
+  assert.deepEqual(select(view, [node]), [
+    { nodeId: node, modelStrength: 2, readEdges: [second, first] },
+  ]);
+  const assigned: string[][] = [];
+  const policy = strength(
+    () => "high",
+    limit(
+      { tools: 1 },
+      reads((_snapshot, _node, planned) => {
+        assigned.push([...planned]);
+        return [];
+      }, parallel()),
+    ),
+  );
+  const decision = await policy(view);
+  assert.deepEqual(assigned, [[second, first]]);
+  assert.deepEqual(decision.selected, [
+    { nodeId: node, modelStrength: 3, readEdges: [] },
+  ]);
+  assert.equal(Object.isFrozen(decision.selected[0]!.readEdges), true);
+  for (const edge of [empty, value, EdgeId.create("foreign")])
+    assert.throws(
+      () =>
+        validateDecision(view, {
+          selected: [{ nodeId: node, modelStrength: 2, readEdges: [edge] }],
+        }),
+      new DataflowDefinitionError(
+        `Scheduler decision reads edge "${edge}" of node "a" which holds no queued message`,
+      ),
+    );
+  assert.throws(
+    () =>
+      validateDecision(view, {
+        selected: [
+          { nodeId: node, modelStrength: 2, readEdges: [first, first] },
+        ],
+      }),
+    new DataflowDefinitionError(
+      'Scheduler decision reads edge "first" of node "a" more than once',
+    ),
+  );
+});
+
+test("context retries invalid reads on the same snapshot and records only accepted entries", async () => {
+  const captured: View[] = [];
+  let accepted: NodeModel | undefined;
+  const { execution, ran } = actors(
+    (view) => {
+      captured.push(view);
+      if (captured.length > 2) return { selected: select(view, [id("a")]) };
+      if (view.lastError !== undefined) {
+        accepted = select(view, [id("a")])[0]!;
+        return { selected: [accepted] };
+      }
+      return {
+        selected: [
+          {
+            nodeId: id("a"),
+            modelStrength: 2,
+            readEdges: [EdgeId.create("bogus")],
+          },
+        ],
+      };
+    },
+    ["a"],
+  );
+  await execution.step();
+  assert.deepEqual(ran, ["a"]);
+  assert.equal(captured.length, 2);
+  assert.equal(captured[0]!.lastError, undefined);
+  assert.match(captured[1]!.lastError!.message, /holds no queued message/);
+  assert.equal(captured[1]!.version, captured[0]!.version);
+  assert.equal(captured[1]!.inputs, captured[0]!.inputs);
+  assert.deepEqual(captured[1]!.history, []);
+  await execution.step();
+  assert.equal(captured[2]!.lastError, undefined);
+  assert.equal(captured[2]!.history.length, 1);
+  assert.equal(captured[2]!.history[0]!.selected[0], accepted);
+});
+
+test("context rejects invalid reads after exactly three scheduler attempts", async () => {
+  let calls = 0;
+  const { execution, ran } = actors(() => {
+    calls++;
+    return {
+      selected: [
+        {
+          nodeId: id("a"),
+          modelStrength: 2,
+          readEdges: [EdgeId.create("bogus")],
+        },
+      ],
+    };
+  }, ["a"]);
+  await assert.rejects(
+    execution.step(),
+    new DataflowDefinitionError(
+      'Scheduler decision reads edge "bogus" of node "a" which holds no queued message',
+    ),
+  );
+  assert.equal(calls, 3);
+  assert.deepEqual(ran, []);
+});
 
 test("choose filters before callbacks, evaluates width once and uses string-ID ties", async () => {
   const seen: string[] = [];
@@ -143,7 +296,11 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
     owned: ["2", "1", "10", "unavailable"],
   });
   assert.deepEqual(await policy(view), {
-    selected: select(ids(["1", "10", "2"])),
+    selected: [
+      { nodeId: id("1"), modelStrength: 2, readEdges: [] },
+      { nodeId: id("10"), modelStrength: 2, readEdges: [] },
+      { nodeId: id("2"), modelStrength: 2, readEdges: [] },
+    ],
   });
   assert.deepEqual(seen, ["2", "1", "10"]);
   assert.equal(widths, 1);
@@ -153,7 +310,7 @@ test("choose filters before callbacks, evaluates width once and uses string-ID t
     parallel(),
   );
   assert.deepEqual(await composed(snapshot(["1", "2"])), {
-    selected: select(ids(["2"])),
+    selected: [{ nodeId: id("2"), modelStrength: 2, readEdges: [] }],
   });
 });
 
@@ -267,17 +424,17 @@ test("round robin preserves selection order, unavailable cursor IDs and explicit
   order.reverse(); // construction copied caller storage
   assert.deepEqual(
     await rotation(snapshot(["a", "b", "c"], { history: [["a", "b"]] })),
-    { selected: select(ids(["c"])) },
+    { selected: [{ nodeId: id("c"), modelStrength: 2, readEdges: [] }] },
   );
   assert.deepEqual(
     await rotation(snapshot(["a", "b", "c"], { history: [["b", "a"]] })),
-    { selected: select(ids(["b"])) },
+    { selected: [{ nodeId: id("b"), modelStrength: 2, readEdges: [] }] },
   );
   assert.deepEqual(
     await rotation(
       snapshot(["a", "b", "c"], { available: ["a", "c"], history: [["b"]] }),
     ),
-    { selected: select(ids(["c"])) },
+    { selected: [{ nodeId: id("c"), modelStrength: 2, readEdges: [] }] },
   );
   assert.deepEqual(await roundRobin([])(snapshot(["a"])), { selected: [] });
   assert.throws(() => roundRobin(ids(["", ""])), DataflowDefinitionError);
@@ -325,7 +482,9 @@ test("separate projects authority/history only and prevents sibling authority es
       return { selected: [] };
     },
   );
-  assert.deepEqual(await policy(ambient), { selected: select(ids(["c"])) });
+  assert.deepEqual(await policy(ambient), {
+    selected: [{ nodeId: id("c"), modelStrength: 2, readEdges: [] }],
+  });
   assert.equal(partitions, 3);
   assert.deepEqual([...probed[0]!.owned], ids(["a", "c"]));
   assert.deepEqual(selections(probed[0]!), [["a"], ["c", "a"]]);
@@ -342,7 +501,7 @@ test("separate projects authority/history only and prevents sibling authority es
   }
   const escaping: Policy = separate(
     (_s, node) => node === id("a"),
-    () => ({ selected: select(ids(["b"])) }),
+    (view) => ({ selected: select(view, ids(["b"])) }),
     parallel(),
   );
   await assert.rejects(
@@ -356,7 +515,7 @@ test("separate projects authority/history only and prevents sibling authority es
   );
   assert.deepEqual(
     await local(snapshot(["a", "b", "c"], { history: [["b"]] })),
-    { selected: select(ids(["a"])) },
+    { selected: [{ nodeId: id("a"), modelStrength: 2, readEdges: [] }] },
   );
 });
 
@@ -470,10 +629,15 @@ test("agent normalizes each current response and never invokes an exhausted orac
   const first = await policy(
     snapshot(["a", "b", "unowned"], { owned: ["a", "b"] }),
   );
-  assert.deepEqual(first, { selected: select(ids(["b", "a"])) });
+  assert.deepEqual(first, {
+    selected: [
+      { nodeId: id("b"), modelStrength: 2, readEdges: [] },
+      { nodeId: id("a"), modelStrength: 2, readEdges: [] },
+    ],
+  });
   assert.deepEqual(
     await policy(snapshot(["a", "b"], { history: [nodeIds(first.selected)] })),
-    { selected: select(ids(["a"])) },
+    { selected: [{ nodeId: id("a"), modelStrength: 2, readEdges: [] }] },
   );
   assert.equal(calls, 2);
   const never: Policy = agent(async () => {
@@ -485,7 +649,7 @@ test("agent normalizes each current response and never invokes an exhausted orac
   assert.deepEqual(await policy(snapshot([""])), { selected: [] });
   const emptyId: Policy = agent(async () => [ids(["", "", "missing"])]);
   assert.deepEqual(await emptyId(snapshot([""])), {
-    selected: select(ids([""])),
+    selected: [{ nodeId: id(""), modelStrength: 2, readEdges: [] }],
   });
 });
 
@@ -496,11 +660,13 @@ test("strength assigns a model rung per selected node", async () => {
   );
   assert.deepEqual(await policy(snapshot(["b", "a"])), {
     selected: [
-      { nodeId: id("b"), modelStrength: 0 },
-      { nodeId: id("a"), modelStrength: 3 },
+      { nodeId: id("b"), modelStrength: 0, readEdges: [] },
+      { nodeId: id("a"), modelStrength: 3, readEdges: [] },
     ],
   });
-  assert.deepEqual(select(ids(["a"])), [{ nodeId: id("a"), modelStrength: 2 }]);
+  assert.deepEqual(select(snapshot(["a"]), ids(["a"])), [
+    { nodeId: id("a"), modelStrength: 2, readEdges: [] },
+  ]);
   // @ts-expect-error deliberately invalid runtime model rung
   const invalid: Policy = strength(() => "unknown", parallel());
   await assert.rejects(
@@ -519,8 +685,8 @@ test("separate preserves selected model strengths", async () => {
   );
   assert.deepEqual(await policy(snapshot(["a", "b"])), {
     selected: [
-      { nodeId: id("a"), modelStrength: 3 },
-      { nodeId: id("b"), modelStrength: 0 },
+      { nodeId: id("a"), modelStrength: 3, readEdges: [] },
+      { nodeId: id("b"), modelStrength: 0, readEdges: [] },
     ],
   });
 });
@@ -536,14 +702,17 @@ test("context rejects malformed decision shapes with the selected-entry contract
     { selected: [7] },
     { selected: ["a"] },
     { selected: [{}] },
-    { selected: [{ nodeId: 7, modelStrength: 2 }] },
+    { selected: [{ nodeId: 7, modelStrength: 2, readEdges: [] }] },
+    { selected: [{ nodeId: id("a"), modelStrength: 2 }] },
+    { selected: [{ nodeId: id("a"), modelStrength: 2, readEdges: null }] },
+    { selected: [{ nodeId: id("a"), modelStrength: 2, readEdges: [7] }] },
     { selected: Array<NodeModel>(1) },
   ]) {
     const { execution, ran } = actors(() => decision as Decision, ["a"]);
     await assert.rejects(
       execution.step(),
       new DataflowDefinitionError(
-        "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
+        "Scheduler must return a decision with a selected array of { nodeId, modelStrength, readEdges } entries",
       ),
     );
     assert.deepEqual(ran, []);
@@ -553,7 +722,10 @@ test("context rejects malformed decision shapes with the selected-entry contract
 test("context rejects invalid model strengths before effects", async () => {
   for (const modelStrength of [5, -1, 1.5, "med"]) {
     const { execution, ran } = actors(
-      () => ({ selected: [{ nodeId: id("a"), modelStrength }] }) as Decision,
+      () =>
+        ({
+          selected: [{ nodeId: id("a"), modelStrength, readEdges: [] }],
+        }) as Decision,
       ["a"],
     );
     await assert.rejects(
@@ -571,14 +743,16 @@ test("context history retains the selected model strength", async () => {
   const { execution } = actors(
     (view) => {
       captured.push(view);
-      return { selected: select(view.available, 3) };
+      return { selected: select(view, view.available, 3) };
     },
     ["a"],
   );
   await execution.step();
   await execution.step();
   assert.equal(captured[1]!.history[0]!.selected[0]!.modelStrength, 3);
-  assert.deepEqual(captured[1]!.history[0]!.selected, select(ids(["a"]), 3));
+  assert.deepEqual(captured[1]!.history[0]!.selected, [
+    { nodeId: id("a"), modelStrength: 3, readEdges: [] },
+  ]);
 });
 
 test("context awaits prepare with the selected entries before executing any node", async () => {
@@ -586,7 +760,10 @@ test("context awaits prepare with the selected entries before executing any node
   const release = Promise.withResolvers<void>();
   const controller = new AbortController();
   const { graph, ran } = actors(parallel(), ["a", "b"]);
-  const entries = select(ids(["a", "b"]), 3);
+  const entries: NodeModel[] = [
+    { nodeId: id("a"), modelStrength: 3, readEdges: [] },
+    { nodeId: id("b"), modelStrength: 3, readEdges: [] },
+  ];
   let prepared = false;
   const execution = context({
     graph,
@@ -623,7 +800,7 @@ test("context propagates prepare rejection without running nodes or committing h
     graph,
     scheduler: (view) => {
       captured.push(view);
-      return { selected: select(view.available, 3) };
+      return { selected: select(view, view.available, 3) };
     },
     prepare: async () => {
       if (fail) throw failure;
@@ -645,12 +822,18 @@ test("context validates malformed, duplicate, unavailable and unowned decisions 
   // @ts-expect-error deliberately invalid JavaScript callback declaration
   const absent: Policy = () => undefined;
   const sparse: Policy = () => ({ selected: Array<NodeModel>(1) });
-  const duplicates: Policy = () => ({ selected: select(ids(["a", "a"])) });
-  const foreign: Policy = () => ({ selected: select(ids(["missing"])) });
-  const unavailable: Policy = () => ({ selected: select(ids(["dormant"])) });
+  const duplicates: Policy = (view) => ({
+    selected: select(view, ids(["a", "a"])),
+  });
+  const foreign: Policy = (view) => ({
+    selected: select(view, ids(["missing"])),
+  });
+  const unavailable: Policy = (view) => ({
+    selected: select(view, ids(["dormant"])),
+  });
   const escaped: Policy = separate(
     (_s, node) => node === id("a"),
-    () => ({ selected: select(ids(["b"])) }),
+    (view) => ({ selected: select(view, ids(["b"])) }),
     parallel(),
   );
   for (const bad of [
@@ -759,13 +942,13 @@ test("context construction is a passive reusable pair with no provider or observ
   assert.equal(descriptions, 0);
 });
 
-test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consume", async () => {
+test("selected reads preserve FIFO order for the whole queue and prime does not consume", async () => {
   const feed = Edge.message<typeof NumberSchema, string>("feed", NumberSchema);
   let target = id("P");
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
   const execution = context({
     graph,
-    scheduler: () => ({ selected: select([target]) }),
+    scheduler: (view) => ({ selected: select(view, [target]) }),
     readInputs: (_node, candidate) =>
       new Map<EdgeIdType, MessageSchedule>(
         candidate.trigger.rule.map((edge) => [edge, 2]),
@@ -793,8 +976,8 @@ test("readInputs preserves FIFO pairs [1,2], [3,4], [5] and prime does not consu
   target = consumer;
   await execution.step();
   assert.deepEqual(batches, []);
-  for (let turn = 0; turn < 3; turn++) await execution.step();
-  assert.deepEqual(batches, [[1, 2], [3, 4], [5]]);
+  await execution.step();
+  assert.deepEqual(batches, [[1, 2, 3, 4, 5]]);
   assert.equal(graph.available().has(consumer), false);
 });
 
@@ -888,7 +1071,7 @@ test("allOf waits for the atomic join and observations/planning do not consume i
   assert.deepEqual(selections(captured[1]!), [["sink"]]);
 });
 
-test("invalid read maps reject the entire column before primes or queue consumption", async () => {
+test("invalid read decisions reject the entire column before primes or queue consumption", async () => {
   const feed = Edge.message<typeof NumberSchema, string>("feed", NumberSchema);
   const captured: View[] = [];
   let invalid = true;
@@ -897,12 +1080,13 @@ test("invalid read maps reject the entire column before primes or queue consumpt
   graph.emit(id("a"), Message.create(feed, 7));
   const execution = context({
     graph,
-    scheduler: (view, signal) => {
-      captured.push(view);
-      return parallel()(view, signal);
-    },
-    readInputs: () =>
-      invalid ? new Map([[EdgeId.create("not-an-edge"), 1]]) : new Map(),
+    scheduler: reads(
+      () => (invalid ? [EdgeId.create("not-an-edge")] : []),
+      (view: View, signal) => {
+        captured.push(view);
+        return parallel()(view, signal);
+      },
+    ),
   });
   const version = graph.observe().version;
   await assert.rejects(execution.step(), DataflowDefinitionError);
@@ -914,7 +1098,9 @@ test("invalid read maps reject the entire column before primes or queue consumpt
   );
   invalid = false;
   await execution.step();
-  assert.deepEqual(selections(captured[1]!), []);
+  assert.equal(captured.length, 4);
+  assert.deepEqual(selections(captured[3]!), []);
+  assert.equal(captured[3]!.lastError, undefined);
 });
 
 test("external pairing excludes overlapping planners without binding policies or graph members", async () => {
@@ -934,10 +1120,10 @@ test("external pairing excludes overlapping planners without binding policies or
     });
   const first = context({
     graph,
-    scheduler: async () => {
+    scheduler: async (view) => {
       entered.resolve();
       await gate.promise;
-      return { selected: select(ids(["a"])) };
+      return { selected: select(view, ids(["a"])) };
     },
   });
   const snapshots: View[] = [];
@@ -945,7 +1131,7 @@ test("external pairing excludes overlapping planners without binding policies or
     graph,
     scheduler: (view) => {
       snapshots.push(view);
-      return { selected: select(ids(["b"])) };
+      return { selected: select(view, ids(["b"])) };
     },
   });
   const pending = first.step();
@@ -987,7 +1173,7 @@ for (const mutation of ["addNode", "emit"] as const) {
         captured.push(view);
         entered.resolve();
         await gate.promise;
-        return { selected: select(ids(["a"])) };
+        return { selected: select(view, ids(["a"])) };
       },
     });
     const pending = execution.step();
@@ -1035,10 +1221,10 @@ test("live availability and mutation inside read lowering also invalidate a deci
     });
     const execution = context({
       graph,
-      scheduler: async () => {
+      scheduler: async (view) => {
         entered.resolve();
         await gate.promise;
-        return { selected: select(ids(["a"])) };
+        return { selected: select(view, ids(["a"])) };
       },
       readInputs: () => {
         if (mutate) {
@@ -1239,7 +1425,7 @@ test("cancellation after either policy settlement wins without committing work",
           entered.resolve();
           return gate.promise;
         }
-        return { selected: select(ids(["a"])) };
+        return { selected: select(view, ids(["a"])) };
       },
     });
     const version = graph.observe().version;
@@ -1250,7 +1436,7 @@ test("cancellation after either policy settlement wins without committing work",
     await entered.promise;
     controller.abort(reason);
     if (rejectedPolicy) gate.reject(new Error("provider error"));
-    else gate.resolve({ selected: select(ids(["a"])) });
+    else gate.resolve({ selected: select(captured[0]!, ids(["a"])) });
     await rejected;
     assert.deepEqual(ran, []);
     assert.equal(graph.observe().version, version);

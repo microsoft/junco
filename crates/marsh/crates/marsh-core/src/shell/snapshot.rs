@@ -15,13 +15,17 @@ use super::access::{Access, Effects};
 use super::completion::{Completion, Finalize};
 use super::execution::Run;
 use super::session::Session;
-use super::{Principal, ShellError};
+use super::{Principal, Resource, ShellError};
 
 #[derive(Default)]
 pub(super) struct CommandEvidence {
     pub records: Vec<Syscall>,
     /// Every classified effect with its entry order in the run's sequence.
     pub effects: Vec<(u64, Effects)>,
+    /// Explicit owner-only releases selected from committed history, at their entry order.
+    pub owned_releases: Vec<(u64, Vec<Resource>)>,
+    /// Records even an empty bulk invocation, which cannot be combined with protected mutation.
+    pub owner_only_release: bool,
     pub failure: Option<String>,
 }
 
@@ -275,6 +279,32 @@ impl Snapshot {
         evidence.effects.push((order, effects));
         drop(state);
         Ok(())
+    }
+
+    pub fn release_owned(&self, run: TraceRun, order: u64) -> Result<Vec<String>, ShellError> {
+        let authority = self.session.validator.read();
+        if authority.recovery_required {
+            return Err(ShellError::infrastructure("source requires recovery"));
+        }
+        let mut resources: Vec<_> = junco_policy::owned_resources(
+            authority.history.iter().map(super::Event::as_policy_event),
+            &self.owner,
+        )
+        .into_iter()
+        .map(|resource| (resource.segments().join("/"), resource.clone()))
+        .collect();
+        drop(authority);
+        resources.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        let mut state = self.state.lock().recover();
+        let Some((_, evidence)) = state.evidence.as_mut().filter(|(active, _)| *active == run) else {
+            return Err(ShellError::infrastructure("release has no active command"));
+        };
+        let (released, resources): (Vec<_>, Vec<_>) = resources.into_iter().unzip();
+        evidence.owner_only_release = true;
+        if !resources.is_empty() {
+            evidence.owned_releases.push((order, resources));
+        }
+        Ok(released)
     }
 
     /// Marks the active command's evidence incomplete, so it is never published.

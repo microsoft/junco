@@ -1,13 +1,7 @@
 import { type Static, type TSchema, Type } from "typebox";
 
 const strict = { additionalProperties: false } as const;
-export const BUILTIN_TOOL_NAMES = [
-  "yield",
-  "info",
-  "send",
-  "recv",
-  "task",
-] as const;
+export const BUILTIN_TOOL_NAMES = ["yield", "info", "send", "task"] as const;
 const strings = Type.Array(Type.String());
 const trigger = Type.Union([
   Type.Literal("always"),

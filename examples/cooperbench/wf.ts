@@ -1,7 +1,7 @@
 // CooperBench shared-worktree driver. Seven small-model roles share one caller-owned Marsh collection.
 // Stdout contains native message/usage JSONL and a terminal result.
 import { createHash, randomUUID } from "node:crypto";
-import { constants, writeSync } from "node:fs";
+import { constants } from "node:fs";
 import { type FileHandle, copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -371,7 +371,7 @@ const ASSIGNMENTS: Record<string, string> = {
 Specifications:
 {{arch-specs}}
 
-If only one specification is present above, call recv once to collect the other before planning.
+If only one specification is present above, yield once for the other; the scheduler delivers it as a user message before planning.
 Read the repository (conventions, affected modules, existing tests, how tests run — also /usr/local/bin/runner.sh if it exists) and return one plan in exactly these sections:
 ## Interfaces — per team: every public name the spec requires (module/package path, class, function, method, parameter, CLI flag, error type, config key) with its exact spelling and signature as the spec states or implies, and the file where it belongs. Where the spec leaves a name or shape open, choose one and state it.
 ## Ownership — three lists of repository paths: Team 1 only, Team 2 only, Shared (both must touch). Make a shared file unshared by moving one team's change to a new file whenever the design allows.
@@ -391,7 +391,7 @@ Turn the specification into executable acceptance tests BEFORE the implementatio
 2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
 3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
 4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
-5. Release every file you created with release({file}).
+5. After the test commands, call release({owned:true}) with no file field to hand off every resource you own, including ignored/generated build outputs. Do this even if tests fail; do not finish or yield while still owning resources.
 Return exactly:
 ## Checklist — the AC list.
 ## Interface contract — the public names/signatures your tests assume.
@@ -411,7 +411,7 @@ Turn the specification into executable acceptance tests BEFORE the implementatio
 2. Write the acceptance checklist: number every testable claim in the spec AC-1, AC-2, …; quote the spec sentence, state the observable behaviour, name the exact public symbol(s). For each claim also cover: exact representation (types, shapes, counts, ordering, case, multi-value vs joined values); application to nested or repeated inputs; lifecycle and state transitions (create/use/close/reset, repeated calls, idempotence); no mutation of inputs or unrelated state (repeat the operation on the same object and assert the original is unchanged); defaults and backward compatibility of existing callers; error paths with the specified error type and message.
 3. Write the tests as NEW files only, one test per AC where practical, using the names and signatures from the Interfaces section. Each new file path must satisfy the grader's test-path rule: a directory segment named tests, test, __tests__, spec or testdata, or a basename matching test_*.py, *_test.<ext>, *.test.<ext> or *.spec.<ext>. Never modify existing test files, fixtures or conftest files. Do not implement the feature.
 4. Run your new tests and confirm they FAIL or error only because the feature is missing; fix collection errors caused by your own code. Run the existing suite for the affected package once to record the baseline.
-5. Release every file you created with release({file}).
+5. After the test commands, call release({owned:true}) with no file field to hand off every resource you own, including ignored/generated build outputs. Do this even if tests fail; do not finish or yield while still owning resources.
 Return exactly:
 ## Checklist — the AC list.
 ## Interface contract — the public names/signatures your tests assume.
@@ -432,7 +432,7 @@ Tester1's acceptance tests and contract (your objective target):
 1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
 2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
 3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
-4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; then call release({owned:true}) with no file field, even if a command failed, to hand off all your source, test and generated/ignored build resources. Release before yielding too.
 Return exactly:
 ## Changes — files changed and what each change does.
 ## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
@@ -451,7 +451,7 @@ Tester2's acceptance tests and contract (your objective target):
 1. The spec is the ground truth; the checklist is its test. Implement with the exact public names and signatures from the Interface contract; where contract and spec disagree, follow the spec and report it.
 2. Make TEST_COMMAND pass, then SUITE_COMMAND; fix every regression you caused. Never weaken, skip or delete tests. If a Tester test contradicts the spec, correct that test minimally and explain.
 3. Edit only paths in your team's Ownership lists and shared paths per the Shared-file protocol. A Marsh ownership denial means the other team holds the file: do your other work first, retry, and if still denied report the path as BLOCKED instead of working around it.
-4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; release every file you edited with release({file}).
+4. Before finishing, run TEST_COMMAND and SUITE_COMMAND once more and paste the exact commands with exit codes; then call release({owned:true}) with no file field, even if a command failed, to hand off all your source, test and generated/ignored build resources. Release before yielding too.
 Return exactly:
 ## Changes — files changed and what each change does.
 ## Deviations — contract/spec disagreements, corrected tests, BLOCKED paths.
@@ -826,9 +826,17 @@ export function emit(record: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
 }
 
-/** Join every queued record before the explicit exit that releases idle model sockets. */
+/** Policy callbacks must not synchronously write a backpressured stderr pipe. */
+export function emitLog(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
+
+/** Join both output queues before the explicit exit that releases idle model sockets. */
 export const flushEvents = (): Promise<void> => new Promise((resolve, reject) => {
-  process.stdout.write("", (error) => error ? reject(error) : resolve());
+  process.stdout.write("", (error) => {
+    if (error) { reject(error); return; }
+    process.stderr.write("", (error) => error ? reject(error) : resolve());
+  });
 });
 
 function describe(error: unknown): string {
@@ -1094,15 +1102,12 @@ export async function recoverWorkspace(worktree: string): Promise<void> {
 }
 
 async function main(signal: AbortSignal): Promise<void> {
-  const release = redirectLog({
-    write(line) { writeSync(2, `${line}\n`); },
-    async flush() {},
-  });
+  const release = redirectLog({ write: emitLog, flush: flushEvents });
   const { type, attachedTransports } = opikLogger.settings;
   opikLogger.settings.type = "hidden";
   opikLogger.settings.attachedTransports = [
     ...attachedTransports,
-    (record) => { writeSync(2, `${JSON.stringify(record)}\n`); },
+    (record) => { emitLog(JSON.stringify(record)); },
   ];
   try {
     const request = parseRequest(await Bun.stdin.text());

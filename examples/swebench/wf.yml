@@ -38,9 +38,7 @@ graph:
         at the issue's base commit. You write precise assignments; you never guess the fix and present it
         as fact.
       prompt: |
-        <issue>
-        {{Input~>Lead}}
-        </issue>
+        Read the issue in the user message following this prompt.
 
         Your team (each works independently and cannot see the others):
         - Trace: locates the responsible implementation, every sibling code path sharing the faulty logic,
@@ -84,7 +82,7 @@ graph:
         suite. Other teammates cannot read your sandbox, so inline every script you mention in your report.
         Your final answer is your report: it is forwarded verbatim to the planner.
       prompt: |
-        {{Assign~>Trace}}
+        Read the issue and your assignment in the user message following this prompt.
 
         Your role: locate the code responsible for the issue. Your report must cover:
         1. Root-cause location(s): file:line, function/class names, the relevant lines quoted, and why they
@@ -102,7 +100,7 @@ graph:
       tools: [bash]
       system: *evidence-system
       prompt: |
-        {{Assign~>Reproduce}}
+        Read the issue and your assignment in the user message following this prompt.
 
         Your role: reproduce the reported behaviour and find runnable focused checks. Your report must cover:
         1. A self-contained reproduction command, runnable from /testbed exactly as written (for example
@@ -123,7 +121,7 @@ graph:
       tools: [bash]
       system: *evidence-system
       prompt: |
-        {{Assign~>Contracts}}
+        Read the issue and your assignment in the user message following this prompt.
 
         Your role: define what a correct fix must and must not change. Your report must cover:
         1. A behaviour matrix for the behaviour the issue concerns: input variants and adjacent paths (types,
@@ -171,7 +169,7 @@ graph:
               no shell. Your plan is executed by two independent implementers and its checks are run automatically,
               exactly as written, so precision matters more than prose.
             prompt: |
-              {{$source~>Draft}}
+              Read the issue and joined evidence in the user message following this prompt.
 
               Write the plan as one JSON object in a single ```json fenced block, with exactly these fields:
               {
@@ -257,14 +255,14 @@ graph:
 
         Final reply: the files and functions you changed and why, and the observed result of every
         acceptance check.
-      prompt: "{{Dispatch~>CandidateA}}"
+      prompt: "Implement your candidate assignment in the user message following this prompt."
 
     CandidateB:
       description: Implements candidate assignment B in its own sandbox.
       trigger: Dispatch~>CandidateB
       tools: [bash]
       system: *candidate-system
-      prompt: "{{Dispatch~>CandidateB}}"
+      prompt: "Implement your candidate assignment in the user message following this prompt."
 
     ValidateA:
       kind: code
@@ -303,7 +301,7 @@ graph:
         the final deliverable; it is re-verified automatically with the same acceptance checks in a pristine
         copy of the baseline, and a failing check fails the whole task.
       prompt: |
-        {{Apply~>Integrator}}
+        Read the selected patch briefing in the user message following this prompt.
 
         Your task is judgment and integration, not a fresh attempt:
         - Review the applied patch against the root cause, the behaviour matrix and the interfaces. Resolve
@@ -332,7 +330,7 @@ graph:
         network). You must not change anything under /testbed: no edits, no new files, no git commands that
         modify the tree or index. Write scratch scripts under /tmp only. Any change to /testbed fails the task.
       prompt: |
-        {{Freeze~>Verifier}}
+        Read the final patch briefing in the user message following this prompt.
 
         Verify independently:
         - Read the final diff and check it against the root cause, the behaviour matrix and the interfaces.

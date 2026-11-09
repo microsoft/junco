@@ -310,11 +310,15 @@ jobs:
       - name: Free runner disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
 
+      - name: Pull SWE-bench container fixture
+        run: docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
+
       - name: Test on a btrfs project root
         run: |
           mkdir -p "$RUNNER_TEMP/artifacts"
           docker run --rm --privileged \
             --env CARGO_BUILD_JOBS=2 \
+            --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
             --volume "$GITHUB_WORKSPACE/junco:/src:ro" \
             --volume "$RUNNER_TEMP/artifacts:/artifacts" \
             junco-ci

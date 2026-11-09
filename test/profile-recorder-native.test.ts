@@ -104,12 +104,22 @@ async function runRecorded(
         const agent = await JuncoAgent.fromResolved({
           ...(
             await nativeOptions([
-              fauxAssistantMessage(fauxToolCall("recv", {}), {
-                stopReason: "toolUse",
-              }),
-              fauxAssistantMessage(fauxToolCall("bash", { command: COMMAND }), {
-                stopReason: "toolUse",
-              }),
+              (context) => {
+                assert.deepEqual(
+                  context.messages
+                    .filter((message) => message.role === "user")
+                    .map((message) =>
+                      typeof message.content === "string"
+                        ? message.content
+                        : contentText(message.content),
+                    ),
+                  ["Measure resources", "measure"],
+                );
+                return fauxAssistantMessage(
+                  fauxToolCall("bash", { command: COMMAND }),
+                  { stopReason: "toolUse" },
+                );
+              },
               lastResult,
             ])
           ).options,
@@ -311,7 +321,6 @@ test("GrafanaRecorder exports the same real Worker run over OTLP JSON", async ()
           operation: "exec",
         },
         { node: "Worker", resource: "memory", tool: "bash" },
-        { node: "Worker", resource: "operations", category: "recv" },
         {
           node: "Worker",
           resource: "operations",

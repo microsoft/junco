@@ -77,7 +77,11 @@ async function build(plan: AssistantMessage, reply = bobReply) {
     params: { query: BOB_QUERY },
     createAgent: async (spec) => {
       const mock: YamlMock = new MockAgent({
-        runs: [run([settle(spec.node === "PLLM" ? plan : reply)])],
+        runs: [
+          run([
+            settle(spec.node === "PLLM" ? plan : reply, { drain: ["steer"] }),
+          ]),
+        ],
       });
       mocks.set(spec.node, mock);
       return mock;

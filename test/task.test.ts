@@ -630,10 +630,6 @@ describe("native tasks on a graph-driven caller", () => {
     // Graph ports are chat, the caller's own sibling routes numeric.
     type N = typeof NumberSchema | Chat;
     type T = number | AssistantMessage;
-    type Received = {
-      messages: { id: string; payload: unknown }[];
-      values: { id: string; payload: unknown }[];
-    };
     const r = registry("caller", "a", "b");
     r.worker("a", 1);
     r.worker("b");
@@ -644,22 +640,15 @@ describe("native tasks on a graph-driven caller", () => {
     let call = 0;
     const tool = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
       toolTurn(fauxToolCall(name, args, { id: `${name}-${++call}` }));
-    const received = (context: Context): Received[] =>
-      context.messages.flatMap((message) =>
-        message.role === "toolResult" && message.toolName === "recv"
-          ? [JSON.parse(contentText(message.content)) as Received]
-          : [],
-      );
     let finalContext: Context | undefined;
     const step = (context: Context) => {
       finalContext = context;
-      const inbox = received(context);
-      const messages = inbox.flatMap(({ messages }) => messages);
-      const values = inbox.flatMap(({ values }) => values);
-      if (messages.length === 0 || values.length === 0)
-        return lastToolResult(context).toolName === "recv"
-          ? tool("yield", { reason: "wait for numbers" })
-          : tool("recv", {});
+      if (
+        !userTexts(context.messages).includes(
+          JSON.stringify({ id: inbound.id, payload: 7 }),
+        )
+      )
+        return tool("yield", { reason: "wait for numbers" });
       const results = toolResultsIn(context);
       if (![...results.values()].some(({ toolName }) => toolName === "send"))
         return tool("send", { id: outbound.id, payload: 42 });
@@ -678,7 +667,6 @@ describe("native tasks on a graph-driven caller", () => {
     const tools: AgentTool[] = [
       new toolsApi.TaskTool(),
       new toolsApi.YieldTool(),
-      new toolsApi.RecvTool(),
       new toolsApi.SendTool(),
     ];
     const caller = await agentApi.JuncoAgent.fromResolved<
@@ -697,7 +685,10 @@ describe("native tasks on a graph-driven caller", () => {
     });
     closers.push(() => caller.return());
     caller.setTaskFailurePolicy({ retries: 1 });
-    caller.stagePrompt("Start");
+    caller.stagePrompt((view) => {
+      assert.equal(view.values.get(parentValue.id), 3);
+      return "Start";
+    });
     const created = trackSubagents(caller);
 
     const source = new graph.nodes.Source<N, T>(
@@ -734,7 +725,10 @@ describe("native tasks on a graph-driven caller", () => {
     });
     const callerId = outer.addNode({
       id: graph.NodeId.create("caller"),
-      trigger: trigger.TriggerRule.always(),
+      trigger: trigger.TriggerRule.allOf(
+        trigger.TriggerEntry.on(inbound),
+        trigger.TriggerEntry.on(parentValue),
+      ),
       policy: LockPolicy,
       state: caller,
     });
@@ -770,17 +764,14 @@ describe("native tasks on a graph-driven caller", () => {
     assert.equal(contentText(final.content), "numeric done");
     // The outbound number reached its real edge while tasks ran.
     assert.deepEqual(consumed, [42]);
-    // Numeric messages and parent values reached the retained inbox; task reports never did.
+    // Only the numeric message is steered; the value stays in the prompt callback.
     const context = finalContext;
     assert.ok(context);
-    const inbox = received(context);
     assert.deepEqual(
-      inbox.flatMap(({ messages }) => messages),
-      [{ id: inbound.id, payload: 7 }],
-    );
-    assert.deepEqual(
-      inbox.flatMap(({ values }) => values),
-      [{ id: parentValue.id, payload: 3 }],
+      userTexts(context.messages).filter(
+        (text) => !text.startsWith('{"type":"task_'),
+      ),
+      ["Start", JSON.stringify({ id: inbound.id, payload: 7 })],
     );
     // Both batches resolved as chat reports: the retried `a` and the later `b`.
     assert.equal(markersIn(context).length, 2);
@@ -799,15 +790,11 @@ describe("native tasks on a graph-driven caller", () => {
     assertGeometry(outer, geometry);
   });
 
-  test("external edges preserve routing: recv postponed across Yield, values once, messages in order, info/send on the original node, only the final result downstream", async () => {
+  test("external edges preserve routing across Yield: values in prompt callbacks, messages in order, info/send on the original node, only the final result downstream", async () => {
     const r = registry("caller", "alpha", "beta");
     type Edge = graph.Edge<Chat, AssistantMessage>;
     type Route = { id: string; edgeId: string; kind: string };
     type Info = { parents: Route[]; children: Route[] };
-    type Received = {
-      messages: { id: string; payload: AgenticInput }[];
-      values: { id: string; payload: AssistantMessage }[];
-    };
     const sourceEdge: Edge = graph.Edge.value(
       "source=>caller",
       AssistantMessageSchema,
@@ -859,16 +846,13 @@ describe("native tasks on a graph-driven caller", () => {
       const infos = results<Info>(context, "info");
       if (infos.length === 0)
         return toolTurn(fauxToolCall("info", {}, { id: "info-1" }));
-      const received = results<Received>(context, "recv");
-      const messages = received.flatMap((batch) => batch.messages);
-      if (messages.length < 5) {
-        const last = context.messages.at(-1);
+      const messages = userTexts(context.messages).filter((text) =>
+        text.startsWith("note-"),
+      );
+      if (messages.length < 5)
         return toolTurn(
-          last?.role === "toolResult" && last.toolName === "recv"
-            ? yieldCall("waiting for notes", `wait-${received.length}`)
-            : fauxToolCall("recv", {}, { id: `recv-${received.length}` }),
+          yieldCall("waiting for notes", `wait-${context.messages.length}`),
         );
-      }
       // A later admission while the first batch may still run.
       if (tasks === 1)
         return toolTurn(
@@ -916,7 +900,6 @@ describe("native tasks on a graph-driven caller", () => {
     };
     r.script(
       "caller",
-      // Five individually delivered notes add six recv/yield turns; rejected sends add two.
       Array.from({ length: 40 }, () => turn),
     );
     r.script("alpha", [
@@ -934,7 +917,6 @@ describe("native tasks on a graph-driven caller", () => {
     const caller = await r.agent("caller", [
       new toolsApi.TaskTool(),
       new toolsApi.YieldTool(),
-      new toolsApi.RecvTool(),
       new toolsApi.SendTool(),
       new toolsApi.InfoTool(),
     ]);
@@ -967,7 +949,10 @@ describe("native tasks on a graph-driven caller", () => {
         return fauxAssistantMessage("notes done");
       }, LockPolicy),
     });
-    caller.stagePrompt("Start");
+    caller.stagePrompt((view) => {
+      assert.equal(view.values.get(sourceEdge.id), upstreamValue);
+      return "Start";
+    });
     const callerId = outer.addNode({
       id: graph.NodeId.create("caller"),
       policy: LockPolicy,
@@ -1015,25 +1000,11 @@ describe("native tasks on a graph-driven caller", () => {
     assertGeometry(outer, geometry);
     assert.ok(finalContext);
 
-    // Postponed recv: every retained note once, in FIFO order, and the stale value exactly once.
-    const batches = results<Received>(finalContext, "recv");
     assert.deepEqual(
-      batches.flatMap((batch) =>
-        batch.messages.map(({ id, payload }) => [
-          id,
-          "text" in payload ? payload.text : "",
-        ]),
+      userTexts(finalContext.messages).filter(
+        (text) => !text.startsWith('{"type":"task_'),
       ),
-      Array.from({ length: 5 }, (_, n) => [notesEdge.id, `note-${n + 1}`]),
-    );
-    assert.deepEqual(
-      batches.flatMap((batch) =>
-        batch.values.map(({ id, payload }) => [
-          id,
-          contentText(payload.content),
-        ]),
-      ),
-      [[sourceEdge.id, "upstream value"]],
+      ["Start", ...Array.from({ length: 5 }, (_, n) => `note-${n + 1}`)],
     );
     const sendResults = finalContext.messages
       .filter((message) => message.role === "toolResult")
@@ -1042,11 +1013,6 @@ describe("native tasks on a graph-driven caller", () => {
     assert.equal(sendResults[0]?.isError, true);
     assert.equal(sendResults[1]?.isError, true);
     assert.equal(sendResults[2]?.isError, false);
-    assert.equal(
-      userTexts(finalContext.messages).includes("note-1"),
-      false,
-      "notes are data, not prompts",
-    );
     assert.deepEqual(
       reportsIn(finalContext)
         .map(({ output }) => output)

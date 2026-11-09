@@ -44,7 +44,6 @@ import {
   type ProfileEvent,
   type ProfileRecorder,
   profileContexts,
-  RecvTool,
   SendTool,
   YieldTool,
 } from "junco-tools";
@@ -346,17 +345,14 @@ test("AgenticInputSchema and AssistantMessageSchema check the native payloads th
   }
 });
 
-test("shared send/recv tools advertise each bound activation's live edge schemas", async () => {
+test("shared send tools advertise each bound activation's live edge schemas", async () => {
   const send = new SendTool();
-  const recv = new RecvTool();
   const unboundParameters = send.parameters;
-  const unboundDescription = recv.description;
-  const requests: { send: unknown; recv: unknown }[] = [];
+  const requests: { send: unknown }[] = [];
   const capture = (context: Context) => {
     const tools = getCurrentTools(context.messages);
     requests.push({
       send: tools.find(({ name }) => name === "send")?.parameters,
-      recv: tools.find(({ name }) => name === "recv")?.description,
     });
     return fauxAssistantMessage("done");
   };
@@ -364,28 +360,18 @@ test("shared send/recv tools advertise each bound activation's live edge schemas
     [EdgeId.create(id), schema] as const;
   let outbound = route("numbers", Type.Number());
   const numeric = {
-    view: { messages: new Map(), values: new Map() },
     get sendParameters() {
       return SendTool.parametersFor([outbound]);
     },
-    recvOutputSchema: RecvTool.outputSchemaFor(
-      [route("numbers-in", Type.Number())],
-      [],
-    ),
-    consume() {},
     send() {},
     info: () => ({ children: [], parents: [] }),
   };
   const text = {
     ...numeric,
     sendParameters: SendTool.parametersFor([route("texts", Type.String())]),
-    recvOutputSchema: RecvTool.outputSchemaFor(
-      [],
-      [route("texts-in", Type.String())],
-    ),
   };
-  const a = await newAgent([capture, capture], { tools: [send, recv] });
-  const b = await newAgent([capture, capture], { tools: [send, recv] });
+  const a = await newAgent([capture, capture], { tools: [send] });
+  const b = await newAgent([capture, capture], { tools: [send] });
   try {
     await a.agent.runWithNodeContext({ messaging: numeric }, () =>
       a.agent.prompt("first"),
@@ -417,17 +403,10 @@ test("shared send/recv tools advertise each bound activation's live edge schemas
     ]);
     assert.deepEqual(checks(requests[2]?.send, "numbers", [7]), [false]);
     assert.deepEqual(requests[3]?.send, unboundParameters);
-    assert.equal(
-      requests[0]?.recv,
-      RecvTool.describe(numeric.recvOutputSchema),
-    );
-    assert.equal(requests[1]?.recv, RecvTool.describe(text.recvOutputSchema));
-    assert.equal(requests[3]?.recv, unboundDescription);
     // The shared originals keep their own schemas and identities.
     assert.equal(send.parameters, unboundParameters);
-    assert.equal(recv.description, unboundDescription);
     assert.ok(a.agent.getTools().includes(send));
-    assert.ok(b.agent.getActiveTools().includes(recv));
+    assert.ok(b.agent.getActiveTools().includes(send));
   } finally {
     await a.agent.return();
     await b.agent.return();
@@ -759,9 +738,15 @@ test("stagePrompt is busy while staged, suspended or awaited, and closed after r
   }
 });
 
-test("turn_end subscribers see the full successful yield result before the next request is gated", async () => {
+test("turn_end subscribers see full yield results and resumed requests include queued steering", async () => {
   const { faux, agent } = await newAgent(
-    [toolTurn(yieldCall("review", "y1")), fauxAssistantMessage("resumed")],
+    [
+      toolTurn(yieldCall("review", "y1")),
+      (context) => {
+        assert.deepEqual(userTexts(context.messages), ["go", "update"]);
+        return fauxAssistantMessage("resumed");
+      },
+    ],
     { tools: [new YieldTool()], prompt: "go" },
   );
   const turns: { ids: string[]; errors: boolean[] }[] = [];
@@ -783,6 +768,7 @@ test("turn_end subscribers see the full successful yield result before the next 
     await flushMacrotasks();
     assert.equal(faux.state.callCount, 1);
     assert.equal(agent.status, "suspended");
+    await agent.steer("update");
     assert.equal(settledText(await agent.next()), "resumed");
     assert.equal(faux.state.callCount, 2);
   } finally {
@@ -2669,21 +2655,21 @@ function userInputs(
   });
 }
 
-// Pi accepts the run with one steer/follow-up per one-at-a-time queue plus every next-turn input;
-// the first request boundary then drains one more steer, and the next boundary one more follow-up.
+// Admission appends the prompt before queued inputs; request boundaries then drain remaining
+// one-at-a-time steering and follow-up inputs.
 for (const { from, to, expected } of [
   {
     from: "all",
     to: "one-at-a-time",
     expected: [
-      ["s1", "f1", "n1", "work", "s2"],
-      ["s1", "f1", "n1", "work", "s2", "f2"],
+      ["work", "s1", "f1", "n1", "s2"],
+      ["work", "s1", "f1", "n1", "s2", "f2"],
     ],
   },
   {
     from: "one-at-a-time",
     to: "all",
-    expected: [["s1", "s2", "f1", "f2", "n1", "work"]],
+    expected: [["work", "s1", "s2", "f1", "f2", "n1"]],
   },
 ] as const) {
   test(

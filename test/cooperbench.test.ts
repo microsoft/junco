@@ -35,6 +35,7 @@ import {
   verdicts,
   type YamlAgent,
 } from "../examples/cooperbench/wf.ts";
+import { userTexts } from "./deterministic-support.ts";
 
 const MODELS = { worker: "faux/worker", leader: "faux/leader" } as const;
 const THINKING = "medium" as const;
@@ -336,7 +337,6 @@ test.each([false, true])(
         request(),
         {
           Agent1: steps(
-            () => call("recv", {}),
             () =>
               call("task", {
                 context: "Native accounting race.",
@@ -762,7 +762,7 @@ test("a raw serialization failure still forwards the original usage once and red
   }
 });
 
-test("large UTF-8 stdout records remain ordered and drain before exit", () => {
+test("large UTF-8 protocol and diagnostic pipes drain intact before exit", () => {
   const module = new URL("../examples/cooperbench/wf.ts", import.meta.url)
     .pathname;
   const result = spawnSync(
@@ -770,9 +770,11 @@ test("large UTF-8 stdout records remain ordered and drain before exit", () => {
     [
       "-e",
       `
-    const { emit, flushEvents } = await import(${JSON.stringify(module)});
+    const { emit, emitLog, flushEvents } = await import(${JSON.stringify(module)});
     const text = "λ🙂".repeat(40000);
     for (let id = 0; id < 8; id++) emit({ type: "message", id, text });
+    await flushEvents();
+    for (let id = 0; id < 8; id++) emitLog(JSON.stringify({ type: "diagnostic", id, text }));
     emit({ type: "result" });
     await flushEvents();
     process.exit();
@@ -790,6 +792,18 @@ test("large UTF-8 stdout records remain ordered and drain before exit", () => {
     Array.from({ length: 8 }, (_, id) => [id, "λ🙂".repeat(40000)]),
   );
   expect(records.at(-1).type).toBe("result");
+  expect(result.stderr.endsWith("\n")).toBe(true);
+  const diagnostics = result.stderr
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(diagnostics).toEqual(
+    Array.from({ length: 8 }, (_, id) => ({
+      type: "diagnostic",
+      id,
+      text: "λ🙂".repeat(40000),
+    })),
+  );
 });
 
 test.each([
@@ -830,26 +844,36 @@ const NOTE = {
   agent2: "PEER-NOTE-FROM-TWO",
 } as const;
 
-test("the Architect receives both assignments, teams receive only theirs, and peer notes arrive by send, yield and recv", async () => {
+test("the Architect receives both assignments, teams receive only theirs, and peer notes arrive as steered user messages after send and yield", async () => {
   const seen: Record<string, Record<string, ToolResult>> = {
     Agent1: {},
     Agent2: {},
   };
+  const assignments: Record<string, string[]> = {};
+  const peerMessages: Record<string, string[]> = {};
   const leader = (key: "agent1" | "agent2") => {
     const name = key === "agent1" ? "Agent1" : "Agent2";
     const out = key === "agent1" ? "agent1-to-agent2" : "agent2-to-agent1";
     const keep =
       (label: string, next: () => AssistantMessage) => (context: Context) => {
-        seen[name]![label] = lastResult(context.messages);
+        seen[name]![label] = lastResult(
+          context.messages.filter((message) => message.role === "toolResult"),
+        );
         return next();
       };
     return steps(
-      () => call("recv", {}),
-      keep("assignment", () => call("info", {})),
+      (context) => {
+        assignments[name] = userTexts(context.messages).slice(1);
+        return call("info", {});
+      },
       keep("info", () => call("send", { id: out, payload: NOTE[key] })),
       keep("send", () => call("yield", { reason: "await peer plan" })),
-      () => call("recv", {}),
-      keep("peer", () => done(`${name} done`)),
+      (context) => {
+        peerMessages[name] = userTexts(context.messages).slice(
+          1 + assignments[name]!.length,
+        );
+        return done(`${name} done`);
+      },
     );
   };
   const req = request({
@@ -901,12 +925,12 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
     ["Agent2", "agent2", "agent1"],
   ] as const) {
     const mine = calls.filter((c) => c.agent === name);
-    expect(seen[name]!.assignment!.text).toContain(SENTINEL[key]);
+    expect(assignments[name]!.join("\n")).toContain(SENTINEL[key]);
     for (const c of mine)
       expect(JSON.stringify(c.messages)).not.toContain(SENTINEL[other]);
     expect(seen[name]!.info!.text).not.toContain(SENTINEL[key]);
     expect(seen[name]!.send!.isError).toBe(false);
-    const delivered = seen[name]!.peer!.text;
+    const delivered = peerMessages[name]!.join("\n");
     expect(delivered.split(NOTE[other]).length - 1).toBe(1);
     expect(delivered).not.toContain(NOTE[key]);
   }
@@ -923,14 +947,8 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
 
 test("both leaders' own reports decide Submitted: an abnormal member report cannot hide behind the lead's sink result", async () => {
   const { execution } = await pair(request(), {
-    Agent1: steps(
-      () => call("recv", {}),
-      () => done("Agent1 done"),
-    ),
-    Agent2: steps(
-      () => call("recv", {}),
-      () => fauxAssistantMessage("", { stopReason: "length" }),
-    ),
+    Agent1: steps(() => done("Agent1 done")),
+    Agent2: steps(() => fauxAssistantMessage("", { stopReason: "length" })),
   });
   const values = await closed(execution, async () => {
     const results = await execution.run();
@@ -1106,10 +1124,7 @@ const reports = (context: Context) =>
     const text = contentText(message.content as never);
     return text.startsWith('{"type":"task_result"') ? [JSON.parse(text)] : [];
   });
-const idleLeader = steps(
-  () => call("recv", {}),
-  () => done("Agent2 done"),
-);
+const idleLeader = steps(() => done("Agent2 done"));
 
 test("leaders deny competing writes, keep disjoint files, and release permits handoff", async () => {
   const cache =
@@ -1190,7 +1205,6 @@ test("native descendants use the worker model and common thinking, inherit polic
   let grandchildRead = false;
   const run = await pair(request(), {
     Agent1: steps(
-      () => call("recv", {}),
       () => bash("printf leader-owned > owned.txt"),
       () => task("CHILD-worker"),
       () => done("leader interim"),
@@ -1248,7 +1262,6 @@ test.each([
     let rejection: ToolResult | undefined;
     const run = await pair(request(), {
       Agent1: steps(
-        () => call("recv", {}),
         () =>
           call("task", {
             context: "fixture",
@@ -1284,8 +1297,7 @@ test("a failed worker leaves its published data owned; its parent cannot edit or
   let releaseDenied = false;
   const run = await pair(request(), {
     Agent1: (context, step) => {
-      if (step === 0) return call("recv", {});
-      if (step === 1) return task("CHILD-abandon");
+      if (step === 0) return task("CHILD-abandon");
       const failed = reports(context).find((report) => report.decisionRequired);
       if (phase === 0 && failed) {
         phase++;
@@ -1335,7 +1347,6 @@ test("pair completion waits for a live native child even after its leader gives 
   const interim = Promise.withResolvers<void>();
   const run = await pair(request(), {
     Agent1: steps(
-      () => call("recv", {}),
       () => task("CHILD-held"),
       () => {
         interim.resolve();

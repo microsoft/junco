@@ -22,6 +22,7 @@
     "pack": "bun run build && bun pm pack --destination ./pack"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.2",
     "typebox": "1.4.3"
   },
   "peerDependencies": {

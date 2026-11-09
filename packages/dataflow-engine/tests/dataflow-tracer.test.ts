@@ -7,8 +7,6 @@ import type {
   DataflowRunTrace,
   DataflowTracer,
   EdgeIdType,
-  MessageSchedule,
-  NodeAvailability,
   NodeGenerator,
   NodeIdType,
   ParentView,
@@ -29,6 +27,7 @@ import {
   UNBOUNDED,
   Width,
 } from "../src/index.ts";
+import { nativeReads } from "./support.ts";
 
 const NumberSchema = Type.Number();
 
@@ -97,17 +96,6 @@ class RecordingTracer implements DataflowTracer {
   }
 }
 
-/** Read `count` off every edge named by the selected node's trigger. */
-const fixedReader =
-  (count: MessageSchedule) =>
-  (
-    _id: NodeIdType,
-    { trigger }: NodeAvailability<typeof NumberSchema, string>,
-  ) =>
-    new Map<EdgeIdType, MessageSchedule>(
-      trigger.rule.map((edgeId) => [edgeId, count]),
-    );
-
 /** Run `body` with `console.warn` silenced, restoring it afterwards. */
 const quietly = async (body: () => Promise<void>): Promise<void> => {
   const warn = console.warn;
@@ -152,11 +140,7 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
   );
   graph.addEdge(src, sink, feed);
 
-  const results = await context({
-    graph,
-    scheduler: parallel(),
-    readInputs: fixedReader(2),
-  }).run();
+  const results = await nativeReads(graph, 2).run();
 
   const [run] = tracer.runs;
   assert.equal(tracer.runs.length, 1);

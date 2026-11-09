@@ -18,9 +18,7 @@ import type {
   DataflowExecution,
   DataflowRunOptions,
   EdgeIdType,
-  InputSchedule,
   MessageSchedule,
-  NodeAvailability,
   NodeGenerator,
   NodeIdType,
   ParentView,
@@ -45,7 +43,7 @@ import {
   UNBOUNDED,
   Width,
 } from "../src/index.ts";
-import { queued } from "./support.ts";
+import { nativeReads, queued } from "./support.ts";
 
 const NumberSchema = Type.Number();
 const StringSchema = Type.String();
@@ -55,14 +53,6 @@ type Graph = DataflowGraph<void, N, string, never>;
 
 const newGraph = (): Graph =>
   new DataflowGraph<void, N, string, never>(Width.create(1), UNBOUNDED);
-
-/** Read `count` off every edge named by the candidate's trigger. */
-const fixedReader =
-  (count: MessageSchedule) =>
-  (_id: NodeIdType, { trigger }: NodeAvailability<N, string>): InputSchedule =>
-    new Map<EdgeIdType, MessageSchedule>(
-      trigger.rule.map((edgeId) => [edgeId, count]),
-    );
 
 test("a value self-edge re-arms its node: each return re-resolves outputs and the node runs again until its availability declines", async () => {
   const graph = newGraph();
@@ -197,11 +187,11 @@ test("a ready dependent is primed without consuming its queued activation batch"
   const graph = newGraph();
   const execution = context({
     graph,
-    scheduler() {
+    scheduler(snapshot) {
       const id = scheduled[turn]!;
       if (turn === 2) assert.deepEqual(queued(feed), [7]);
       turn += 1;
-      return { selected: select([id]) };
+      return { selected: select(snapshot, [id]) };
     },
   });
   const received: number[] = [];
@@ -572,11 +562,7 @@ test("public emit enqueues FIFO without driving, consuming, or completing any no
     Width.create(1),
     UNBOUNDED,
   );
-  const execution = context({
-    graph,
-    scheduler: parallel(),
-    readInputs: fixedReader(2),
-  });
+  const execution = nativeReads(graph, 2);
   const batches: number[][] = [];
   const source = graph.addNode(
     new EmitOnce<void, N, string>(() => [], "source", {
@@ -690,11 +676,7 @@ test("one firing reads exactly its planned count and leaves the rest queued", as
           Width.create(1),
           UNBOUNDED,
         );
-        const execution = context({
-          graph,
-          scheduler: parallel(),
-          readInputs: fixedReader(count),
-        });
+        const execution = nativeReads(graph, count);
         const consumed: number[] = [];
 
         const producer = graph.addNode(
@@ -738,11 +720,7 @@ test("the scheduler sizes each read: a pair-reading plan drains an `all` trigger
     Width.create(1),
     UNBOUNDED,
   );
-  const execution = context({
-    graph,
-    scheduler: parallel(),
-    readInputs: fixedReader(2),
-  });
+  const execution = nativeReads(graph, 2);
   const srcId = graph.addNode(
     new EmitOnce<void, N, string>(
       () => [1, 2, 3, 4, 5].map((n) => Message.create(feed, n)),
@@ -1551,11 +1529,7 @@ test("on_error after a resume throw emits its batch in order and leaves the valu
     Width.create(1),
     UNBOUNDED,
   );
-  const execution = context({
-    graph,
-    scheduler: parallel(),
-    readInputs: fixedReader(1),
-  });
+  const execution = nativeReads(graph, 1);
   const cause = new Error("resume");
   let handled = 0;
   let afterValue = 0;
@@ -2174,7 +2148,9 @@ test("external composition observes native work and ordered links without adding
     ["running", "done"],
   );
   assert.deepEqual(snapshots[0]!.history, []);
-  assert.deepEqual(snapshots[1]!.history, [{ selected: select([zero, one]) }]);
+  assert.deepEqual(snapshots[1]!.history, [
+    { selected: select(snapshots[0]!, [zero, one]) },
+  ]);
   assert.ok(Object.isFrozen(snapshots[1]!.history));
   assert.ok(Object.isFrozen(snapshots[1]!.history[0]));
   assert.ok(Object.isFrozen(snapshots[1]!.history[0]!.selected));
@@ -2228,7 +2204,7 @@ test("contexts sharing one native graph exclude planning and keep independent co
       seenA.push(snapshot);
       started.resolve();
       await release.promise;
-      return { selected: select([a]) };
+      return { selected: select(snapshot, [a]) };
     },
   });
   const second = context({

@@ -362,7 +362,6 @@ const DEFAULT_NAMES = [
   "code_graph",
   "task",
   "yield",
-  "recv",
   "send",
   "info",
 ] as const;

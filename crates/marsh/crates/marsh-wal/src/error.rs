@@ -5,6 +5,7 @@
 //! not represented here — this crate never runs one.
 
 use std::io::ErrorKind;
+use std::path::PathBuf;
 
 /// Failure raised while logging or publishing a transaction.
 #[derive(Debug, thiserror::Error)]
@@ -15,6 +16,28 @@ pub enum Error {
     /// Filesystem I/O failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A metadata append failed and its rollback or checkpoint cleanup also failed. The source
+    /// remains in doubt until repaired; both failures and the saved boundary remain available.
+    #[error("metadata receipt is in doubt at {checkpoint:?}: append failed: {append}; abort failed: {rollback}")]
+    AppendRollback {
+        /// The write or durability error that prevented the metadata receipt.
+        #[source]
+        append: std::io::Error,
+        /// The error while restoring the prior log or clearing its checkpoint.
+        rollback: std::io::Error,
+        /// Retained checkpoint that blocks further publication and recovery.
+        checkpoint: PathBuf,
+    },
+    /// END was durably committed, but removing or syncing its checkpoint failed. This diagnostic
+    /// must never cause the committed transaction's history to be rolled back.
+    #[error("metadata receipt committed; checkpoint cleanup failed at {checkpoint:?}: {cleanup}")]
+    CommittedCleanup {
+        /// Checkpoint retained after the receipt was durably committed.
+        checkpoint: PathBuf,
+        /// The failure removing or syncing the committed checkpoint.
+        #[source]
+        cleanup: std::io::Error,
+    },
 }
 
 impl From<rustix::io::Errno> for Error {

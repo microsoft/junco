@@ -697,25 +697,15 @@ describe("acceptance gates", () => {
     assert.equal(applied[0]?.candidate, keysWork.candidate);
   }, 30_000);
 
-  test("each proposer's summary reaches its own judge through send and recv", async () => {
+  test("each proposer's summary reaches its own judge as a steered user message", async () => {
     const { lanes } = await keysBatch([keysScript(), keysScript()]);
     lanes.forEach(({ log }, index) => {
       const rank = index + 1;
       assert.equal(log.received.length, 1);
-      const inbox = JSON.parse(log.received[0]!) as {
-        messages: unknown[];
-        values: { id: string }[];
-      };
-      assert.deepEqual(inbox.messages, [
-        {
-          id: `summary:${rank}`,
-          payload: `Proposer ${rank}: callers reconciled; research launched`,
-        },
-      ]);
-      assert.deepEqual(
-        inbox.values.map((value) => value.id),
-        [`proposal:${rank}`],
-      );
+      assert.deepEqual(JSON.parse(log.received[0]!), {
+        id: `summary:${rank}`,
+        payload: `Proposer ${rank}: callers reconciled; research launched`,
+      });
     });
   }, 30_000);
 
@@ -1225,11 +1215,12 @@ describe("candidate batch graph", () => {
       const [input] = log.judgeInputs;
       assert.equal(
         input?.length,
-        1,
-        "a fresh judge session sees only its prompt",
+        1 + log.received.length,
+        "a fresh judge session sees its proposal prompt followed by its summaries",
       );
       assert.ok(input?.[0]?.includes(own));
       assert.ok(!input?.[0]?.includes(other));
+      assert.ok(input?.every((text) => !text.includes(other)));
       assert.ok(
         input?.[0]?.includes("6 projected net nonblank source lines removed"),
       );

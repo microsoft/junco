@@ -1,22 +1,22 @@
 //! The write-ahead log: a job's frozen snapshot into the seed.
 //!
 //! One append-only log, at `meta/wal.jsonl`, holds every transaction. The order is the protocol:
-//! the whole transaction is logged and fsynced first, then each record is applied to the seed, then
-//! `End`. A crash before `End` leaves a log a replay can finish; a crash after it leaves nothing to
-//! do in the seed.
+//! a physical transaction's complete intent is logged and fsynced first, then each record is applied
+//! to the seed, then `End`. Its unfinished intent can be replayed. Metadata-only frames instead
+//! need their durable `End`; a pending rollback checkpoint blocks automatic recovery.
 //!
 //! Everything that can be decided before the intent is written is decided there — by [`prepare`],
 //! which appends nothing: whether each operation is representable, whether the tree it lands in is
 //! the seed's own filesystem, mount and subvolume, whether the seed's directories can take it,
-//! and what exactly every write will carry. Only [`PreparedTransaction::apply`] writes, and its
-//! first write is the intent: any failure from it may leave a durable intent behind, and the
-//! seed must then be recovered before anything else is published into it.
+//! and what exactly every write will carry. Only [`PreparedTransaction::apply`] appends transaction
+//! records. Physical failures may leave an intent to replay; metadata failures restore the prior
+//! log or retain an explicit in-doubt checkpoint that must be resolved before more publication.
 //!
 //! The log also outlives its own stage. A caller normally follows a transaction with a record of
 //! its own — a history entry, an audit line — and a crash between the two leaves this log as the
 //! only surviving description of what entered the seed. That is why [`recover`] returns *every*
-//! transaction whose intent is complete, finished or not: the caller compares them against whatever
-//! it remembers and re-derives the difference.
+//! complete physical intent and finished metadata-only receipt: the caller compares them against
+//! whatever it remembers and re-derives the difference.
 //!
 //! The per-transaction metadata `M` is entirely the caller's. It is serialized into the `BEGIN`
 //! record beside the sequence number, flattened, so a caller's own fields sit at the top level of
@@ -226,10 +226,14 @@ struct Frame<M> {
 }
 
 impl<M> Frame<M> {
-    /// Whether this is a counted intent whose operations did not all reach the log: nothing about
-    /// it was ever durable, so it is neither replayed nor reported.
-    const fn abandoned(&self) -> bool {
-        !self.finished && self.records.len() < self.op_count
+    /// An incomplete physical intent, or a metadata-only frame without its receipt, is never
+    /// replayed or reported. Metadata-only headers must still pass the normal shape checks.
+    fn abandoned(&self) -> Result<bool, Error> {
+        if !self.finished && self.op_count == 0 {
+            self.validate()?;
+            return Ok(true);
+        }
+        Ok(!self.finished && self.records.len() < self.op_count)
     }
 
     /// Fails unless the operations present are exactly the count declared.
@@ -339,6 +343,8 @@ pub struct PreparedTransaction<'a> {
     intent: usize,
     /// The log, opened for appending.
     log: JsonLog<WalRecord<()>>,
+    /// Borrowed name of the log, for its metadata receipt's durable rollback checkpoint.
+    log_path: &'a Path,
     /// The buffer every file is read through.
     buffer: Vec<u8>,
 }
@@ -409,6 +415,7 @@ pub fn prepare<'a, M: Serialize>(
     meta: &M,
     ops: &[CommitOp],
 ) -> Result<PreparedTransaction<'a>, Error> {
+    log::check_metadata_receipt(log)?;
     let staging = Staging::of(seq, uid);
     let seed = Tree::open(seed)?;
     let mut buffer = vec![0; log::CHUNK];
@@ -434,6 +441,7 @@ pub fn prepare<'a, M: Serialize>(
     log::write_record(&mut frame, &WalRecord::<()>::End { seq })?;
     Ok(PreparedTransaction {
         log: JsonLog::open(log)?,
+        log_path: log,
         seed,
         work,
         staging,
@@ -454,12 +462,15 @@ impl PreparedTransaction<'_> {
     ///
     /// # Errors
     ///
-    /// Fails with [`Error::Io`] or [`Error::Wal`] for any failure at all — and since the intent
-    /// is the first thing written, any failure may leave it durable with the seed partly changed.
-    /// Nothing may be published into the seed after that until [`recover`] has run over it.
+    /// Physical publication failures return [`Error::Io`] or [`Error::Wal`] and may leave a
+    /// durable intent with the seed partly changed; nothing may publish until recovery runs.
+    /// Metadata-only append failure durably restores the prior log boundary. An incomplete abort
+    /// returns [`Error::AppendRollback`] and leaves a checkpoint that blocks automatic recovery.
+    /// [`Error::CommittedCleanup`] instead proves END was durably committed: preserve the
+    /// transaction's history and report the cleanup diagnostic, never treat it as an aborted call.
     pub fn apply(mut self) -> Result<(), Error> {
         if self.records.is_empty() {
-            return self.log.write_durably(&self.frame);
+            return self.log.write_metadata(self.log_path, &self.frame);
         }
         let (intent, end) = self.frame.split_at(self.intent);
         self.log.write_durably(intent)?;
@@ -497,9 +508,14 @@ impl PreparedTransaction<'_> {
 /// every record's shape; then every source of the transaction to finish is checked against the
 /// kind, hash and mode its record logged, and a source that is gone is accepted only when the
 /// seed already carries exactly what it would have written. A counted intent whose operations did
-/// not all reach the log is abandoned wherever it appears — neither replayed nor returned — and one
-/// at the end of the log is truncated away. A staging directory a frame names is cleaned — only
-/// its own temporaries, and only that directory — and never anything else in the seed.
+/// not all reach the log, or a zero-operation frame without `END`, is abandoned wherever it
+/// appears — neither replayed nor returned — and one at the end of the log is truncated away.
+/// A staging directory a frame names is cleaned — only its own temporaries, and only that
+/// directory — and never anything else in the seed.
+/// A pending metadata rollback checkpoint makes the source explicitly in doubt. Recovery refuses
+/// it without replay or truncation, even when complete `END` bytes are present. Repair must resolve
+/// the outcome: retain a known committed receipt, or durably restore the boundary for an uncommitted
+/// attempt, then remove the checkpoint and sync its directory.
 ///
 /// Replay is idempotent, including across a change of kind that already happened: a removal that
 /// finds its path — or an ancestor — already turned into what a later operation of the same
@@ -541,6 +557,7 @@ pub fn recover<M: Serialize + DeserializeOwned>(
     mut metadata_paths: impl FnMut(&M, &mut Vec<PathBuf>),
     mut prune_metadata: impl FnMut(&mut M, &BTreeSet<PathBuf>) -> bool,
 ) -> Result<Vec<Transaction<M>>, Error> {
+    log::check_metadata_receipt(log)?;
     let records = log::read_records::<WalRecord<M>>(log)?;
     if records.is_empty() {
         return Ok(Vec::new());
@@ -688,7 +705,7 @@ fn frames<M>(records: Vec<(u64, WalRecord<M>)>) -> Result<(Vec<Frame<M>>, Option
                 meta,
             } => {
                 if let Some(previous) = open.take()
-                    && !previous.abandoned()
+                    && !previous.abandoned()?
                 {
                     previous.check_count()?;
                     return Err(Error::Wal(format!(
@@ -732,7 +749,7 @@ fn frames<M>(records: Vec<(u64, WalRecord<M>)>) -> Result<(Vec<Frame<M>>, Option
     }
     let mut abandoned_tail = None;
     if let Some(frame) = open {
-        if frame.abandoned() {
+        if frame.abandoned()? {
             abandoned_tail = Some(frame.offset);
         } else {
             frames.push(frame);
@@ -2489,6 +2506,33 @@ pub(crate) mod tests {
         assert_eq!(recovered[0].uid, uid("job1"));
         assert_eq!(recovered[0].ops, [write("b.txt")]);
         assert!(!layout.seed.join("a.txt").exists());
+        assert_eq!(layout.log_bytes(), before);
+    }
+
+    #[test]
+    fn an_unfinished_metadata_frame_is_abandoned_without_changing_prior_receipts() {
+        let layout = Scratch::new();
+        layout.append(&[begin(1, "job0", 0), end(1)]);
+        let before = layout.log_bytes();
+        layout.append(&[begin(2, "job1", 0)]);
+        for _ in 0..2 {
+            let recovered = layout.recover().unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].seq, Seq::new(1));
+            assert_eq!(layout.log_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn unfinished_metadata_headers_still_require_their_own_staging_directory() {
+        let layout = Scratch::new();
+        let mut foreign = begin(1, "job0", 0);
+        if let WalRecord::Begin { staging, .. } = &mut foreign {
+            *staging = Staging::of(Seq::new(9), &uid("job0"));
+        }
+        layout.append(&[foreign]);
+        let before = layout.log_bytes();
+        assert!(matches!(layout.recover(), Err(Error::Wal(_))));
         assert_eq!(layout.log_bytes(), before);
     }
 

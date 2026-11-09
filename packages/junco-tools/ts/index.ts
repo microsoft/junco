@@ -86,8 +86,6 @@ export {
 } from "./memory.js";
 export {
   InfoTool,
-  RecvTool,
-  type RecvToolHost,
   SendTool,
   type SendToolHost,
 } from "./messaging.js";

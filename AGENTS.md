@@ -61,6 +61,8 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 ### `schedules` — policies, combinators and workflow controllers
 
 `config.scheduler: (label, graphPath) => policy`; controllers are spread into the `fromYaml` config (`{ available }` / `{ available, code }`).
+`schedules.ralph({ retries })` re-runs provider-error results (`stopReason: "error"`) in the same round, at most `retries` times per graph level. The default is zero; other invalid results and exhausted retries retain their existing failure behavior. Memory Ralph is unchanged.
+
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
@@ -72,9 +74,11 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.separate` | fn | `packages/junco-scheduler/src/scheduler.ts` | Split exclusive selection authority, not work, effects or JavaScript memory. |
 | `schedules.strength` | fn | `packages/junco-scheduler/src/scheduler.ts` | Override the strength of every node `inner` selects; `assign` names the rung per node. |
 | `schedules.limit` | fn | `packages/junco-scheduler/src/resources.ts` | Bound `scheduler`'s work by `limits`. |
+| `schedules.reads` | fn | `packages/junco-scheduler/src/scheduler.ts` | Override which inbound message edges every node `inner` selects reads this decision; `assign` receives its planned reads. |
+| `schedules.plannedReads` | fn | `packages/junco-scheduler/src/scheduler.ts` | The message edges of `nodeId`'s planned inputs (`snapshot.plans`) holding at least one queued message, in plan order. |
 | `schedules.lowest` | fn | `packages/junco-scheduler/src/resources.ts` | Rank for `choose`: lower predicted `kind` cost first (the profile's `safe` estimate, base units). |
 | `schedules.highest` | fn | `packages/junco-scheduler/src/resources.ts` | Rank for `choose`: higher predicted `kind` cost first, e.g. `highest("runtime")` starts the longest work first. |
-| `schedules.select` | const | `packages/junco-scheduler/src/scheduler.ts` | Work-only policies select at the default strength. |
+| `schedules.select` | const | `packages/junco-scheduler/src/scheduler.ts` | Select nodes at the given strength, reading their nonempty planned message edges. |
 | `schedules.nodeIds` | const | `packages/junco-scheduler/src/scheduler.ts` | The node ids of `selected`, in order. |
 | `schedules.MODEL_STRENGTHS` | const | `packages/junco-scheduler/src/scheduler.ts` | The five model strengths, weakest first; a `Ladder` names one model per strength. |
 | `schedules.DEFAULT_MODEL_STRENGTH` | const | `packages/junco-scheduler/src/scheduler.ts` | `2` (`"med"`): the strength work-only policies select at. |
@@ -89,9 +93,9 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.memory` | fn | `src/std/schedules/memory.ts` | Borrowed-memory controllers for all three standard memory workflow topologies. |
 | `schedules.runOptimizer` | fn | `src/std/schedules/optimizer.ts` | Optimize the prepared target `request` names until every requested stop predicate holds on a confirmed incumbent, a caller budget or cancellation stops it, or a prerequisite blocks it. |
 | `schedules.Scheduler` | type | `packages/junco-scheduler/src/scheduler.ts` | A policy: from a `Snapshot` of the graph (and an optional cancellation signal) to one `Decision`. |
-| `schedules.Snapshot` | type | `packages/junco-scheduler/src/scheduler.ts` | Native containers are detached; opaque state, messages, results and metadata are borrowed. |
+| `schedules.Snapshot` | type | `packages/junco-scheduler/src/scheduler.ts` | A scheduling snapshot with detached native containers and an optional previous validation error. |
 | `schedules.Decision` | type | `packages/junco-scheduler/src/scheduler.ts` | One scheduler answer: the nodes that run together in the next column, each at a strength. |
-| `schedules.NodeModel` | type | `packages/junco-scheduler/src/scheduler.ts` | One selected node and the strength it runs at. |
+| `schedules.NodeModel` | type | `packages/junco-scheduler/src/scheduler.ts` | One selected node, the strength it runs at, and the inbound message edges it reads this decision (each must hold ≥1 queued message; `[]` reads nothing). |
 | `schedules.ModelStrength` | type | `packages/junco-scheduler/src/scheduler.ts` | Index into MODEL_STRENGTHS: 0 = smol … 4 = xhigh. |
 | `schedules.ModelStrengthName` | type | `packages/junco-scheduler/src/scheduler.ts` | A strength by name, `"smol"` … `"xhigh"`. |
 | `schedules.SchedulerContext` | type | `packages/junco-scheduler/src/context.ts` | A graph paired with its policy: `step()` runs one decision, `run()` repeats decisions to quiescence; both resolve to the results map. |
@@ -109,6 +113,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.LadderRung` | type | `src/node-policy.ts` | One rung: a "provider/model-id" and its reasoning effort (`"off"` when omitted). |
 | `schedules.AgencyNodeMetadata` | type | `src/node-policy.ts` | Source-derived policy metadata; native descriptions remain on native observations. |
 | `schedules.RalphOptions` | type | `src/std/schedules/ralph.ts` | Round control of `schedules.ralph`: a fixed `rounds` count, or an `until` success check with an optional `rounds` cap. |
+| `schedules.RalphLoopOptions` | type | `src/std/schedules/ralph.ts` | Non-memory Ralph round control with bounded provider-error retries. |
 | `schedules.RalphPredicate` | type | `src/std/schedules/ralph.ts` | Synchronous success check of one completed Ralph result; `round` is one-based, `label` is the graph level's. |
 | `schedules.MemoryScheduleOptions` | interface | `src/std/schedules/memory.ts` | Options of `schedules.memory`: the borrowed `JuncoMemory` store and the Ralph round options of the memory Ralph loop. |
 | `schedules.OptimizationRequest` | type | `src/std/schedules/optimizer.ts` | What `runOptimizer` optimizes: the prepared target, objective, constraints, stop predicates, tuning axes and budgets. |

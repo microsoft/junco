@@ -50,6 +50,7 @@ type Result = {
   readonly isError: boolean;
 };
 const seen: Record<string, Result[]> = { A: [], B: [] };
+const userMessages: Record<string, string[]> = { A: [], B: [] };
 const tokens: Record<string, number> = { A: 0, B: 0 };
 const agents: Record<string, JuncoAgent> = {};
 
@@ -60,6 +61,13 @@ const step =
     next: (results: Result[]) => AssistantMessage,
   ): FauxResponseFactory =>
   (context) => {
+    userMessages[node] = context.messages
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        typeof message.content === "string"
+          ? message.content
+          : contentText(message.content),
+      );
     const last = context.messages.at(-1) as AgentMessage | undefined;
     if (last?.role === "toolResult")
       seen[node]!.push({
@@ -109,11 +117,8 @@ const b = (results: Result[]) => {
   if (!names.includes("bash")) return call("bash", { command: hold(32) });
   if (!names.includes("yield"))
     return call("yield", { reason: "waiting for A" });
-  type Received = { messages: unknown[] };
-  if (json<Received>(results, "recv").every((r) => r.messages.length === 0))
-    return names.at(-1) === "recv"
-      ? call("yield", { reason: "still waiting for A" })
-      : call("recv", {});
+  if (!userMessages.B!.includes("src/a.ts edited and released"))
+    return call("yield", { reason: "still waiting for A" });
   const graphs = results.filter((r) => r.name === "code_graph");
   type List = { clusters: { cluster: { id: string } }[] };
   const clusterId = () => {
@@ -251,9 +256,9 @@ try {
     await readFile(join(seed, "src/a.ts"), "utf8"),
     "export function ping() { return 22; }\n",
   );
-  type Received = { messages: unknown[] };
   assert.equal(
-    json<Received>(seen.B!, "recv").reduce((n, r) => n + r.messages.length, 0),
+    userMessages.B!.filter((text) => text === "src/a.ts edited and released")
+      .length,
     1,
   );
   const count = (node: string, name: string) =>
@@ -270,9 +275,7 @@ try {
   console.log(
     `  code_graph calls = 6 (map, search, deps, cluster.list/members/neighbors)`,
   );
-  console.log(
-    `  send = ${count("A", "send")}, recv calls = ${count("B", "recv")}, messages received = 1`,
-  );
+  console.log(`  send = ${count("A", "send")}, delivered user messages = 1`);
   console.log(
     `  yield tool calls A = ${count("A", "yield")}, B = ${count("B", "yield")}`,
   );

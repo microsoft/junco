@@ -1,5 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
+import type {
+  BashOperations,
+  BashToolOptions,
+} from "@earendil-works/pi-coding-agent";
 import type {
   NativeMux,
   NativeResourceEvent,
@@ -66,6 +69,8 @@ export interface ToolBinding {
   /** Policy owner id of this binding's calls and commands (`NativeResourceEvent.owner`). */
   readonly owner: string;
   readonly tools: ReadonlyMap<AgentTool, AgentTool>;
+  /** One shell command as this owner on the collection's mux (Pi `BashOperations.exec`): merged stdout/stderr through `onData`, `timeout` in seconds, `env` replaces the environment; its pipelines record in this binding's recorder. Rejects once closed. */
+  readonly exec: BashOperations["exec"];
   close(): Promise<void>;
 }
 
@@ -384,6 +389,8 @@ export class ToolCollection {
     return {
       owner,
       tools,
+      exec: (command, cwd, options) =>
+        bashOperations.exec(command, cwd, options),
       close: () => {
         closing ??= (async () => {
           stop.abort(new Error("ToolBinding is closed"));

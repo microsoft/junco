@@ -26,7 +26,7 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/read.ts`, `ts/grep.ts` | Snapshot-anchored `[path#TAG]` + numbered-row output over Pi's read/grep contracts. |
 | `ts/mime.ts` | Pi's image type sniffing, ported verbatim because Pi does not export it. |
 | `ts/edit.ts` | The hashline edit tool: one routed `mux.edit` call per edit. |
-| `ts/release.ts` | The `release` tool: one routed, always-managed `mux.release` call per file. |
+| `ts/release.ts` | The existing `release` tool: one routed, always-managed `mux.release` call for an exact file, or explicit `mux.releaseOwned` for the calling principal's committed ownership on the source. |
 | `ts/find.ts`, `ts/ast.ts`, `ts/diff.ts` | Native walker behind Pi's `find`, plus the structural-search/rewrite and diff tools. |
 | `ts/collection.ts` | `ToolCollection`: one `EditStore`, its own mux owner and policy, the complete ordered tool list, per-owner `bind()` sets, creator/borrower holds (`close()`/`lease()`), and final teardown that drains its invocations and closes its mux. |
 | `ts/yield.ts` | The native-free `yield` tool and the module-private registry behind `isYieldTool`: only its own tool objects are scheduling primitives for `junco-agent`. Keep factory and registry in this one module. |

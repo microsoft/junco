@@ -202,22 +202,22 @@ export function memory(options: MemoryScheduleOptions): {
               const assignments = view.messages.get(ASSIGNMENT) ?? [];
               if (state.started && assignments.length > 0)
                 throw new Error(
-                  "MemoryRalphLoop requires exactly one non-empty assignment",
+                  "MemoryRalphLoop requires one batch of non-empty prompt objectives",
                 );
               if (!state.started && assignments.length > 0) {
                 state.phase = "processing";
                 const progress = ralph.progress(graph);
                 let assignment: string;
                 try {
-                  assignment = ralph.first(progress, ASSIGNMENT)(view);
+                  assignment = ralph.admit(progress, view, ASSIGNMENT);
                 } catch {
                   throw new Error(
-                    "MemoryRalphLoop requires exactly one non-empty assignment",
+                    "MemoryRalphLoop requires one batch of non-empty prompt objectives",
                   );
                 }
                 if (assignment.trim() === "")
                   throw new Error(
-                    "MemoryRalphLoop requires exactly one non-empty assignment",
+                    "MemoryRalphLoop requires one batch of non-empty prompt objectives",
                   );
                 state.started = true;
                 state.prepared = await recall(assignment, assignment, signal);
@@ -243,7 +243,7 @@ export function memory(options: MemoryScheduleOptions): {
                 const assignment = progress.assignment;
                 if (assignment === undefined)
                   throw new Error(
-                    "MemoryRalphLoop requires exactly one non-empty assignment",
+                    "MemoryRalphLoop requires one batch of non-empty prompt objectives",
                   );
                 await save(JSON.stringify({ assignment, answer }), signal);
                 state.lastSaved = result;
@@ -255,7 +255,7 @@ export function memory(options: MemoryScheduleOptions): {
                   ];
                 } else {
                   state.prepared = await recall(
-                    ralph.revision(tracked)(view),
+                    ralph.revision(tracked),
                     assignment,
                     signal,
                   );
@@ -451,7 +451,9 @@ export function memory(options: MemoryScheduleOptions): {
           if (!(agent instanceof JuncoAgent || agent instanceof MockAgent))
             throw new TypeError("Ralph must be an agent node");
           if (agent.status === "idle" && state.prepared !== undefined) {
-            agent.stagePrompt(state.prepared);
+            agent.stagePrompt(
+              "Carry out the assignment in the user message that follows this one. Return the complete answer.",
+            );
             state.prepared = undefined;
           }
           return agent.status === "ready";

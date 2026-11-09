@@ -1,3 +1,4 @@
+import type { Events } from "@earendil-works/pi-agent-core";
 import { expect, spyOn, test } from "bun:test";
 import {
   DataflowGraph,
@@ -171,3 +172,66 @@ test("startNode snapshots mutable inputs before a blocked trace create lets the 
     server.stop(true);
   }
 });
+
+test("observeAgent exports one llm child span per model turn under the open activation span", async () => {
+  const { received, server, client } = receiver(() => 204);
+  const listeners = new Map<string, Set<(event: unknown) => void>>();
+  const events = {
+    on(type: string, listener: (event: unknown) => void) {
+      const set = listeners.get(type) ?? new Set();
+      listeners.set(type, set);
+      set.add(listener);
+      return () => set.delete(listener);
+    },
+  } as unknown as Events;
+  const emit = (type: string, event: unknown) => {
+    for (const listener of listeners.get(type) ?? []) listener(event);
+  };
+  const tracer = new OpikTracer(client);
+  const message = {
+    role: "assistant", content: [{ type: "text", text: "hi" }], api: "x",
+    provider: "github-copilot", model: "claude",
+    usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 0, totalTokens: 17,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.25 } },
+    stopReason: "stop",
+  };
+  const turn = { lane: "main", runId: "run", turnId: "turn", message, toolResults: [] };
+  const graph = new DataflowGraph<void, typeof Schema, number, never>(Width.create(1), Width.create(1), tracer);
+  const only = graph.addNode({
+    id: NodeId.create("only"), state: undefined, trigger: TriggerRule.always(),
+    // biome-ignore lint/correctness/useYield: the body must return on its first activation.
+    step: async function* (): NodeGenerator<typeof Schema, number> {
+      const detach = tracer.observeAgent({ id: only }, events);
+      emit("message_end", { lane: "main", message: { role: "user", content: "hello" } });
+      emit("message_start", { lane: "main", message });
+      emit("turn_end", turn);
+      detach();
+      detach();
+      emit("turn_end", turn);
+      return 42;
+    },
+  });
+  try {
+    await graph.evaluate((execute) => execute([[{ id: only, inputs: new Map() }]]));
+    const [trace] = received[0]!.body.traces as [Entity];
+    const [activation] = received[1]!.body.spans as [Entity];
+    const [llm] = received[2]!.body.spans as [Entity];
+    expect(received.map((r) => [r.method, r.path])).toEqual([
+      ["POST", "/api/v1/private/traces/batch"], ["POST", "/api/v1/private/spans/batch"],
+      ["POST", "/api/v1/private/spans/batch"], ["PATCH", `/api/v1/private/spans/${activation.id}`],
+      ["PATCH", `/api/v1/private/traces/${trace.id}`],
+    ]);
+    expect(trace.input).toMatchObject({ nodes: [{ id: "only" }] });
+    expect(llm).toMatchObject({
+      type: "llm", name: "only llm #1", parent_span_id: activation.id, trace_id: trace.id,
+      model: "claude", provider: "github-copilot", total_estimated_cost: 0.25,
+      input: { messages: [{ role: "user", content: "hello" }] },
+      output: { content: message.content, stopReason: "stop" },
+    });
+    expect(llm.usage).toEqual({ prompt_tokens: 12, completion_tokens: 5, total_tokens: 17,
+      cache_read_input_tokens: 2, cache_creation_input_tokens: 0 });
+  } finally {
+    server.stop(true);
+  }
+});
+

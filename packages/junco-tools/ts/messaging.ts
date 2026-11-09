@@ -1,72 +1,38 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { JsonValue } from "@earendil-works/pi-ai";
 import {
   EdgeId,
   type EdgeIdType,
   type Message,
-  messagesOf,
   type NodeIdType,
-  type ParentView,
 } from "dataflow-engine";
 import { type Static, type TSchema, Type } from "typebox";
-import { Value } from "typebox/value";
 import {
   captureRecorder,
   markProfileOwned,
   type ProfileRecorder,
   profileToolCall,
 } from "./profile-recorder.js";
-import { checkToolInput, checkToolOutput } from "./tool-support.js";
+import { checkToolInput } from "./tool-support.js";
 
 /** The recorder a carrier was built with: a view, or a getter resolved per call. */
 type Recorder =
   | ProfileRecorder<"operations">
   | (() => ProfileRecorder<"operations"> | undefined);
 
-const operationOf = (tool: "recv" | "send" | "info") =>
+const operationOf = (tool: "send" | "info") =>
   ({
     resource: "operations",
     category: tool,
     tool,
     operation: "execute",
   }) as const;
-const recvOperation = operationOf("recv");
 const sendOperation = operationOf("send");
 const infoOperation = operationOf("info");
 
-const recvParameters = Type.Object({}, { additionalProperties: false });
-const infoParameters = recvParameters;
+const infoParameters = Type.Object({}, { additionalProperties: false });
 
 /** One route a messaging schema covers: its edge and that edge's stored payload schema. */
 type Route = readonly [EdgeIdType, TSchema];
-
-/** `{id, payload}` correlated to `route`; `payload` may be absent only if its schema admits `undefined`. */
-function routeItem([id, schema]: Route, omittable: boolean): TSchema {
-  return Type.Object(
-    {
-      id: Type.Literal(id),
-      payload:
-        omittable && Value.Check(schema, undefined)
-          ? Type.Optional(schema)
-          : schema,
-    },
-    { additionalProperties: false },
-  );
-}
-
-/** recv's JSON items over `routes`; with none, only `[]`. */
-const routeItems = (routes: readonly Route[]): TSchema =>
-  Type.Array(
-    routes.length === 0
-      ? Type.Never()
-      : Type.Union(routes.map((route) => routeItem(route, true))),
-  );
-
-/** A recv output shape no host announced: an empty inbox. */
-const emptyInbox = Type.Object(
-  { messages: routeItems([]), values: routeItems([]) },
-  { additionalProperties: false },
-);
 
 /** A send parameter shape admitting no call: there is no outgoing message route. */
 const noRoutes = Type.Object(
@@ -78,13 +44,6 @@ const noRoutes = Type.Object(
 export type SendToolHost<N extends TSchema> = {
   readonly sendParameters: TSchema;
   send(message: Message<N>): void;
-};
-
-/** What a {@link RecvTool} drains: the retained inbox, its JSON output schema, and consumption. */
-export type RecvToolHost<N extends TSchema, T> = {
-  readonly view: ParentView<N, T>;
-  readonly recvOutputSchema: TSchema;
-  consume(): void;
 };
 
 /**
@@ -100,17 +59,6 @@ type UncheckedExecute<A extends AgentTool<TSchema, unknown>> =
   ) => infer O
     ? (toolCallId: string, params: unknown, ...rest: R) => O
     : never;
-
-type RecvToolStruct<N extends TSchema, T> = AgentTool<
-  typeof recvParameters,
-  {
-    readonly messages: readonly Message<N>[];
-    readonly values: readonly {
-      readonly id: EdgeIdType;
-      readonly payload: T;
-    }[];
-  }
->;
 
 type SendToolStruct = AgentTool<TSchema, undefined>;
 
@@ -138,54 +86,11 @@ type Binding<H> = {
  * Carriers each constructor built, with their hosts and recorders. Only these are graph
  * primitives; a copied or cast object is not.
  */
-const recvTools = new WeakMap<
-  object,
-  Binding<Pick<RecvToolHost<never, never>, "recvOutputSchema">>
->();
 const sendTools = new WeakMap<
   object,
   Binding<Pick<SendToolHost<never>, "sendParameters">>
 >();
 const infoTools = new WeakMap<object, Recorder | undefined>();
-
-async function receive<N extends TSchema, T>(
-  host: RecvToolHost<N, T> | undefined,
-  input: unknown,
-  signal: AbortSignal | undefined,
-  recorder: Recorder | undefined,
-): ReturnType<RecvTool<N, T>["execute"]> {
-  return profileToolCall(
-    captureRecorder(recorder),
-    recvOperation,
-    signal,
-    async () => {
-      checkToolInput("recv", recvParameters, input);
-      signal?.throwIfAborted();
-      if (host === undefined)
-        throw new Error("recv requires a JuncoGraph host");
-      const { view } = host;
-      const messages = messagesOf(view);
-      const values: { readonly id: EdgeIdType; readonly payload: T }[] = [];
-      for (const id of view.values.keys())
-        values.push({ id, payload: view.values.get(id) as T });
-      const details = { messages, values };
-      // Render and check before consuming: a payload JSON cannot express, one off its route's
-      // schema, or a cancellation leaves the inbox intact.
-      const text = JSON.stringify(details);
-      const structuredContent: JsonValue = JSON.parse(text);
-      checkToolOutput("recv", host.recvOutputSchema, structuredContent);
-      signal?.throwIfAborted();
-      host.consume();
-      return { content: [{ type: "text", text }], details, structuredContent };
-    },
-    ({ details }) => ({
-      counters: {
-        messages_received: details.messages.length,
-        values_received: details.values.length,
-      },
-    }),
-  );
-}
 
 async function emit<N extends TSchema>(
   host: SendToolHost<N> | undefined,
@@ -253,74 +158,6 @@ async function describe(
       };
     },
   );
-}
-
-/**
- * `recv`: drains the delivered messages and parent results retained for the current graph node,
- * reading `host`, or the host a `JuncoAgent` binds to its graph activation; without either it
- * fails rather than pretend the inbox is empty.
- */
-export class RecvTool<N extends TSchema = never, T = never> {
-  declare private readonly brand: "RecvTool";
-  readonly name = "recv";
-  readonly label = "recv";
-  readonly parameters = recvParameters;
-  readonly executionMode = "sequential";
-  execute: UncheckedExecute<RecvToolStruct<N, T>>;
-
-  constructor(host?: RecvToolHost<N, T>, recorder?: Recorder) {
-    this.execute = (_toolCallId, input, signal) =>
-      receive(host, input, signal, recorder);
-    recvTools.set(this, { host, recorder });
-    markProfileOwned(this, () => recvOperation);
-  }
-
-  /** The JSON this tool returns as `structuredContent`: its host's, else an empty inbox's. */
-  get outputSchema(): TSchema {
-    return recvTools.get(this)?.host?.recvOutputSchema ?? emptyInbox;
-  }
-
-  /** The model-visible contract: what recv does, and {@link outputSchema}. */
-  get description(): string {
-    return RecvTool.describe(this.outputSchema);
-  }
-
-  /** recv's description advertising `schema`, since providers do not transport output schemas. */
-  static describe(schema: TSchema): string {
-    return `Consumes messages and parent values retained for the current graph node. Returns JSON matching: ${JSON.stringify(schema)}`;
-  }
-
-  /**
-   * recv's output over the inbound `messages` and `values` routes: a strict `{messages, values}`
-   * whose items correlate each edge ID with that edge's schema, embedded unchanged.
-   */
-  static outputSchemaFor(
-    messages: readonly Route[],
-    values: readonly Route[],
-  ): TSchema {
-    return Type.Object(
-      { messages: routeItems(messages), values: routeItems(values) },
-      { additionalProperties: false },
-    );
-  }
-
-  /** Whether {@link RecvTool} built `tool`; a copied or same-named object is not a recv tool. */
-  static is(tool: object): tool is RecvTool<TSchema, unknown> {
-    return recvTools.has(tool);
-  }
-
-  /** Executes a genuine recv tool against `host`, ignoring any host it was built with. */
-  static async invoke<N extends TSchema, T>(
-    tool: RecvTool<TSchema, unknown>,
-    host: RecvToolHost<N, T>,
-    _toolCallId: string,
-    input: Static<typeof recvParameters>,
-    signal: AbortSignal,
-  ): ReturnType<RecvTool<N, T>["execute"]> {
-    if (!RecvTool.is(tool))
-      throw new TypeError("Not a recv tool constructed by RecvTool");
-    return receive(host, input, signal, recvTools.get(tool)?.recorder);
-  }
 }
 
 /**

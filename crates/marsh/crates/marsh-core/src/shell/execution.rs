@@ -1178,6 +1178,24 @@ impl BuiltinContext {
         let order = tracing.next_order(trace)?;
         snapshot.release(trace, &snapshot.physical(&self.cwd.join(file)), order)
     }
+    /// Queues release of every resource the calling principal currently owns on this source.
+    /// Selection uses committed history, including absent files, not the command's private edits.
+    /// Returns sorted source-relative paths; `run_tool` exposes them only after publication.
+    /// Publication atomically denies the entire command if any selected resource is no longer
+    /// owned by this principal or the selected policy refuses it. Reader and freshness claims
+    /// are unchanged. An empty owner set is a no-op; direct and ended commands are rejected.
+    /// Cannot be combined with managed filesystem mutation in the same command, even a reverted
+    /// write or an empty selection; publish edits first, then invoke bulk release separately.
+    /// A cleanup error after durable END explicitly reports a committed receipt; it does not
+    /// roll ownership back. An unresolved metadata checkpoint blocks automatic reopen.
+    pub fn release_owned(&self) -> Result<Vec<String>, ShellError> {
+        let snapshot = self
+            .snapshot()?
+            .ok_or_else(|| ShellError::infrastructure("a direct command cannot release"))?;
+        let (tracing, trace) = self.run.trace()?;
+        let order = tracing.next_order(trace)?;
+        snapshot.release_owned(trace, order)
+    }
     /// Resolves when cancellation is requested or the owning run ends.
     pub async fn cancelled(&self) {
         self.run.cancelled().await;

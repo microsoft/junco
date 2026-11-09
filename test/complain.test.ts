@@ -20,7 +20,7 @@ import {
   tools,
   trigger,
 } from "../src/index.ts";
-import { terminalPorts } from "./deterministic-support.ts";
+import { terminalPorts, userTexts } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
 
 // Real JuncoAgents on faux providers inside real graphs: the always-on complain tool records the
@@ -59,15 +59,12 @@ const input: AgenticInput = {
   text: "Contact the coordinator.",
 };
 
-/** A real agent that receives its inbox, complains `complaint` once and then answers "continued". */
+/** A real agent that complains `complaint` once and then answers "continued". */
 async function worker(
   complaint: string,
   systemPrompt: string = "complaint system",
 ) {
   const { options } = await nativeOptions([
-    fauxAssistantMessage([fauxToolCall("recv", {}, { id: "recv-1" })], {
-      stopReason: "toolUse",
-    }),
     fauxAssistantMessage(
       [fauxToolCall("complain", { complaint }, { id: "complaint-1" })],
       { stopReason: "toolUse" },
@@ -77,23 +74,10 @@ async function worker(
   const member = await agentApi.JuncoAgent.fromResolved({
     ...options,
     systemPrompt,
-    tools: [new tools.RecvTool()],
   });
   closers.push(() => member.return());
   return member;
 }
-
-/** The user and tool-result texts of a complaint's request snapshot. */
-const promptTexts = (issue: tools.Issue) =>
-  issue.prompt.messages.flatMap((message) =>
-    message.role === "user" || message.role === "toolResult"
-      ? [
-          typeof message.content === "string"
-            ? message.content
-            : contentText(message.content),
-        ]
-      : [],
-  );
 
 /** `member` registered behind a deterministic source sending `delivered` on `source->worker`. */
 function wire(
@@ -118,7 +102,7 @@ function wire(
     trigger: trigger.TriggerRule.always(),
     state: source,
   });
-  member.stagePrompt("Call recv and follow the delivered request.");
+  member.stagePrompt("Follow the request in the user message that follows.");
   const workerId = flow.addNode({
     ...(id === undefined ? {} : { id }),
     state: member,
@@ -177,12 +161,13 @@ describe("complaints through real graphs", () => {
       issue!.prompt.systemPrompt,
       `complaint system\n\n${agentApi.SYSTEM_INSTRUCTION}`,
     );
-    // The delivered payload reached the request as recv's result, not as a native user message.
-    assert.ok(promptTexts(issue!).some((text) => text.includes(input.text)));
+    assert.deepEqual(userTexts(issue!.prompt.messages), [
+      "Follow the request in the user message that follows.",
+      input.text,
+    ]);
     assert.deepEqual(issue!.prompt.tools?.map((tool) => tool.name).sort(), [
       "complain",
       "info",
-      "recv",
       "send",
       "task",
       "yield",
@@ -296,8 +281,11 @@ describe("complaints through real graphs", () => {
         issue.prompt.systemPrompt,
         `${systemPrompt}\n\n${agentApi.SYSTEM_INSTRUCTION}`,
       );
-      const texts = promptTexts(issue);
-      assert.ok(texts.some((text) => text.includes(own.text)));
+      const texts = userTexts(issue.prompt.messages);
+      assert.deepEqual(texts, [
+        "Follow the request in the user message that follows.",
+        own.text,
+      ]);
       assert.ok(!texts.some((text) => text.includes(foreign.text)));
     }
   }, 5_000);

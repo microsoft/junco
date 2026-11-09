@@ -53,10 +53,10 @@ graph:
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
     Bun:
       mcp: [playwright]
-      prompt: Call recv once, then answer for Bun only, browsing from https://bun.sh with the playwright tools.
+      prompt: Answer the question in the user message(s) following this prompt for Bun only, browsing from https://bun.sh with the playwright tools.
     Rust:
       mcp: [playwright]
-      prompt: Call recv once, then answer for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
+      prompt: Answer the question in the user message(s) following this prompt for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
     Reviewer:
       prompt: |-
         Merge the two answers below into one table of tool, version, release date and source URL. Keep a claim only if it cites a page.
@@ -74,7 +74,11 @@ graph:
     - {from: Reviewer, to: $sink, schema: {}}
 ```
 
-`mcp:` registers stdio MCP servers; a node lists the ones it may call under `mcp:`. `Goals` publishes its text once on each `~>` message edge; `Bun` and `Rust` run in parallel, each with its own Playwright server plus the built-in `send`, `recv`, `yield`, `info` and `task`; `Reviewer` fires when both `->` value edges hold a result and reads them through the `{{edge}}` placeholders. Models live in the TypeScript ladder, never in the YAML:
+`mcp:` registers stdio MCP servers; a node lists the ones it may call under `mcp:`. `Goals` publishes its text once on each `~>` message edge; `Bun` and `Rust` run in parallel, each with its own Playwright server plus the built-in coordination tools `task`, `yield`, `send` and `info` (and the separately enabled default `complain`). Their instructions precede the delivered user messages. `Reviewer` fires when both `->` value edges hold a result and reads them through the `{{edge}}` placeholders.
+
+Each scheduler-selected `NodeModel` must specify `readEdges`: the queued inbound message edges to consume this round. `schedules.select(snapshot, ids, strength?)` defaults to `schedules.plannedReads(snapshot, id)`; `schedules.reads(assign, inner)` overrides those reads, and `schedules.reads(() => [], schedules.parallel())` withholds all messages without consuming them. Invalid decisions are retried up to three attempts with `snapshot.lastError`, then throw. Read messages arrive as separate user messages in delivered order: `AgenticInput` text/images are steered as content (never dispatched by `kind`), and other payloads become `JSON.stringify({ id, payload })`. Stage instructions, not a copy of that content. Values are not steered: staged callbacks and YAML placeholders read value edges; message-edge placeholders fail at build time. `params` substitutions remain supported.
+
+Models live in the TypeScript ladder, never in the YAML:
 
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";

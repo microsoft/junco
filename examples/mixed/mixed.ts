@@ -1,6 +1,6 @@
 // # Mixed workflow: one agent against a nested graph
 //
-// mixed.yml declares the Goals emit node, Direct, the two-round Ralph workflow (a nested `Ralph -> Ralph` loop driven by `schedules.ralph`), and their joined Reviewer; this module supplies LADDER.
+// mixed.yml declares the competitors and their joined Reviewer; this module supplies LADDER, Ralph's rounds and raw-draft validation.
 // Goals sends the same assignment to both competitors; only Ralph's final draft reaches Reviewer.
 // Install workspace dependencies, then run after `pi` → `/login` → GitHub Copilot:
 //
@@ -26,13 +26,25 @@ export interface MixedGraph {
 
 export const MixedGraph = {
   async create(options: Pick<syntax.BuildOptions, "createAgent" | "tracer" | "ladder" | "recorder">): Promise<MixedGraph> {
+    const reviewerId = graph.NodeId.create("Reviewer");
+    const ralph = schedules.ralph({ rounds: 2 });
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: process.cwd(),
       scheduler: () => schedules.parallel(),
-      ...schedules.ralph({ rounds: 2 }),
+      ...ralph,
+      available: {
+        ...ralph.available,
+        Reviewer: ({ graph: workflow }) => (view, triggered) => {
+          // Validate the raw draft without copying it into the staged prompt.
+          if (triggered)
+            for (const draft of view.messages.get(graph.EdgeId.create("Ralph~>Reviewer")) ?? [])
+              syntax.finalText(draft, "Ralph~>Reviewer");
+          return triggered || workflow.getNode(reviewerId)?.status === "running";
+        },
+      },
       ...options,
     });
-    return { execution, reviewerId: graph.NodeId.create("Reviewer") };
+    return { execution, reviewerId };
   },
 };
 

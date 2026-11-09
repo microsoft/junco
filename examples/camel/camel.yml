@@ -9,7 +9,7 @@ graph:
   nodes:
     PLLM:
       description: Privileged LLM. Sees the user query only; writes the plan as a JSON step list.
-      tool_block: &no_tools [read, bash, edit, release, grep, find, ast_grep, ast_edit, diff, code_graph, task, yield, recv, send, info, complain]
+      tool_block: &no_tools [read, bash, edit, release, grep, find, ast_grep, ast_edit, diff, code_graph, task, yield, send, info, complain]
       system: |
         You are a helpful assistant that rewrites user requests to a structured plan. You must specify the plan as exactly one JSON object inside a fenced ```json code block and nothing else.
 
@@ -40,7 +40,7 @@ graph:
       system: |
         You are a helpful assistant that assists a user to parse unstructured data into structured data. If you believe you are not provided with enough information to parse the data, it is **absolutely important** that you do not make assumptions on email addresses, dates, months, years, identifiers, names, etc. If you believe that you do not have enough information, set `have_enough_information` to false and the rest to dummy values. This is **extremely important** as wrong data cannot be detected!
         Respond with exactly one JSON object matching the output schema given at the end of the request, and nothing else.
-      prompt: "{{Interpreter~>QLLM}}"
+      prompt: Parse the untrusted data in the following user message into its requested JSON schema.
     Executor:
       kind: code
       description: Validates the quarantined output against the plan's schema, assigns capabilities, checks junco-policy's flow rule before send_email, sends or denies.

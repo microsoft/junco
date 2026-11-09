@@ -1,6 +1,7 @@
 import {
   DataflowDefinitionError,
   type DataflowObservation,
+  type EdgeIdType,
   type InputSchedule,
   type NodeIdType,
 } from "dataflow-engine";
@@ -15,23 +16,42 @@ export type ModelStrengthName = (typeof MODEL_STRENGTHS)[number];
 export type ModelStrength = 0 | 1 | 2 | 3 | 4;
 /** `2` (`"med"`): the strength work-only policies select at. */
 export const DEFAULT_MODEL_STRENGTH: ModelStrength = 2;
-/** One selected node and the strength it runs at. */
+/** One selected node, the strength it runs at, and the inbound message edges it reads this decision (each must hold ≥1 queued message; `[]` reads nothing). */
 export type NodeModel = {
   readonly nodeId: NodeIdType;
   readonly modelStrength: ModelStrength;
+  readonly readEdges: readonly EdgeIdType[];
 };
 /** One scheduler answer: the nodes that run together in the next column, each at a strength. */
 export type Decision = { readonly selected: readonly NodeModel[] };
-/** Work-only policies select at the default strength. */
-export const select = (
+/** The message edges of `nodeId`'s planned inputs (`snapshot.plans`) holding at least one queued message, in plan order. */
+export const plannedReads = <S, N extends TSchema, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
+  nodeId: NodeIdType,
+): EdgeIdType[] =>
+  [...(snapshot.plans.get(nodeId) ?? [])]
+    .filter(
+      ([edge, count]) =>
+        count !== "none" &&
+        (snapshot.inputs.get(nodeId)?.messages.get(edge)?.length ?? 0) > 0,
+    )
+    .map(([edge]) => edge);
+/** Select nodes at the given strength, reading their nonempty planned message edges. */
+export const select = <S, N extends TSchema, T, C>(
+  snapshot: Snapshot<S, N, T, C>,
   ids: Iterable<NodeIdType>,
   modelStrength: ModelStrength = DEFAULT_MODEL_STRENGTH,
-): NodeModel[] => [...ids].map((nodeId) => ({ nodeId, modelStrength }));
+): NodeModel[] =>
+  [...ids].map((nodeId) => ({
+    nodeId,
+    modelStrength,
+    readEdges: plannedReads(snapshot, nodeId),
+  }));
 /** The node ids of `selected`, in order. */
 export const nodeIds = (selected: readonly NodeModel[]): NodeIdType[] =>
   selected.map((entry) => entry.nodeId);
 
-/** Native containers are detached; opaque state, messages, results and metadata are borrowed. */
+/** A scheduling snapshot with detached native containers and an optional previous validation error. Opaque state, messages, results and metadata are borrowed. */
 export type Snapshot<S, N extends TSchema, T, C> = DataflowObservation<
   S,
   N,
@@ -44,6 +64,8 @@ export type Snapshot<S, N extends TSchema, T, C> = DataflowObservation<
   readonly plans: ReadonlyMap<NodeIdType, InputSchedule>;
   readonly history: readonly Decision[];
   readonly threads: number;
+  /** Why the previous decision for this same snapshot was rejected; absent on the first attempt. */
+  readonly lastError?: DataflowDefinitionError;
 };
 
 /** A policy: from a `Snapshot` of the graph (and an optional cancellation signal) to one `Decision`. */
@@ -64,7 +86,7 @@ export function validateDecision<S, N extends TSchema, T, C>(
     !Array.isArray(decision.selected)
   ) {
     throw new DataflowDefinitionError(
-      "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
+      "Scheduler must return a decision with a selected array of { nodeId, modelStrength, readEdges } entries",
     );
   }
   const seen = new Set<NodeIdType>();
@@ -73,10 +95,12 @@ export function validateDecision<S, N extends TSchema, T, C>(
       entry === null ||
       typeof entry !== "object" ||
       Array.isArray(entry) ||
-      typeof entry.nodeId !== "string"
+      typeof entry.nodeId !== "string" ||
+      !Array.isArray(entry.readEdges) ||
+      entry.readEdges.some((edge: unknown) => typeof edge !== "string")
     )
       throw new DataflowDefinitionError(
-        "Scheduler must return a decision with a selected array of { nodeId, modelStrength } entries",
+        "Scheduler must return a decision with a selected array of { nodeId, modelStrength, readEdges } entries",
       );
     const { nodeId, modelStrength } = entry;
     if (
@@ -88,7 +112,7 @@ export function validateDecision<S, N extends TSchema, T, C>(
         `Scheduler decision gives node "${nodeId}" an invalid model strength ${String(modelStrength)}`,
       );
   }
-  for (const { nodeId: id } of decision.selected) {
+  for (const { nodeId: id, readEdges } of decision.selected) {
     if (seen.has(id))
       throw new DataflowDefinitionError(
         `Scheduler decision selects node "${id}" more than once`,
@@ -102,6 +126,18 @@ export function validateDecision<S, N extends TSchema, T, C>(
         `Scheduler decision selects unavailable node "${id}"`,
       );
     seen.add(id);
+    const seenEdges = new Set<EdgeIdType>();
+    for (const edge of readEdges) {
+      if (seenEdges.has(edge))
+        throw new DataflowDefinitionError(
+          `Scheduler decision reads edge "${edge}" of node "${id}" more than once`,
+        );
+      if ((snapshot.inputs.get(id)?.messages.get(edge)?.length ?? 0) === 0)
+        throw new DataflowDefinitionError(
+          `Scheduler decision reads edge "${edge}" of node "${id}" which holds no queued message`,
+        );
+      seenEdges.add(edge);
+    }
   }
 }
 
@@ -137,7 +173,7 @@ export function choose<S, N extends TSchema, T, C>(options: {
         );
       return rank === 0 ? (left < right ? -1 : left > right ? 1 : 0) : rank;
     });
-    return { selected: select(candidates.slice(0, width)) };
+    return { selected: select(snapshot, candidates.slice(0, width)) };
   };
 }
 
@@ -219,10 +255,34 @@ export function strength<S, N extends TSchema, T, C>(
             `strength: unknown model strength "${name}" for node "${nodeId}"`,
           );
         return copyUsageLimits(entry, {
-          nodeId,
+          ...entry,
           modelStrength: index as ModelStrength,
         });
       }),
+    };
+  };
+}
+
+/** Override which inbound message edges every node `inner` selects reads this decision; `assign` receives its planned reads. */
+export function reads<S, N extends TSchema, T, C>(
+  assign: (
+    snapshot: Snapshot<S, N, T, C>,
+    nodeId: NodeIdType,
+    planned: readonly EdgeIdType[],
+  ) => readonly EdgeIdType[],
+  inner: Scheduler<S, N, T, C>,
+): Scheduler<S, N, T, C> {
+  return async (snapshot, signal) => {
+    const decision = await inner(snapshot, signal);
+    return {
+      selected: decision.selected.map((entry) =>
+        copyUsageLimits(entry, {
+          ...entry,
+          readEdges: Object.freeze([
+            ...assign(snapshot, entry.nodeId, entry.readEdges),
+          ]),
+        }),
+      ),
     };
   };
 }
@@ -249,7 +309,7 @@ export function agent<S, N extends TSchema, T, C>(
       for (const id of wave)
         if (snapshot.available.has(id) && snapshot.owned.has(id))
           selected.add(id);
-      if (selected.size > 0) return { selected: select(selected) };
+      if (selected.size > 0) return { selected: select(snapshot, selected) };
     }
     return { selected: [] };
   };

@@ -95,7 +95,6 @@ const ONLY_COMPLAIN_BLOCK = [
   ...NATIVE_TOOL_BLOCK,
   "task",
   "yield",
-  "recv",
   "send",
   "info",
 ] as const;

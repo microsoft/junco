@@ -3,7 +3,8 @@
 # success and prompts are code:
 #   JuncoGraph.fromYaml(workflows.ralph, { cwd, scheduler: () => schedules.parallel(),
 #     ladder, ...schedules.ralph({ rounds: 3 }) });   // or schedules.ralph({ until })
-# Feed the assignment on route `assignment`; the result is Ralph's final (or accepted) round.
+# Feed the objectives on route `assignment`, one prompt message each in delivery order (one
+# message = one objective); the result is Ralph's final (or accepted) round.
 graph:
   name: Ralph
   source:

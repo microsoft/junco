@@ -76,6 +76,8 @@ export type ProfileEvent<R extends string> =
       readonly edgeId: string;
       /** One value published on that edge. */
       readonly value: number;
+      /** Grafana unit id of `value` (`ms`, `bytes`, `count:cases`, `bool_yes_no`, …); unitless probes share one dashboard panel. */
+      readonly unit?: string;
     }
   | ({ readonly kind: "start" } & ProfileOperation<R>)
   | ({

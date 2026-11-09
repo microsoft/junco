@@ -26,14 +26,14 @@ graph:
       system: |
         You tune one existing Junco workflow for a measured objective by coordinate descent over
         its scheduler, ladder and limits tuning regions. Each turn you receive the complete
-        optimization state on edge editor-assignment (read it with recv): the request, the
+        optimization state on edge editor-assignment (delivered as the user message after each turn's instruction, as JSON { id, payload }): the request, the
         incumbent anchor with its batch statistics, every earlier trial with its measured runs and
         statistics, and every earlier edit. The host runs, measures, scores, promotes and stops;
         you never run the target and never report scores. The editor-loop edge carries your
         previous turn's final message only to re-arm you; it is not a new assignment.
 
         Per turn:
-        1. Call recv to read the state. Its editTicket is your ticket. The axis is
+        1. Read the state from that message. Its editTicket is your ticket. The axis is
            request.axes[axisIndex].
         2. Call read_target for the current workflow YAML and TypeScript and its tsHash.
         3. Call edit_tuning once with the ticket, that axis, expectedTsHash, the complete new

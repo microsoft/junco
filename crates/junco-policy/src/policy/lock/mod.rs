@@ -12,6 +12,7 @@
 //! and reader denials. [`LockPolicy`] compiles this seven-rule table once and retains its
 //! evaluator caches across decisions.
 
+use std::collections::HashSet;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -174,6 +175,31 @@ where
         owner: name(owner),
         reader: name(reader),
     }
+}
+
+/// Resources currently owned by `principal` in the caller's committed history.
+/// An edit replaces ownership; release and remove clear it, while reads leave it unchanged.
+pub fn owned_resources<P, R>(
+    history: impl IntoIterator<Item = LockEvent<P, R>>,
+    principal: P,
+) -> HashSet<R>
+where
+    P: Eq,
+    R: Eq + Hash,
+{
+    let mut owned = HashSet::new();
+    for event in history {
+        match event.action {
+            Action::Edit if event.principal == principal => {
+                owned.insert(event.resource);
+            }
+            Action::Edit | Action::Release | Action::Remove => {
+                owned.remove(&event.resource);
+            }
+            Action::Read => {}
+        }
+    }
+    owned
 }
 
 /// Compiled ownership-lock trace policy reusable across candidate decisions.

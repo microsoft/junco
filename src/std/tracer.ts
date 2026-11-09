@@ -14,7 +14,9 @@ export type {
   ProfileOperation,
   ProfileRecorder,
 } from "junco-tools";
+export type { AgentObserver } from "../agent-node.js";
 export {
+  type GrafanaPanel,
   GrafanaRecorder,
   type GrafanaRecorderOptions,
 } from "../grafana-recorder.js";

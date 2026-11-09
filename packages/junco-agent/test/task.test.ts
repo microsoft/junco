@@ -1025,14 +1025,14 @@ test(
       assert.equal((await inherit.getModel())?.provider, "faux2");
       assert.deepEqual(
         inherit.getActiveTools().map((tool) => tool.name),
-        ["task", "yield", "recv", "send", "info", "c", "b", "complain", "bash"],
+        ["task", "yield", "send", "info", "c", "b", "complain", "bash"],
       );
       assert.ok(inherit.getTools().includes(c.tool));
       assert.ok(inherit.getTools().includes(b.tool));
       assert.ok(narrowed.getTools().includes(b.tool));
       assert.deepEqual(
         none.getTools().map((tool) => tool.name),
-        ["task", "yield", "recv", "send", "info", "complain", "bash"],
+        ["task", "yield", "send", "info", "complain", "bash"],
       );
       assert.deepEqual(none.getActiveTools(), none.getTools());
       assert.notEqual(none.getTools().at(-1), agent.getTools().at(-1));
@@ -1099,7 +1099,7 @@ test("subagents inherit and extend immutable tool blocks", async () => {
       ...(await agent.createSubagents([
         {},
         { tools: [] },
-        { tools: ["a"], tool_block: ["recv"] },
+        { tools: ["a"], tool_block: ["info"] },
       ])),
     );
     const [inherited, defaultsOnly, extended] = children;
@@ -1110,7 +1110,7 @@ test("subagents inherit and extend immutable tool blocks", async () => {
     assert.ok(!defaultsOnly.getTools().includes(a.tool));
     assert.ok(!defaultsOnly.getTools().includes(b.tool));
     assert.ok(extended.getTools().includes(a.tool));
-    assert.ok(!extended.getTools().some(({ name }) => name === "recv"));
+    assert.ok(!extended.getTools().some(({ name }) => name === "info"));
 
     const spy = spySessions();
     try {

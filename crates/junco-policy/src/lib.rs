@@ -70,4 +70,4 @@ mod policy;
 
 pub use model::{Action, Flow, FlowEvent, LockEvent};
 pub use policy::flow::{FlowPolicy, flow_decision};
-pub use policy::lock::{LockPolicy, lock_decision};
+pub use policy::lock::{LockPolicy, lock_decision, owned_resources};

@@ -11,6 +11,7 @@ import { contentText } from "@earendil-works/pi-ai";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import * as graph from "dataflow-engine";
 import { type ProfilesFile, profilesOf, unitOf } from "dataflow-profile";
+import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import * as agent from "junco-agent";
 import * as mcp from "junco-mcp";
@@ -248,7 +249,6 @@ function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
     ["yield", () => new tools.YieldTool()],
     ["info", () => new tools.InfoTool()],
     ["send", () => new tools.SendTool()],
-    ["recv", () => new tools.RecvTool()],
     ["task", () => new tools.TaskTool()],
   ];
   return defaults.flatMap(([name, create]) =>
@@ -632,8 +632,24 @@ async function registerAgent(
       instance = created;
     }
   }
-  if (node.prompt !== undefined)
-    instance.stagePrompt(compilePrompt(node.prompt));
+  if (node.prompt !== undefined) {
+    const prompt = compilePrompt(node.prompt);
+    const inbound = inboundEdges(spec, id);
+    for (const match of node.prompt.matchAll(PLACEHOLDER)) {
+      const placeholder = match[1]!;
+      if (placeholder.startsWith("params.")) continue;
+      const edge = edges.get(placeholder);
+      if (
+        !inbound.some((candidate) => edgeId(candidate) === placeholder) ||
+        edge === undefined ||
+        !E.isRight(edge.transport)
+      )
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: prompt placeholder {{${placeholder}}} of node "${id}" names message edge "${placeholder}"; delivered messages are steered into the agent as user messages, placeholders render value edges`,
+        );
+    }
+    instance.stagePrompt(prompt);
+  }
   const registered = g.addNode({
     ...registration,
     trigger: resolveTrigger(spec, id, edges, node.trigger),
@@ -834,7 +850,7 @@ async function rollback(
 
 /**
  * A placeholder's text for one payload of edge `id`: chat input text (`appendMessage` contributes
- * nothing) or a normally completed assistant result. Other payloads are read through `recv` or code.
+ * nothing) or a normally completed assistant result. Other payloads are read through code.
  */
 function render(payload: unknown, id: string): string {
   if (Value.Check(agent.AgenticInputSchema, payload))
@@ -842,7 +858,7 @@ function render(payload: unknown, id: string): string {
   if (Value.Check(agent.AssistantMessageSchema, payload))
     return finalText(payload, id);
   throw new TypeError(
-    `Prompt placeholder {{${id}}} renders only AgenticInput or AssistantMessage payloads; read edge "${id}" with recv or a code node`,
+    `Prompt placeholder {{${id}}} renders only AgenticInput or AssistantMessage payloads; read edge "${id}" with a code node`,
   );
 }
 
@@ -854,9 +870,7 @@ function compilePrompt(
     text.replace(PLACEHOLDER, (_, id: string) => {
       const key = graph.EdgeId.create(id);
       if (inputs.values.has(key)) return render(inputs.values.get(key), id);
-      return (inputs.messages.get(key) ?? [])
-        .map((payload) => render(payload, id))
-        .join("\n\n");
+      return "";
     });
 }
 

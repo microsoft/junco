@@ -234,7 +234,11 @@ for (const strategy of STRATEGIES) {
       ];
       const worker = new MockAgent({
         runs: [
-          run([pause(first), pause(second), settle(assistant("worker done"))]),
+          run([
+            pause(first, { drain: ["steer"] }),
+            pause(second),
+            settle(assistant("worker done")),
+          ]),
         ],
       });
       const child = new MockAgent({
@@ -293,9 +297,9 @@ for (const strategy of STRATEGIES) {
       assert.equal(resultText(graph, w), "worker done");
       assert.equal(resultText(graph, c), "child done");
       assert.deepEqual(requestTexts(worker.requests), [
-        ["work"],
-        ["work"],
-        ["work"],
+        ["work", "work"],
+        ["work", "work"],
+        ["work", "work"],
       ]);
       await graph.close();
       assert.equal(worker.status, "closed");
@@ -308,13 +312,13 @@ for (const strategy of STRATEGIES) {
       });
       const gatedMember = new MockAgent({
         prompt: "start",
-        followUpMode: "all",
+        steeringMode: "all",
         runs: [
           run([
             ...Array.from({ length: 8 }, (_, index) =>
-              pause([reason("wait", `m${index}`)], { drain: ["followUp"] }),
+              pause([reason("wait", `m${index}`)], { drain: ["steer"] }),
             ),
-            settle(assistant("member done"), { drain: ["followUp"] }),
+            settle(assistant("member done"), { drain: ["steer"] }),
           ]),
         ],
       });
@@ -365,7 +369,9 @@ for (const strategy of STRATEGIES) {
       graph.emit(s, Message.create(right, followUp("y1")));
       await stepUntil(graphContext, () => gatedMember.requests.length === 1);
       assert.deepEqual([queued(left), queued(right)], [[], []]);
-      assert.deepEqual(requestTexts(gatedMember.requests), [["start"]]);
+      assert.deepEqual(requestTexts(gatedMember.requests), [
+        ["start", "x1", "y1"],
+      ]);
 
       graph.emit(s, Message.create(left, followUp("x2")));
       await stepUntil(graphContext, () => queued(left).length === 1);
@@ -381,8 +387,13 @@ for (const strategy of STRATEGIES) {
 
       await graphContext.run();
       assert.equal(resultText(graph, m), "member done");
-      // Delivered messages are retained data for recv, never injected as native follow-ups.
-      assert.deepEqual(userTexts(gatedMember.history), ["start"]);
+      assert.deepEqual(userTexts(gatedMember.history), [
+        "start",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+      ]);
       await graph.close();
     });
 

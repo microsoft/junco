@@ -27,6 +27,8 @@ export {
   type NodeModel,
   nodeIds,
   parallel,
+  plannedReads,
+  reads,
   roundRobin,
   type Scheduler,
   type SchedulerContext,
@@ -57,4 +59,9 @@ export {
   type OptimizationState,
   runOptimizer,
 } from "./optimizer.js";
-export { type RalphOptions, type RalphPredicate, ralph } from "./ralph.js";
+export {
+  type RalphLoopOptions,
+  type RalphOptions,
+  type RalphPredicate,
+  ralph,
+} from "./ralph.js";

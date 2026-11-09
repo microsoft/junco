@@ -21,7 +21,8 @@ import { type BuildOptions, finalText } from "../../syntax/build.js";
 export type RalphPredicate = (
   result: AssistantMessage,
   context: {
-    readonly assignment: string;
+    /** The assignment's objectives in delivery order: one per prompt message on the assignment route. */
+    readonly objectives: readonly string[];
     readonly round: number;
     readonly label: string;
   },
@@ -37,30 +38,57 @@ export type RalphOptions = {
   /** Evaluated once per completed result: true publishes that result, false stages a revision. */
   readonly until?: RalphPredicate;
 };
+/** Non-memory Ralph round control with bounded provider-error retries. */
+export type RalphLoopOptions = RalphOptions & {
+  /** Same-round re-runs after a provider-error result (`stopReason: "error"`), per Ralph level; 0 (default) keeps the error as the round's result. */
+  readonly retries?: number;
+};
 /** Factories keyed by node id, the shape of `syntax.BuildOptions.available`. */
 export type Availability = NonNullable<BuildOptions["available"]>;
 
 type Progress = {
   completed: number;
+  /** Provider-error results re-run so far. */
+  retried: number;
+  /** The next staging is a continuation of the same round. */
+  retry: boolean;
   /** Ralph's latest retained result; `finalText` validates it before use. */
   last: unknown;
+  /** One objective per admitted prompt message, in delivery order. */
+  objectives: readonly string[] | undefined;
+  /** The admitted objectives, numbered when there are several. */
   assignment: string | undefined;
   /** Ralph is over: its fixed rounds ran, or `until` accepted `last`. Both hooks read this one decision. */
   done: boolean;
   /** A cached success-mode failure, boxed so a falsy thrown value is still rethrown. */
   failure: { readonly error: unknown } | undefined;
 };
-type Prompt = (inputs: ParentView<TSchema, unknown>) => string;
 
 const NODE = NodeId.create("Ralph");
 const INPUT = EdgeId.create("$source~>Ralph");
 const LOOP = "Ralph->Ralph";
+const FIRST_ROUND =
+  "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.";
+const RETRY =
+  "Your previous attempt in this round ended with a provider error, not because the work was finished. Continue the same round: carry on with the objectives, in order, building on what you already did. Return the complete answer.";
+const isProviderError = (result: unknown): boolean =>
+  typeof result === "object" &&
+  result !== null &&
+  (result as { stopReason?: unknown }).stopReason === "error";
+
+/** One objective verbatim; several as a numbered list in order. */
+const listed = (objectives: readonly string[]): string =>
+  objectives.length === 1
+    ? objectives.join("")
+    : objectives.map((text, i) => `${i + 1}. ${text}`).join("\n\n");
 
 /**
- * @throws {RangeError} when `rounds` is not a positive safe integer.
+ * @throws {RangeError} when `rounds` is not a positive safe integer or `retries` is not a non-negative safe integer.
  * @throws {TypeError} when `until` is not a function.
  */
-export function createRalphController(options: RalphOptions = {}) {
+export function createRalphController(options: RalphOptions = {}, retries = 0) {
+  if (!(Number.isSafeInteger(retries) && retries >= 0))
+    throw new RangeError("Ralph retries must be a non-negative safe integer");
   const { until } = options;
   const rounds = options.rounds ?? (until === undefined ? 2 : undefined);
   if (rounds !== undefined && !(Number.isSafeInteger(rounds) && rounds >= 1))
@@ -73,7 +101,10 @@ export function createRalphController(options: RalphOptions = {}) {
     if (p === undefined) {
       p = {
         completed: 0,
+        retried: 0,
+        retry: false,
         last: undefined,
+        objectives: undefined,
         assignment: undefined,
         done: false,
         failure: undefined,
@@ -84,8 +115,8 @@ export function createRalphController(options: RalphOptions = {}) {
     return p;
   };
   /**
-   * Every distinct retained result of Ralph completes one round on this graph level and is decided
-   * once; a success-mode failure is cached so later probes rethrow it without another call.
+   * Every distinct retained result completes one round unless retried after a provider error;
+   * a success-mode failure is cached so later probes rethrow it without another call.
    */
   const track = (
     graph: JuncoGraph<TSchema, unknown>,
@@ -100,15 +131,20 @@ export function createRalphController(options: RalphOptions = {}) {
     ) {
       // Identity first: user code never sees, and so never re-decides, the same result twice.
       p.last = current;
+      if (isProviderError(current) && p.retried < retries) {
+        p.retried++;
+        p.retry = true;
+        return p; // the same round runs again; nothing was decided
+      }
       p.completed++;
       if (until === undefined) p.done = p.completed >= (rounds ?? Infinity);
       else
         try {
           finalText(current, "Ralph");
-          if (p.assignment === undefined)
-            throw new Error("Ralph requires exactly one prompt assignment");
+          if (p.objectives === undefined)
+            throw new Error("Ralph requires one or more prompt objectives");
           const decision: unknown = until(current as AssistantMessage, {
-            assignment: p.assignment,
+            objectives: p.objectives,
             round: p.completed,
             label,
           });
@@ -124,47 +160,56 @@ export function createRalphController(options: RalphOptions = {}) {
     if (p.failure !== undefined) throw p.failure.error;
     return p;
   };
-  const first =
-    (p: Progress, input: EdgeIdType): Prompt =>
-    (inputs) => {
-      const batch = inputs.messages.get(input) ?? [];
-      const foreign =
-        [...inputs.messages.keys()].some(
-          (id) => id !== input && (inputs.messages.get(id)?.length ?? 0) > 0,
-        ) || [...inputs.values.keys()].length > 0;
-      const [assignment] = batch;
+  /** Admits the assignment: every message on `input`, in delivery order, is one image-free prompt objective. */
+  const admit = (
+    p: Progress,
+    view: ParentView<TSchema, unknown>,
+    input: EdgeIdType,
+  ): string => {
+    const batch = view.messages.get(input) ?? [];
+    const foreign =
+      [...view.messages.keys()].some(
+        (id) => id !== input && (view.messages.get(id)?.length ?? 0) > 0,
+      ) || [...view.values.keys()].length > 0;
+    const objectives: string[] = [];
+    for (const objective of batch) {
       if (
-        foreign ||
-        batch.length !== 1 ||
-        !Value.Check(AgenticInputSchema, assignment) ||
-        assignment.kind !== "prompt" ||
-        (assignment.images?.length ?? 0) > 0
+        !Value.Check(AgenticInputSchema, objective) ||
+        objective.kind !== "prompt" ||
+        (objective.images?.length ?? 0) > 0
       )
-        throw new Error("Ralph requires exactly one prompt assignment");
-      p.assignment = assignment.text;
-      return p.assignment;
-    };
-  const revision =
-    (p: Progress): Prompt =>
-    () => {
-      if (p.assignment === undefined)
-        throw new Error("Ralph requires exactly one prompt assignment");
-      const previous = finalText(p.last, "Ralph");
-      return `${p.assignment}\n\nRevise your previous answer to improve coverage, correctness, and clarity for every goal. Return the complete revised answer.\n\nPrevious answer:\n${previous}`;
-    };
-  return { progress, track, first, revision };
+        break;
+      objectives.push(objective.text);
+    }
+    if (foreign || batch.length === 0 || objectives.length !== batch.length)
+      throw new Error("Ralph requires one or more prompt objectives");
+    p.objectives = objectives;
+    p.assignment = listed(p.objectives);
+    return p.assignment;
+  };
+  // The last answer is already in session history; repeating it doubles context.
+  const revision = (p: Progress): string => {
+    if (p.objectives === undefined)
+      throw new Error("Ralph requires one or more prompt objectives");
+    finalText(p.last, "Ralph");
+    return `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed(p.objectives)}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
+  };
+  return { progress, track, admit, revision };
 }
 
 /** Availability hooks for the original, non-memory Ralph workflow. */
-export function ralph(options: RalphOptions = {}): {
+export function ralph(options: RalphLoopOptions = {}): {
   readonly available: Availability;
 } {
-  const { track, first, revision } = createRalphController(options);
+  const { track, admit, revision } = createRalphController(
+    options,
+    options.retries ?? 0,
+  );
   return {
     available: {
       Ralph: ({ graph, edges, label }) =>
         edges.has(LOOP)
-          ? (_view, triggered) => {
+          ? (view, triggered) => {
               const node = graph.getNode(NODE);
               if (node === undefined) throw new Error("Ralph node missing");
               if (node.status === "running") return true;
@@ -174,10 +219,17 @@ export function ralph(options: RalphOptions = {}): {
               if (!(agent instanceof JuncoAgent || agent instanceof MockAgent))
                 throw new TypeError("Ralph must be an agent node");
               // Only an idle agent is staged, once per round; repeated availability probes are safe.
-              if (agent.status === "idle")
-                agent.stagePrompt(
-                  p.completed === 0 ? first(p, INPUT) : revision(p),
-                );
+              if (agent.status === "idle") {
+                if (p.retry) {
+                  p.retry = false;
+                  agent.stagePrompt(RETRY);
+                } else {
+                  if (p.completed === 0) admit(p, view, INPUT);
+                  agent.stagePrompt(
+                    p.completed === 0 ? FIRST_ROUND : revision(p),
+                  );
+                }
+              }
               return agent.status === "ready";
             }
           : undefined,

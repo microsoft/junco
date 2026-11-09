@@ -36,11 +36,7 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import {
-  type AgenticOptions,
-  JuncoAgentError,
-  SYSTEM_INSTRUCTION,
-} from "junco-agent";
+import { type AgenticOptions, JuncoAgentError } from "junco-agent";
 import { EmptyPolicy, LockPolicy } from "junco-tools";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -74,7 +70,7 @@ import { nativeOptions } from "./support.ts";
 
 // The adapter is scheduler-agnostic: every scenario runs on both deterministic junco-scheduler
 // policies. Execution scenarios keep the original MockAgent as node state; messaging scenarios use
-// real JuncoAgents on faux providers, whose recv/send/info calls run against their registrations.
+// real JuncoAgents on faux providers, whose send/info calls run against their registrations.
 
 const closers: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -136,9 +132,8 @@ const sorted = (routes: readonly Route[]) =>
   );
 
 /**
- * A real JuncoAgent with a genuine `yield` plus `tools` (fresh recv/send/info by default), serving
- * `responses`. Records each request's context and every tool result it commits. `N` is the inbox
- * schema of the graph it joins.
+ * A real JuncoAgent with a genuine `yield` plus `tools`, serving `responses`.
+ * Records each request's context and every tool result it commits. `N` is the graph's message schema.
  */
 async function member<N extends TSchema = Chat>(
   responses: readonly FauxResponseStep[],
@@ -242,6 +237,89 @@ async function stepUntil(
   assert.ok(reached(), "the graph never reached the expected state");
 }
 
+for (const withhold of [false, true]) {
+  test(
+    withhold
+      ? "scheduler reads override withholds messages from native requests and leaves queues intact"
+      : "scheduler parallel steers ordered chat and numeric messages only to the wired native recipient",
+    async () => {
+      const numberSchema = Type.Number();
+      type N = Chat | typeof numberSchema;
+      const chat = chatEdge("sender->recipient");
+      const numeric = Edge.message("sender-number->recipient", numberSchema);
+      const unused = chatEdge("sender->bystander");
+      const texts = ["first", "second", "third"];
+      const recipient = await member<N>(
+        [call("info", {}, "info-1"), fauxAssistantMessage("recipient done")],
+        { prompt: "Read your inbox." },
+      );
+      const bystander = new MockAgent<Skill, PromptTemplate, AgentTool, N>({
+        runs: [yieldsThen(0, "never")],
+      });
+      const ports = terminalPorts<N, typeof AssistantMessageSchema>(
+        AgenticInputSchema,
+      );
+      const graph = new JuncoGraph(
+        ports.source,
+        ports.sink,
+        Width.create(1),
+        UNBOUNDED,
+        new DummyTracer(),
+        LockPolicy,
+      );
+      closers.push(() => graph.close());
+      const execution = schedules.context({
+        graph,
+        scheduler: withhold
+          ? schedules.reads(() => [], schedules.parallel())
+          : schedules.parallel(),
+      });
+      const sender = graph.addNode({
+        trigger: TriggerRule.always(),
+        state: new Deterministic<N, AssistantMessage>(async function* () {
+          yield [
+            ...texts.map((text) =>
+              Message.create(chat, { kind: "prompt", text }),
+            ),
+            Message.create(numeric, 42),
+          ];
+          return assistant("sender done");
+        }, LockPolicy),
+      });
+      const r = graph.addNode({
+        state: recipient.agent,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(chat),
+      });
+      const b = graph.addNode({
+        state: bystander,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(unused),
+      });
+      graph
+        .addEdge(sender, r, chat)
+        .addEdge(sender, r, numeric)
+        .addEdge(sender, b, unused);
+      ports.connect(graph, r);
+      await execution.run();
+
+      // The info response guarantees a second request after Pi processes its steering queue.
+      assert.equal(recipient.contexts.length, 2);
+      assert.deepEqual(userTexts(recipient.contexts[1]!.messages), [
+        "Read your inbox.",
+        ...(withhold
+          ? []
+          : [...texts, JSON.stringify({ id: numeric.id, payload: 42 })]),
+      ]);
+      assert.deepEqual(bystander.requests, []);
+      assert.ok(O.isNone(graph.result(b)));
+      const messages = graph.observe().inputs.get(r)!.messages;
+      assert.equal(messages.get(chat.id)?.length ?? 0, withhold ? 3 : 0);
+      assert.equal(messages.get(numeric.id)?.length ?? 0, withhold ? 1 : 0);
+    },
+  );
+}
+
 for (const strategy of STRATEGIES) {
   describe(strategy, () => {
     test("a dependent's parent result is not injected: priming loses nothing and its staged prompt runs unchanged", async () => {
@@ -343,7 +421,7 @@ for (const strategy of STRATEGIES) {
       ]);
     });
 
-    test("delivered payloads of every kind reach only the wired recipient's recv, in order, as data", async () => {
+    test("delivered payload kinds are data and text payloads forward their images through steering", async () => {
       const images = [image("1"), image("2"), image("3"), image("4")] as const;
       const toRecipient = chatEdge("sender->recipient");
       const toBystander = chatEdge("sender->bystander");
@@ -366,7 +444,7 @@ for (const strategy of STRATEGIES) {
         LockPolicy,
       );
       const recipient = await member([
-        call("recv", {}, "recv-1"),
+        call("info", {}, "info-1"),
         fauxAssistantMessage("recipient done"),
       ]);
       const bystander = new MockAgent({ runs: [yieldsThen(0, "never")] });
@@ -398,15 +476,26 @@ for (const strategy of STRATEGIES) {
       graphPorts.connect(graph, r);
       await graphContext.run();
 
-      const received = resultOf(recipient.results, "recv-1");
-      assert.deepEqual(received.details, {
-        messages: payloads.map((payload) => ({ id: toRecipient.id, payload })),
-        values: [],
-      });
-      // None of them acted as a native command: the only user message is the node prompt.
+      const users = recipient.contexts[1]!.messages.filter(
+        (message) => message.role === "user",
+      );
       assert.deepEqual(userTexts(recipient.contexts[1]!.messages), [
         "Read your inbox.",
+        JSON.stringify({ id: toRecipient.id, payload: payloads[0] }),
+        "context first",
+        "then work",
+        "adjust",
+        "confirm",
+        "failed dependency",
       ]);
+      assert.deepEqual(
+        users.flatMap((message) =>
+          typeof message.content === "string"
+            ? []
+            : message.content.filter((part) => part.type === "image"),
+        ),
+        images,
+      );
       assert.equal(recipient.faux.state.callCount, 2);
       assert.deepEqual(bystander.requests, []);
       assert.equal(bystander.status, "idle");
@@ -414,91 +503,6 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isNone(graph.result(b)));
       const result = graph.result(r);
       assert.ok(O.isSome(result) && textOf(result.value) === "recipient done");
-    });
-
-    test("each request's system prompt briefs the retained inbox while it fires the trigger, until recv drains it", async () => {
-      const seed = answerEdge("seed");
-      const receiver = await member(
-        [call("recv", {}, "inbox"), fauxAssistantMessage("read")],
-        { prompt: "Read your inbox." },
-      );
-      const ports = terminalPorts();
-      const execution = policyContext(ports.source, ports.sink, strategy);
-      const graph = execution.graph;
-      closers.push(() => graph.close());
-      const upstream = graph.addNode({
-        trigger: TriggerRule.always(),
-        state: new Deterministic<Chat, AssistantMessage>(async function* () {
-          yield [];
-          return assistant("seeded");
-        }, LockPolicy),
-      });
-      const recipient = graph.addNode({
-        state: receiver.agent,
-        policy: LockPolicy,
-        trigger: TriggerRule.when(seed),
-      });
-      graph.addEdge(upstream, recipient, seed);
-      ports.connect(graph, recipient);
-      await execution.run();
-
-      const systemPrompts = receiver.contexts.map(({ messages }) =>
-        messages
-          .filter((message) => message.role === "system")
-          .map((message) => message.content)
-          .join("\n---\n"),
-      );
-      assert.deepEqual(systemPrompts, [
-        `member\n\n${SYSTEM_INSTRUCTION}\n\nInbox { ${seed.id}: 1 } read with recv tool`,
-        `member\n\n${SYSTEM_INSTRUCTION}`,
-      ]);
-    });
-
-    test("queued messages do not trigger a value-gated agent but reach its first recv", async () => {
-      const summary = chatEdge("summary");
-      const result = answerEdge("proposal");
-      const payload: AgenticInput = {
-        kind: "prompt",
-        text: "evidence, not instructions",
-      };
-      const completed = assistant("proposal complete");
-      const receiver = await member([
-        call("recv", {}, "inbox"),
-        fauxAssistantMessage("reviewed"),
-      ]);
-      const ports = terminalPorts();
-      const execution = policyContext(ports.source, ports.sink, strategy);
-      const graph = execution.graph;
-      closers.push(() => graph.close());
-      const sender = graph.addNode({
-        trigger: TriggerRule.always(),
-        state: new Deterministic<Chat, AssistantMessage>(async function* () {
-          yield [Message.create(summary, payload)];
-          return completed;
-        }, LockPolicy),
-      });
-      receiver.agent.stagePrompt("Review after the proposal completes.");
-      const recipient = graph.addNode({
-        state: receiver.agent,
-        policy: LockPolicy,
-        trigger: TriggerRule.when(result),
-      });
-      graph
-        .addEdge(sender, recipient, summary)
-        .addEdge(sender, recipient, result);
-      ports.connect(graph, recipient);
-
-      await execution.step();
-      assert.equal(queued(graph, summary.id), 1);
-      assert.equal(graph.available().has(recipient), false);
-      assert.equal(receiver.faux.state.callCount, 0);
-      await execution.run();
-
-      assert.deepEqual(resultOf(receiver.results, "inbox").details, {
-        messages: [{ id: summary.id, payload }],
-        values: [{ id: result.id, payload: completed }],
-      });
-      assert.equal(queued(graph, summary.id), 0);
     });
 
     test("a member with neither a staged nor a received prompt is quiescent", async () => {
@@ -524,7 +528,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(idle.status, "idle");
     });
 
-    test("a delivery to a member without a prompt is retained data, not a command", async () => {
+    test("a delivery to a member without a prompt waits for a run, not a command", async () => {
       const edge = chatEdge("sender->member");
       const sender = new Deterministic<Chat, AssistantMessage>(
         async function* () {
@@ -538,7 +542,9 @@ for (const strategy of STRATEGIES) {
         },
         LockPolicy,
       );
-      const member = new MockAgent({ runs: [yieldsThen(0, "later")] });
+      const member = new MockAgent({
+        runs: [run([settle(assistant("later"), { drain: ["steer"] })])],
+      });
       const graphPorts = terminalPorts();
       const graphContext = plainContext(
         graphPorts.source,
@@ -567,7 +573,18 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.getNode(m)!.status, "running");
       assert.equal(graph.available().size, 0);
       assert.equal(textOf(await member.prompt("and now")), "later");
-      assert.deepEqual(requestTexts(member.requests), [["and now"]]);
+      assert.deepEqual(requestTexts(member.requests), [
+        [
+          "and now",
+          JSON.stringify({
+            id: edge.id,
+            payload: {
+              kind: "appendMessage",
+              message: { role: "user", content: "remember this", timestamp: 1 },
+            },
+          }),
+        ],
+      ]);
     });
 
     for (const stopReason of ["error", "aborted"] as const) {
@@ -769,7 +786,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(seen.length, 2);
       assert.equal(seen[1]!.values.get(edge.id), undefined);
       assert.equal(seen[1]!.messages.get(edge.id), undefined);
-      // The delivered parent result is inbox data for recv, never an injected user message.
+      // Value inputs remain callback data, never injected user messages.
       assert.deepEqual(userTexts(member.history), ["round one", "round two"]);
     });
 
@@ -809,7 +826,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(otherCalls, 0);
     });
 
-    test("a prompt callback sees the joined inputs once, after priming, without draining recv", async () => {
+    test("a prompt callback sees the delivered inputs once, after priming, while messages are steered", async () => {
       const notes = chatEdge("notes->agent");
       const seed = answerEdge("seed=>agent");
       const seedMessage = assistant("seed");
@@ -817,7 +834,6 @@ for (const strategy of STRATEGIES) {
       const seen: [unknown, unknown][] = [];
       const receiver = await member(
         [
-          call("recv", {}, "recv-inputs"),
           call("yield", { reason: "later" }, "yield-later"),
           fauxAssistantMessage("done"),
         ],
@@ -878,14 +894,11 @@ for (const strategy of STRATEGIES) {
 
       await graphContext.run();
       assert.deepEqual(seen, [[[note], seedMessage]]);
-      assert.deepEqual(resultOf(receiver.results, "recv-inputs").details, {
-        messages: [{ id: notes.id, payload: note }],
-        values: [{ id: seed.id, payload: seedMessage }],
-      });
       const result = graph.result(agentId);
       assert.ok(O.isSome(result) && textOf(result.value) === "done");
       assert.deepEqual(userTexts(receiver.contexts.at(-1)!.messages), [
         "Use note with seed",
+        "note",
       ]);
       const calls = receiver.faux.state.callCount;
       await graphContext.run();
@@ -1095,7 +1108,7 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.getNode(g)!.state, child);
     });
 
-    test("an agent discovers its routes, receives and sends as ordinary tools, and pauses only at Yield and policy denials", async () => {
+    test("an agent discovers its routes, receives steering and sends with tools, and pauses only at Yield and policy denials", async () => {
       const toAgent = chatEdge("source->agent");
       const seed = answerEdge("source=>agent");
       const toSink = chatEdge("agent->sink");
@@ -1134,7 +1147,6 @@ for (const strategy of STRATEGIES) {
       const receiver = await member(
         [
           call("info", {}, "info-1"),
-          call("recv", {}, "recv-1"),
           call("lookup", {}, "lookup-1"),
           (context) => {
             // The route comes from info's actual result, never from the script.
@@ -1152,14 +1164,12 @@ for (const strategy of STRATEGIES) {
               "send-1",
             );
           },
-          call("recv", {}, "recv-2"),
           call("yield", { reason: "checkpoint" }, "yield-1"),
           call("publish", {}, "publish-1"),
           fauxAssistantMessage("done"),
         ],
         {
           tools: [
-            new toolsApi.RecvTool(),
             new toolsApi.SendTool(),
             new toolsApi.InfoTool(),
             lookup,
@@ -1180,7 +1190,9 @@ for (const strategy of STRATEGIES) {
         trigger: TriggerRule.always(),
         state: source,
       });
-      receiver.agent.stagePrompt("Inspect info, then work through your inbox.");
+      receiver.agent.stagePrompt(
+        "Inspect info, then work through your messages.",
+      );
       const agentId = graph.addNode({
         state: receiver.agent,
         id: NodeId.create("agent"),
@@ -1207,15 +1219,13 @@ for (const strategy of STRATEGIES) {
         policy.lastYield?.map(({ kind, toolName }) => [kind, toolName]),
         [["tool", "yield"]],
       );
-      assert.equal(receiver.faux.state.callCount, 6);
+      assert.equal(receiver.faux.state.callCount, 4);
       assert.deepEqual(
         receiver.results.map(({ toolName, isError }) => [toolName, isError]),
         [
           ["info", false],
-          ["recv", false],
           ["lookup", true],
           ["send", false],
-          ["recv", false],
           ["yield", false],
         ],
       );
@@ -1247,15 +1257,11 @@ for (const strategy of STRATEGIES) {
           kind: "value",
         },
       ]);
-      // info consumed nothing: the first recv holds every delivery, and the second is empty.
-      assert.deepEqual(resultOf(receiver.results, "recv-1").details, {
-        messages: notes.map((payload) => ({ id: toAgent.id, payload })),
-        values: [{ id: seed.id, payload: seedMessage }],
-      });
-      assert.deepEqual(resultOf(receiver.results, "recv-2").details, {
-        messages: [],
-        values: [],
-      });
+      assert.deepEqual(userTexts(receiver.contexts.at(-1)!.messages), [
+        "Inspect info, then work through your messages.",
+        "first",
+        "second",
+      ]);
       // send admitted exactly one message before the run resumed.
       assert.equal(queued(graph, toSink.id) + out.delivered.length, 1);
 
@@ -1264,7 +1270,7 @@ for (const strategy of STRATEGIES) {
         () => policy.lastYield?.[0]?.kind === "policy",
       );
       assert.equal(receiver.agent.status, "suspended");
-      assert.equal(receiver.faux.state.callCount, 7);
+      assert.equal(receiver.faux.state.callCount, 5);
       assert.deepEqual(
         policy.lastYield?.map(({ kind, toolName }) => [kind, toolName]),
         [["policy", "publish"]],
@@ -1274,95 +1280,16 @@ for (const strategy of STRATEGIES) {
       assert.match(contentText(denied.content), /denied by policy/);
 
       await graphContext.run();
-      assert.equal(receiver.faux.state.callCount, 8);
+      assert.equal(receiver.faux.state.callCount, 6);
       const result = graph.result(agentId);
       assert.ok(O.isSome(result) && textOf(result.value) === "done");
       assert.deepEqual(out.delivered, [{ kind: "prompt", text: "forwarded" }]);
-    });
-
-    test("a postponed recv returns every retained batch in FIFO order and each value once; a stale value never starves a fresh message", async () => {
-      const notes = chatEdge("notes->agent");
-      const seed = answerEdge("seed=>agent");
-      const seedMessage = assistant("seed");
-      const note = (text: string): AgenticInput => ({ kind: "prompt", text });
-      const receiver = await member([
-        call("yield", { reason: "later" }, "yield-1"),
-        call("recv", {}, "recv-1"),
-        call("yield", { reason: "again" }, "yield-2"),
-        call("recv", {}, "recv-2"),
-        fauxAssistantMessage("done"),
-      ]);
-      const graphPorts = terminalPorts();
-      const graphContext = policyContext(
-        graphPorts.source,
-        graphPorts.sink,
-        strategy,
-      );
-      const graph = graphContext.graph;
-      closers.push(() => graph.close());
-      const seedId = graph.addNode({
-        id: NodeId.create("seed"),
-        trigger: TriggerRule.always(),
-        state: new Deterministic<Chat, AssistantMessage>(
-          // biome-ignore lint/correctness/useYield: a source resolving on its first activation.
-          async function* () {
-            return seedMessage;
-          },
-          LockPolicy,
-        ),
-      });
-      const notesId = inert(graph, { id: NodeId.create("notes") });
-      receiver.agent.stagePrompt("Work through your inbox when ready.");
-      const agentId = graph.addNode({
-        state: receiver.agent,
-        id: NodeId.create("agent"),
-        policy: LockPolicy,
-        trigger: TriggerRule.anyOf(
-          TriggerEntry.on(notes),
-          TriggerEntry.on(seed),
-        ),
-      });
-      graph.addEdge(seedId, agentId, seed).addEdge(notesId, agentId, notes);
-      const policy = nodePolicies.get(graph.getNode(agentId)!.step)!;
-
-      graphPorts.connect(graph, agentId);
-      graph.emit(notesId, Message.create(notes, note("n1")));
-      graph.emit(notesId, Message.create(notes, note("n2")));
-      await stepUntil(
-        graphContext,
-        () => receiver.agent.status === "suspended",
-      );
-      assert.ok(O.isSome(graph.result(seedId)));
-      // Another batch arrives while the model postpones recv.
-      graph.emit(notesId, Message.create(notes, note("n3")));
-      await stepUntil(
-        graphContext,
-        () => policy.lastYield?.[0]?.reason === "again",
-      );
-      graph.emit(notesId, Message.create(notes, note("n4")));
-      await graphContext.run();
-
-      assert.deepEqual(resultOf(receiver.results, "recv-1").details, {
-        messages: ["n1", "n2", "n3"].map((text) => ({
-          id: notes.id,
-          payload: note(text),
-        })),
-        values: [{ id: seed.id, payload: seedMessage }],
-      });
-      assert.deepEqual(resultOf(receiver.results, "recv-2").details, {
-        messages: [{ id: notes.id, payload: note("n4") }],
-        values: [],
-      });
-      const result = graph.result(agentId);
-      assert.ok(O.isSome(result) && textOf(result.value) === "done");
     });
 
     test("shared messaging carriers act for each agent's own registration; a copied carrier gains no graph authority", async () => {
       const direct: string[] = [];
       const directHost = {
         sendParameters: toolsApi.SendTool.parametersFor([]),
-        view: { messages: new Map(), values: new Map() },
-        consume: () => void direct.push("consume"),
         send: () => void direct.push("send"),
         info: () => {
           direct.push("info");
@@ -1829,11 +1756,10 @@ describe("edge schemas reach each agent's messaging tools", () => {
     assert.deepEqual(y.delivered, ["seven"]);
   });
 
-  test("recv advertises the inbound schema, and a route added while suspended is validated at once and declared to the model", async () => {
+  test("a send route added while suspended is validated at once and declared to the model", async () => {
     const feed = Edge.message("feed->A", NumberSchema);
     const late = Edge.message("A->B", NumberSchema);
     const a = await member<N>([
-      call("recv", {}, "recv-1"),
       call("send", { id: late.id, payload: 5 }, "send-early"),
       call("yield", { reason: "await a route" }, "yield-1"),
       call("send", { id: late.id, payload: 5 }, "send-1"),
@@ -1859,15 +1785,7 @@ describe("edge schemas reach each agent's messaging tools", () => {
     ports.connect(graph, aId);
     await stepUntil(execution, () => a.agent.status === "suspended");
 
-    // Before the route exists, send admits nothing; recv describes exactly the inbound edge.
-    const registration = registeredNodeContexts.get(graph.getNode(aId)!)!;
-    const recv = toolIn(a.contexts[0]!, "recv");
-    assert.equal(
-      recv.description,
-      toolsApi.RecvTool.describe(registration.recvOutputSchema),
-    );
-    assert.ok(recv.description.includes('"type":"number"'));
-    assert.ok(recv.description.includes(feed.id));
+    // Before the route exists, send admits nothing.
     assert.ok(resultOf(a.results, "send-early").isError);
     assert.ok(
       !Value.Check(toolIn(a.contexts[1]!, "send").parameters, {
@@ -1875,10 +1793,6 @@ describe("edge schemas reach each agent's messaging tools", () => {
         payload: 5,
       }),
     );
-    assert.deepEqual(resultOf(a.results, "recv-1").details, {
-      messages: [{ id: feed.id, payload: 7 }],
-      values: [],
-    });
 
     const b = collector(graph, late, "B");
     graph.addEdge(aId, b.id, late);

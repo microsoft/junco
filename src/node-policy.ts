@@ -138,14 +138,14 @@ export const nodePolicies = new WeakMap<object, NodePolicy>();
 
 /**
  * What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes,
- * plus messaging tool schemas read live from the node's actual links.
+ * plus the send tool schema read live from the node's actual outbound message links.
  */
 export type NodeRegistration<
   N extends TSchema = TSchema,
   V = AssistantMessage,
 > = Pick<
   NonNullable<JuncoAgentNodeContext<N, V>["messaging"]>,
-  "send" | "info" | "sendParameters" | "recvOutputSchema"
+  "send" | "info" | "sendParameters"
 > & {
   readonly tracer: DataflowTracer;
   /** The owning graph's current recorder view, if it records. */

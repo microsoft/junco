@@ -39,7 +39,7 @@ const NATIVE = [
   "diff",
   "code_graph",
 ] as const;
-const DEFAULTS = [...NATIVE, "task", "yield", "recv", "send", "info", "complain"];
+const DEFAULTS = [...NATIVE, "task", "yield", "send", "info", "complain"];
 const copyTree = {
   ...testAddon,
   NativeMux: { open: testAddon.NativeMux.openCopyTree.bind(testAddon.NativeMux) },

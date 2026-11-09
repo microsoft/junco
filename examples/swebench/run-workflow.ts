@@ -72,7 +72,7 @@ const WORKDIR = "/testbed";
 const ACTIVATE = "source /opt/miniconda3/bin/activate\nconda activate testbed";
 const GIT = ["git", "-c", "safe.directory=/testbed", "-C", WORKDIR];
 /** Junco's communication tools. Bound tools are the only others. */
-const COMMUNICATION_TOOLS: Record<string, true> = { yield: true, info: true, send: true, recv: true };
+const COMMUNICATION_TOOLS: Record<string, true> = { yield: true, info: true, send: true };
 /**
  * Junco defaults every agent loses: the host file and shell natives (a node's bound container bash replaces
  * the native bash) and `task`, so nodes cannot spawn undeclared work.
@@ -757,7 +757,7 @@ graph:
       description: Repeats the handed-off value.
       system: You are a test agent.
       trigger: Relay~>Echo
-      prompt: "Reply with exactly this value and nothing else: {{Relay~>Echo}}"
+      prompt: "Reply with exactly the value in the user message following this prompt and nothing else."
   edges:
     - {from: Probe, to: Relay, schema: {}}
     - {from: Relay, to: Echo, kind: message, schema: {type: object, required: [kind, text], properties: {kind: {const: prompt}, text: {type: string}}}}

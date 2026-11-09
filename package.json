@@ -87,5 +87,8 @@
     "@earendil-works/pi-coding-agent": {
       "undici": "8.12.3"
     }
+  },
+  "patchedDependencies": {
+    "@earendil-works/pi-agent-core@0.99.2": "patches/@earendil-works%2Fpi-agent-core@0.99.2.patch"
   }
 }

@@ -128,7 +128,7 @@ test("a timed-out command stops its own container and leaves other containers ru
 }, 60_000);
 
 // ---- Coordination: the real workflow topology and code nodes, with root agents scripted as code nodes
-// and Planner agents kept as real MockAgents so their YAML prompt placeholders are rendered.
+// and Planner agents kept as real MockAgents so staged instructions and steered messages stay separate.
 type Fake = {
   files: Record<string, string>;
   log: string[];
@@ -269,7 +269,7 @@ type YamlMock = MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
 /** A Planner mock that logs every request, including staged corrections. */
 class Draft extends MockAgent<Skill, PromptTemplate, AgentTool, TSchema, unknown> {
   constructor(runs: readonly MockRun[], readonly h: Fake, readonly id = "Draft") {
-    super({ runs });
+    super({ runs, steeringMode: "all" });
   }
   override next(...args: Parameters<YamlMock["next"]>) {
     this.h.log.push(`${this.id}:next`);
@@ -280,9 +280,12 @@ const settled = (text: string): MockRun["frames"][number] => ({ step: { kind: "s
 /** One Draft run per entry: a plan text settles at once; frames are used verbatim. */
 const drafts = (...runs: (string | MockRun["frames"])[]): MockRun[] =>
   runs.map((run) => ({
-    frames: typeof run === "string" ? [settled(run)] : run,
+    frames: (typeof run === "string" ? [settled(run)] : run).map((frame, index) => index === 0 ? { ...frame, drain: ["steer"] } : frame),
     interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
   }));
+const userTexts = (request: Draft["requests"][number]): string[] => request.messages
+  .filter((message) => message.role === "user")
+  .map(({ content }) => typeof content === "string" ? content : content.map((part) => "text" in part ? part.text : "").join(""));
 /** The user text of each Planner request after the first: the correction prompts CheckPlan staged. */
 const corrections = (agent: Draft): string[] =>
   agent.requests.slice(1).map(({ messages }) => {
@@ -363,7 +366,7 @@ group("solo baseline", () => {
     context: h.host,
     tools: { bash: containerBash("unused", () => {}) },
     createAgent: async () => new MockAgent({ runs: [{
-      frames: [{ step: { kind: "settled", message: message("solo report", stop) } }],
+      frames: [{ drain: ["steer"], step: { kind: "settled", message: message("solo report", stop) } }],
       interrupted: { step: { kind: "settled", message: message("aborted", "aborted") } },
     }] }),
     tracer: new tracer.DummyTracer(),
@@ -395,6 +398,11 @@ group("coordination", () => {
     expect(run.error).toBeUndefined();
     for (const worker of ["Trace", "Reproduce", "Contracts"]) expect(run.at("Draft:next")).toBeGreaterThan(run.at(`${worker}:done`));
     expect(run.at("Contracts:done")).toBeGreaterThan(run.at("Trace:done"));
+    const texts = userTexts(run.draft.requests[0]);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).not.toContain("f(1) is wrong");
+    expect(texts[1].split("f(1) is wrong")).toHaveLength(2);
+    expect(texts[1].split(run.saved.get("evidence.md")!)).toHaveLength(2);
   });
 
   test("an abnormal evidence report or a duplicated assignment fails the run before planning", async () => {
@@ -632,7 +640,7 @@ group("dormant topology capabilities", () => {
     level.nodes.Draft.trigger = "$source~>Draft";
     level.nodes.Critic = {
       trigger: { any: ["Draft->Critic", "Critic->Critic"] },
-      prompt: "{{$source~>Critic}}\n\n# Draft plan\n{{Draft->Critic}}",
+      prompt: "Read the issue and evidence in the user message following this prompt.\n\n# Draft plan\n{{Draft->Critic}}",
     };
     level.nodes.CheckPlan.trigger = "Critic->CheckPlan";
     level.edges = [
@@ -656,11 +664,12 @@ group("dormant topology capabilities", () => {
       expect(critic.requests).toHaveLength(2);
       expect(corrections(critic)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
       expect(corrections(critic)[0]).toContain("The plan has no regression check");
-      const first = JSON.stringify(critic.requests[0].messages);
-      expect(first).toContain("initial draft based on evidence");
-      expect(first).toContain("f(1) is wrong");
-      expect(first).toContain("Trace report");
-      expect(first).not.toContain("{{$source~>Critic}}");
+      const first = userTexts(critic.requests[0]);
+      expect(first).toHaveLength(2);
+      expect(first[0]).toContain("initial draft based on evidence");
+      expect(first[0]).not.toContain("f(1) is wrong");
+      expect(first[1].split("f(1) is wrong")).toHaveLength(2);
+      expect(first[1].split(run.saved.get("evidence.md")!)).toHaveLength(2);
     });
   });
 
@@ -680,7 +689,7 @@ group("dormant topology capabilities", () => {
 
   test("Input publishes the same issue once on both outgoing message edges", async () => {
     const document = structuredClone(cb.document);
-    document.graph.nodes.Observer = { trigger: "Input~>Observer", prompt: "{{Input~>Observer}}" };
+    document.graph.nodes.Observer = { trigger: "Input~>Observer", prompt: "Read the issue in the user message following this prompt." };
     document.graph.edges!.push({
       ...document.graph.edges!.find((edge) => edge.from === "Input")!, to: "Observer",
     });
@@ -705,10 +714,10 @@ group("dormant topology capabilities", () => {
     const promptSchema = level.edges!.find((edge) => edge.from === "$source")!.schema;
     level.source = { routes: { "JoinEvidence~>Planner": ["$source~>DraftA", "$source~>DraftB", "$source~>Merge"] } };
     level.nodes = {
-      DraftA: { trigger: "$source~>DraftA", prompt: "{{$source~>DraftA}}" },
-      DraftB: { trigger: "$source~>DraftB", prompt: "{{$source~>DraftB}}" },
+      DraftA: { trigger: "$source~>DraftA", prompt: "Draft a plan from the evidence in the user message following this prompt." },
+      DraftB: { trigger: "$source~>DraftB", prompt: "Draft a plan from the evidence in the user message following this prompt." },
       JoinDrafts: { kind: "code", trigger: { all: ["DraftA->JoinDrafts", "DraftB->JoinDrafts"] } },
-      Merge: { trigger: { any: ["JoinDrafts~>Merge", "Merge->Merge"] }, prompt: "{{$source~>Merge}}\n\n{{JoinDrafts~>Merge}}" },
+      Merge: { trigger: { any: ["JoinDrafts~>Merge", "Merge->Merge"] }, prompt: "Merge the evidence and named draft reports in the user messages following this prompt." },
       CheckPlan: { ...level.nodes.CheckPlan, trigger: "Merge->CheckPlan" },
     };
     level.edges = [
@@ -734,9 +743,12 @@ group("dormant topology capabilities", () => {
       for (const path of ["Planner/DraftA", "Planner/DraftB"]) expect(run.agents.get(path)!.requests).toHaveLength(1);
       const merge = run.agents.get("Planner/Merge")!;
       expect(merge.requests).toHaveLength(2);
-      const first = JSON.stringify(merge.requests[0].messages);
-      for (const text of ["Plan 1 (DraftA)", "first independent draft", "Plan 2 (DraftB)", "second independent draft", "Trace report", "f(1) is wrong"]) expect(first).toContain(text);
-      expect(first).not.toContain("{{$source~>Merge}}");
+      const first = userTexts(merge.requests[0]);
+      expect(first).toHaveLength(3);
+      expect(first[0]).not.toContain("f(1) is wrong");
+      expect(first[1].split("f(1) is wrong")).toHaveLength(2);
+      expect(first[1].split(run.saved.get("evidence.md")!)).toHaveLength(2);
+      expect(first[2]).toBe(run.saved.get("planning/drafts.md")!);
       expect(corrections(merge)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
 
       const abnormal = await scenario({}, {

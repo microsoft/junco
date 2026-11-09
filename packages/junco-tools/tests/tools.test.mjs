@@ -2153,7 +2153,7 @@ test("LspTool executes native status and semantic errors under Node", {
     `const { fixture, closeFixture } = await import(${JSON.stringify(new URL("./helpers.mjs", import.meta.url).href)});`,
     `const ws = await fixture({ files: {} });`,
     `try {`,
-    `  const options = { native: ws.native, mux: ws.mux.forkOwner(), readOnly: true };`,
+    `  const options = { native: ws.native, mux: ws.mux.forkOwner(), readOnly: true, trustedWorkspace: true };`,
     `  const { execute } = await LspTool.create(ws.seed, options);`,
     `  const status = await execute("node-status", { action: "status" });`,
     `  assert.equal(status.details.action, "status");`,
@@ -2504,5 +2504,34 @@ test("memory: an unconfigured collection exposes no memory tools", {
       () => binding?.close(),
       () => ws.dispose(),
     );
+  }
+});
+
+test("binding exec merges output, preserves exit status and rejects after close", {
+  timeout: 60_000,
+}, async () => {
+  const ws = await workspace();
+  const binding = ws.collection.bind();
+  try {
+    const chunks = [];
+    const result = await binding.exec(
+      "echo out; echo err 1>&2; exit 3",
+      ws.root,
+      {
+        onData: (data) => chunks.push(data),
+      },
+    );
+    assert.equal(result.exitCode, 3);
+    const output = Buffer.concat(chunks).toString();
+    assert.match(output, /out\n/);
+    assert.match(output, /err\n/);
+    await binding.close();
+    await assert.rejects(
+      binding.exec("true", ws.root, { onData() {} }),
+      /closed/,
+    );
+  } finally {
+    await binding.close();
+    await ws.dispose();
   }
 });

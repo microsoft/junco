@@ -880,7 +880,7 @@ function latestResults(context: Context): Result[] {
   return results;
 }
 
-/** One scripted editor turn: recv, read_target, the edit rounds, then a one-sentence settlement. */
+/** One scripted editor turn: read the steered state, read_target, edit rounds, then settle. */
 function editorTurn(turn: EditorTurn, log: EditorLog): FauxResponseStep[] {
   let state: State | undefined;
   let info: Info | undefined;
@@ -901,13 +901,16 @@ function editorTurn(turn: EditorTurn, log: EditorLog): FauxResponseStep[] {
           ],
         ]);
   const steps: FauxResponseStep[] = [
-    toolTurn(fauxToolCall("recv", {})),
     (context) => {
-      const [recv] = latestResults(context);
-      const inbox = JSON.parse(recv?.text ?? "{}");
-      state = inbox.messages?.find(
-        (m: { id: string }) => m.id === "editor-assignment",
-      )?.payload;
+      const message = context.messages.at(-1);
+      assert.ok(message?.role === "user", "the editor received no assignment");
+      const assignment = JSON.parse(
+        typeof message.content === "string"
+          ? message.content
+          : contentText(message.content),
+      );
+      assert.equal(assignment.id, "editor-assignment");
+      state = assignment.payload;
       if (state === undefined)
         throw new Error("the editor received no assignment");
       log.states.push(state);

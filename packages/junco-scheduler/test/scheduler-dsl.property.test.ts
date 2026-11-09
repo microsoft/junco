@@ -166,7 +166,15 @@ function snapshot(f: Fixture): View {
     plans: new Map(),
     history: Object.freeze(
       f.history.map((selected) =>
-        Object.freeze({ selected: Object.freeze(select(selected)) }),
+        Object.freeze({
+          selected: Object.freeze(
+            selected.map((nodeId) => ({
+              nodeId,
+              modelStrength: 2 as const,
+              readEdges: [],
+            })),
+          ),
+        }),
       ),
     ),
     version: f.version,
@@ -791,7 +799,7 @@ test("CSL: async composition drains before settling", async () => {
       const reason = new Error("cancelled");
       const child =
         (n: number): Policy =>
-        () => {
+        (view) => {
           started[n] = true;
           const kind = kinds[n]!;
           if (kind === "throw") {
@@ -800,13 +808,13 @@ test("CSL: async composition drains before settling", async () => {
           }
           if (kind === "return") {
             cleaned[n] = true;
-            return { selected: select([id(n === 0 ? "a" : "b")]) };
+            return { selected: select(view, [id(n === 0 ? "a" : "b")]) };
           }
           return (async () => {
             try {
               await gates[n]!.promise;
               if (kind === "reject") throw errors[n];
-              return { selected: select([id(n === 0 ? "a" : "b")]) };
+              return { selected: select(view, [id(n === 0 ? "a" : "b")]) };
             } finally {
               cleaned[n] = true;
             }
@@ -930,9 +938,9 @@ test("CSL: context rejects authority or capacity violations atomically", async (
       const faulty: EnginePolicy = separate(
         (_s, node) => left.includes(node),
         fault === "escape"
-          ? () => ({ selected: select([right[0]!]) })
+          ? (view) => ({ selected: select(view, [right[0]!]) })
           : fault === "duplicate"
-            ? () => ({ selected: select([left[0]!, left[0]!]) })
+            ? (view) => ({ selected: select(view, [left[0]!, left[0]!]) })
             : parallel(),
         parallel(),
       );

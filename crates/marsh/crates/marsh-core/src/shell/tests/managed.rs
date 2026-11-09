@@ -653,3 +653,309 @@ async fn delegated_resources_remain_charged_across_parks_and_finish_before_close
         "close drains and removes the pipeline cgroup"
     );
 }
+
+struct ReleaseOwnedTool;
+impl From<ReleaseOwnedTool> for Action {
+    fn from(_: ReleaseOwnedTool) -> Self {
+        Self::Release
+    }
+}
+impl From<&ReleaseOwnedTool> for Action {
+    fn from(_: &ReleaseOwnedTool) -> Self {
+        Self::Release
+    }
+}
+impl MarshTool for ReleaseOwnedTool {
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed("release owned resources")
+    }
+}
+
+async fn release_owned(shell: &Shell) -> Result<Vec<String>, ShellError> {
+    shell.run_tool(ReleaseOwnedTool, |context| context.release_owned()).await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_uses_committed_owners_and_preserves_other_claims() {
+    use crate::{Event, Resource};
+
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.seed.join("out")).unwrap();
+    let owner = fixture.shell().await;
+    let other = fixture.shell().await;
+    let stranger = fixture.shell().await;
+    accepted(&owner, "printf owned > src/a.txt; printf z > out/z; printf gone > out/gone; printf prior > out/already; printf ignored > .ignored").await;
+    accepted(&other, "printf foreign > out/b; cat src/a.txt >/dev/null").await;
+    accepted(&owner, "cat out/b >/dev/null; release -- out/already").await;
+    std::fs::remove_file(fixture.seed.join("out/gone")).unwrap();
+    let validator = session(&owner).await.validator.clone();
+    let released = release_owned(&owner).await.unwrap();
+    assert_eq!(released, [".ignored", "out/gone", "out/z", "src/a.txt"]);
+    assert_eq!(fixture.read("src/a.txt"), "owned");
+    assert_eq!(fixture.read("out/b"), "foreign");
+    assert!(!fixture.seed.join("out/gone").exists());
+
+    let decide = |principal: Principal, action, path: &str| {
+        validator.decide(&Event::new(principal, action, Resource::new(path.split('/')))).unwrap()
+    };
+    assert!(matches!(decide(owner.principal().clone(), Action::Edit, "src/a.txt"), PolicyDecision::Deny { .. }));
+    assert_eq!(decide(other.principal().clone(), Action::Edit, "src/a.txt"), PolicyDecision::Grant);
+    assert!(matches!(decide(stranger.principal().clone(), Action::Edit, "out/z"), PolicyDecision::Deny { .. }));
+    assert!(matches!(decide(owner.principal().clone(), Action::Release, "out/b"), PolicyDecision::Deny { .. }));
+    let history = validator.read().history.clone();
+    assert!(release_owned(&owner).await.unwrap().is_empty());
+    assert_eq!(validator.read().history, history);
+    accepted(&stranger, "cat out/z >/dev/null; printf fresh > out/z").await;
+    close(stranger).await;
+    close(other).await;
+    close(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_revalidates_the_whole_selection_even_with_permissive_policy() {
+    for takeover in [false, true] {
+        let fixture = Fixture::new();
+        let mut builder = Shell::builder()
+            .working_dir(fixture.seed.clone())
+            .sandbox_policy(SandboxPolicy::allow())
+            .shell_policy(Arc::new(crate::EmptyPolicy));
+        builder.backend = Some(fixture.fs.clone());
+        let owner = builder.build().await.unwrap();
+        accepted(&owner, "printf a > a; printf z > z").await;
+        let mut builder = Shell::builder()
+            .working_dir(fixture.seed.clone())
+            .sandbox_policy(SandboxPolicy::allow())
+            .policy_owner(Some(owner.principal().clone()));
+        builder.backend = Some(fixture.fs.clone());
+        let handoff = builder.build().await.unwrap();
+        let other = fixture.shell().await;
+        let validator = session(&owner).await.validator.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        let release = owner.run_tool(ReleaseOwnedTool, move |context| {
+            let paths = context.release_owned().unwrap();
+            started.send(paths.clone()).unwrap();
+            paused.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            paths
+        });
+        let (result, history) = tokio::join!(release, async {
+            assert_eq!(ready.await.unwrap(), ["a", "z"]);
+            accepted(&handoff, "release -- z").await;
+            if takeover {
+                accepted(&other, "cat z >/dev/null; printf foreign > z").await;
+            }
+            let history = validator.read().history.clone();
+            resume.send(()).unwrap();
+            history
+        });
+        assert!(matches!(result, Err(ref error) if matches!(error.kind(), ShellErrorKind::Denied { .. })));
+        assert_eq!(validator.read().history, history);
+        assert_eq!(fixture.read("a"), "a");
+        assert_eq!(fixture.read("z"), if takeover { "foreign" } else { "z" });
+        close(other).await;
+        close(handoff).await;
+        close(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_rolls_back_all_ownership_on_publication_failure() {
+    let fixture = Fixture::new();
+    let owner = fixture.shell().await;
+    let sibling = fixture.shell().await;
+    accepted(&owner, "printf a > a; printf z > z").await;
+    let validator = session(&owner).await.validator.clone();
+    let history = validator.read().history.clone();
+    let log = fixture.log();
+    let saved = log.with_extension("saved");
+    std::fs::rename(&log, &saved).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    let error = release_owned(&owner).await.unwrap_err();
+    assert_eq!(error.kind(), &ShellErrorKind::Infrastructure);
+    assert_eq!(validator.read().history, history);
+    assert_eq!(fixture.read("a"), "a");
+    assert_eq!(fixture.read("z"), "z");
+    std::fs::remove_dir(&log).unwrap();
+    std::fs::rename(saved, log).unwrap();
+    close(owner).await;
+    close(sibling).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_honors_the_selected_policy_atomically() {
+    struct RejectRelease;
+    impl Policy for RejectRelease {
+        fn evaluator<'batch>(
+            &'batch self,
+            _store: Arc<PolicyStore<'batch>>,
+        ) -> Result<Box<PolicyFn<'batch>>, ShellError> {
+            Ok(Box::new(|_, event| {
+                Ok(if event.action == Action::Release && event.resource.segments() == ["z"] {
+                    PolicyDecision::Deny {
+                        failed_precondition: "test release refusal".into(),
+                        allowed_fixes: Vec::new(),
+                    }
+                } else {
+                    PolicyDecision::Grant
+                })
+            }))
+        }
+    }
+    let fixture = Fixture::new();
+    let mut builder = Shell::builder()
+        .working_dir(fixture.seed.clone())
+        .sandbox_policy(SandboxPolicy::allow())
+        .shell_policy(Arc::new(RejectRelease));
+    builder.backend = Some(fixture.fs.clone());
+    let owner = builder.build().await.unwrap();
+    accepted(&owner, "printf a > a; printf z > z").await;
+    let validator = session(&owner).await.validator.clone();
+    let history = validator.read().history.clone();
+    let error = release_owned(&owner).await.unwrap_err();
+    assert!(matches!(error.kind(), ShellErrorKind::Denied { .. }));
+    assert_eq!(validator.read().history, history);
+    close(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_allows_the_managed_root_but_rejects_direct_and_ended_contexts() {
+    let fixture = Fixture::new();
+    let owner = fixture.shell().await;
+    let context = owner
+        .run_tool(ReleaseOwnedTool, |context| {
+            assert!(matches!(context.release(Path::new(".")).unwrap_err().kind(), ShellErrorKind::Unsupported));
+            assert!(context.release_owned().unwrap().is_empty());
+            context.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.release_owned().unwrap_err().kind(), &ShellErrorKind::Closed);
+    close(owner).await;
+    assert_eq!(context.release_owned().unwrap_err().kind(), &ShellErrorKind::Closed);
+
+    let mut builder = Shell::builder()
+        .working_dir(fixture.seed.clone())
+        .sandbox_policy(SandboxPolicy::forbid());
+    builder.backend = Some(fixture.fs.clone());
+    let direct = builder.build().await.unwrap();
+    let error = direct
+        .run_tool(ReleaseOwnedTool, |context| context.release_owned().unwrap_err())
+        .await
+        .unwrap();
+    assert_eq!(error.kind(), &ShellErrorKind::Infrastructure);
+    close(direct).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_rejects_managed_mutations_before_any_publication() {
+    use std::io::Write as _;
+    for (owned, path, release_first) in [
+        (true, "new", false),
+        (true, "src/a.txt", true),
+        (false, "new", true),
+        (false, "src/a.txt", false),
+    ] {
+        let fixture = Fixture::new();
+        let owner = fixture.shell().await;
+        if owned {
+            accepted(&owner, "printf a > a; printf z > z").await;
+        }
+        let validator = session(&owner).await.validator.clone();
+        let history = validator.read().history.clone();
+        let result = owner.run_tool(ReleaseOwnedTool, move |context| {
+            let selected = release_first.then(|| context.release_owned().unwrap());
+            // Writing the original bytes also exercises a reverted/no-diff protected write.
+            context.open(Path::new(path), std::fs::OpenOptions::new().write(true).create(true).truncate(true))
+                .unwrap().write_all(b"seed\n").unwrap();
+            selected.unwrap_or_else(|| context.release_owned().unwrap())
+        }).await;
+        assert!(matches!(result, Err(ref error) if error.kind() == &ShellErrorKind::Unsupported));
+        assert_eq!(validator.read().history, history);
+        assert_eq!(fixture.read("src/a.txt"), "seed\n");
+        assert!(!fixture.seed.join("new").exists());
+        close(owner).await;
+        let reopened = fixture.shell().await;
+        if owned {
+            refused(&reopened, "cat a >/dev/null; printf stolen > a").await;
+            refused(&reopened, "cat z >/dev/null; printf stolen > z").await;
+        }
+        close(reopened).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_reopen_never_adopts_an_unfinished_metadata_frame() {
+    for tail in [0, 5] {
+        let fixture = Fixture::new();
+        let owner = fixture.shell().await;
+        accepted(&owner, "printf a > a; printf z > z").await;
+        assert_eq!(release_owned(&owner).await.unwrap(), ["a", "z"]);
+        close(owner).await;
+        let log = fixture.log();
+        let bytes = std::fs::read(&log).unwrap();
+        let end = bytes[..bytes.len() - 1].iter().rposition(|byte| *byte == b'\n').unwrap() + 1;
+        std::fs::write(&log, &bytes[..end + tail]).unwrap();
+        std::fs::File::open(&log).unwrap().sync_all().unwrap();
+        for _ in 0..2 {
+            let reopened = fixture.shell().await;
+            refused(&reopened, "cat a >/dev/null; printf stolen > a").await;
+            refused(&reopened, "cat z >/dev/null; printf stolen > z").await;
+            assert_eq!(fixture.read("a"), "a");
+            assert_eq!(fixture.read("z"), "z");
+            close(reopened).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_complete_metadata_receipt_survives_reopen() {
+    let fixture = Fixture::new();
+    let owner = fixture.shell().await;
+    accepted(&owner, "printf a > a; printf z > z").await;
+    assert_eq!(release_owned(&owner).await.unwrap(), ["a", "z"]);
+    close(owner).await;
+    let reopened = fixture.shell().await;
+    accepted(&reopened, "cat a z >/dev/null; printf next > a; printf next > z").await;
+    assert_eq!(fixture.read("a"), "next");
+    assert_eq!(fixture.read("z"), "next");
+    close(reopened).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_release_in_doubt_checkpoint_blocks_reopen_until_outcome_is_resolved() {
+    for committed in [false, true] {
+        let fixture = Fixture::new();
+        let owner = fixture.shell().await;
+        accepted(&owner, "printf a > a; printf z > z").await;
+        let log = fixture.log();
+        let boundary = std::fs::metadata(&log).unwrap().len();
+        assert_eq!(release_owned(&owner).await.unwrap(), ["a", "z"]);
+        close(owner).await;
+        let pending = log.with_extension("metadata-pending");
+        std::fs::write(&pending, boundary.to_le_bytes()).unwrap();
+        std::fs::File::open(&pending).unwrap().sync_all().unwrap();
+        std::fs::File::open(log.parent().unwrap()).unwrap().sync_all().unwrap();
+        let before = std::fs::read(&log).unwrap();
+        for _ in 0..2 {
+            let error = fixture.open().await.err().unwrap();
+            assert_eq!(error.kind(), &ShellErrorKind::Infrastructure);
+            assert_eq!(std::fs::read(&log).unwrap(), before);
+            assert!(pending.exists());
+        }
+        if !committed {
+            let file = std::fs::OpenOptions::new().write(true).open(&log).unwrap();
+            file.set_len(boundary).unwrap();
+            file.sync_all().unwrap();
+        }
+        std::fs::remove_file(&pending).unwrap();
+        std::fs::File::open(log.parent().unwrap()).unwrap().sync_all().unwrap();
+        let reopened = fixture.shell().await;
+        if committed {
+            accepted(&reopened, "cat a z >/dev/null; printf next > a; printf next > z").await;
+        } else {
+            refused(&reopened, "cat a >/dev/null; printf stolen > a").await;
+            refused(&reopened, "cat z >/dev/null; printf stolen > z").await;
+        }
+        close(reopened).await;
+    }
+}

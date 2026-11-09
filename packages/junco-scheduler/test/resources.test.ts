@@ -309,8 +309,8 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
   );
   await assert.rejects(
     async () =>
-      limit({ memory: gigabytes(4) }, () => ({
-        selected: select([id("unowned")]),
+      limit({ memory: gigabytes(4) }, (view) => ({
+        selected: select(view, [id("unowned")]),
       }))(s),
     /unowned/,
   );
@@ -323,7 +323,7 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
       { memory: gigabytes(4) },
       strength(() => "high", parallel()),
     )(s),
-    { selected: select([id("A"), id("D")], 3) },
+    { selected: select(s, [id("A"), id("D")], 3) },
   );
 });
 
@@ -390,9 +390,9 @@ test("limit checks cancellation before invocation and after awaited inner work",
   let invoked = false;
   await assert.rejects(
     async () =>
-      limit({ memory: gigabytes(4) }, () => {
+      limit({ memory: gigabytes(4) }, (view) => {
         invoked = true;
-        return { selected: select([id("a")]) };
+        return { selected: select(view, [id("a")]) };
       })(s, before.signal),
     (error) => error === reason,
   );
@@ -400,10 +400,10 @@ test("limit checks cancellation before invocation and after awaited inner work",
   const after = new AbortController();
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const pending = limit({ memory: gigabytes(4) }, async () => {
+  const pending = limit({ memory: gigabytes(4) }, async (view) => {
     entered.resolve();
     await release.promise;
-    return { selected: select([id("a")]) };
+    return { selected: select(view, [id("a")]) };
   })(s, after.signal);
   await entered.promise;
   after.abort(reason);

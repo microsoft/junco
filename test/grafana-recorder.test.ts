@@ -355,6 +355,56 @@ test("updates a tagged dashboard and rejects an untagged one", async () => {
   assert.equal(body.metadata.resourceVersion, "41");
   assert.equal(body.spec.title, "Junco telemetry");
 
+  const titled = await fakeGrafana();
+  await (
+    await open(titled, {
+      dashboard: "Z3-proof-objects",
+      title: "Z3 proof objects",
+      panels: [
+        {
+          title: "Lean verified",
+          expr: 'junco_probe_value{edge_id="lean"}',
+          unit: "short",
+        },
+        { title: "Over time", expr: "junco_probe_value", kind: "timeseries" },
+      ],
+    })
+  ).close();
+  const created = titled.seen.find(
+    (request) => request.method === "POST" && request.path === COLLECTION,
+  );
+  const spec = JSON.parse(created?.body ?? "").spec as {
+    title: string;
+    panels: {
+      title: string;
+      type: string;
+      targets: { expr: string; instant?: boolean }[];
+      gridPos: { y: number };
+    }[];
+  };
+  assert.equal(spec.title, "Z3 proof objects");
+  const custom = spec.panels.filter((panel) =>
+    ["Lean verified", "Over time"].includes(panel.title),
+  );
+  assert.deepEqual(
+    custom.map((panel) => [
+      panel.type,
+      panel.targets[0]?.expr,
+      panel.targets[0]?.instant === true,
+    ]),
+    [
+      ["stat", 'junco_probe_value{edge_id="lean"}', true],
+      ["timeseries", "junco_probe_value", false],
+    ],
+  );
+  const managedBottom = Math.max(
+    ...spec.panels.filter((p) => !custom.includes(p)).map((p) => p.gridPos.y),
+  );
+  assert.ok(
+    custom.every((panel) => panel.gridPos.y > managedBottom),
+    "custom panels sit below the managed ones",
+  );
+
   const untagged = await fakeGrafana(undefined, {
     metadata: { name: "junco-telemetry", resourceVersion: "7" },
     spec: { title: "theirs", tags: [] },
@@ -1797,4 +1847,101 @@ test("concurrent benchmark sessions share one managed board without selecting ei
     assert.deepEqual([variable.current.value].flat(), ["$__all"]);
   }
   await Promise.all(recorders.map((recorder) => recorder.close()));
+});
+
+test("custom dashboards scale tokens and provision separate step panels at unit discovery", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake, { dashboard: "Z3-pulse-loop" });
+  const created = JSON.parse(
+    fake.seen.find((request) => request.method === "POST")!.body,
+  ).spec;
+  assert.equal(created.title, "Z3-pulse-loop");
+  const panel = (spec: typeof created, title: string) =>
+    spec.panels.find((p: { title: string }) => p.title === title);
+  for (const title of ["Total tokens used", "Tokens per node"])
+    assert.equal(
+      panel(created, title).fieldConfig.defaults.unit,
+      "count:tokens",
+    );
+  for (const title of ["Tokens/sec", "Tokens/node/sec"])
+    assert.equal(
+      panel(created, title).fieldConfig.defaults.unit,
+      "count:tokens/s",
+    );
+  const updates = () => fake.seen.filter((request) => request.method === "PUT");
+  const view = recorder.add_context("Verify");
+  try {
+    view.record({ ...probe("check_ms_total", 12), unit: "ms" });
+    await recorder.flush();
+    assert.deepEqual(parse(fake.pushes()[0]!.body)[0]!.tags, {
+      node: "Verify",
+      edge_id: "check_ms_total",
+      unit: "ms",
+    });
+    assert.equal(updates().length, 1);
+    const first = JSON.parse(updates()[0]!.body).spec;
+    const ms = panel(first, "Edge probes (ms)");
+    assert.equal(ms.fieldConfig.defaults.unit, "ms");
+    assert.equal(ms.fieldConfig.defaults.custom.spanNulls, true);
+    assert.equal(ms.fieldConfig.defaults.custom.lineInterpolation, "stepAfter");
+    assert.ok(ms.targets[0].expr.includes('unit="ms"'));
+    assert.ok(panel(first, "Edge probes").targets[0].expr.includes('unit=""'));
+    await recorder.flush();
+    assert.equal(updates().length, 1);
+    view.record({
+      ...probe("proof_steps_total", 6_400_000),
+      unit: "count:steps",
+    });
+    await recorder.flush();
+    assert.equal(updates().length, 2);
+    const second = JSON.parse(updates()[1]!.body).spec;
+    assert.deepEqual(
+      second.panels
+        .filter((p: { title: string }) => p.title.startsWith("Edge probes"))
+        .map((p: { title: string }) => p.title),
+      ["Edge probes (count:steps)", "Edge probes (ms)", "Edge probes"],
+    );
+    for (const title of [
+      "Tool and execution metrics",
+      "Resource and token details",
+      "Graph context totals",
+    ])
+      assert.equal(
+        panel(second, title).gridPos.y,
+        panel(created, title).gridPos.y + 16,
+      );
+  } finally {
+    await recorder.close();
+  }
+});
+
+test("unit discovery retains caller title and panels", async () => {
+  const fake = await fakeGrafana();
+  const recorder = await open(fake, {
+    dashboard: "custom-options",
+    title: "Caller title",
+    panels: [
+      { title: "Caller stat", expr: "junco_probe_value", unit: "short" },
+    ],
+  });
+  try {
+    recorder.record({ ...probe("elapsed", 12), unit: "ms" });
+    await recorder.flush();
+    const update = fake.seen.find((request) => request.method === "PUT")!;
+    const spec = JSON.parse(update.body).spec;
+    assert.equal(spec.title, "Caller title");
+    assert.equal(
+      spec.panels.find(
+        (panel: { title: string }) => panel.title === "Caller stat",
+      ).gridPos.y,
+      68,
+    );
+    assert.ok(
+      spec.panels.find(
+        (panel: { title: string }) => panel.title === "Edge probes (ms)",
+      ),
+    );
+  } finally {
+    await recorder.close();
+  }
 });

@@ -10,172 +10,13 @@ import {
 } from "dataflow-engine";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { InfoTool, RecvTool, SendTool } from "../dist/messaging.js";
+import { InfoTool, SendTool } from "../dist/messaging.js";
 
 // Native-free: only dist/messaging.js plus the engine for real send admission.
-
-const route = ([id, , schema]) => [EdgeId.create(id), schema];
-
-/**
- * A retained inbox shaped like AgentDriver's: ordered per-edge batches and value cells, each
- * `[id, payloads | value, schema]`, with the recv output schema of those routes.
- */
-function inbox(messages = [], values = []) {
-  const host = {
-    consumed: 0,
-    view: {
-      messages: new Map(
-        messages.map(([id, payloads]) => [EdgeId.create(id), payloads]),
-      ),
-      values: new Map(values.map(([id, value]) => [EdgeId.create(id), value])),
-    },
-    recvOutputSchema: RecvTool.outputSchemaFor(
-      messages.map(route),
-      values.map(route),
-    ),
-    consume() {
-      host.consumed++;
-      host.view.messages.clear();
-      host.view.values.clear();
-    },
-  };
-  return host;
-}
 
 const call = (tool, input = {}, signal) =>
   tool.execute("call-1", input, signal);
 const never = () => new AbortController().signal;
-
-/** A schema whose payload sits behind a local `$defs` entry named `P`, scoped by a real edge. */
-const scoped = (id, inner) =>
-  Edge.message(id, { $defs: { P: inner }, $ref: "#/$defs/P" }).schema;
-
-test("recv flattens per-edge FIFO messages and value envelopes, then drains", async () => {
-  const parent = { text: "parent" };
-  const host = inbox(
-    [
-      ["b", ["b1", "b2"], Type.String()],
-      ["a", ["a1"], Type.String()],
-    ],
-    [
-      ["v", parent, Type.Object({ text: Type.String() })],
-      ["u", undefined, Type.Unknown()],
-    ],
-  );
-  const tool = new RecvTool(host);
-  const first = await call(tool);
-  assert.deepEqual(first.details, {
-    messages: [
-      { id: "b", payload: "b1" },
-      { id: "b", payload: "b2" },
-      { id: "a", payload: "a1" },
-    ],
-    values: [
-      { id: "v", payload: { text: "parent" } },
-      { id: "u", payload: undefined },
-    ],
-  });
-  assert.equal(first.details.values[0].payload, parent);
-  const json = {
-    messages: first.details.messages,
-    values: [{ id: "v", payload: { text: "parent" } }, { id: "u" }],
-  };
-  assert.deepEqual(JSON.parse(first.content[0].text), json);
-  assert.deepEqual(first.structuredContent, json);
-  const second = await call(tool);
-  assert.equal(second.content[0].text, '{"messages":[],"values":[]}');
-  assert.equal(host.consumed, 2);
-});
-
-test("recv leaves the inbox intact when rendering, cancellation, validation or hosting fails", async () => {
-  const cyclic = {};
-  cyclic.self = cyclic;
-  for (const payload of [cyclic, 1n]) {
-    const host = inbox([["m", [payload], Type.Unknown()]]);
-    await assert.rejects(call(new RecvTool(host)), TypeError);
-    assert.equal(host.consumed, 0);
-    assert.equal(host.view.messages.get("m")[0], payload);
-  }
-
-  const host = inbox([["m", ["kept"], Type.String()]]);
-  const aborted = AbortSignal.abort(new Error("stop"));
-  await assert.rejects(call(new RecvTool(host), {}, aborted), /stop/);
-  await assert.rejects(
-    call(new RecvTool(host), { extra: 1 }),
-    /^Error: Invalid recv input/,
-  );
-  await assert.rejects(call(new RecvTool()), /requires a JuncoGraph host/);
-  assert.equal(host.consumed, 0);
-  assert.deepEqual(host.view.messages.get("m"), ["kept"]);
-});
-
-test("recv correlates each message and value route with its own schema and keeps a mismatch unconsumed", async () => {
-  const routes = (n, s, vn, vs) => [
-    [
-      ["n", [n], Type.Number()],
-      ["s", [s], Type.String()],
-    ],
-    [
-      ["vn", vn, Type.Number()],
-      ["vs", vs, Type.String()],
-    ],
-  ];
-  const ok = inbox(...routes(7, "7", 8, "8"));
-  const result = await call(new RecvTool(ok));
-  assert.deepEqual(result.structuredContent, {
-    messages: [
-      { id: "n", payload: 7 },
-      { id: "s", payload: "7" },
-    ],
-    values: [
-      { id: "vn", payload: 8 },
-      { id: "vs", payload: "8" },
-    ],
-  });
-  assert.equal(ok.consumed, 1);
-
-  for (const swapped of [
-    routes("7", "7", 8, "8"),
-    routes(7, 7, 8, "8"),
-    routes(7, "7", "8", "8"),
-    routes(7, "7", 8, 8),
-  ]) {
-    const host = inbox(...swapped);
-    await assert.rejects(
-      call(new RecvTool(host)),
-      /^Error: Invalid recv output/,
-    );
-    assert.equal(host.consumed, 0);
-    assert.equal(host.view.messages.size, 2);
-    assert.equal(host.view.values.size, 2);
-  }
-});
-
-test("recv omits an undefined payload only where its route's schema admits undefined", async () => {
-  const optional = inbox([], [["u", undefined, Type.Unknown()]]);
-  const result = await call(new RecvTool(optional));
-  assert.deepEqual(result.structuredContent, {
-    messages: [],
-    values: [{ id: "u" }],
-  });
-
-  const required = inbox([], [["n", undefined, Type.Number()]]);
-  await assert.rejects(
-    call(new RecvTool(required)),
-    /^Error: Invalid recv output/,
-  );
-  assert.equal(required.consumed, 0);
-  assert.equal(
-    Value.Check(
-      RecvTool.outputSchemaFor([], [[EdgeId.create("n"), Type.Number()]]),
-      {
-        messages: [],
-        values: [{ id: "n" }],
-      },
-    ),
-    false,
-  );
-});
 
 test("unhosted tools announce no routes and still refuse to run", async () => {
   const send = new SendTool();
@@ -186,35 +27,15 @@ test("unhosted tools announce no routes and still refuse to run", async () => {
     call(send, { id: "a", payload: 1 }),
     /send requires a JuncoGraph host/,
   );
-
-  const recv = new RecvTool();
-  const empty = { messages: [], values: [] };
-  assert.equal(Value.Check(recv.outputSchema, empty), true);
-  assert.equal(
-    Value.Check(recv.outputSchema, {
-      messages: [{ id: "a", payload: 1 }],
-      values: [],
-    }),
-    false,
-  );
-  assert.deepEqual(recv.outputSchema, RecvTool.outputSchemaFor([], []));
-  assert.equal(recv.description, RecvTool.describe(recv.outputSchema));
 });
 
-test("hosted tools expose their host's schemas and recv describes its output", () => {
+test("hosted tools expose their host's schemas", () => {
   const sendParameters = SendTool.parametersFor([
     [EdgeId.create("n"), Type.Number()],
   ]);
   assert.equal(
     new SendTool({ sendParameters, send() {} }).parameters,
     sendParameters,
-  );
-  const host = inbox([["n", [], Type.Number()]]);
-  const recv = new RecvTool(host);
-  assert.equal(recv.outputSchema, host.recvOutputSchema);
-  assert.equal(
-    recv.description,
-    `Consumes messages and parent values retained for the current graph node. Returns JSON matching: ${JSON.stringify(host.recvOutputSchema)}`,
   );
 });
 
@@ -324,7 +145,7 @@ test("send rejects invalid, unhosted and cancelled calls without emitting", asyn
   assert.equal(out.transport.left.length, 0);
 });
 
-test("identically named local $defs stay isolated per edge through send and recv", async () => {
+test("identically named local $defs stay isolated per edge through send", async () => {
   const { edges, host } = wiredGraph([
     ["n", { $defs: { P: Type.Number() }, $ref: "#/$defs/P" }],
     ["s", { $defs: { P: Type.String() }, $ref: "#/$defs/P" }],
@@ -345,24 +166,6 @@ test("identically named local $defs stay isolated per edge through send and recv
     edges.map((edge) => edge.transport.left),
     [[7], ["7"]],
   );
-
-  const n = scoped("n", Type.Number());
-  const s = scoped("s", Type.String());
-  const good = inbox([
-    ["n", [7], n],
-    ["s", ["7"], s],
-  ]);
-  await call(new RecvTool(good));
-  assert.equal(good.consumed, 1);
-  const crossed = inbox([
-    ["n", ["7"], n],
-    ["s", [7], s],
-  ]);
-  await assert.rejects(
-    call(new RecvTool(crossed)),
-    /^Error: Invalid recv output/,
-  );
-  assert.equal(crossed.consumed, 0);
 });
 
 test("invoke validates against the supplied host's schemas, not the construction host's", async () => {
@@ -386,13 +189,6 @@ test("invoke validates against the supplied host's schemas, not the construction
   );
   assert.deepEqual(numeric.out.transport.left, []);
   assert.deepEqual(text.out.transport.left, ["7"]);
-
-  const recv = new RecvTool(inbox([["e", ["7"], Type.Number()]]));
-  const host = inbox([["e", ["7"], Type.String()]]);
-  const result = await RecvTool.invoke(recv, host, "c", {}, never());
-  assert.deepEqual(result.details.messages, [{ id: "e", payload: "7" }]);
-  assert.equal(host.consumed, 1);
-  await assert.rejects(call(recv), /Invalid recv output/);
 });
 
 test("info rejects model-supplied identity and absent hosts, and preserves host errors", async () => {
@@ -430,19 +226,6 @@ test("info rejects model-supplied identity and absent hosts, and preserves host 
 });
 
 test("a copied tool cannot acquire graph authority through companion invoke", async () => {
-  const host = inbox([["m", ["kept"], Type.String()]]);
-  const recv = new RecvTool();
-  assert.equal(RecvTool.is(recv), true);
-  const copy = { ...recv };
-  assert.equal(RecvTool.is(copy), false);
-  await assert.rejects(
-    RecvTool.invoke(copy, host, "c", {}, never()),
-    TypeError,
-  );
-  assert.equal(host.consumed, 0);
-  const result = await RecvTool.invoke(recv, host, "c", {}, never());
-  assert.deepEqual(result.details.messages, [{ id: "m", payload: "kept" }]);
-
   const { out, host: sendHost } = wiredGraph();
   const send = new SendTool();
   assert.equal(SendTool.is({ ...send }), false);
@@ -496,7 +279,7 @@ function profileRecorder() {
   return recorder;
 }
 
-test("messaging tools count each send, recv and info call once, direct or invoked", async () => {
+test("messaging tools count each send and info call once, direct or invoked", async () => {
   const recorder = profileRecorder();
   const sent = [];
   const sendHost = {
@@ -533,30 +316,6 @@ test("messaging tools count each send, recv and info call once, direct or invoke
       .length,
     1,
   );
-
-  const recvEvents = () => recorder.events.filter((e) => e.tool === "recv");
-  const host = inbox(
-    [["a", ["a1", "a2"], Type.String()]],
-    [["v", undefined, Type.Unknown()]],
-  );
-  const recv = new RecvTool(host, () => recorder);
-  await call(recv);
-  await RecvTool.invoke(recv, host, "c", {}, new AbortController().signal);
-  const sum = (field) =>
-    recvEvents().reduce((t, e) => t + (e.counters?.[field] ?? 0), 0);
-  assert.equal(sum("messages_received"), 2);
-  assert.equal(sum("values_received"), 1);
-  assert.equal(
-    recvEvents().filter((e) => e.kind === "finish" && e.outcome === "success")
-      .length,
-    2,
-  );
-  await assert.rejects(
-    call(new RecvTool(undefined, recorder)),
-    /requires a JuncoGraph host/,
-  );
-  assert.equal(recvEvents().filter((e) => e.outcome === "error").length, 1);
-  assert.equal(sum("messages_received"), 2);
 
   const info = new InfoTool(
     {

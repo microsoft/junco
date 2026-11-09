@@ -7,7 +7,6 @@ import {
   contentText,
   type FauxResponseStep,
   fauxAssistantMessage,
-  fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
   type DataflowGraph,
@@ -25,6 +24,7 @@ import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import type { YamlAgent } from "../examples/support.ts";
 import { AssistantMessageSchema, Deterministic, syntax } from "../src/index.ts";
 import type { AgentSpec } from "../src/syntax/build.ts";
+import { userTexts } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
 
 /** Records every raw message Reviewer is activated with on the nested graph's `Ralph~>Reviewer`. */
@@ -66,8 +66,8 @@ function latestUserText(context: Context): string {
 
 /**
  * Real agents over faux models, built from the example's own construction options: Direct reads
- * its goals through recv and answers `directAnswer`; Reviewer's prompt is composed from the graph
- * inputs. Ralph's run r returns `draft-r`; with `failSecond` its second request throws instead.
+ * its goals through steered user messages and answers `directAnswer`; Reviewer sees its value
+ * inputs in the prompt and Ralph's draft in a following message. Ralph's run r returns `draft-r`.
  * Dispose it to close the graph and every agent.
  */
 async function mixedWorkflow(
@@ -83,8 +83,25 @@ async function mixedWorkflow(
   const recording =
     (role: Role, response: () => AssistantMessage): FauxResponseStep =>
     (context) => {
-      if (context.messages.at(-1)?.role === "user")
-        prompts[role].push(latestUserText(context));
+      if (context.messages.at(-1)?.role === "user") {
+        const texts = userTexts(context.messages);
+        if (role === "Ralph" && prompts.Ralph.length === 0) {
+          assert.deepEqual(texts, [
+            "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.",
+            goalsPrompt,
+          ]);
+        }
+        if (role === "Reviewer") {
+          assert.equal(texts.length, 2);
+          const delivered = JSON.parse(texts[1]!);
+          assert.equal(delivered.id, "Ralph~>Reviewer");
+          assert.ok(Value.Check(AssistantMessageSchema, delivered.payload));
+          assert.equal(contentText(delivered.payload.content), "draft-2");
+        }
+        prompts[role].push(
+          role === "Reviewer" ? texts.join("\n") : latestUserText(context),
+        );
+      }
       return response();
     };
   const ralphResponses = [
@@ -95,23 +112,12 @@ async function mixedWorkflow(
     }),
   ];
 
-  /** Call recv, then record the one received prompt `role` was given and answer with `answer`. */
+  /** Record the delivered objective separately from the staged instruction. */
   const receiving = (role: Role, answer: string): FauxResponseStep[] => [
-    () =>
-      fauxAssistantMessage([fauxToolCall("recv", {}, { id: `${role}-recv` })], {
-        stopReason: "toolUse",
-      }),
     (context) => {
-      const result = context.messages.at(-1);
-      assert.ok(
-        result?.role === "toolResult" && result.content[0]?.type === "text",
-      );
-      const { messages } = JSON.parse(result.content[0].text) as {
-        messages: { payload: { kind: string; text: string } }[];
-      };
-      assert.equal(messages.length, 1);
-      assert.equal(messages[0]!.payload.kind, "prompt");
-      prompts[role].push(messages[0]!.payload.text);
+      const texts = userTexts(context.messages);
+      assert.equal(texts.length, 2);
+      prompts[role].push(texts[1]!);
       return fauxAssistantMessage(answer);
     },
   ];
@@ -207,7 +213,6 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.equal(prompts.Ralph.length, 2);
     assert.equal(prompts.Ralph[0], goalsPrompt);
     assert.ok(prompts.Ralph[1]!.includes(goalsPrompt));
-    assert.ok(prompts.Ralph[1]!.includes("draft-1"));
     assert.deepEqual(prompts.Direct, [goalsPrompt]);
 
     assert.equal(prompts.Reviewer.length, 1);
@@ -229,17 +234,24 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
 
 test("a failed second Ralph round forwards its raw abnormal draft, which the Reviewer rejects before any request", async () => {
   await using flow = await mixedWorkflow(true);
-  const { execution, reviewerId, prompts, inbox } = flow;
+  const { execution, reviewerId, prompts } = flow;
   const graph = execution.graph;
 
   const failure = await execution.run().then(
     () => assert.fail("graph should reject"),
     (error: unknown) => error,
   );
-  assert.ok(failure instanceof DataflowNodeError);
-  assert.equal(failure.nodeId, reviewerId);
+  assert.ok(failure instanceof Error);
+  assert.match(
+    failure.message,
+    /Ralph~>Reviewer did not finish normally: error/,
+  );
   assert.equal(prompts.Ralph.length, 2);
-  const [draft] = inbox.received;
+  const [draft] =
+    graph
+      .observe()
+      .inputs.get(reviewerId)
+      ?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? [];
   assert.ok(Value.Check(AssistantMessageSchema, draft));
   assert.equal(draft.stopReason, "error");
   assert.ok(O.isNone(graph.result(reviewerId)));

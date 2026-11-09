@@ -318,6 +318,13 @@ idempotent. `BuiltinContext::release(file)` and the `release` builtin
 record a release in the current managed command; it publishes atomically with that command's
 other effects. A direct command cannot release.
 
+`BuiltinContext::release_owned()` explicitly selects every resource currently owned by the calling
+principal from committed history, including absent files, and returns sorted source-relative paths
+after `run_tool` publishes. It records ordinary Release events and preserves reader/freshness claims.
+Publication revalidates the entire selection atomically; losing any selected ownership denies the
+whole call. Bulk release cannot share a command with protected filesystem mutation, including
+reverted writes or an empty selection: publish edits first, then release ownership separately.
+
 Each shell has a fresh uid for its jobs, views, routes and cancellation. By default its commands
 also act as that uid. `ShellBuilder::policy_owner`, `SpawnOptions::policy_owner` and the `owner`
 argument of `ShellMux::run_tool` make a shell act as a trusted principal from
@@ -365,6 +372,13 @@ rather than running commands without their limits.
   counted intent and grants, applies descriptor-relative operations with namespace fsyncs, and ends
   with durable `END`. Any possibly written intent failure blocks the source until reopen recovery.
   After `END`, cleanup failure cannot relabel committed bytes as unpublished.
+* Metadata-only transactions save a durable rollback checkpoint before appending. Write or END-sync
+  failure restores the prior log durably; an unfinished zero-operation frame is never replayed.
+  If rollback or checkpoint cleanup fails, errors retain both causes and the source stays in doubt.
+  A checkpoint blocks reopen even with complete END bytes. A post-END cleanup error explicitly
+  reports a committed receipt and never rolls its ownership back. Operator repair must distinguish
+  a known committed receipt (keep it) from an uncommitted attempt (durably restore the saved boundary),
+  then remove the checkpoint and sync its directory; reopening never makes that decision silently.
 * A complete WAL record that cannot be decoded is refused, and startup fails with the log, seed
   and snapshots unchanged. This covers malformed JSON, an obsolete or incompatible record schema,
   missing or obsolete ownership metadata, and retired Git actions such as `stage` or `delete`.
@@ -382,6 +396,7 @@ Private operator layout:
 | --- | --- |
 | `snap/` | work views and retained per-command readonly baseline/redo subvolumes |
 | `meta/wal.jsonl` | filesystem intent and durable grants |
+| `meta/wal.metadata-pending` | in-doubt metadata checkpoint: prior WAL length as eight little-endian bytes |
 | `meta/runs/<principal>/trace.log` | append-only JSON observations: upstream syscall info plus captured filesystem metadata |
 
 Each command appends its owned observations once. Transaction staging is owned by its validated

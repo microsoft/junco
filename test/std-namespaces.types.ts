@@ -538,7 +538,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
   > = schedules.roundRobin();
   const rawId: schedules.Decision = {
     // @ts-expect-error selected IDs are branded native IDs
-    selected: [{ nodeId: "a", modelStrength: 2 }],
+    selected: [{ nodeId: "a", modelStrength: 2, readEdges: [] }],
   };
   // @ts-expect-error a read is a count, "all" or "none"
   const unknownRead: MessageSchedule = "some";
@@ -1188,10 +1188,7 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
   // Children carry dynamically discovered MCP tools, so they are broad AgentTool agents.
   const children: agent.JuncoAgent<TaggedSkill, TaggedTemplate, AgentTool>[] =
     await specialized.createSubagents(overrides, signal);
-  const bound: number = await specialized.runWithNodeContext(
-    { briefing: () => undefined },
-    async () => 1,
-  );
+  const bound: number = await specialized.runWithNodeContext({}, async () => 1);
   const batch: tools.TaskInput = { context: "c", tasks: [{ task: "x" }] };
   const assigned: tools.AssignedTaskTool = new tools.AssignedTaskTool(
     batch,
@@ -1278,18 +1275,11 @@ export async function taskToolsAndSubagentsKeepTheirContracts(
 
 export async function messagingToolsAreNominalAgentTools(
   _specialized: agent.JuncoAgent<TaggedSkill, TaggedTemplate, TaggedTool>,
-  view: graph.ParentView<Num, string>,
   signal: AbortSignal,
 ) {
   const numbersRoute = [graph.EdgeId.create("numbers"), NumberSchema] as const;
   const host = {
-    view,
     sendParameters: tools.SendTool.parametersFor([numbersRoute]),
-    recvOutputSchema: tools.RecvTool.outputSchemaFor(
-      [numbersRoute],
-      [[graph.EdgeId.create("done"), StringSchema]],
-    ),
-    consume: () => {},
     send: (_message: graph.Message<Num>) => {},
     info: () => ({
       parents: [
@@ -1302,29 +1292,15 @@ export async function messagingToolsAreNominalAgentTools(
       children: [],
     }),
   };
-  const recv: tools.RecvTool<Num, string> = new tools.RecvTool(host);
   const send: tools.SendTool<Num> = new tools.SendTool(host);
   const info: tools.InfoTool = new tools.InfoTool(host);
-  const unhosted: tools.RecvTool = new tools.RecvTool();
+  const unhosted: tools.SendTool = new tools.SendTool();
   // Constructed values are AgentTools without unwrapping.
-  const loadout: AgentTool[] = [recv, send, info, unhosted];
+  const loadout: AgentTool[] = [send, info, unhosted];
   const recognized: boolean[] = [
-    tools.RecvTool.is(loadout[0]!),
-    tools.SendTool.is(loadout[1]!),
-    tools.InfoTool.is(loadout[2]!),
+    tools.SendTool.is(loadout[0]!),
+    tools.InfoTool.is(loadout[1]!),
   ];
-  const received = await tools.RecvTool.invoke<Num, string>(
-    recv,
-    host,
-    "recv-1",
-    {},
-    signal,
-  );
-  const messages: readonly graph.Message<Num>[] = received.details.messages;
-  const values: readonly {
-    readonly id: graph.EdgeIdType;
-    readonly payload: string;
-  }[] = received.details.values;
   await tools.SendTool.invoke(
     send,
     host,
@@ -1344,27 +1320,15 @@ export async function messagingToolsAreNominalAgentTools(
   const routeEdge: graph.EdgeIdType | undefined = route?.edgeId;
   const routeKind: "message" | "value" | undefined = route?.kind;
 
-  // @ts-expect-error a copied carrier is not a nominal recv tool
-  const plainRecv: tools.RecvTool<Num, string> = { ...recv };
   // @ts-expect-error a copied carrier is not a nominal send tool
   const plainSend: tools.SendTool = { ...send };
   // @ts-expect-error a copied carrier is not a nominal info tool
   const plainInfo: tools.InfoTool = { ...info };
   // @ts-expect-error the constructors require new
-  void tools.RecvTool();
+  void tools.SendTool();
   // @ts-expect-error send names its edge
   await tools.SendTool.invoke(send, host, "send-2", { payload: 1 }, signal);
-  return [
-    recognized,
-    messages,
-    values,
-    routeId,
-    routeEdge,
-    routeKind,
-    plainRecv,
-    plainSend,
-    plainInfo,
-  ];
+  return [recognized, routeId, routeEdge, routeKind, plainSend, plainInfo];
 }
 
 export async function profileRecordersAreOneSharedInterface(
@@ -1448,10 +1412,12 @@ export async function profileOptimizerIsAStandardWorkflow(signal: AbortSignal) {
 export function ralphSuccessModeTypes() {
   const until: schedules.RalphPredicate = (result, context) => {
     const message: AssistantMessage = result;
-    const assignment: string = context.assignment;
+    const objectives: readonly string[] = context.objectives;
     const round: number = context.round;
     const label: string = context.label;
-    return message.stopReason === "stop" && round > 0 && label !== assignment;
+    return (
+      message.stopReason === "stop" && round > 0 && label !== objectives[0]
+    );
   };
   const uncapped: schedules.RalphOptions = { until };
   const capped: schedules.RalphOptions = { until, rounds: 5 };
@@ -1511,10 +1477,10 @@ export function memoryWorkflowTypes(memory: tools.JuncoMemory) {
     ralph: {
       rounds: 3,
       until: (result, context) => {
-        const assignment: string = context.assignment;
+        const objectives: readonly string[] = context.objectives;
         const round: number = context.round;
         return (
-          result.stopReason === "stop" && assignment.length > 0 && round > 0
+          result.stopReason === "stop" && objectives.length > 0 && round > 0
         );
       },
     },

@@ -18,7 +18,7 @@ use std::io::{BufWriter, ErrorKind, Write};
 use std::marker::PhantomData;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Tolerate};
 use crate::tree::Kind;
@@ -104,6 +104,40 @@ impl<R> JsonLog<R> {
         Ok(())
     }
 
+    /// Metadata has no filesystem intent to replay: restore the prior durable log on failure.
+    pub(crate) fn write_metadata(&mut self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        self.append_metadata(path, |file| {
+            file.write_all(bytes)?;
+            file.sync_data()
+        })
+    }
+
+    fn append_metadata(
+        &mut self,
+        path: &Path,
+        append: impl FnOnce(&mut File) -> std::io::Result<()>,
+    ) -> Result<(), Error> {
+        let checkpoint = self.file.metadata()?.len();
+        let pending = metadata_pending(path);
+        let mut marker = OpenOptions::new().write(true).create_new(true).open(&pending)?;
+        marker.write_all(&checkpoint.to_le_bytes())?;
+        marker.sync_all()?;
+        drop(marker);
+        File::open(parent_of(path))?.sync_all()?;
+        if let Err(append) = append(&mut self.file) {
+            if let Err(rollback) = self.file.set_len(checkpoint)
+                .and_then(|()| self.file.sync_all())
+                .and_then(|()| clear_metadata_pending(&pending))
+            {
+                return Err(Error::AppendRollback { append, rollback, checkpoint: pending });
+            }
+            return Err(append.into());
+        }
+        // END is already durable: preserve cleanup errors without misreporting an aborted receipt.
+        clear_metadata_pending(&pending)
+            .map_err(|cleanup| Error::CommittedCleanup { checkpoint: pending, cleanup })
+    }
+
     /// Every complete record of the log at `path`; an absent log reads as empty.
     ///
     /// A torn final line — the only corruption an append-and-fsync log can produce — is truncated
@@ -154,6 +188,27 @@ pub(crate) fn read_records<R: DeserializeOwned>(path: &Path) -> Result<Vec<(u64,
         offset += line.len() as u64;
     }
     Ok(records)
+}
+
+/// A durable rollback boundary retained whenever a metadata receipt cannot be resolved.
+pub(crate) fn metadata_pending(path: &Path) -> PathBuf {
+    path.with_extension("metadata-pending")
+}
+
+pub(crate) fn check_metadata_receipt(path: &Path) -> Result<(), Error> {
+    let pending = metadata_pending(path);
+    if std::fs::symlink_metadata(&pending).tolerate(&[ErrorKind::NotFound])?.is_some() {
+        return Err(Error::Wal(format!(
+            "metadata receipt is in doubt; repair the log using the checkpoint in {} before reopening",
+            pending.display()
+        )));
+    }
+    Ok(())
+}
+
+fn clear_metadata_pending(pending: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(pending)?;
+    File::open(parent_of(pending))?.sync_all()
 }
 
 /// Truncates the log at `path` to `len` bytes and forces the truncation to disk.
@@ -476,6 +531,132 @@ mod tests {
     fn read(path: &Path) -> Vec<u64> {
         let records = JsonLog::<Line>::read(path).expect("read log");
         records.into_iter().map(|line| line.seq).collect()
+    }
+
+    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    struct MetadataLine {
+        receipt: u64,
+    }
+
+    fn metadata_frame(seq: u64) -> (Vec<u8>, usize) {
+        use crate::commit::WalRecord;
+        use crate::types::{Seq, SourceUid, Staging};
+        let number = Seq::new(seq);
+        let uid = SourceUid::new(format!("metadata-{seq}")).unwrap();
+        let mut bytes = Vec::new();
+        write_record(&mut bytes, &WalRecord::Begin {
+            seq: number,
+            staging: Staging::of(number, &uid),
+            uid,
+            op_count: 0,
+            meta: MetadataLine { receipt: seq },
+        }).unwrap();
+        let intent = bytes.len();
+        write_record(&mut bytes, &WalRecord::<MetadataLine>::End { seq: number }).unwrap();
+        (bytes, intent)
+    }
+
+    #[test]
+    fn metadata_append_failures_restore_the_durable_prefix() {
+        use crate::commit::{WalRecord, recover};
+        let (frame, intent) = metadata_frame(2);
+        for written in [intent, intent + 5, frame.len()] {
+            let (scratch, path) = scratch("wal.jsonl");
+            let seed = scratch.path().join("seed");
+            let snap = scratch.path().join("snap");
+            std::fs::create_dir(&seed).unwrap();
+            std::fs::create_dir(&snap).unwrap();
+            let mut log = JsonLog::<WalRecord<MetadataLine>>::open(&path).unwrap();
+            let (before, _) = metadata_frame(1);
+            log.write_metadata(&path, &before).unwrap();
+            let error = log.append_metadata(&path, |file| {
+                file.write_all(&frame[..written])?;
+                // The full-frame case injects failure at the END sync boundary.
+                Err(std::io::Error::other("injected metadata append failure"))
+            }).unwrap_err();
+            assert!(matches!(error, Error::Io(_)));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!metadata_pending(&path).exists());
+            let recovered = recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true).unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].meta, MetadataLine { receipt: 1 });
+            log.write_metadata(&path, &frame).unwrap();
+            let recovered = recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true).unwrap();
+            assert_eq!(recovered.len(), 2);
+            assert_eq!(recovered[1].meta, MetadataLine { receipt: 2 });
+        }
+    }
+
+    #[test]
+    fn metadata_rollback_failure_blocks_recovery_even_with_complete_end() {
+        use crate::commit::{WalRecord, recover};
+        let (scratch, path) = scratch("wal.jsonl");
+        let seed = scratch.path().join("seed");
+        let snap = scratch.path().join("snap");
+        std::fs::create_dir(&seed).unwrap();
+        std::fs::create_dir(&snap).unwrap();
+        let mut log = JsonLog::<WalRecord<MetadataLine>>::open(&path).unwrap();
+        let (before, _) = metadata_frame(1);
+        let (frame, _) = metadata_frame(2);
+        log.write_metadata(&path, &before).unwrap();
+        let error = log.append_metadata(&path, |file| {
+            file.write_all(&frame)?;
+            *file = File::open(&path)?;
+            Err(std::io::Error::other("injected END sync failure"))
+        }).unwrap_err();
+        let Error::AppendRollback { append, rollback, .. } = error else {
+            panic!("both failures must survive");
+        };
+        assert_eq!(append.kind(), ErrorKind::Other);
+        assert!(rollback.raw_os_error().is_some());
+        let pending = metadata_pending(&path);
+        let checkpoint = u64::from_le_bytes(std::fs::read(&pending).unwrap().try_into().unwrap());
+        assert_eq!(checkpoint, before.len() as u64);
+        let doubtful = std::fs::read(&path).unwrap();
+        assert_eq!(doubtful, [before.as_slice(), frame.as_slice()].concat());
+        for _ in 0..2 {
+            assert!(matches!(recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true), Err(Error::Wal(_))));
+            assert_eq!(std::fs::read(&path).unwrap(), doubtful);
+            assert!(pending.exists());
+        }
+        truncate(&path, checkpoint).unwrap();
+        std::fs::remove_file(&pending).unwrap();
+        File::open(parent_of(&pending)).unwrap().sync_all().unwrap();
+        let recovered = recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].meta, MetadataLine { receipt: 1 });
+    }
+
+    #[test]
+    fn metadata_cleanup_failure_reports_a_committed_receipt_without_rollback() {
+        use crate::commit::{WalRecord, recover};
+        let (scratch, path) = scratch("wal.jsonl");
+        let seed = scratch.path().join("seed");
+        let snap = scratch.path().join("snap");
+        std::fs::create_dir(&seed).unwrap();
+        std::fs::create_dir(&snap).unwrap();
+        let mut log = JsonLog::<WalRecord<MetadataLine>>::open(&path).unwrap();
+        let (before, _) = metadata_frame(1);
+        let (frame, _) = metadata_frame(2);
+        log.write_metadata(&path, &before).unwrap();
+        let pending = metadata_pending(&path);
+        let error = log.append_metadata(&path, |file| {
+            file.write_all(&frame)?;
+            file.sync_data()?;
+            std::fs::remove_file(&pending)?;
+            std::fs::create_dir(&pending)?;
+            File::open(parent_of(&pending))?.sync_all()
+        }).unwrap_err();
+        assert!(matches!(error, Error::CommittedCleanup { .. }));
+        let committed = [before.as_slice(), frame.as_slice()].concat();
+        assert_eq!(std::fs::read(&path).unwrap(), committed);
+        assert!(matches!(recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true), Err(Error::Wal(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), committed);
+        std::fs::remove_dir(&pending).unwrap();
+        File::open(parent_of(&pending)).unwrap().sync_all().unwrap();
+        let recovered = recover::<MetadataLine>(&seed, &snap, &path, |_, _| {}, |_, _| true).unwrap();
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[1].meta, MetadataLine { receipt: 2 });
     }
 
     /// The length in bytes of the file at `path`.

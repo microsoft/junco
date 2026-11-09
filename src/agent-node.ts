@@ -6,7 +6,6 @@ import type {
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   type EdgeIdType,
-  fires,
   type Message,
   messagesOf,
   type Node,
@@ -15,15 +14,16 @@ import {
   type NodeSpec,
   type ParentView,
   type StepFn,
-  type TriggerRule,
 } from "dataflow-engine";
 import {
+  AgenticInputSchema,
   JuncoAgent,
   JuncoAgentError,
   type JuncoAgentNodeContext,
 } from "junco-agent";
-import { RecvTool, SendTool, type ToolCollection } from "junco-tools";
-import type { Static, TSchema } from "typebox";
+import { SendTool, type ToolCollection } from "junco-tools";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import type { Agentic } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
 import {
@@ -33,7 +33,17 @@ import {
   registrationOf,
   unseenValues,
 } from "./node-policy.js";
-import { TuiTracer } from "./tui-tracer.js";
+
+/** A tracer that also observes the agent behind an agentic node (`TuiTracer`, `OpikTracer`); `observeAgent` returns its detach function. */
+export type AgentObserver = {
+  observeAgent<S, N extends TSchema, T>(
+    node: Node<S, N, T>,
+    events: JuncoAgent["events"],
+  ): () => void;
+};
+const observesAgents = (tracer: unknown): tracer is AgentObserver =>
+  typeof (tracer as { observeAgent?: unknown } | undefined)?.observeAgent ===
+  "function";
 
 /** The prompt agent a driver advances, reading inputs of `N` and parent values `V`. */
 type DrivenAgent<N extends TSchema, V> =
@@ -48,10 +58,6 @@ export class AgentDriver<N extends TSchema, V> {
   readonly #agent: DrivenAgent<N, V>;
   /** The node's one run has started: its staged prompt demanded. */
   #started = false;
-  /** Delivered message batches per edge, retained in FIFO order until the model's `recv`. */
-  readonly #messages = new Map<EdgeIdType, Static<N>[]>();
-  /** Delivered parent results, each staged once, retained until the model's `recv`. */
-  readonly #values = new Map<EdgeIdType, V>();
   /** Parent results already staged, with the value staged; a re-resolved edge is fresh again. */
   readonly #seenValues = new Map<EdgeIdType, unknown>();
   /** The node body's policy, sharing {@link #seenValues}. */
@@ -71,35 +77,15 @@ export class AgentDriver<N extends TSchema, V> {
     };
   }
 
-  /**
-   * The node's messaging host, created once: its retained inbox for `recv`, and its registration's
-   * routes, route schemas and topology for `send`, `recv` and `info`. Every access reads the
-   * current registration and checks its current signal.
-   */
+  /** Live outbound route schemas and topology for `send` and `info`. */
   #messaging(): NonNullable<JuncoAgentNodeContext<N, V>["messaging"]> {
     if (this.#messageHost !== undefined) return this.#messageHost;
     const driver = this;
-    const view = { messages: this.#messages, values: this.#values };
     this.#messageHost = {
-      get view() {
-        driver.#registration?.signal.throwIfAborted();
-        return view;
-      },
-      get recvOutputSchema() {
-        return (
-          driver.#registration?.recvOutputSchema ??
-          RecvTool.outputSchemaFor([], [])
-        );
-      },
       get sendParameters() {
         return (
           driver.#registration?.sendParameters ?? SendTool.parametersFor([])
         );
-      },
-      consume: () => {
-        this.#registration?.signal.throwIfAborted();
-        this.#messages.clear();
-        this.#values.clear();
       },
       send: (message) => {
         const registration = this.#registration;
@@ -117,23 +103,9 @@ export class AgentDriver<N extends TSchema, V> {
     return this.#messageHost;
   }
 
-  /**
-   * Retain original parent edge identities and FIFO batches for the agent's recv tool. Values are
-   * seen once staged, so a postponed recv never lets a permanent result starve a newer message.
-   */
-  #retain(view: ParentView<N, V>): Message<N>[] {
-    const messages = messagesOf(view);
-    for (const { id, payload } of messages) {
-      const retained = this.#messages.get(id);
-      if (retained === undefined) this.#messages.set(id, [payload]);
-      else retained.push(payload);
-    }
-    const values = unseenValues(view.values, this.#seenValues);
-    for (const id of values.keys()) {
-      const value = values.get(id);
-      if (value !== undefined) this.#values.set(id, value);
-    }
-    return messages;
+  #deliver(view: ParentView<N, V>): Message<N>[] {
+    unseenValues(view.values, this.#seenValues);
+    return messagesOf(view);
   }
 
   /**
@@ -156,18 +128,6 @@ export class AgentDriver<N extends TSchema, V> {
     return false;
   }
 
-  /** What `recv` returns right now, for the model's next request — only while that inbox would fire `trigger`. */
-  #briefing<M extends TSchema>(trigger: TriggerRule<M, V>): string | undefined {
-    if (this.#messages.size === 0 && this.#values.size === 0) return undefined;
-    if (!fires(trigger, (id) => this.#messages.has(id) || this.#values.has(id)))
-      return undefined;
-    const entries = [
-      ...[...this.#messages].map(([id, batch]) => `${id}: ${batch.length}`),
-      ...[...this.#values.keys()].map((id) => `${id}: 1`),
-    ];
-    return `Inbox { ${entries.join(", ")} } read with recv tool`;
-  }
-
   /**
    * One activation: advance the run at most once, returning its final message once it settled. A
    * real agent does this with one node context bound: its messaging host, and complaints
@@ -175,43 +135,54 @@ export class AgentDriver<N extends TSchema, V> {
    */
   async #activate(
     node: Node<Agentic<N, V>, N, V>,
+    view: ParentView<N, V>,
     messages: readonly Message<N>[],
   ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
     const tracer = this.#registration?.tracer;
     const recorder = this.#registration?.recorder;
-    const detach =
-      tracer instanceof TuiTracer
-        ? tracer.observeAgent(node, agent.events)
-        : undefined;
+    const detach = observesAgents(tracer)
+      ? tracer.observeAgent(node, agent.events)
+      : undefined;
     try {
-      if (!(agent instanceof JuncoAgent)) return await this.#advance();
+      if (!(agent instanceof JuncoAgent))
+        return await this.#advance(view, messages);
       return await agent.runWithNodeContext<N, V, AssistantMessage | undefined>(
         {
           nodeId: node.id,
           messaging: this.#messaging(),
-          briefing: () => this.#briefing(node.trigger),
           complaint: { nodeId: node.id, messages },
           ...(recorder === undefined
             ? {}
             : { recorder, recorderNodeId: String(node.id) }),
         },
-        () => this.#advance(),
+        () => this.#advance(view, messages),
       );
     } finally {
       detach?.();
     }
   }
 
-  async #advance(): Promise<AssistantMessage | undefined> {
+  async #advance(
+    view: ParentView<N, V>,
+    messages: readonly Message<N>[],
+  ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
+    for (const { id, payload: input } of messages) {
+      const payload: unknown = input;
+      if (Value.Check(AgenticInputSchema, payload) && "text" in payload)
+        await agent.steer(
+          payload.text,
+          payload.images?.length ? { images: payload.images } : undefined,
+        );
+      else await agent.steer(JSON.stringify({ id, payload }));
+    }
     if (!this.#started) {
-      // Delivered data waits in the inbox; an agent without a staged prompt has nothing to await.
+      // Steers wait in Pi until a staged run is admitted.
       if (agent.status !== "ready") return undefined;
       this.#started = true;
     }
-    // The retained inbox is also the view a staged prompt function reads.
-    const result = await agent.next(this.#messaging().view);
+    const result = await agent.next(view);
     if (result.done === true)
       throw new JuncoAgentError(
         "closed",
@@ -231,11 +202,10 @@ export class AgentDriver<N extends TSchema, V> {
    * A graph node driving one prompt agent through a single run.
    *
    * The body first yields `[]` so the engine's priming consumes nothing. Each later activation
-   * retains the delivered batch and any parent result it has not seen in the node's inbox, which
-   * the model drains through `recv`; payloads are data, never native commands. The node demands
-   * the agent's staged prompt once, passing that inbox as the view a prompt function reads, then
-   * calls `agent.next()` at most once per activation: a `yield` step leaves the agent suspended, a
-   * settled step returns the native final message, and a failed step throws the native error.
+   * steers the delivered batch into the agent before advancing it; payload kinds are data, never
+   * native commands. A staged prompt function receives the delivered view, including value edges.
+   * The node calls `agent.next()` at most once per activation: a `yield` step leaves the agent
+   * suspended, a settled step returns the native final message, and a failed step throws the error.
    * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
    * message edges and `info` describes this node's routes. Unless
    * `options.is_available` replaces it, the node is available before it starts only when its
@@ -257,7 +227,11 @@ export class AgentDriver<N extends TSchema, V> {
       driver.#registration = registrationOf(this);
       let view = yield [];
       while (true) {
-        const result = await driver.#activate(this, driver.#retain(view));
+        const result = await driver.#activate(
+          this,
+          view,
+          driver.#deliver(view),
+        );
         if (result !== undefined) {
           driver.#started = false;
           // The native result; the step-less registration admits AssistantMessage into V.

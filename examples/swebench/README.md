@@ -95,7 +95,10 @@ For measured runs, set exactly one of `JUNCO_GRAPH_RUN_DIR` or `JUNCO_PROFILE_RU
 
 ### Harness tests
 
+Runtime tests require a reachable Docker daemon and the official fixture image below. The root `bun run test` runner prepares this image and mounts the caller's Docker socket into its CI container; GitHub Actions uses the same prerequisites.
+
 ```sh
+docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
 bun test ./test_runtime.test.ts                   # model routing, container bash, wf.yml protocol, sandbox ops (Docker)
 .venv/bin/python -m unittest test_benchmark       # benchmark.py boundaries (git, containers)
 ```

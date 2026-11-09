@@ -10,11 +10,7 @@ import type {
   PromptTemplate,
   Skill,
 } from "@earendil-works/pi-agent-core";
-import type {
-  AssistantMessage,
-  ImageContent,
-  JsonValue,
-} from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
   DataflowDefinitionError,
   DataflowGraph,
@@ -62,7 +58,6 @@ import {
   type Policy,
   type ProfileActivation,
   type ProfileRecorder,
-  RecvTool,
   SendTool,
   ShellMuxLease,
   ShellMuxOperations,
@@ -1124,19 +1119,18 @@ export function typedContextsPreserveNativeAndCallerData(id: NodeIdType) {
         ];
       }),
     );
-  const ordinary: Scheduler<
-    State,
-    Num,
-    string,
-    { priority: number }
-  > = async () => ({ selected: select([id]) });
+  const ordinary: Scheduler<State, Num, string, { priority: number }> = async (
+    snapshot,
+  ) => ({ selected: select(snapshot, [id]) });
   const unbranded: Scheduler<
     State,
     Num,
     string,
     { priority: number }
+  > = () => ({
     // @ts-expect-error selections use branded native IDs
-  > = () => ({ selected: [{ nodeId: "raw", modelStrength: 2 }] });
+    selected: [{ nodeId: "raw", modelStrength: 2, readEdges: [] }],
+  });
   // @ts-expect-error policy association is external
   graph.scheduler;
   // @ts-expect-error passive native graphs do not drive policies
@@ -1562,7 +1556,6 @@ export async function schemaDomainsStayExact(
   numberOnly: JuncoGraph<Num, number>,
   config: Parameters<typeof JuncoGraph.fromYaml>[1],
   registration: NodeRegistration<Num, string>,
-  view: ParentView<Num, string>,
   signal: AbortSignal,
 ) {
   const id = EdgeId.create("numbers");
@@ -1627,20 +1620,6 @@ export async function schemaDomainsStayExact(
       JuncoGraph<TSchema, unknown>
     >
   >(true);
-  // Hosted tools infer exact raw types; JSON content is JsonValue.
-  const host = {
-    view,
-    recvOutputSchema: RecvTool.outputSchemaFor(
-      [[EdgeId.create("numbers"), NumberSchema]],
-      [[EdgeId.create("text"), StringSchema]],
-    ),
-    consume: () => {},
-  };
-  const received = await RecvTool.invoke(new RecvTool(), host, "r", {}, signal);
-  exact<(typeof received.details.messages)[number]["payload"], number>(true);
-  exact<(typeof received.details.values)[number]["payload"], string>(true);
-  // Pi's result field is optional; recv always fills it with parsed JSON.
-  exact<typeof received.structuredContent, JsonValue | undefined>(true);
   exact<Static<typeof AssistantMessageSchema>, AssistantMessage>(true);
   await SendTool.invoke(
     new SendTool(),

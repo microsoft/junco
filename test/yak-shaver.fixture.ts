@@ -241,7 +241,7 @@ export type LaneLog = {
   reads: number;
   judgeCalls: number;
   judgeInputs: string[][];
-  /** `recv` results the judge read, as JSON text. */
+  /** Steered summary messages the judge read, as JSON text. */
   received: string[];
 };
 
@@ -474,17 +474,12 @@ export async function scriptedLane(
     Array.from({ length: 200 }, () => dispatch),
   );
   const judgeOptions = await nativeOptions([
-    () => toolTurn(call("recv", {})),
     (context: Context) => {
       log.judgeCalls++;
       script.onJudge?.();
-      // The judge's input is the staged prompt its callback composed.
+      // The staged proposal prompt precedes the delivered summaries.
       log.judgeInputs.push(userTexts(context.messages));
-      log.received.push(
-        ...latestResults(context)
-          .filter((result) => result.toolName === "recv" && !result.isError)
-          .map((result) => result.text),
-      );
+      log.received.push(...userTexts(context.messages).slice(1));
       if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
       return toolTurn(call("judge_refactor", script.verdict ?? allPass));
     },
@@ -508,7 +503,7 @@ export async function scriptedLane(
   const judge: YamlAgent = await agentApi.JuncoAgent.fromResolved({
     ...judgeOptions.options,
     systemPrompt: "judge",
-    tools: [read, new toolsApi.RecvTool(), verdict.tool],
+    tools: [read, verdict.tool],
   });
   return { lane: { work, proposer, judge, proposal, verdict }, log };
 }

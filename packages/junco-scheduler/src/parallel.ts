@@ -11,6 +11,6 @@ export function parallel(): <S, N extends TSchema, T, C>(
     const selected: NodeIdType[] = [];
     for (const id of snapshot.available)
       if (snapshot.owned.has(id)) selected.push(id);
-    return { selected: select(selected) };
+    return { selected: select(snapshot, selected) };
   };
 }

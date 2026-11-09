@@ -13,6 +13,8 @@ export {
   type ModelStrengthName,
   type NodeModel,
   nodeIds,
+  plannedReads,
+  reads,
   type Scheduler,
   type Snapshot,
   select,

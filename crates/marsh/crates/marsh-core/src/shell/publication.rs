@@ -36,6 +36,7 @@ pub(super) fn commit(
             .any(|(_, effects)| effects.workspace_mutated);
     let mut redo = None;
     let mut durable = false;
+    let mut committed_cleanup = None;
     let publication = (|| -> Result<(), ShellError> {
         let scope = session.tracing.internal_scope()?;
         let _guard = scope.enter();
@@ -93,14 +94,20 @@ pub(super) fn commit(
             // Even the first BEGIN write can partially succeed. Retain recovery resources until END.
             authority.recovery_required = true;
             snapshot.retained.store(true, Ordering::Release);
-            transaction.apply()?;
+            match transaction.apply() {
+                Ok(()) => {}
+                Err(error @ marsh_wal::Error::CommittedCleanup { .. }) => {
+                    committed_cleanup = Some(error);
+                }
+                Err(error) => return Err(error.into()),
+            }
             durable = true;
             authorized.completed = true;
             authority.seq = seq;
             if physical {
                 Session::record_versions(authority, operations)?;
             }
-            authority.recovery_required = false;
+            authority.recovery_required = committed_cleanup.is_some();
             snapshot.retained.store(false, Ordering::Release);
         } else {
             let _seal = executed.prepared.run.seal_publication(&executed.seal)?;
@@ -124,6 +131,9 @@ pub(super) fn commit(
         &snapshot,
         &mut executed,
     )?;
+    if let Some(error) = committed_cleanup {
+        return Err(error.into());
+    }
     Ok(workspace_mutated)
 }
 

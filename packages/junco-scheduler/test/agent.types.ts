@@ -84,6 +84,7 @@ export function genericOracle() {
       ),
       context: contextPairs,
       history: snapshot.history,
+      lastError: snapshot.lastError?.message ?? null,
     };
     const metadata: C | undefined = request.context[0]?.[1];
     return metadata === undefined ? [] : [request.nodes.map((node) => node.id)];
@@ -125,7 +126,7 @@ export function exactRequest(
   request.context.push([NodeId.create("a"), { trigger: "all", satisfied: 0 }]);
   const decision: Decision = {
     // @ts-expect-error Historical selections contain branded native IDs.
-    selected: [{ nodeId: "unbranded", modelStrength: 2 }],
+    selected: [{ nodeId: "unbranded", modelStrength: 2, readEdges: [] }],
   };
   return [satisfied, trigger, decision];
 }

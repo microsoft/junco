@@ -36,7 +36,6 @@ import {
   issueLog,
   type ProfileActivation,
   type ProfileRecorder,
-  RecvTool,
   SendTool,
   ToolCollection,
   type ToolCollectionOptions,
@@ -859,7 +858,7 @@ export class JuncoGraph<
     const id = super.addNode(complete);
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
-    const schemas = () => this.#messageSchemas(id);
+    const sendParameters = () => this.#sendParameters(id);
     const registration: NodeRegistration<N, T> = {
       tracer: this.#delegate,
       get recorder() {
@@ -869,10 +868,7 @@ export class JuncoGraph<
         return current();
       },
       get sendParameters() {
-        return schemas().sendParameters;
-      },
-      get recvOutputSchema() {
-        return schemas().recvOutputSchema;
+        return sendParameters();
       },
       send: (message) => {
         this.signal.throwIfAborted();
@@ -913,30 +909,14 @@ export class JuncoGraph<
     }
   }
 
-  /**
-   * Node `id`'s messaging schemas over its actual links, computed per call so a late edge is
-   * visible: `send` over its outbound message edges, `recv` over its inbound message and value
-   * edges.
-   */
-  #messageSchemas(
-    id: NodeIdType,
-  ): Pick<NodeRegistration<N, T>, "sendParameters" | "recvOutputSchema"> {
+  /** Node `id`'s send schema over outbound message links, computed live to include late edges. */
+  #sendParameters(id: NodeIdType): NodeRegistration<N, T>["sendParameters"] {
     const routes: (readonly [EdgeIdType, TSchema])[] = [];
-    const messages: (readonly [EdgeIdType, TSchema])[] = [];
-    const values: (readonly [EdgeIdType, TSchema])[] = [];
-    this.forEachLink((from, to, edge) => {
-      const route = [edge.id, edge.schema] as const;
-      if (E.isRight(edge.transport)) {
-        if (to === id) values.push(route);
-        return;
-      }
-      if (from === id) routes.push(route);
-      if (to === id) messages.push(route);
+    this.forEachLink((from, _to, edge) => {
+      if (from === id && E.isLeft(edge.transport))
+        routes.push([edge.id, edge.schema]);
     });
-    return {
-      sendParameters: SendTool.parametersFor(routes),
-      recvOutputSchema: RecvTool.outputSchemaFor(messages, values),
-    };
+    return SendTool.parametersFor(routes);
   }
 
   /** Prime without input consumption; each resume admits input and advances one child decision. */

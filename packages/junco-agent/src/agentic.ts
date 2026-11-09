@@ -31,8 +31,8 @@ import { type TSchema, Type } from "typebox";
 import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
 
 /**
- * The message payload of agent graphs. A prompt-agent node retains delivered payloads as data for
- * its model's `recv`; it never dispatches them as native commands.
+ * The message payload of agent graphs. A prompt-agent node steers delivered payloads into
+ * its model as user messages; it never dispatches them as native commands.
  */
 export type AgenticInput =
   | {

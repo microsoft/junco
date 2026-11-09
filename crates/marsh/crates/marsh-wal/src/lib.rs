@@ -4,9 +4,9 @@
 //! the command does write into. When the command finishes, [`diff::diff_trees`] recovers what it
 //! changed as a list of [`diff::CommitOp`] — or [`diff::diff_paths`], reading only the paths the
 //! caller knows were written — and [`commit::prepare`] checks that list against the seed and
-//! serializes it without writing anything. [`commit::PreparedTransaction::apply`] then publishes
-//! it through an append-only log, so a crash at any point leaves the seed either untouched or
-//! completable by a replay of [`commit::recover`].
+//! serializes it without writing an intent. [`commit::PreparedTransaction::apply`] then publishes
+//! through an append-only log. Physical intents can be replayed; metadata-only receipts require
+//! durable END, and an unresolved rollback checkpoint makes recovery fail closed.
 //!
 //! Nothing here knows what a command is, who ran it, or why it was allowed to. A transaction
 //! carries whatever per-transaction metadata `M` its caller wants recorded beside the operations —

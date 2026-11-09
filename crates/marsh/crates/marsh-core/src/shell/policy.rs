@@ -386,7 +386,8 @@ pub(super) fn authorize<'session>(
                     .collect(),
             }));
         }
-        let events = translate(&executed)?;
+        revalidate_owned(&executed, &guard)?;
+        let events = translate(&mut executed)?;
         let checkpoint = guard.history.len();
         guard.check(shell_policy, &events, observer)?;
         Ok((guard, operations, events, checkpoint))
@@ -407,6 +408,16 @@ fn preflight(
     executed: &ExecutedTransaction<'_>,
     operations: &[CommitOp],
 ) -> Result<(), ShellError> {
+    if executed.evidence.owner_only_release
+        && (!operations.is_empty()
+            || executed.evidence.effects.iter().any(|(_, effects)| {
+                effects.workspace_mutated || !effects.writes.is_empty()
+            }))
+    {
+        return Err(ShellError::unsupported(
+            "owner-only bulk release cannot be combined with managed filesystem mutation",
+        ));
+    }
     use std::os::unix::fs::MetadataExt;
     for operation in operations {
         let covered = executed.evidence.effects.iter().any(|(_, effect)| {
@@ -465,35 +476,70 @@ fn stale_paths(executed: &ExecutedTransaction<'_>, authority: &Authority) -> Vec
     stale.into_iter().collect()
 }
 
+fn revalidate_owned(
+    executed: &ExecutedTransaction<'_>,
+    authority: &Authority,
+) -> Result<(), ShellError> {
+    if executed.evidence.owned_releases.is_empty() {
+        return Ok(());
+    }
+    let principal = &executed.prepared.snapshot.owner;
+    let owned = junco_policy::owned_resources(
+        authority.history.iter().map(Event::as_policy_event),
+        principal,
+    );
+    let denials: Vec<_> = executed
+        .evidence
+        .owned_releases
+        .iter()
+        .flat_map(|(_, resources)| resources)
+        .filter(|resource| !owned.contains(resource))
+        .map(|resource| Denial {
+            event: Event::new(principal.clone(), Action::Release, resource.clone()),
+            failed_precondition: format!(
+                "{resource} is no longer owned by {principal}; owner-only bulk release was invalidated"
+            ),
+            allowed_fixes: vec![format!("{principal} retry owner-only bulk release")],
+        })
+        .collect();
+    if denials.is_empty() {
+        Ok(())
+    } else {
+        Err(ShellError::new(ShellErrorKind::Denied { denials }))
+    }
+}
+
 /// The run's effects as one ordered capability batch for the shell's policy principal: a read
 /// claims, a write edits, a successful removal removes and an explicit release releases, each at
 /// its own entry order. A repeated action on a resource collapses into its first.
-fn translate(executed: &ExecutedTransaction<'_>) -> Result<Vec<Event>, ShellError> {
+fn translate(executed: &mut ExecutedTransaction<'_>) -> Result<Vec<Event>, ShellError> {
     let principal = &executed.prepared.snapshot.owner;
     let mut ordered = Vec::new();
     for (order, effects) in &executed.evidence.effects {
-        for path in &effects.reads {
-            ordered.push((*order, Action::Read, path.as_path()));
-        }
         let write = if effects.removed {
             Action::Remove
         } else {
             Action::Edit
         };
-        for path in &effects.writes {
-            ordered.push((*order, write, path.as_path()));
+        for (action, path) in effects
+            .reads
+            .iter()
+            .map(|path| (Action::Read, path))
+            .chain(effects.writes.iter().map(|path| (write, path)))
+            .chain(effects.release.iter().map(|path| (Action::Release, path)))
+        {
+            if let Some(resource) = resource_of(path)? {
+                ordered.push((*order, action, resource));
+            }
         }
-        if let Some(path) = &effects.release {
-            ordered.push((*order, Action::Release, path.as_path()));
-        }
+    }
+    for (order, resources) in std::mem::take(&mut executed.evidence.owned_releases) {
+        ordered.extend(resources.into_iter().map(|resource| (order, Action::Release, resource)));
     }
     ordered.sort_by_key(|(order, _, _)| *order);
     let mut last = HashMap::new();
     let mut events = Vec::new();
-    for (_, action, path) in ordered {
-        let Some(resource) = resource_of(path)? else {
-            continue;
-        };
+    for (_, action, resource) in ordered {
         if last.get(&resource) == Some(&action) {
             continue;
         }

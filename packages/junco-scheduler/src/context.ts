@@ -18,6 +18,8 @@ import {
 } from "./scheduler.js";
 import { type UsageLimitDefinition, usageBudgets } from "./usage-limits.js";
 
+const SCHEDULE_ATTEMPTS = 3;
+
 /** A graph paired with its policy: `step()` runs one decision, `run()` repeats decisions to quiescence; both resolve to the results map. */
 export type SchedulerContext<
   S,
@@ -90,23 +92,36 @@ export function context<
           threads: graph.threads,
         });
         signal?.throwIfAborted();
+        let attempt = snapshot;
         let decision: Decision;
-        try {
-          decision = await scheduler(snapshot, signal);
-        } catch (error) {
+        for (let tries = 1; ; tries++) {
+          try {
+            decision = await scheduler(attempt, signal);
+          } catch (error) {
+            signal?.throwIfAborted();
+            throw error;
+          }
           signal?.throwIfAborted();
-          throw error;
+          try {
+            validateDecision(attempt, decision);
+            break;
+          } catch (error) {
+            if (
+              !(error instanceof DataflowDefinitionError) ||
+              tries >= SCHEDULE_ATTEMPTS
+            )
+              throw error;
+            attempt = Object.freeze({ ...snapshot, lastError: error });
+          }
         }
-        signal?.throwIfAborted();
-        validateDecision(snapshot, decision);
-        const schedule = decision.selected.map(({ nodeId }) => {
-          const plan = plans.get(nodeId);
-          if (plan === undefined)
-            throw new DataflowDefinitionError(
-              `Scheduler: no input plan for node "${nodeId}"`,
-            );
-          return [{ id: nodeId, inputs: plan }];
-        });
+        const schedule = decision.selected.map((entry) => [
+          {
+            id: entry.nodeId,
+            inputs: new Map(
+              entry.readEdges.map((edge) => [edge, "all" as const]),
+            ),
+          },
+        ]);
         const live = graph.available();
         if (
           graph.observe().version !== snapshot.version ||
@@ -116,25 +131,24 @@ export function context<
             "Scheduler snapshot changed while computing a decision",
           );
         }
-        const strengths = new Map(
-          decision.selected.map((entry) => [entry.nodeId, entry.modelStrength]),
+        const byId = new Map(
+          decision.selected.map((entry) => [entry.nodeId, entry]),
         );
         await options.prepare?.(decision.selected, signal);
         await execute(schedule, {
           usageBudgets: usageBudgets(decision.selected, evaluation),
-          resolveInputs: (entry, candidate) => inputs(entry.id, candidate),
           onColumn: (selected) => {
             if (selected.length > 0)
               history.push(
                 Object.freeze({
                   selected: Object.freeze(
                     selected.map((nodeId) => {
-                      const modelStrength = strengths.get(nodeId);
-                      if (modelStrength === undefined)
+                      const entry = byId.get(nodeId);
+                      if (entry === undefined)
                         throw new DataflowDefinitionError(
                           `Scheduler: node "${nodeId}" ran but was not selected`,
                         );
-                      return { nodeId, modelStrength };
+                      return entry;
                     }),
                   ),
                 }),

@@ -56,6 +56,8 @@ pub(crate) enum JuncoTool {
     Edit { cwd: PathBuf },
     /// `release` of one file's ownership.
     Release { path: PathBuf },
+    /// Explicit release of every resource currently owned by this call's principal.
+    ReleaseOwned,
 }
 
 /// The one classification of a call: it may write exactly when it applies an edit, whatever the
@@ -70,7 +72,7 @@ impl From<&JuncoTool> for Action {
             | JuncoTool::Graph { .. }
             | JuncoTool::AstEdit { apply: false, .. } => Self::Read,
             JuncoTool::Edit { .. } | JuncoTool::AstEdit { apply: true, .. } => Self::Edit,
-            JuncoTool::Release { .. } => Self::Release,
+            JuncoTool::Release { .. } | JuncoTool::ReleaseOwned => Self::Release,
         }
     }
 }
@@ -94,6 +96,7 @@ impl MarshTool for JuncoTool {
             }
             Self::Edit { cwd } => format!("junco edit {}", cwd.display()),
             Self::Release { path } => format!("junco release {}", path.display()),
+            Self::ReleaseOwned => return Cow::Borrowed("junco release --owned"),
         })
     }
 }
@@ -127,7 +130,10 @@ pub(crate) fn sandbox_policy(mode: SandboxMode) -> SandboxPolicy {
     };
     SandboxPolicy::or(
         SandboxPolicy::Base(|ctx| {
-            matches!(ctx.tool_as::<JuncoTool>(), Some(JuncoTool::Release { .. }))
+            matches!(
+                ctx.tool_as::<JuncoTool>(),
+                Some(JuncoTool::Release { .. } | JuncoTool::ReleaseOwned)
+            )
         }),
         SandboxPolicy::and(
             marsh,
@@ -647,6 +653,26 @@ impl NativeMux {
             resolve,
         )
     }
+
+    /// Relinquishes only this call owner's current ownership on the managed source. Resolves
+    /// with deterministic source-relative paths once Marsh publishes the entire release batch.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn release_owned<'env>(
+        &self,
+        env: &'env Env,
+        cwd: String,
+    ) -> Result<PromiseRaw<'env, Vec<String>>> {
+        env.spawn_future_with_callback(
+            routed(
+                Arc::clone(&self.session),
+                self.owner.clone(),
+                cwd,
+                JuncoTool::ReleaseOwned,
+                |ctx| ctx.release_owned().map_err(|error| error.to_string()),
+            ),
+            resolve,
+        )
+    }
 }
 
 /// Replaces `path` (as callers name it) with `content` through the call's context, so that on the
@@ -920,6 +946,7 @@ mod tests {
             ),
             (JuncoTool::Edit { cwd: root() }, Action::Edit),
             (JuncoTool::Release { path: root() }, Action::Release),
+            (JuncoTool::ReleaseOwned, Action::Release),
         ];
         for (tool, expected) in cases {
             let actual: Action = (&tool).into();

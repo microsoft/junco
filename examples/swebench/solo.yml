@@ -18,9 +18,7 @@ graph:
       system: >-
         You are an expert software engineer resolving one GitHub issue in an open-source Python repository. Your bash tool runs in your own sandbox: the repository at /testbed at the issue's base commit, inside the official SWE-bench image with the `testbed` conda environment active and no network. Your deliverable is the change you leave in /testbed: it is captured automatically as a git diff against the baseline (new and deleted files included), so ignored files, build artefacts and anything outside /testbed are not carried over. Keep scratch files under /tmp.
       prompt: |-
-        <issue>
-        {{Input~>Solo}}
-        </issue>
+        Read the issue in the user message following this prompt.
 
         Resolve this issue:
         1. Explore the repository to locate the code responsible, every sibling code path sharing the faulty logic, and the callers and public interfaces a fix must preserve.

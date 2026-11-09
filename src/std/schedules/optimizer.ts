@@ -1887,7 +1887,7 @@ class OptimizerController {
   #prompt(state: OptimizationState, ticket: string, axis: Axis): string {
     return [
       `Optimization turn ${ticket}: tune the ${axis} region (cycle ${state.cycle}).`,
-      "Read the complete optimization state on editor-assignment with recv, then call read_target,",
+      "Read the complete optimization state in the user message that follows (edge editor-assignment, JSON { id, payload }), then call read_target,",
       `then edit_tuning with ticket "${ticket}" and axis "${axis}". Finish with one sentence.`,
     ].join(" ");
   }

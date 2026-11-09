@@ -84,11 +84,21 @@ export function graphAndHookDetermineAllTypes(
         // @ts-expect-error input containers are readonly
         snapshot.inputs.get(id)!.messages.set(edge, []);
         // @ts-expect-error historical selections are readonly
-        snapshot.history[0]!.selected.push({ nodeId: id, modelStrength: 2 });
+        snapshot.history[0]!.selected.push({
+          nodeId: id,
+          modelStrength: 2,
+          readEdges: [],
+        });
         // @ts-expect-error historical node IDs are readonly
         snapshot.history[0]!.selected[0]!.nodeId = id;
         // @ts-expect-error historical strengths are readonly
         snapshot.history[0]!.selected[0]!.modelStrength = 3;
+        // @ts-expect-error historical read plans are readonly
+        snapshot.history[0]!.selected[0]!.readEdges = [];
+        // @ts-expect-error historical read edge arrays are readonly
+        snapshot.history[0]!.selected[0]!.readEdges.push(edge);
+        // @ts-expect-error historical read edge elements are readonly
+        snapshot.history[0]!.selected[0]!.readEdges[0] = edge;
         // @ts-expect-error ownership is readonly
         snapshot.owned.add(id);
         void [
@@ -269,14 +279,16 @@ export function universalPoliciesAndExactComposition(id: NodeIdType) {
     string,
     Metadata
   > = async (snapshot, signal) => await composed(snapshot, signal);
-  // @ts-expect-error raw strings are not native branded selections
-  const malformed: Decision = { selected: [{ nodeId: "a", modelStrength: 2 }] };
+  const malformed: Decision = {
+    // @ts-expect-error raw strings are not native branded selections
+    selected: [{ nodeId: "a", modelStrength: 2, readEdges: [] }],
+  };
   const valid: Decision = {
-    selected: [{ nodeId: NodeId.create("a"), modelStrength: 2 }],
+    selected: [{ nodeId: NodeId.create("a"), modelStrength: 2, readEdges: [] }],
   };
   const invalidStrength: Decision = {
     // @ts-expect-error strengths are ladder indices, not arbitrary numbers
-    selected: [{ nodeId: id, modelStrength: 5 }],
+    selected: [{ nodeId: id, modelStrength: 5, readEdges: [] }],
   };
   // @ts-expect-error bare branded IDs are not model selections
   const bareIds: Decision = { selected: [id] };

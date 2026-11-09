@@ -10,10 +10,10 @@ graph:
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
     Bun:
       mcp: [playwright]
-      prompt: Call recv once, then answer for Bun only, browsing from https://bun.sh with the playwright tools.
+      prompt: Answer the assignment in the following user message for Bun only, browsing from https://bun.sh with the playwright tools.
     Rust:
       mcp: [playwright]
-      prompt: Call recv once, then answer for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
+      prompt: Answer the assignment in the following user message for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
     Reviewer:
       prompt: |-
         Merge the two answers below into one table of tool, version, release date and source URL. Keep a claim only if it cites a page.
