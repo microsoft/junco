@@ -19,6 +19,11 @@ use tokio::{sync::Mutex, time::Instant};
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct LspOptions {
     pub read_only: bool,
+    /// Permit LSP actions only after the host trusts this workspace to execute code.
+    /// This includes repository configuration, local binaries and server-side project hooks.
+    /// Defaults to false; never derive approval from repository files or model input.
+    #[serde(default)]
+    pub trusted_workspace: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +217,11 @@ impl LspTool {
         }
         if self.closed.load(Ordering::Acquire) {
             return Err(LspError::Closed);
+        }
+        if !self.options.trusted_workspace {
+            return Err(LspError::Tool(
+                "LSP requires explicit workspace trust; set trusted_workspace (JS: trustedWorkspace) only after trusting this workspace to execute code".into(),
+            ));
         }
         let mut state = tokio::select! { biased; _=cancel.cancelled()=>return Err(LspError::Cancelled),_=self.closing.cancelled()=>return Err(LspError::Closed),state=self.state.lock()=>state };
         if self.closed.load(Ordering::Acquire) {

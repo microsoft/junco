@@ -58,7 +58,16 @@ async fn fixture(control: Value, rust: bool) -> (tempfile::TempDir, LspTool) {
         .build_managed_session()
         .await
         .unwrap();
-    (root, LspTool::from_session(session, LspOptions::default()))
+    (
+        root,
+        LspTool::from_session(
+            session,
+            LspOptions {
+                trusted_workspace: true,
+                ..Default::default()
+            },
+        ),
+    )
 }
 fn input(action: LspAction, file: Option<&str>) -> LspInput {
     LspInput {

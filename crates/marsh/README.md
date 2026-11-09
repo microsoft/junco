@@ -57,11 +57,13 @@ and reaps the command's whole process tree. The interpreter's own filesystem acc
 records in the same vocabulary. A launch the tracer cannot seize never runs, and failed
 observation fails closed. No trace spool, sysctl changes or fallback tracer is involved.
 
-During whole-tree exit, a newborn may reach its terminal ptrace stop before its adoption event.
-Marsh consumes already-queued lifecycle events before declaring held tasks unclassifiable, so a
-replacement EXIT is not mistaken for a stalled attachment stop. It drains that stop only after
-every task is exiting and retains the newborn's bookkeeping until the tree is reaped. Tombstones
-with pending, deferred or application records still fail observation.
+During whole-tree exit, a newborn may reach its terminal ptrace stop before its adoption event,
+or retain its initial stop after its thread group has entered `exit_group`. Marsh consumes
+already-queued lifecycle events before declaring held tasks unclassifiable. It drains EXIT holds
+only after every task is exiting; an initial stop also requires a matching procfs thread group
+and an observed `exit_group` caller at EXIT. Unrelated held processes remain stopped. Newborn
+bookkeeping survives until the tree is reaped; tombstones with pending, deferred or application
+records still fail observation.
 
 A nonleader `exec` reports its EXEC stop under the group leader's TID, naming the caller's former
 TID. If SIGKILL replaces that stop before its message is read, Marsh never treats the stale

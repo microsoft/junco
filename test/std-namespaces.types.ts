@@ -934,14 +934,28 @@ export async function lspToolTypesThroughBothRoutes(
   native?: tools.NativeModule,
   mux?: tools.NativeMux,
 ) {
-  const options: tools.LspToolOptions = { readOnly: true, native, mux };
-  const routedOptions: tools.LspToolOptions = { readOnly: false, native, mux };
+  const options: tools.LspToolOptions = {
+    readOnly: true,
+    trustedWorkspace: true,
+    native,
+    mux,
+  };
+  const routedOptions: tools.LspToolOptions = {
+    readOnly: false,
+    trustedWorkspace: true,
+    native,
+    mux,
+  };
   const flat: tools.LspTool = await tools.LspTool.create(cwd, options);
   const routed: tools.LspTool = await tools.LspTool.create(cwd, routedOptions);
   const execute: tools.LspTool["execute"] = flat.execute;
   const routedExecute: tools.LspTool["execute"] = routed.execute;
   if (native) {
-    const handle = await native.NativeLsp.open(cwd, { readOnly: true }, mux);
+    const handle = await native.NativeLsp.open(
+      cwd,
+      { readOnly: true, trustedWorkspace: true },
+      mux,
+    );
     const call: InstanceType<tools.NativeModule["NativeLspCall"]> =
       handle.start({ action: "status" });
     const result = await call.wait();

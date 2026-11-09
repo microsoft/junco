@@ -3,9 +3,9 @@
 //! traced, which Linux refuses within one thread group anyway. No CLI, renderer, tracee launcher,
 //! or dependency source patch participates here.
 //!
-//! A newborn killed before its adoption event may first report EXIT. Such terminal holds
-//! drain only after every creator is exiting; their lifecycle tombstones survive until the
-//! whole tree is reaped. This never completes a pending syscall or seals a parked epoch.
+//! A newborn killed before its adoption event may first report EXIT, or retain its initial
+//! stop during group exit. Terminal holds drain only once all creators exit, or that exact
+//! thread group's `exit_group` is observed. No pending syscall or parked epoch is completed.
 
 use std::collections::HashMap;
 use std::io;
@@ -347,24 +347,28 @@ impl Observer {
                     self.stop(tid, status, observe)?;
                     continue;
                 }
-                // exit_group/SIGKILL can replace a newborn's attachment stop with EXIT before
-                // its creator's event message can be read. An exit stop must reach its final
-                // wait, but only after every possible creator is exiting: otherwise its late
-                // adoption still needs the held task and its buffered lifecycle records.
-                let terminal_only = self.tasks.values().all(|task| task.exiting)
-                    && self.held.iter().all(|(tid, held)| {
-                        held.policy
-                            || self.tasks.get(tid).is_some_and(|task| {
-                                !task.synchronized
-                                    && !task.in_syscall
-                                    && task.entry.is_none()
-                                    && matches!(
-                                        WaitStatus::from_raw(*tid, held.status),
-                                        Ok(WaitStatus::PtraceEvent(_, _, code))
-                                            if code == Event::PTRACE_EVENT_EXIT as i32
-                                    )
-                            })
-                    });
+                // An EXIT hold drains only after every creator exits. An initial newborn stop
+                // may survive exit_group; releasing it needs proof its exact group is dying.
+                let all_exiting = self.tasks.values().all(|task| task.exiting);
+                let mut terminal_only = true;
+                for (tid, held) in &self.held {
+                    if held.policy {
+                        continue;
+                    }
+                    let wait = WaitStatus::from_raw(*tid, held.status)?;
+                    if self.tasks.get(tid).is_none_or(|task| {
+                        task.synchronized || task.in_syscall || task.entry.is_some()
+                    }) || !(all_exiting
+                        && matches!(wait, WaitStatus::PtraceEvent(_, _, code)
+                            if code == Event::PTRACE_EVENT_EXIT as i32)
+                        || matches!(wait, WaitStatus::PtraceEvent(_, Signal::SIGTRAP, code)
+                            if code == Event::PTRACE_EVENT_STOP as i32)
+                            && self.group_exiting(*tid)?)
+                    {
+                        terminal_only = false;
+                        break;
+                    }
+                }
                 if terminal_only {
                     for (&tid, held) in &self.held {
                         if !held.policy {
@@ -373,7 +377,9 @@ impl Observer {
                     }
                     for tid in release.drain(..) {
                         self.held.remove(&tid);
-                        self.unexecuted_exits.push(tid);
+                        if !self.unexecuted_exits.contains(&tid) {
+                            self.unexecuted_exits.push(tid);
+                        }
                         resume(tid, None)?;
                     }
                     continue;
@@ -396,6 +402,23 @@ impl Observer {
                 "native wait ended before every task's final exit",
             ))
         }
+    }
+
+    /// An initial newborn stop may outlive group exit; resume only its proven dying group.
+    fn group_exiting(&self, tid: Pid) -> io::Result<bool> {
+        let exiting = |task: &Task| task.exiting && task.syscall == Some(Sysno::exit_group);
+        if !self.tasks.values().any(exiting) {
+            return Ok(false);
+        }
+        let group = proc_field::<i32>(format!("/proc/{tid}/status"), "Tgid:")?
+            .filter(|group| *group > 0)
+            .ok_or_else(|| io::Error::other("missing or invalid exiting thread group"))?;
+        for (caller, _) in self.tasks.iter().filter(|(_, task)| exiting(task)) {
+            if proc_field::<i32>(format!("/proc/{caller}/status"), "Tgid:")? == Some(group) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// After a failure: kills every tracee and resumes whatever still stops, observing nothing,

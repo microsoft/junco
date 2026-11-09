@@ -87,7 +87,13 @@ impl Fixture {
             .build_managed_session()
             .await
             .unwrap();
-        LspTool::from_session(session, LspOptions::default())
+        LspTool::from_session(
+            session,
+            LspOptions {
+                trusted_workspace: true,
+                ..Default::default()
+            },
+        )
     }
 }
 fn input(action: LspAction) -> LspInput {

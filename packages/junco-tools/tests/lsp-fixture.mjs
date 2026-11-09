@@ -1718,7 +1718,11 @@ export async function smokeClangd() {
     );
     const owner = mux.forkOwner();
     const blocker = mux.forkOwner();
-    const tool = await LspTool.create(seed, { native, mux: owner });
+    const tool = await LspTool.create(seed, {
+      native,
+      mux: owner,
+      trustedWorkspace: true,
+    });
     const execute = tool.execute;
     const run = async (input) => {
       const result = await execute("clangd-smoke", input);

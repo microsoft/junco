@@ -364,7 +364,7 @@ test(
     const mux = (
       await native.NativeMux.openCopyTree(directory, { sandbox: "always" })
     ).forkOwner();
-    const options = { readOnly: true, mux, native };
+    const options = { readOnly: true, trustedWorkspace: true, mux, native };
     try {
       const lsp = await tools.LspTool.create(directory, options);
       assert.equal(lsp.name, "lsp");

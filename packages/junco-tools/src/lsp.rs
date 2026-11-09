@@ -28,6 +28,7 @@ type CallResult = std::result::Result<LspResult, BindingError>;
 #[napi(object)]
 pub struct NativeLspOptions {
     pub read_only: Option<bool>,
+    pub trusted_workspace: Option<bool>,
 }
 
 /// The public tool input, converted field-by-field without a second wire protocol.
@@ -290,7 +291,11 @@ impl NativeLsp {
         let registry = registry(env)?;
         let options = LspOptions {
             read_only: options
+                .as_ref()
                 .and_then(|options| options.read_only)
+                .unwrap_or(false),
+            trusted_workspace: options
+                .and_then(|options| options.trusted_workspace)
                 .unwrap_or(false),
         };
         // Bun's process.env changes need not update libc; capture the caller's runtime.

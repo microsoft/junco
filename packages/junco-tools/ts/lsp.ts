@@ -68,6 +68,8 @@ export interface LspToolDetails {
 export interface LspToolOptions {
   /** Reject write-tier actions before server contact; not a filesystem capability boundary. */
   readonly readOnly?: boolean;
+  /** Host approval to execute workspace code, including repo config and local bins. Default false; never take approval from repo files or model input. */
+  readonly trustedWorkspace?: boolean;
   /** Borrow this owner-bound mux's policy, environment and resource configuration. */
   readonly mux?: NativeMux;
   readonly native?: NativeModule;
@@ -131,7 +133,10 @@ export const LspTool = {
     bindings.add(native);
     const handle = await native.NativeLsp.open(
       resolveToolPath(process.cwd(), cwd),
-      { readOnly: options.readOnly },
+      {
+        readOnly: options.readOnly,
+        trustedWorkspace: options.trustedWorkspace,
+      },
       options.mux,
     );
     const describe = (args: unknown) => {

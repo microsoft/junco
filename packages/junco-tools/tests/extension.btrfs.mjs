@@ -769,7 +769,7 @@ test("cwd-only native LSP construction enforces production Btrfs policy and publ
       )
       .wait();
     assert.equal(held.exitCode, 0);
-    const tool = await LspTool.create(seed);
+    const tool = await LspTool.create(seed, { trustedWorkspace: true });
     const execute = tool.execute;
     const hover = await execute("production-hover", {
       action: "hover",

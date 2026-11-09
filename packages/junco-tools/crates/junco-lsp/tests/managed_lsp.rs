@@ -113,7 +113,13 @@ impl Fixture {
             .build_managed_session()
             .await
             .unwrap();
-        LspTool::from_session(session, LspOptions { read_only })
+        LspTool::from_session(
+            session,
+            LspOptions {
+                read_only,
+                trusted_workspace: true,
+            },
+        )
     }
     async fn lock_b(&self) -> Shell {
         let shell = shell_builder(self.fs.clone())
@@ -184,6 +190,62 @@ fn counter(state: &Value) -> u64 {
 }
 fn dead(pid: u64) -> bool {
     !Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn untrusted_workspace_cannot_load_config_or_execute_commands() {
+    let fixture = Fixture::new(json!({}));
+    let marker = fixture.root.path().join("executed");
+    std::fs::write(
+        fixture.seed.join(".lsp.json"),
+        json!({
+            "trustedWorkspace": true,
+            "trusted_workspace": true,
+            "servers": {"fixture": {
+                "command": "node",
+                "args": ["-e", format!("require('fs').writeFileSync({}, 'executed')", json!(marker))],
+                "fileTypes": ["fixture"], "rootMarkers": ["."]
+            }}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for options in [
+        LspOptions::default(),
+        serde_json::from_value(json!({"read_only": true})).unwrap(),
+    ] {
+        let session = shell_builder(fixture.fs.clone())
+            .working_dir(fixture.seed.clone())
+            .environment(fixture.environment())
+            .build_managed_session()
+            .await
+            .unwrap();
+        let tool = LspTool::from_session(session, options);
+        for action in [
+            LspAction::Diagnostics,
+            LspAction::Definition,
+            LspAction::References,
+            LspAction::Hover,
+            LspAction::Symbols,
+            LspAction::Rename,
+            LspAction::RenameFile,
+            LspAction::CodeActions,
+            LspAction::TypeDefinition,
+            LspAction::Implementation,
+            LspAction::Status,
+            LspAction::Reload,
+            LspAction::Capabilities,
+            LspAction::Request,
+        ] {
+            let result = execute(&tool, input(action)).await;
+            assert!(
+                matches!(result, Err(LspError::Tool(ref message)) if message.contains("explicit workspace trust")),
+                "{action}: {result:?}"
+            );
+        }
+        assert!(!marker.exists(), "repository command must not execute");
+        tool.close().await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

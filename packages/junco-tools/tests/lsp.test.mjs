@@ -178,10 +178,19 @@ async function workspace(
       return handle;
     },
     async js(extra = {}) {
-      return LspTool.create(at, { native, mux: owner, ...extra });
+      return LspTool.create(at, {
+        native,
+        mux: owner,
+        trustedWorkspace: true,
+        ...extra,
+      });
     },
     async direct(extra = {}, handle = owner) {
-      const tool = await native.NativeLsp.open(at, extra, handle);
+      const tool = await native.NativeLsp.open(
+        at,
+        { trustedWorkspace: true, ...extra },
+        handle,
+      );
       handles.push(tool);
       return tool;
     },
@@ -297,6 +306,46 @@ const normalCases = [
     /"normal": true/,
   ],
 ];
+
+test("workspace trust defaults to deny for native and JavaScript callers", {
+  timeout: 90_000,
+}, async (t) => {
+  const ws = await workspace(t);
+  const marker = join(ws.root, "executed");
+  await ws.write(
+    ".lsp.json",
+    JSON.stringify({
+      trustedWorkspace: true,
+      servers: {
+        fixture: server({
+          args: [
+            "-e",
+            `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`,
+          ],
+        }),
+      },
+    }),
+  );
+  for (const options of [{}, { trustedWorkspace: false, readOnly: true }]) {
+    const direct = ws.track(
+      await ws.native.NativeLsp.open(ws.cwd, options, ws.owner),
+    );
+    await assert.rejects(
+      direct.start(hover).wait(),
+      /explicit workspace trust/,
+    );
+    const js = await LspTool.create(ws.cwd, {
+      native: ws.native,
+      mux: ws.owner,
+      ...options,
+    });
+    await assert.rejects(
+      js.execute("untrusted-hover", hover),
+      /explicit workspace trust/,
+    );
+  }
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+});
 
 test("all fourteen native actions retain public results and renderer formats", {
   timeout: 180_000,
@@ -999,13 +1048,25 @@ test("native close is idempotent and mux/global close drain active and queued ca
     await ws.native.NativeMux.openCopyTree(ws.seed, { sandbox: "always" }),
   );
   const owner = other.forkOwner();
-  const a = await ws.native.NativeLsp.open(ws.seed, {}, owner);
-  const b = await ws.native.NativeLsp.open(ws.seed, {}, owner);
+  const a = await ws.native.NativeLsp.open(
+    ws.seed,
+    { trustedWorkspace: true },
+    owner,
+  );
+  const b = await ws.native.NativeLsp.open(
+    ws.seed,
+    { trustedWorkspace: true },
+    owner,
+  );
   const pids = [(await nativeState(a)).pid, (await nativeState(b)).pid];
   await ws.native.NativeLsp.shutdownAll();
   await ws.native.NativeLsp.shutdownAll();
   for (const pid of pids) assert.equal(alive(pid), false);
-  const later = await ws.native.NativeLsp.open(ws.seed, {}, owner);
+  const later = await ws.native.NativeLsp.open(
+    ws.seed,
+    { trustedWorkspace: true },
+    owner,
+  );
   assert.ok((await nativeState(later)).pid);
   await later.close();
   assert.equal((await owner.readFile(ws.seed, "a.fixture")).toString(), A);

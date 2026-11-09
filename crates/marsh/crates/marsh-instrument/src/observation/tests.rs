@@ -433,7 +433,7 @@ fn memory_fixture() {
     unsafe {
         std::ptr::write_bytes(base, b'x', page);
     }
-    println!("MEMORY {} {} {}", base as usize, edge, bytes.len());
+    println!("\nMEMORY {} {} {}", base as usize, edge, bytes.len());
     std::io::stdout().flush().unwrap();
     let mut release = [0];
     std::io::stdin().read_exact(&mut release).unwrap();
