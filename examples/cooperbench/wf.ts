@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { type FileHandle, copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspect } from "node:util";
 import type {
   AgentTool,
   PromptTemplate,
@@ -821,23 +822,23 @@ export async function createBenchmarkRecorder(
 
 // ## CLI
 
-/** Node's writable queue serializes complete JSONL records under pipe backpressure. */
+const eventOutput = Bun.stdout.writer();
+const diagnosticOutput = Bun.stderr.writer();
+
+/** Bun's file sink serializes complete JSONL records under pipe backpressure. */
 export function emit(record: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
+  eventOutput.write(`${JSON.stringify({ ...record, timestamp: new Date().toISOString() })}\n`);
 }
 
 /** Policy callbacks must not synchronously write a backpressured stderr pipe. */
 export function emitLog(line: string): void {
-  process.stderr.write(`${line}\n`);
+  diagnosticOutput.write(`${line}\n`);
 }
 
-/** Join both output queues before the explicit exit that releases idle model sockets. */
-export const flushEvents = (): Promise<void> => new Promise((resolve, reject) => {
-  process.stdout.write("", (error) => {
-    if (error) { reject(error); return; }
-    process.stderr.write("", (error) => error ? reject(error) : resolve());
-  });
-});
+/** Flush the actual sinks: Bun's empty Node-stream writes can acknowledge before buffered bytes drain. */
+export const flushEvents = async (): Promise<void> => {
+  await Promise.all([eventOutput.flush(), diagnosticOutput.flush()]);
+};
 
 function describe(error: unknown): string {
   if (error instanceof AggregateError) return [error.message, ...error.errors.map(describe)].join("; ");
@@ -1177,7 +1178,7 @@ if (import.meta.main) {
     else if (process.argv.length === 3 && process.argv[2] === "--recover-workspace") await recoverWorkspace(process.cwd());
     else throw new Error("unsupported workflow arguments");
   } catch (error) {
-    console.error(error instanceof Error && error.constructor === Error && error.cause === undefined ? error.message : error);
+    emitLog(error instanceof Error && error.constructor === Error && error.cause === undefined ? error.message : inspect(error));
     process.exitCode = 1;
   }
   if (controller.signal.aborted) process.exitCode = 130;
