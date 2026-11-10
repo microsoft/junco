@@ -28,6 +28,7 @@ export {
   NO_USAGE,
 } from "./mock-agent.js";
 export { MockJuncoGraph } from "./mock-junco-graph.js";
+export * as errors from "./std/errors.js";
 export * as graph from "./std/graph.js";
 export * as schedules from "./std/schedules/index.js";
 export * as tracer from "./std/tracer.js";

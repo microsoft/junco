@@ -21,7 +21,7 @@ import type {
   Model,
   Usage,
 } from "@earendil-works/pi-ai";
-import type { ParentView } from "dataflow-engine";
+import type { Message, ParentView } from "dataflow-engine";
 import type {
   ComplainToolHost,
   ProfileRecorder,
@@ -335,6 +335,34 @@ export type TokenMonitorConfig = {
 };
 
 /**
+ * Failure policy of the graph node driving an agent. Called with each failure of the node's run:
+ * a thrown error, or a settlement with `stopReason: "error"` as an `Error` whose `cause` is that
+ * message. Return messages to route them on the node's outbound message edges instead of a result
+ * (soft error), `{ retryAfterMs }` to re-prompt the same agent after that many milliseconds, or
+ * throw to reject the run with `DataflowNodeError` carrying the thrown value (hard error).
+ */
+export type ErrorHandler<
+  N extends TSchema = typeof AgenticInputSchema,
+  V = AssistantMessage,
+> = (failure: {
+  readonly error: unknown;
+  /** Failures of the node's current run so far, this one included; resets when the run returns a result. */
+  readonly attempt: number;
+  readonly agent: Agentic<Skill, PromptTemplate, AgentTool, N, V>;
+  /** The owning graph's recorder at this node (`add_context(nodeId)`), when the graph records. */
+  readonly recorder:
+    | ProfileRecorder<
+        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
+      >
+    | undefined;
+  /** The owning graph's signal; undefined outside a `JuncoGraph`. */
+  readonly signal: AbortSignal | undefined;
+}) =>
+  | readonly Message<N>[]
+  | { readonly retryAfterMs: number }
+  | Promise<readonly Message<N>[] | { readonly retryAfterMs: number }>;
+
+/**
  * Native harness options plus an optional initial prompt staged until the first `next()`. A prompt
  * function runs once, synchronously, on that `next(inputs)`'s graph view.
  */
@@ -359,6 +387,8 @@ export type AgenticOptions<
   readonly resources?: AgentHarnessResources<S, P>;
   readonly prompt?: string | ((inputs: ParentView<N, V>) => string);
   readonly images?: ImageContent[];
+  /** Failure policy of the node driving this agent; without it a thrown failure crashes the node and a `stopReason: "error"` settlement is the node's result. */
+  readonly errorHandler?: ErrorHandler<N, V>;
   /**
    * Borrowed collection selecting authorization, native defaults and lifetime. The agent holds
    * and closes only its binding, never the caller's creator hold.

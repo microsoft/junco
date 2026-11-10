@@ -4,7 +4,14 @@ import { readFileSync } from "node:fs";
 import * as E from "fp-ts/lib/Either.js";
 import { context } from "junco-scheduler";
 import { Type } from "typebox";
-import { graph, schedules, tracer, trigger, workflows } from "../src/index.ts";
+import {
+  errors,
+  graph,
+  schedules,
+  tracer,
+  trigger,
+  workflows,
+} from "../src/index.ts";
 
 // The root `graph`, `schedules`, `tracer` and `trigger` namespaces compose into one runnable graph:
 // constant fan-out sources feed an ordered fan-in, a persistent sink and a one-shot marker.
@@ -82,6 +89,7 @@ test("every runtime std export is indexed in AGENTS.md", () => {
     "graph.nodes": graph.nodes,
     trigger,
     schedules,
+    errors,
     tracer,
     workflows,
   };

@@ -19,7 +19,9 @@ import { context as nativeContext } from "junco-scheduler";
 import { type TSchema, Type } from "typebox";
 import {
   agent,
+  errors,
   graph,
+  MockAgent,
   mcp,
   schedules,
   type syntax,
@@ -257,6 +259,22 @@ export function spawnBuildsTypedStars(
       policy: tools.LockPolicy,
     }),
   );
+  const errorHandler: errors.ErrorHandler = errors.record(
+    errors.retry({ afterMs: 0, times: 1 }, errors.crash()),
+  );
+  const mockAgent = new MockAgent({ runs: [], errorHandler });
+  defaults.graph.addNode({
+    state: mockAgent,
+    policy: tools.LockPolicy,
+    trigger: trigger.TriggerRule.always(),
+  });
+  // @ts-expect-error agent nodes configure failures on the agent, not with on_error
+  defaults.graph.addNode({
+    state: mockAgent,
+    policy: tools.LockPolicy,
+    trigger: trigger.TriggerRule.always(),
+    on_error: () => [],
+  });
   // @ts-expect-error the root must be an adapted node, not a bare state
   graph.JuncoGraph.spawn(source, sink, bare, tasks, (task) =>
     child(task.label),

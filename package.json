@@ -37,7 +37,7 @@
     "check": "bun run --bun biome check .",
     "check:ci": "bun run --bun biome ci .",
     "test": "bun ci/run-tests.ts junco",
-    "test:unit": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-payload.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/grafana-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts ./test/install.test.ts",
+    "test:unit": "bun test ./test/mock-agent.test.ts ./test/agent-node.test.ts ./test/std-errors.test.ts ./test/deterministic-agency.test.ts ./test/compaction.test.ts ./test/deterministic.test.ts ./test/std-namespaces.test.ts ./test/map.test.ts ./test/spawn.test.ts ./test/task.test.ts ./test/tui-payload.test.ts ./test/complain.test.ts ./test/agency.test.ts ./test/resource-schedulers.test.ts ./test/profile-recorder.test.ts ./test/grafana-recorder.test.ts ./test/syntax-parse.test.ts ./test/syntax-build.test.ts ./test/syntax-examples.test.ts ./test/install.test.ts",
     "test:coverage": "bun run test:unit --coverage",
     "test:marsh": "bun ci/run-tests.ts marsh",
     "test:junco-policy": "node packages/junco-tools/scripts/with-junco-build-env.mjs cargo test --locked --workspace --manifest-path crates/junco-policy/Cargo.toml && node packages/junco-tools/scripts/with-junco-build-env.mjs cargo test --release --locked --manifest-path crates/junco-policy/fuzz/Cargo.toml --lib",

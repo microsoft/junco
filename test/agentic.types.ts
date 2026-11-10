@@ -360,7 +360,10 @@ export function everyKindSharesOneNodeOptions(
 }
 
 export async function promptsLiveOnAgents(
-  native: Omit<Parameters<typeof JuncoAgent.fromResolved>[0], "prompt">,
+  native: Omit<
+    Parameters<typeof JuncoAgent.fromResolved>[0],
+    "prompt" | "errorHandler"
+  >,
   junco: JuncoAgent,
   mock: MockAgent,
   transcript: TaggedTranscript,

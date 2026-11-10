@@ -102,6 +102,7 @@ export type AgenticNode<
             | JuncoAgent<Skill, PromptTemplate, AgentTool, N, T>
             | MockAgent<Skill, PromptTemplate, AgentTool, N, T>;
           readonly step?: never;
+          readonly on_error?: never;
           readonly policy: ToolCollection["policy"];
           readonly persistent?: never;
         }

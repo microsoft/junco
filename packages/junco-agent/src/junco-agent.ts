@@ -100,6 +100,7 @@ import {
   type AgenticStatus,
   type AgenticStep,
   type AgenticYieldReason,
+  type ErrorHandler,
   resolveStagedPrompt,
   type TokenMonitorConfig,
   validateActiveTools,
@@ -851,6 +852,7 @@ export class JuncoAgent<
     }
   }
 
+  readonly errorHandler: ErrorHandler<N, V> | undefined;
   readonly #options: AgenticOptions<S, P, T, N, V>;
   /** The immutable exact-name exclusions supplied at construction. */
   readonly #blocked: ReadonlySet<string>;
@@ -1109,6 +1111,7 @@ export class JuncoAgent<
     );
     this.#blocked = normalizeToolBlock(options.tool_block);
     this.#options = options;
+    this.errorHandler = options.errorHandler;
     this.#owned = owned;
     this.#owned.toolCollection ??= options.collection;
     this.#resources = options.resources ?? {};

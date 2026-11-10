@@ -40,6 +40,7 @@ import {
   type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
+  type ErrorHandler,
   JuncoAgentError,
   type Agentic as JuncoAgentProtocol,
   resolveStagedPrompt,
@@ -110,6 +111,7 @@ export type MockTranscript<
   V = AssistantMessage,
 > = {
   readonly prompt?: AgenticOptions<S, P, T, N, V>["prompt"];
+  readonly errorHandler?: ErrorHandler<N, V>;
   readonly images?: ImageContent[];
   readonly history?: readonly AgentMessage[];
   readonly models?: readonly Model<Api>[];
@@ -246,6 +248,7 @@ export class MockAgent<
   V = AssistantMessage,
 > implements JuncoAgentProtocol<S, P, T, N, V>
 {
+  readonly errorHandler: ErrorHandler<N, V> | undefined;
   /** Profiles a MockJuncoGraph attaches to this agent's node: one constant per declared kind. */
   readonly profiles: ProfileSet;
   readonly #transcript: MockTranscript<S, P, T, N, V>;
@@ -300,6 +303,7 @@ export class MockAgent<
   constructor(transcript: MockTranscript<S, P, T, N, V>) {
     for (const run of transcript.runs) validateRun(run);
     this.#transcript = transcript;
+    this.errorHandler = transcript.errorHandler;
     this.#history = [...(transcript.history ?? [])];
     this.#tools = [...(transcript.tools ?? [])];
     this.#activeNames = [

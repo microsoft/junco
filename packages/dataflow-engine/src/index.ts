@@ -97,6 +97,7 @@ export {
   assertUsageAllowed,
   captureUsageContext,
   chargeTokenUsage,
+  holdsUsageFailure,
   isUsageLimitError,
   runWithUsageBudgets,
   runWithUsageContext,

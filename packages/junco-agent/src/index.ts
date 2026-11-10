@@ -5,6 +5,7 @@ export type {
   AgenticStatus,
   AgenticStep,
   AgenticYieldReason,
+  ErrorHandler,
   TokenMonitorConfig,
 } from "./agentic.js";
 export {

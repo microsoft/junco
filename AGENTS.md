@@ -42,7 +42,7 @@ no API key, $0).
 
 ## Standard library index
 
-`import { graph, schedules, tracer, trigger, workflows } from "junco"` (`src/index.ts`). Each summary is the first sentence of the export's JSDoc; the JSDoc at the definition is the full reference. `test/std-namespaces.test.ts` fails when a runtime export of these namespaces has no row here. Human version: https://github.com/microsoft/junco/wiki/Standard-Library.
+`import { errors, graph, schedules, tracer, trigger, workflows } from "junco"` (`src/index.ts`). Each summary is the first sentence of the export's JSDoc; the JSDoc at the definition is the full reference. `test/std-namespaces.test.ts` fails when a runtime export of these namespaces has no row here. Human version: https://github.com/microsoft/junco/wiki/Standard-Library.
 
 ### `workflows` — graph documents for `JuncoGraph.fromYaml(text, config)`
 
@@ -118,6 +118,20 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.MemoryScheduleOptions` | interface | `src/std/schedules/memory.ts` | Options of `schedules.memory`: the borrowed `JuncoMemory` store and the Ralph round options of the memory Ralph loop. |
 | `schedules.OptimizationRequest` | type | `src/std/schedules/optimizer.ts` | What `runOptimizer` optimizes: the prepared target, objective, constraints, stop predicates, tuning axes and budgets. |
 | `schedules.OptimizationState` | type | `src/std/schedules/optimizer.ts` | `runOptimizer`'s result and resumable state: current and anchor candidates, trial/edit history and the stop reason (`null` while running). |
+
+### `errors` — failure policies of agent nodes
+
+Configure `JuncoAgent` with `errorHandler` (or put it in a `MockAgent` transcript), not the agent node's `on_error`. Code and graph nodes keep the engine's `on_error`. Without a handler, thrown failures crash and `stopReason: "error"` settlements remain results, including Ralph's existing retry path.
+
+Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate({ ladder }, errors.crash())))`. Attempts count failures across the node's current run, including yields, and reset on a returned result. Retry stages a continuation prompt in the same session; it does not resend the original prompt. To recover softly, return outbound messages directly from a handler, e.g. `({ error }) => [graph.Message.create(edge, { kind: "error", text: String(error) })]`; the node has no result. Cancellation, definition errors, exhausted budgets and closed agents bypass recovery.
+
+| Export | Kind | Source | Summary |
+| --- | --- | --- | --- |
+| `errors.crash` | fn | `src/std/errors.ts` | Hard error: reject the run with `DataflowNodeError` carrying the failure. |
+| `errors.retry` | fn | `src/std/errors.ts` | Re-prompt the same agent after `afterMs` while `failure.attempt <= times`; then `inner` decides. |
+| `errors.escalate` | fn | `src/std/errors.ts` | Switch the agent to the rung above the highest one matching its current `provider/model@thinking` and re-prompt it at once; at the top rung, or when its model is on no rung, `inner` decides. |
+| `errors.record` | fn | `src/std/errors.ts` | Count the failure and `inner`'s decision in the node's recorder, then return that decision. |
+| `errors.ErrorHandler` | type | `packages/junco-agent/src/agentic.ts` | Failure policy of the graph node driving an agent. |
 
 ### `graph` — the dataflow engine and the agency graph
 

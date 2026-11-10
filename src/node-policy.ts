@@ -1,3 +1,4 @@
+import type { ModelIdentity } from "@earendil-works/pi-agent-core";
 import type {
   AssistantMessage,
   ModelThinkingLevel,
@@ -18,7 +19,11 @@ import {
   messageInputs,
   triggerInputs,
 } from "dataflow-engine";
-import type { AgenticYieldReason, JuncoAgentNodeContext } from "junco-agent";
+import type {
+  AgenticYieldReason,
+  Agentic as AgentProtocol,
+  JuncoAgentNodeContext,
+} from "junco-agent";
 import {
   MODEL_STRENGTHS,
   type ModelStrength,
@@ -104,6 +109,19 @@ export function resolveRung(
 
 /** The `provider/model@thinking` each agent last switched to. */
 const appliedModels = new WeakMap<object, string>();
+
+/** Switch `member` to `model` at `thinking`; a no-op when that is the last switch applied to it. */
+export async function applyModel(
+  member: Pick<AgentProtocol, "setModel" | "setThinkingLevel">,
+  model: ModelIdentity,
+  thinking: ModelThinkingLevel,
+): Promise<void> {
+  const key = `${model.provider}/${model.modelId}@${thinking}`;
+  if (appliedModels.get(member) === key) return;
+  await member.setModel(model);
+  await member.setThinkingLevel(thinking);
+  appliedModels.set(member, key);
+}
 
 // Internal execution bookkeeping of adapter-built node bodies; not part of the public surface.
 
@@ -264,11 +282,7 @@ export function context<
                 ladder,
                 modelStrength,
               );
-              const key = `${provider}/${modelId}@${thinking}`;
-              if (appliedModels.get(member) === key) continue;
-              await member.setModel({ provider, modelId });
-              await member.setThinkingLevel(thinking);
-              appliedModels.set(member, key);
+              await applyModel(member, { provider, modelId }, thinking);
             }
           },
         }),
