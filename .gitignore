@@ -13,6 +13,8 @@ __pycache__/
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 /.trail/cache/
+.claude/*
+.trail/*
 
 # Local code-exploration index (live SQLite database) — regenerable, not committed.
 /.explore/
