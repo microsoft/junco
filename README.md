@@ -83,7 +83,7 @@ sudo btrfs subvolume create /mnt/junco/seed && sudo chown "$USER" /mnt/junco/see
 
 ### My first Junco workflow
 
-A workflow is `name.yml` (MCP servers, nodes, edges, triggers) plus `name.ts`, which calls `JuncoGraph.fromYaml(source, { cwd, scheduler, ladder, ... })`, awaits `execution.run()` and closes the graph. `cwd` selects the seed. This pair, [`examples/first`](examples/first), fans one question out to two agents browsing through the Playwright MCP server and joins their answers in a reviewer:
+A workflow has two files. `name.yml` declares the MCP servers, nodes, edges and triggers. `name.ts` builds it with `JuncoGraph.fromYaml(source, { cwd, scheduler, ladder, ... })`, awaits `execution.run()` and closes the graph; `cwd` selects the seed. In [`examples/first`](examples/first), two agents answer one question by browsing with the Playwright MCP server, and a reviewer merges their answers:
 
 ```yaml
 mcp:
@@ -119,11 +119,13 @@ graph:
     - {from: Reviewer, to: $sink, schema: {}}
 ```
 
-`mcp:` registers stdio MCP servers; a node lists the ones it may call under `mcp:`. `Goals` publishes its text once on each `~>` message edge; `Bun` and `Rust` run in parallel, each with its own Playwright server plus the built-in coordination tools `task`, `yield`, `send` and `info` (and the separately enabled default `complain`). Their instructions precede the delivered user messages. `Reviewer` fires when both `->` value edges hold a result and reads them through the `{{edge}}` placeholders.
+The top-level `mcp:` block registers stdio MCP servers, and a node's `mcp:` list names the servers it may call. `Goals` sends its text once on each `~>` message edge. `Bun` and `Rust` then run in parallel, each with its own Playwright server and the built-in coordination tools `task`, `yield`, `send` and `info`, plus the default `complain` tool, which is enabled separately. Each agent gets its prompt first and the delivered question after it. `Reviewer` runs once both `->` value edges hold a result, and reads them through the `{{edge}}` placeholders.
 
-Each scheduler-selected `NodeModel` must specify `readEdges`: the queued inbound message edges to consume this round. `schedules.select(snapshot, ids, strength?)` defaults to `schedules.plannedReads(snapshot, id)`; `schedules.reads(assign, inner)` overrides those reads, and `schedules.reads(() => [], schedules.parallel())` withholds all messages without consuming them. Invalid decisions are retried up to three attempts with `snapshot.lastError`, then throw. Read messages arrive as separate user messages in delivered order: `AgenticInput` text/images are steered as content (never dispatched by `kind`), and other payloads become `JSON.stringify({ id, payload })`. Stage instructions, not a copy of that content. Values are not steered: staged callbacks and YAML placeholders read value edges; message-edge placeholders fail at build time. `params` substitutions remain supported.
+The scheduler decides which queued messages a node reads: each `NodeModel` it selects lists those edges in `readEdges`. `schedules.select(snapshot, ids, strength?)` reads the edges from `schedules.plannedReads(snapshot, id)` by default, and `schedules.reads(assign, inner)` overrides them. `schedules.reads(() => [], schedules.parallel())` runs nodes without consuming any message. If a decision is invalid, the scheduler is asked again with `snapshot.lastError`, up to three attempts in all, and then the run throws.
 
-Models live in the TypeScript ladder, never in the YAML:
+Each message a node reads reaches the agent as its own user message, in delivery order. `AgenticInput` text and images arrive as message content, and the agent does not dispatch on their `kind`. Other payloads arrive as `JSON.stringify({ id, payload })`. Write prompts that refer to these messages, as the `Bun` and `Rust` prompts do, instead of copying their content. Value edges never arrive as messages. Prompt callbacks and YAML placeholders read them, and a placeholder that names a message edge fails at build time. Prompts can also use `params` substitutions.
+
+Models are chosen in TypeScript through the ladder. The YAML never names one:
 
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
