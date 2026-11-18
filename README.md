@@ -6,9 +6,23 @@ Junco is a multi-agent system for policy-validated software engineering at scale
 
 ## How to use
 
-### Install
+### Prerequisites
 
-Junco runs only on Linux, on Btrfs. You need Bun 1.4.2, Rust 1.98.1, Clang and libbtrfsutil.
+Junco runs only on Linux, on Btrfs. Install:
+
+- [Bun](https://bun.com/docs/installation) 1.4.2
+- [Pi](https://docs.pi.dev/latest/quickstart), the agent harness Junco drives
+- Rust 1.98.1 through [rustup](https://rust-lang.org/tools/install/)
+- Clang and libbtrfsutil. On Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  build-essential pkg-config clang libclang-dev llvm-dev \
+  libbtrfsutil-dev zlib1g-dev ca-certificates curl git
+```
+
+### Install
 
 ```sh
 bun install --frozen-lockfile  # also builds the native addon
@@ -17,18 +31,21 @@ bun run install                # interactive: global CLIs plus the skills for th
 
 `bun run install` installs the `junco-profile-optimizer` CLI and copies the three skills into the harnesses you pick: GitHub Copilot CLI, Claude Code, Pi, OpenAI Codex or OpenCode.
 
-### A Btrfs seed with `user_subvol_rm_allowed`
+### Set up a Btrfs subvolume
 
-Every `bash`, `edit`, `read`, `grep` and `find` call runs through Marsh on one Btrfs subvolume, the seed. Reads see the live seed; shell commands and edits run in a private copy-on-write snapshot and publish back only what the policy authorizes. Under the default `LockPolicy` a write owns its file until released or deleted, so a second agent's edit of that file is rejected. Deleting snapshots as an unprivileged user needs the mount option `user_subvol_rm_allowed`; Marsh refuses to run without it.
+Marsh stages concurrent file access to prevent races, so Junco needs a Btrfs copy-on-write file system: either an existing Btrfs subvolume or a new loopback image. Agents work in a dedicated subvolume, the seed. Junco finds the seed that encloses the working directory and never creates one.
 
-The seed is a dedicated subvolume inside a writable parent. Junco discovers the seed enclosing the working directory and never creates one.
+#### Existing Btrfs subvolume
+
+The mount needs the option `user_subvol_rm_allowed`; Marsh refuses to run without it. Add the option to the mount's `/etc/fstab` entry to keep it after a reboot.
 
 ```sh
-findmnt -T "$HOME/work" -o FSTYPE,OPTIONS    # expect btrfs with user_subvol_rm_allowed
-btrfs subvolume create "$HOME/work/seed"      # clone your repository inside it
+findmnt -T "$HOME/work" -o TARGET,FSTYPE,OPTIONS             # expect btrfs
+sudo mount -o remount,user_subvol_rm_allowed /mount/target   # TARGET from findmnt
+btrfs subvolume create "$HOME/work/seed"                     # clone your repository inside it
 ```
 
-Without a Btrfs mount, a loopback image works:
+#### New Btrfs loopback
 
 ```sh
 truncate -s 32G junco.img && mkfs.btrfs -q junco.img
