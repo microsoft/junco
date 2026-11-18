@@ -22,6 +22,34 @@ sudo apt-get install --no-install-recommends \
   libbtrfsutil-dev zlib1g-dev ca-certificates curl git
 ```
 
+### Prerequisites for observability
+
+Opik and Grafana run in Docker containers started by Docker Compose from [`docker-compose.yml`](docker-compose.yml). On Ubuntu, install Docker Engine and the Compose plugin from [Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/). Remove Ubuntu's `docker.io`, `docker-compose` and `docker-compose-v2` packages first if they are installed.
+
+```sh
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker "$USER"   # log out and back in to run docker without sudo
+docker compose version
+```
+
+The Compose file includes Opik's own deployment from a checkout beside this one:
+
+```sh
+git clone https://github.com/comet-ml/opik.git ../opik
+```
+
 ### Install
 
 ```sh
