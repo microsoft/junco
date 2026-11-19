@@ -15,12 +15,17 @@ import {
   finalText,
 } from "../../syntax/build.js";
 import { anyFanIn } from "./any-fan-in.js";
-import { createRalphController, type RalphOptions } from "./ralph.js";
+import {
+  createRalphController,
+  type RalphLoopOptions,
+  RETRY,
+} from "./ralph.js";
 
 /** Options of `schedules.memory`: the borrowed `JuncoMemory` store and the Ralph round options of the memory Ralph loop. */
 export interface MemoryScheduleOptions {
   readonly memory: JuncoMemory;
-  readonly ralph?: RalphOptions;
+  /** Round control of the memory Ralph loop; `retries` re-runs provider-error results in the same round. */
+  readonly ralph?: RalphLoopOptions;
 }
 
 type Graph = JuncoGraph<TSchema, unknown>;
@@ -110,7 +115,10 @@ export function memory(options: MemoryScheduleOptions): {
     readonly AnyFanInPublish: DeterministicNode;
   };
 } {
-  const ralph = createRalphController(options.ralph);
+  const ralph = createRalphController(
+    options.ralph,
+    options.ralph?.retries ?? 0,
+  );
   const select = anyFanIn();
   const levels = new WeakMap<Graph, Level>();
   const level = (graph: Graph, kind: Topology): Level => {
@@ -238,8 +246,19 @@ export function memory(options: MemoryScheduleOptions): {
                 result !== state.lastSaved
               ) {
                 state.phase = "processing";
-                const answer = finalText(result, "Ralph");
                 const progress = ralph.progress(graph);
+                if (ralph.retry(progress, result)) {
+                  // A provider error is not a draft: nothing to save or decide; the same round continues.
+                  state.lastSaved = result;
+                  state.prepared = RETRY;
+                  state.phase = "flushing-prompt";
+                  view = yield [
+                    Message.create(prepared, { kind: "prompt", text: RETRY }),
+                  ];
+                  state.phase = "idle";
+                  continue;
+                }
+                const answer = finalText(result, "Ralph");
                 const assignment = progress.assignment;
                 if (assignment === undefined)
                   throw new Error(

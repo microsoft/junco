@@ -38,7 +38,7 @@ export type RalphOptions = {
   /** Evaluated once per completed result: true publishes that result, false stages a revision. */
   readonly until?: RalphPredicate;
 };
-/** Non-memory Ralph round control with bounded provider-error retries. */
+/** Ralph round control with bounded provider-error retries. */
 export type RalphLoopOptions = RalphOptions & {
   /** Same-round re-runs after a provider-error result (`stopReason: "error"`), per Ralph level; 0 (default) keeps the error as the round's result. */
   readonly retries?: number;
@@ -69,7 +69,7 @@ const INPUT = EdgeId.create("$source~>Ralph");
 const LOOP = "Ralph->Ralph";
 const FIRST_ROUND =
   "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.";
-const RETRY =
+export const RETRY =
   "Your previous attempt in this round ended with a provider error, not because the work was finished. Continue the same round: carry on with the objectives, in order, building on what you already did. Return the complete answer.";
 const isProviderError = (result: unknown): boolean =>
   typeof result === "object" &&
@@ -114,6 +114,12 @@ export function createRalphController(options: RalphOptions = {}, retries = 0) {
     if (p.failure !== undefined) throw p.failure.error;
     return p;
   };
+  /** Records a same-round re-run when `current` is a provider-error result and retries remain. */
+  const retry = (p: Progress, current: unknown): boolean => {
+    if (!(isProviderError(current) && p.retried < retries)) return false;
+    p.retried++;
+    return true;
+  };
   /**
    * Every distinct retained result completes one round unless retried after a provider error;
    * a success-mode failure is cached so later probes rethrow it without another call.
@@ -131,8 +137,7 @@ export function createRalphController(options: RalphOptions = {}, retries = 0) {
     ) {
       // Identity first: user code never sees, and so never re-decides, the same result twice.
       p.last = current;
-      if (isProviderError(current) && p.retried < retries) {
-        p.retried++;
+      if (retry(p, current)) {
         p.retry = true;
         return p; // the same round runs again; nothing was decided
       }
@@ -194,7 +199,7 @@ export function createRalphController(options: RalphOptions = {}, retries = 0) {
     finalText(p.last, "Ralph");
     return `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed(p.objectives)}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
   };
-  return { progress, track, admit, revision };
+  return { progress, track, admit, revision, retry };
 }
 
 /** Availability hooks for the original, non-memory Ralph workflow. */

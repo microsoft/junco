@@ -61,7 +61,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 ### `schedules` — policies, combinators and workflow controllers
 
 `config.scheduler: (label, graphPath) => policy`; controllers are spread into the `fromYaml` config (`{ available }` / `{ available, code }`).
-`schedules.ralph({ retries })` re-runs provider-error results (`stopReason: "error"`) in the same round, at most `retries` times per graph level. The default is zero; other invalid results and exhausted retries retain their existing failure behavior. Memory Ralph is unchanged.
+`schedules.ralph({ retries })` and `schedules.memory({ ralph: { retries } })` re-run provider-error results (`stopReason: "error"`) in the same round, at most `retries` times per graph level; memory Ralph neither saves nor decides an error result. The default is zero; other invalid results and exhausted retries retain their existing failure behavior.
 
 
 | Export | Kind | Source | Summary |
@@ -113,7 +113,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.LadderRung` | type | `src/node-policy.ts` | One rung: a "provider/model-id" and its reasoning effort (`"off"` when omitted). |
 | `schedules.AgencyNodeMetadata` | type | `src/node-policy.ts` | Source-derived policy metadata; native descriptions remain on native observations. |
 | `schedules.RalphOptions` | type | `src/std/schedules/ralph.ts` | Round control of `schedules.ralph`: a fixed `rounds` count, or an `until` success check with an optional `rounds` cap. |
-| `schedules.RalphLoopOptions` | type | `src/std/schedules/ralph.ts` | Non-memory Ralph round control with bounded provider-error retries. |
+| `schedules.RalphLoopOptions` | type | `src/std/schedules/ralph.ts` | Ralph round control with bounded provider-error retries. |
 | `schedules.RalphPredicate` | type | `src/std/schedules/ralph.ts` | Synchronous success check of one completed Ralph result; `round` is one-based, `label` is the graph level's. |
 | `schedules.MemoryScheduleOptions` | interface | `src/std/schedules/memory.ts` | Options of `schedules.memory`: the borrowed `JuncoMemory` store and the Ralph round options of the memory Ralph loop. |
 | `schedules.OptimizationRequest` | type | `src/std/schedules/optimizer.ts` | What `runOptimizer` optimizes: the prepared target, objective, constraints, stop predicates, tuning axes and budgets. |
