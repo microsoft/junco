@@ -1,23 +1,126 @@
+/* Dark palette from Syncfusion Material 3 dark (`.e-dark-mode`), so the Kanban matches. */
+:root {
+  color-scheme: dark;
+  --bg: rgb(20 19 23);
+  --panel: rgb(28 27 31);
+  --border: rgb(68 71 70);
+  --fg: rgb(230 225 229);
+  --muted: rgb(160 154 166);
+  --accent: rgb(208 188 255);
+  --ok: rgb(74 222 128);
+  --warn: rgb(251 191 36);
+  --err: rgb(248 113 113);
+  font:
+    13px / 1.45 system-ui,
+    sans-serif;
+  scrollbar-color: var(--border) transparent;
+}
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
 }
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  height: 100vh;
+  gap: 8px;
+  padding: 8px;
+  min-height: 0;
 }
 .panel {
+  min-height: 0;
   overflow: auto;
-  border: 1px solid #ddd;
-  padding: 8px;
-  font: 13px system-ui;
+  padding: 0 12px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.panel > h2 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 0 6px;
+  padding: 10px 0 6px;
+  background: var(--panel);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+h3,
+h4 {
+  margin: 8px 0 4px;
+}
+.muted {
+  color: var(--muted);
+}
+.ok {
+  color: var(--ok);
+}
+.running {
+  color: var(--warn);
+}
+.error {
+  color: var(--err);
+}
+details {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+summary {
+  cursor: pointer;
+}
+summary:hover {
+  color: var(--accent);
 }
 pre {
-  white-space: pre-wrap;
   max-height: 16em;
   overflow: auto;
+  margin: 6px 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font:
+    12px / 1.4 ui-monospace,
+    monospace;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  color: var(--muted);
+  font-weight: 600;
 }

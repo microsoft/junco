@@ -4,7 +4,13 @@ import type { State } from "../state.ts";
 
 export type NodeRef = { graph: number; node: string };
 
-mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: "loose",
+  theme: "dark",
+  // The panel background (app.css --panel), instead of Mermaid's grey label boxes.
+  themeVariables: { edgeLabelBackground: "#1c1b1f" },
+});
 let renders = 0;
 
 /** Mermaid's entity spelling of `"` inside a quoted label. */
@@ -55,10 +61,10 @@ export function mermaidOf(graphs: State["graphs"]): {
   for (const g of Object.keys(graphs).map(Number))
     if (!children.has(g)) emit(g, new Set([g]));
   lines.push(
-    "classDef running fill:#fde68a",
-    "classDef waiting fill:#e0f2fe",
-    "classDef done fill:#bbf7d0",
-    "classDef error fill:#fecaca",
+    "classDef running fill:#4a3b0b,stroke:#fbbf24,color:#fde68a",
+    "classDef waiting fill:#0b3147,stroke:#38bdf8,color:#e0f2fe",
+    "classDef done fill:#12391f,stroke:#4ade80,color:#bbf7d0",
+    "classDef error fill:#4a1717,stroke:#f87171,color:#fecaca",
   );
   return { text: lines.join("\n"), ids };
 }
@@ -97,11 +103,11 @@ export function GraphView({
     };
   }, [text, ids, onSelect]);
   const graphs = Object.entries(state.graphs);
-  if (graphs.length === 0) return <p>Waiting for a run…</p>;
+  if (graphs.length === 0) return <p className="muted">Waiting for a run…</p>;
   return (
     <>
       {graphs.map(([g, info]) => (
-        <div key={g}>
+        <div key={g} className="muted">
           g{g} {info.run && `run #${info.run.run} ${info.run.phase}`}
         </div>
       ))}
