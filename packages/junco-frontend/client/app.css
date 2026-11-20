@@ -1,4 +1,4 @@
-/* Dark palette from Syncfusion Material 3 dark (`.e-dark-mode`), so the Kanban matches. */
+/* Dark palette: Material 3 dark tones. */
 :root {
   color-scheme: dark;
   --bg: rgb(20 19 23);
@@ -10,6 +10,7 @@
   --ok: rgb(74 222 128);
   --warn: rgb(251 191 36);
   --err: rgb(248 113 113);
+  --info: rgb(56 189 248);
   font:
     13px / 1.45 system-ui,
     sans-serif;
@@ -123,4 +124,55 @@ td {
 th {
   color: var(--muted);
   font-weight: 600;
+}
+.board {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+.board-head,
+.board-row {
+  padding: 4px;
+  font-weight: 600;
+  color: var(--muted);
+  word-break: break-all;
+}
+.board-cell {
+  min-height: 2.5em;
+  padding: 4px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.card {
+  --status: var(--muted);
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--status);
+  border-radius: 6px;
+}
+.card:hover {
+  border-color: var(--accent);
+  border-left-color: var(--status);
+}
+.card b {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--status);
+}
+.card.running {
+  --status: var(--warn);
+}
+.card.waiting {
+  --status: var(--info);
+}
+.card.error {
+  --status: var(--err);
 }

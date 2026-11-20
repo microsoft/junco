@@ -17,7 +17,16 @@ import { type FrontendEvent, JuncoFrontend } from "../server/index.ts";
 const Schema = Type.Object({
   kind: Type.String(),
   text: Type.String(),
-  taskId: Type.Optional(Type.String()),
+  taskId: Type.String(),
+  spec: Type.String(),
+  deps: Type.Array(Type.String()),
+  history: Type.Array(
+    Type.Object({
+      node: Type.String(),
+      desc: Type.String(),
+      handoff: Type.String(),
+    }),
+  ),
 });
 type S = typeof Schema;
 
@@ -37,7 +46,16 @@ async function runHandoff(frontend: JuncoFrontend): Promise<void> {
     state: undefined,
     trigger: TriggerRule.always(),
     step: async function* (): NodeGenerator<S, number> {
-      yield [Message.create(e, { kind: "prompt", text: "do", taskId: "T1" })];
+      yield [
+        Message.create(e, {
+          kind: "prompt",
+          text: "do",
+          taskId: "T1",
+          spec: "",
+          deps: [],
+          history: [],
+        }),
+      ];
       return 1;
     },
   });

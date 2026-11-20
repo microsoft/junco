@@ -1,11 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  EMPTY,
-  isTask,
-  reduce,
-  type State,
-  taskIdOf,
-} from "../client/state.ts";
+import { EMPTY, isTask, reduce, type State } from "../client/state.ts";
 import type { FrontendEvent, FrontendEventBody } from "../server/index.ts";
 
 let seq = 0;
@@ -13,10 +7,17 @@ const at = "2026-01-01T00:00:00.000Z";
 const step = (state: State, body: FrontendEventBody): State =>
   reduce(state, { seq: ++seq, at, ...body } as FrontendEvent);
 
-const task = { kind: "prompt", text: "do", taskId: "T1" };
+const task = {
+  kind: "prompt",
+  text: "do",
+  taskId: "T1",
+  spec: "",
+  deps: [],
+  history: [],
+};
 const where = { graph: 1, run: 1 };
 
-test("a handed-off task's card moves queued → running → waiting → done", () => {
+test("a handed-off task's card moves queued → running → waiting, and a return leaves it waiting", () => {
   let state = step(EMPTY, {
     kind: "graph",
     graph: 1,
@@ -69,7 +70,7 @@ test("a handed-off task's card moves queued → running → waiting → done", (
     value: 2,
   });
   expect(state.cards["T1@b"]).toMatchObject({
-    status: "done",
+    status: "waiting",
     taskId: "T1",
     node: "b",
     summary: "prompt: do",
@@ -105,8 +106,18 @@ test("a tool start and end fold into one call", () => {
   ]);
 });
 
-test("only kind/text payloads are tasks; a task without an id shares one row", () => {
+test("only complete tasks are tasks", () => {
   expect(isTask({ role: "assistant" })).toBe(false);
-  expect(isTask({ kind: "prompt", text: "x" })).toBe(true);
-  expect(taskIdOf({ kind: "prompt", text: "x" })).toBe("(no taskId)");
+  expect(isTask({ kind: "prompt", text: "x" })).toBe(false);
+  expect(isTask({ kind: "prompt", text: "x", taskId: "T1" })).toBe(false);
+  expect(
+    isTask({
+      kind: "prompt",
+      text: "x",
+      taskId: "T1",
+      spec: "",
+      deps: [],
+      history: [],
+    }),
+  ).toBe(true);
 });

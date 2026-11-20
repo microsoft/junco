@@ -1,11 +1,7 @@
-import {
-  ColumnDirective,
-  ColumnsDirective,
-  KanbanComponent,
-} from "@syncfusion/ej2-react-kanban";
-import type { Card } from "../state.ts";
+import { Fragment } from "react";
+import { type Card, cardId } from "../state.ts";
 
-/** Rows are task ids, columns node ids; drag and drop is off, the board only mirrors the run. */
+/** Rows are task ids, columns node ids; the board only mirrors the run, so cards are plain buttons. */
 export function TaskBoard({
   cards,
   onSelect,
@@ -13,26 +9,45 @@ export function TaskBoard({
   cards: Record<string, Card>;
   onSelect: (id: string) => void;
 }) {
-  // Copies: Syncfusion's data layer may annotate its records, and these are reducer state.
-  const list = Object.values(cards).map((card) => ({ ...card }));
-  if (list.length === 0) return <p>No tasks yet</p>;
+  const list = Object.values(cards);
+  if (list.length === 0) return <p className="muted">No tasks yet</p>;
   const columns = [...new Set(list.map((card) => card.node))].sort();
+  const rows = [...new Set(list.map((card) => card.taskId))].sort();
   return (
-    <KanbanComponent
-      // Remount when the column set changes: directives are read once at creation.
-      key={columns.join("\u0000")}
-      keyField="node"
-      dataSource={list}
-      cardSettings={{ headerField: "Id", contentField: "summary" }}
-      swimlaneSettings={{ keyField: "taskId" }}
-      allowDragAndDrop={false}
-      cardClick={(args) => onSelect(String(args.data.Id))}
+    <div
+      className="board"
+      style={{
+        gridTemplateColumns: `minmax(8em, max-content) repeat(${columns.length}, minmax(14em, 1fr))`,
+      }}
     >
-      <ColumnsDirective>
-        {columns.map((node) => (
-          <ColumnDirective key={node} headerText={node} keyField={node} />
-        ))}
-      </ColumnsDirective>
-    </KanbanComponent>
+      <div />
+      {columns.map((node) => (
+        <div key={node} className="board-head">
+          {node}
+        </div>
+      ))}
+      {rows.map((taskId) => (
+        <Fragment key={taskId}>
+          <div className="board-row">{taskId}</div>
+          {columns.map((node) => {
+            const card = cards[cardId(taskId, node)];
+            return (
+              <div key={node} className="board-cell">
+                {card && (
+                  <button
+                    type="button"
+                    className={`card ${card.status}`}
+                    onClick={() => onSelect(card.id)}
+                  >
+                    <b>{card.status}</b>
+                    {card.summary}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </Fragment>
+      ))}
+    </div>
   );
 }

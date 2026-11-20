@@ -9,12 +9,12 @@ export function TaskPanel({ card }: { card: Card }) {
         {card.taskId} @ {card.node} — {card.status}
       </h3>
       <h4>Spec</h4>
-      <pre>{task.spec ?? ""}</pre>
+      <pre>{task.spec}</pre>
       <h4>Text</h4>
       <pre>{task.text}</pre>
       <h4>Deps</h4>
       <ul>
-        {(task.deps ?? []).map((dep) => (
+        {task.deps.map((dep) => (
           <li key={dep}>{dep}</li>
         ))}
       </ul>
@@ -28,7 +28,7 @@ export function TaskPanel({ card }: { card: Card }) {
           </tr>
         </thead>
         <tbody>
-          {(task.history ?? []).map((entry, i) => (
+          {task.history.map((entry, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: history is append-only; position is its identity.
             <tr key={i}>
               <td>{entry.node}</td>

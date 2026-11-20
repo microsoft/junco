@@ -130,10 +130,9 @@
         "express": "5.3.0",
         "fp-ts": "^2.16.11",
         "junco-tools": "workspace:*",
+        "typebox": "1.4.3",
       },
       "devDependencies": {
-        "@syncfusion/ej2-material3-theme": "35.2.12",
-        "@syncfusion/ej2-react-kanban": "35.2.12",
         "@types/bun": "1.4.2",
         "@types/express": "5.0.6",
         "@types/node": "26.6.6",
@@ -143,7 +142,6 @@
         "mermaid": "11.17.2",
         "react": "19.2.7",
         "react-dom": "19.2.7",
-        "typebox": "1.4.3",
         "typescript": "7.0.2",
       },
     },
@@ -606,38 +604,6 @@
     "@stablelib/base64": ["@stablelib/base64@1.0.1", "", {}, "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
-
-    "@syncfusion/ej2-base": ["@syncfusion/ej2-base@35.2.12", "", { "dependencies": { "@syncfusion/ej2-icons": "~35.2.12" }, "bin": { "syncfusion-license": "bin/syncfusion-license.js" } }, "sha512-odr5GyIGYHWN00iVL2jMRq+1YtguNDN0vCtAjqthOEAvEwHap/A9QP+n6Qo/mspfkiSF3se9gb5WxW2mV39ArA=="],
-
-    "@syncfusion/ej2-buttons": ["@syncfusion/ej2-buttons@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12" } }, "sha512-u5JvHWnwjc1EDq6P+32FdBuXOa8uIs+UPOtjzwWQ45lb/CeH27N09MlGNJ+lmSWaE/RuWkyQ87ZkCh/+GdTsUg=="],
-
-    "@syncfusion/ej2-data": ["@syncfusion/ej2-data@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12" } }, "sha512-6q/ZZf7rHmZO5MBG4GPwQSNLpumrfxGmti0N4H0YgHWsmUQcH/vdseSndjTFNUt0zyq59XOTQBP4sn8REPC3CA=="],
-
-    "@syncfusion/ej2-dropdowns": ["@syncfusion/ej2-dropdowns@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-data": "~35.2.12", "@syncfusion/ej2-inputs": "~35.2.12", "@syncfusion/ej2-lists": "~35.2.12", "@syncfusion/ej2-navigations": "~35.2.12", "@syncfusion/ej2-notifications": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-ZitHvJAXRgE9yOGCSsBGn+6H+rAHTd6b62cpYxJM+WZ1KfC96/FolkLqF1XDjLNujqnZfL+6QxTnqZLXG9ofTw=="],
-
-    "@syncfusion/ej2-icons": ["@syncfusion/ej2-icons@35.2.12", "", {}, "sha512-pW/PRDWqHvwhOJ4dt79Y4+kogYYuKiQaZfjRffOCVJnt1S1xnqO2dU7Sj4mNt1Hp+3HCci/wLE6KZUmc6UAAKw=="],
-
-    "@syncfusion/ej2-inputs": ["@syncfusion/ej2-inputs@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12", "@syncfusion/ej2-splitbuttons": "~35.2.12" } }, "sha512-nuZdO9Rac5ikuDaiY8sO445rpmOIXTP6gziFpzFNEhH4C8/gjvLe/6v3ElFZtCyltsV8PI1D4slfGgxIoVPljA=="],
-
-    "@syncfusion/ej2-kanban": ["@syncfusion/ej2-kanban@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12", "@syncfusion/ej2-data": "~35.2.12", "@syncfusion/ej2-dropdowns": "~35.2.12", "@syncfusion/ej2-inputs": "~35.2.12", "@syncfusion/ej2-layouts": "~35.2.12", "@syncfusion/ej2-navigations": "~35.2.12", "@syncfusion/ej2-notifications": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-8wOeyoTUiftMRW9ADwNE7ygJq132pdviiPJVXuxRp8Yq/1H2U1h2mG4FL2jLRtt/jl1nE63LD+nYvPFPEPE0mA=="],
-
-    "@syncfusion/ej2-layouts": ["@syncfusion/ej2-layouts@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12" } }, "sha512-LdY/b1jIBzpMzKNV8+dy3ZKu8cgNJQ+DwgFcZT964H0/ZPXnWbr/6O/FAXrjxLS7gOqEZexq13cXPh4KyCf27Q=="],
-
-    "@syncfusion/ej2-lists": ["@syncfusion/ej2-lists@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12", "@syncfusion/ej2-data": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-pPKiRjPkX1dR7q46UhrdaIuY34BxzmPvkd8rKULZe8RtPwsSTeE2M2f+7iczYGsz4m/0x2Vl7rgSZt4dTHcINQ=="],
-
-    "@syncfusion/ej2-material3-theme": ["@syncfusion/ej2-material3-theme@35.2.12", "", {}, "sha512-9PRxqDmWrvAxmf7N2ZrG360sp8btJtqESdETHyXtfIU90MsjtTE2sDrTAZH3V0ISzfBy86hv2ayK+IWt9tLqfQ=="],
-
-    "@syncfusion/ej2-navigations": ["@syncfusion/ej2-navigations@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12", "@syncfusion/ej2-data": "~35.2.12", "@syncfusion/ej2-inputs": "~35.2.12", "@syncfusion/ej2-lists": "~35.2.12", "@syncfusion/ej2-notifications": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-ZjKYvZuT+iQSMH3h0jRhRafOkrAIoxUZsBv+GQWwXLxUvq9Eg2jzqk2BGs/ukzn1dPMg524YU87dbBeckmubcg=="],
-
-    "@syncfusion/ej2-notifications": ["@syncfusion/ej2-notifications@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-rZuxmcBcWbK3qxrtFyWk8x+AMmXzGoI8xqNzn4fDwENUYWXB9xIwT4SGowJa9aG6iYXO4XA/QdQA6T4AozXJOQ=="],
-
-    "@syncfusion/ej2-popups": ["@syncfusion/ej2-popups@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-buttons": "~35.2.12" } }, "sha512-RoHAmct0T7kwXZLmLsHvLLNE4qY/AdoRsdnnc7JaDO/FAr0tUrg+RQbgXY4Jx4zFPVpPKsfcN9Uf7wsDs8la9Q=="],
-
-    "@syncfusion/ej2-react-base": ["@syncfusion/ej2-react-base@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12" } }, "sha512-ztsSOMGEaNAZmZluzQEDe7HXnv8IYt2P9K6hEqxwD/QACZnJfA5c5DieArZw7HPAcB3LrGgbZBqk6IQ1Z1wFZw=="],
-
-    "@syncfusion/ej2-react-kanban": ["@syncfusion/ej2-react-kanban@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-kanban": "35.2.12", "@syncfusion/ej2-react-base": "~35.2.12" } }, "sha512-PPB9ZqOgkFeFeLbrJ+uPQoA3iUYVZorUiTo2PCPh0Sk1Ho/qIaGI6KVehSNjCP9GllkRhll3tZ8mBTcCGZGp3g=="],
-
-    "@syncfusion/ej2-splitbuttons": ["@syncfusion/ej2-splitbuttons@35.2.12", "", { "dependencies": { "@syncfusion/ej2-base": "~35.2.12", "@syncfusion/ej2-popups": "~35.2.12" } }, "sha512-MP6Ma+7PAppy9FljOVIkd/SvG+tq4kEyCimVxCQUYruM2D83yH97vGt10JKUkOHjMmm3VXzfdogZZAKS+VtrYA=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.4", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A=="],
 

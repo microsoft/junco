@@ -19,19 +19,20 @@ export type ToolCall = {
   result?: unknown;
   isError?: boolean;
 };
-/** A task-shaped message payload (`Task` of junco-agent, or a source prompt without provenance yet). */
+/** A task-shaped message payload: junco-agent's `Task`, whose provenance fields are all required. */
 export type TaskPayload = {
   kind: string;
   text: string;
-  taskId?: string;
-  spec?: string;
-  deps?: string[];
-  history?: { node: string; desc: string; handoff: string }[];
+  taskId: string;
+  spec: string;
+  deps: string[];
+  history: { node: string; desc: string; handoff: string }[];
 };
-export type CardStatus = "queued" | "running" | "waiting" | "done" | "error";
+/** How busy a task's holder is; tasks themselves have no done flag, a returned holder leaves them `waiting`. */
+export type CardStatus = "queued" | "running" | "waiting" | "error";
 /** One task at one node: a kanban card. */
 export type Card = {
-  Id: string;
+  id: string;
   graph: number;
   taskId: string;
   node: string;
@@ -54,10 +55,19 @@ export const isTask = (p: unknown): p is TaskPayload =>
   "text" in p &&
   typeof p.text === "string" &&
   "kind" in p &&
-  typeof p.kind === "string";
+  typeof p.kind === "string" &&
+  "taskId" in p &&
+  typeof p.taskId === "string" &&
+  "spec" in p &&
+  typeof p.spec === "string" &&
+  "deps" in p &&
+  Array.isArray(p.deps) &&
+  "history" in p &&
+  Array.isArray(p.history);
 
-// shortcut: source prompts carry no taskId until an agent hands them off; key by history desc match if rows must merge
-export const taskIdOf = (t: TaskPayload): string => t.taskId ?? "(no taskId)";
+/** The key of the card of task `taskId` at node `node`. */
+export const cardId = (taskId: string, node: string): string =>
+  `${taskId}@${node}`;
 
 function withLive(
   graphs: State["graphs"],
@@ -92,7 +102,7 @@ function moveCards(
       card.node === node &&
       from.includes(card.status)
     )
-      next = { ...next, [card.Id]: { ...card, status: to } };
+      next = { ...next, [card.id]: { ...card, status: to } };
   return next;
 }
 
@@ -103,10 +113,10 @@ function upsertCard(
   task: TaskPayload,
   status: CardStatus,
 ): State["cards"] {
-  const taskId = taskIdOf(task);
-  const Id = `${taskId}@${node}`;
+  const { taskId } = task;
+  const id = cardId(taskId, node);
   const summary = `${task.kind}: ${task.text.slice(0, 120)}`;
-  return { ...cards, [Id]: { Id, graph, taskId, node, status, task, summary } };
+  return { ...cards, [id]: { id, graph, taskId, node, status, task, summary } };
 }
 
 /** Fold one server event into the client state; never mutates `state`. */
@@ -161,13 +171,7 @@ export function reduce(state: State, event: FrontendEvent): State {
         return {
           ...base,
           graphs: withLive(state.graphs, graph, node, "done"),
-          cards: moveCards(
-            state.cards,
-            graph,
-            node,
-            ["running", "waiting"],
-            "done",
-          ),
+          cards: moveCards(state.cards, graph, node, ["running"], "waiting"),
         };
       if (event.outcome === "error")
         return {
@@ -183,7 +187,7 @@ export function reduce(state: State, event: FrontendEvent): State {
           if (
             link.id === edge &&
             link.from === node &&
-            cards[`${taskIdOf(payload)}@${link.to}`]?.status !== "running"
+            cards[cardId(payload.taskId, link.to)]?.status !== "running"
           )
             cards = upsertCard(cards, graph, link.to, payload, "queued");
       }
