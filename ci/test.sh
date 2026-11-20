@@ -69,9 +69,10 @@ step "Typecheck and test junco-agent with coverage"
 step "Typecheck and test junco-scheduler with coverage"
 (cd packages/junco-scheduler && bun run typecheck && bun run test:coverage)
 
-step "Typecheck and test dataflow-engine-opik and dataflow-profile"
+step "Typecheck and test dataflow-engine-opik, dataflow-profile and junco-frontend"
 (cd packages/dataflow-engine-opik && bun run typecheck && bun run test)
 (cd packages/dataflow-profile && bun run typecheck && bun run test)
+(cd packages/junco-frontend && bun run typecheck && bun run test)
 
 step "Offline campaign replay regression (isolated process)"
 bun test test/backfill-cooperbench.test.ts

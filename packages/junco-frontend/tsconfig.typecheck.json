@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": ".",
+    "types": ["node", "bun"],
+    "allowImportingTsExtensions": true,
+    "noUnusedLocals": true
+  },
+  "include": ["server/**/*.ts", "tests/**/*.ts"]
+}

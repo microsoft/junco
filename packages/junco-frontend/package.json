@@ -1,0 +1,45 @@
+{
+  "name": "junco-frontend",
+  "version": "0.1.0",
+  "description": "Live monitoring frontend for Junco graphs: an Express event server and React widgets.",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "main": "./dist/server/index.js",
+  "types": "./dist/server/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server/index.d.ts",
+      "bun": "./server/index.ts",
+      "import": "./dist/server/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build ./server/index.ts --outdir ./dist/server --target node --format esm --packages external --sourcemap=external && bun run tsc -p tsconfig.json --emitDeclarationOnly && bun build ./client/index.html --outdir ./dist/client --minify",
+    "typecheck": "bun run tsc -p tsconfig.typecheck.json && bun run tsc -p tsconfig.client.json",
+    "test": "bun test ./tests/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.2",
+    "@earendil-works/pi-ai": "0.99.2",
+    "dataflow-engine": "workspace:*",
+    "express": "5.3.0",
+    "fp-ts": "^2.16.11",
+    "junco-tools": "workspace:*",
+    "typebox": "1.4.3"
+  },
+  "devDependencies": {
+    "@syncfusion/ej2-material3-theme": "35.2.12",
+    "@syncfusion/ej2-react-kanban": "35.2.12",
+    "@types/bun": "1.4.2",
+    "@types/express": "5.0.6",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "junco-scheduler": "workspace:*",
+    "mermaid": "11.17.2",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "typescript": "7.0.2"
+  }
+}

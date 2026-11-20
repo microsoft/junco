@@ -1,0 +1,23 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  height: 100vh;
+}
+.panel {
+  overflow: auto;
+  border: 1px solid #ddd;
+  padding: 8px;
+  font: 13px system-ui;
+}
+pre {
+  white-space: pre-wrap;
+  max-height: 16em;
+  overflow: auto;
+}
