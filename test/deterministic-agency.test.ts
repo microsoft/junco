@@ -23,9 +23,9 @@ import {
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
-  AgenticInputSchema,
   AssistantMessageSchema,
   JuncoAgentError,
+  TaskSchema,
 } from "junco-agent";
 import {
   type Decision,
@@ -35,9 +35,9 @@ import {
 } from "junco-scheduler";
 import { LockPolicy } from "junco-tools";
 import { type Static, type TNumber, Type } from "typebox";
+import { renderTask } from "../src/agent-node.ts";
 import {
   type Agentic,
-  type AgenticInput,
   type AgenticNode,
   Deterministic,
   JuncoGraph,
@@ -45,6 +45,7 @@ import {
   type MockHook,
   type MockRun,
   schedules,
+  type Task,
 } from "../src/index.ts";
 import {
   assistant,
@@ -66,13 +67,16 @@ import {
 } from "./deterministic-support.ts";
 import { flushMacrotasks } from "./support.ts";
 
+const asTask = (text: string, taskId: string) =>
+  renderTask({ kind: "prompt", text, taskId, spec: "", deps: [], history: [] });
+
 // JuncoGraphs of mock members, coroutines and nested graphs on the real round-robin and parallel
 // policies. Graphs, schedules, recursive lifecycle and cancellation are real.
 
-type PolicyGraph = JuncoGraph<typeof AgenticInputSchema, AssistantMessage>;
+type PolicyGraph = JuncoGraph<typeof TaskSchema, AssistantMessage>;
 type PolicyContext = SchedulerContext<
-  Agentic<typeof AgenticInputSchema, AssistantMessage>,
-  typeof AgenticInputSchema,
+  Agentic<typeof TaskSchema, AssistantMessage>,
+  typeof TaskSchema,
   AssistantMessage,
   schedules.AgencyNodeMetadata,
   PolicyGraph
@@ -252,9 +256,9 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const work = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+      const work = Edge.message<typeof TaskSchema, AssistantMessage>(
         "sender->worker",
-        AgenticInputSchema,
+        TaskSchema,
       );
       const result = Edge.value("worker->child", AssistantMessageSchema);
       const s = graph.addNode({
@@ -278,7 +282,17 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(s, w, work).addEdge(w, c, result);
       graphPorts.connect(graph, c);
-      graph.emit(s, Message.create(work, { kind: "prompt", text: "work" }));
+      graph.emit(
+        s,
+        Message.create(work, {
+          kind: "prompt",
+          text: "work",
+          taskId: "work",
+          spec: "",
+          deps: [],
+          history: [],
+        }),
+      );
 
       await stepUntil(graphContext, () => worker.requests.length === 1);
       assert.deepEqual(queued(work), []);
@@ -297,9 +311,9 @@ for (const strategy of STRATEGIES) {
       assert.equal(resultText(graph, w), "worker done");
       assert.equal(resultText(graph, c), "child done");
       assert.deepEqual(requestTexts(worker.requests), [
-        ["work", "work"],
-        ["work", "work"],
-        ["work", "work"],
+        ["work", asTask("work", "work")],
+        ["work", asTask("work", "work")],
+        ["work", asTask("work", "work")],
       ]);
       await graph.close();
       assert.equal(worker.status, "closed");
@@ -329,13 +343,13 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const left = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+      const left = Edge.message<typeof TaskSchema, AssistantMessage>(
         "left",
-        AgenticInputSchema,
+        TaskSchema,
       );
-      const right = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+      const right = Edge.message<typeof TaskSchema, AssistantMessage>(
         "right",
-        AgenticInputSchema,
+        TaskSchema,
       );
       const s = graph.addNode({
         id: NodeId.create("s"),
@@ -356,9 +370,13 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(s, m, left).addEdge(s, m, right);
       graphPorts.connect(graph, m);
-      const followUp = (text: string): AgenticInput => ({
+      const followUp = (text: string): Task => ({
         kind: "followUp",
         text,
+        taskId: text,
+        spec: "",
+        deps: [],
+        history: [],
       });
       graph.emit(s, Message.create(left, followUp("x1")));
       await stepUntil(graphContext, () => queued(left).length === 1);
@@ -370,7 +388,7 @@ for (const strategy of STRATEGIES) {
       await stepUntil(graphContext, () => gatedMember.requests.length === 1);
       assert.deepEqual([queued(left), queued(right)], [[], []]);
       assert.deepEqual(requestTexts(gatedMember.requests), [
-        ["start", "x1", "y1"],
+        ["start", asTask("x1", "x1"), asTask("y1", "y1")],
       ]);
 
       graph.emit(s, Message.create(left, followUp("x2")));
@@ -389,10 +407,10 @@ for (const strategy of STRATEGIES) {
       assert.equal(resultText(graph, m), "member done");
       assert.deepEqual(userTexts(gatedMember.history), [
         "start",
-        "x1",
-        "y1",
-        "x2",
-        "y2",
+        asTask("x1", "x1"),
+        asTask("y1", "y1"),
+        asTask("x2", "x2"),
+        asTask("y2", "y2"),
       ]);
       await graph.close();
     });
@@ -408,17 +426,23 @@ for (const strategy of STRATEGIES) {
       });
       const consumer = new MockAgent({ runs: [yieldsThen(0, "reviewed")] });
       const childPorts = terminalPorts();
-      const childSource = new Source<
-        typeof AgenticInputSchema,
-        AssistantMessage
-      >(
+      const childSource = new Source<typeof TaskSchema, AssistantMessage>(
         (view) => {
           assert.deepEqual([...view.messages.keys()], [go.id]);
-          assert.deepEqual(from(view, go), [{ kind: "prompt", text: "go" }]);
+          assert.deepEqual(from(view, go), [
+            {
+              kind: "prompt",
+              text: "go",
+              taskId: "go",
+              spec: "",
+              deps: [],
+              history: [],
+            },
+          ]);
           assert.equal([...view.values.keys()].length, 0);
           return [];
         },
-        { schema: AgenticInputSchema, id: NodeId.create("$source") },
+        { schema: TaskSchema, id: NodeId.create("$source") },
       );
       const childContext = policyContext(
         childSource,
@@ -435,9 +459,9 @@ for (const strategy of STRATEGIES) {
         strategy,
       );
       const graph = graphContext.graph;
-      const go = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+      const go = Edge.message<typeof TaskSchema, AssistantMessage>(
         "source->nested",
-        AgenticInputSchema,
+        TaskSchema,
       );
       const selected = Edge.value("nested=>consumer", AssistantMessageSchema);
       const s = graph.addNode({
@@ -458,7 +482,17 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(s, n, go).addEdge(n, c, selected);
       graphPorts.connect(graph, c);
-      graph.emit(s, Message.create(go, { kind: "prompt", text: "go" }));
+      graph.emit(
+        s,
+        Message.create(go, {
+          kind: "prompt",
+          text: "go",
+          taskId: "go",
+          spec: "",
+          deps: [],
+          history: [],
+        }),
+      );
 
       await stepUntil(graphContext, () => inner.requests.length === 1);
       // The one trigger message is consumed, yet the started nested graph keeps running.
@@ -481,7 +515,7 @@ for (const strategy of STRATEGIES) {
     });
 
     test("nested graph routes final messages", async () => {
-      const inputText = (input: AgenticInput): string =>
+      const inputText = (input: Task): string =>
         input.kind === "prompt"
           ? input.text
           : assert.fail("expected a prompt input");
@@ -493,33 +527,34 @@ for (const strategy of STRATEGIES) {
           strategy,
         );
         const parent = parentContext.graph;
-        const left = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+        const left = Edge.message<typeof TaskSchema, AssistantMessage>(
           "left->nested",
-          AgenticInputSchema,
+          TaskSchema,
         );
-        const right = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+        const right = Edge.message<typeof TaskSchema, AssistantMessage>(
           "right->nested",
-          AgenticInputSchema,
+          TaskSchema,
         );
-        const toN3 = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+        const toN3 = Edge.message<typeof TaskSchema, AssistantMessage>(
           "nested->n3",
-          AgenticInputSchema,
+          TaskSchema,
         );
-        const toN4 = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+        const toN4 = Edge.message<typeof TaskSchema, AssistantMessage>(
           "nested->n4",
-          AgenticInputSchema,
+          TaskSchema,
         );
-        const prompt = (text: string): AgenticInput => ({
+        const prompt = (text: string): Task => ({
           kind: "prompt",
           text,
+          taskId: text,
+          spec: "",
+          deps: [],
+          history: [],
         });
 
         const texts: string[] = [];
         const deliveries: string[][] = [];
-        const childSource = new Source<
-          typeof AgenticInputSchema,
-          AssistantMessage
-        >(
+        const childSource = new Source<typeof TaskSchema, AssistantMessage>(
           (view) => {
             const batch = [...from(view, left), ...from(view, right)].map(
               inputText,
@@ -530,28 +565,30 @@ for (const strategy of STRATEGIES) {
             texts.push(...batch);
             return [];
           },
-          { schema: AgenticInputSchema, id: NodeId.create("$source") },
+          { schema: TaskSchema, id: NodeId.create("$source") },
         );
         const final = Edge.value("inner->$sink", AssistantMessageSchema);
-        const childSink: Sink<typeof AgenticInputSchema, AssistantMessage> =
-          new Sink<typeof AgenticInputSchema, AssistantMessage>(
-            async function* (
-              sink,
-            ): NodeGenerator<typeof AgenticInputSchema, AssistantMessage> {
-              yield [];
-              const retained = child.result(innerId);
-              assert.ok(O.isSome(retained));
-              const answer = textOf(retained.value);
-              sink.send(Message.create(toN3, prompt(`n3: ${answer}`)));
-              sink.send(Message.create(toN4, prompt(`n4: ${answer}`)));
-              return retained.value;
-            },
-            {
-              schema: AgenticInputSchema,
-              id: NodeId.create("$sink"),
-              trigger: TriggerRule.when(final),
-            },
-          );
+        const childSink: Sink<typeof TaskSchema, AssistantMessage> = new Sink<
+          typeof TaskSchema,
+          AssistantMessage
+        >(
+          async function* (
+            sink,
+          ): NodeGenerator<typeof TaskSchema, AssistantMessage> {
+            yield [];
+            const retained = child.result(innerId);
+            assert.ok(O.isSome(retained));
+            const answer = textOf(retained.value);
+            sink.send(Message.create(toN3, prompt(`n3: ${answer}`)));
+            sink.send(Message.create(toN4, prompt(`n4: ${answer}`)));
+            return retained.value;
+          },
+          {
+            schema: TaskSchema,
+            id: NodeId.create("$sink"),
+            trigger: TriggerRule.when(final),
+          },
+        );
         const childContext = schedules.context({
           scheduler: parallel(),
           graph: new JuncoGraph(
@@ -567,7 +604,7 @@ for (const strategy of STRATEGIES) {
         const innerId = child.addNode({
           id: NodeId.create("inner"),
           trigger: TriggerRule.always(),
-          state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+          state: new Deterministic<typeof TaskSchema, AssistantMessage>(
             async function* () {
               yield [];
               while (texts.length < 2) yield [];
@@ -578,13 +615,13 @@ for (const strategy of STRATEGIES) {
         });
 
         const source = (
-          edge: Edge<typeof AgenticInputSchema, AssistantMessage>,
+          edge: Edge<typeof TaskSchema, AssistantMessage>,
           text: string,
           delay: number,
         ) => ({
           id: NodeId.create(text),
           trigger: TriggerRule.always(),
-          state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+          state: new Deterministic<typeof TaskSchema, AssistantMessage>(
             async function* () {
               for (let index = 0; index < delay; index++) yield [];
               yield [Message.create(edge, prompt(text))];
@@ -595,12 +632,12 @@ for (const strategy of STRATEGIES) {
         });
         const observed = { n3: [] as string[][], n4: [] as string[][] };
         const consumer = (
-          edge: Edge<typeof AgenticInputSchema, AssistantMessage>,
+          edge: Edge<typeof TaskSchema, AssistantMessage>,
           name: "n3" | "n4",
         ) => ({
           id: NodeId.create(name),
           trigger: TriggerRule.when(edge),
-          state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+          state: new Deterministic<typeof TaskSchema, AssistantMessage>(
             async function* () {
               const view = yield [];
               observed[name].push(from(view, edge).map(inputText));
@@ -716,7 +753,7 @@ for (const strategy of STRATEGIES) {
       });
       const d = graph.addNode({
         trigger: TriggerRule.when(selected),
-        state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+        state: new Deterministic<typeof TaskSchema, AssistantMessage>(
           async function* () {
             yield [];
             ran = true;
@@ -740,20 +777,20 @@ for (const strategy of STRATEGIES) {
 
     test("dormant ports stay quiescent and invalid boundaries reject before registration", async () => {
       const emptyPorts = {
-        source: new Source<typeof AgenticInputSchema, AssistantMessage>(
+        source: new Source<typeof TaskSchema, AssistantMessage>(
           () => {
             throw new DataflowDefinitionError(
               "Empty fixture does not accept external input",
             );
           },
-          { schema: AgenticInputSchema, id: NodeId.create("$source") },
+          { schema: TaskSchema, id: NodeId.create("$source") },
         ),
-        sink: new Sink<typeof AgenticInputSchema, AssistantMessage>(
+        sink: new Sink<typeof TaskSchema, AssistantMessage>(
           async function* () {
             throw new Error("Empty fixture has no output work");
           },
           {
-            schema: AgenticInputSchema,
+            schema: TaskSchema,
             id: NodeId.create("$sink"),
             trigger: TriggerRule.never(),
           },
@@ -767,20 +804,20 @@ for (const strategy of STRATEGIES) {
       const empty = emptyContext.graph;
       assert.equal((await emptyContext.run()).size, 0);
       const parentPorts = {
-        source: new Source<typeof AgenticInputSchema, AssistantMessage>(
+        source: new Source<typeof TaskSchema, AssistantMessage>(
           () => {
             throw new DataflowDefinitionError(
               "Boundary rejection fixture does not accept external input",
             );
           },
-          { schema: AgenticInputSchema, id: NodeId.create("$source") },
+          { schema: TaskSchema, id: NodeId.create("$source") },
         ),
-        sink: new Sink<typeof AgenticInputSchema, AssistantMessage>(
+        sink: new Sink<typeof TaskSchema, AssistantMessage>(
           async function* () {
             throw new Error("Boundary rejection fixture has no output work");
           },
           {
-            schema: AgenticInputSchema,
+            schema: TaskSchema,
             id: NodeId.create("$sink"),
             trigger: TriggerRule.never(),
           },
@@ -820,7 +857,7 @@ for (const strategy of STRATEGIES) {
 
     test("one shared availability predicate holds agent, coroutine and graph nodes until released", async () => {
       let admitted = false;
-      const shared: NodeOptions<typeof AgenticInputSchema, AssistantMessage> = {
+      const shared: NodeOptions<typeof TaskSchema, AssistantMessage> = {
         trigger: TriggerRule.always(),
         is_available: (_view, triggered) => admitted && triggered,
       };
@@ -828,13 +865,13 @@ for (const strategy of STRATEGIES) {
         prompt: "go",
         runs: [yieldsThen(1, "agent done")],
       });
-      const coroutine = new Deterministic<
-        typeof AgenticInputSchema,
-        AssistantMessage
-      >(async function* () {
-        yield [];
-        return assistant("coroutine done");
-      }, LockPolicy);
+      const coroutine = new Deterministic<typeof TaskSchema, AssistantMessage>(
+        async function* () {
+          yield [];
+          return assistant("coroutine done");
+        },
+        LockPolicy,
+      );
       const inner = new MockAgent({
         prompt: "inner",
         runs: [yieldsThen(0, "inner done")],
@@ -1371,7 +1408,7 @@ describe("nested graphs", () => {
   test("an undefined sink result is a present parent value", async () => {
     type Maybe = AssistantMessage | undefined;
     const MaybeSchema = Type.Union([AssistantMessageSchema, Type.Undefined()]);
-    const childPorts = terminalPorts(AgenticInputSchema, MaybeSchema);
+    const childPorts = terminalPorts(TaskSchema, MaybeSchema);
     const childContext = schedules.context({
       scheduler: parallel(),
       graph: new JuncoGraph(
@@ -1386,15 +1423,12 @@ describe("nested graphs", () => {
     const child = childContext.graph;
     const empty = child.addNode({
       trigger: TriggerRule.always(),
-      state: new Deterministic<typeof AgenticInputSchema, Maybe>(
-        async function* () {
-          return undefined;
-        },
-        LockPolicy,
-      ),
+      state: new Deterministic<typeof TaskSchema, Maybe>(async function* () {
+        return undefined;
+      }, LockPolicy),
     });
     childPorts.connect(child, empty);
-    const parentPorts = terminalPorts(AgenticInputSchema, MaybeSchema);
+    const parentPorts = terminalPorts(TaskSchema, MaybeSchema);
     const parentContext = schedules.context({
       scheduler: parallel(),
       graph: new JuncoGraph(
@@ -1417,17 +1451,14 @@ describe("nested graphs", () => {
     });
     const r = parent.addNode({
       trigger: TriggerRule.when(selected),
-      state: new Deterministic<typeof AgenticInputSchema, Maybe>(
-        async function* () {
-          const view = yield [];
-          observed = {
-            delivered: view.values.has(selected.id),
-            value: view.values.get(selected.id),
-          };
-          return assistant("read");
-        },
-        LockPolicy,
-      ),
+      state: new Deterministic<typeof TaskSchema, Maybe>(async function* () {
+        const view = yield [];
+        observed = {
+          delivered: view.values.has(selected.id),
+          value: view.values.get(selected.id),
+        };
+        return assistant("read");
+      }, LockPolicy),
     });
     parent.addEdge(n, r, selected);
     parentPorts.connect(parent, r);
@@ -1823,20 +1854,29 @@ describe("source and sink boundaries", () => {
   test("source admission invalidates a pending policy but reads and empty ingress do not", async () => {
     const gate = Promise.withResolvers<void>();
     const started = Promise.withResolvers<void>();
-    const edge = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    const edge = Edge.message<typeof TaskSchema, AssistantMessage>(
       "external",
-      AgenticInputSchema,
+      TaskSchema,
     );
     let admitted = 0;
     let activated = 0;
     const ports = terminalPorts();
-    const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+    const source = new Source<typeof TaskSchema, AssistantMessage>(
       (view) => {
-        assert.deepEqual(from(view, edge), [{ kind: "prompt", text: "go" }]);
+        assert.deepEqual(from(view, edge), [
+          {
+            kind: "prompt",
+            text: "go",
+            taskId: "go",
+            spec: "",
+            deps: [],
+            history: [],
+          },
+        ]);
         admitted++;
         return [];
       },
-      { schema: AgenticInputSchema, id: NodeId.create("$source") },
+      { schema: TaskSchema, id: NodeId.create("$source") },
     );
     const graph = new JuncoGraph(
       source,
@@ -1859,7 +1899,7 @@ describe("source and sink boundaries", () => {
     });
     const work = graph.addNode({
       trigger: TriggerRule.always(),
-      state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+      state: new Deterministic<typeof TaskSchema, AssistantMessage>(
         async function* () {
           activated++;
           return assistant("done");
@@ -1876,7 +1916,21 @@ describe("source and sink boundaries", () => {
       source.enqueue({ messages: new Map(), values: new Map() });
       assert.equal(graph.observe().version, version);
       source.enqueue({
-        messages: new Map([[edge.id, [{ kind: "prompt", text: "go" }]]]),
+        messages: new Map([
+          [
+            edge.id,
+            [
+              {
+                kind: "prompt",
+                text: "go",
+                taskId: "go",
+                spec: "",
+                deps: [],
+                history: [],
+              },
+            ],
+          ],
+        ]),
         values: new Map(),
       });
       assert.ok(graph.observe().version > version);
@@ -2043,9 +2097,9 @@ describe("source and sink boundaries", () => {
 
 describe("nested sink publication", () => {
   test("a precompleted child publishes its retained sink result and outbox once without a child decision", async () => {
-    const output = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    const output = Edge.message<typeof TaskSchema, AssistantMessage>(
       "nested->reader",
-      AgenticInputSchema,
+      TaskSchema,
     );
     const final = Edge.value("worker->$sink", AssistantMessageSchema);
     const answer = assistant("already complete");
@@ -2053,29 +2107,36 @@ describe("nested sink publication", () => {
       "Completed child does not accept external input",
     );
     let decisions = 0;
-    const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+    const source = new Source<typeof TaskSchema, AssistantMessage>(
       () => {
         throw rejectedIngress;
       },
-      { schema: AgenticInputSchema, id: NodeId.create("$source") },
+      { schema: TaskSchema, id: NodeId.create("$source") },
     );
-    const sink: Sink<typeof AgenticInputSchema, AssistantMessage> = new Sink<
-      typeof AgenticInputSchema,
+    const sink: Sink<typeof TaskSchema, AssistantMessage> = new Sink<
+      typeof TaskSchema,
       AssistantMessage
     >(
       async function* (
         sink,
-      ): NodeGenerator<typeof AgenticInputSchema, AssistantMessage> {
+      ): NodeGenerator<typeof TaskSchema, AssistantMessage> {
         yield [];
         const retained = child.result(work);
         assert.ok(O.isSome(retained));
         sink.send(
-          Message.create(output, { kind: "prompt", text: "final message" }),
+          Message.create(output, {
+            kind: "prompt",
+            text: "final message",
+            taskId: "final",
+            spec: "",
+            deps: [],
+            history: [],
+          }),
         );
         return retained.value;
       },
       {
-        schema: AgenticInputSchema,
+        schema: TaskSchema,
         id: NodeId.create("$sink"),
         trigger: TriggerRule.when(final),
       },
@@ -2097,7 +2158,7 @@ describe("nested sink publication", () => {
     });
     const work = child.addNode({
       trigger: TriggerRule.always(),
-      state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+      state: new Deterministic<typeof TaskSchema, AssistantMessage>(
         async function* () {
           return answer;
         },
@@ -2114,10 +2175,10 @@ describe("nested sink publication", () => {
       trigger: TriggerRule.always(),
       state: childContext,
     });
-    const observed: AgenticInput[] = [];
+    const observed: Task[] = [];
     const reader = parent.addNode({
       trigger: TriggerRule.when(output),
-      state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+      state: new Deterministic<typeof TaskSchema, AssistantMessage>(
         async function* () {
           const view = yield [];
           observed.push(...from(view, output));
@@ -2129,18 +2190,15 @@ describe("nested sink publication", () => {
     parent.addEdge(nested, reader, output);
     ports.connect(parent, nested);
     const secondPorts = terminalPorts();
-    const ingress = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    const ingress = Edge.message<typeof TaskSchema, AssistantMessage>(
       "new external input",
-      AgenticInputSchema,
+      TaskSchema,
     );
-    const delivery = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+    const delivery = Edge.message<typeof TaskSchema, AssistantMessage>(
       "$source->nested",
-      AgenticInputSchema,
+      TaskSchema,
     );
-    const secondSource = new Source<
-      typeof AgenticInputSchema,
-      AssistantMessage
-    >(
+    const secondSource = new Source<typeof TaskSchema, AssistantMessage>(
       (view) => {
         assert.deepEqual([...view.messages.keys()], [ingress.id]);
         assert.equal([...view.values.keys()].length, 0);
@@ -2148,7 +2206,7 @@ describe("nested sink publication", () => {
           Message.create(delivery, payload),
         );
       },
-      { schema: AgenticInputSchema, id: NodeId.create("$source") },
+      { schema: TaskSchema, id: NodeId.create("$source") },
     );
     const secondContext = policyContext(
       secondSource,
@@ -2164,7 +2222,16 @@ describe("nested sink publication", () => {
       assert.equal(parent.getNode(nested)?.state, child);
       assert.equal(decisions, completedDecisions);
       assert.equal(source.revision, 0);
-      assert.deepEqual(observed, [{ kind: "prompt", text: "final message" }]);
+      assert.deepEqual(observed, [
+        {
+          kind: "prompt",
+          text: "final message",
+          taskId: "final",
+          spec: "",
+          deps: [],
+          history: [],
+        },
+      ]);
       await parentContext.run();
       assert.equal(decisions, completedDecisions);
       assert.equal(observed.length, 1);
@@ -2176,7 +2243,19 @@ describe("nested sink publication", () => {
       secondPorts.connect(second, freshNested);
       secondSource.enqueue({
         messages: new Map([
-          [ingress.id, [{ kind: "prompt", text: "unexpected" }]],
+          [
+            ingress.id,
+            [
+              {
+                kind: "prompt",
+                text: "unexpected",
+                taskId: "unexpected",
+                spec: "",
+                deps: [],
+                history: [],
+              },
+            ],
+          ],
         ]),
         values: new Map(),
       });
@@ -2203,30 +2282,34 @@ describe("nested sink publication", () => {
       const started = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       const failure = new Error(`child ${mode}`);
-      const output = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+      const output = Edge.message<typeof TaskSchema, AssistantMessage>(
         "nested->reader",
-        AgenticInputSchema,
+        TaskSchema,
       );
       const final = Edge.value("worker->$sink", AssistantMessageSchema);
-      const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+      const source = new Source<typeof TaskSchema, AssistantMessage>(
         () => {
           throw new DataflowDefinitionError(
             "Child does not accept external input",
           );
         },
-        { schema: AgenticInputSchema, id: NodeId.create("$source") },
+        { schema: TaskSchema, id: NodeId.create("$source") },
       );
-      const message: AgenticInput = {
+      const message: Task = {
         kind: "prompt",
         text: "staged, not published",
+        taskId: "staged",
+        spec: "",
+        deps: [],
+        history: [],
       };
-      const sink: Sink<typeof AgenticInputSchema, AssistantMessage> = new Sink<
-        typeof AgenticInputSchema,
+      const sink: Sink<typeof TaskSchema, AssistantMessage> = new Sink<
+        typeof TaskSchema,
         AssistantMessage
       >(
         async function* (
           sink,
-        ): NodeGenerator<typeof AgenticInputSchema, AssistantMessage> {
+        ): NodeGenerator<typeof TaskSchema, AssistantMessage> {
           yield [];
           sink.send(Message.create(output, message));
           started.resolve();
@@ -2237,7 +2320,7 @@ describe("nested sink publication", () => {
           return retained.value;
         },
         {
-          schema: AgenticInputSchema,
+          schema: TaskSchema,
           id: NodeId.create("$sink"),
           trigger: TriggerRule.when(final),
         },
@@ -2256,7 +2339,7 @@ describe("nested sink publication", () => {
       });
       const work = child.addNode({
         trigger: TriggerRule.always(),
-        state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+        state: new Deterministic<typeof TaskSchema, AssistantMessage>(
           async function* () {
             return assistant("work done");
           },
@@ -2274,7 +2357,7 @@ describe("nested sink publication", () => {
       let consumed = false;
       const reader = parent.addNode({
         trigger: TriggerRule.when(output),
-        state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+        state: new Deterministic<typeof TaskSchema, AssistantMessage>(
           async function* () {
             yield [];
             consumed = true;
@@ -2300,7 +2383,7 @@ describe("nested sink publication", () => {
         assert.equal(consumed, false);
         assert.deepEqual(queued(output), []);
         assert.ok(O.isNone(parent.result(nested)));
-        const retained: AgenticInput[] = [];
+        const retained: Task[] = [];
         sink.drain((outgoing) => retained.push(outgoing.payload));
         assert.deepEqual(retained, [message]);
       } finally {
@@ -2312,13 +2395,17 @@ describe("nested sink publication", () => {
   }
 });
 
-type ChatEdge = Edge<typeof AgenticInputSchema, AssistantMessage>;
+type ChatEdge = Edge<typeof TaskSchema, AssistantMessage>;
 const chatEdge = (id: string): ChatEdge =>
-  Edge.message<typeof AgenticInputSchema, AssistantMessage>(
-    id,
-    AgenticInputSchema,
-  );
-const promptOf = (text: string): AgenticInput => ({ kind: "prompt", text });
+  Edge.message<typeof TaskSchema, AssistantMessage>(id, TaskSchema);
+const promptOf = (text: string): Task => ({
+  kind: "prompt",
+  text,
+  taskId: text,
+  spec: "",
+  deps: [],
+  history: [],
+});
 
 /**
  * One streaming level counting its scheduler decisions: its source forwards `input` deliveries to
@@ -2329,17 +2416,14 @@ function streamingLevel(
   input: ChatEdge,
   output: ChatEdge,
   [into, out]: readonly [ChatEdge, ChatEdge],
-  work: AgenticNode<typeof AgenticInputSchema, AssistantMessage>,
+  work: AgenticNode<typeof TaskSchema, AssistantMessage>,
 ) {
-  const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+  const source = new Source<typeof TaskSchema, AssistantMessage>(
     (view) => from(view, input).map((payload) => Message.create(into, payload)),
-    { schema: AgenticInputSchema, id: NodeId.create("$source") },
+    { schema: TaskSchema, id: NodeId.create("$source") },
   );
-  const sink = new Sink<typeof AgenticInputSchema, AssistantMessage>(
-    async function* (): NodeGenerator<
-      typeof AgenticInputSchema,
-      AssistantMessage
-    > {
+  const sink = new Sink<typeof TaskSchema, AssistantMessage>(
+    async function* (): NodeGenerator<typeof TaskSchema, AssistantMessage> {
       let view = yield [];
       while (true)
         view = yield from(view, out).map((payload) =>
@@ -2347,7 +2431,7 @@ function streamingLevel(
         );
     },
     {
-      schema: AgenticInputSchema,
+      schema: TaskSchema,
       id: NodeId.create("$sink"),
       trigger: TriggerRule.when(out),
     },
@@ -2384,16 +2468,16 @@ for (const strategy of STRATEGIES)
         chatEdge("$source->echo"),
         chatEdge("echo->$sink"),
       ] as const;
-      const echo = new Deterministic<
-        typeof AgenticInputSchema,
-        AssistantMessage
-      >(async function* () {
-        let view = yield [];
-        while (true)
-          view = yield from(view, inner[0]).map((payload) =>
-            Message.create(inner[1], payload),
-          );
-      }, LockPolicy);
+      const echo = new Deterministic<typeof TaskSchema, AssistantMessage>(
+        async function* () {
+          let view = yield [];
+          while (true)
+            view = yield from(view, inner[0]).map((payload) =>
+              Message.create(inner[1], payload),
+            );
+        },
+        LockPolicy,
+      );
       const innermost = streamingLevel(strategy, middle[0], middle[1], inner, {
         trigger: TriggerRule.when(inner[0]),
         state: echo,
@@ -2418,7 +2502,7 @@ for (const strategy of STRATEGIES)
           values: new Map(),
         });
         await root.context.run();
-        const delivered: AgenticInput[] = [];
+        const delivered: Task[] = [];
         graph.sink.drain((message) => {
           assert.equal(message.id, egress.id);
           delivered.push(message.payload);
@@ -2495,7 +2579,7 @@ for (const strategy of STRATEGIES)
           .addEdge(other, persistent, chatEdge("other->persistent"))
           .addEdge(persistent, other, chatEdge("persistent->other"));
         const coroutine = new Deterministic<
-          typeof AgenticInputSchema,
+          typeof TaskSchema,
           AssistantMessage
         >(async function* () {
           return assistant("unused");

@@ -4,7 +4,7 @@
 // Graph levels without the `AnyFanIn->AnyFanIn` marker edge are left alone.
 import { EdgeId, Message, NodeId } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
-import { AgenticInputSchema, JuncoAgent } from "junco-agent";
+import { JuncoAgent, TaskSchema } from "junco-agent";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { Deterministic } from "../../deterministic.js";
@@ -78,7 +78,7 @@ export function anyFanIn(): {
                 );
               for (const candidate of batch) {
                 if (
-                  !Value.Check(AgenticInputSchema, candidate) ||
+                  !Value.Check(TaskSchema, candidate) ||
                   candidate.kind !== "prompt"
                 )
                   throw new TypeError(

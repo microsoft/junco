@@ -94,6 +94,8 @@ const graphSchema = Type.Cyclic(
                 kind: Type.Literal("emit"),
                 trigger: Type.Optional(trigger),
                 text: Type.String(),
+                /** When the emitted task counts as complete. */
+                spec: Type.String(),
               },
               strict,
             ),

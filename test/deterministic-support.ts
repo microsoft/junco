@@ -24,9 +24,9 @@ import {
   schedules,
 } from "junco";
 import {
-  AgenticInputSchema,
   type AgenticYieldReason,
   AssistantMessageSchema,
+  TaskSchema,
 } from "junco-agent";
 import {
   context as nativeContext,
@@ -53,8 +53,8 @@ const quiet = new DummyTracer();
 export function policy<C>(
   strategy: Strategy,
 ): Scheduler<
-  Agentic<typeof AgenticInputSchema, AssistantMessage>,
-  typeof AgenticInputSchema,
+  Agentic<typeof TaskSchema, AssistantMessage>,
+  typeof TaskSchema,
   AssistantMessage,
   C
 > {
@@ -74,8 +74,8 @@ function bounds(
 
 /** Native trigger reads intentionally differ from the agency bridge's retained-value reads. */
 export function plainContext(
-  source: Source<typeof AgenticInputSchema, AssistantMessage>,
-  sink: Sink<typeof AgenticInputSchema, AssistantMessage>,
+  source: Source<typeof TaskSchema, AssistantMessage>,
+  sink: Sink<typeof TaskSchema, AssistantMessage>,
   strategy: Strategy,
 ) {
   const [window, threads] = bounds(strategy, undefined);
@@ -92,8 +92,8 @@ export function plainContext(
 
 /** Agency live reads prevent a retained result from starving newer messages. */
 export function policyContext(
-  source: Source<typeof AgenticInputSchema, AssistantMessage>,
-  sink: Sink<typeof AgenticInputSchema, AssistantMessage>,
+  source: Source<typeof TaskSchema, AssistantMessage>,
+  sink: Sink<typeof TaskSchema, AssistantMessage>,
   strategy: Strategy,
   { threads }: { readonly threads?: WidthType } = {},
 ) {
@@ -107,10 +107,10 @@ export function policyContext(
 
 /** Fresh closed ingress and a sink explicitly wired to the fixture's chosen terminal work. */
 export function terminalPorts<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   R extends TSchema = typeof AssistantMessageSchema,
 >(
-  messageSchema: N = AgenticInputSchema as TSchema as N,
+  messageSchema: N = TaskSchema as TSchema as N,
   resultSchema: R = AssistantMessageSchema as TSchema as R,
 ) {
   type T = Static<R>;

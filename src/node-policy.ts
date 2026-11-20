@@ -1,9 +1,5 @@
 import type { ModelIdentity } from "@earendil-works/pi-agent-core";
-import type {
-  AssistantMessage,
-  ModelThinkingLevel,
-  ThinkingLevel,
-} from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type {
@@ -11,6 +7,7 @@ import type {
   EdgeIdType as EdgeId,
   InputSchedule,
   Lookup,
+  Message,
   Node,
   NodeAvailability,
 } from "dataflow-engine";
@@ -158,13 +155,12 @@ export const nodePolicies = new WeakMap<object, NodePolicy>();
  * What one node registration in a {@link JuncoGraph} binds: its graph's tracer, signal and routes,
  * plus the send tool schema read live from the node's actual outbound message links.
  */
-export type NodeRegistration<
-  N extends TSchema = TSchema,
-  V = AssistantMessage,
-> = Pick<
-  NonNullable<JuncoAgentNodeContext<N, V>["messaging"]>,
-  "send" | "info" | "sendParameters"
+export type NodeRegistration<N extends TSchema = TSchema> = Pick<
+  NonNullable<JuncoAgentNodeContext<N>["messaging"]>,
+  "info" | "sendParameters"
 > & {
+  /** Emits `message` as is; an agent node's `send` has already attached its task provenance. */
+  send(message: Message<N>): void;
   readonly tracer: DataflowTracer;
   /** The owning graph's current recorder view, if it records. */
   readonly recorder:
@@ -180,17 +176,14 @@ export type NodeRegistration<
  * Each node record's registration, keyed by that registration's own Node record: a reused spec or
  * body registered in several graphs keeps each graph's tracer and routes.
  */
-export const registeredNodeContexts = new WeakMap<
-  object,
-  NodeRegistration<TSchema, unknown>
->();
+export const registeredNodeContexts = new WeakMap<object, NodeRegistration>();
 
 /** The registration of `node`, with the domains of the graph that registered it. */
 export const registrationOf = <N extends TSchema, V>(
   node: Node<Agentic<N, V>, N, V>,
-): NodeRegistration<N, V> | undefined =>
+): NodeRegistration<N> | undefined =>
   // Only JuncoGraph<N,V>.addNode stores the registration of its own node records.
-  registeredNodeContexts.get(node) as NodeRegistration<N, V> | undefined;
+  registeredNodeContexts.get(node) as NodeRegistration<N> | undefined;
 
 /**
  * Rejects a missing policy (anything without a `toNative` method), or a collection opened under

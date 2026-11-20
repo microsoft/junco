@@ -95,13 +95,13 @@ import { log } from "junco-tools/log";
 import type { TSchema } from "typebox";
 import {
   type Agentic,
-  type AgenticInputSchema,
   type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
   type AgenticYieldReason,
   type ErrorHandler,
   resolveStagedPrompt,
+  type TaskSchema,
   type TokenMonitorConfig,
   validateActiveTools,
 } from "./agentic.js";
@@ -139,7 +139,7 @@ export type JuncoAgentResolvedOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > = Omit<AgenticOptions<S, P, T, N, V>, "tools"> & {
   readonly tools?: JuncoAgentTools<T>;
@@ -150,7 +150,7 @@ export type JuncoAgentCreateOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > = Omit<
   AgenticOptions<S, P, T, N, V>,
@@ -194,7 +194,7 @@ export type TaskResult = {
  * What one graph activation binds while a {@link JuncoAgent} runs: outgoing routes,
  * topology for send/info, and complaint attribution.
  */
-export type JuncoAgentNodeContext<N extends TSchema = TSchema, T = unknown> = {
+export type JuncoAgentNodeContext<N extends TSchema = TSchema> = {
   /** The host's authoritative NodeId for this activation; absence denies memory access. */
   readonly nodeId?: NodeIdType;
   readonly messaging?: SendToolHost<N> &
@@ -505,7 +505,7 @@ function withRequiredNames(
 
 /** The text every model request's system prompt carries: team guidance, then the release rule. */
 export const SYSTEM_INSTRUCTION =
-  "You are an expert in a collaborative team. You have the tool send for messaging collaborators and yield if you receive a resource-in-use error or if you want to wait for other collaborators to make progress; messages from collaborators arrive as user messages when the scheduler delivers them. Summarize your work (send) to your downstream collaborator before yielding.\n\n" +
+  "You are an expert in a collaborative team. Work arrives as tasks: user messages ending in a `Task:` JSON line with the task's id, spec (when it counts as complete; fixed at creation), deps (its subtasks) and history (who held it before, what they were asked and what they did). Hand tasks to collaborators with the tool send: the payload is what the receiver reads, task names the received task the message comes from, and handoff states what you did. Pass that task's own spec to hand the task off; pass a different spec to create a subtask of it, recorded in its deps. Use yield if you receive a resource-in-use error or if you want to wait for other collaborators to make progress; messages from collaborators arrive as user messages when the scheduler delivers them. Summarize your work (send) to your downstream collaborator before yielding.\n\n" +
   "After you write to a file use release to relinquish ownership";
 
 function valueOrThrow<T, E>(
@@ -673,7 +673,7 @@ export class JuncoAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > implements Agentic<S, P, AgentTool, N, V>
 {
@@ -685,7 +685,7 @@ export class JuncoAgent<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
     T extends AgentTool = AgentTool,
-    N extends TSchema = typeof AgenticInputSchema,
+    N extends TSchema = typeof TaskSchema,
     V = AssistantMessage,
   >(
     options: JuncoAgentResolvedOptions<S, P, T, N, V>,
@@ -731,7 +731,7 @@ export class JuncoAgent<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
     T extends AgentTool = AgentTool,
-    N extends TSchema = typeof AgenticInputSchema,
+    N extends TSchema = typeof TaskSchema,
     V = AssistantMessage,
   >(
     options: JuncoAgentCreateOptions<S, P, T, N, V> & { readonly tools: T[] },
@@ -739,7 +739,7 @@ export class JuncoAgent<
   static create<
     S extends Skill = Skill,
     P extends PromptTemplate = PromptTemplate,
-    N extends TSchema = typeof AgenticInputSchema,
+    N extends TSchema = typeof TaskSchema,
     V = AssistantMessage,
   >(
     options: JuncoAgentCreateOptions<S, P, AgentTool, N, V>,
@@ -2133,8 +2133,8 @@ export class JuncoAgent<
    * The caller's usage budgets bind with it: every model request and tool call while it is bound
    * charges them, even of a run admitted in an earlier activation.
    */
-  async runWithNodeContext<N extends TSchema, T, R>(
-    context: JuncoAgentNodeContext<N, T>,
+  async runWithNodeContext<N extends TSchema, R>(
+    context: JuncoAgentNodeContext<N>,
     work: () => Promise<R>,
   ): Promise<R> {
     if (this.#nodeContext !== undefined)
@@ -2283,10 +2283,7 @@ export class JuncoAgent<
    * child holds its own collection lease. Everything is validated before any child is created; on failure or
    * `signal` abort every created child is closed again.
    */
-  createSubagents<
-    C extends TSchema = typeof AgenticInputSchema,
-    W = AssistantMessage,
-  >(
+  createSubagents<C extends TSchema = typeof TaskSchema, W = AssistantMessage>(
     options: readonly TaskAgentOptions[],
     signal?: AbortSignal,
   ): Promise<JuncoAgent<S, P, AgentTool, C, W>[]> {

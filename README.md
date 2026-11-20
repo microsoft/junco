@@ -92,6 +92,7 @@ graph:
     Goals:
       kind: emit
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
+      spec: Both versions and release dates are stated, each with a cited source page.
     Bun:
       prompt: Answer the question in the user message(s) following this prompt for Bun only, browsing from https://bun.sh with the playwright tools.
     Rust:
@@ -117,7 +118,7 @@ MCP servers are attached in TypeScript like every other tool: `mcp.McpBuilder` o
 
 The scheduler decides which queued messages a node reads: each `NodeModel` it selects lists those edges in `readEdges`. `schedules.select(snapshot, ids, strength?)` reads the edges from `schedules.plannedReads(snapshot, id)` by default, and `schedules.reads(assign, inner)` overrides them. `schedules.reads(() => [], schedules.parallel())` runs nodes without consuming any message. If a decision is invalid, the scheduler is asked again with `snapshot.lastError`, up to three attempts in all, and then the run throws.
 
-Each message a node reads reaches the agent as its own user message, in delivery order. `AgenticInput` text and images arrive as message content, and the agent does not dispatch on their `kind`. Other payloads arrive as `JSON.stringify({ id, payload })`. Write prompts that refer to these messages, as the `Bun` and `Rust` prompts do, instead of copying their content. Value edges never arrive as messages. Prompt callbacks and YAML placeholders read them, and a placeholder that names a message edge fails at build time. Prompts can also use `params` substitutions.
+Each message a node reads reaches the agent as its own user message, in delivery order. `Task` text and images arrive as message content, the text followed by a `Task:` JSON line with the task's id, spec, deps and history, and the agent does not dispatch on their `kind`. Other payloads arrive as `JSON.stringify({ id, payload })`. Write prompts that refer to these messages, as the `Bun` and `Rust` prompts do, instead of copying their content. Value edges never arrive as messages. Prompt callbacks and YAML placeholders read them, and a placeholder that names a message edge fails at build time. Prompts can also use `params` substitutions.
 
 Models and MCP servers are chosen in TypeScript. The YAML never names either:
 

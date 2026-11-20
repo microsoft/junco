@@ -8,7 +8,7 @@
 
 import { basename, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
+import { graph, JuncoGraph, schedules, syntax, Task, tools, tracer } from "junco";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { problemRecorder, runCli, verifiedModels } from "../support.ts";
@@ -189,9 +189,13 @@ export const Interpreter: syntax.DeterministicNode<CamelContext> = ({ context, e
         query: { as: step.as, output_schema: step.output_schema, sources: query.sources, readers: query.readers },
       };
       published = true;
+      const tasks = [
+        Task.create({ kind: "prompt", text, spec: "The reply is one JSON object matching the output schema." }),
+        Task.create({ kind: "prompt", text: JSON.stringify(handoff), spec: "The remaining plan steps are executed." }),
+      ];
       while (true) yield [
-        graph.Message.create(edges.get("Interpreter~>QLLM")!, { kind: "prompt", text }),
-        graph.Message.create(edges.get("Interpreter~>Executor")!, { kind: "prompt", text: JSON.stringify(handoff) }),
+        graph.Message.create(edges.get("Interpreter~>QLLM")!, tasks[0]),
+        graph.Message.create(edges.get("Interpreter~>Executor")!, tasks[1]),
       ];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,

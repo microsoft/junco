@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { NodeIdType } from "dataflow-engine";
-import type { AgenticInputSchema } from "junco-agent";
+import type { TaskSchema } from "junco-agent";
 import type { TSchema } from "typebox";
 import type { AgenticNode } from "./agentic.js";
 import { JuncoGraph } from "./junco-graph.js";
@@ -13,7 +13,7 @@ import { MockAgent, NO_USAGE } from "./mock-agent.js";
  * (`schedules.limit`, `schedules.lowest`) therefore accept the whole graph.
  */
 export class MockJuncoGraph<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   T = AssistantMessage,
   EH = never,
 > extends JuncoGraph<N, T, EH> {

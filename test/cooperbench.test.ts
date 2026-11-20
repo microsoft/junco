@@ -866,7 +866,18 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
         assignments[name] = userTexts(context.messages).slice(1);
         return call("info", {});
       },
-      keep("info", () => call("send", { id: out, payload: NOTE[key] })),
+      // `send` requires the held task's id (the assignment's `Task:` line), even for a plain note.
+      keep("info", () =>
+        call("send", {
+          id: out,
+          payload: NOTE[key],
+          task: JSON.parse(
+            assignments[name]!.at(-1)!.split("\n\nTask: ").at(-1)!,
+          ).taskId,
+          spec: "",
+          handoff: "",
+        }),
+      ),
       keep("send", () => call("yield", { reason: "await peer plan" })),
       (context) => {
         peerMessages[name] = userTexts(context.messages).slice(

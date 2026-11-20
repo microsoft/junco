@@ -20,13 +20,13 @@ import {
 import { JuncoAgentError } from "junco-agent";
 import { LockPolicy } from "junco-tools";
 import {
-  AgenticInputSchema,
   type CompactionPolicy,
   Deterministic,
   JuncoGraph,
   MockAgent,
   type MockMaintenance,
   type MockTranscript,
+  TaskSchema,
 } from "../src/index.ts";
 import {
   assistant,
@@ -135,9 +135,9 @@ async function compactionFixture() {
     a: graph.addNode(node(agents.a, "a")),
     b: graph.addNode(node(agents.b, "b")),
   } as Record<keyof typeof agents, NodeIdType>;
-  const never = Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+  const never = Edge.message<typeof TaskSchema, AssistantMessage>(
     "d->c",
-    AgenticInputSchema,
+    TaskSchema,
   );
   ids.c = graph.addNode({
     id: NodeId.create("c"),
@@ -209,21 +209,21 @@ describe("policy selection", () => {
 describe("policy boundaries", () => {
   test("an empty graph or selection completes without requests", async () => {
     for (const [policy] of POLICIES) {
-      const source = new Source<typeof AgenticInputSchema, AssistantMessage>(
+      const source = new Source<typeof TaskSchema, AssistantMessage>(
         () => {
           throw new DataflowDefinitionError(
             "Empty compaction graph does not accept external input",
           );
         },
-        { id: NodeId.create("$source"), schema: AgenticInputSchema },
+        { id: NodeId.create("$source"), schema: TaskSchema },
       );
-      const sink = new Sink<typeof AgenticInputSchema, AssistantMessage>(
+      const sink = new Sink<typeof TaskSchema, AssistantMessage>(
         async function* () {
           throw new Error("Empty compaction graph has no terminal result");
         },
         {
           id: NodeId.create("$sink"),
-          schema: AgenticInputSchema,
+          schema: TaskSchema,
           trigger: TriggerRule.never(),
         },
       );
@@ -493,14 +493,14 @@ describe("policy boundaries", () => {
       );
       const child = childContext.graph;
       const innerId = child.addNode(node(inner, "inner"));
-      const coroutine = new Deterministic<
-        typeof AgenticInputSchema,
-        AssistantMessage
-      >(async function* () {
-        started.add(coroutine);
-        yield [];
-        return assistant("coroutine done");
-      }, LockPolicy);
+      const coroutine = new Deterministic<typeof TaskSchema, AssistantMessage>(
+        async function* () {
+          started.add(coroutine);
+          yield [];
+          return assistant("coroutine done");
+        },
+        LockPolicy,
+      );
       childPorts.connect(child, innerId);
       const childId = graph.addNode({
         id: NodeId.create("child"),

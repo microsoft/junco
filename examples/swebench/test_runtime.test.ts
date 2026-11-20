@@ -748,7 +748,8 @@ group("dormant topology capabilities", () => {
       expect(first[0]).not.toContain("f(1) is wrong");
       expect(first[1].split("f(1) is wrong")).toHaveLength(2);
       expect(first[1].split(run.saved.get("evidence.md")!)).toHaveLength(2);
-      expect(first[2]).toBe(run.saved.get("planning/drafts.md")!);
+      // JoinDrafts emits a Task.create task, so Merge sees it rendered with its minted id and spec.
+      expect(first[2]).toMatch(new RegExp(`^${RegExp.escape(run.saved.get("planning/drafts.md")!)}\\n\\nTask: \\{"taskId":"[0-9a-f-]{36}","spec":"One merged fix plan chosen from the drafts\\.","deps":\\[\\],"history":\\[\\]\\}$`));
       expect(corrections(merge)).toEqual([expect.stringContaining("Correction turn 1 of 3")]);
 
       const abnormal = await scenario({}, {

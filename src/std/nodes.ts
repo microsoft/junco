@@ -10,8 +10,8 @@ export {
 } from "dataflow-engine";
 export type {
   Agentic,
-  AgenticInput,
   AgenticNode,
   CompactionPolicy,
 } from "../agentic.js";
+export { Task } from "../agentic.js";
 export { Deterministic } from "../deterministic.js";

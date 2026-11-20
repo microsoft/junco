@@ -25,11 +25,7 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import {
-  type AgenticInputSchema,
-  JuncoAgent,
-  JuncoAgentError,
-} from "junco-agent";
+import { JuncoAgent, JuncoAgentError, type TaskSchema } from "junco-agent";
 import { parallel, type SchedulerContext } from "junco-scheduler";
 import {
   beginOperation,
@@ -42,7 +38,7 @@ import {
 } from "junco-tools";
 import type { Graph } from "ngraph.graph";
 import type { TSchema } from "typebox";
-import { AgentDriver } from "./agent-node.js";
+import { AgentDriver, withoutProvenance } from "./agent-node.js";
 import { cancellation, settleAll } from "./agent-operations.js";
 import type {
   Agentic,
@@ -293,7 +289,7 @@ function startActivation<S, N extends TSchema, T, EH>(
 
 /** A passive native work graph owning its agents, child graphs and coroutines. */
 export class JuncoGraph<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   T = AssistantMessage,
   EH = never,
 > extends DataflowGraph<Agentic<N, T>, N, T, EH> {
@@ -503,12 +499,7 @@ export class JuncoGraph<
    * Map work in insertion order, preserving skeleton IDs and allocating fresh transports, each a
    * message edge of the source's schema.
    */
-  static map<
-    S,
-    L,
-    N extends TSchema = typeof AgenticInputSchema,
-    T = AssistantMessage,
-  >(
+  static map<S, L, N extends TSchema = typeof TaskSchema, T = AssistantMessage>(
     skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
     f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
     options: {
@@ -590,7 +581,7 @@ export class JuncoGraph<
    */
   static spawn<
     Input,
-    N extends TSchema = typeof AgenticInputSchema,
+    N extends TSchema = typeof TaskSchema,
     T = AssistantMessage,
   >(
     source: Source<N, T>,
@@ -859,7 +850,7 @@ export class JuncoGraph<
     const current = (): AbortSignal => this.signal;
     const recorder = () => this.recorder;
     const sendParameters = () => this.#sendParameters(id);
-    const registration: NodeRegistration<N, T> = {
+    const registration: NodeRegistration<N> = {
       tracer: this.#delegate,
       get recorder() {
         return recorder();
@@ -909,12 +900,12 @@ export class JuncoGraph<
     }
   }
 
-  /** Node `id`'s send schema over outbound message links, computed live to include late edges. */
-  #sendParameters(id: NodeIdType): NodeRegistration<N, T>["sendParameters"] {
+  /** Node `id`'s send schema over outbound message links, computed live to include late edges; task provenance is the node's to attach. */
+  #sendParameters(id: NodeIdType): NodeRegistration<N>["sendParameters"] {
     const routes: (readonly [EdgeIdType, TSchema])[] = [];
     this.forEachLink((from, _to, edge) => {
       if (from === id && E.isLeft(edge.transport))
-        routes.push([edge.id, edge.schema]);
+        routes.push([edge.id, withoutProvenance(edge.schema)]);
     });
     return SendTool.parametersFor(routes);
   }

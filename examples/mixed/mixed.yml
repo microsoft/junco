@@ -4,6 +4,7 @@ graph:
     Goals:
       kind: emit
       description: Publishes the assignment once to both competitors.
+      spec: All three goals are answered.
       text: |-
         1. Explain what a dataflow graph is in two sentences.
         2. Give one concrete example that combines a single agent with a nested graph.

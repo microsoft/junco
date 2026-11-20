@@ -14,7 +14,7 @@ import { type ProfilesFile, profilesOf, unitOf } from "dataflow-profile";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import * as agent from "junco-agent";
-import * as mcp from "junco-mcp";
+import type * as mcp from "junco-mcp";
 import {
   DEFAULT_MODEL_STRENGTH,
   type Scheduler,
@@ -543,14 +543,19 @@ function createSink(
 function registerEmit(
   g: JuncoGraph<TSchema, unknown>,
   registration: Registration,
-  text: string,
+  task: { readonly text: string; readonly spec: string },
   outbound: readonly Edge[],
 ): void {
   let published = false;
   const state = new Deterministic<TSchema, unknown>(async function* (
     signal,
   ): graph.NodeGenerator<TSchema, unknown> {
-    const payload = { kind: "prompt", text } as const;
+    // One task, broadcast on every outbound edge.
+    const payload = agent.Task.create({
+      kind: "prompt",
+      text: task.text,
+      spec: task.spec,
+    });
     while (true) {
       signal.throwIfAborted();
       published = true;
@@ -606,8 +611,9 @@ async function registerAgent(
     const prompt = compilePrompt(node.prompt);
     const inbound = inboundEdges(spec, id);
     for (const match of node.prompt.matchAll(PLACEHOLDER)) {
-      const placeholder = match[1]!;
-      if (placeholder.startsWith("params.")) continue;
+      const placeholder = match[1];
+      if (placeholder === undefined || placeholder.startsWith("params."))
+        continue;
       const edge = edges.get(placeholder);
       if (
         !inbound.some((candidate) => edgeId(candidate) === placeholder) ||
@@ -730,7 +736,7 @@ async function buildGraph(
       ...(profiles ? { profiles } : {}),
     };
     if (node.kind === "emit") {
-      registerEmit(g, registration, node.text, outbound);
+      registerEmit(g, registration, node, outbound);
     } else if (node.kind === "graph") {
       const child = await buildGraph(
         c,
@@ -823,12 +829,12 @@ async function rollback(
  * nothing) or a normally completed assistant result. Other payloads are read through code.
  */
 function render(payload: unknown, id: string): string {
-  if (Value.Check(agent.AgenticInputSchema, payload))
+  if (Value.Check(agent.TaskSchema, payload))
     return "text" in payload ? payload.text : "";
   if (Value.Check(agent.AssistantMessageSchema, payload))
     return finalText(payload, id);
   throw new TypeError(
-    `Prompt placeholder {{${id}}} renders only AgenticInput or AssistantMessage payloads; read edge "${id}" with a code node`,
+    `Prompt placeholder {{${id}}} renders only Task or AssistantMessage payloads; read edge "${id}" with a code node`,
   );
 }
 

@@ -40,15 +40,16 @@ import { type AgenticOptions, JuncoAgentError } from "junco-agent";
 import { EmptyPolicy, LockPolicy } from "junco-tools";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import { renderTask } from "../src/agent-node.ts";
 import {
-  type AgenticInput,
-  AgenticInputSchema,
   AssistantMessageSchema,
   agent as agentApi,
   Deterministic,
   JuncoGraph,
   MockAgent,
   schedules,
+  Task,
+  TaskSchema,
   tools as toolsApi,
 } from "../src/index.ts";
 import { nodePolicies, registeredNodeContexts } from "../src/node-policy.ts";
@@ -68,6 +69,12 @@ import {
 } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
 
+// A complete task with fixed provenance, so expected steered text is deterministic.
+const full = (text: string, taskId: string) =>
+  ({ text, taskId, spec: "", deps: [], history: [] }) as const;
+const asTask = (text: string, taskId: string) =>
+  renderTask({ kind: "prompt", ...full(text, taskId) });
+
 // The adapter is scheduler-agnostic: every scenario runs on both deterministic junco-scheduler
 // policies. Execution scenarios keep the original MockAgent as node state; messaging scenarios use
 // real JuncoAgents on faux providers, whose send/info calls run against their registrations.
@@ -78,10 +85,10 @@ afterEach(async () => {
     await close().catch(() => {});
 });
 
-type Chat = typeof AgenticInputSchema;
+type Chat = typeof TaskSchema;
 type Graph = JuncoGraph;
 const chatEdge = (id: string) =>
-  Edge.message<Chat, AssistantMessage>(id, AgenticInputSchema);
+  Edge.message<Chat, AssistantMessage>(id, TaskSchema);
 const answerEdge = (id: string) => Edge.value(id, AssistantMessageSchema);
 type Route = {
   readonly id: string;
@@ -200,7 +207,7 @@ function inert(
 
 /** A coroutine node `id` recording every payload delivered on `edge`. */
 function sink(graph: Graph, edge: Edge<Chat, AssistantMessage>, id: string) {
-  const delivered: AgenticInput[] = [];
+  const delivered: Task[] = [];
   const body = new Deterministic<Chat, AssistantMessage>(async function* () {
     let view = yield [];
     while (true) {
@@ -256,9 +263,7 @@ for (const withhold of [false, true]) {
       const bystander = new MockAgent<Skill, PromptTemplate, AgentTool, N>({
         runs: [yieldsThen(0, "never")],
       });
-      const ports = terminalPorts<N, typeof AssistantMessageSchema>(
-        AgenticInputSchema,
-      );
+      const ports = terminalPorts<N, typeof AssistantMessageSchema>(TaskSchema);
       const graph = new JuncoGraph(
         ports.source,
         ports.sink,
@@ -278,8 +283,11 @@ for (const withhold of [false, true]) {
         trigger: TriggerRule.always(),
         state: new Deterministic<N, AssistantMessage>(async function* () {
           yield [
-            ...texts.map((text) =>
-              Message.create(chat, { kind: "prompt", text }),
+            ...texts.map((text, i) =>
+              Message.create(chat, {
+                kind: "prompt",
+                ...full(text, `1#${i + 1}`),
+              }),
             ),
             Message.create(numeric, 42),
           ];
@@ -309,7 +317,10 @@ for (const withhold of [false, true]) {
         "Read your inbox.",
         ...(withhold
           ? []
-          : [...texts, JSON.stringify({ id: numeric.id, payload: 42 })]),
+          : [
+              ...texts.map((text, i) => asTask(text, `1#${i + 1}`)),
+              JSON.stringify({ id: numeric.id, payload: 42 }),
+            ]),
       ]);
       assert.deepEqual(bystander.requests, []);
       assert.ok(O.isNone(graph.result(b)));
@@ -389,7 +400,12 @@ for (const strategy of STRATEGIES) {
       const feeder = graph.addNode({
         trigger: TriggerRule.always(),
         state: new Deterministic<Chat, AssistantMessage>(async function* () {
-          yield [Message.create(assignment, { kind: "prompt", text: "go" })];
+          yield [
+            Message.create(
+              assignment,
+              Task.create({ kind: "prompt", text: "go", spec: "" }),
+            ),
+          ];
           return assistant("fed");
         }, LockPolicy),
       });
@@ -411,7 +427,10 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.available().has(worker), false); // a staged prompt alone is no trigger
       graph.emit(
         feeder,
-        Message.create(assignment, { kind: "prompt", text: "go again" }),
+        Message.create(
+          assignment,
+          Task.create({ kind: "prompt", text: "go again", spec: "" }),
+        ),
       );
       assert.ok(graph.available().has(worker));
       await execution.run();
@@ -425,16 +444,24 @@ for (const strategy of STRATEGIES) {
       const images = [image("1"), image("2"), image("3"), image("4")] as const;
       const toRecipient = chatEdge("sender->recipient");
       const toBystander = chatEdge("sender->bystander");
-      const payloads: AgenticInput[] = [
+      const payloads: Task[] = [
         {
           kind: "appendMessage",
           message: { role: "user", content: "note", timestamp: 1 },
         },
-        { kind: "nextTurn", text: "context first", images: [images[0]] },
-        { kind: "prompt", text: "then work", images: [images[1]] },
-        { kind: "steer", text: "adjust", images: [images[2]] },
-        { kind: "followUp", text: "confirm" },
-        { kind: "error", text: "failed dependency", images: [images[3]] },
+        {
+          kind: "nextTurn",
+          images: [images[0]],
+          ...full("context first", "1#1"),
+        },
+        { kind: "prompt", images: [images[1]], ...full("then work", "1#2") },
+        { kind: "steer", images: [images[2]], ...full("adjust", "1#3") },
+        { kind: "followUp", ...full("confirm", "1#4") },
+        {
+          kind: "error",
+          images: [images[3]],
+          ...full("failed dependency", "1#5"),
+        },
       ];
       const sender = new Deterministic<Chat, AssistantMessage>(
         async function* () {
@@ -482,11 +509,13 @@ for (const strategy of STRATEGIES) {
       assert.deepEqual(userTexts(recipient.contexts[1]!.messages), [
         "Read your inbox.",
         JSON.stringify({ id: toRecipient.id, payload: payloads[0] }),
-        "context first",
-        "then work",
-        "adjust",
-        "confirm",
-        "failed dependency",
+        ...[
+          "context first",
+          "then work",
+          "adjust",
+          "confirm",
+          "failed dependency",
+        ].map((text, i) => asTask(text, `1#${i + 1}`)),
       ]);
       assert.deepEqual(
         users.flatMap((message) =>
@@ -830,7 +859,7 @@ for (const strategy of STRATEGIES) {
       const notes = chatEdge("notes->agent");
       const seed = answerEdge("seed=>agent");
       const seedMessage = assistant("seed");
-      const note: AgenticInput = { kind: "prompt", text: "note" };
+      const note: Task = { kind: "prompt", ...full("note", "agent#1") };
       const seen: [unknown, unknown][] = [];
       const receiver = await member(
         [
@@ -898,7 +927,7 @@ for (const strategy of STRATEGIES) {
       assert.ok(O.isSome(result) && textOf(result.value) === "done");
       assert.deepEqual(userTexts(receiver.contexts.at(-1)!.messages), [
         "Use note with seed",
-        "note",
+        asTask("note", "agent#1"),
       ]);
       const calls = receiver.faux.state.callCount;
       await graphContext.run();
@@ -1112,9 +1141,9 @@ for (const strategy of STRATEGIES) {
       const toAgent = chatEdge("source->agent");
       const seed = answerEdge("source=>agent");
       const toSink = chatEdge("agent->sink");
-      const notes: AgenticInput[] = [
-        { kind: "prompt", text: "first" },
-        { kind: "followUp", text: "second" },
+      const notes: Task[] = [
+        { kind: "prompt", ...full("first", "agent#1") },
+        { kind: "followUp", ...full("second", "agent#2") },
       ];
       const seedMessage = assistant("seed");
       const source = new Deterministic<Chat, AssistantMessage>(
@@ -1160,6 +1189,9 @@ for (const strategy of STRATEGIES) {
               {
                 id: route.edgeId,
                 payload: { kind: "prompt", text: "forwarded" },
+                task: "agent#1",
+                spec: "",
+                handoff: "",
               },
               "send-1",
             );
@@ -1259,8 +1291,8 @@ for (const strategy of STRATEGIES) {
       ]);
       assert.deepEqual(userTexts(receiver.contexts.at(-1)!.messages), [
         "Inspect info, then work through your messages.",
-        "first",
-        "second",
+        asTask("first", "agent#1"),
+        asTask("second", "agent#2"),
       ]);
       // send admitted exactly one message before the run resumed.
       assert.equal(queued(graph, toSink.id) + out.delivered.length, 1);
@@ -1283,7 +1315,16 @@ for (const strategy of STRATEGIES) {
       assert.equal(receiver.faux.state.callCount, 6);
       const result = graph.result(agentId);
       assert.ok(O.isSome(result) && textOf(result.value) === "done");
-      assert.deepEqual(out.delivered, [{ kind: "prompt", text: "forwarded" }]);
+      assert.deepEqual(out.delivered, [
+        {
+          kind: "prompt",
+          text: "forwarded",
+          taskId: "agent#1",
+          spec: "",
+          deps: [],
+          history: [{ node: "agent", desc: "first", handoff: "" }],
+        },
+      ]);
     });
 
     test("shared messaging carriers act for each agent's own registration; a copied carrier gains no graph authority", async () => {
@@ -1300,7 +1341,7 @@ for (const strategy of STRATEGIES) {
         new toolsApi.InfoTool(directHost),
         new toolsApi.SendTool(directHost),
       ];
-      const script = (text: string) => [
+      const script = (text: string, task: string) => [
         call("info", {}, "info-1"),
         (context: Parameters<FauxResponseFactory>[0]) => {
           const route = jsonResult<Topology>(
@@ -1310,14 +1351,20 @@ for (const strategy of STRATEGIES) {
           assert.ok(route);
           return call(
             "send",
-            { id: route.edgeId, payload: { kind: "prompt", text } },
+            {
+              id: route.edgeId,
+              payload: { kind: "prompt", text },
+              task,
+              spec: "",
+              handoff: "h",
+            },
             "send-1",
           );
         },
         fauxAssistantMessage(`${text} done`),
       ];
-      const p = await member(script("from P"), { tools: shared });
-      const q = await member(script("from Q"), { tools: shared });
+      const p = await member(script("from P", "TP"), { tools: shared });
+      const q = await member(script("from Q", "TQ"), { tools: shared });
       const copy = { ...new toolsApi.InfoTool() };
       const r = await member([
         call("info", {}, "info-1"),
@@ -1332,35 +1379,66 @@ for (const strategy of STRATEGIES) {
       );
       const graph = graphContext.graph;
       closers.push(() => graph.close());
+      const fromF = chatEdge("F->P");
+      const fromFQ = chatEdge("F->Q");
+      const feeder = graph.addNode({
+        id: NodeId.create("F"),
+        trigger: TriggerRule.always(),
+        state: new Deterministic<Chat, AssistantMessage>(async function* () {
+          yield [
+            Message.create(fromF, { kind: "prompt", ...full("work", "TP") }),
+            Message.create(fromFQ, { kind: "prompt", ...full("work", "TQ") }),
+          ];
+          return assistant("fed");
+        }, LockPolicy),
+      });
       const ids = [p, q, r].map((agent, index) => {
         agent.agent.stagePrompt("Report along your message route.");
         return graph.addNode({
           state: agent.agent,
           id: NodeId.create(["P", "Q", "R"][index]!),
           policy: LockPolicy,
-          trigger: TriggerRule.always(),
+          trigger: [
+            TriggerRule.when(fromF),
+            TriggerRule.when(fromFQ),
+            TriggerRule.always(),
+          ][index]!,
         });
       });
       const toP = chatEdge("P->sink");
       const toQ = chatEdge("Q->sink");
       const sinkP = sink(graph, toP, "sinkP");
       const sinkQ = sink(graph, toQ, "sinkQ");
-      graph.addEdge(ids[0]!, sinkP.id, toP).addEdge(ids[1]!, sinkQ.id, toQ);
+      graph
+        .addEdge(feeder, ids[0]!, fromF)
+        .addEdge(feeder, ids[1]!, fromFQ)
+        .addEdge(ids[0]!, sinkP.id, toP)
+        .addEdge(ids[1]!, sinkQ.id, toQ);
 
       graphPorts.connect(graph, ids[2]!);
       await graphContext.run();
 
-      for (const [agent, out, edge] of [
-        [p, sinkP, toP],
-        [q, sinkQ, toQ],
+      for (const [agent, out, edge, inbound] of [
+        [p, sinkP, toP, fromF],
+        [q, sinkQ, toQ, fromFQ],
       ] as const) {
         assert.deepEqual(jsonResult<Topology>(agent.results, "info-1"), {
-          parents: [],
+          parents: [{ id: feeder, edgeId: inbound.id, kind: "message" }],
           children: [{ id: out.id, edgeId: edge.id, kind: "message" }],
         });
       }
-      assert.deepEqual(sinkP.delivered, [{ kind: "prompt", text: "from P" }]);
-      assert.deepEqual(sinkQ.delivered, [{ kind: "prompt", text: "from Q" }]);
+      for (const [node, sink] of [
+        ["P", sinkP],
+        ["Q", sinkQ],
+      ] as const) {
+        assert.deepEqual(sink.delivered, [
+          {
+            kind: "prompt",
+            ...full(`from ${node}`, `T${node}`),
+            history: [{ node, desc: "work", handoff: "h" }],
+          },
+        ]);
+      }
       // Neither the constructors' direct host nor the copy acquired anyone's graph routes.
       assert.deepEqual(direct, []);
       assert.ok(resultOf(r.results, "info-1").isError);
@@ -1394,7 +1472,10 @@ for (const strategy of STRATEGIES) {
       graph.addEdge(a, b, edge);
       graphPorts.connect(graph, b);
       const registration = registeredNodeContexts.get(graph.getNode(a)!)!;
-      const late = Message.create(edge, { kind: "prompt", text: "late" });
+      const late = Message.create(
+        edge,
+        Task.create({ kind: "prompt", text: "late", spec: "" }),
+      );
       registration.send(late);
       assert.deepEqual(
         registration.info().children.map(({ id }) => id),
@@ -1647,9 +1728,7 @@ describe("edge schemas reach each agent's messaging tools", () => {
   type T = AssistantMessage;
   /** A parallel graph over chat ports whose members may route numbers and text. */
   const typedGraph = () => {
-    const ports = terminalPorts<N, typeof AssistantMessageSchema>(
-      AgenticInputSchema,
-    );
+    const ports = terminalPorts<N, typeof AssistantMessageSchema>(TaskSchema);
     const graph = new JuncoGraph(
       ports.source,
       ports.sink,
@@ -1703,20 +1782,23 @@ describe("edge schemas reach each agent's messaging tools", () => {
     return tool;
   };
 
+  // Non-task payloads pass through; send still requires its task fields.
+  const noTask = { task: "none", spec: "", handoff: "" };
+
   test("one shared send carrier offers each agent its own route schema without mutating the original", async () => {
     const send = new toolsApi.SendTool();
     const original = send.parameters;
     const p = await member<N>(
       [
-        call("send", { id: "P->x", payload: "seven" }, "send-bad"),
-        call("send", { id: "P->x", payload: 7 }, "send-1"),
+        call("send", { id: "P->x", payload: "seven", ...noTask }, "send-bad"),
+        call("send", { id: "P->x", payload: 7, ...noTask }, "send-1"),
         fauxAssistantMessage("P done"),
       ],
       { tools: [send] },
     );
     const q = await member<N>(
       [
-        call("send", { id: "Q->y", payload: "seven" }, "send-1"),
+        call("send", { id: "Q->y", payload: "seven", ...noTask }, "send-1"),
         fauxAssistantMessage("Q done"),
       ],
       { tools: [send] },
@@ -1741,11 +1823,17 @@ describe("edge schemas reach each agent's messaging tools", () => {
 
     const pParameters = toolIn(p.contexts[0]!, "send").parameters;
     const qParameters = toolIn(q.contexts[0]!, "send").parameters;
-    assert.ok(Value.Check(pParameters, { id: "P->x", payload: 7 }));
-    assert.ok(!Value.Check(pParameters, { id: "P->x", payload: "7" }));
-    assert.ok(!Value.Check(pParameters, { id: "Q->y", payload: "seven" }));
-    assert.ok(Value.Check(qParameters, { id: "Q->y", payload: "seven" }));
-    assert.ok(!Value.Check(qParameters, { id: "P->x", payload: 7 }));
+    assert.ok(Value.Check(pParameters, { id: "P->x", payload: 7, ...noTask }));
+    assert.ok(
+      !Value.Check(pParameters, { id: "P->x", payload: "7", ...noTask }),
+    );
+    assert.ok(
+      !Value.Check(pParameters, { id: "Q->y", payload: "seven", ...noTask }),
+    );
+    assert.ok(
+      Value.Check(qParameters, { id: "Q->y", payload: "seven", ...noTask }),
+    );
+    assert.ok(!Value.Check(qParameters, { id: "P->x", payload: 7, ...noTask }));
     // The shared original keeps its own unhosted, impossible contract.
     assert.equal(send.parameters, original);
     assert.deepEqual(send.parameters, toolsApi.SendTool.parametersFor([]));
@@ -1760,9 +1848,9 @@ describe("edge schemas reach each agent's messaging tools", () => {
     const feed = Edge.message("feed->A", NumberSchema);
     const late = Edge.message("A->B", NumberSchema);
     const a = await member<N>([
-      call("send", { id: late.id, payload: 5 }, "send-early"),
+      call("send", { id: late.id, payload: 5, ...noTask }, "send-early"),
       call("yield", { reason: "await a route" }, "yield-1"),
-      call("send", { id: late.id, payload: 5 }, "send-1"),
+      call("send", { id: late.id, payload: 5, ...noTask }, "send-1"),
       fauxAssistantMessage("A done"),
     ]);
     const { ports, graph, execution } = typedGraph();
@@ -1791,6 +1879,7 @@ describe("edge schemas reach each agent's messaging tools", () => {
       !Value.Check(toolIn(a.contexts[1]!, "send").parameters, {
         id: late.id,
         payload: 5,
+        ...noTask,
       }),
     );
 
@@ -1807,7 +1896,167 @@ describe("edge schemas reach each agent's messaging tools", () => {
       Value.Check(toolIn(a.contexts.at(-1)!, "send").parameters, {
         id: late.id,
         payload: 5,
+        ...noTask,
       }),
     );
+  });
+
+  /** A source node emitting `tasks` on `edge` in one batch. */
+  const feed = (
+    graph: JuncoGraph<N, T>,
+    edge: Edge<Chat, T>,
+    tasks: Static<Chat>[],
+  ) =>
+    graph.addNode({
+      id: NodeId.create("feed"),
+      trigger: TriggerRule.always(),
+      state: new Deterministic<N, T>(async function* () {
+        yield tasks.map((task) => Message.create(edge, task));
+        return assistant("fed");
+      }, LockPolicy),
+    });
+  const task = (taskId: string, text: string, spec: string) =>
+    ({
+      kind: "prompt",
+      text,
+      taskId,
+      spec,
+      deps: [],
+      history: [],
+    }) as const;
+
+  test("a handed-off task keeps its id and spec and accumulates each holder's history", async () => {
+    const toA = Edge.message("feed~>A", TaskSchema);
+    const toB = Edge.message("A~>B", TaskSchema);
+    const toC = Edge.message("B~>C", TaskSchema);
+    const a = await member<N>([
+      call(
+        "send",
+        {
+          id: toB.id,
+          payload: { kind: "prompt", text: "finish X" },
+          task: "T1",
+          spec: "X works",
+          handoff: "did half",
+        },
+        "send-1",
+      ),
+      fauxAssistantMessage("A done"),
+    ]);
+    const b = await member<N>([
+      // A model cannot forge provenance inside the payload.
+      call(
+        "send",
+        {
+          id: toC.id,
+          payload: { kind: "prompt", text: "X done", taskId: "forged" },
+          task: "T1",
+          spec: "X works",
+          handoff: "finished",
+        },
+        "send-1",
+      ),
+      fauxAssistantMessage("B done"),
+    ]);
+    const { ports, graph, execution } = typedGraph();
+    const source = feed(graph, toA, [task("T1", "do X", "X works")]);
+    const [aId, bId] = (
+      [
+        ["A", a, toA],
+        ["B", b, toB],
+      ] as const
+    ).map(([id, { agent }, edge]) => {
+      agent.stagePrompt("Work on your task.");
+      return graph.addNode({
+        id: NodeId.create(id),
+        state: agent,
+        policy: LockPolicy,
+        trigger: TriggerRule.when(edge),
+      });
+    });
+    const c = collector(graph, toC, "C");
+    graph
+      .addEdge(source, aId!, toA)
+      .addEdge(aId!, bId!, toB)
+      .addEdge(bId!, c.id, toC);
+    ports.connect(graph, bId!);
+    await execution.run();
+
+    const atA = { node: "A", desc: "do X", handoff: "did half" };
+    assert.deepEqual(userTexts(b.contexts.at(-1)!.messages), [
+      "Work on your task.",
+      'finish X\n\nTask: {"taskId":"T1","spec":"X works","deps":[],"history":[{"node":"A","desc":"do X","handoff":"did half"}]}',
+    ]);
+    assert.deepEqual(c.delivered, [
+      {
+        ...task("T1", "X done", "X works"),
+        history: [atA, { node: "B", desc: "finish X", handoff: "finished" }],
+      },
+    ]);
+  });
+
+  test("a different spec creates a subtask recorded in the named task's deps; send requires its task fields", async () => {
+    const toA = Edge.message("feed~>A", TaskSchema);
+    const out = Edge.message("A~>out", TaskSchema);
+    const send = (args: Record<string, unknown>, id: string) =>
+      call(
+        "send",
+        { id: out.id, payload: { kind: "prompt", text: id }, ...args },
+        id,
+      );
+    const a = await member<N>([
+      send(
+        { task: "T1", spec: "tests green", handoff: "split off tests" },
+        "subtask",
+      ),
+      send({ task: "nope", spec: "", handoff: "" }, "unknown"),
+      send({ task: "T1", spec: "X works" }, "no-handoff"),
+      send({ task: "T1", spec: "X works", handoff: "delegated" }, "handoff"),
+      send({ task: "T2", spec: "Y works", handoff: "untouched" }, "other"),
+      fauxAssistantMessage("A done"),
+    ]);
+    const { ports, graph, execution } = typedGraph();
+    const source = feed(graph, toA, [
+      task("T1", "do X", "X works"),
+      task("T2", "do Y", "Y works"),
+    ]);
+    a.agent.stagePrompt("Work on your tasks.");
+    const aId = graph.addNode({
+      id: NodeId.create("A"),
+      state: a.agent,
+      policy: LockPolicy,
+      trigger: TriggerRule.when(toA),
+    });
+    const sink = collector(graph, out, "out");
+    graph.addEdge(source, aId, toA).addEdge(aId, sink.id, out);
+    ports.connect(graph, aId);
+    await execution.run();
+
+    assert.ok(
+      contentText(resultOf(a.results, "unknown").content).includes(
+        'task "nope" was not received; received: T1, T2',
+      ),
+    );
+    assert.ok(resultOf(a.results, "unknown").isError);
+    assert.ok(resultOf(a.results, "no-handoff").isError);
+    const [first] = sink.delivered;
+    assert.ok(first !== undefined && "taskId" in first);
+    const subtask = first.taskId;
+    assert.match(subtask, /^[0-9a-f-]{36}$/);
+    assert.deepEqual(sink.delivered, [
+      {
+        ...task(subtask, "subtask", "tests green"),
+        history: [{ node: "A", desc: "do X", handoff: "split off tests" }],
+      },
+      {
+        ...task("T1", "handoff", "X works"),
+        deps: [subtask],
+        history: [{ node: "A", desc: "do X", handoff: "delegated" }],
+      },
+      {
+        ...task("T2", "other", "Y works"),
+        history: [{ node: "A", desc: "do Y", handoff: "untouched" }],
+      },
+    ]);
   });
 });

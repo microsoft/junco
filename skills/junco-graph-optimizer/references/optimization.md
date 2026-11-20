@@ -113,10 +113,10 @@ function textOf(payload: unknown, edgeId: string): string {
   return syntax.finalText(payload, edgeId);
 }
 
-/** Sends `{ kind: "prompt", text }` once on `outputs` through the standard primitive, then returns. */
+/** Sends one task `Task.create({ kind: "prompt", text, spec: text })` once on `outputs` through the standard primitive, then returns. */
 function broadcast(text: string, outputs: graph.Edge<TSchema, unknown>[]) {
   return new graph.nodes.ConstFanout<undefined, TSchema, unknown>(
-    { kind: "prompt", text },
+    graph.nodes.Task.create({ kind: "prompt", text, spec: text }), // the fanned-out assignment is its own completion spec
     outputs,
     { state: undefined, ret: undefined },
   ).step();
@@ -170,7 +170,7 @@ export const fanin: syntax.DeterministicNode = ({ node, edges, policy }) => {
 /**
  * `__junco_assignment`: renders the complete frozen assignment (original prompt plus delivered
  * message references) from `__junco_assignment:input:<originalEdgeId>`, then sends it once as
- * `{ kind: "prompt", text }` on every `__junco_assignment:output*` edge.
+ * one task `{ kind: "prompt", text, taskId }` on every `__junco_assignment:output*` edge.
  */
 export const assignment =
   (templates: Readonly<Record<string, string>>): syntax.DeterministicNode =>

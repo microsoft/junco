@@ -19,7 +19,7 @@ import {
   Width,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticInputSchema, AssistantMessageSchema } from "junco-agent";
+import { AssistantMessageSchema, type TaskSchema } from "junco-agent";
 import { LockPolicy } from "junco-tools";
 import { flushLog, log, redirectLog } from "junco-tools/log";
 import { type TString, Type } from "typebox";
@@ -510,7 +510,7 @@ async function agentsScenario(
       const fail = graph.addNode({
         id: NodeId.create("Failure"),
         trigger: TriggerRule.when(done),
-        state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+        state: new Deterministic<typeof TaskSchema, AssistantMessage>(
           async function* () {
             yield [];
             throw failure;

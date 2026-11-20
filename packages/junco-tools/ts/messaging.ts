@@ -40,10 +40,17 @@ const noRoutes = Type.Object(
   { additionalProperties: false },
 );
 
+/** Task metadata of one `send` call; the host attaches the task provenance it implies. */
+type SendTask = {
+  readonly handoff: string;
+  readonly task: string;
+  readonly spec: string;
+};
+
 /** What a {@link SendTool} sends through: its outgoing routes' parameter schema and admission. */
 export type SendToolHost<N extends TSchema> = {
   readonly sendParameters: TSchema;
-  send(message: Message<N>): void;
+  send(message: Message<N>, task: SendTask): void;
 };
 
 /**
@@ -107,9 +114,12 @@ async function emit<N extends TSchema>(
         throw new Error("send requires a JuncoGraph host");
       checkToolInput("send", host.sendParameters, input);
       // `sendParameters` is the host's projection of its routes, so a passing input has their shape.
-      const { id, payload } = input as { id: string; payload: Static<N> };
+      const { id, payload, handoff, task, spec } = input as {
+        id: string;
+        payload: Static<N>;
+      } & SendTask;
       signal?.throwIfAborted();
-      host.send({ id: EdgeId.create(id), payload });
+      host.send({ id: EdgeId.create(id), payload }, { handoff, task, spec });
       return {
         content: [{ type: "text", text: "Message sent." }],
         details: undefined,
@@ -170,7 +180,7 @@ export class SendTool<N extends TSchema = never> {
   readonly name = "send";
   readonly label = "send";
   readonly description: string =
-    "Sends a message to downstream node along an existing graph edge";
+    "Hands a task to a downstream node along an existing graph edge: the payload is what the receiver reads; handoff records what you did.";
   readonly executionMode = "sequential";
   execute: UncheckedExecute<SendToolStruct>;
 
@@ -187,10 +197,10 @@ export class SendTool<N extends TSchema = never> {
   }
 
   /**
-   * send's parameters over the outgoing message `routes`: a strict `{id, payload}` object whose
-   * `anyOf` branches correlate each edge ID with that edge's schema, embedded unchanged. With no
-   * route, no call is admitted. Root property domains stay visible when a provider drops root
-   * combinators.
+   * send's parameters over the outgoing message `routes`: a strict `{id, payload, handoff, task,
+   * spec}` object whose `anyOf` branches correlate each edge ID with that edge's schema, embedded
+   * unchanged. With no route, no call is admitted. Root property domains stay visible when a
+   * provider drops root combinators.
    */
   static parametersFor(routes: readonly Route[]): TSchema {
     if (routes.length === 0) return noRoutes;
@@ -198,6 +208,16 @@ export class SendTool<N extends TSchema = never> {
       {
         id: Type.Union(routes.map(([id]) => Type.Literal(id))),
         payload: Type.Union(routes.map(([, schema]) => schema)),
+        handoff: Type.String({
+          description: "What you did with the task; recorded in its history.",
+        }),
+        task: Type.String({
+          description: "The id of the received task this message comes from.",
+        }),
+        spec: Type.String({
+          description:
+            "When the sent task counts as complete: the received task's own spec hands that task off; a different spec creates a subtask of it, recorded in its deps.",
+        }),
       },
       {
         additionalProperties: false,
@@ -218,7 +238,10 @@ export class SendTool<N extends TSchema = never> {
     tool: SendTool<TSchema>,
     host: SendToolHost<N>,
     _toolCallId: string,
-    input: { readonly id: string; readonly payload: NoInfer<Static<N>> },
+    input: {
+      readonly id: string;
+      readonly payload: NoInfer<Static<N>>;
+    } & SendTask,
     signal: AbortSignal,
   ): ReturnType<SendTool["execute"]> {
     if (!SendTool.is(tool))

@@ -67,8 +67,6 @@ import type { Graph } from "ngraph.graph";
 import { type Static, type TSchema, Type } from "typebox";
 import {
   type Agentic,
-  type AgenticInput,
-  type AgenticInputSchema,
   type AgenticNode,
   type AssistantMessageSchema,
   type CompactionPolicy,
@@ -86,6 +84,8 @@ import {
   type MockTerminal,
   type MockTranscript,
   schedules,
+  type Task,
+  type TaskSchema,
   tracer,
 } from "../src/index.ts";
 import type { NodePolicy, NodeRegistration } from "../src/node-policy.ts";
@@ -98,7 +98,7 @@ const NumberSchema = Type.Number();
 const StringSchema = Type.String();
 type Num = typeof NumberSchema;
 type Str = typeof StringSchema;
-type Chat = typeof AgenticInputSchema;
+type Chat = typeof TaskSchema;
 /** Exact type equality: `any`, `unknown` and `never` cannot pass by mere assignability. */
 type Equal<A, B> =
   (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2
@@ -374,8 +374,7 @@ export async function promptsLiveOnAgents(
   const built = await JuncoAgent.fromResolved({
     ...native,
     prompt: (inputs) => {
-      const messages: readonly AgenticInput[] | undefined =
-        inputs.messages.get(id);
+      const messages: readonly Task[] | undefined = inputs.messages.get(id);
       const value: AssistantMessage | undefined = inputs.values.get(id);
       return `${messages?.length}:${value?.role}`;
     },
@@ -686,29 +685,70 @@ export function maintenanceUsesNarrowedActors(
   return [sizes, compactions, requests];
 }
 
-export function everyAgenticInputKindIsTyped(
+export function everyTaskKindIsTyped(
   message: AgentMessage,
   image: ImageContent,
 ) {
-  const inputs: AgenticInput[] = [
-    { kind: "prompt", text: "start", images: [image] },
-    { kind: "steer", text: "steer" },
-    { kind: "followUp", text: "follow", images: [image] },
-    { kind: "nextTurn", text: "next" },
-    { kind: "error", text: "failed", images: [image] },
+  const inputs: Task[] = [
+    {
+      kind: "prompt",
+      text: "start",
+      taskId: "t1",
+      spec: "",
+      deps: [],
+      history: [],
+      images: [image],
+    },
+    {
+      kind: "steer",
+      text: "steer",
+      taskId: "t2",
+      spec: "",
+      deps: [],
+      history: [],
+    },
+    {
+      kind: "followUp",
+      text: "follow",
+      taskId: "t3",
+      spec: "",
+      deps: [],
+      history: [],
+      images: [image],
+    },
+    {
+      kind: "nextTurn",
+      text: "next",
+      taskId: "t4",
+      spec: "",
+      deps: [],
+      history: [],
+    },
+    {
+      kind: "error",
+      text: "failed",
+      taskId: "t5",
+      spec: "",
+      deps: [],
+      history: [],
+      images: [image],
+    },
     { kind: "appendMessage", message },
   ];
+  // @ts-expect-error text tasks require a taskId
+  const idless: Task = { kind: "prompt", text: "start" };
+  void idless;
   const described: string[] = inputs.map((input) =>
     input.kind === "appendMessage"
       ? input.message.role
       : `${input.kind}:${input.text}:${input.images?.length ?? 0}`,
   );
   // @ts-expect-error a text input requires its text
-  const untexted: AgenticInput = { kind: "prompt", images: [image] };
+  const untexted: Task = { kind: "prompt", images: [image] };
   // @ts-expect-error an input kind outside the declared commands is rejected
-  const unknown: AgenticInput = { kind: "interrupt", text: "stop" };
+  const unknown: Task = { kind: "interrupt", text: "stop" };
   // @ts-expect-error appendMessage carries a message, not text
-  const malformed: AgenticInput = { kind: "appendMessage", text: "hello" };
+  const malformed: Task = { kind: "appendMessage", text: "hello" };
   return [described, untexted, unknown, malformed];
 }
 
@@ -1558,7 +1598,7 @@ export async function schemaDomainsStayExact(
   numberAgent: Native<Num, number>,
   numberOnly: JuncoGraph<Num, number>,
   config: Parameters<typeof JuncoGraph.fromYaml>[1],
-  registration: NodeRegistration<Num, string>,
+  registration: NodeRegistration<Num>,
   signal: AbortSignal,
 ) {
   const id = EdgeId.create("numbers");
@@ -1628,7 +1668,7 @@ export async function schemaDomainsStayExact(
     new SendTool(),
     registration,
     "s",
-    { id: "numbers", payload: 7 },
+    { id: "numbers", payload: 7, handoff: "", task: "", spec: "" },
     signal,
   );
   await SendTool.invoke(

@@ -156,6 +156,12 @@ export async function scriptedCommittee(
           {
             id: "Librarian~>DesignAssignment",
             payload: { kind: "prompt", text: librarianReport },
+            // Hand the received assignment on: its id is the `Task:` line of the latest user input.
+            task: JSON.parse(
+              memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!,
+            ).taskId,
+            spec: "",
+            handoff: "partial research after a failed lookup",
           },
           { id: `librarian-send-${librarianRound + 1}` },
         ),

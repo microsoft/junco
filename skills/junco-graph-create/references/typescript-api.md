@@ -144,7 +144,7 @@ export const from = <N, T>(
 Verbatim signature excerpts (`graph.JuncoGraph`):
 
 ```text
-export class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never>
+export class JuncoGraph<N = Task, T = AssistantMessage, EH = never>
   extends DataflowGraph<Agentic<N, T>, N, T, EH>
 
   constructor(
@@ -173,7 +173,7 @@ export class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never>
   [Symbol.asyncDispose](): Promise<void>
   compact(policy: CompactionPolicy): Promise<void>
 
-  static map<S, L, N = AgenticInput, T = AssistantMessage>(
+  static map<S, L, N = Task, T = AssistantMessage>(
     skeleton: Pick<Graph<S, L>, "forEachNode" | "forEachLink" | "getLinks">,
     f: (state: S) => Agentic<N, T> | AgenticNode<N, T>,
     options: {
@@ -183,7 +183,7 @@ export class JuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never>
       readonly tracer?: DataflowTracer;
     },
   ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>>
-  static spawn<Input, N = AgenticInput, T = AssistantMessage>(
+  static spawn<Input, N = Task, T = AssistantMessage>(
     source: Source<N, T>,
     sink: Sink<N, T>,
     root: AgenticNode<N, T>,
@@ -205,7 +205,7 @@ Construction rules:
 - **Edges.** Message edges queue emitted `N`; value edges retain the source's latest returned `T`, replacing the previous value on each return. Agency delivery freshness is keyed by edge ID and `!==` value identity: a changed retained value is fresh again, not a deep comparison. Read batches with `graph.from(view, edge)` or `view.messages`, results with `view.values.get(edge.id)`. `Message.create`/`emit` target wired message edges, never value edges. IDs must be unique within each source-outbound and target-inbound set. Register endpoints before `addEdge`; never mutate transport.
 - **Generator protocol.** Start dependent bodies with `let view = yield []`; priming consumes no queued inputs. Each activation advances once; returning `T` marks done and updates all outbound value edges. Only delivery on the returning node's own value self-edge re-arms it: a new `step()` generator, same state. Message self-edges, non-self value updates and multi-node cycles do not re-arm returned nodes. Bound re-runs through availability; results retain the latest return. Annotate hand-written bodies `async function* (): graph.NodeGenerator<N, T> { … }`.
 - **Generic inference.** `new StepNode` / `new EmitOnce` infer `S`, `N`, `T` from arguments including `options` (`state: undefined` infers `S = undefined`). If these differ from graph types (e.g. `void` state, union `N`, narrower trigger), pass explicit generics: `new graph.nodes.StepNode<void, Payload, string>(…)`. `Message.create` infers from arguments. `graph.from(view, edge)` returns graph-wide `N`, not the edge's narrower type; narrow payloads with type guards, never casts.
-- **Agent graphs use `AgenticInput` messages and `AssistantMessage` results** (the `JuncoGraph` defaults). A deterministic node feeding an agent emits `{ kind: "prompt", text }`.
+- **Agent graphs use `Task` messages and `AssistantMessage` results** (the `JuncoGraph` defaults). Every task carries `taskId`, `spec`, `deps` and `history`, all required: construct a new one with `Task.create({ kind: "prompt", text, spec })`, which mints the UID with empty `deps`/`history`; an agent's `send` fills them in and never shows them to the model. A deterministic node feeding an agent emits `Task.create(…)` or forwards a received task; an agent node rejects an incomplete task (`DataflowDefinitionError`).
 - **Closing.** `JuncoGraph.close()` recursively closes agents, graphs and coroutines, joining active evaluations (provider/port work included) before releasing collection holds. Source/Sink states own no independent lifecycle resources. Results remain readable; repeated close is safe. Until successful registration, acquirers own resources and must close earlier acquisitions on failure. Close persistent round members once at the end, not per round.
 - **Spawn policy.** `JuncoGraph.spawn(source,sink,root,inputs,child)` returns a parallel context under root authorization. Ports precede root/children; explicit port names consume no automatic work IDs. Native root/child message pairs remain bidirectional; callers wire terminal work to the sink. Construction failure leaves members caller-owned; unpublished factory failures also release port claims, allowing untouched-port retry.
 - **Execution.** Pair `new graph.JuncoGraph(source,sink,window,threads,observer,policy)` with `schedules.context({ graph: workflow, scheduler: schedules.parallel() })`; drive the context, inspect/close `.graph`. Plain native graphs use `context` from `junco-scheduler`. Context `run()` returns cumulative results at quiescence, not proof all members finished; `step()` makes at most one current decision. Native single-flight evaluation rejects overlapping drives before planning.
@@ -305,15 +305,23 @@ export class ConstFanin<S, C, T> implements ConstNodeSpec<S, C | C[], T>
 Verbatim signature excerpts (Junco node states and bindings; `ImageContent` and `AssistantMessage` come from `@earendil-works/pi-ai`, `AgentMessage` from `@earendil-works/pi-agent-core`; `MockAgent` is a test double exported only at the package top level, and generated workflows use `agent.JuncoAgent`):
 
 ```text
-export type AgenticInput =
+export type Task =
   | {
       readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error"; // error: delivered via followUp
       readonly text: string;
       readonly images?: ImageContent[];
+      readonly taskId: string; // UID minted by Task.create or the sender's `send`
+      readonly spec: string; // when the task counts as complete; fixed at creation
+      readonly deps: readonly string[]; // ids of subtasks created while it was held
+      readonly history: readonly { readonly node: string; readonly desc: string; readonly handoff: string }[];
     }
   | { readonly kind: "appendMessage"; readonly message: AgentMessage };
 
-export type Agentic<N = AgenticInput, T = AssistantMessage> =
+export const Task: {
+  create(task: Omit<Extract<Task, { readonly text: string }>, "taskId" | "deps" | "history">): Extract<Task, { readonly text: string }>; // fresh UID, deps: [], history: []
+};
+
+export type Agentic<N = Task, T = AssistantMessage> =
   | JuncoAgent
   | JuncoGraph<N, T>
   | MockAgent
@@ -321,7 +329,7 @@ export type Agentic<N = AgenticInput, T = AssistantMessage> =
   | Source<N, T>
   | Sink<N, T>;
 
-export type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
+export type AgenticNode<N = Task, T = AssistantMessage> = (
   | (NodeSpec<Agentic<N, T>, N, T> & { readonly policy: ToolCollection["policy"] })
   | ((Source<N, T> | Sink<N, T>) & { readonly policy?: never })
   | (StepLess<N, T> & {
@@ -348,7 +356,7 @@ export type AgenticNode<N = AgenticInput, T = AssistantMessage> = (
 // A nested native state is childContext.graph, never the context itself.
 // Source/Sink are complete native specs authorized under the graph's policy.
 
-export class Deterministic<N = AgenticInput, T = AssistantMessage> implements NodeGenerator<N, T>
+export class Deterministic<N = Task, T = AssistantMessage> implements NodeGenerator<N, T>
   constructor(
     body: (
       signal: AbortSignal,
@@ -361,7 +369,7 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
   close(): Promise<void>
 ```
 
-- A registered agent (`workflow.addNode({ ...options, policy, state: agent })`) runs **one staged prompt per run** and returns when it settles; without a value self-edge a staged-prompt source with `trigger: TriggerRule.always()` runs once. Prompts belong to the agent: `JuncoAgent.create({ prompt })` (one-shot), or `agent.stagePrompt(prompt)` while idle before another admitted run (`busy` unless idle). A `prompt` callback `(inputs: graph.ParentView<AgenticInput, AssistantMessage>) => string` runs once synchronously with the delivered view when its staged prompt starts; throws fail the node unchanged. A value self-edge re-arms the returned node with the same agent/session; another staged prompt is still required. Never register `prompt`. The scheduler selects message reads; each delivered AgenticInput text/images payload is steered as a separate user message in delivered order, irrespective of `kind`. Other payloads are steered as `JSON.stringify({ id, payload })`. Admission puts the staged instruction before queued steering, and a paused native run sees delivered steering on its next request. There is no retained graph-agent inbox; values are never steered and remain available to staged callbacks. Input without a staged prompt does not start a run. Use `send({ id: edgeId, payload })` for outgoing message edges and `info({})` for topology routes; value edges carry the latest returned result. Only `yield` and Marsh policy denial pause runs; native yields resume the same run, not another round. Settlement returns the node's `AssistantMessage`; failure throws the native error.
+- A registered agent (`workflow.addNode({ ...options, policy, state: agent })`) runs **one staged prompt per run** and returns when it settles; without a value self-edge a staged-prompt source with `trigger: TriggerRule.always()` runs once. Prompts belong to the agent: `JuncoAgent.create({ prompt })` (one-shot), or `agent.stagePrompt(prompt)` while idle before another admitted run (`busy` unless idle). A `prompt` callback `(inputs: graph.ParentView<Task, AssistantMessage>) => string` runs once synchronously with the delivered view when its staged prompt starts; throws fail the node unchanged. A value self-edge re-arms the returned node with the same agent/session; another staged prompt is still required. Never register `prompt`. The scheduler selects message reads; each delivered Task text/images payload is steered as a separate user message in delivered order, irrespective of `kind`, its text followed by a `Task:` JSON line (`taskId`, `spec`, `deps`, `history`); a task missing any of them throws `DataflowDefinitionError`. Other payloads are steered as `JSON.stringify({ id, payload })`. Admission puts the staged instruction before queued steering, and a paused native run sees delivered steering on its next request. There is no retained graph-agent inbox; values are never steered and remain available to staged callbacks. Input without a staged prompt does not start a run. Use `send({ id: edgeId, payload, handoff, task, spec })` (all required) for outgoing message edges: `task` names a task the node has received; with that task's `spec` the payload hands it off with `handoff` appended to its history, with another `spec` it becomes a new subtask recorded in the named task's `deps`. A node that received no task cannot send a task payload; non-task payloads pass unchanged. Use `info({})` for topology routes; value edges carry the latest returned result. Only `yield` and Marsh policy denial pause runs; native yields resume the same run, not another round. Settlement returns the node's `AssistantMessage`; failure throws the native error.
 - **Topology and instructions.** `info` reports live parents and children as `{ id, edgeId, kind }`, including parallel and self edges. Put artifact requirements and acceptance conditions in role/handoff prompts, and select handoffs by explicit edge ID plus kind `message`, not prose. Edge schemas and deterministic consumers validate data.
 - **Validated handoffs.** A consumer's prompt callback may validate `inputs.messages.get(edgeId)` / `inputs.values.get(edgeId)` and throw on invalid data. Render value reports into assignments, but return a constant instruction referring to following user messages for message inputs: copying their text would duplicate automatic steering. YAML agent prompt placeholders accept only inbound value edges; message placeholders fail at build. `params` substitution remains separate and unchanged. Wire/trigger upstream edges directly into the consumer. Never add a deterministic node solely to prepare a prompt message.
 - Never separately iterate an agent the graph is driving.
@@ -373,7 +381,7 @@ export class Deterministic<N = AgenticInput, T = AssistantMessage> implements No
 `workflows.ralph` is YAML text exported from `junco`. It declares an ordinary agent `Ralph`, assignment ingress `$source~>Ralph`, value feedback `Ralph->Ralph` and final output `Ralph->$sink`. Construct it with `JuncoGraph.fromYaml`; its models come from a TypeScript ladder and round control from `schedules.ralph` availability hooks.
 
 ```ts
-import { graph, JuncoGraph, schedules, workflows } from "junco";
+import { graph, JuncoGraph, schedules, Task, workflows } from "junco";
 
 // ladder is a ModelLadder pairing the runtime and five authoring-verified rungs.
 const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
@@ -385,7 +393,7 @@ const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
 });
 try {
   childContext.graph.source.enqueue({
-    messages: new Map([[graph.EdgeId.create("assignment"), [{ kind: "prompt", text: assignment }]]]),
+    messages: new Map([[graph.EdgeId.create("assignment"), [Task.create({ kind: "prompt", text: assignment, spec: "The assignment is done and its checks pass." })]]]),
     values: new Map(),
   });
   await childContext.run();
@@ -489,7 +497,7 @@ export type AgenticOptions<
 > = Omit<AgentHarnessOptions<undefined>, "tools" | "resources" | "toolExecution"> & {
   readonly tools?: T[];
   readonly resources?: AgentHarnessResources<S, P>;
-  readonly prompt?: string | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string); // one-shot staged prompt
+  readonly prompt?: string | ((inputs: ParentView<Task, AssistantMessage>) => string); // one-shot staged prompt
   readonly images?: ImageContent[];
 };
 
@@ -541,8 +549,8 @@ export class JuncoAgent<
 
   get status(): AgenticStatus
   prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage>
-  stagePrompt(prompt: string | ((inputs: ParentView<AgenticInput, AssistantMessage>) => string), options?: { images?: ImageContent[] }): void // closed; busy unless idle with no queued demand
-  next(inputs?: ParentView<AgenticInput, AssistantMessage>): Promise<IteratorResult<AgenticStep, void>> // callback stage without inputs: failed invalid_state; throw: failed with that error; non-string: failed invalid_argument
+  stagePrompt(prompt: string | ((inputs: ParentView<Task, AssistantMessage>) => string), options?: { images?: ImageContent[] }): void // closed; busy unless idle with no queued demand
+  next(inputs?: ParentView<Task, AssistantMessage>): Promise<IteratorResult<AgenticStep, void>> // callback stage without inputs: failed invalid_state; throw: failed with that error; non-string: failed invalid_argument
   return(value?: void | PromiseLike<void>): Promise<IteratorResult<AgenticStep, void>>
   async [Symbol.asyncDispose](): Promise<void>
   steer(text: string, options?: { images?: ImageContent[] }): Promise<void>
@@ -559,7 +567,7 @@ export class JuncoAgent<
   compact(options?: { customInstructions?: string }): Promise<void>
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
   // JuncoAgent only, not Agentic:
-  runWithNodeContext<N, T, R>(context: JuncoAgentNodeContext<N, T>, work: () => Promise<R>): Promise<R> // { messaging?, briefing?, complaint?, recorder?, recorderNodeId? }; overlapping binding rejects busy; graph-registered agents do this
+  runWithNodeContext<N, R>(context: JuncoAgentNodeContext<N>, work: () => Promise<R>): Promise<R> // { messaging?, briefing?, complaint?, recorder?, recorderNodeId? }; overlapping binding rejects busy; graph-registered agents do this
   setTaskPolicy(policy: TaskPolicy | undefined): void // throw to reject a task launch (not a decision) as a tool error
   setTaskBatch(input: TaskInput): Promise<void> // idle only; model launches the stored batch once with task({}); children get an ordinary task tool
   setTaskFailurePolicy(policy: TaskFailurePolicy): void // default { retries: 0 }; snapshotted per admitted task; not inherited
@@ -1004,11 +1012,11 @@ import * as O from "fp-ts/lib/Option.js";
 import { graph, schedules, tools, tracer } from "junco";
 
 const terminal = graph.NodeId.create("worker");
-const final = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>("worker->$sink");
-const source = new graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>(() => {
+const final = graph.Edge.value<graph.nodes.Task, AssistantMessage>("worker->$sink");
+const source = new graph.nodes.Source<graph.nodes.Task, AssistantMessage>(() => {
   throw new graph.DataflowDefinitionError("Worker workflow does not accept external input");
 }, { id: graph.NodeId.create("$source") });
-const sink = new graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
+const sink = new graph.nodes.Sink<graph.nodes.Task, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.Task, AssistantMessage> {
   yield [];
   const result = execution.graph.result(terminal);
   if (!O.isSome(result)) throw new Error("Worker did not produce a result");
@@ -1088,7 +1096,7 @@ Verbatim signature excerpts (package top level; test doubles for credential-free
 export type MockUsage = { readonly [R in "memory" | "tokens"]?: ResourceQuantity<R> };
 export function constantProfiles(usage: MockUsage): ProfileSet;
 export const NO_USAGE: ProfileSet; // zero memory and zero tokens
-export class MockJuncoGraph<N = AgenticInput, T = AssistantMessage, EH = never> extends JuncoGraph<N, T, EH>
+export class MockJuncoGraph<N = Task, T = AssistantMessage, EH = never> extends JuncoGraph<N, T, EH>
   override addNode(spec: AgenticNode<N, T>): NodeIdType
 ```
 
@@ -1108,14 +1116,14 @@ import { constantProfile, gigabytes, megabytes } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { graph, schedules, tools, tracer } from "junco";
 
-type Policy = schedules.Scheduler<graph.nodes.Agentic, graph.nodes.AgenticInput, AssistantMessage, schedules.AgencyNodeMetadata>;
+type Policy = schedules.Scheduler<graph.nodes.Agentic, graph.nodes.Task, AssistantMessage, schedules.AgencyNodeMetadata>;
 const costs = { a: 3000, b: 3000, c: 2000, d: 1000 } as const;
 const terminal = graph.NodeId.create("d");
-const final = graph.Edge.value<graph.nodes.AgenticInput, AssistantMessage>("d->$sink");
-const source = new graph.nodes.Source<graph.nodes.AgenticInput, AssistantMessage>(() => {
+const final = graph.Edge.value<graph.nodes.Task, AssistantMessage>("d->$sink");
+const source = new graph.nodes.Source<graph.nodes.Task, AssistantMessage>(() => {
   throw new graph.DataflowDefinitionError("Bounded workflow does not accept external input");
 }, { id: graph.NodeId.create("$source") });
-const sink = new graph.nodes.Sink<graph.nodes.AgenticInput, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.AgenticInput, AssistantMessage> {
+const sink = new graph.nodes.Sink<graph.nodes.Task, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.Task, AssistantMessage> {
   yield [];
   const result = execution.graph.result(terminal);
   if (!O.isSome(result)) throw new Error("d did not produce a result");
@@ -1281,7 +1289,7 @@ close(context: Context): Promise<void>;
 
 **Research/review committee.** Persist agents/sessions; each round uses fresh Source/Sink ports and a passive graph with `schedules.parallel()`. Reject source ingress; return final work through the sink. Value edges feed reports to validating staged assignment callbacks. Keep artifact requirements in prompts. For partial handoff, find the explicit edge ID with kind `message` in `info`, `send` by that ID, then `yield`; consume with `anyOf(partial,final)`. A typed verdict tool records `{ approved,feedback }`: take-and-clear once per round; missing verdict fails, prose is not approval. Preserve the requested stop rule without a round cap. Close persistent members after their last owning use, not per-round graphs; finish a retained shared TUI once afterward, if selected. Evaluation already joins tracer delivery.
 
-**Mixed nested work.** Emit one `{ kind: "prompt", text }` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on required finals and a validating staged assignment callback. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then finish a retained TUI if selected; evaluation already joins delivery.
+**Mixed nested work.** Emit one `Task.create({ kind: "prompt", text, spec })` to an agent and nested wrapper; register `{ ...nodeOptions, state: childContext }` (native state is the actual graph). The child's scheduled Source validates/routes edge-addressed ingress; its Sink waits on final work, stages only final parent-edge messages and returns the exact result, never intermediate drafts. Reviewer uses `TriggerRule.allOf` on required finals and a validating staged assignment callback. Use fresh positional ports per graph and reject outer source ingress. Close the root recursively, then finish a retained TUI if selected; evaluation already joins delivery.
 
 ## Executable example
 

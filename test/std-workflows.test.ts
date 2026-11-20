@@ -32,6 +32,7 @@ import {
 } from "junco";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { renderTask } from "../src/agent-node.ts";
 import {
   assistant,
   pause,
@@ -44,6 +45,30 @@ import {
 import { nativeOptions } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
+/** A fresh prompt task with an explicit `taskId`, as `Task.create` would build it. */
+const prompt = (text: string, taskId = "Ralph#1") =>
+  ({ kind: "prompt", text, taskId, spec: "", deps: [], history: [] }) as const;
+const asTask = (text: string, taskId: string) =>
+  renderTask(prompt(text, taskId));
+/** Expected selector batches, task ids numbered `${node}#n` in delivery order from `first`. */
+const taskBatches = (node: string, batches: string[][], first = 1) =>
+  batches.map((batch) =>
+    batch.map((text) => asTask(text, `${node}#${first++}`)),
+  );
+/** Expected selector batches of `[text, taskId]` pairs; memory fan-in forwards each candidate's own id. */
+const tasksOf = (batches: [text: string, taskId: string][][]) =>
+  batches.map((batch) => batch.map(([text, taskId]) => asTask(text, taskId)));
+/** `value` with each distinct `Task.create` UUID renamed `${node}#n` in order of first appearance. */
+const renumbered = <T>(node: string, value: T): T => {
+  const ids = new Map<string, string>();
+  return JSON.parse(
+    JSON.stringify(value).replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,
+      (uuid) =>
+        ids.get(uuid) ?? ids.set(uuid, `${node}#${ids.size + 1}`).get(uuid)!,
+    ),
+  );
+};
 const revision = `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${assignment}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
 const FIRST_ROUND =
   "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.";
@@ -77,7 +102,10 @@ async function nativeWorkflow(
           seenUsers = users.length;
           if (batch.length) {
             if (source === workflows.ralph && index === 0)
-              assert.deepEqual(batch, [FIRST_ROUND, assignment]);
+              assert.deepEqual(batch, [
+                FIRST_ROUND,
+                asTask(assignment, "Ralph#1"),
+              ]);
             if (source === workflows.memoryRalphLoop) {
               assert.equal(batch.length, 2);
               assert.equal(batch[0], MEMORY_INSTRUCTION);
@@ -137,10 +165,7 @@ async function ralphWorkflow(
   );
   workflow.execution.graph.source.enqueue({
     messages: new Map([
-      [
-        graph.EdgeId.create("assignment"),
-        [{ kind: "prompt", text: assignment }],
-      ],
+      [graph.EdgeId.create("assignment"), [prompt(assignment)]],
     ]),
     values: new Map(),
   });
@@ -155,12 +180,20 @@ test("three rounds revise in one session and only the last draft is the result",
   ]);
   try {
     const results = await execution.run();
-    assert.deepEqual(prompts, [assignment, revision, revision]);
+    assert.deepEqual(prompts, [
+      asTask(assignment, "Ralph#1"),
+      revision,
+      revision,
+    ]);
     const final = results.get(graph.NodeId.create("Ralph"));
     assert.equal(textOf(final), "draft-3");
     assert.equal(results.get(execution.graph.sink.id), final);
     await execution.run();
-    assert.deepEqual(prompts, [assignment, revision, revision]);
+    assert.deepEqual(prompts, [
+      asTask(assignment, "Ralph#1"),
+      revision,
+      revision,
+    ]);
   } finally {
     await execution.graph.close();
   }
@@ -173,7 +206,7 @@ test("rounds: 1 asks once", async () => {
   ]);
   try {
     const results = await execution.run();
-    assert.deepEqual(prompts, [assignment]);
+    assert.deepEqual(prompts, [asTask(assignment, "Ralph#1")]);
     assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-1");
   } finally {
     await execution.graph.close();
@@ -193,7 +226,7 @@ test("a native yield resumes within a round and never counts as one", async () =
   ]);
   try {
     const results = await execution.run();
-    assert.deepEqual(prompts, [assignment, revision]);
+    assert.deepEqual(prompts, [asTask(assignment, "Ralph#1"), revision]);
     assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-2");
   } finally {
     await execution.graph.close();
@@ -222,7 +255,7 @@ test("until judges only completed drafts and publishes the accepted one", async 
   try {
     const results = await execution.run();
     assert.deepEqual(judged, ["draft-1", "draft-2"]);
-    assert.deepEqual(prompts, [assignment, revision]);
+    assert.deepEqual(prompts, [asTask(assignment, "Ralph#1"), revision]);
     assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-2");
   } finally {
     await execution.graph.close();
@@ -239,7 +272,7 @@ test("a blank intermediate draft fails before the next round", async () => {
     await assert.rejects(execution.run(), {
       message: /^Ralph produced an empty report$/,
     });
-    assert.deepEqual(prompts, [assignment, revision]);
+    assert.deepEqual(prompts, [asTask(assignment, "Ralph#1"), revision]);
     assert.ok(O.isNone(execution.graph.result(execution.graph.sink.id)));
   } finally {
     await execution.graph.close();
@@ -268,12 +301,18 @@ const selectorOf = (...results: (MockRun | AssistantMessage)[]): YamlMock =>
       };
     }),
   });
+/** Candidate ids continue `AnyFanIn#n` per execution, as the selector used to mint them. */
+const candidateIds = new WeakMap<Execution, number>();
 const enqueueCandidates = (execution: Execution, ...texts: string[]) =>
   execution.graph.source.enqueue({
     messages: new Map([
       [
         graph.EdgeId.create("candidates"),
-        texts.map((text) => ({ kind: "prompt", text })),
+        texts.map((text) => {
+          const n = (candidateIds.get(execution) ?? 0) + 1;
+          candidateIds.set(execution, n);
+          return prompt(text, `AnyFanIn#${n}`);
+        }),
       ],
     ]),
     values: new Map(),
@@ -377,7 +416,16 @@ test("allFanIn waits for every candidate and rejects blank or abnormal answers b
     try {
       execution.graph.source.enqueue({
         messages: new Map([
-          [graph.EdgeId.create("seed"), [{ kind: "prompt", text: "task" }]],
+          [
+            graph.EdgeId.create("seed"),
+            [
+              graph.nodes.Task.create({
+                kind: "prompt",
+                text: "task",
+                spec: "",
+              }),
+            ],
+          ],
         ]),
         values: new Map(),
       });
@@ -425,8 +473,8 @@ const sender =
       state: new Deterministic<TSchema, unknown>(async function* () {
         yield [];
         sent = true;
-        yield texts.map((text) =>
-          graph.Message.create(output, { kind: "prompt", text }),
+        yield texts.map((text, index) =>
+          graph.Message.create(output, prompt(text, `${edge}#${index + 1}`)),
         );
       }, policy),
       is_available: () => !sent,
@@ -505,7 +553,9 @@ test("anyFanIn selects a sent candidate while its parents have not returned", as
   );
   try {
     await execution.run();
-    assert.deepEqual(stagedBatches(selector), [["left candidate"]]);
+    assert.deepEqual(stagedBatches(selector), [
+      [asTask("left candidate", "left-message#1")],
+    ]);
     const [[edge, payload] = []] = drainSink(execution);
     assert.equal(edge, "Select~>$sink");
     assert.equal(payload, selected);
@@ -533,7 +583,10 @@ test("anyFanIn admits ready parents one queue at a time in trigger order", async
   );
   try {
     await execution.run();
-    assert.deepEqual(stagedBatches(selector), [["r1", "r2"], ["l1"]]);
+    assert.deepEqual(stagedBatches(selector), [
+      [asTask("r1", "right-message#1"), asTask("r2", "right-message#2")],
+      [asTask("l1", "left-message#1")],
+    ]);
     const delivered = drainSink(execution).map(([, payload]) => payload);
     assert.equal(delivered.length, 2);
     assert.ok(delivered[0] === right && delivered[1] === left);
@@ -567,10 +620,13 @@ test("anyFanIn judges each batch alone, even when the next arrives mid-selection
         enqueueCandidates(execution, "b-incomplete", "b-complete");
       }
       await execution.run();
-      assert.deepEqual(stagedBatches(selector), [
-        ["a-incomplete", "a-complete"],
-        ["b-incomplete", "b-complete"],
-      ]);
+      assert.deepEqual(
+        stagedBatches(selector),
+        taskBatches("AnyFanIn", [
+          ["a-incomplete", "a-complete"],
+          ["b-incomplete", "b-complete"],
+        ]),
+      );
       const delivered = drainSink(execution);
       assert.deepEqual(
         delivered.map(([edge]) => edge),
@@ -601,10 +657,13 @@ test("anyFanIn publishes every selection, even the same result object twice", as
       1,
     );
     await execution.run();
-    assert.deepEqual(stagedBatches(selector), [
-      ["shared", "other-1"],
-      ["other-2", "shared"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      taskBatches("AnyFanIn", [
+        ["shared", "other-1"],
+        ["other-2", "shared"],
+      ]),
+    );
     const delivered = drainSink(execution);
     assert.equal(delivered.length, 2);
     assert.ok(delivered.every(([, payload]) => payload === same));
@@ -627,7 +686,7 @@ test("anyFanIn parks while idle and a native selector resumes on later input", a
     enqueueCandidates(execution, "x-short", "x-complete");
     await execution.run();
     assert.equal(prompts.length, 1);
-    assert.equal(prompts[0], "x-complete");
+    assert.equal(prompts[0], asTask("x-complete", "AnyFanIn#2"));
     const delivered = drainSink(execution);
     assert.deepEqual(
       delivered.map(([edge, payload]) => [edge, textOf(payload)]),
@@ -652,7 +711,7 @@ test("anyFanIn fails on bad candidates or selections without publishing or admit
     [
       "blank candidate",
       assistant("unused"),
-      [{ kind: "prompt", text: "  " }],
+      [prompt("  ", "c")],
       "AnyFanIn candidate text must not be empty",
     ],
     [
@@ -664,13 +723,13 @@ test("anyFanIn fails on bad candidates or selections without publishing or admit
     [
       "blank selection",
       assistant("  "),
-      [{ kind: "prompt", text: "a" }],
+      [prompt("a", "c")],
       "AnyFanIn produced an empty report",
     ],
     [
       "abnormal selection",
       assistant("a", "error"),
-      [{ kind: "prompt", text: "a" }],
+      [prompt("a", "c")],
       "AnyFanIn did not finish normally: error",
     ],
   ];
@@ -693,10 +752,7 @@ test("anyFanIn fails on bad candidates or selections without publishing or admit
       });
       const next = {
         messages: new Map([
-          [
-            graph.EdgeId.create("candidates"),
-            [{ kind: "prompt", text: "next" }],
-          ],
+          [graph.EdgeId.create("candidates"), [prompt("next", "n")]],
         ]),
         values: new Map(),
       };
@@ -822,30 +878,44 @@ test("one anyFanIn controller keeps sibling levels independent and declines fini
       messages: new Map([[graph.EdgeId.create(route), payloads]]),
       values: new Map(),
     });
-  const prompts = (...texts: string[]) =>
-    texts.map((text) => ({ kind: "prompt", text }));
+  const minted = new Map<string, number>();
+  // Ids continue `${node}#n` per route, as the receiving node used to mint them.
+  const prompts = (route: string, node: string, ...texts: string[]) =>
+    texts.map((text) => {
+      const n = (minted.get(route) ?? 0) + 1;
+      minted.set(route, n);
+      return prompt(text, `${node}#${n}`);
+    });
   try {
-    enqueue("one", prompts("o1a", "o1b"));
-    enqueue("two", prompts("t1"));
+    enqueue("one", prompts("one", "AnyFanIn", "o1a", "o1b"));
+    enqueue("two", prompts("two", "AnyFanIn", "t1"));
     enqueue("all", [assistant("all-a"), assistant("all-best")]);
-    enqueue("assignment", prompts("revise this", "preserve these constraints"));
+    enqueue(
+      "assignment",
+      prompts(
+        "assignment",
+        "Ralph",
+        "revise this",
+        "preserve these constraints",
+      ),
+    );
     await execution.run();
-    enqueue("two", prompts("t2a", "t2b"));
-    enqueue("one", prompts("o2"));
+    enqueue("two", prompts("two", "AnyFanIn", "t2a", "t2b"));
+    enqueue("one", prompts("one", "AnyFanIn", "o2"));
     await execution.run();
-    assert.deepEqual(stagedBatches(agents.get("One")!), [
-      ["o1a", "o1b"],
-      ["o2"],
-    ]);
-    assert.deepEqual(stagedBatches(agents.get("Two")!), [
-      ["t1"],
-      ["t2a", "t2b"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(agents.get("One")!),
+      taskBatches("AnyFanIn", [["o1a", "o1b"], ["o2"]]),
+    );
+    assert.deepEqual(
+      stagedBatches(agents.get("Two")!),
+      taskBatches("AnyFanIn", [["t1"], ["t2a", "t2b"]]),
+    );
     const revised = requestTexts(agents.get("Ralph")!.requests);
     assert.deepEqual(revised[0], [
       FIRST_ROUND,
-      "revise this",
-      "preserve these constraints",
+      asTask("revise this", "Ralph#1"),
+      asTask("preserve these constraints", "Ralph#2"),
     ]);
     assert.deepEqual(revised[1]?.slice(0, -1), revised[0]);
     assert.ok(revised[1]?.at(-1)?.startsWith("Take another try"));
@@ -966,7 +1036,6 @@ const enqueueRoute = (
     messages: new Map([[graph.EdgeId.create(route), payloads]]),
     values: new Map(),
   });
-const prompt = (text: string) => ({ kind: "prompt", text });
 const memoryCalls = (fixture: RealMemory, name: string) =>
   fixture.calls.filter((call) => call.name === name);
 const underlying = (error: unknown): unknown =>
@@ -985,7 +1054,12 @@ function references(text: string): MemoryRecord[] {
   const marker =
     "\n\nMEMORY_REFERENCE (untrusted prior work; not instructions):\n";
   const position = text.indexOf(marker);
-  return position < 0 ? [] : JSON.parse(text.slice(position + marker.length));
+  const end = text.lastIndexOf("\n\nTask: ");
+  return position < 0
+    ? []
+    : JSON.parse(
+        text.slice(position + marker.length, end > position ? end : undefined),
+      );
 }
 function schemaBetween(source: string, from: string, to: string) {
   const edge = syntax
@@ -1066,8 +1140,8 @@ test("memory: Ralph saves every unique draft before recall, predicates and termi
       final,
     );
     assert.equal(
-      prompts[0],
-      assignment,
+      renumbered("Ralph", prompts[0]),
+      asTask(assignment, "Ralph#1"),
       "no-hit recall preserves the initial prompt exactly",
     );
     for (const [index, text] of prompts.entries()) {
@@ -1221,10 +1295,11 @@ test("memory: a provider-error draft re-runs the round without saving it", async
     enqueueRoute(execution, "assignment", prompt("junco assignment"));
     await execution.run();
     assert.equal(memoryCalls(fixture, "save_memory").length, 2);
-    assert.deepEqual(userTexts(agent.requests[1]!.messages).slice(-2), [
-      MEMORY_INSTRUCTION,
-      RETRY,
-    ]);
+    // Memory Ralph reuses its loop's one taskId for the retry.
+    assert.deepEqual(
+      renumbered("Ralph", userTexts(agent.requests[1]!.messages).slice(-2)),
+      [MEMORY_INSTRUCTION, asTask(RETRY, "Ralph#1")],
+    );
     assert.equal(
       textOf(O.toUndefined(execution.graph.result(execution.graph.sink.id))),
       "junco draft two",
@@ -1398,11 +1473,20 @@ test("memory: fan-in persists candidates in order and republishes a retained win
         0,
       );
     }
-    assert.deepEqual(stagedBatches(selector), [
-      ["junco strong first"],
-      ["junco strong first", "junco weak second"],
-      ["junco strong first", "junco strongest third"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      tasksOf([
+        [["junco strong first", "AnyFanIn#1"]],
+        [
+          ["junco strong first", "AnyFanIn#1"],
+          ["junco weak second", "AnyFanIn#2"],
+        ],
+        [
+          ["junco strong first", "AnyFanIn#1"],
+          ["junco strongest third", "AnyFanIn#3"],
+        ],
+      ]),
+    );
     assert.deepEqual(
       memoryCalls(fixture, "save_memory").map(({ params }) => params),
       ["junco strong first", "junco weak second", "junco strongest third"].map(
@@ -1483,15 +1567,24 @@ test("memory: fan-in holds later source deliveries through selection and publica
     const waiting = execution.graph.source.peek();
     await execution.run();
     assert.deepEqual(execution.graph.source.peek(), waiting);
-    assert.deepEqual(stagedBatches(selector), [["junco first"]]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      tasksOf([[["junco first", "AnyFanIn#1"]]]),
+    );
     assert.equal(memoryCalls(fixture, "save_memory").length, 1);
     release = true;
     await execution.run();
     assert.equal(publicationAcknowledged, true);
-    assert.deepEqual(stagedBatches(selector), [
-      ["junco first"],
-      ["junco first", "junco second"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      tasksOf([
+        [["junco first", "AnyFanIn#1"]],
+        [
+          ["junco first", "AnyFanIn#1"],
+          ["junco second", "AnyFanIn#2"],
+        ],
+      ]),
+    );
     assert.deepEqual(drainSink(execution), [
       ["Memory~>$sink", first],
       ["Memory~>$sink", second],
@@ -1621,10 +1714,16 @@ test("memory: fan-in accepts boundary whitespace and publishes the exact selecte
     await execution.run();
     enqueueCandidates(execution, "junco weaker");
     await execution.run();
-    assert.deepEqual(stagedBatches(selector), [
-      ["  junco selected  "],
-      ["junco selected", "junco weaker"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      tasksOf([
+        [["  junco selected  ", "AnyFanIn#1"]],
+        [
+          ["junco selected", "AnyFanIn#1"],
+          ["junco weaker", "AnyFanIn#2"],
+        ],
+      ]),
+    );
     const delivered = drainSink(execution);
     assert.equal(delivered.length, 2);
     assert.ok(delivered.every(([, message]) => message === selected));
@@ -1774,14 +1873,26 @@ test("memory: sibling fan-in phases and choices do not leak even with shared res
     enqueueRoute(execution, "two", prompt("junco two weaker"));
     enqueueRoute(execution, "one", prompt("junco one weaker"));
     await execution.run();
-    assert.deepEqual(stagedBatches(agents.get("One")!), [
-      ["junco shared"],
-      ["junco shared", "junco one weaker"],
-    ]);
-    assert.deepEqual(stagedBatches(agents.get("Two")!), [
-      ["junco separate"],
-      ["junco separate", "junco two weaker"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(agents.get("One")!),
+      tasksOf([
+        [["junco shared", "Ralph#1"]],
+        [
+          ["junco shared", "Ralph#1"],
+          ["junco one weaker", "Ralph#1"],
+        ],
+      ]),
+    );
+    assert.deepEqual(
+      stagedBatches(agents.get("Two")!),
+      tasksOf([
+        [["junco separate", "Ralph#1"]],
+        [
+          ["junco separate", "Ralph#1"],
+          ["junco two weaker", "Ralph#1"],
+        ],
+      ]),
+    );
     const one = drainSink(execution).filter(([edge]) => edge === "One~>$sink");
     assert.equal(one.length, 2);
     assert.ok(one.every(([, message]) => message === same));
@@ -2172,12 +2283,22 @@ test("memory: all-trigger waits for each worker message while any-trigger stream
       await execution.run();
       assert.deepEqual(
         stagedBatches(selector),
-        all
-          ? [["junco Left candidate", "junco Right candidate"]]
-          : [
-              ["junco Left candidate"],
-              ["junco Left candidate", "junco Right candidate"],
-            ],
+        tasksOf(
+          all
+            ? [
+                [
+                  ["junco Left candidate", "Left~>Select#1"],
+                  ["junco Right candidate", "Right~>Select#1"],
+                ],
+              ]
+            : [
+                [["junco Left candidate", "Left~>Select#1"]],
+                [
+                  ["junco Left candidate", "Left~>Select#1"],
+                  ["junco Right candidate", "Right~>Select#1"],
+                ],
+              ],
+        ),
       );
       assert.deepEqual(drainSink(execution), [["Select~>$sink", selected]]);
       assert.equal((await fixture.recall("junco")).length, 2);
@@ -2371,11 +2492,20 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
     enqueueCandidates(execution, "junco strongest replacement");
     await execution.run();
     assert.deepEqual(drainSink(execution), [["Join~>$sink", strongest]]);
-    assert.deepEqual(stagedBatches(selector), [
-      ["junco strong candidate"],
-      ["junco strong candidate", "junco weaker candidate"],
-      ["junco strong candidate", "junco strongest replacement"],
-    ]);
+    assert.deepEqual(
+      stagedBatches(selector),
+      tasksOf([
+        [["junco strong candidate", "Ralph#1"]],
+        [
+          ["junco strong candidate", "Ralph#1"],
+          ["junco weaker candidate", "Ralph#1"],
+        ],
+        [
+          ["junco strong candidate", "Ralph#1"],
+          ["junco strongest replacement", "AnyFanIn#1"],
+        ],
+      ]),
+    );
     assert.equal(
       memoryCalls(fixture, "save_memory").length,
       3,
@@ -2716,11 +2846,21 @@ test("memory: real native workers read selected broadcasts during a run and neve
               return fauxAssistantMessage(
                 fauxToolCall("send", {
                   id: `${name}~>Join`,
-                  payload: prompt(
-                    name === "WorkerA"
-                      ? "junco native stronger candidate"
-                      : "junco native weaker candidate",
-                  ),
+                  // A handoff of the received assignment: `send` stamps its id and provenance.
+                  handoff: "sent my candidate",
+                  task: JSON.parse(
+                    users[1]!.slice(users[1]!.lastIndexOf("\n\nTask: ") + 8),
+                  ).taskId,
+                  spec: JSON.parse(
+                    users[1]!.slice(users[1]!.lastIndexOf("\n\nTask: ") + 8),
+                  ).spec,
+                  payload: {
+                    kind: "prompt",
+                    text:
+                      name === "WorkerA"
+                        ? "junco native stronger candidate"
+                        : "junco native weaker candidate",
+                  },
                 }),
                 { stopReason: "toolUse" },
               );
@@ -2783,9 +2923,40 @@ test("memory: real native workers read selected broadcasts during a run and neve
       );
     }
     assert.deepEqual(drainSink(execution), [["Join~>$sink", selected]]);
-    assert.deepEqual(stagedBatches(selector), [
-      ["junco native stronger candidate", "junco native weaker candidate"],
-    ]);
+    const [staged, ...restBatches] = stagedBatches(selector);
+    assert.deepEqual(restBatches, []);
+    // Each worker hands off the assignment task: same id, one history entry of its own.
+    assert.deepEqual(
+      staged?.map((text) => {
+        const at = text.lastIndexOf("\n\nTask: ");
+        const { taskId, deps, history } = JSON.parse(text.slice(at + 8));
+        return [
+          text.slice(0, at),
+          taskId,
+          deps,
+          history.map(
+            ({ node, handoff }: { node: string; handoff: string }) => [
+              node,
+              handoff,
+            ],
+          ),
+        ];
+      }),
+      [
+        [
+          "junco native stronger candidate",
+          "Ralph#1",
+          [],
+          [["WorkerA", "sent my candidate"]],
+        ],
+        [
+          "junco native weaker candidate",
+          "Ralph#1",
+          [],
+          [["WorkerB", "sent my candidate"]],
+        ],
+      ],
+    );
     assert.equal(memoryCalls(fixture, "search_memory").length, 1);
     assert.equal(memoryCalls(fixture, "save_memory").length, 2);
     const calls = fixture.calls.length;

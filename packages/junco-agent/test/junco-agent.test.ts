@@ -60,12 +60,12 @@ import {
   toolTurn,
 } from "../../../test/support.ts";
 import {
-  AgenticInputSchema,
   type AgenticStep,
   AssistantMessageSchema,
   JuncoAgent,
   JuncoAgentError,
   SYSTEM_INSTRUCTION,
+  TaskSchema,
   type TokenMonitorConfig,
 } from "../src/index.ts";
 import {
@@ -307,20 +307,32 @@ test("a callback prompt runs once on demand with the supplied view and static im
   }
 });
 
-test("AgenticInputSchema and AssistantMessageSchema check the native payloads they describe", async () => {
+test("TaskSchema and AssistantMessageSchema check the native payloads they describe", async () => {
   for (const input of [
-    { kind: "prompt", text: "hi" },
+    {
+      kind: "prompt",
+      text: "hi",
+      taskId: "t",
+      spec: "",
+      deps: [],
+      history: [],
+    },
     {
       kind: "error",
       text: "x",
+      taskId: "t",
+      spec: "s",
+      deps: ["d"],
+      history: [{ node: "A", desc: "x", handoff: "h" }],
       images: [{ type: "image", data: "d", mimeType: "image/png" }],
     },
     { kind: "appendMessage", message: { role: "custom", extra: 1 } },
   ])
-    assert.equal(Value.Check(AgenticInputSchema, input), true);
+    assert.equal(Value.Check(TaskSchema, input), true);
   for (const input of [
     7,
     { kind: "prompt" },
+    { kind: "prompt", text: "hi" },
     { kind: "nope", text: "x" },
     {
       kind: "steer",
@@ -329,7 +341,7 @@ test("AgenticInputSchema and AssistantMessageSchema check the native payloads th
     },
     { kind: "appendMessage", message: { content: "no role" } },
   ])
-    assert.equal(Value.Check(AgenticInputSchema, input), false);
+    assert.equal(Value.Check(TaskSchema, input), false);
   const { agent } = await newAgent([fauxAssistantMessage("native")]);
   try {
     const message = await agent.prompt("go");
@@ -387,7 +399,13 @@ test("shared send tools advertise each bound activation's live edge schemas", as
     await b.agent.prompt("unbound");
     const checks = (schema: unknown, id: string, payloads: unknown[]) =>
       payloads.map((payload) =>
-        Value.Check(schema as TSchema, { id, payload }),
+        Value.Check(schema as TSchema, {
+          id,
+          payload,
+          handoff: "h",
+          task: "t",
+          spec: "s",
+        }),
       );
     assert.deepEqual(checks(requests[0]?.send, "numbers", [7, "7"]), [
       true,

@@ -4,11 +4,11 @@ export * as mcp from "junco-mcp";
 export * as tools from "junco-tools";
 export {
   type Agentic,
-  type AgenticInput,
-  AgenticInputSchema,
   type AgenticNode,
   AssistantMessageSchema,
   type CompactionPolicy,
+  Task,
+  TaskSchema,
 } from "./agentic.js";
 export { Deterministic } from "./deterministic.js";
 export { JuncoGraph } from "./junco-graph.js";

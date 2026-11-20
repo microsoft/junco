@@ -46,7 +46,7 @@ no API key, $0).
 
 ### `workflows` — graph documents for `JuncoGraph.fromYaml(text, config)`
 
-Reuse these instead of hand-writing the topology. Source routes are the keys of `source.routes`; feed a root graph with `execution.graph.source.enqueue({ messages: new Map([[graph.EdgeId.create("<route>"), [{ kind: "prompt", text }]]]), values: new Map() })`, or route a parent edge onto them when embedding (`kind: graph`).
+Reuse these instead of hand-writing the topology. Source routes are the keys of `source.routes`; feed a root graph with `execution.graph.source.enqueue({ messages: new Map([[graph.EdgeId.create("<route>"), [Task.create({ kind: "prompt", text, spec })]]]), values: new Map() })` (`Task.create` mints the required `taskId` with empty `deps` and `history`), or route a parent edge onto them when embedding (`kind: graph`).
 
 | Export | Source | Summary | Routes / output | Drive with |
 | --- | --- | --- | --- | --- |
@@ -123,7 +123,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 
 Configure `JuncoAgent` with `errorHandler` (or put it in a `MockAgent` transcript), not the agent node's `on_error`. Code and graph nodes keep the engine's `on_error`. Without a handler, thrown failures crash and `stopReason: "error"` settlements remain results, including Ralph's existing retry path.
 
-Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate({ ladder }, errors.crash())))`. Attempts count failures across the node's current run, including yields, and reset on a returned result. Retry stages a continuation prompt in the same session; it does not resend the original prompt. To recover softly, return outbound messages directly from a handler, e.g. `({ error }) => [graph.Message.create(edge, { kind: "error", text: String(error) })]`; the node has no result. Cancellation, definition errors, exhausted budgets and closed agents bypass recovery.
+Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate({ ladder }, errors.crash())))`. Attempts count failures across the node's current run, including yields, and reset on a returned result. Retry stages a continuation prompt in the same session; it does not resend the original prompt. To recover softly, return outbound messages directly from a handler, e.g. `({ error }) => [graph.Message.create(edge, graph.nodes.Task.create({ kind: "error", text: String(error), spec }))]`; the node has no result. Cancellation, definition errors, exhausted budgets and closed agents bypass recovery.
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
@@ -192,7 +192,7 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 | `graph.nodes.Sink` | class | `packages/dataflow-engine/src/stdlib.ts` | Native egress: yielded and explicitly sent messages await acknowledged external delivery. |
 | `graph.nodes.Agentic` | type | `src/agentic.ts` | Native work states; policies and execution contexts are never graph members. |
 | `graph.nodes.AgenticNode` | type | `src/agentic.ts` | Complete bodies require their authorization policy. |
-| `graph.nodes.AgenticInput` | type | `packages/junco-agent/src/agentic.ts` | The message payload of agent graphs. |
+| `graph.nodes.Task` | type, const | `packages/junco-agent/src/agentic.ts` | The task payload of agent graphs: a description, a readonly completion spec, subtask deps and the history of its holders. All four fields are required; `Task.create({ kind, text, spec })` mints its `taskId` UID with empty `deps` and `history`. |
 | `graph.nodes.CompactionPolicy` | type | `src/agentic.ts` | Which direct prompt-agent node states `JuncoGraph.compact` compacts. |
 
 ### `trigger` (also `graph.trigger`) — readiness rules over inbound edges
@@ -225,11 +225,11 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 
 ### Root exports
 
-Also exported directly from `junco`: `JuncoGraph`, `MockJuncoGraph`, `Deterministic`, `Agentic`, `AgenticInput`, `AgenticNode`, `CompactionPolicy` (rows above), and:
+Also exported directly from `junco`: `JuncoGraph`, `MockJuncoGraph`, `Deterministic`, `Agentic`, `Task`, `AgenticNode`, `CompactionPolicy` (rows above), and:
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
-| `AgenticInputSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of AgenticInput. |
+| `TaskSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Task. |
 | `AssistantMessageSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Pi's native AssistantMessage: its content, usage/cost, diagnostics and deferred handle, with required fields, literal alternatives and optional fields. |
 | `MockAgent` | class | `src/mock-agent.ts` | A scripted `JuncoAgentProtocol` replaying its `MockTranscript`: no model requests; profiles come from declared usage. |
 | `MockTranscript` | type | `src/mock-agent.ts` | Everything a `MockAgent` will do, fixed at construction. |

@@ -8,15 +8,16 @@ import {
 } from "@earendil-works/pi-ai";
 import { DummyTracer, type NodeIdType } from "dataflow-engine";
 import { LockPolicy } from "junco-tools";
-import { AgenticInputSchema } from "../src/agentic.ts";
+import { renderTask } from "../src/agent-node.ts";
+import { TaskSchema } from "../src/agentic.ts";
 import {
-  type AgenticInput,
   agent as agentApi,
   Deterministic,
   graph,
   JuncoGraph,
   MockAgent,
   schedules,
+  type Task,
   tools,
   trigger,
 } from "../src/index.ts";
@@ -54,9 +55,13 @@ const throwingBackend: tools.ComplainBackend = {
   },
 };
 
-const input: AgenticInput = {
+const input: Task = {
   kind: "prompt",
   text: "Contact the coordinator.",
+  taskId: "worker#1",
+  spec: "",
+  deps: [],
+  history: [],
 };
 
 /** A real agent that complains `complaint` once and then answers "continued". */
@@ -84,13 +89,13 @@ function wire(
   flow: JuncoGraph,
   member: agentApi.JuncoAgent,
   id?: NodeIdType,
-  delivered: AgenticInput = input,
+  delivered: Task = input,
 ) {
-  const edge = graph.Edge.message<typeof AgenticInputSchema, AssistantMessage>(
+  const edge = graph.Edge.message<typeof TaskSchema, AssistantMessage>(
     "source->worker",
-    AgenticInputSchema,
+    TaskSchema,
   );
-  const source = new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+  const source = new Deterministic<typeof TaskSchema, AssistantMessage>(
     async function* () {
       yield [graph.Message.create(edge, delivered)];
       return fauxAssistantMessage("seeded");
@@ -163,7 +168,7 @@ describe("complaints through real graphs", () => {
     );
     assert.deepEqual(userTexts(issue!.prompt.messages), [
       "Follow the request in the user message that follows.",
-      input.text,
+      renderTask(input),
     ]);
     assert.deepEqual(issue!.prompt.tools?.map((tool) => tool.name).sort(), [
       "complain",
@@ -243,11 +248,19 @@ describe("complaints through real graphs", () => {
     const inputA = {
       kind: "prompt",
       text: "Contact coordinator A.",
-    } as const satisfies AgenticInput;
+      taskId: "worker#1",
+      spec: "",
+      deps: [],
+      history: [],
+    } as const satisfies Task;
     const inputB = {
       kind: "prompt",
       text: "Contact coordinator B.",
-    } as const satisfies AgenticInput;
+      taskId: "worker#1",
+      spec: "",
+      deps: [],
+      history: [],
+    } as const satisfies Task;
     const wiredA = wire(a, await worker("from A", "system A"), id, inputA);
     const wiredB = wire(b, await worker("from B", "system B"), id, inputB);
     const before = tools.issueLog.length;
@@ -284,7 +297,7 @@ describe("complaints through real graphs", () => {
       const texts = userTexts(issue.prompt.messages);
       assert.deepEqual(texts, [
         "Follow the request in the user message that follows.",
-        own.text,
+        renderTask(own),
       ]);
       assert.ok(!texts.some((text) => text.includes(foreign.text)));
     }
@@ -381,8 +394,8 @@ describe("direct Agentic.complain", () => {
 
     const nodeId = graph.NodeId.create("supplied-node");
     assert.notEqual(nodeId, real.nodeId);
-    const edgeId = graph.Edge.message("edge", AgenticInputSchema).id;
-    const lateId = graph.Edge.message("late", AgenticInputSchema).id;
+    const edgeId = graph.Edge.message("edge", TaskSchema).id;
+    const lateId = graph.Edge.message("late", TaskSchema).id;
     const messages = [{ id: edgeId, payload: input }];
     const original = {
       role: "user" as const,

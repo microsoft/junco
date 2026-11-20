@@ -22,10 +22,31 @@ import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import type { YamlAgent } from "../examples/support.ts";
+import { renderTask } from "../src/agent-node.ts";
 import { AssistantMessageSchema, Deterministic, syntax } from "../src/index.ts";
 import type { AgentSpec } from "../src/syntax/build.ts";
 import { userTexts } from "./deterministic-support.ts";
 import { nativeOptions } from "./support.ts";
+
+/** Asserts `rendered` is the Goals task with its `Task.create`-minted UUID, and returns that id. */
+function goalsTaskId(rendered: string): string {
+  const { taskId } = JSON.parse(
+    rendered.slice(rendered.lastIndexOf("Task: ") + 6),
+  );
+  assert.match(taskId, /^[0-9a-f-]{36}$/);
+  assert.equal(
+    rendered,
+    renderTask({
+      kind: "prompt",
+      text: goalsPrompt,
+      taskId,
+      spec: "All three goals are answered.",
+      deps: [],
+      history: [],
+    }),
+  );
+  return taskId;
+}
 
 /** Records every raw message Reviewer is activated with on the nested graph's `Ralph~>Reviewer`. */
 class ReviewerInbox extends DummyTracer {
@@ -86,10 +107,12 @@ async function mixedWorkflow(
       if (context.messages.at(-1)?.role === "user") {
         const texts = userTexts(context.messages);
         if (role === "Ralph" && prompts.Ralph.length === 0) {
-          assert.deepEqual(texts, [
+          assert.equal(texts.length, 2);
+          assert.equal(
+            texts[0],
             "Achieve the objectives in the user message(s) that follow this one, in order. Do your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete answer.",
-            goalsPrompt,
-          ]);
+          );
+          goalsTaskId(texts[1]!);
         }
         if (role === "Reviewer") {
           assert.equal(texts.length, 2);
@@ -211,9 +234,11 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.ok(Value.Check(AssistantMessageSchema, draft));
     assert.equal(contentText(draft.content), "draft-2");
     assert.equal(prompts.Ralph.length, 2);
-    assert.equal(prompts.Ralph[0], goalsPrompt);
+    const taskId = goalsTaskId(prompts.Ralph[0]!);
     assert.ok(prompts.Ralph[1]!.includes(goalsPrompt));
-    assert.deepEqual(prompts.Direct, [goalsPrompt]);
+    assert.equal(prompts.Direct.length, 1);
+    // Goals broadcasts one task: both competitors receive the same id.
+    assert.equal(goalsTaskId(prompts.Direct[0]!), taskId);
 
     assert.equal(prompts.Reviewer.length, 1);
     const review = prompts.Reviewer[0]!;
@@ -270,7 +295,8 @@ test("a blank Direct answer fails the Reviewer before any Reviewer request", asy
   assert.ok(failure instanceof DataflowNodeError);
   assert.equal(failure.nodeId, reviewerId);
   assert.equal(prompts.Ralph.length, 2);
-  assert.deepEqual(prompts.Direct, [goalsPrompt]);
+  assert.equal(prompts.Direct.length, 1);
+  goalsTaskId(prompts.Direct[0]!);
   assert.equal(prompts.Reviewer.length, 0);
   assert.ok(O.isNone(graph.result(reviewerId)));
 }, 5_000);

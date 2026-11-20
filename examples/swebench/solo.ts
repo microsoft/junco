@@ -41,7 +41,7 @@ export const strengthOf = (_path: string): schedules.ModelStrengthName => "med";
 export const scheduler: syntax.BuildOptions["scheduler"] = () => schedules.strength(() => "med", schedules.parallel());
 
 type Code = syntax.DeterministicNode<Host>;
-const prompt = (text: string) => ({ kind: "prompt", text }) as const;
+const prompt = (text: string, spec: string) => graph.nodes.Task.create({ kind: "prompt", text, spec });
 const tail = (text: string, size = 4000): string => (text.length <= size ? text : `…${text.slice(-size)}`);
 const issueText = ({ repo, base_commit, problem_statement }: Problem): string =>
   `Repository: ${repo} (base commit ${base_commit})\n\n${problem_statement}`;
@@ -71,7 +71,7 @@ export const Input: Code = ({ context, edges, policy }) => {
       while (true) {
         signal.throwIfAborted();
         published = true;
-        yield [graph.Message.create(output, prompt(issueText(context.problem)))];
+        yield [graph.Message.create(output, prompt(issueText(context.problem), "The issue is fixed in /testbed and its tests pass."))];
       }
     }, policy),
     is_available: () => !published,

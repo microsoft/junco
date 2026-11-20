@@ -39,7 +39,6 @@ graph:
         properties:
           kind: { const: prompt }
           text: { type: string }
-        additionalProperties: false
     - from: AnyFanIn
       to: AnyFanIn
       schema: &assistant

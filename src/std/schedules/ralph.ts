@@ -10,7 +10,7 @@ import {
   type ParentView,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import { AgenticInputSchema, JuncoAgent } from "junco-agent";
+import { JuncoAgent, TaskSchema } from "junco-agent";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { JuncoGraph } from "../../junco-graph.js";
@@ -179,7 +179,7 @@ export function createRalphController(options: RalphOptions = {}, retries = 0) {
     const objectives: string[] = [];
     for (const objective of batch) {
       if (
-        !Value.Check(AgenticInputSchema, objective) ||
+        !Value.Check(TaskSchema, objective) ||
         objective.kind !== "prompt" ||
         (objective.images?.length ?? 0) > 0
       )

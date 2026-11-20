@@ -30,10 +30,10 @@ import {
   Width,
 } from "dataflow-engine";
 import {
-  type AgenticInputSchema,
   AssistantMessageSchema,
   JuncoAgent,
   JuncoAgentError,
+  type TaskSchema,
 } from "junco-agent";
 import { LockPolicy, TaskTool } from "junco-tools";
 import { Type } from "typebox";
@@ -50,8 +50,8 @@ import { terminalPorts, textOf, yieldsThen } from "./deterministic-support.ts";
 import { NATIVE_TOOL_BLOCK, toolTurn } from "./support.ts";
 
 type Policy = schedules.Scheduler<
-  Agentic<typeof AgenticInputSchema, AssistantMessage>,
-  typeof AgenticInputSchema,
+  Agentic<typeof TaskSchema, AssistantMessage>,
+  typeof TaskSchema,
   AssistantMessage,
   schedules.AgencyNodeMetadata
 >;
@@ -59,16 +59,13 @@ const member = (
   name: string,
   agent: MockAgent,
   options: Partial<
-    Pick<
-      NodeOptions<typeof AgenticInputSchema, AssistantMessage>,
-      "is_available"
-    >
+    Pick<NodeOptions<typeof TaskSchema, AssistantMessage>, "is_available">
   > = {},
 ) => ({
   id: NodeId.create(name),
   state: agent,
   policy: LockPolicy,
-  trigger: TriggerRule.always<typeof AgenticInputSchema, AssistantMessage>(),
+  trigger: TriggerRule.always<typeof TaskSchema, AssistantMessage>(),
   ...options,
 });
 function recorded(inner: Policy): {
@@ -172,8 +169,8 @@ for (const Graph of [MockJuncoGraph, JuncoGraph]) {
         );
         ports.connect(graph, members[3]!);
         const limited: Policy = schedules.limit<
-          Agentic<typeof AgenticInputSchema, AssistantMessage>,
-          typeof AgenticInputSchema,
+          Agentic<typeof TaskSchema, AssistantMessage>,
+          typeof TaskSchema,
           AssistantMessage,
           schedules.AgencyNodeMetadata
         >({ memory: gigabytes(4) }, schedules.parallel());
@@ -244,7 +241,7 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
     const edges = names.map((name) =>
       Edge.value(`${name}->join`, AssistantMessageSchema),
     );
-    const join = new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+    const join = new Deterministic<typeof TaskSchema, AssistantMessage>(
       async function* () {
         const view = yield [];
         for (const edge of edges) {
@@ -269,8 +266,8 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
     ports.connect(graph, joinId);
     const { waves, scheduler } = recorded(
       schedules.choose<
-        Agentic<typeof AgenticInputSchema, AssistantMessage>,
-        typeof AgenticInputSchema,
+        Agentic<typeof TaskSchema, AssistantMessage>,
+        typeof TaskSchema,
         AssistantMessage,
         schedules.AgencyNodeMetadata
       >({ rank: schedules.lowest("tokens"), width: () => 1 }),
@@ -417,7 +414,7 @@ function agencyGraph() {
 
 const memberOf = (name: string, agent: JuncoAgent) => ({
   id: NodeId.create(name),
-  trigger: TriggerRule.always<typeof AgenticInputSchema, AssistantMessage>(),
+  trigger: TriggerRule.always<typeof TaskSchema, AssistantMessage>(),
   policy: LockPolicy,
   state: agent,
 });

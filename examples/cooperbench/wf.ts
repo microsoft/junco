@@ -65,10 +65,10 @@ function textOf(payload: unknown, edgeId: string): string {
   return syntax.finalText(payload, edgeId);
 }
 
-/** Sends `{ kind: "prompt", text }` once on `outputs` through the standard primitive, then returns. */
-function broadcast(text: string, outputs: graph.Edge<TSchema, unknown>[]) {
+/** Sends one `Task.create({ kind: "prompt", text, spec })` on `outputs` through the standard primitive, then returns. */
+function broadcast(text: string, spec: string, outputs: graph.Edge<TSchema, unknown>[]) {
   return new graph.nodes.ConstFanout<undefined, TSchema, unknown>(
-    { kind: "prompt", text },
+    graph.nodes.Task.create({ kind: "prompt", text, spec }),
     outputs,
     { state: undefined, ret: undefined },
   ).step();
@@ -88,7 +88,7 @@ export const fanout: syntax.DeterministicNode = ({ node, edges, policy }) => {
         throw new Error(`${node} needs exactly one payload on "${input.id}"`);
       const text = textOf(payloads[0], input.id);
       emitting = true;
-      return yield* broadcast(text, outputs);
+      return yield* broadcast(text, "Every worker has carried out this assignment.", outputs);
     }, policy),
     // Priming reads nothing; stay available through the emission's terminal-return activation.
     is_available: (_view, triggered) => emitting || triggered,
@@ -122,7 +122,7 @@ export const fanin: syntax.DeterministicNode = ({ node, edges, policy }) => {
 /**
  * `__junco_assignment`: re-renders the replaced agent's original prompt template (frozen per
  * replacement graph label) from `__junco_assignment:input:<originalEdgeId>`, then sends it once as
- * `{ kind: "prompt", text }` on every `__junco_assignment:output*` edge.
+ * one `Task.create({ kind: "prompt", text })` on every `__junco_assignment:output*` edge.
  */
 export const assignment =
   (templates: Readonly<Record<string, string>>): syntax.DeterministicNode =>
@@ -157,7 +157,7 @@ export const assignment =
         const text = template.replace(PLACEHOLDER, (_, id: string) => texts.get(id) ?? "");
         if (!text.trim()) throw new Error(`${node}: the rendered assignment is empty`);
         emitting = true;
-        return yield* broadcast(text, outputs);
+        return yield* broadcast(text, "The rendered assignment is carried out.", outputs);
       }, policy),
       is_available: (_view, triggered) => emitting || triggered,
     };
@@ -525,8 +525,8 @@ export async function createPair(request: PairRequest, options: PairOptions): Pr
   try {
     execution.graph.source.enqueue({
       messages: new Map([
-        [graph.EdgeId.create("assignment-1"), [{ kind: "prompt", text: "## Feature assigned to Team 1\n\n" + request.agents.agent1.task }]],
-        [graph.EdgeId.create("assignment-2"), [{ kind: "prompt", text: "## Feature assigned to Team 2\n\n" + request.agents.agent2.task }]],
+        [graph.EdgeId.create("assignment-1"), [graph.nodes.Task.create({ kind: "prompt", text: "## Feature assigned to Team 1\n\n" + request.agents.agent1.task, spec: "The feature assigned to Team 1 is implemented and its tests pass." })]],
+        [graph.EdgeId.create("assignment-2"), [graph.nodes.Task.create({ kind: "prompt", text: "## Feature assigned to Team 2\n\n" + request.agents.agent2.task, spec: "The feature assigned to Team 2 is implemented and its tests pass." })]],
       ]),
       values: new Map(),
     });

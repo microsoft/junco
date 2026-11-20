@@ -378,6 +378,9 @@ export async function scriptedLane(
         call("send", {
           id: `summary:${work.rank}`,
           payload: `Proposer ${work.rank}: callers reconciled; research launched`,
+          handoff: "summary",
+          task: "summary",
+          spec: "summary",
         }),
         call("task", {}),
       );

@@ -31,16 +31,45 @@ import { type TSchema, Type } from "typebox";
 import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
 
 /**
- * The message payload of agent graphs. A prompt-agent node steers delivered payloads into
- * its model as user messages; it never dispatches them as native commands.
+ * The task payload of agent graphs: a description, a readonly completion spec, subtask deps and the
+ * history of its holders. A prompt-agent node steers delivered payloads into its model as user
+ * messages; it never dispatches them as native commands.
  */
-export type AgenticInput =
+export type Task =
   | {
       readonly kind: "prompt" | "steer" | "followUp" | "nextTurn" | "error";
+      /** What the receiver is asked to do. */
       readonly text: string;
       readonly images?: ImageContent[];
+      /** Task identity: a UID minted by {@link Task.create} or by the sending node's `send`. */
+      readonly taskId: string;
+      /** When the task counts as complete; fixed at creation, copied unchanged on every handoff. */
+      readonly spec: string;
+      /** Ids of the subtasks created while this task was held. */
+      readonly deps: readonly string[];
+      /** Prior holders, oldest first: the node, the description it received, what it did. */
+      readonly history: readonly {
+        readonly node: string;
+        readonly desc: string;
+        readonly handoff: string;
+      }[];
     }
   | { readonly kind: "appendMessage"; readonly message: AgentMessage };
+
+/** Construction of `Task`s: `create` mints a new task's UID; it has no subtasks and no holders yet. */
+export const Task = {
+  create: (
+    task: Omit<
+      Extract<Task, { readonly text: string }>,
+      "taskId" | "deps" | "history"
+    >,
+  ): Extract<Task, { readonly text: string }> => ({
+    ...task,
+    taskId: crypto.randomUUID(),
+    deps: [],
+    history: [],
+  }),
+};
 
 const ImageContentSchema = Type.Object({
   type: Type.Literal("image"),
@@ -49,11 +78,11 @@ const ImageContentSchema = Type.Object({
 });
 
 /**
- * Runtime schema of {@link AgenticInput}. Pi's `AgentMessage` is declaration-merge extensible
- * and has no runtime schema, so an appended message is checked as an object with a string `role`.
- * Structural extras are allowed throughout.
+ * Runtime schema of Task. Pi's `AgentMessage` is declaration-merge extensible and has no runtime
+ * schema, so an appended message is checked as an object with a string `role`. Structural extras
+ * are allowed throughout.
  */
-export const AgenticInputSchema = Type.Unsafe<AgenticInput>(
+export const TaskSchema = Type.Unsafe<Task>(
   Type.Union([
     Type.Object({
       kind: Type.Union([
@@ -65,6 +94,16 @@ export const AgenticInputSchema = Type.Unsafe<AgenticInput>(
       ]),
       text: Type.String(),
       images: Type.Optional(Type.Array(ImageContentSchema)),
+      taskId: Type.String(),
+      spec: Type.String(),
+      deps: Type.Array(Type.String()),
+      history: Type.Array(
+        Type.Object({
+          node: Type.String(),
+          desc: Type.String(),
+          handoff: Type.String(),
+        }),
+      ),
     }),
     Type.Object({
       kind: Type.Literal("appendMessage"),
@@ -243,7 +282,7 @@ export interface Agentic<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > extends AsyncGenerator<AgenticStep, void, ParentView<N, V> | undefined>,
     ComplainToolHost {
@@ -342,7 +381,7 @@ export type TokenMonitorConfig = {
  * throw to reject the run with `DataflowNodeError` carrying the thrown value (hard error).
  */
 export type ErrorHandler<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > = (failure: {
   readonly error: unknown;
@@ -370,7 +409,7 @@ export type AgenticOptions<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > = Omit<
   AgentHarnessOptions<undefined>,

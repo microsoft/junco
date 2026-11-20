@@ -67,7 +67,7 @@ async function main(signal: AbortSignal): Promise<void> {
     lifetime.adopt(execution.graph, (g) => g.close());
     const ASSIGNMENT = `Make \`sort\` in ${SOURCE} faster. Build and test with exactly: \`${BUILD} && ./sort\` (run from ${DIR}). It currently prints PASS ${baseline.ms} ms; every test must keep passing.`;
     execution.graph.source.enqueue({
-      messages: new Map([[graph.EdgeId.create("assignment"), [{ kind: "prompt", text: ASSIGNMENT }]]]),
+      messages: new Map([[graph.EdgeId.create("assignment"), [graph.nodes.Task.create({ kind: "prompt", text: ASSIGNMENT, spec: `\`${BUILD} && ./sort\` prints PASS in under ${baseline.ms} ms.` })]]]),
       values: new Map(),
     });
     await execution.run({ signal });

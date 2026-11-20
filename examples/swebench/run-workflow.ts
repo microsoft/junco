@@ -776,7 +776,7 @@ const Relay: syntax.DeterministicNode = ({ edges, policy }) => {
       const view = yield [];
       const text = syntax.finalText(view.values.get(graph.EdgeId.create("Probe->Relay")), "Probe");
       published = true;
-      yield [graph.Message.create(output, { kind: "prompt", text })];
+      yield [graph.Message.create(output, graph.nodes.Task.create({ kind: "prompt", text, spec: "The Probe's report is acknowledged." }))];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };

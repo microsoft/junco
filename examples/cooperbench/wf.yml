@@ -198,7 +198,7 @@ graph:
       tool_block: [task]
       trigger: { all: [team2-spec-agent, Architect->Agent2, Implementer2->Agent2] }
   edges:
-    - { from: $source, to: Architect, kind: message, id: arch-specs, schema: &prompt { type: object, additionalProperties: false, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string, pattern: '\S' } } } }
+    - { from: $source, to: Architect, kind: message, id: arch-specs, schema: &prompt { type: object, required: [kind, text], properties: { kind: { const: prompt }, text: { type: string, pattern: '\S' } } } }
     - { from: $source, to: Tester1, kind: message, id: team1-spec, schema: *prompt }
     - { from: $source, to: Implementer1, kind: message, id: team1-spec-impl, schema: *prompt }
     - { from: $source, to: Agent1, kind: message, id: team1-spec-agent, schema: *prompt }

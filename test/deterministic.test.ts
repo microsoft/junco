@@ -13,7 +13,7 @@ import {
 } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { type AgenticInputSchema, JuncoAgentError } from "junco-agent";
+import { JuncoAgentError, type TaskSchema } from "junco-agent";
 import {
   EmptyPolicy,
   LockPolicy,
@@ -480,17 +480,17 @@ describe("close", () => {
       scheduler: schedules.parallel(),
     });
     const failure = new Error("finally failed");
-    const coroutine = new Deterministic<
-      typeof AgenticInputSchema,
-      AssistantMessage
-    >(async function* () {
-      try {
-        yield [];
-      } finally {
-        // biome-ignore lint/correctness/noUnsafeFinally: the case under test is a throwing finally block.
-        throw failure;
-      }
-    }, LockPolicy);
+    const coroutine = new Deterministic<typeof TaskSchema, AssistantMessage>(
+      async function* () {
+        try {
+          yield [];
+        } finally {
+          // biome-ignore lint/correctness/noUnsafeFinally: the case under test is a throwing finally block.
+          throw failure;
+        }
+      },
+      LockPolicy,
+    );
     const sibling = new MockAgent({ runs: [] });
     const coroutineId = graph.addNode({
       trigger: TriggerRule.always(),

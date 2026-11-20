@@ -14,8 +14,14 @@ import { InfoTool, SendTool } from "../dist/messaging.js";
 
 // Native-free: only dist/messaging.js plus the engine for real send admission.
 
+/** The task fields every send call must carry. */
+const meta = { handoff: "h", task: "t", spec: "s" };
 const call = (tool, input = {}, signal) =>
-  tool.execute("call-1", input, signal);
+  tool.execute(
+    "call-1",
+    SendTool.is(tool) ? { ...meta, ...input } : input,
+    signal,
+  );
 const never = () => new AbortController().signal;
 
 test("unhosted tools announce no routes and still refuse to run", async () => {
@@ -85,6 +91,22 @@ test("send admits one message on a real outgoing message edge, keeping the paylo
   assert.equal(out.transport.left[0], payload);
 });
 
+test("send passes its task metadata to the host beside the message", async () => {
+  const seen = [];
+  const host = {
+    sendParameters: SendTool.parametersFor([["a->b", Type.Number()]]),
+    send: (...args) => void seen.push(args),
+  };
+  const input = { id: "a->b", payload: 7, handoff: "h", task: "t", spec: "s" };
+  await call(new SendTool(host), input);
+  assert.deepEqual(seen, [
+    [
+      { id: "a->b", payload: 7 },
+      { handoff: "h", task: "t", spec: "s" },
+    ],
+  ]);
+});
+
 test("send correlates each route's ID with its schema", async () => {
   const { edges, host } = wiredGraph([
     ["n", Type.Number()],
@@ -134,6 +156,10 @@ test("send rejects invalid, unhosted and cancelled calls without emitting", asyn
     /^Error: Invalid send input/,
   );
   await assert.rejects(
+    new SendTool(host).execute("call-1", { id: "a->b", payload: 1 }),
+    /^Error: Invalid send input/,
+  );
+  await assert.rejects(
     call(new SendTool(host), { id: "a->b", payload: 1, to: "b" }),
     /^Error: Invalid send input/,
   );
@@ -180,11 +206,17 @@ test("invoke validates against the supplied host's schemas, not the construction
     send,
     text.host,
     "c",
-    { id: "e", payload: "7" },
+    { id: "e", payload: "7", ...meta },
     never(),
   );
   await assert.rejects(
-    SendTool.invoke(send, text.host, "c", { id: "e", payload: 7 }, never()),
+    SendTool.invoke(
+      send,
+      text.host,
+      "c",
+      { id: "e", payload: 7, ...meta },
+      never(),
+    ),
     /Invalid send input/,
   );
   assert.deepEqual(numeric.out.transport.left, []);
@@ -234,7 +266,7 @@ test("a copied tool cannot acquire graph authority through companion invoke", as
       { ...send },
       sendHost,
       "c",
-      { id: "a->b", payload: 1 },
+      { id: "a->b", payload: 1, ...meta },
       never(),
     ),
     TypeError,
@@ -297,7 +329,7 @@ test("messaging tools count each send and info call once, direct or invoked", as
     send,
     sendHost,
     "c",
-    { id: "ok", payload: 2 },
+    { id: "ok", payload: 2, ...meta },
     new AbortController().signal,
   );
   await assert.rejects(

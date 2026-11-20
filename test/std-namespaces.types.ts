@@ -45,7 +45,7 @@ const NumberSchema = Type.Number();
 const StringSchema = Type.String();
 type Num = typeof NumberSchema;
 type Str = typeof StringSchema;
-type Chat = typeof agent.AgenticInputSchema;
+type Chat = typeof agent.TaskSchema;
 
 // --- graph: typed node construction and reading ---------------------------------------------------
 
@@ -129,9 +129,13 @@ export async function graphTypesBuildAndReadTypedNodes(
     step,
     on_error: recover,
   };
-  const notice: graph.nodes.AgenticInput = {
+  const notice: graph.nodes.Task = {
     kind: "error",
     text: "upstream failed",
+    taskId: "notice",
+    spec: "",
+    deps: [],
+    history: [],
   };
   const id: graph.NodeIdType = g.addNode(spec);
   g.addEdge(source, id, numbers).addEdge(source, id, done);
@@ -1323,7 +1327,7 @@ export async function messagingToolsAreNominalAgentTools(
     send,
     host,
     "send-1",
-    { id: "numbers", payload: 1 },
+    { id: "numbers", payload: 1, handoff: "", task: "", spec: "" },
     signal,
   );
   const described = await tools.InfoTool.invoke(

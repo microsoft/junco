@@ -365,7 +365,7 @@ type ValidatedPlan = {
 type PlanDecision = { accepted: true; value: ValidatedPlan } | { accepted: false; feedback: string; partial?: ValidatedPlan };
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const prompt = (text: string) => ({ kind: "prompt", text }) as const;
+const prompt = (text: string, spec: string) => graph.nodes.Task.create({ kind: "prompt", text, spec });
 const tail = (text: string, size = 4000): string => (text.length <= size ? text : `…${text.slice(-size)}`);
 const fence = (lang: string, body: string): string => `\`\`\`\`${lang}\n${body}${body.endsWith("\n") ? "" : "\n"}\`\`\`\``;
 const other = (branch: Branch): Branch => (branch === "A" ? "B" : "A");
@@ -497,7 +497,7 @@ export const Input: Code = ({ context, edges, policy }) => {
   return {
     state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
       while (true) {
-        const issue = prompt(issueText(context.problem));
+        const issue = prompt(issueText(context.problem), "The lead's investigation plan assigns every worker a section.");
         signal.throwIfAborted();
         published = true;
         yield outputs.map((output) => graph.Message.create(output, issue));
@@ -539,7 +539,7 @@ export const Assign: Code = ({ context, edges, policy }) => {
       const issue = issueText(context.problem);
       published = true;
       yield outputs.map(([worker, output]) =>
-        graph.Message.create(output, prompt(`<issue>\n${issue}\n</issue>\n\n# Your assignment from the lead\n\n${sections[worker]}`)),
+        graph.Message.create(output, prompt(`<issue>\n${issue}\n</issue>\n\n# Your assignment from the lead\n\n${sections[worker]}`, "An investigator report answering this assignment with evidence.")),
       );
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
@@ -560,8 +560,8 @@ export const JoinEvidence: Code = ({ context, edges, policy }) => {
       context.save("evidence.md", evidence);
       published = true;
       yield [
-        graph.Message.create(planner, prompt(`<issue>\n${issueText(context.problem)}\n</issue>\n\n# Evidence from the investigation team\n\n${evidence}`)),
-        graph.Message.create(dispatch, prompt(evidence)),
+        graph.Message.create(planner, prompt(`<issue>\n${issueText(context.problem)}\n</issue>\n\n# Evidence from the investigation team\n\n${evidence}`, "A fix plan grounded in the evidence.")),
+        graph.Message.create(dispatch, prompt(evidence, "The evidence is dispatched to the candidates.")),
       ];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
@@ -584,7 +584,7 @@ export const JoinDrafts: Code = ({ context, edges, policy }) => {
       }).join("\n\n");
       context.save("planning/drafts.md", drafts);
       published = true;
-      yield [graph.Message.create(outputs[0], prompt(drafts))];
+      yield [graph.Message.create(outputs[0], prompt(drafts, "One merged fix plan chosen from the drafts."))];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -749,8 +749,8 @@ export const Dispatch: Code = ({ context, edges, policy }) => {
       };
       published = true;
       yield [
-        graph.Message.create(candidates.A, prompt(assignment("A"))),
-        graph.Message.create(candidates.B, prompt(assignment("B"))),
+        graph.Message.create(candidates.A, prompt(assignment("A"), "Candidate A's patch is applied in its sandbox and passes its checks.")),
+        graph.Message.create(candidates.B, prompt(assignment("B"), "Candidate B's patch is applied in its sandbox and passes its checks.")),
         graph.Message.create(validators.A, { checks }),
         graph.Message.create(validators.B, { checks }),
         graph.Message.create(apply, { brief, checks }),
@@ -888,7 +888,7 @@ export const Apply: Code = ({ context, edges, policy }) => {
         `Candidate ${loser}: ${rejected}`,
       ].join("\n\n");
       published = true;
-      yield [...(integrator === undefined ? [] : [graph.Message.create(integrator, prompt(body))]), graph.Message.create(freeze, { brief, checks, summary })];
+      yield [...(integrator === undefined ? [] : [graph.Message.create(integrator, prompt(body, "The winning patch is integrated into canonical /testbed and its checks pass."))]), graph.Message.create(freeze, { brief, checks, summary })];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -920,6 +920,7 @@ export const Freeze: Code = ({ context, edges, policy }) => {
               "# Final diff (canonical /testbed; `git diff HEAD` shows it, the changes are staged)",
               fence("diff", patch),
             ].join("\n\n"),
+            "A verdict on whether the final diff fixes the issue.",
           ),
         )]),
         graph.Message.create(finish, { patch, checks, summary }),

@@ -8,11 +8,7 @@ import {
 import { NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import {
-  type AgenticInputSchema,
-  Deterministic,
-  MockAgent,
-} from "../src/index.ts";
+import { Deterministic, MockAgent, type TaskSchema } from "../src/index.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 import {
   assistant,
@@ -69,7 +65,7 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
     policy: LockPolicy,
     description: "",
     trigger: TriggerRule.always(),
-    state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+    state: new Deterministic<typeof TaskSchema, AssistantMessage>(
       async function* () {
         return fauxAssistantMessage("unused");
       },
@@ -82,7 +78,7 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
   });
   const quiet = graph.addNode({
     trigger: TriggerRule.always(),
-    state: new Deterministic<typeof AgenticInputSchema, AssistantMessage>(
+    state: new Deterministic<typeof TaskSchema, AssistantMessage>(
       async function* () {
         yield [];
         return fauxAssistantMessage("quiet done");

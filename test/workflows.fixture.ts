@@ -26,6 +26,7 @@ import {
   workflows,
 } from "junco";
 import { Value } from "typebox/value";
+import { renderTask } from "../src/agent-node.ts";
 import { userTexts } from "./deterministic-support.ts";
 import { fauxRuntime, NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
 
@@ -159,14 +160,14 @@ const execution = await JuncoGraph.fromYaml(workflows.ralph, {
 const graph = execution.graph;
 const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!.state;
 assert.ok(agent instanceof agentApi.JuncoAgent);
+const task = graphApi.nodes.Task.create({
+  kind: "prompt",
+  text: assignment,
+  spec: "",
+});
 try {
   graph.source.enqueue({
-    messages: new Map([
-      [
-        graphApi.EdgeId.create("assignment"),
-        [{ kind: "prompt", text: assignment }],
-      ],
-    ]),
+    messages: new Map([[graphApi.EdgeId.create("assignment"), [task]]]),
     values: new Map(),
   });
   for (let windows = 0; requests.length < 3; windows++) {
@@ -176,12 +177,13 @@ try {
   }
   await execution.run();
   await execution.run();
+  const rendered = renderTask(task);
   assert.deepEqual(
     requests.map(({ users }) => users),
     [
-      [FIRST_ROUND, assignment],
-      [FIRST_ROUND, assignment, revision],
-      [FIRST_ROUND, assignment, revision, revision],
+      [FIRST_ROUND, rendered],
+      [FIRST_ROUND, rendered, revision],
+      [FIRST_ROUND, rendered, revision, revision],
     ],
   );
   assert.deepEqual(judged, [1, 2, 3]);
@@ -278,10 +280,11 @@ try {
     ["x-short", "x-complete"],
     ["y-short", "y-complete"],
   ]) {
+    const tasks = batch.map((text) =>
+      graphApi.nodes.Task.create({ kind: "prompt", text, spec: "" }),
+    );
     any.graph.source.enqueue({
-      messages: new Map([
-        [candidates, batch.map((text) => ({ kind: "prompt", text }))],
-      ]),
+      messages: new Map([[candidates, tasks]]),
       values: new Map(),
     });
     await any.run();
@@ -293,7 +296,7 @@ try {
     const users = selections.at(-1)!.users;
     assert.deepEqual(users.slice(previousUsers), [
       SELECT_INSTRUCTION,
-      ...batch,
+      ...tasks.map((task) => renderTask(task)),
     ]);
     previousUsers = users.length;
   }

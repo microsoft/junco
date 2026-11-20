@@ -1,9 +1,9 @@
 import { EdgeId, Message, NodeId, type ParentView } from "dataflow-engine";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { JuncoAgent } from "junco-agent";
+import { JuncoAgent, Task, TaskSchema } from "junco-agent";
 import { invokeMemoryTool, type JuncoMemory } from "junco-tools";
-import { type TSchema, Type } from "typebox";
+import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { Deterministic } from "../../deterministic.js";
 import type { JuncoGraph } from "../../junco-graph.js";
@@ -39,6 +39,8 @@ type RalphState = {
   started: boolean;
   lastSaved: unknown;
   prepared: string | undefined;
+  /** The one task this loop revises, minted when its assignment is admitted. */
+  task: TextTask | undefined;
 };
 type FanInState = {
   readonly kind: "fan-in";
@@ -49,8 +51,8 @@ type FanInState = {
     | "selecting"
     | "flushing-publication";
   failure: Failure | undefined;
-  winner: string | undefined;
-  choices: readonly string[];
+  winner: TextTask | undefined;
+  choices: readonly TextTask[];
 };
 type FanOutState = {
   readonly kind: "fan-out";
@@ -83,10 +85,6 @@ const TOPOLOGIES = [
   ["fan-in", [CANDIDATES, "Memory~>Select", SELECTED, OUTPUT]],
   ["fan-out", [RECALL, UPDATE, OUTPUT]],
 ] as const;
-const PROMPT = Type.Object(
-  { kind: Type.Literal("prompt"), text: Type.String() },
-  { additionalProperties: false },
-);
 
 function topology(edges: CodeContext["edges"]): Topology | undefined {
   for (const [kind, ids] of TOPOLOGIES)
@@ -99,12 +97,17 @@ function healthy(state: Level): void {
   if (state.failure !== undefined) throw state.failure.error;
 }
 
-function promptText(value: unknown, label: string): string {
-  if (!Value.Check(PROMPT, value))
+type TextTask = Extract<Task, { readonly text: string }>;
+
+function promptTask(value: unknown, label: string): TextTask {
+  if (
+    !(Value.Check(TaskSchema, value) && "text" in value) ||
+    value.kind !== "prompt"
+  )
     throw new TypeError(`${label} requires prompt messages`);
   if (value.text.trim() === "")
     throw new Error(`${label} prompt text must not be empty`);
-  return value.text;
+  return value;
 }
 
 /** Borrowed-memory controllers for all three standard memory workflow topologies. */
@@ -132,6 +135,7 @@ export function memory(options: MemoryScheduleOptions): {
           started: false,
           lastSaved: undefined,
           prepared: undefined,
+          task: undefined,
         };
       else if (kind === "fan-in")
         state = {
@@ -229,13 +233,16 @@ export function memory(options: MemoryScheduleOptions): {
                   );
                 state.started = true;
                 state.prepared = await recall(assignment, assignment, signal);
+                state.task = Task.create({
+                  kind: "prompt",
+                  text: state.prepared,
+                  // shortcut: one spec for the whole admitted batch; split per objective if Ralph tracks objectives separately
+                  spec: assignments
+                    .map((t) => promptTask(t, "MemoryRalphLoop").spec)
+                    .join("\n"),
+                });
                 state.phase = "flushing-prompt";
-                view = yield [
-                  Message.create(prepared, {
-                    kind: "prompt",
-                    text: state.prepared,
-                  }),
-                ];
+                view = yield [Message.create(prepared, state.task)];
                 state.phase = "idle";
                 continue;
               }
@@ -253,7 +260,7 @@ export function memory(options: MemoryScheduleOptions): {
                   state.prepared = RETRY;
                   state.phase = "flushing-prompt";
                   view = yield [
-                    Message.create(prepared, { kind: "prompt", text: RETRY }),
+                    Message.create(prepared, { ...state.task, text: RETRY }),
                   ];
                   state.phase = "idle";
                   continue;
@@ -270,7 +277,7 @@ export function memory(options: MemoryScheduleOptions): {
                 if (tracked.done) {
                   state.phase = "flushing-final";
                   view = yield [
-                    Message.create(output, { kind: "prompt", text: "saved" }),
+                    Message.create(output, { ...state.task, text: "saved" }),
                   ];
                 } else {
                   state.prepared = await recall(
@@ -281,7 +288,7 @@ export function memory(options: MemoryScheduleOptions): {
                   state.phase = "flushing-prompt";
                   view = yield [
                     Message.create(prepared, {
-                      kind: "prompt",
+                      ...state.task,
                       text: state.prepared,
                     }),
                   ];
@@ -305,18 +312,16 @@ export function memory(options: MemoryScheduleOptions): {
                 }
                 state.phase = "processing";
                 // Validate the whole delivery before its first persistent write.
-                const texts = batch.map((candidate) =>
-                  promptText(candidate, "MemoryFanIn"),
+                const tasks = batch.map((candidate) =>
+                  promptTask(candidate, "MemoryFanIn"),
                 );
-                for (const text of texts) await save(text, signal);
+                for (const { text } of tasks) await save(text, signal);
+                // The candidates' own tasks, provenance intact.
                 state.choices =
-                  state.winner === undefined ? texts : [state.winner, ...texts];
+                  state.winner === undefined ? tasks : [state.winner, ...tasks];
                 state.phase = "flushing-candidates";
-                view = yield state.choices.map((text) =>
-                  Message.create(selection, {
-                    kind: "prompt",
-                    text,
-                  }),
+                view = yield state.choices.map((task) =>
+                  Message.create(selection, task),
                 );
                 state.phase = "selecting";
               }
@@ -332,11 +337,14 @@ export function memory(options: MemoryScheduleOptions): {
                 );
               const result = selected[0];
               const selectedText = finalText(result, "MemoryFanIn");
-              if (!state.choices.some((text) => text.trim() === selectedText))
+              const chosen = state.choices.find(
+                (task) => task.text.trim() === selectedText,
+              );
+              if (chosen === undefined)
                 throw new Error(
                   "MemoryFanIn selected text outside the candidate set",
                 );
-              state.winner = selectedText;
+              state.winner = { ...chosen, text: selectedText };
               state.phase = "flushing-publication";
               view = yield [Message.create(output, result)];
               state.choices = [];
@@ -362,10 +370,11 @@ export function memory(options: MemoryScheduleOptions): {
               state.phase = "processing";
               let payload: unknown;
               if (next.id === RECALL) {
-                const assignment = promptText(next.payload, "MemoryFanOut");
+                const task = promptTask(next.payload, "MemoryFanOut");
+                // The same task, its text enriched with recalled memories.
                 payload = {
-                  kind: "prompt",
-                  text: await recall(assignment, assignment, signal),
+                  ...task,
+                  text: await recall(task.text, task.text, signal),
                 };
               } else {
                 finalText(next.payload, "MemoryFanOut");

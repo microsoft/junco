@@ -20,13 +20,14 @@ import {
   type StepFn,
 } from "dataflow-engine";
 import {
-  AgenticInputSchema,
   JuncoAgent,
   JuncoAgentError,
   type JuncoAgentNodeContext,
+  type Task,
+  TaskSchema,
 } from "junco-agent";
 import { SendTool, type ToolCollection } from "junco-tools";
-import type { TSchema } from "typebox";
+import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { Agentic } from "./agentic.js";
 import type { MockAgent } from "./mock-agent.js";
@@ -57,6 +58,44 @@ type DrivenAgent<N extends TSchema, V> =
   | JuncoAgent<Skill, PromptTemplate, AgentTool, N, V>
   | MockAgent<Skill, PromptTemplate, AgentTool, N, V>;
 
+type TextTask = Extract<Task, { readonly text: string }>;
+
+/** A received task; `deps` grows as its holder sends subtasks of it. */
+type HeldTask = Omit<TextTask, "deps"> & { readonly deps: string[] };
+
+/** The user message a delivered task becomes: its text, then its metadata as a `Task:` JSON line. */
+export const renderTask = (task: TextTask): string =>
+  `${task.text}\n\nTask: ${JSON.stringify({ taskId: task.taskId, spec: task.spec, deps: task.deps, history: task.history })}`;
+
+const PROVENANCE = ["taskId", "spec", "deps", "history"];
+
+/**
+ * `schema` with the provenance properties of every task-shaped object (one with a `taskId`)
+ * dropped, through `anyOf`/`oneOf`/`allOf`: a sending node attaches them itself from `send`'s
+ * `task`/`spec`/`handoff`, so its model never writes them into a payload.
+ */
+export function withoutProvenance<S extends TSchema>(schema: S): S {
+  const out = { ...schema } as Record<string, unknown>;
+  for (const key of ["anyOf", "oneOf", "allOf"])
+    if (Array.isArray(out[key])) out[key] = out[key].map(withoutProvenance);
+  const { properties, required } = out;
+  if (
+    typeof properties === "object" &&
+    properties !== null &&
+    "taskId" in properties
+  ) {
+    out.properties = Object.fromEntries(
+      Object.entries(properties).filter(([name]) => !PROVENANCE.includes(name)),
+    );
+    if (Array.isArray(required))
+      out.required = required.filter((name) => !PROVENANCE.includes(name));
+  }
+  return out as S;
+}
+
+/** A task as a model sends it: everything but the provenance its node attaches. */
+const TaskDraftSchema = withoutProvenance(TaskSchema);
+
 /**
  * The one run of a prompt agent driven by its graph node. Internal: graphs construct its node for
  * a registered agent without a step.
@@ -72,10 +111,15 @@ export class AgentDriver<N extends TSchema, V> {
   /** The node body's policy, sharing {@link #seenValues}. */
   readonly #policy: NodePolicy;
   /** The node's own graph registration, captured when its body was primed. */
-  #registration: NodeRegistration<N, V> | undefined;
-  #messageHost:
-    | NonNullable<JuncoAgentNodeContext<N, V>["messaging"]>
-    | undefined;
+  #registration: NodeRegistration<N> | undefined;
+  #messageHost: NonNullable<JuncoAgentNodeContext<N>["messaging"]> | undefined;
+  /** The node's id, captured when its body was primed; recorded in the history it appends. */
+  #node = "";
+  /**
+   * Every task this node received, by id; a redelivered task replaces its earlier copy. Kept for
+   * the node's lifetime: its session keeps showing their ids across runs.
+   */
+  readonly #received = new Map<string, HeldTask>();
 
   private constructor(agent: DrivenAgent<N, V>) {
     this.#agent = agent;
@@ -87,7 +131,7 @@ export class AgentDriver<N extends TSchema, V> {
   }
 
   /** Live outbound route schemas and topology for `send` and `info`. */
-  #messaging(): NonNullable<JuncoAgentNodeContext<N, V>["messaging"]> {
+  #messaging(): NonNullable<JuncoAgentNodeContext<N>["messaging"]> {
     if (this.#messageHost !== undefined) return this.#messageHost;
     const driver = this;
     this.#messageHost = {
@@ -96,11 +140,11 @@ export class AgentDriver<N extends TSchema, V> {
           driver.#registration?.sendParameters ?? SendTool.parametersFor([])
         );
       },
-      send: (message) => {
+      send: (message, task) => {
         const registration = this.#registration;
         if (registration === undefined)
           throw new Error("send requires a JuncoGraph host");
-        registration.send(message);
+        registration.send(this.#outbound(message, task));
       },
       info: () => {
         const registration = this.#registration;
@@ -110,6 +154,49 @@ export class AgentDriver<N extends TSchema, V> {
       },
     };
     return this.#messageHost;
+  }
+
+  /**
+   * `message` with the task provenance its `send` call implies: a handoff of received task `task`
+   * with this node's history entry appended when `spec` is that task's own spec, otherwise a new
+   * subtask of it, recorded in its deps. Fields a model put inside the payload never win; non-task
+   * payloads pass unchanged.
+   */
+  #outbound(
+    message: Message<N>,
+    {
+      handoff,
+      task,
+      spec,
+    }: {
+      readonly handoff: string;
+      readonly task: string;
+      readonly spec: string;
+    },
+  ): Message<N> {
+    const payload: unknown = message.payload;
+    if (!(Value.Check(TaskDraftSchema, payload) && "text" in payload))
+      return message;
+    const held = this.#received.get(task);
+    if (held === undefined)
+      throw new Error(
+        `send: task "${task}" was not received; received: ${[...this.#received.keys()].join(", ") || "none"}`,
+      );
+    const entry = { node: this.#node, desc: held.text, handoff };
+    let fields: Pick<TextTask, "taskId" | "spec" | "deps" | "history">;
+    if (spec === held.spec)
+      fields = {
+        taskId: held.taskId,
+        spec,
+        deps: [...held.deps],
+        history: [...held.history, entry],
+      };
+    else {
+      const taskId = crypto.randomUUID();
+      held.deps.push(taskId);
+      fields = { taskId, spec, deps: [], history: [entry] };
+    }
+    return { ...message, payload: { ...payload, ...fields } as Static<N> };
   }
 
   #deliver(view: ParentView<N, V>): Message<N>[] {
@@ -233,12 +320,20 @@ export class AgentDriver<N extends TSchema, V> {
     const agent = this.#agent;
     for (const { id, payload: input } of messages) {
       const payload: unknown = input;
-      if (Value.Check(AgenticInputSchema, payload) && "text" in payload)
+      if (Value.Check(TaskDraftSchema, payload) && "text" in payload) {
+        if (!Value.Check(TaskSchema, payload))
+          throw new DataflowDefinitionError(
+            `Task on edge ${id} lacks its taskId, spec, deps or history; construct it with Task.create`,
+          );
+        this.#received.set(payload.taskId, {
+          ...payload,
+          deps: [...payload.deps],
+        });
         await agent.steer(
-          payload.text,
+          renderTask(payload),
           payload.images?.length ? { images: payload.images } : undefined,
         );
-      else await agent.steer(JSON.stringify({ id, payload }));
+      } else await agent.steer(JSON.stringify({ id, payload }));
     }
     if (!this.#started) {
       // Steers wait in Pi until a staged run is admitted.
@@ -270,7 +365,8 @@ export class AgentDriver<N extends TSchema, V> {
    * Without a failure handler the node calls `agent.next()` at most once per activation; a handler
    * can retry failed runs before yielding. A settlement returns the native final message.
    * While it drives a `JuncoAgent`, the agent's `send` admits messages on this node's outgoing
-   * message edges and `info` describes this node's routes. Unless
+   * message edges, attaching task provenance (see `#outbound`), and `info` describes this node's
+   * routes. Delivered tasks are steered as {@link renderTask} text. Unless
    * `options.is_available` replaces it, the node is available before it starts only when its
    * trigger fires with a staged prompt or fresh inbound data, and once started it stays resumable
    * until it returns; a node re-armed through a value self-edge waits for its trigger again.
@@ -286,6 +382,7 @@ export class AgentDriver<N extends TSchema, V> {
       V
     > {
       driver.#registration = registrationOf(this);
+      driver.#node = String(this.id);
       let view = yield [];
       while (true) {
         const result = await driver.#recovering(

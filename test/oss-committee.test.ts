@@ -8,11 +8,7 @@ import {
   NodeId,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
-import {
-  type AgenticInput,
-  AssistantMessageSchema,
-  Deterministic,
-} from "junco";
+import { AssistantMessageSchema, Deterministic, type Task } from "junco";
 import { Value } from "typebox/value";
 import {
   approvedPlan,
@@ -20,6 +16,7 @@ import {
   OssSearchTool,
   ReviewRound,
 } from "../examples/oss-committee/oss-committee.ts";
+import { renderTask } from "../src/agent-node.ts";
 import {
   request,
   type ScriptedReview,
@@ -27,6 +24,12 @@ import {
 } from "./oss-committee.fixture.ts";
 
 const quiet = new DummyTracer();
+/** The emit nodes mint assignment ids with `Task.create`; read the id back from the rendered input. */
+const taskIdOf = (input: string | undefined): string => {
+  const id = JSON.parse(input!.slice(input!.lastIndexOf("Task: ") + 6)).taskId;
+  assert.match(id, /^[0-9a-f-]{36}$/);
+  return id;
+};
 
 const repositoryUrl = "https://github.com/tui-cs/Terminal.Gui";
 /** The trimmed text of a dynamic YAML result, after checking it is a native assistant message. */
@@ -83,16 +86,37 @@ test("a round gates each member on the previous member's complete report", async
   assert.equal(committee.memberInputs.Architect.length, 1);
   assert.equal(
     committee.memberInputs.Librarian[0],
-    `Original request:\n${request}\n\nSearch public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps.`,
+    renderTask({
+      kind: "prompt",
+      text: `Original request:\n${request}\n\nSearch public GitHub repositories using only generic technical terms, then report the available evidence and any research gaps.`,
+      taskId: taskIdOf(committee.memberInputs.Librarian[0]),
+      spec: "A research report citing public OSS evidence and stating its gaps.",
+      deps: [],
+      history: [],
+    }),
   );
   assert.equal(
     committee.memberInputs.Architect[0],
-    `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}`,
+    renderTask({
+      kind: "prompt",
+      text: `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}`,
+      taskId: taskIdOf(committee.memberInputs.Architect[0]),
+      spec: "A design report grounded in the request and the Librarian report.",
+      deps: [],
+      history: [],
+    }),
   );
   assert.equal(committee.memberInputs.Reducer.length, 1);
   assert.equal(
     committee.memberInputs.Reducer[0],
-    `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}\n\nArchitect report:\n${textOf(architect.value)}`,
+    renderTask({
+      kind: "prompt",
+      text: `Original request:\n${request}\n\nLibrarian report:\n${librarianReport}\n\nArchitect report:\n${textOf(architect.value)}`,
+      taskId: taskIdOf(committee.memberInputs.Reducer[0]),
+      spec: "One final recommendation reconciling the Librarian and Architect reports.",
+      deps: [],
+      history: [],
+    }),
   );
   assert.ok(
     committee.modelRequests.indexOf("Reducer") >
@@ -252,20 +276,43 @@ test("a truncated research report never reaches the Architect", async () => {
 }, 5_000);
 
 test("the design code node rejects missing searches and malformed partial handoffs before any model starts", async () => {
-  const cases: { batch?: AgenticInput[]; failed?: boolean; error: RegExp }[] = [
+  const cases: { batch?: Task[]; failed?: boolean; error: RegExp }[] = [
     { error: /Librarian did not complete a valid GitHub OSS search/ },
     {
       batch: [],
       error: /Librarian must send exactly one partial research prompt/,
     },
     {
-      batch: [{ kind: "followUp", text: "partial" }],
+      batch: [
+        {
+          kind: "followUp",
+          text: "partial",
+          taskId: "partial",
+          spec: "",
+          deps: [],
+          history: [],
+        },
+      ],
       error: /Librarian must send exactly one partial research prompt/,
     },
     {
       batch: [
-        { kind: "prompt", text: "first" },
-        { kind: "prompt", text: "second" },
+        {
+          kind: "prompt",
+          text: "first",
+          taskId: "first",
+          spec: "",
+          deps: [],
+          history: [],
+        },
+        {
+          kind: "prompt",
+          text: "second",
+          taskId: "second",
+          spec: "",
+          deps: [],
+          history: [],
+        },
       ],
       error: /Librarian must send exactly one partial research prompt/,
     },
@@ -504,7 +551,14 @@ test("the Reducer sends the Librarian and Architect back until it approves", asy
   for (const [index, feedback] of [markdownFeedback, cacheFeedback].entries()) {
     assert.equal(
       Librarian[index + 1],
-      `Original request:\n${request}\n\nReview feedback:\n${feedback}\n\nContinue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.`,
+      renderTask({
+        kind: "prompt",
+        text: `Original request:\n${request}\n\nReview feedback:\n${feedback}\n\nContinue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.`,
+        taskId: taskIdOf(Librarian[index + 1]),
+        spec: "A research report citing public OSS evidence and stating its gaps.",
+        deps: [],
+        history: [],
+      }),
     );
     assert.ok(
       Architect[index + 1]!.startsWith(

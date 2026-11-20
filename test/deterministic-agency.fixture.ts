@@ -12,19 +12,21 @@ import {
 import {
   Edge,
   EdgeId,
+  Message as EdgeMessage,
   NodeId,
   TriggerEntry,
   TriggerRule,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
-  AgenticInputSchema,
   AssistantMessageSchema,
   agent,
   Deterministic,
   JuncoGraph,
   schedules,
   type syntax,
+  Task,
+  TaskSchema,
   tools,
   tracer,
 } from "junco";
@@ -57,7 +59,13 @@ export type DeterministicSummary = {
 export async function runDeterministicFixture(
   strategy: Strategy,
 ): Promise<DeterministicSummary> {
-  const handoff = Edge.message("producer->worker", AgenticInputSchema);
+  const handoff = Edge.message("producer->worker", TaskSchema);
+  const seed = Edge.message("$source->producer", TaskSchema);
+  const seedTask = Task.create({
+    kind: "prompt",
+    text: "produce",
+    spec: "worker done",
+  });
   const value = Edge.value("producer=>worker", AssistantMessageSchema);
   const producer = await leaf(
     [
@@ -68,7 +76,13 @@ export async function runDeterministicFixture(
         ].map((payload, index) =>
           fauxToolCall(
             "send",
-            { id: handoff.id, payload },
+            {
+              id: handoff.id,
+              payload,
+              handoff: "sent",
+              task: seedTask.taskId,
+              spec: seedTask.spec,
+            },
             { id: `send-${index}` },
           ),
         ),
@@ -121,7 +135,11 @@ export async function runDeterministicFixture(
       TriggerEntry.on(value),
     ),
   });
-  graph.addEdge(p, w, handoff).addEdge(p, w, value);
+  graph
+    .addEdge(p, w, handoff)
+    .addEdge(p, w, value)
+    .addEdge(ports.source.id, p, seed);
+  graph.emit(ports.source.id, EdgeMessage.create(seed, seedTask));
 
   ports.connect(graph, w);
   await graphContext.run();
@@ -134,11 +152,10 @@ export async function runDeterministicFixture(
   assert.deepEqual(outputs, ["seed", "done"]);
 
   assert.equal(upstream, "seed");
-  assert.deepEqual(consumerUserTexts, [
-    "upstream: seed",
-    "context first",
-    "then work",
-  ]);
+  assert.deepEqual(
+    consumerUserTexts.map((text) => text.split("\n\nTask: ")[0]),
+    ["upstream: seed", "context first", "then work"],
+  );
   const inputs = consumerUserTexts;
 
   await graph.close();
@@ -208,7 +225,11 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   const producer = await nativeOptions([
     fauxAssistantMessage(
       // Pi coerces a numeric string such as "7" to the route's number, so the model sends a word.
-      fauxToolCall("send", { id: "numbers", payload: "seven" }, { id: "s1" }),
+      fauxToolCall(
+        "send",
+        { id: "numbers", payload: "seven", handoff: "", task: "", spec: "" },
+        { id: "s1" },
+      ),
       { stopReason: "toolUse" },
     ),
     (context) => {
@@ -216,7 +237,11 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       rejectedString = result?.role === "toolResult" && result.isError;
       sendSchema = declared(context.messages, "send")?.parameters;
       return fauxAssistantMessage(
-        fauxToolCall("send", { id: "numbers", payload: 7 }, { id: "s2" }),
+        fauxToolCall(
+          "send",
+          { id: "numbers", payload: 7, handoff: "", task: "", spec: "" },
+          { id: "s2" },
+        ),
         { stopReason: "toolUse" },
       );
     },
@@ -284,8 +309,24 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   }
   assert.equal(rejectedString, true);
   assert.ok(sendSchema);
-  assert.ok(Value.Check(sendSchema, { id: "numbers", payload: 7 }));
-  assert.ok(!Value.Check(sendSchema, { id: "numbers", payload: "7" }));
+  assert.ok(
+    Value.Check(sendSchema, {
+      id: "numbers",
+      payload: 7,
+      handoff: "",
+      task: "",
+      spec: "",
+    }),
+  );
+  assert.ok(
+    !Value.Check(sendSchema, {
+      id: "numbers",
+      payload: "7",
+      handoff: "",
+      task: "",
+      spec: "",
+    }),
+  );
   assert.deepEqual(consumerUserTexts, [
     "Receive your numbers.",
     '{"id":"numbers","payload":7}',

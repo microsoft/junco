@@ -3,6 +3,7 @@ graph:
   nodes:
     Goals:
       kind: emit
+      spec: Both versions and release dates are stated, each with a cited source page.
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
     Bun:
       prompt: Answer the assignment in the following user message for Bun only, browsing from https://bun.sh with the playwright tools.

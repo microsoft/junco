@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Message, NodeGenerator, ParentView } from "dataflow-engine";
-import { type AgenticInputSchema, JuncoAgentError } from "junco-agent";
+import { JuncoAgentError, type TaskSchema } from "junco-agent";
 import type { ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
 import { checkPolicy } from "./node-policy.js";
@@ -26,7 +26,7 @@ type Advance<N extends TSchema, T> = IteratorResult<Message<N>[], T>;
  * lease, and rejects every later advance. Neither can preempt a body that ignores its signal.
  */
 export class Deterministic<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   T = AssistantMessage,
 > implements NodeGenerator<N, T>
 {

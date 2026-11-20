@@ -24,7 +24,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import * as E from "fp-ts/lib/Either.js";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { AgenticInputSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
+import { Task, TaskSchema, Deterministic, graph as graphApi, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { problemRecorder, runCli, type YamlAgent, type YamlExecution } from "../support.ts";
 import source from "./oss-committee.yml" with { type: "text" };
 
@@ -188,7 +188,8 @@ const ResearchAssignment: syntax.DeterministicNode<RoundContext> = ({ context, e
           : "Continue investigating with new search_oss lookups using only generic technical terms, then report the updated evidence and any remaining research gaps.");
       published = true;
       // Like a YAML emit node, publish once and park; assignments are messages, not fake reports.
-      while (true) yield [graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, { kind: "prompt", text })];
+      const task = Task.create({ kind: "prompt", text, spec: "A research report citing public OSS evidence and stating its gaps." });
+      while (true) yield [graphApi.Message.create(edges.get("ResearchAssignment~>Librarian")!, task)];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -204,7 +205,7 @@ const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
       let report: string;
       if (partial !== undefined) {
         const [snapshot, ...extra] = partial;
-        if (!Value.Check(AgenticInputSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
+        if (!Value.Check(TaskSchema, snapshot) || snapshot.kind !== "prompt" || extra.length > 0)
           throw new Error("Librarian must send exactly one partial research prompt");
         report = `Partial research: a GitHub lookup failed and the Librarian is paused.\n${snapshot.text}`;
       } else {
@@ -217,7 +218,8 @@ const DesignAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
       context.architectStarted = true;
       const text = `Original request:\n${context.request}\n\n${context.feedback === undefined ? "" : `Review feedback:\n${context.feedback}\n\n`}Librarian report:\n${report}`;
       published = true;
-      while (true) yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, { kind: "prompt", text })];
+      const task = Task.create({ kind: "prompt", text, spec: "A design report grounded in the request and the Librarian report." });
+      while (true) yield [graphApi.Message.create(edges.get("DesignAssignment~>Architect")!, task)];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -231,7 +233,8 @@ const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
       const inputs = yield [];
       const text = `Original request:\n${context.request}\n\nLibrarian report:\n${syntax.finalText(inputs.values.get(reducerResearchId), "Librarian")}\n\nArchitect report:\n${syntax.finalText(inputs.values.get(designId), "Architect")}`;
       published = true;
-      while (true) yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, { kind: "prompt", text })];
+      const task = Task.create({ kind: "prompt", text, spec: "One final recommendation reconciling the Librarian and Architect reports." });
+      while (true) yield [graphApi.Message.create(edges.get("ReviewAssignment~>Reducer")!, task)];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };

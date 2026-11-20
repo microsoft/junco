@@ -26,15 +26,15 @@ import { LockPolicy, type TaskToolDetails } from "junco-tools";
 import { errorGraph } from "junco-tools/errors";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import { renderTask } from "../src/agent-node.ts";
 import {
-  type AgenticInput,
-  AgenticInputSchema,
   AssistantMessageSchema,
   agent as agentApi,
   Deterministic,
   graph,
   JuncoGraph,
   schedules,
+  TaskSchema,
   tools as toolsApi,
   tracer,
   trigger,
@@ -50,7 +50,7 @@ import { NATIVE_TOOL_BLOCK, toolTurn, waitingTool } from "./support.ts";
 // `task` call runs fresh subagents natively in the background while the caller's node stays itself.
 
 type Agent = agentApi.JuncoAgent;
-type Chat = typeof AgenticInputSchema;
+type Chat = typeof TaskSchema;
 
 const quiet = new tracer.DummyTracer();
 
@@ -397,8 +397,17 @@ describe("native tasks on a graph-driven caller", () => {
     const r = registry("caller", "worker");
     const outbound = graph.Edge.message<Chat, AssistantMessage>(
       "accepted",
-      AgenticInputSchema,
+      TaskSchema,
     );
+    const feed = graph.Edge.message<Chat, AssistantMessage>("feed", TaskSchema);
+    const work = {
+      kind: "prompt",
+      text: "work",
+      taskId: "T1",
+      spec: "",
+      deps: [],
+      history: [],
+    } as const;
     let failedContext: Context | undefined;
     r.worker("worker", 1);
     r.script("caller", [
@@ -409,6 +418,9 @@ describe("native tasks on a graph-driven caller", () => {
           {
             id: outbound.id,
             payload: { kind: "followUp", text: "accepted" },
+            task: "T1",
+            spec: "",
+            handoff: "",
           },
           { id: "accepted-send" },
         ),
@@ -426,7 +438,19 @@ describe("native tasks on a graph-driven caller", () => {
     const { execution, ports } = taskExecution();
     const outer = execution.graph;
     closers.push(() => outer.close());
-    const id = outer.addNode(callerNode(caller));
+    const feeder = outer.addNode({
+      id: graph.NodeId.create("feeder"),
+      trigger: trigger.TriggerRule.always(),
+      state: new Deterministic<Chat, AssistantMessage>(async function* () {
+        yield [{ id: feed.id, payload: work }];
+        return fauxAssistantMessage("fed");
+      }, LockPolicy),
+    });
+    const id = outer.addNode({
+      ...callerNode(caller),
+      trigger: trigger.TriggerRule.when(feed),
+    });
+    outer.addEdge(feeder, id, feed);
     ports.connect(outer, id);
     const receiver = outer.addNode({
       id: graph.NodeId.create("receiver"),
@@ -460,8 +484,17 @@ describe("native tasks on a graph-driven caller", () => {
       false,
     );
     assert.deepEqual(
-      outer.observe().inputs.get(receiver)?.messages.get(outbound.id) ?? [],
-      [{ kind: "followUp", text: "accepted" }],
+      outer.observe().inputs.get(receiver)?.messages.get(outbound.id),
+      [
+        {
+          kind: "followUp",
+          text: "accepted",
+          taskId: "T1",
+          spec: "",
+          deps: [],
+          history: [{ node: "caller", desc: "work", handoff: "" }],
+        },
+      ],
       "an accepted send stays queued on the real edge",
     );
     assert.equal(outer.getNode(id)?.state, caller);
@@ -651,7 +684,13 @@ describe("native tasks on a graph-driven caller", () => {
         return tool("yield", { reason: "wait for numbers" });
       const results = toolResultsIn(context);
       if (![...results.values()].some(({ toolName }) => toolName === "send"))
-        return tool("send", { id: outbound.id, payload: 42 });
+        return tool("send", {
+          id: outbound.id,
+          payload: 42,
+          task: "none",
+          spec: "",
+          handoff: "",
+        });
       if (!results.has("task-later"))
         return toolTurn(taskCall([r.task("b")], "task-later"));
       return markersIn(context).length >= 2
@@ -695,7 +734,7 @@ describe("native tasks on a graph-driven caller", () => {
       () => {
         throw new graph.DataflowDefinitionError("No external input");
       },
-      { id: graph.NodeId.create("$source"), schema: AgenticInputSchema },
+      { id: graph.NodeId.create("$source"), schema: TaskSchema },
     );
     const sink = new graph.nodes.Sink<N, T>(
       async function* () {
@@ -706,7 +745,7 @@ describe("native tasks on a graph-driven caller", () => {
       },
       {
         id: graph.NodeId.create("$sink"),
-        schema: AgenticInputSchema,
+        schema: TaskSchema,
         trigger: trigger.TriggerRule.when(result),
       },
     );
@@ -799,14 +838,8 @@ describe("native tasks on a graph-driven caller", () => {
       "source=>caller",
       AssistantMessageSchema,
     );
-    const notesEdge: Edge = graph.Edge.message(
-      "notes->caller",
-      AgenticInputSchema,
-    );
-    const outboundEdge: Edge = graph.Edge.message(
-      "caller->down",
-      AgenticInputSchema,
-    );
+    const notesEdge: Edge = graph.Edge.message("notes->caller", TaskSchema);
+    const outboundEdge: Edge = graph.Edge.message("caller->down", TaskSchema);
     const resultEdge: Edge = graph.Edge.value(
       "caller=>down",
       AssistantMessageSchema,
@@ -873,6 +906,9 @@ describe("native tasks on a graph-driven caller", () => {
             {
               id: sendResults.length === 0 ? "missing" : resultEdge.id,
               payload: { kind: "followUp", text: "must not stage" },
+              task: "note-5",
+              spec: "",
+              handoff: "",
             },
             { id: `invalid-send-${sendResults.length}` },
           ),
@@ -889,6 +925,10 @@ describe("native tasks on a graph-driven caller", () => {
             {
               id: route.edgeId,
               payload: { kind: "followUp", text: "checkpoint" },
+              // Five notes were received; send names the one it hands off.
+              task: "note-5",
+              spec: "",
+              handoff: "",
             },
             { id: "send-1" },
           ),
@@ -943,7 +983,14 @@ describe("native tasks on a graph-driven caller", () => {
           yield [
             {
               id: notesEdge.id,
-              payload: { kind: "followUp", text: `note-${n}` },
+              payload: {
+                kind: "followUp",
+                text: `note-${n}`,
+                taskId: `note-${n}`,
+                spec: "",
+                deps: [],
+                history: [],
+              },
             },
           ];
         return fauxAssistantMessage("notes done");
@@ -1004,7 +1051,19 @@ describe("native tasks on a graph-driven caller", () => {
       userTexts(finalContext.messages).filter(
         (text) => !text.startsWith('{"type":"task_'),
       ),
-      ["Start", ...Array.from({ length: 5 }, (_, n) => `note-${n + 1}`)],
+      [
+        "Start",
+        ...Array.from({ length: 5 }, (_, n) =>
+          renderTask({
+            kind: "followUp",
+            text: `note-${n + 1}`,
+            taskId: `note-${n + 1}`,
+            spec: "",
+            deps: [],
+            history: [],
+          }),
+        ),
+      ],
     );
     const sendResults = finalContext.messages
       .filter((message) => message.role === "toolResult")

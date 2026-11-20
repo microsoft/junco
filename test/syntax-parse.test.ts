@@ -157,7 +157,7 @@ test("unknown skill", () =>
 for (const mode of ["input", "value", "empty"])
   test(`invalid emit ${mode}`, () =>
     rejects((d) => {
-      d.graph.nodes.A = { kind: "emit", text: "go" };
+      d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
       if (mode === "input")
         d.graph.edges.push({ from: "B", to: "A", kind: "message", schema });
       if (mode === "empty") d.graph.edges.shift();
@@ -203,7 +203,10 @@ test("identifiers, duplicates, source routes and sink results", () => {
   const emitter = (returns?: string): LooseDoc => ({
     graph: {
       ...(returns === undefined ? {} : { sink: { returns } }),
-      nodes: { E: { kind: "emit", text: "go" }, C: { kind: "code" } },
+      nodes: {
+        E: { kind: "emit", text: "go", spec: "done" },
+        C: { kind: "code" },
+      },
       edges: [
         { from: "E", to: "$sink", kind: "message", schema },
         ...(returns === undefined
@@ -1151,7 +1154,7 @@ test("strict object boundaries and malformed list/map entries", () => {
           ...(kind === "graph"
             ? { graph: nested().graph }
             : kind === "emit"
-              ? { text: "go" }
+              ? { text: "go", spec: "done" }
               : {}),
           kind,
           extra: true,
@@ -1218,7 +1221,7 @@ test("resource quantities parse on every node kind and reject unknown units", ()
   const doc = parse({
     graph: {
       nodes: {
-        Start: { kind: "emit", text: "go", profiles },
+        Start: { kind: "emit", text: "go", spec: "done", profiles },
         A: { profiles },
         C: { kind: "code", profiles },
         Inner: {
@@ -1390,7 +1393,7 @@ test("recursive validation accepts connected graphs with cycles", () => {
   const { routes } = fixture.graph.nodes.A.graph.source;
   const child: LooseGraph = fixture.graph.nodes.A.graph;
   const doc: LooseDoc = fixture;
-  doc.graph.nodes.Seed = { kind: "emit", text: "go" };
+  doc.graph.nodes.Seed = { kind: "emit", text: "go", spec: "done" };
   doc.graph.edges.unshift({
     from: "Seed",
     to: "A",
@@ -1453,7 +1456,7 @@ test("recursive validation accepts connected graphs with cycles", () => {
 
 test("emit fan-out degrees", () => {
   const doc = variant((d) => {
-    d.graph.nodes.A = { kind: "emit", text: "go" };
+    d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
     for (const e of d.graph.edges) e.kind = "message";
     d.graph.nodes.C = {};
     d.graph.edges.push(
@@ -1493,7 +1496,7 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
       sink: { returns: "A" },
     },
   );
-  emit.graph.nodes.E = { kind: "emit", text: "go" };
+  emit.graph.nodes.E = { kind: "emit", text: "go", spec: "done" };
   for (const doc of [
     g([
       ["A", "B"],
@@ -1755,7 +1758,8 @@ test("every edge kind at every level requires a schema mapping", () => {
   for (const kind of [undefined, "value", "message"])
     for (const root of roots) {
       const doc = variant((d) => {
-        if (kind === "message") d.graph.nodes.A = { kind: "emit", text: "go" };
+        if (kind === "message")
+          d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
         if (kind !== undefined) d.graph.edges[0]!.kind = kind;
         setSchema(d.graph.edges[0]!, root);
       });
@@ -1943,7 +1947,8 @@ const probed = (
   probe: Json | undefined,
 ) =>
   variant((d) => {
-    if (kind === "message") d.graph.nodes.A = { kind: "emit", text: "go" };
+    if (kind === "message")
+      d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
     const edge = d.graph.edges[0]!;
     if (kind !== undefined) edge.kind = kind;
     edge.schema = edgeSchema;
@@ -2012,7 +2017,7 @@ test("probe flags survive YAML and are checked at nested levels", () => {
   const fixture = nested();
   const child: LooseGraph = fixture.graph.nodes.A.graph;
   const doc: LooseDoc = fixture;
-  doc.graph.nodes.Seed = { kind: "emit", text: "go" };
+  doc.graph.nodes.Seed = { kind: "emit", text: "go", spec: "done" };
   doc.graph.edges.push({
     from: "Seed",
     to: "A",

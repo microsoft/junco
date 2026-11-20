@@ -1,6 +1,5 @@
 export type {
   Agentic,
-  AgenticInput,
   AgenticOptions,
   AgenticStatus,
   AgenticStep,
@@ -9,9 +8,10 @@ export type {
   TokenMonitorConfig,
 } from "./agentic.js";
 export {
-  AgenticInputSchema,
   AssistantMessageSchema,
   resolveStagedPrompt,
+  Task,
+  TaskSchema,
   validateActiveTools,
 } from "./agentic.js";
 export {

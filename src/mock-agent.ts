@@ -36,7 +36,6 @@ import {
   tokens,
 } from "dataflow-engine";
 import {
-  type AgenticInputSchema,
   type AgenticOptions,
   type AgenticStatus,
   type AgenticStep,
@@ -44,6 +43,7 @@ import {
   JuncoAgentError,
   type Agentic as JuncoAgentProtocol,
   resolveStagedPrompt,
+  type TaskSchema,
   validateActiveTools,
 } from "junco-agent";
 import { type Issue, issueLog, trackPromise } from "junco-tools";
@@ -107,7 +107,7 @@ export type MockTranscript<
   S extends Skill,
   P extends PromptTemplate,
   T extends AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > = {
   readonly prompt?: AgenticOptions<S, P, T, N, V>["prompt"];
@@ -244,7 +244,7 @@ export class MockAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
   T extends AgentTool = AgentTool,
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 > implements JuncoAgentProtocol<S, P, T, N, V>
 {

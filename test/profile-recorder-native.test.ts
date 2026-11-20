@@ -49,7 +49,7 @@ const PROMPT = {
 const DOCUMENT = {
   graph: {
     nodes: {
-      Start: { kind: "emit", text: "measure" },
+      Start: { kind: "emit", text: "measure", spec: "done" },
       Worker: {
         prompt: "Measure resources",
         tools: ["bash"],
@@ -105,15 +105,18 @@ async function runRecorded(
           ...(
             await nativeOptions([
               (context) => {
-                assert.deepEqual(
-                  context.messages
-                    .filter((message) => message.role === "user")
-                    .map((message) =>
-                      typeof message.content === "string"
-                        ? message.content
-                        : contentText(message.content),
-                    ),
-                  ["Measure resources", "measure"],
+                const texts = context.messages
+                  .filter((message) => message.role === "user")
+                  .map((message) =>
+                    typeof message.content === "string"
+                      ? message.content
+                      : contentText(message.content),
+                  );
+                assert.equal(texts.length, 2);
+                assert.equal(texts[0], "Measure resources");
+                assert.match(
+                  texts[1]!,
+                  /^measure\n\nTask: \{"taskId":"[0-9a-f-]{36}","spec":"done","deps":\[\],"history":\[\]\}$/,
                 );
                 return fauxAssistantMessage(
                   fauxToolCall("bash", { command: COMMAND }),
@@ -359,7 +362,7 @@ test("graph resources reach bash as cgroup pid limits", async () => {
           {
             graph: {
               nodes: {
-                Start: { kind: "emit", text: "resource probe" },
+                Start: { kind: "emit", text: "resource probe", spec: "done" },
                 Terminal: { kind: "code", trigger: "never" },
               },
               edges: [

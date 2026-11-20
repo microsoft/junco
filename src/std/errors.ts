@@ -1,6 +1,6 @@
 // Failure policies of agent nodes: leaves decide, wrappers take `inner`, as the `schedules` combinators do.
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { AgenticInputSchema, ErrorHandler } from "junco-agent";
+import type { ErrorHandler, TaskSchema } from "junco-agent";
 import type { ModelStrength } from "junco-scheduler";
 import type { TSchema } from "typebox";
 import {
@@ -14,10 +14,10 @@ export type { ErrorHandler } from "junco-agent";
 
 /** Hard error: reject the run with `DataflowNodeError` carrying the failure. */
 export const crash =
-  <
-    N extends TSchema = typeof AgenticInputSchema,
-    V = AssistantMessage,
-  >(): ErrorHandler<N, V> =>
+  <N extends TSchema = typeof TaskSchema, V = AssistantMessage>(): ErrorHandler<
+    N,
+    V
+  > =>
   ({ error }) => {
     throw error;
   };
@@ -27,7 +27,7 @@ export const crash =
  * @throws {RangeError} "retry afterMs must be a non-negative finite number" / "retry times must be a non-negative safe integer".
  */
 export function retry<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 >(
   options: { readonly afterMs: number; readonly times: number },
@@ -50,7 +50,7 @@ export function retry<
  * @throws {DataflowDefinitionError} via `validateLadder` at construction.
  */
 export function escalate<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   V = AssistantMessage,
 >(
   options: { readonly ladder: Ladder },
@@ -90,7 +90,7 @@ export function escalate<
  * `outcome: "error"` is already recorded by `JuncoAgent`.
  */
 export const record =
-  <N extends TSchema = typeof AgenticInputSchema, V = AssistantMessage>(
+  <N extends TSchema = typeof TaskSchema, V = AssistantMessage>(
     inner: ErrorHandler<N, V>,
   ): ErrorHandler<N, V> =>
   async (failure) => {

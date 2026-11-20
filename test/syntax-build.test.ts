@@ -20,13 +20,13 @@ import {
 import { megabytes } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
-  type AgenticInput,
   agent,
   Deterministic,
   graph,
   JuncoGraph,
   MockAgent,
   schedules,
+  type Task,
   tools,
   tracer,
   trigger,
@@ -34,6 +34,7 @@ import {
 } from "junco";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import { renderTask } from "../src/agent-node.ts";
 import {
   type BuildOptions,
   build,
@@ -61,7 +62,10 @@ import {
   Relay,
 } from "./syntax-code-nodes.fixture.ts";
 
-/** Edge schemas: chat inputs (AgenticInput) and native assistant results. */
+const asTask = (text: string, taskId: string) =>
+  renderTask({ kind: "prompt", text, taskId, spec: "", deps: [], history: [] });
+
+/** Edge schemas: chat inputs (Task) and native assistant results. */
 const prompt = {
   anyOf: [
     {
@@ -113,7 +117,7 @@ const document = () =>
   parse({
     graph: {
       nodes: {
-        Start: { kind: "emit", text: "go" },
+        Start: { kind: "emit", text: "go", spec: "done" },
         Inner: {
           kind: "graph",
           trigger: "Start~>Inner",
@@ -372,7 +376,7 @@ const resumable =
 const enqueuePrompts = (
   execution: Awaited<ReturnType<typeof build>>,
   id: string,
-  ...payloads: AgenticInput[]
+  ...payloads: Task[]
 ) =>
   execution.graph.source.enqueue({
     messages: new Map([[graph.EdgeId.create(id), payloads]]),
@@ -962,12 +966,20 @@ test("a value self-loop runs Ralph once per round and publishes only the last", 
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
       text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
     });
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), ["assignment", revision, revision]);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      revision,
+      revision,
+    ]);
     assert.deepEqual(requestTexts(instance.requests)[0], [
       FIRST_ROUND,
-      "assignment",
+      asTask("assignment", "Ralph#1"),
     ]);
     assert.equal(
       resultText(execution.graph, graph.NodeId.create("Ralph")),
@@ -995,13 +1007,20 @@ test("default rounds is two and a staged round survives graph steps", async () =
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
       text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
     });
     for (let step = 0; instance.requests.length === 0 && step < 100; step++)
       await execution.step();
-    assert.deepEqual(lastPrompts(instance), ["assignment"]);
+    assert.deepEqual(lastPrompts(instance), [asTask("assignment", "Ralph#1")]);
     assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      revision,
+    ]);
     assert.equal(resultText(execution.graph), "draft-2");
   } finally {
     await execution.graph.close();
@@ -1031,31 +1050,54 @@ for (const [name, draft, error] of [
       enqueuePrompts(execution, "assignment", {
         kind: "prompt",
         text: "assignment",
+        taskId: "Ralph#1",
+        spec: "",
+        deps: [],
+        history: [],
       });
       await assert.rejects(execution.run(), { message: error });
       assert.equal(
         execution.graph.result(execution.graph.sink.id)._tag,
         "None",
       );
-      assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
+      assert.deepEqual(lastPrompts(instance), [
+        asTask("assignment", "Ralph#1"),
+        revision,
+      ]);
     } finally {
       await execution.graph.close();
     }
   });
 
 for (const [name, payloads] of [
-  ["followUp", [{ kind: "followUp", text: "assignment" }]],
+  [
+    "followUp",
+    [
+      {
+        kind: "followUp",
+        text: "assignment",
+        taskId: "Ralph#1",
+        spec: "",
+        deps: [],
+        history: [],
+      },
+    ],
+  ],
   [
     "images",
     [
       {
         kind: "prompt",
         text: "assignment",
+        taskId: "Ralph#1",
+        spec: "",
+        deps: [],
+        history: [],
         images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
       },
     ],
   ],
-] satisfies readonly (readonly [string, AgenticInput[]])[])
+] satisfies readonly (readonly [string, Task[]])[])
   test(`Ralph assignment admission rejects ${name}`, async () => {
     const instance = mock("unused");
     const execution = await build(ralphDoc(), {
@@ -1100,15 +1142,29 @@ test("several prompts on the assignment route are ordered objectives in every ro
     enqueuePrompts(
       execution,
       "assignment",
-      { kind: "prompt", text: "first goal" },
-      { kind: "prompt", text: "second goal" },
+      {
+        kind: "prompt",
+        text: "first goal",
+        taskId: "Ralph#1",
+        spec: "",
+        deps: [],
+        history: [],
+      },
+      {
+        kind: "prompt",
+        text: "second goal",
+        taskId: "Ralph#2",
+        spec: "",
+        deps: [],
+        history: [],
+      },
     );
     await execution.run();
     const listed = "1. first goal\n\n2. second goal";
     assert.deepEqual(requestTexts(instance.requests)[0], [
       FIRST_ROUND,
-      "first goal",
-      "second goal",
+      asTask("first goal", "Ralph#1"),
+      asTask("second goal", "Ralph#2"),
     ]);
     assert.deepEqual(lastPrompts(instance).slice(1), [
       `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`,
@@ -1140,9 +1196,17 @@ test("a provider-error result re-runs the round up to retries times", async () =
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
       text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
     });
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), ["assignment", RETRY, revision]);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      RETRY,
+      revision,
+    ]);
     assert.equal(resultText(execution.graph), "draft-2");
     assert.equal(execution.graph.available().size, 0);
   } finally {
@@ -1167,6 +1231,10 @@ test("exhausted retries keep the error as the round's result", async () => {
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
       text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
     });
     await assert.rejects(execution.run(), {
       message: /did not finish normally: error/,
@@ -1233,6 +1301,10 @@ async function untilRalph(
   enqueuePrompts(execution, "assignment", {
     kind: "prompt",
     text: "assignment",
+    taskId: "Ralph#1",
+    spec: "",
+    deps: [],
+    history: [],
   });
   return { execution, instance, calls };
 }
@@ -1264,7 +1336,11 @@ test("until runs uncapped rounds and publishes only the accepted draft", async (
   try {
     await execution.run();
     assert.deepEqual(calls, [1, 2, 3].map(ralphCall));
-    assert.deepEqual(lastPrompts(instance), ["assignment", revision, revision]);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      revision,
+      revision,
+    ]);
     assert.equal(resultText(execution.graph), "draft-3");
     assert.equal(execution.graph.available().size, 0);
     await execution.run();
@@ -1282,7 +1358,7 @@ test("until accepting the first draft never revises", async () => {
   try {
     await execution.run();
     assert.deepEqual(calls, [ralphCall(1)]);
-    assert.deepEqual(lastPrompts(instance), ["assignment"]);
+    assert.deepEqual(lastPrompts(instance), [asTask("assignment", "Ralph#1")]);
     assert.equal(resultText(execution.graph), "draft-1");
   } finally {
     await execution.graph.close();
@@ -1439,7 +1515,14 @@ test("nested Ralph levels sharing one controller succeed independently", async (
     },
   );
   try {
-    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    enqueuePrompts(execution, "seed", {
+      kind: "prompt",
+      text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
+    });
     await execution.run();
     assert.deepEqual(calls.sort(), [
       "Left:1:Left-1",
@@ -1560,7 +1643,14 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     },
   );
   try {
-    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    enqueuePrompts(execution, "seed", {
+      kind: "prompt",
+      text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
+    });
     await execution.run();
     assert.deepEqual(levels, [
       ["Team", ""],
@@ -1619,9 +1709,19 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
     },
   );
   try {
-    enqueuePrompts(execution, "seed", { kind: "prompt", text: "assignment" });
+    enqueuePrompts(execution, "seed", {
+      kind: "prompt",
+      text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
+    });
     await execution.run();
-    assert.deepEqual(lastPrompts(instance), ["assignment", revision]);
+    assert.deepEqual(lastPrompts(instance), [
+      asTask("assignment", "Ralph#1"),
+      revision,
+    ]);
     assert.deepEqual(lastPrompts(final), ["draft-2"]);
     assert.equal(resultText(execution.graph), "final reply");
   } finally {
@@ -1637,7 +1737,7 @@ test("message-edge prompt placeholders fail before a model request", async () =>
         parse({
           graph: {
             nodes: {
-              Start: { kind: "emit", text: "data" },
+              Start: { kind: "emit", text: "data", spec: "done" },
               Reader: { prompt: "{{Start~>Reader}}" },
             },
             edges: [
@@ -1779,6 +1879,10 @@ test("source fan-out preserves queued payloads and sink waits for both value res
     const payload = {
       kind: "prompt" as const,
       text: "seed text",
+      taskId: "T1",
+      spec: "",
+      deps: [],
+      history: [],
       images: [
         { type: "image" as const, data: "aGVsbG8=", mimeType: "image/png" },
       ],
@@ -1834,8 +1938,8 @@ test("source fan-out preserves queued payloads and sink waits for both value res
     assert.equal(execution.graph.result(execution.graph.sink.id)._tag, "None");
     allowed.add("Right");
     await execution.run();
-    for (const instance of agents.values())
-      assert.deepEqual(lastPrompts(instance), ["seed text"]);
+    for (const [, instance] of agents)
+      assert.deepEqual(lastPrompts(instance), [asTask("seed text", "T1")]);
     const left = execution.graph.result(graph.NodeId.create("Left"));
     const sink = execution.graph.result(execution.graph.sink.id);
     assert.equal(left._tag, "Some");
@@ -1955,7 +2059,14 @@ test("scheduled ingress rejects unrouted input", async () => {
     { ...options(), createAgent: async () => mock("unused") },
   );
   try {
-    enqueuePrompts(execution, "wrong", { kind: "prompt", text: "go" });
+    enqueuePrompts(execution, "wrong", {
+      kind: "prompt",
+      text: "go",
+      taskId: "T1",
+      spec: "",
+      deps: [],
+      history: [],
+    });
     await assert.rejects(
       execution.run(),
       /does not accept input on edge "wrong"/,
@@ -2148,20 +2259,34 @@ test("repeated value placeholders preserve order and optional emptiness without 
     enqueuePrompts(
       execution,
       "seed",
-      { kind: "prompt", text: "first" },
+      {
+        kind: "prompt",
+        text: "first",
+        taskId: "B#1",
+        spec: "",
+        deps: [],
+        history: [],
+      },
       {
         kind: "appendMessage",
         message: { role: "user", content: "not text", timestamp: 0 },
       },
-      { kind: "prompt", text: "third" },
+      {
+        kind: "prompt",
+        text: "third",
+        taskId: "B#2",
+        spec: "",
+        deps: [],
+        history: [],
+      },
     );
     await execution.run();
     assert.deepEqual(requestTexts(consumer.requests), [
       [
         "VALUE|VALUE|",
-        "first",
+        asTask("first", "B#1"),
         '{"id":"m","payload":{"kind":"appendMessage","message":{"role":"user","content":"not text","timestamp":0}}}',
-        "third",
+        asTask("third", "B#2"),
       ],
     ]);
   } finally {
@@ -2232,7 +2357,7 @@ for (const nested of [false, true])
     const child = {
       sink: { trigger: "never" },
       nodes: {
-        Seed: { kind: "emit", text: "go" },
+        Seed: { kind: "emit", text: "go", spec: "done" },
         Terminal: { kind: "code", trigger: "never" },
       },
       edges: [
@@ -3716,7 +3841,13 @@ test("an agent sends a number through its edge schema", async () => {
         fauxToolCall(
           "send",
           // Pi coerces a numeric string such as "7" to the route's number before execution.
-          { id: "Worker~>Tail", payload: "seven" },
+          {
+            id: "Worker~>Tail",
+            payload: "seven",
+            handoff: "h",
+            task: "t",
+            spec: "s",
+          },
           { id: "s1" },
         ),
         { stopReason: "toolUse" },
@@ -3727,7 +3858,17 @@ test("an agent sends a number through its edge schema", async () => {
       if (result?.role === "toolResult" && result.isError)
         seen.sendError = contentText(result.content);
       return fauxAssistantMessage(
-        fauxToolCall("send", { id: "Worker~>Tail", payload: 7 }, { id: "s2" }),
+        fauxToolCall(
+          "send",
+          {
+            id: "Worker~>Tail",
+            payload: 7,
+            handoff: "h",
+            task: "t",
+            spec: "s",
+          },
+          { id: "s2" },
+        ),
         { stopReason: "toolUse" },
       );
     },
@@ -3770,9 +3911,23 @@ test("an agent sends a number through its edge schema", async () => {
     assert.match(seen.sendError!, /payload: must be number/);
     const send = seen.tools?.find((tool) => tool.name === "send");
     assert.ok(send);
-    assert.ok(Value.Check(send.parameters, { id: "Worker~>Tail", payload: 7 }));
     assert.ok(
-      !Value.Check(send.parameters, { id: "Worker~>Tail", payload: "7" }),
+      Value.Check(send.parameters, {
+        id: "Worker~>Tail",
+        payload: 7,
+        handoff: "h",
+        task: "t",
+        spec: "s",
+      }),
+    );
+    assert.ok(
+      !Value.Check(send.parameters, {
+        id: "Worker~>Tail",
+        payload: "7",
+        handoff: "h",
+        task: "t",
+        spec: "s",
+      }),
     );
     const result = execution.graph.result(execution.graph.sink.id);
     assert.ok(result._tag === "Some");
@@ -3869,7 +4024,11 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
             trigger: { all: ["Worker->$sink", "worker->$sink"] },
           },
           nodes: {
-            Start: { kind: "emit", text: "Exercise scoped memory" },
+            Start: {
+              kind: "emit",
+              text: "Exercise scoped memory",
+              spec: "done",
+            },
             ...Object.fromEntries(
               names.map((name) => [
                 name,

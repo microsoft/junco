@@ -34,16 +34,16 @@ Read [README.md](README.md) for setup and user-facing usage. This file describes
 | `ts/extension.ts` | Pi session hooks and same-name collection registration. |
 | `scripts/with-junco-build-env.mjs` | Isolated Rust homes and authenticated process-local Cargo/Git environment. |
 | `scripts/rustc-bootstrap-shim.sh` | `RUSTC_WRAPPER` exporting `RUSTC_BOOTSTRAP` for `xutf` only; every other crate compiles as plain stable. |
-| `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane. |
+| `scripts/test-btrfs.mjs` | Argument-free `test:btrfs` entrypoint: owns one disposable fixture around the production lane under `JUNCO_BTRFS_TEST_ROOT`; without it, reruns itself in the `junco-ci` image over this checkout on a fresh loop btrfs (`ci/btrfs-bind-run.sh`). |
 | `tests/helpers.mjs`, `tests/scripted-model.mjs` | CopyTree seeds (`seedFixture`) and raw test muxes (`fixture`/`closeFixture`), the stable `copyTreeNative()` adapter for automatic acquisition, the ordered `cleanup`/`settleAgent` release helpers, the shared SDK resource bootstrap, the shared stdout-writer body, the held-child gate protocol, and the faux-provider scripting used by the suites. |
 | `tests/shell-mux.test.mjs` | Resource-local mux lifecycle on the CopyTree addon: independent muxes and policies over one seed, refused configurations/cwds, failed opens, close/release idempotence, persistent `NativeProcess` basics, and forked owners/`release` in both sandbox modes. |
 | `tests/bash.test.mjs` | Tool, output, cancellation, and native admission/shutdown cases on the CopyTree addon. |
 | `tests/agent.test.mjs` | Real Agent loop with standalone bash and file tools, the native-free `yield` tool in a bare Agent, and SDK `customTools` registration, with scripted model responses. |
 | `tests/tools.test.mjs` | Collection file tools over a CopyTree seed: hashline provenance, snapshot fidelity, staging, search boundaries, publication gating, and SDK registration. |
 | `tests/btrfs-fixture.mjs` | Automatic `target/btrfs-test-*` fixture allocation, owned-cwd handoff, and subvolume reclaim. |
-| `tests/btrfs-fixture.test.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. |
+| `tests/btrfs-fixture.btrfs.mjs` | Fixture-ownership lifecycle: success with nested subvolumes, child failure, interruption with descendants, concurrent isolation, synchronous/asynchronous spawn failure, cancellation, and a signal during descendant draining. Runs only in `test:btrfs`. |
 | `tests/extension.btrfs.mjs` | Opt-in production lane: packaged extension, per-session collection mux lifecycle, ownership release without a live peer and removal-triggered release (both across reopening the seed), and nested-seed refusal on a real btrfs seed. Runs only as a fixture child (`test:btrfs`). |
-| `tests/extension.test.mjs` | Lets plain `bun test` run that lane: owns one fixture around a Node run of `extension.btrfs.mjs`. |
+| `tests/btrfs.test.mjs` | Lets plain `bun test` run that whole lane: one Node run of `scripts/test-btrfs.mjs`, so in Docker unless `JUNCO_BTRFS_TEST_ROOT` is set. |
 
 `dist/`, `native/index.js`, `native/index.d.ts`, native binaries, `target/`, and `node_modules/` are generated/ignored. Do not hand-edit generated loaders or declarations. Keep `Cargo.lock` tracked; JavaScript dependencies are locked by the junco workspace root's `bun.lock`.
 
@@ -58,7 +58,7 @@ bun run test
 bun run test:btrfs
 ```
 
-The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon. `bun run test` needs the test addon; `bun run test:btrfs` needs the production addon and a `target/` on a writable btrfs mount carrying `user_subvol_rm_allowed`. It takes no arguments and no configuration: every run allocates its own `target/btrfs-test-*` root with a fresh empty seed subvolume, hands it to the child suites as their working directory, and deletes exactly that root afterwards. Without a suitable mount it fails with its filesystem prerequisite; never sudo, mount an image, or substitute the checkout or home subvolume.
+The native build must precede TypeScript declaration compilation. Production output goes to `native/`; the explicitly enabled test addon goes to `target/native-test/`, never over the production addon. `bun run test` needs the test addon; `bun run test:btrfs` needs the production addon and takes no arguments. Without `JUNCO_BTRFS_TEST_ROOT` it runs in Docker: it builds the `junco-ci` image (`ci/Dockerfile`), bind-mounts this checkout with its host builds at the same path, and `ci/btrfs-bind-run.sh` mounts a fresh loop btrfs with `user_subvol_rm_allowed`, then reruns the lane as the host user with `JUNCO_BTRFS_TEST_ROOT` on it (needs Docker with `--privileged`, and host builds whose glibc the Ubuntu 24.04 image can load). With `JUNCO_BTRFS_TEST_ROOT` naming a writable btrfs directory carrying `user_subvol_rm_allowed`, it runs on the host. Either way every run allocates its own `btrfs-test-*` root beneath that base with a fresh empty seed subvolume, hands it to the child suites as their working directory, and deletes exactly that root afterwards. On the host, never sudo, mount an image, or substitute the checkout or home subvolume.
 
 For focused Rust checks and formatting, use the same launcher as the package's native build scripts:
 

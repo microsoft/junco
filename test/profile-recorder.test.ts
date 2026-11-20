@@ -40,7 +40,7 @@ const document = () =>
   parse({
     graph: {
       nodes: {
-        Start: { kind: "emit", text: "go" },
+        Start: { kind: "emit", text: "go", spec: "done" },
         Inner: {
           kind: "graph",
           trigger: "Start~>Inner",

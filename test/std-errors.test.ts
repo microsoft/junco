@@ -17,11 +17,11 @@ import {
   type ProfileRecorder,
 } from "junco-tools";
 import {
-  AgenticInputSchema,
   errors,
   type JuncoGraph,
   MockAgent,
   type schedules,
+  TaskSchema,
 } from "../src/index.ts";
 import { applyModel } from "../src/node-policy.ts";
 import {
@@ -249,12 +249,19 @@ for (const strategy of STRATEGIES) {
 
     test("soft errors route to children without producing a parent result", async () => {
       const cause = new Error("down");
-      const edge = Edge.message("parent->child", AgenticInputSchema);
+      const edge = Edge.message("parent->child", TaskSchema);
       const parent = new MockAgent({
         prompt: "go",
         runs: [run([{ step: failed(cause) }])],
         errorHandler: ({ error }) => [
-          Message.create(edge, { kind: "error", text: String(error) }),
+          Message.create(edge, {
+            kind: "error",
+            text: String(error),
+            taskId: "E1",
+            spec: "",
+            deps: [],
+            history: [],
+          }),
         ],
       });
       const child = new MockAgent({

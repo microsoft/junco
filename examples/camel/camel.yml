@@ -63,7 +63,6 @@ graph:
         properties:
           kind: { const: prompt }
           text: { type: string }
-        additionalProperties: false
     - { from: Interpreter, to: Executor, kind: message, schema: *prompt }
     - { from: QLLM, to: Executor, schema: *assistant }
     - from: Executor

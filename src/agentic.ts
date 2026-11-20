@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { NodeSpec, Sink, Source } from "dataflow-engine";
-import type { AgenticInputSchema, JuncoAgent } from "junco-agent";
+import type { JuncoAgent, TaskSchema } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
 import type { ToolCollection } from "junco-tools";
 import type { TSchema } from "typebox";
@@ -14,9 +14,9 @@ import type { JuncoGraph } from "./junco-graph.js";
 import type { MockAgent } from "./mock-agent.js";
 
 export {
-  type AgenticInput,
-  AgenticInputSchema,
   AssistantMessageSchema,
+  Task,
+  TaskSchema,
 } from "junco-agent";
 
 // biome-ignore-start lint/suspicious/noExplicitAny: agents are not contravariant in their input domains (`never` fails to typecheck); erased for lifecycle storage only.
@@ -40,7 +40,7 @@ export type AnyMockAgent = MockAgent<
 
 /** Native work states; policies and execution contexts are never graph members. */
 export type Agentic<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   T = AssistantMessage,
 > =
   | AnyJuncoAgent
@@ -66,7 +66,7 @@ type StepLess<N extends TSchema, T> = Omit<
  * returns its native message, so the graph's result domain must contain `AssistantMessage`.
  */
 export type AgenticNode<
-  N extends TSchema = typeof AgenticInputSchema,
+  N extends TSchema = typeof TaskSchema,
   T = AssistantMessage,
 > =
   | (NodeSpec<Agentic<N, T>, N, T> & {

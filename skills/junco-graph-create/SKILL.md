@@ -54,8 +54,9 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
     tools?: [string]                                   # ADDITIONAL collection or config.tools entries by name
     skills?: [<skill name>]
     prompt?: string                                    # staged instruction; {{<inbound value edge id>}} placeholders
-  kind: emit                        # publishes one {kind: prompt, text} on every outbound message edge, once
+  kind: emit                        # publishes one task {kind: prompt, text, spec, taskId, deps: [], history: []} on every outbound message edge, once
     text: string                    # no inbound edges; no outbound value edges; >= 1 outbound message edge
+    spec: string                    # required: when the task counts as complete
   kind: graph                       # nested graph as a node
     graph: <Graph>
   kind: code                        # node id selects config.code[nodeId]
@@ -65,11 +66,11 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
 
 Semantics that decide whether a document runs:
 
-- **Edges.** `value` edges (default, id `A->B`) retain the source's latest returned `AssistantMessage`; `message` edges (id `A~>B`) queue `{ kind: "prompt", text }` payloads. Use message edges for assignments and partial handoffs, value edges for finished reports. Edges into `$source`, out of `$sink`, and value edges out of `$source` are rejected. Quote edge IDs containing `>` where YAML would misparse (`"Goals~>Direct"`).
+- **Edges.** `value` edges (default, id `A->B`) retain the source's latest returned `AssistantMessage`; `message` edges (id `A~>B`) queue task payloads `{ kind: "prompt", text, taskId, spec, deps, history }` (all required): build them with `graph.nodes.Task.create({ kind: "prompt", text, spec })` (it mints `taskId` with empty `deps`/`history`; an agent node rejects an incomplete task). An agent's `send` takes `task` (a received task id), `spec` and `handoff`: the same spec hands that task off with `handoff` appended to its history; a different spec creates a subtask recorded in that task's `deps`; a node that received no task cannot send one. Use message edges for assignments and partial handoffs, value edges for finished reports. Edges into `$source`, out of `$sink`, and value edges out of `$source` are rejected. Quote edge IDs containing `>` where YAML would misparse (`"Goals~>Direct"`).
 - **Agents run once per staged prompt.** A YAML `prompt` is staged once at build. `{{edge}}` placeholders render only inbound value edges with `finalText(value)` (requires `stopReason === "stop"` and non-empty text, else the node fails); message-edge placeholders fail at build. Stage an instruction referring to the user message(s) following this prompt, not a copy of message content. Without a `prompt`, nothing starts the agent — then code (a `kind: code` node, `createAgent`, or `schedules.ralph`) must stage it. A value self-edge re-arms a returned agent but still needs another staged prompt, so agent loops in pure YAML are Ralph loops only.
 - **Scheduler-decided reads.** Each selected node's mandatory `readEdges` chooses queued inbound message edges; default policies use `schedules.plannedReads(snapshot, nodeId)`. Each read delivers all queued messages on that edge. Agentic text/images arrive as separate user messages in delivered order, after the staged instruction; `kind` is data, never native command dispatch. Other payloads arrive as `JSON.stringify({ id, payload })`. Paused native runs see delivered steering on their next request. Values are never steered; prompt callbacks and value placeholders see them. `schedules.reads(() => [], schedules.parallel())` runs selected nodes without consuming queued messages; there is no retained graph-agent inbox.
 - **Agent tools.** Default coordination tools are `task`, `yield`, `send`, `info` (names reserved; cannot be listed or shadowed); `complain` is a separate enabled default. `tools:` adds collection tools (`read`, `bash`, `edit`, `grep`, `find`, `code_graph`, `ast_grep`, `ast_edit`, `diff`, `release`) or names supplied through `BuildOptions.tools`; existing native defaults and `tool_block` behavior are unchanged. Put handoff requirements and explicit route IDs in prompts: `send` directly using the declared message edge ID, then `yield`. For dynamic topology discovery, `info` shows live parent and child routes as `{ id, edgeId, kind }`. Value edges carry final results; edge schemas and deterministic consumers validate payloads.
-- **`emit`** needs ≥ 1 outbound message edge and no inbound edges; it publishes the same text once per edge and parks.
+- **`emit`** needs `text`, `spec`, ≥ 1 outbound message edge and no inbound edges; it publishes the same task once per edge and parks.
 - **Nested graphs.** `source.routes` forwards each parent message on edge `k` unchanged onto the listed internal `$source~>…` edges; parent values arrive as `{ kind: "prompt", text: finalText(value) }`. No routes = closed source (unexpected ingress throws). The nested `sink` reads `graph.result(returns)` (default: the unique predecessor of `$sink`; several predecessors need an explicit `returns`), returns it as the wrapper's value, and also sends it as a prompt on every parent message edge leaving the wrapper. Only the final retained result escapes; intermediate drafts never do. `sink: { stream: true }` instead forwards every message reaching `$sink` (message edges only, no `returns`) and never returns; its wrapper parks between inputs, so connect it by message edges only. With several inbound edges, a streaming sink needs `trigger: { any: [...] }` (the default is all-of).
 - **`$sink` of the root** retains the selected terminal's exact result; read it from the `run()` map by node ID (`results.get(graph.NodeId.create("Reviewer"))`) or `execution.graph.result(execution.graph.sink.id)`. A sink whose `returns` node never finishes throws `<returns> did not produce a result`.
 - **Skills** load once per registry name and are appended to `system` with `"\n\n"`. **MCP** servers are attached in the runner, not YAML: `await new mcp.McpBuilder().add({ name, type: "stdio", command, args, clientOptions? }).build(cwd, options?)` returns a `tools.ToolCollection` whose `tools` include the `mcp__<server>__<tool>` wrappers; pass it as config `collection` (one server process shared by every agent) or, for a server per agent, build one per node and hand it over through `createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: perNode.get(spec.node) }, ladder)`. Every agent over a collection gets all its tools like native defaults (`tool_block` opts out by name); close collections after the graph. Servers are stdio; capture their stderr in the runner when a TUI tracer owns the terminal.
@@ -132,11 +133,11 @@ export type CodeContext<C = unknown> = {
   readonly signal?: AbortSignal;
 };
 export type CodeRegistration = {
-  readonly state: Deterministic<AgenticInput, AssistantMessage>;
-  readonly is_available?: graph.AvailabilityFn<AgenticInput, AssistantMessage>;  // overrides BuildOptions.available for this id
+  readonly state: Deterministic<Task, AssistantMessage>;
+  readonly is_available?: graph.AvailabilityFn<Task, AssistantMessage>;  // overrides BuildOptions.available for this id
 };
 export type DeterministicNode<C = unknown> = (context: CodeContext<C>) => CodeRegistration | Promise<CodeRegistration>;
-// graph.nodes.Deterministic: new Deterministic<AgenticInput, AssistantMessage>(
+// graph.nodes.Deterministic: new Deterministic<Task, AssistantMessage>(
 //   async function* (signal, collection?) : NodeGenerator, policy, collection?)
 ```
 
@@ -150,11 +151,12 @@ export const Goals: syntax.DeterministicNode<{ goals: string }> = ({ context, ed
   const outputs = ["Goals~>Direct", "Goals~>Ralph"].map((id) => edges.get(id)!);
   let published = false;
   return {
-    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* (signal) {
+    state: new graph.nodes.Deterministic<graph.nodes.Task, AssistantMessage>(async function* (signal) {
+      const task = graph.nodes.Task.create({ kind: "prompt", text: context.goals, spec: context.goals }); // one task, both competitors
       while (true) {
         signal.throwIfAborted();
         published = true;
-        yield outputs.map((edge) => graph.Message.create(edge, { kind: "prompt", text: context.goals }));
+        yield outputs.map((edge) => graph.Message.create(edge, task));
       }
     }, policy),
     is_available: () => !published,
@@ -166,14 +168,15 @@ export const Join: syntax.DeterministicNode = ({ edges, policy }) => {
   const a = graph.EdgeId.create("A->Join"), b = graph.EdgeId.create("B->Join");
   let published = false;
   return {
-    state: new graph.nodes.Deterministic<graph.nodes.AgenticInput, AssistantMessage>(async function* () {
+    state: new graph.nodes.Deterministic<graph.nodes.Task, AssistantMessage>(async function* () {
       const inputs = yield [];                                   // prime; consumes nothing
       const text = [inputs.values.get(a), inputs.values.get(b)].map((m, i) => {
         if (m?.stopReason !== "stop") throw new Error(`${i ? "B" : "A"} did not finish normally`);
         return contentText(m.content).trim();
       }).join("\n\n");
       published = true;
-      while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, { kind: "prompt", text })];
+      const task = graph.nodes.Task.create({ kind: "prompt", text, spec: "One merged report covering both inputs." });
+      while (true) yield [graph.Message.create(edges.get("Join~>Reducer")!, task)];
     }, policy),
     is_available: (_view, triggered) => triggered && !published,
   };
@@ -206,7 +209,7 @@ The [AGENTS.md standard library index](../../AGENTS.md#standard-library-index) i
 | `workflows.ralph` | The only Ralph definition: YAML text, source route `assignment`, loop `Ralph->Ralph`, output `Ralph->$sink`. Models come from config.ladder. Never hand-write a Ralph graph. |
 | `schedules.ralph({ rounds })` / `schedules.ralph({ until, rounds? })` | Round controller; returns `{ available }` for fromYaml config. `until` is a synchronous success check per completed draft (no cap unless `rounds` is given). Declines graph levels without `Ralph->Ralph`, so it is safe on a parent document. |
 | `workflows.allFanIn` | Select (never synthesize) the best of completed candidates once all returned: source route `candidates`, output `AllFanIn->$sink`. Embedded: wrapper `trigger: { all: [<parent value edges>] }`, those edges routed to `$source~>AllFanIn`. Selection criteria go in the agent's `system`. |
-| `workflows.anyFanIn` + `schedules.anyFanIn()` | Stream one selection per delivered candidate batch (`{ kind: "prompt", text }` on route `candidates`) without waiting for parents to return; streamed under `AnyFanInPublish~>$sink`. Embedded: route parent message edges to `$source~>AnyFanIn`, wrapper `trigger: { any: [...] }`, message edges only. Spread `...schedules.anyFanIn()` into config (`{ available, code }`); merge `available` with Ralph's when both appear. |
+| `workflows.anyFanIn` + `schedules.anyFanIn()` | Stream one selection per delivered candidate batch (`Task.create({ kind: "prompt", text, spec })` on route `candidates`) without waiting for parents to return; streamed under `AnyFanInPublish~>$sink`. Embedded: route parent message edges to `$source~>AnyFanIn`, wrapper `trigger: { any: [...] }`, message edges only. Spread `...schedules.anyFanIn()` into config (`{ available, code }`); merge `available` with Ralph's when both appear. |
 | `schedules.parallel()`, `roundRobin()`, `agent()`/`pi(...)`, `choose`, `separate`, `strength`, `reads`, `limit`, `lowest`, `highest` | Scheduler policies for config.scheduler. Default `parallel()` chooses `med` and planned message reads; `strength` assigns a rung per node, `reads` overrides selected message edges. Custom decisions use `select(snapshot, ids, strength?)` or supply mandatory `readEdges`. |
 | `schedules.context`, `SchedulerContext` | What `fromYaml` returns (`run()`, `step()`, `.graph`); only hand-wired graphs call `context` themselves. |
 | `tracer.DummyTracer`, `tracer.TuiTracer.shared()` | `BuildOptions.tracer`; shared returns `TuiTracer | DummyTracer`. Retain and pass the shared observer explicitly to finish an interactive TUI after all graphs close; print only after terminal restoration. |

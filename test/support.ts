@@ -30,10 +30,10 @@ import {
   tools as toolsApi,
 } from "junco";
 import type {
-  AgenticInputSchema,
   AgenticStep,
   JuncoAgent,
   Agentic as JuncoAgentProtocol,
+  TaskSchema,
 } from "junco-agent";
 import type { SchedulerContext } from "junco-scheduler";
 import { pi, type SchedulerRequest } from "junco-scheduler/agent";
@@ -50,7 +50,7 @@ import {
 } from "../packages/junco-scheduler/test/support.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 
-type Chat = typeof AgenticInputSchema;
+type Chat = typeof TaskSchema;
 
 export type AgencyContext = SchedulerContext<
   Agentic<Chat, AssistantMessage>,
