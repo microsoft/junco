@@ -18,7 +18,7 @@ const labelOf = (event: FrontendEvent): string => {
   }
 };
 
-/** What one node did and is doing: status, usage totals and its newest activations, steps, messages and tool calls. */
+/** What one node did and is doing: status and its newest activations, steps, messages and tool calls. */
 export function NodePanel({
   state,
   graph,
@@ -29,19 +29,11 @@ export function NodePanel({
   node: string;
 }) {
   const info = state.graphs[graph]?.nodes[node];
-  let tokens = 0;
-  let cost = 0;
   const rows: FrontendEvent[] = [];
   for (let i = state.log.length - 1; i >= 0; i--) {
     const event = state.log[i];
     if (event === undefined) continue;
-    if (event.kind === "profile") {
-      // shortcut: profile paths are node-id chains, matched by innermost id; nested graphs reusing a node id merge
-      if (event.path.at(-1) !== node || event.event.kind !== "usage") continue;
-      if (event.event.resource === "tokens")
-        tokens += event.event.usage.totalTokens;
-      if (event.event.resource === "cost") cost += event.event.usage.cost.total;
-    } else if (
+    if (
       (event.kind === "activation" ||
         event.kind === "step" ||
         event.kind === "tool" ||
@@ -58,9 +50,6 @@ export function NodePanel({
         g{graph}/{node} — {info?.live ?? "unknown"}
       </h3>
       {info?.description && <p>{info.description}</p>}
-      <p>
-        tokens {tokens} · cost ${cost.toFixed(4)}
-      </p>
       {rows.map((event) => (
         <details key={event.seq}>
           <summary>

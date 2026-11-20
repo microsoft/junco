@@ -13,22 +13,12 @@ import {
 } from "dataflow-engine";
 import express, { type Express, type Response } from "express";
 import * as E from "fp-ts/lib/Either.js";
-import {
-  type ProfileEvent,
-  type ProfileRecorder,
-  profileContexts,
-} from "junco-tools";
 import type { TSchema } from "typebox";
-import type {
-  FrontendEventBody,
-  GraphNode,
-  Link,
-  ProfileWire,
-} from "./events.js";
+import type { FrontendEventBody, GraphNode, Link } from "./events.js";
 
 const serials = new WeakMap<object, number>();
 let lastSerial = 0;
-/** A process-wide number for `object`: graph serials and opaque profile identities share it. */
+/** A process-wide number for each graph. */
 const serialOf = (object: object): number => {
   let serial = serials.get(object);
   if (serial === undefined) {
@@ -63,25 +53,15 @@ const clientDir = ["../dist/client/", "../client/"]
   .find((dir) => existsSync(`${dir}index.html`));
 
 /**
- * A tracer and profile recorder that logs every graph run, activation, agent tool call and message,
- * and profile event in memory, and serves that log (`GET /api/events?after=N`, SSE
- * `GET /api/events/stream`) with the monitoring client. Pass it as both `tracer` and `recorder`.
+ * A tracer that logs graph runs, activations, agent tool calls and messages in memory and serves
+ * that log (`GET /api/events?after=N`, SSE `GET /api/events/stream`) with the monitoring client.
  */
-export class JuncoFrontend implements DataflowTracer, ProfileRecorder<string> {
-  readonly root: object = this;
-  readonly path = "";
+export class JuncoFrontend implements DataflowTracer {
   // shortcut: the log is unbounded in memory, add a ring buffer when a run outgrows RAM
   /** Serialized events; entry `i` has `seq` `i + 1`. */
   readonly #events: string[] = [];
   readonly #clients = new Set<Response>();
   readonly #nodes = new WeakMap<object, { graph: number; id: string }>();
-  readonly #contexts = profileContexts(
-    this,
-    (ids, _path, event) => this.#profile(ids, event),
-    () => {
-      if (this.#closing !== undefined) throw new Error("JuncoFrontend: closed");
-    },
-  );
   #runs = 0;
   #url = "";
   /** Set by `listen`, the only way to construct a frontend. */
@@ -306,54 +286,6 @@ export class JuncoFrontend implements DataflowTracer, ProfileRecorder<string> {
     };
   }
 
-  readonly record = (event: ProfileEvent<string>): void =>
-    this.#profile([], event);
-
-  add_context(nodeId: string): ProfileRecorder<string> {
-    return this.#contexts.add([], nodeId);
-  }
-
-  #profile(ids: readonly string[], event: ProfileEvent<string>): void {
-    let wire: ProfileWire;
-    switch (event.kind) {
-      case "usage":
-        wire = {
-          resource: event.resource,
-          kind: "usage",
-          source: serialOf(event.source),
-          usage: event.usage,
-        };
-        break;
-      case "resource":
-        wire = {
-          resource: event.resource,
-          kind: "resource",
-          source: serialOf(event.source),
-          event: capture(event.event),
-        };
-        break;
-      case "probe":
-        wire = { ...event };
-        break;
-      default: {
-        const { activation } = event;
-        wire = {
-          ...event,
-          activation: activation && {
-            ...activation,
-            agent: activation.agent && serialOf(activation.agent),
-          },
-        };
-      }
-    }
-    this.#push({ kind: "profile", path: [...ids], event: wire });
-  }
-
-  /** Nothing is buffered. */
-  flush(): Promise<void> {
-    return Promise.resolve();
-  }
-
   /** Stop logging, end every event stream and stop the server; idempotent. */
   close(): Promise<void> {
     if (this.#closing !== undefined) return this.#closing;
@@ -361,7 +293,6 @@ export class JuncoFrontend implements DataflowTracer, ProfileRecorder<string> {
     this.#closing = promise;
     for (const client of this.#clients) client.end();
     this.#clients.clear();
-    this.#contexts.clear();
     this.#server.close((error) => (error ? reject(error) : resolve()));
     this.#server.closeAllConnections();
     return promise;

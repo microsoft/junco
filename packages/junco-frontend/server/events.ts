@@ -1,5 +1,3 @@
-import type { Usage } from "@earendil-works/pi-ai";
-
 /** A graph link as the client draws it. */
 export type Link = {
   from: string;
@@ -14,43 +12,6 @@ export type GraphNode = {
   status: "ready" | "running" | "done";
   description?: string;
   child?: number;
-};
-
-/** A profile event with its opaque object identities replaced by per-server numbers. */
-export type ProfileWire =
-  | { resource: string; kind: "usage"; source: number; usage: Usage }
-  | { resource: string; kind: "resource"; source: number; event: unknown }
-  | {
-      resource: string;
-      kind: "probe";
-      edgeId: string;
-      value: number;
-      unit?: string;
-    }
-  | ({ kind: "start" } & OperationWire)
-  | ({
-      kind: "finish";
-      outcome: "success" | "error" | "cancelled";
-      durationMs: number;
-    } & OperationWire)
-  | ({
-      kind: "metrics";
-      counters?: Record<string, number>;
-      gauges?: Record<string, number | null>;
-    } & OperationWire);
-
-type OperationWire = {
-  resource: string;
-  category: string;
-  tool: string;
-  operation: string;
-  activation?: {
-    runId: string;
-    firedAt: string;
-    features: Record<string, { count: number }>;
-    agent: number | undefined;
-    owner: string | undefined;
-  };
 };
 
 /**
@@ -134,5 +95,4 @@ export type FrontendEventBody =
       text: string;
       stopReason?: string;
       errorMessage?: string;
-    }
-  | { kind: "profile"; path: string[]; event: ProfileWire };
+    };

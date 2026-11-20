@@ -80,17 +80,10 @@ const eventsOf = async (
     FrontendEvent[]
   >;
 
-test("a run's topology, activations, steps and profile events are served in order", async () => {
+test("a run's topology, activations and steps are served in order", async () => {
   const frontend = await JuncoFrontend.listen();
   try {
     await runHandoff(frontend);
-    frontend.add_context("b").record({
-      kind: "start",
-      resource: "operations",
-      category: "tool",
-      tool: "read",
-      operation: "read",
-    });
     const log = await eventsOf(frontend);
     expect(log.map((event) => event.seq)).toEqual(log.map((_, i) => i + 1));
     expect(log[0]).toMatchObject({ kind: "graph", seq: 1 });
@@ -143,11 +136,6 @@ test("a run's topology, activations, steps and profile events are served in orde
     if (end?.kind !== "run" || end.phase !== "end")
       throw new Error("run never ended");
     expect(end.results.toSorted()).toEqual(["a", "b"]);
-    expect(log.at(-1)).toMatchObject({
-      kind: "profile",
-      path: ["b"],
-      event: { kind: "start", tool: "read" },
-    });
 
     const after = await eventsOf(frontend, "?after=1");
     expect(after.map((event) => event.seq)).toEqual(
