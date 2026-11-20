@@ -1,7 +1,3 @@
-mcp:
-  playwright:
-    command: npx
-    args: ["-y", "@playwright/mcp@latest", "--headless"]
 graph:
   name: First
   nodes:
@@ -9,10 +5,8 @@ graph:
       kind: emit
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
     Bun:
-      mcp: [playwright]
       prompt: Answer the assignment in the following user message for Bun only, browsing from https://bun.sh with the playwright tools.
     Rust:
-      mcp: [playwright]
       prompt: Answer the assignment in the following user message for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
     Reviewer:
       prompt: |-

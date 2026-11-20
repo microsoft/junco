@@ -229,21 +229,6 @@ async function loadSkill(name: string, path: string): Promise<Skill> {
   };
 }
 
-function mcpDefinition(
-  name: string,
-  server: NonNullable<JuncoDocument["mcp"]>[string],
-): mcp.JuncoMcpTools {
-  const { timeout, ...definition } = server;
-  return mcp.JuncoMcpTools.add({
-    ...definition,
-    name,
-    type: "stdio",
-    ...(timeout === undefined
-      ? {}
-      : { clientOptions: { requestTimeoutMs: timeout } }),
-  });
-}
-
 function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
   const defaults: readonly (readonly [string, () => AgentTool])[] = [
     ["yield", () => new tools.YieldTool()],
@@ -260,7 +245,6 @@ export async function resolveAgents(
   doc: JuncoDocument,
   options: Pick<BuildOptions, "cwd" | "tools" | "collection" | "toolSource">,
 ): Promise<readonly AgentSpec[]> {
-  const definitions = new Map<string, mcp.JuncoMcpTools>();
   const loaded = new Map<string, Skill>();
   const result: AgentSpec[] = [];
   for (const { id, node, key, label } of walk(doc.graph)) {
@@ -300,19 +284,6 @@ export async function resolveAgents(
         );
       return tool;
     });
-    const servers = (node.mcp ?? []).map((name) => {
-      let definition = definitions.get(name);
-      if (!definition) {
-        const server = doc.mcp?.[name];
-        if (server === undefined)
-          throw new TypeError(
-            `build: unknown mcp server "${name}" for node "${id}"`,
-          );
-        definition = mcpDefinition(name, server);
-        definitions.set(name, definition);
-      }
-      return definition;
-    });
     result.push({
       graph: label,
       node: id,
@@ -329,7 +300,6 @@ export async function resolveAgents(
           (tool) => !extra.some((selected) => selected.name === tool.name),
         ),
         ...extra,
-        ...servers,
       ],
       ...(node.tool_block === undefined ? {} : { tool_block: block }),
       skills,

@@ -6,3 +6,4 @@ export {
   type JuncoMcpToolIdentity,
   JuncoMcpTools,
 } from "./junco-mcp-tools.js";
+export { McpBuilder, type McpBuilderOptions } from "./mcp-builder.js";

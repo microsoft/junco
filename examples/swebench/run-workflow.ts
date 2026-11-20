@@ -523,12 +523,12 @@ const within = (path: string, root: string): boolean => path === root || path.st
 
 /**
  * Offline checks of the pair against this runtime, at every graph depth: defined code (by local ID, as Junco
- * resolves it), no MCP/skills, bash the only bound tool and only on an agent path with its own sandbox, and
+ * resolves it), no skills, bash the only bound tool and only on an agent path with its own sandbox, and
  * branch roots whose bash leaves are confined to that branch's sandboxes.
  */
 export function checkDocument(workflow: Workflow): void {
   const { document, code, SANDBOX, BRANCHES, ROLES } = workflow;
-  if (document.mcp !== undefined || document.skills !== undefined) throw new Error("mcp and skills registries are not permitted");
+  if (document.skills !== undefined) throw new Error("skills registry is not permitted");
   const roles: readonly string[] = ROLES;
   /** Agent and nested-graph paths: the nodes a branch may be rooted at. */
   const roots = new Set<string>();
@@ -544,7 +544,7 @@ export function checkDocument(workflow: Workflow): void {
         if (typeof (code as Record<string, unknown>)[id] !== "function") throw new Error(`code node ${path} has no exported definition ${id} in code`);
       } else if (node.kind !== "emit") {
         roots.add(path);
-        if (node.mcp?.length || node.skills?.length) throw new Error(`${path}: mcp and skills are not permitted`);
+        if (node.skills?.length) throw new Error(`${path}: skills are not permitted`);
         for (const tool of node.tools ?? []) if (tool !== "bash") throw new Error(`${path}: tool ${tool} is not permitted`);
         if (node.tools?.includes("bash")) bashUsers.push(path);
       }

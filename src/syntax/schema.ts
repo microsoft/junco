@@ -44,7 +44,6 @@ const agentFields = {
   system: Type.Optional(Type.String()),
   tools: Type.Optional(strings),
   tool_block: Type.Optional(strings),
-  mcp: Type.Optional(strings),
   skills: Type.Optional(strings),
   prompt: Type.Optional(Type.String()),
 };
@@ -128,21 +127,6 @@ const graphSchema = Type.Cyclic(
 
 export const JuncoDocumentSchema = Type.Object(
   {
-    mcp: Type.Optional(
-      Type.Record(
-        Type.String(),
-        Type.Object(
-          {
-            command: Type.String(),
-            args: Type.Optional(strings),
-            cwd: Type.Optional(Type.String()),
-            env: Type.Optional(Type.Record(Type.String(), Type.String())),
-            timeout: Type.Optional(Type.Integer()),
-          },
-          strict,
-        ),
-      ),
-    ),
     skills: Type.Optional(Type.Record(Type.String(), Type.String())),
     graph: graphSchema,
   },

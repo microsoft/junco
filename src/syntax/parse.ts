@@ -743,9 +743,8 @@ export function parse(
       seen.set(name, here);
     }
   };
-  for (const field of ["mcp", "skills"] as const)
-    for (const name of Object.keys(doc[field] ?? {}))
-      identifier(name, `/${field}/${pointer(name)}`, "key");
+  for (const name of Object.keys(doc.skills ?? {}))
+    identifier(name, `/skills/${pointer(name)}`, "key");
   function checkGraph(
     spec: GraphSpec,
     path: string,
@@ -979,24 +978,15 @@ export function parse(
               known,
               "reference",
             );
-        for (const [field, registry, noun] of [
-          ["mcp", doc.mcp, "mcp"],
-          ["skills", doc.skills, "skill"],
-        ] as const) {
-          unique(
-            node[field] ?? [],
-            `${nodePath}/${field}`,
-            `Node "${id}" ${field}`,
-          );
-          for (const [index, name] of (node[field] ?? []).entries())
-            if (!Object.hasOwn(registry ?? {}, name))
-              fail(
-                `${nodePath}/${field}/${index}`,
-                `Node "${id}" references unknown ${noun} "${name}"`,
-                `declare "${name}" in the top-level ${field} registry, or use one of: ${list(Object.keys(registry ?? {}))}`,
-                "reference",
-              );
-        }
+        unique(node.skills ?? [], `${nodePath}/skills`, `Node "${id}" skills`);
+        for (const [index, name] of (node.skills ?? []).entries())
+          if (!Object.hasOwn(doc.skills ?? {}, name))
+            fail(
+              `${nodePath}/skills/${index}`,
+              `Node "${id}" references unknown skill "${name}"`,
+              `declare "${name}" in the top-level skills registry, or use one of: ${list(Object.keys(doc.skills ?? {}))}`,
+              "reference",
+            );
         const additions = node.tools ?? [];
         const block = node.tool_block ?? [];
         unique(additions, `${nodePath}/tools`, `Node "${id}" tools`);

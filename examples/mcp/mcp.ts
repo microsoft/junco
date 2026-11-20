@@ -1,16 +1,16 @@
 // # MCP: two agents read this repository through graft
 //
 // Two live-LLM agents analyze the repository through graft MCP, alongside Junco's builtin tools.
-// mcp.yml declares their prompts, graph, and shared server definition; this module supplies Reports
-// and LADDER. Each agent owns its graft client and server through the graph's tool collection.
+// mcp.yml declares their prompts and graph; this module supplies Reports, LADDER and the graft
+// server: one client and process on a shared tool collection, whose tools every agent gets.
 // Research maps the repository with `mcp__graft__graft_repo_map` and selects exactly five
 //    central, repository-owned classes, confirming each declaration.
 // 3. Dependencies runs once Research's report exists, as a value edge. Its staged prompt callback
 //    validates that report and embeds it in the dependency assignment; Dependencies then traces
 //    every one of those five classes itself with outbound all-depth
 //    `mcp__graft__graft_trace_calls`.
-// 4. The runner closes the graph (and with it both agents, their graft servers and, last, the
-//    collection's ShellMux), then holds the final TUI screen until dismissed.
+// 4. The runner closes the graph (and with it both agents), the TUI, then the collection (its graft
+//    server and, last, its ShellMux), then holds the final TUI screen until dismissed.
 //
 // Prerequisites: junco-tools' Rust toolchain and system libraries (packages/junco-tools/README.md),
 // so that `bun install --frozen-lockfile` at the root also builds the production native addon
@@ -21,7 +21,7 @@
 
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agent, graph, JuncoGraph, schedules, syntax, tools, tracer } from "junco";
+import { agent, graph, JuncoGraph, mcp, schedules, syntax, tools, tracer } from "junco";
 import type { TSchema } from "typebox";
 import { problemRecorder, runCli, verifiedModels } from "../support.ts";
 import source from "./mcp.yml" with { type: "text" };
@@ -51,17 +51,15 @@ const repositoryRoot =
     ? resolve(directory, "../../..")
     : resolve(directory, "../..");
 
-// ## 2. The MCP definition
+// ## 2. The MCP server
 //
-// One stdio server, launched through npx inside the managed shell. Both agents reuse this
-// definition; each gets its own client and process. Every syscall of npx and graft is traced,
-// so starting the server alone can take about half a minute: requests, `initialize` included,
-// get five minutes instead of pi-mcp's 30-second default.
+// One stdio server, launched through npx inside the collection's managed shell and shared by both
+// agents: one client and process for the whole run. Every syscall of npx and graft is traced, so
+// starting the server alone can take about half a minute: requests, `initialize` included, get
+// five minutes instead of pi-mcp's 30-second default.
 //
 // Graft refreshes its index before a query only when the working tree drifted from the last
-// build, so over a current index (`graft build` beforehand) its queries write nothing. Over a stale
-// one, both servers would rewrite the shared index under `graft/`; the rewrites overlap, and Marsh
-// refuses the later one when its server ends.
+// build, so over a current index (`graft build` beforehand) its queries write nothing.
 
 const requiredTools = [
   "mcp__graft__graft_repo_map",
@@ -82,12 +80,18 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
   let researchText: string;
   let dependencyText: string;
   {
-    // LIFO: close the graph (its agents, their graft servers and the collection), finish the TUI, then close the recorder.
+    // LIFO: close the graph (its agents), finish the TUI, close the collection (graft, then its ShellMux), then the recorder.
     await using lifetime = new AsyncDisposableStack();
     signal?.throwIfAborted();
     const models = await verifiedModels(LADDER.med, signal);
     signal?.throwIfAborted();
     const recorder = lifetime.adopt(await problemRecorder(repositoryRoot), (owned) => owned.close());
+    const collection = lifetime.adopt(
+      await new mcp.McpBuilder()
+        .add({ name: "graft", type: "stdio", command: "npx", args: ["-y", "@nanonets/graft", "mcp"], clientOptions: { requestTimeoutMs: 300_000 } })
+        .build(repositoryRoot, { policy: tools.LockPolicy, recorder, signal }),
+      (owned) => owned.close(),
+    );
     const observer = tracer.TuiTracer.shared();
     const execution = await JuncoGraph.fromYaml(source, {
       cwd: repositoryRoot,
@@ -95,6 +99,7 @@ async function runMcpExample(signal?: AbortSignal): Promise<void> {
       code: { Reports },
       scheduler: () => schedules.parallel(),
       policy: tools.LockPolicy,
+      collection,
       recorder,
       tracer: observer,
       signal,

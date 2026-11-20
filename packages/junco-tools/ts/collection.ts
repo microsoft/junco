@@ -57,6 +57,16 @@ export interface ToolCollectionOptions {
   recorder?: ProfileRecorder<
     "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
+  /**
+   * Tools connected over the created collection once its native tools exist (e.g. MCP servers on
+   * its mux). Every owner shares them as they are: no owner-bound counterparts, no collection
+   * fence. A rejection closes the collection. Its `close()` runs first when the creator closes
+   * the collection, so it may hold a `lease()`.
+   */
+  extend?: (collection: ToolCollection) => Promise<{
+    readonly tools: readonly AgentTool[];
+    close(): Promise<void>;
+  }>;
 }
 
 /**
@@ -112,7 +122,9 @@ type BuildTools = (
  * Lifetime is reference-counted: the creator holds one hold, released by `close()`; each
  * borrower takes another with `lease()` or `bind()` and releases it with the returned handle's
  * `close()`, never the collection's. The final release aborts and joins this collection's
- * invocations and default bash commands, then closes its mux.
+ * invocations and default bash commands, then closes its mux. Tools added by
+ * `ToolCollectionOptions.extend` are shared by every owner and closed by the creator's
+ * `close()` before its hold is released.
  */
 export class ToolCollection {
   readonly tools: AgentTool[];
@@ -132,6 +144,8 @@ export class ToolCollection {
   #creatorRelease: Promise<void> | undefined;
   /** The final teardown, once started; fences execution and further leases. */
   #closing: Promise<void> | undefined;
+  /** What `ToolCollectionOptions.extend` connected; closed before the creator's release. */
+  #extension: { close(): Promise<void> } | undefined;
   readonly #recorder:
     | ProfileRecorder<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
@@ -253,6 +267,7 @@ export class ToolCollection {
     });
     const { native } = lease;
     let operations: ShellMuxOperations | undefined;
+    let collection: ToolCollection;
     try {
       // This collection's own owner: no other collection over the same seed shares it.
       const mux = lease.mux.forkOwner();
@@ -280,7 +295,7 @@ export class ToolCollection {
         CodeGraphTool.create(root, native, mux, recorder),
         ...(options.memory?.tools(recorder) ?? []),
       ];
-      return new ToolCollection(
+      collection = new ToolCollection(
         mux,
         build,
         lease,
@@ -304,6 +319,24 @@ export class ToolCollection {
         throw new AggregateError(
           [error, ...failures],
           "ToolCollection: construction failed and releasing its mux failed",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    if (options.extend === undefined) return collection;
+    try {
+      const extension = await options.extend(collection);
+      collection.tools.push(...extension.tools);
+      collection.#extension = extension;
+      return collection;
+    } catch (error) {
+      try {
+        await collection.close();
+      } catch (closeError) {
+        throw new AggregateError(
+          [error, closeError],
+          "ToolCollection: extension failed and closing failed",
           { cause: error },
         );
       }
@@ -408,7 +441,10 @@ export class ToolCollection {
 
   /** Releases the creator's hold, once; the final release tears the collection down. */
   close(): Promise<void> {
-    this.#creatorRelease ??= this.#release();
+    this.#creatorRelease ??=
+      this.#extension === undefined
+        ? this.#release()
+        : this.#extension.close().finally(() => this.#release());
     return this.#creatorRelease;
   }
 

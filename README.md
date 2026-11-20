@@ -83,13 +83,9 @@ sudo btrfs subvolume create /mnt/junco/seed && sudo chown "$USER" /mnt/junco/see
 
 ### My first Junco workflow
 
-A workflow has two files. `name.yml` declares the MCP servers, nodes, edges and triggers. `name.ts` builds it with `JuncoGraph.fromYaml(source, { cwd, scheduler, ladder, ... })`, awaits `execution.run()` and closes the graph; `cwd` selects the seed. In [`examples/first`](examples/first), two agents answer one question by browsing with the Playwright MCP server, and a reviewer merges their answers:
+A workflow has two files. `name.yml` declares the nodes, edges and triggers. `name.ts` builds it with `JuncoGraph.fromYaml(source, { cwd, scheduler, ladder, ... })`, awaits `execution.run()` and closes the graph; `cwd` selects the seed. In [`examples/first`](examples/first), two agents answer one question by browsing with the Playwright MCP server, and a reviewer merges their answers:
 
 ```yaml
-mcp:
-  playwright:
-    command: npx
-    args: ["-y", "@playwright/mcp@latest", "--headless"]
 graph:
   name: First
   nodes:
@@ -97,10 +93,8 @@ graph:
       kind: emit
       text: What are the current stable versions of Bun and of Rust, and when were they released? Cite the page you read each answer from.
     Bun:
-      mcp: [playwright]
       prompt: Answer the question in the user message(s) following this prompt for Bun only, browsing from https://bun.sh with the playwright tools.
     Rust:
-      mcp: [playwright]
       prompt: Answer the question in the user message(s) following this prompt for Rust only, browsing from https://www.rust-lang.org with the playwright tools.
     Reviewer:
       prompt: |-
@@ -119,33 +113,43 @@ graph:
     - {from: Reviewer, to: $sink, schema: {}}
 ```
 
-The top-level `mcp:` block registers stdio MCP servers, and a node's `mcp:` list names the servers it may call. `Goals` sends its text once on each `~>` message edge. `Bun` and `Rust` then run in parallel, each with its own Playwright server and the built-in coordination tools `task`, `yield`, `send` and `info`, plus the default `complain` tool, which is enabled separately. Each agent gets its prompt first and the delivered question after it. `Reviewer` runs once both `->` value edges hold a result, and reads them through the `{{edge}}` placeholders.
+MCP servers are attached in TypeScript like every other tool: `mcp.McpBuilder` opens a tool collection and connects each added stdio server on it, one process per server, published in `collection.tools` and closed with the collection. An agent over a collection gets all of its tools; `first.ts` builds one per browsing agent through `createAgent`, so `Bun` and `Rust` run in parallel, each with its own Playwright server (`mcp__playwright__*`) next to the built-in coding tools and the coordination tools `task`, `yield`, `send` and `info`, plus the default `complain` tool, which is enabled separately. `Reviewer` gets no server. `tool_block` removes names a node must not use. `Goals` sends its text once on each `~>` message edge. Each agent gets its prompt first and the delivered question after it. `Reviewer` runs once both `->` value edges hold a result, and reads them through the `{{edge}}` placeholders.
 
 The scheduler decides which queued messages a node reads: each `NodeModel` it selects lists those edges in `readEdges`. `schedules.select(snapshot, ids, strength?)` reads the edges from `schedules.plannedReads(snapshot, id)` by default, and `schedules.reads(assign, inner)` overrides them. `schedules.reads(() => [], schedules.parallel())` runs nodes without consuming any message. If a decision is invalid, the scheduler is asked again with `snapshot.lastError`, up to three attempts in all, and then the run throws.
 
 Each message a node reads reaches the agent as its own user message, in delivery order. `AgenticInput` text and images arrive as message content, and the agent does not dispatch on their `kind`. Other payloads arrive as `JSON.stringify({ id, payload })`. Write prompts that refer to these messages, as the `Bun` and `Rust` prompts do, instead of copying their content. Value edges never arrive as messages. Prompt callbacks and YAML placeholders read them, and a placeholder that names a message edge fails at build time. Prompts can also use `params` substitutions.
 
-Models are chosen in TypeScript through the ladder. The YAML never names one:
+Models and MCP servers are chosen in TypeScript. The YAML never names either:
 
 ```ts
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
+import { graph, JuncoGraph, mcp, schedules, syntax, type tools, tracer } from "junco";
 import source from "./first.yml" with { type: "text" };
 
 const models = await ModelRuntime.create();
+const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" }));
+const playwright = { name: "playwright", type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] } as const;
+/** One Playwright server, and so one browser, per browsing agent: its own collection. */
+const browsers = new Map<string, tools.ToolCollection>();
 const observer = tracer.TuiTracer.shared();
-const execution = await JuncoGraph.fromYaml(source, {
-  cwd: process.cwd(),
-  scheduler: () => schedules.parallel(),
-  ladder: new schedules.ModelLadder(models, schedules.uniformLadder({ model: "github-copilot/claude-sonnet-5.5", thinking: "medium" })),
-  tracer: observer,
-});
 let answer: string;
 try {
-  const results = await execution.run();
-  answer = syntax.finalText(results.get(graph.NodeId.create("Reviewer")), "Reviewer");
+  for (const node of ["Bun", "Rust"]) browsers.set(node, await new mcp.McpBuilder().add(playwright).build(process.cwd()));
+  const execution = await JuncoGraph.fromYaml(source, {
+    cwd: process.cwd(),
+    scheduler: () => schedules.parallel(),
+    ladder,
+    createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: browsers.get(spec.node) }, ladder),
+    tracer: observer,
+  });
+  try {
+    const results = await execution.run();
+    answer = syntax.finalText(results.get(graph.NodeId.create("Reviewer")), "Reviewer");
+  } finally {
+    await execution.graph.close();
+  }
 } finally {
-  await execution.graph.close();
+  for (const collection of browsers.values()) await collection.close();
   if (observer instanceof tracer.TuiTracer) await observer.finish();
 }
 console.log(answer);

@@ -109,7 +109,7 @@ Edit `wf.yml`, `wf.ts` and the harness files here, then snapshot again (step 1).
 
 - A pair may import only `junco`, the Pi packages, `dataflow-engine`, Node built-ins and its own `./<stem>.yml`.
 - It must export `document`, `code`, `run`, `strengthOf`, `ladder`, `ROLES`, `SANDBOX` and `BRANCHES`. `strengthOf` and the `SANDBOX` keys take root-relative node paths (`CandidateA`, `CandidateA/Worker` when nested).
-- `document` must equal `syntax.parse(<stem>.yml)`. Nested graphs are allowed; at every depth there are no MCP or skills, no node ID contains `/`, and every code node has a `code` export named by its local ID.
+- `document` must equal `syntax.parse(<stem>.yml)`. Nested graphs are allowed; at every depth there are no skills, no node ID contains `/`, and every code node has a `code` export named by its local ID.
 - The only agent tool allowed is `bash`, and only on agent paths that `SANDBOX` binds to a known role other than an acceptance sandbox. Each sandbox has at most one bash agent, except `canonical`, which `Integrator` and `Verifier` (or one leaf under each) share in turn.
 - Each `BRANCHES` root is an agent or nested-graph path whose bash agents all use its `candidate<Branch>` sandbox; cancelling it aborts every agent under that root and stops exactly `candidate<Branch>` and `accept<Branch>`.
 - Every ladder rung must be one of the runner's `MODELS`. Before creating agents, the worker also requires each rung's thinking level to be one its model supports.

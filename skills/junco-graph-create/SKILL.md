@@ -23,14 +23,6 @@ One request → one runnable workflow: `<name>.yml` (declarative graph) + `<name
 `syntax.parse(source)` validates this schema (TypeBox, `additionalProperties: false`); unknown keys fail. Models and thinking levels belong only in the TypeScript ladder, not YAML.
 
 ```yaml
-mcp:                                   # optional registry of stdio MCP servers
-  <name>:
-    command: string
-    args?: [string]
-    cwd?: string
-    env?:
-      <string>: string
-    timeout?: int                      # timeout = requestTimeoutMs
 skills:                                # optional registry; path to a SKILL.md, relative to build cwd
   <name>: path/to/SKILL.md
 graph: <Graph>                         # required root graph
@@ -60,7 +52,6 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
   kind: agent
     system?: string
     tools?: [string]                                   # ADDITIONAL collection or config.tools entries by name
-    mcp?: [<mcp name>]
     skills?: [<skill name>]
     prompt?: string                                    # staged instruction; {{<inbound value edge id>}} placeholders
   kind: emit                        # publishes one {kind: prompt, text} on every outbound message edge, once
@@ -81,7 +72,7 @@ Semantics that decide whether a document runs:
 - **`emit`** needs ≥ 1 outbound message edge and no inbound edges; it publishes the same text once per edge and parks.
 - **Nested graphs.** `source.routes` forwards each parent message on edge `k` unchanged onto the listed internal `$source~>…` edges; parent values arrive as `{ kind: "prompt", text: finalText(value) }`. No routes = closed source (unexpected ingress throws). The nested `sink` reads `graph.result(returns)` (default: the unique predecessor of `$sink`; several predecessors need an explicit `returns`), returns it as the wrapper's value, and also sends it as a prompt on every parent message edge leaving the wrapper. Only the final retained result escapes; intermediate drafts never do. `sink: { stream: true }` instead forwards every message reaching `$sink` (message edges only, no `returns`) and never returns; its wrapper parks between inputs, so connect it by message edges only. With several inbound edges, a streaming sink needs `trigger: { any: [...] }` (the default is all-of).
 - **`$sink` of the root** retains the selected terminal's exact result; read it from the `run()` map by node ID (`results.get(graph.NodeId.create("Reviewer"))`) or `execution.graph.result(execution.graph.sink.id)`. A sink whose `returns` node never finishes throws `<returns> did not produce a result`.
-- **Skills** load once per registry name and are appended to `system` with `"\n\n"`. **MCP** servers are stdio; capture their stderr in the runner when a TUI tracer owns the terminal.
+- **Skills** load once per registry name and are appended to `system` with `"\n\n"`. **MCP** servers are attached in the runner, not YAML: `await new mcp.McpBuilder().add({ name, type: "stdio", command, args, clientOptions? }).build(cwd, options?)` returns a `tools.ToolCollection` whose `tools` include the `mcp__<server>__<tool>` wrappers; pass it as config `collection` (one server process shared by every agent) or, for a server per agent, build one per node and hand it over through `createAgent: (spec) => syntax.createJuncoAgent({ ...spec, collection: perNode.get(spec.node) }, ladder)`. Every agent over a collection gets all its tools like native defaults (`tool_block` opts out by name); close collections after the graph. Servers are stdio; capture their stderr in the runner when a TUI tracer owns the terminal.
 - **Params.** `JuncoGraph.fromYaml(text, { ...config, params: { description: "review" } })` splices `{{ params.description }}` verbatim into YAML text before parsing (quote the placeholder). Distinct from runtime `{{edge}}` prompt placeholders; params on a parsed object throw. `syntax.parse(text, { params })` supports the same authoring substitution.
 
 ## Runner
@@ -236,7 +227,7 @@ Only for documents with agents. Deterministic-only documents skip this.
 
 1. **Extract the shape and select building blocks.** Inputs/output, roles, dependencies, stop condition, tool permissions, tracing. Match these against the standard library index before designing custom topology. Map the remaining roles to a node kind (agent / emit / code / graph) and each dependency to an edge kind (message = assignment or handoff, value = finished report).
 2. **Select models** (above).
-3. **Write `<name>.yml`.** Top comment: purpose, topology, termination. Per node: `description`, explicit `trigger`, `prompt` placeholders and artifact/acceptance requirements in role or handoff prompts. Name explicit edge IDs for handoffs. Register only `mcp`/`skills`; never YAML model/thinking/code registries. Every finite path must end at `$sink`.
+3. **Write `<name>.yml`.** Top comment: purpose, topology, termination. Per node: `description`, explicit `trigger`, `prompt` placeholders and artifact/acceptance requirements in role or handoff prompts. Name explicit edge IDs for handoffs. Register only `skills`; never YAML model/thinking/code registries. Every finite path must end at `$sink`.
 4. **Export code nodes in `<name>.ts`** only when the pattern needs deterministic logic; pass them by node ID in config.code.
 5. **Run from `<name>.ts`.** Declare the ladder and call `JuncoGraph.fromYaml(source, config)` → run → read the terminal result → close in `finally`. For the shared TUI, retain and pass the observer explicitly, then guard `observer.finish()` in a nested `finally` after close. Guard live acquisition with `if (import.meta.main)` when exporting a factory for tests. Operational prints go after terminal restoration; under TUI ownership use `log.info` from `junco-tools/log`.
 6. **Check offline first.** `syntax.parse(source)` checks schema, reserved IDs, edge direction, dangling edges and triggers. `syntax.resolveAgents` checks role tools/prompts; `schedules.validateLadder` checks model identities. Run these before agent acquisition.

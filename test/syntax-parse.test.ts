@@ -150,14 +150,10 @@ test("removed contracts field is rejected", () => {
     ValidationError,
   );
 });
-for (const [field, name] of [
-  ["mcp", "mcp"],
-  ["skills", "skill"],
-])
-  test(`unknown ${name}`, () =>
-    rejects((d) => {
-      d.graph.nodes.A[field!] = ["missing"];
-    }, `Node "A" references unknown ${name} "missing"`));
+test("unknown skill", () =>
+  rejects((d) => {
+    d.graph.nodes.A.skills = ["missing"];
+  }, 'Node "A" references unknown skill "missing"'));
 for (const mode of ["input", "value", "empty"])
   test(`invalid emit ${mode}`, () =>
     rejects((d) => {
@@ -219,7 +215,7 @@ test("identifiers, duplicates, source routes and sink results", () => {
       ],
     },
   });
-  const registries = { mcp: { m: { command: "x" } }, skills: { s: "./s" } };
+  const registries = { skills: { s: "./s" } };
   const rejected: [
     label: string,
     doc: LooseDoc,
@@ -315,16 +311,6 @@ test("identifiers, duplicates, source routes and sink results", () => {
       "duplicate",
       "/graph/nodes/A/tools/1",
       "/graph/nodes/A/tools/0",
-    ],
-    [
-      "duplicate mcp",
-      variant((d) => {
-        Object.assign(d, registries);
-        d.graph.nodes.A!.mcp = ["m", "m"];
-      }),
-      "duplicate",
-      "/graph/nodes/A/mcp/1",
-      "/graph/nodes/A/mcp/0",
     ],
     [
       "duplicate skill",
@@ -813,16 +799,6 @@ test("YAML merges, overrides and scalar keys keep their semantics", () => {
 
 test("complete block YAML preserves every registry, node, edge and scalar", () => {
   const yaml = `# Complete grammar using block mappings.
-mcp:
-  fast:
-    command: fixture-mcp
-  full:
-    command: fixture-mcp
-    args: ["--stdio"]
-    cwd: "."
-    env:
-      MODE: fixture
-    timeout: 250
 skills:
   guide: guide/SKILL.md
 graph:
@@ -850,7 +826,6 @@ graph:
         first system line
         second system line
       tools: [read, custom]
-      mcp: [fast, full]
       skills: [guide]
       trigger:
         any: [ingress, seed]
@@ -861,7 +836,6 @@ graph:
       description: revises the seeded assignment
       system: revise the assignment
       tools: [custom]
-      mcp: [full]
       skills: [guide]
       prompt: "{{ ralph-input }}"
     Child:
@@ -951,16 +925,6 @@ graph:
   };
   const result = { type: "string" };
   const expected = {
-    mcp: {
-      fast: { command: "fixture-mcp" },
-      full: {
-        command: "fixture-mcp",
-        args: ["--stdio"],
-        cwd: ".",
-        env: { MODE: "fixture" },
-        timeout: 250,
-      },
-    },
     skills: { guide: "guide/SKILL.md" },
     graph: {
       name: "full",
@@ -986,7 +950,6 @@ graph:
           description: "receives either input",
           system: "first system line\nsecond system line",
           tools: ["read", "custom"],
-          mcp: ["fast", "full"],
           skills: ["guide"],
           trigger: { any: ["ingress", "seed"] },
           prompt: "External: {{ ingress }}\nSeed: {{ seed }}",
@@ -995,7 +958,6 @@ graph:
           description: "revises the seeded assignment",
           system: "revise the assignment",
           tools: ["custom"],
-          mcp: ["full"],
           skills: ["guide"],
           prompt: "{{ ralph-input }}",
         },
@@ -1126,12 +1088,11 @@ test("schema rejects non-documents and missing required fields at stable paths",
     [{ graph: { nodes: {} } }, "/graph/nodes"],
     [{ graph: { nodes: { A: { kind: "emit" } } } }, "/graph/nodes/A"],
     [{ graph: { nodes: { A: { kind: "graph" } } } }, "/graph/nodes/A"],
-    [{ ...base(), mcp: { server: {} } }, "/mcp/server"],
   ];
   for (const [value, path] of cases) rejectsAt(value, path);
 });
 
-test("numeric grammar preserves positive widths and unrestricted integer MCP timeout", () => {
+test("numeric grammar preserves positive widths", () => {
   for (const field of ["window", "threads"] as const) {
     for (const value of [1, 2, ...(field === "threads" ? ["unbounded"] : [])]) {
       const doc = variant((d) => {
@@ -1148,15 +1109,6 @@ test("numeric grammar preserves positive widths and unrestricted integer MCP tim
       );
     }
   }
-  for (const timeout of [-1, 0, 250]) {
-    const doc = { ...base(), mcp: { server: { command: "unused", timeout } } };
-    assert.equal(parse(doc).mcp?.server?.timeout, timeout);
-  }
-  for (const timeout of [1.5, "250"])
-    rejectsAt(
-      { ...base(), mcp: { server: { command: "unused", timeout } } },
-      "/mcp/server/timeout",
-    );
 });
 
 test("agents reject YAML model and thinking fields", () => {
@@ -1172,10 +1124,6 @@ test("agents reject YAML model and thinking fields", () => {
 test("strict object boundaries and malformed list/map entries", () => {
   const cases: [string, Mutate][] = [
     ["/extra", (d) => (d.extra = true)],
-    [
-      "/mcp/server/extra",
-      (d) => (d.mcp = { server: { command: "unused", extra: true } }),
-    ],
     ["/graph/extra", (d) => (d.graph.extra = true)],
     ["/graph/source/extra", (d) => (d.graph.source = { extra: true })],
     ["/graph/sink/extra", (d) => (d.graph.sink = { extra: true })],
@@ -1231,19 +1179,9 @@ test("strict object boundaries and malformed list/map entries", () => {
       (d) => (d.graph.source = { routes: { seed: "edge" } }),
     ],
     ["/skills/guide", (d) => (d.skills = { guide: 2 })],
-    [
-      "/mcp/server/env/MODE",
-      (d) => (d.mcp = { server: { command: "unused", env: { MODE: false } } }),
-    ],
-    [
-      "/mcp/server/args/0",
-      (d) => (d.mcp = { server: { command: "unused", args: [1] } }),
-    ],
-    [
-      "/mcp/server/cwd",
-      (d) => (d.mcp = { server: { command: "unused", cwd: 1 } }),
-    ],
-    ...["tools", "skills", "mcp", "system", "prompt", "description"].map(
+    ["/mcp", (d) => (d.mcp = { playwright: { command: "npx" } })],
+    ["/graph/nodes/A", (d) => (d.graph.nodes.A.mcp = ["playwright"])],
+    ...["tools", "skills", "system", "prompt", "description"].map(
       (field): [string, Mutate] => [
         "/graph/nodes/A",
         (d) => {

@@ -844,10 +844,16 @@ export class JuncoMcpTools {
   connect(options?: JuncoMcpConnectOptions): Promise<JuncoMcpConnection>;
   snapshot(): JuncoMcpTools; // detached copy; acquires nothing
 }
+
+export class McpBuilder {
+  add(options: JuncoMcpServerOptions): this;
+  build(cwd: string, options?: ToolCollectionOptions & { signal?: AbortSignal }): Promise<ToolCollection>;
+}
 ```
 
 - **Declare a server** with `mcp.JuncoMcpTools.add({ name, type: "stdio", command, args })`; chain `.add(...)` for multiple servers. `command` resolves through `PATH`; `args` pass literally, never through a shell. Optional: `cwd` (relative to the connecting agent's `cwd`, must exist inside the seed), `env` (merged over parent environment; `inheritEnv: false` passes only `env`), `stderr`/`onStderr`, `closeTimeoutMs`, `clientOptions` (e.g. `{ requestTimeoutMs: 300_000 }` for slow startup; pi-mcp defaults to 30 seconds). `name` must be nonblank and unique per definition; it supplies `<server>` in tool names.
 - **Pass the definition to an agent factory:** `tools: [servers]`, optionally mixed with concrete tools. Definition starts nothing; each agent connects its own client/server from its `cwd` and closes both on agent close. Subagents reconnect fresh servers from caller-definition snapshots. Use published `mcp__<server>__<tool>` names in `activeToolNames`.
+- **Servers as collection tools:** `McpBuilder.build` returns a `ToolCollection` with the wrappers in `tools`; one server process per collection, closed by `collection.close()`; pass it as `collection` (shared) or per agent via `createAgent`.
 - **Direct use:** `const connection = await servers.connect({ cwd, signal, collection })`; use `connection.tools`, then `await connection.close()` in `finally`. `signal` cancels acquisition only (`McpAbortError`), stopping already-started servers; returned connections ignore it.
 - **Stdio only.** Each server is an audited job under the supplied collection's ShellMux/policy (requires the native addon and a Btrfs seed containing `cwd`); nonempty definitions without a collection reject with `TypeError`. Effects publish only at server exit; refused publication rejects agent/connection close with `MARSH_POLICY_DENIED`. Replies do not prove publication. Servers snapshot state at startup: another server publishing to a path this server read or wrote makes its close fail, even if it wrote nothing. Prepare shared state before startup; a server kept running across another's publication may not close cleanly.
 

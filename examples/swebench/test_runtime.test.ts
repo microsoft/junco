@@ -838,8 +838,7 @@ test("nested pairs are checked at every depth against the runtime's permissions 
   rejects(nestedA(legal, {}), /CandidateA\/Worker uses bash but has no sandbox/);
   rejects(nestedA(legal, { CandidateA: "candidateA", "CandidateA/Worker": "candidateA" }), /SANDBOX\.CandidateA must bind a bash-using agent path/);
   rejects(nestedA({ ...legal, Helper: { ...helper, tools: ["read"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: tool read is not permitted/);
-  rejects(nestedA({ ...legal, Helper: { ...helper, mcp: ["github"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: mcp and skills/);
-  rejects(nestedA({ ...legal, Helper: { ...helper, skills: ["x"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: mcp and skills/);
+  rejects(nestedA({ ...legal, Helper: { ...helper, skills: ["x"] } }, { "CandidateA/Worker": "candidateA" }), /CandidateA\/Helper: skills are not permitted/);
   rejects(nestedA({ "Two/Parts": shell }, { "CandidateA/Two/Parts": "candidateA" }), /must not contain \//);
   rejects(nestedA(legal, { "CandidateA/Worker": "acceptA" }), /acceptance sandbox acceptA is reserved/);
   rejects(nestedA({ Worker: shell, Second: shell }, { "CandidateA/Worker": "candidateA", "CandidateA/Second": "candidateA" }), /sandbox candidateA would be shared/);

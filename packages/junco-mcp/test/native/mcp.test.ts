@@ -18,6 +18,7 @@ import {
   type JuncoMcpConnection,
   type JuncoMcpServerOptions,
   JuncoMcpTools,
+  McpBuilder,
 } from "../../src/index.ts";
 import { ShellMuxStdioTransport } from "../../src/stdio.ts";
 import { withNativeCleanup } from "../../../../test/native-support.ts";
@@ -343,6 +344,35 @@ describe("native MCP stdio on the shared ShellMux", () => {
     assert.ok(nul instanceof Error);
     expect(String((nul.cause as Error)?.message)).toContain("NUL");
   }, TIMEOUT);
+
+  test("McpBuilder publishes server tools in a collection whose close stops the server", () =>
+    withNativeCleanup(async (defer) => {
+      const watch = watchStderr();
+      const built = await new McpBuilder()
+        .add(server("fx", { onStderr: watch.onStderr }))
+        .build(seed, { native: copyTree, policy: LockPolicy });
+      const forgetBuilt = defer(() => built.close());
+      const read = built.tools.find((candidate) => candidate.name === "mcp__fx__read_state");
+      assert.ok(read);
+      assert.ok(getJuncoMcpToolIdentity(read));
+      const binding = built.bind();
+      const forgetBinding = defer(() => binding.close());
+      // Shared as is: an owner binding has no counterpart of an extension tool.
+      assert.equal(binding.tools.get(read), undefined);
+      const result = (await read.execute("call", {} as never)) as { content: { text?: string }[] };
+      assert.ok(Number.isInteger(JSON.parse(result.content[0]?.text ?? "{}").pid));
+      const pid = watch.pid();
+      expect(fixtureRunning(pid)).toBe(true);
+      await binding.close().finally(forgetBinding);
+      await built.close().finally(forgetBuilt);
+      expect(fixtureRunning(pid)).toBe(false);
+      await assert.rejects(read.execute("call", {} as never));
+      await assert.rejects(built.mux.validateCwd(seed));
+      await assert.rejects(
+        new McpBuilder().add(server("missing", { cwd: "absent" })).build(seed, { native: copyTree, policy: LockPolicy }),
+        (error) => error instanceof Error && error.message.includes('failed to initialize server "missing"'),
+      );
+    }), TIMEOUT);
 
   test("held RPCs on one connection survive another connection's close", async () => {
     const holder = await JuncoMcpTools.add(server("holder")).connect({ cwd: seed, collection });

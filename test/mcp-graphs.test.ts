@@ -26,7 +26,7 @@ import {
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
-import { JuncoMcpTools } from "junco-mcp";
+import { JuncoMcpTools, McpBuilder } from "junco-mcp";
 import { pi } from "junco-scheduler/agent";
 import {
   LockPolicy,
@@ -257,6 +257,38 @@ test(
     }),
   60_000,
 );
+
+test("McpBuilder's collection gives every agent the server's tools and one shared server", () =>
+  withNativeCleanup(async (defer) => {
+    const built = await new McpBuilder()
+      .add({ name: "fx", type: "stdio", command: process.execPath, args: [SERVER] })
+      .build(seed, { native: copyTree, policy: LockPolicy });
+    const forgetBuilt = defer(() => built.close());
+    const runs = [];
+    for (let index = 0; index < 2; index++) {
+      // No `tools`: the MCP tool arrives as a collection default.
+      const agent = await JuncoAgent.fromResolved({
+        ...(await nativeOptions(readPid)).options,
+        cwd: seed,
+        collection: built,
+      });
+      const forgetAgent = defer(() => agent.return());
+      const run = single(agent, built);
+      const forgetGraph = defer(() => run.context.graph.close());
+      forgetAgent();
+      runs.push({ ...run, forgetGraph });
+    }
+    const pids = await Promise.all(
+      runs.map(async (run) => pidOf((await run.context.run()).get(run.id))),
+    );
+    expect(Number.isInteger(pids[0]) && pids[0]! > 0).toBe(true);
+    expect(pids[1]).toBe(pids[0]);
+    for (const run of runs) await run.context.graph.close().finally(run.forgetGraph);
+    // The creator's hold is still outstanding.
+    await built.mux.validateCwd(seed);
+    await built.close().finally(forgetBuilt);
+    await assert.rejects(built.mux.validateCwd(seed));
+  }), 60_000);
 
 /** The text of every tool result for `name` in `context`. */
 const toolTexts = (context: Context, name: string) =>
