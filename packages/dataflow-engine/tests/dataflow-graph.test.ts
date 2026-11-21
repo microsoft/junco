@@ -287,6 +287,28 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
   assert.equal(graph.getNode(failingId)!.status, "done");
 });
 
+test("nested node errors print the leaf once", () => {
+  const { exitCode, stderr } = Bun.spawnSync([process.execPath, "-e", `
+    import assert from "node:assert/strict";
+    import { DataflowNodeError } from "../src/errors.ts";
+    const leaf = new Error(["provider", "leaf", "marker"].join("-"));
+    const inner = new DataflowNodeError("Memory", leaf);
+    const outer = new DataflowNodeError("FrameworkTwp", inner);
+    assert.equal(inner.nodeId, "Memory");
+    assert.equal(outer.nodeId, "FrameworkTwp");
+    assert.equal(inner.error, leaf);
+    assert.equal(inner.cause, leaf);
+    assert.equal(outer.error, inner);
+    assert.equal(outer.cause, inner);
+    console.error(outer);
+  `], { cwd: import.meta.dir, stderr: "pipe" });
+  const printed = stderr.toString();
+  assert.equal(exitCode, 0, printed);
+  assert.ok(printed.includes('Dataflow node "FrameworkTwp" failed'), printed);
+  assert.ok(printed.includes('Dataflow node "Memory" failed'), printed);
+  assert.equal(printed.match(/provider-leaf-marker/g)?.length, 1, printed);
+});
+
 test("omitted node ids continue after explicit ones without disturbing earlier nodes", async () => {
   const graph = newGraph();
   const execution = context({ graph, scheduler: parallel() });

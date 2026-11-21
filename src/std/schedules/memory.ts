@@ -458,7 +458,7 @@ export function memory(options: MemoryScheduleOptions): {
           );
         };
       },
-      Ralph: ({ graph, edges }) => {
+      Ralph: ({ graph, edges, label }) => {
         const kind = topology(edges);
         if (kind !== "ralph") return undefined;
         const state = level(graph, kind);
@@ -482,6 +482,7 @@ export function memory(options: MemoryScheduleOptions): {
             agent.stagePrompt(
               "Carry out the assignment in the user message that follows this one. Return the complete answer.",
             );
+            ralph.traceStaged(label, progress);
             state.prepared = undefined;
           }
           return agent.status === "ready";

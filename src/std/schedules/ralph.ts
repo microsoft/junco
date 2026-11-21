@@ -11,6 +11,7 @@ import {
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent, TaskSchema } from "junco-agent";
+import { log } from "junco-tools/log";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { JuncoGraph } from "../../junco-graph.js";
@@ -199,14 +200,23 @@ export function createRalphController(options: RalphOptions = {}, retries = 0) {
     finalText(p.last, "Ralph");
     return `Take another try at achieving some of these objectives, in order, building on your previous answer (your last message above):\n\n${listed(p.objectives)}\n\nDo your best and focus on depth (finish objectives well), not width (finish many objectives). Return the complete revised answer.`;
   };
-  return { progress, track, admit, revision, retry };
+  const traceStaged = (label: string, p: Progress): void => {
+    log.debug("Ralph staged", {
+      at: new Date().toISOString(),
+      level: label,
+      round: p.completed + 1,
+      retriesUsed: p.retried,
+      retryLimit: retries,
+    });
+  };
+  return { progress, track, admit, revision, retry, traceStaged };
 }
 
 /** Availability hooks for the original, non-memory Ralph workflow. */
 export function ralph(options: RalphLoopOptions = {}): {
   readonly available: Availability;
 } {
-  const { track, admit, revision } = createRalphController(
+  const { track, admit, revision, traceStaged } = createRalphController(
     options,
     options.retries ?? 0,
   );
@@ -234,6 +244,7 @@ export function ralph(options: RalphLoopOptions = {}): {
                     p.completed === 0 ? FIRST_ROUND : revision(p),
                   );
                 }
+                traceStaged(label, p);
               }
               return agent.status === "ready";
             }

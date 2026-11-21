@@ -22,5 +22,6 @@ export class DataflowNodeError<EH> extends Error {
     this.name = "DataflowNodeError";
     this.nodeId = nodeId;
     this.error = error;
+    Object.defineProperty(this, "error", { enumerable: false });
   }
 }
