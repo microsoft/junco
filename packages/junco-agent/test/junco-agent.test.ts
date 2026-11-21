@@ -64,6 +64,7 @@ import {
   AssistantMessageSchema,
   JuncoAgent,
   JuncoAgentError,
+  LoopGuard,
   SYSTEM_INSTRUCTION,
   TaskSchema,
   type TokenMonitorConfig,
@@ -880,6 +881,84 @@ test(
       assert.equal(settledText(await agent.next()), "after batch");
     } finally {
       release.resolve();
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "a loop guard redirects a stuck run once, then holds it as a guard yield",
+  async () => {
+    const write: AgentTool = {
+      name: "write",
+      label: "write",
+      description: "writes a file",
+      parameters: Type.Object({ path: Type.String() }),
+      execute: async () => ({
+        content: [{ type: "text", text: "ok" }],
+        details: undefined,
+      }),
+    };
+    const probe: AgentTool = {
+      name: "probe",
+      label: "probe",
+      description: "always fails",
+      parameters: Type.Object({}),
+      execute: async () => {
+        throw new Error("boom at line 7");
+      },
+    };
+    // Odd calls write a.ts, even calls fail the same way: the 4th redirects, the 8th holds.
+    const call = (n: number) =>
+      toolTurn(
+        n % 2 === 1
+          ? fauxToolCall("write", { path: "a.ts" }, { id: `c${n}` })
+          : fauxToolCall("probe", {}, { id: `c${n}` }),
+      );
+    const redirected: string[] = [];
+    const { agent } = await newAgent(
+      [
+        ...[1, 2, 3, 4].map(call),
+        (context) => {
+          const last = context.messages.at(-1) as ToolResultMessage;
+          redirected.push(
+            last.content
+              .flatMap((c) => (c.type === "text" ? [c.text] : []))
+              .join("\n"),
+          );
+          return call(5);
+        },
+        ...[6, 7, 8].map(call),
+        fauxAssistantMessage("done"),
+      ],
+      {
+        tools: [write, probe],
+        prompt: "go",
+        loopGuard: new LoopGuard({ minCalls: 4, editChurn: 2, failures: 2 }),
+      },
+    );
+    try {
+      assert.deepEqual(step(await agent.next()), {
+        kind: "yield",
+        reasons: [
+          {
+            kind: "guard",
+            toolCallId: "c8",
+            toolName: "probe",
+            reason:
+              "loop guard: stuck after 1 redirect(s): 2 failing tool result(s), 1 repeated failure(s), 2 edit(s) across 1 file(s)",
+          },
+        ],
+      });
+      assert.equal(redirected.length, 1);
+      assert.match(
+        redirected[0]!,
+        /^boom at line 7\nProcess check \(automated\)/,
+      );
+      assert.equal(agent.status, "suspended");
+      assert.equal(settledText(await agent.next()), "done");
+    } finally {
       await agent.return();
     }
   },

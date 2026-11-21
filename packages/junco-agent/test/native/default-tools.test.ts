@@ -350,3 +350,41 @@ test("conflicts and blocked mutations fail without changing usable state", async
     await blocked.return();
   }
 }, TIMEOUT);
+
+test("tool_pruning deactivates never-called collection tools from the eleventh run on", async () => {
+  await withNativeCleanup(async (defer) => {
+    const pruning = await ToolCollection.create(seed, {
+      native: copyTree,
+      policy: LockPolicy,
+      sandbox: "always",
+      tool_pruning: true,
+    });
+    defer(() => pruning.close());
+    const offered: string[][] = [];
+    const answer = (context: Context) => {
+      offered.push(getCurrentTools(context.messages).map(({ name }) => name).sort());
+      return fauxAssistantMessage("answered");
+    };
+    const runtime = scripted([
+      () => fauxAssistantMessage(fauxToolCall("read", { path: "src/a.ts" }), { stopReason: "toolUse" }),
+      answer,
+      ...Array.from({ length: 10 }, () => answer),
+    ]);
+    const agent = await JuncoAgent.fromResolved({
+      session: await new MemorySessionRepo().create({}, BACKGROUND_CONTEXT),
+      models: runtime.models,
+      model: runtime.model,
+      collection: pruning,
+    });
+    defer(() => agent.return());
+    for (let run = 1; run <= 11; run++) await agent.prompt(`run ${run}`);
+    const unused = ["bash", "edit", "grep", "find", "ast_grep", "ast_edit", "diff", "code_graph"];
+    assert.equal(offered.length, 11);
+    assert.deepEqual(offered[9], [...DEFAULTS].sort());
+    assert.deepEqual(offered[10], offered[9]!.filter((name) => !unused.includes(name)));
+    assert.deepEqual(
+      agent.getActiveTools().map(({ name }) => name),
+      ["read", "release", "task", "yield", "send", "info", "complain"],
+    );
+  });
+}, TIMEOUT);

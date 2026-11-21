@@ -114,7 +114,7 @@ The junco workspace root pins `typebox` 1.4.3 with an override so Pi's older met
 
 ### Pi SDK: the whole collection
 
-`ToolCollection.create` returns Pi `AgentTool` objects that also keep Pi's prompt metadata and renderers, so `tools` goes straight into SDK `customTools`, `pi.registerTool`, or a bare `Agent`'s tools. The cwd must lie inside a btrfs seed. Each collection opens its own ShellMux with the required `policy`, shared by `bash` and every file tool; the final release of the collection closes that mux.
+`ToolCollection.create` returns Pi `AgentTool` objects that also keep Pi's prompt metadata and renderers, so `tools` goes straight into SDK `customTools`, `pi.registerTool`, or a bare `Agent`'s tools. The cwd must lie inside a btrfs seed. Each collection opens its own ShellMux with the required `policy`, shared by `bash` and every file tool; the final release of the collection closes that mux. `tool_pruning: true` marks the collection for `JuncoAgent` tool pruning: an agent over it deactivates the collection tools it never called once it has settled ten runs; the collection itself never changes its `tools`.
 
 ```ts
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";

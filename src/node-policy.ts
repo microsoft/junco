@@ -10,6 +10,7 @@ import type {
   Message,
   Node,
   NodeAvailability,
+  NodeIdType,
 } from "dataflow-engine";
 import {
   DataflowDefinitionError,
@@ -297,4 +298,24 @@ export function context<
       };
     },
   });
+}
+
+/**
+ * Whether `nodeId` is paused at a loop-guard hold: its agent is suspended and its latest pause
+ * carries a `guard` reason (see `agent.LoopGuard`). Skip stuck nodes with
+ * `schedules.separate(schedules.stuck, () => ({ selected: [] }), inner)` — when every available
+ * node is stuck, `run()` then ends with the engine's "no work while nodes are available"
+ * `DataflowDefinitionError` — or escalate them with
+ * `schedules.strength((s, id) => (schedules.stuck(s, id) ? "xhigh" : "med"), inner)`.
+ */
+export function stuck(
+  snapshot: { readonly context: ReadonlyMap<NodeIdType, AgencyNodeMetadata> },
+  nodeId: NodeIdType,
+): boolean {
+  const meta = snapshot.context.get(nodeId);
+  // A stale `lastYield` of a node that resumed and settled is not a hold.
+  return (
+    meta?.agentStatus === "suspended" &&
+    (meta.lastYield ?? []).some((reason) => reason.kind === "guard")
+  );
 }

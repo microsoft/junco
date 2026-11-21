@@ -29,3 +29,9 @@ export {
   type TaskPolicy,
   type TaskResult,
 } from "./junco-agent.js";
+export {
+  LoopGuard,
+  type LoopGuardCall,
+  type LoopGuardOptions,
+  type LoopGuardVerdict,
+} from "./loop-guard.js";

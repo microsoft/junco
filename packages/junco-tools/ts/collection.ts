@@ -67,6 +67,8 @@ export interface ToolCollectionOptions {
     readonly tools: readonly AgentTool[];
     close(): Promise<void>;
   }>;
+  /** Agents over this collection deactivate its tools they never called once they have settled ten runs (TE tool pruning); see `JuncoAgent`. */
+  tool_pruning?: boolean;
 }
 
 /**
@@ -131,6 +133,8 @@ export class ToolCollection {
   readonly policy: Policy;
   readonly mux: NativeMux;
   readonly native: NativeModule;
+  /** Whether agents over this collection prune its tools they never call; see {@link ToolCollectionOptions.tool_pruning}. */
+  readonly tool_pruning: boolean;
   readonly #lease: ShellMuxLease;
   readonly #operations: ShellMuxOperations | undefined;
   readonly #build: BuildTools;
@@ -163,6 +167,7 @@ export class ToolCollection {
           "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
         >
       | undefined,
+    tool_pruning: boolean,
   ) {
     this.policy = lease.policy;
     this.mux = lease.mux;
@@ -171,6 +176,7 @@ export class ToolCollection {
     this.#operations = operations;
     this.#build = build;
     this.#customOperations = customOperations;
+    this.tool_pruning = tool_pruning;
     this.#recorder = recorder;
     const bashOperations = customOperations ?? operations;
     if (bashOperations === undefined)
@@ -302,6 +308,7 @@ export class ToolCollection {
         operations,
         options.bash?.operations,
         recorder,
+        options.tool_pruning === true,
       );
     } catch (error) {
       const failures: unknown[] = [];

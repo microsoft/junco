@@ -5,10 +5,24 @@ import {
   type FauxResponseFactory,
   fauxAssistantMessage,
 } from "@earendil-works/pi-ai";
-import { NodeId, type NodeIdType, TriggerRule } from "dataflow-engine";
+import {
+  DummyTracer,
+  NodeId,
+  type NodeIdType,
+  TriggerRule,
+  UNBOUNDED,
+  Width,
+} from "dataflow-engine";
 import type { SchedulerRequest } from "junco-scheduler/agent";
 import { LockPolicy } from "junco-tools";
-import { Deterministic, MockAgent, type TaskSchema } from "../src/index.ts";
+import {
+  type Agentic,
+  Deterministic,
+  JuncoGraph,
+  MockAgent,
+  schedules,
+  type TaskSchema,
+} from "../src/index.ts";
 import type { AgencyNodeMetadata } from "../src/node-policy.ts";
 import {
   assistant,
@@ -142,6 +156,67 @@ test("SchedulerRequest carries native descriptions and source-exact latest agenc
     );
     assert.equal(idle.status, "idle");
     assert.deepEqual(idle.requests, []);
+  } finally {
+    await graph.close();
+  }
+});
+
+test("schedules.stuck flags a node held by its loop guard until it resumes", async () => {
+  const hold = reason("loop guard: stuck after 1 redirect(s)", "g1", "guard");
+  const worker = new MockAgent({
+    prompt: "work",
+    runs: [run([pause([hold]), settle(assistant("done"))])],
+  });
+  const ports = terminalPorts();
+  const graph = new JuncoGraph(
+    ports.source,
+    ports.sink,
+    Width.create(1),
+    UNBOUNDED,
+    new DummyTracer(),
+    LockPolicy,
+  );
+  const snapshots: schedules.Snapshot<
+    Agentic<typeof TaskSchema, AssistantMessage>,
+    typeof TaskSchema,
+    AssistantMessage,
+    AgencyNodeMetadata
+  >[] = [];
+  const context = schedules.context({
+    graph,
+    scheduler: (snapshot) => {
+      snapshots.push(snapshot);
+      return schedules.parallel()(snapshot);
+    },
+  });
+  const w = graph.addNode(member(worker, "worker"));
+  ports.connect(graph, w);
+  try {
+    await context.run();
+    assert.equal(resultText(graph, w), "done");
+    // Only the decision that resumes the held worker sees it stuck; before and after it is not.
+    const held = snapshots.filter((snapshot) => schedules.stuck(snapshot, w));
+    assert.equal(held.length, 1);
+    assert.equal(schedules.stuck(snapshots[0]!, w), false);
+    assert.equal(schedules.stuck(snapshots.at(-1)!, w), false);
+    const skip = schedules.separate(
+      schedules.stuck,
+      () => ({ selected: [] }),
+      schedules.parallel(),
+    );
+    assert.ok(held[0]!.available.has(w));
+    const decision = await skip(held[0]!);
+    assert.equal(
+      decision.selected.some(({ nodeId }) => nodeId === w),
+      false,
+    );
+    assert.equal(
+      schedules.stuck(
+        { context: new Map([[w, { agentStatus: "idle", lastYield: [hold] }]]) },
+        w,
+      ),
+      false,
+    );
   } finally {
     await graph.close();
   }

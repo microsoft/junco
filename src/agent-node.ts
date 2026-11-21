@@ -243,7 +243,7 @@ export class AgentDriver<N extends TSchema, V> {
     try {
       if (!(agent instanceof JuncoAgent))
         return await this.#advance(view, messages);
-      return await agent.runWithNodeContext<N, V, AssistantMessage | undefined>(
+      return await agent.runWithNodeContext<N, AssistantMessage | undefined>(
         {
           nodeId: node.id,
           messaging: this.#messaging(),

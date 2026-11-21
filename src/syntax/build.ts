@@ -90,6 +90,8 @@ export type AgentSpec = {
   >;
   /** The agent's local node ID. */
   readonly recorderNodeId?: string;
+  /** The build's `loopGuard`, shared by every agent it creates. */
+  readonly loopGuard?: agent.LoopGuard;
 };
 /** What a `kind: code` definition sees when its node is registered. */
 export type CodeContext<C = unknown> = {
@@ -136,6 +138,10 @@ export type BuildOptions<C = unknown> = {
   readonly resources?: tools.NativeResourceOptions;
   /** Monitor callback; pair with resources.monitorIntervalMs. Recorders take `recorder` instead. */
   readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
+  /** `tool_pruning` of the collection build creates; rejected with a supplied collection, like `resources`. */
+  readonly tool_pruning?: boolean;
+  /** Failure-loop guard of every agent the build creates (`createJuncoAgent`); `createAgent` receives it as `spec.loopGuard`. */
+  readonly loopGuard?: agent.LoopGuard;
   /** Fitted profiles keyed by id or parentNodeId/id; a present node overrides its YAML profiles. */
   readonly profiles?: ProfilesFile;
   /** Code-node definitions by node id, exported by the same-named workflow module. */
@@ -243,7 +249,10 @@ function builtinTools(blocked: ReadonlySet<string>): AgentTool[] {
 
 export async function resolveAgents(
   doc: JuncoDocument,
-  options: Pick<BuildOptions, "cwd" | "tools" | "collection" | "toolSource">,
+  options: Pick<
+    BuildOptions,
+    "cwd" | "tools" | "collection" | "toolSource" | "loopGuard"
+  >,
 ): Promise<readonly AgentSpec[]> {
   const loaded = new Map<string, Skill>();
   const result: AgentSpec[] = [];
@@ -306,6 +315,9 @@ export async function resolveAgents(
       cwd: options.cwd,
       collection: options.collection,
       toolSource: options.toolSource,
+      ...(options.loopGuard === undefined
+        ? {}
+        : { loopGuard: options.loopGuard }),
     });
   }
   return result;
@@ -332,6 +344,7 @@ export function createJuncoAgent(
     collection: spec.collection,
     recorder: spec.recorder,
     recorderNodeId: spec.recorderNodeId,
+    loopGuard: spec.loopGuard,
     ...(spec.skills.length ? { resources: { skills: spec.skills } } : {}),
   });
 }
@@ -942,6 +955,10 @@ export async function build<C = unknown>(
       throw new graph.DataflowDefinitionError(
         "junco-syntax: resources and onResourceEvent apply to the collection build creates; open the supplied collection with them instead",
       );
+    if (!creates && options.tool_pruning !== undefined)
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: tool_pruning applies to the collection build creates; open the supplied collection with { tool_pruning: true } instead",
+      );
     for (const id of codeIds(doc.graph))
       if (options.code?.[id] === undefined)
         throw new graph.DataflowDefinitionError(
@@ -1007,6 +1024,7 @@ export async function build<C = unknown>(
         ...(options.onResourceEvent
           ? { onResourceEvent: options.onResourceEvent }
           : {}),
+        ...(options.tool_pruning ? { tool_pruning: true } : {}),
       },
       construct,
     );

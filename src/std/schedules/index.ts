@@ -49,6 +49,7 @@ export {
   type Ladder,
   type LadderRung,
   ModelLadder,
+  stuck,
   uniformLadder,
   validateLadder,
 } from "../../node-policy.js";

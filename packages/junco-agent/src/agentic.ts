@@ -29,6 +29,7 @@ import type {
 } from "junco-tools";
 import { type TSchema, Type } from "typebox";
 import { type JuncoAgent, JuncoAgentError } from "./junco-agent.js";
+import type { LoopGuard } from "./loop-guard.js";
 
 /**
  * The task payload of agent graphs: a description, a readonly completion spec, subtask deps and the
@@ -253,9 +254,9 @@ export type AgenticStatus =
   | "idle"
   | "closed";
 
-/** Why a run paused: its explicit `yield` tool, or a typed Marsh policy denial of one tool call. */
+/** Why a run paused: its explicit `yield` tool, a typed Marsh policy denial of one tool call, or the agent's `LoopGuard` holding a stuck run after that call. */
 export type AgenticYieldReason = {
-  readonly kind: "tool" | "policy";
+  readonly kind: "tool" | "policy" | "guard";
   readonly toolCallId: string;
   readonly toolName: string;
   readonly reason: string;
@@ -428,6 +429,8 @@ export type AgenticOptions<
   readonly images?: ImageContent[];
   /** Failure policy of the node driving this agent; without it a thrown failure crashes the node and a `stopReason: "error"` settlement is the node's result. */
   readonly errorHandler?: ErrorHandler<N, V>;
+  /** Failure-loop guard of this agent's runs; see {@link LoopGuard}. */
+  readonly loopGuard?: LoopGuard;
   /**
    * Borrowed collection selecting authorization, native defaults and lifetime. The agent holds
    * and closes only its binding, never the caller's creator hold.

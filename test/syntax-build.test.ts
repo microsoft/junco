@@ -2934,6 +2934,42 @@ test("resources need the collection build creates", async () => {
   }
 });
 
+test("tool_pruning needs the collection build creates; loopGuard reaches every agent spec", async () => {
+  const message =
+    "junco-syntax: tool_pruning applies to the collection build creates; open the supplied collection with { tool_pruning: true } instead";
+  for (const extra of [
+    { createAgent: async () => mock("done") },
+    { collection: {} as tools.ToolCollection },
+  ])
+    await assert.rejects(
+      build(document(), { ...options(), ...extra, tool_pruning: true }),
+      (error) =>
+        error instanceof graph.DataflowDefinitionError &&
+        error.message === message,
+    );
+  const loopGuard = new agent.LoopGuard();
+  const seen: [string, unknown][] = [];
+  const execution = await build(document(), {
+    ...options(),
+    loopGuard,
+    createAgent: async (spec) => {
+      seen.push([spec.path, spec.loopGuard]);
+      return mock("done");
+    },
+  });
+  try {
+    assert.deepEqual(
+      seen.map(([path, guard]) => [path, guard === loopGuard]),
+      [
+        ["Inner/Worker", true],
+        ["Final", true],
+      ],
+    );
+  } finally {
+    await execution.graph[Symbol.asyncDispose]();
+  }
+});
+
 test("prepared agents use node paths, skip factory configuration and belong to the successful graph", async () => {
   const { models, faux } = await fauxRuntime([
     fauxAssistantMessage("prepared child result"),

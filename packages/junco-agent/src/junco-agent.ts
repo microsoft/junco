@@ -105,6 +105,7 @@ import {
   type TokenMonitorConfig,
   validateActiveTools,
 } from "./agentic.js";
+import type { LoopGuardCall, LoopGuardVerdict } from "./loop-guard.js";
 import { TaskScope } from "./tasks.js";
 
 export class JuncoAgentError extends Error {
@@ -592,6 +593,8 @@ class RunRecord implements AgenticRun, UsageOwner {
   taskFailure: { readonly error: unknown } | undefined;
   /** The one native abort that failure started; resolves to its failure, never rejects. */
   taskAbort: Promise<unknown> | undefined;
+  /** This run's loop-guard fold, created on its first tool result. */
+  guard: ((call: LoopGuardCall) => LoopGuardVerdict | undefined) | undefined;
 
   constructor(
     readonly kind: AgenticRun["kind"],
@@ -649,6 +652,20 @@ const HANDOFF = {
   tool: "yield",
   operation: "handoff",
 } as const;
+const LOOP_GUARD = {
+  resource: "operations",
+  category: "agent",
+  tool: "",
+  operation: "loop_guard",
+} as const;
+const TOOL_PRUNING = {
+  resource: "operations",
+  category: "agent",
+  tool: "",
+  operation: "tool_pruning",
+} as const;
+/** Settled runs before a `tool_pruning` collection's never-called tools are pruned (TE `toolprune_evidence`). */
+const PRUNE_AFTER = 10;
 const MODEL_REQUEST = {
   resource: "tokens",
   category: "agent",
@@ -891,6 +908,9 @@ export class JuncoAgent<
   #releaseTool: AgentTool | undefined;
   #tools: AgentTool[] = [];
   #activeNames: string[] = [];
+  /** Calls per tool name over this agent's lifetime; evidence for `tool_pruning`. */
+  readonly #toolCalls = new Map<string, number>();
+  #settledRuns = 0;
   #resources: AgentHarnessResources<S, P>;
   #toolMutation: Promise<void> = Promise.resolve();
   readonly #runsByToolSignal = new WeakMap<AbortSignal, RunRecord>();
@@ -1143,6 +1163,7 @@ export class JuncoAgent<
       activeToolNames,
       cwd,
       tool_block: _toolBlock,
+      loopGuard,
       ...native
     } = this.#options;
     const includeComplain = !this.#blocked.has("complain");
@@ -1249,6 +1270,46 @@ export class JuncoAgent<
         }
         return undefined;
       });
+      if (loopGuard !== undefined)
+        harness.hooks.on(
+          "after_tool",
+          ({ lane, runId, toolCallId, toolName, args, content, isError }) => {
+            if (lane !== "main") return undefined;
+            const run = this.#runForOperation(runId);
+            if (run === undefined || run.stopping || this.#closing)
+              return undefined;
+            run.guard ??= loopGuard.run();
+            const text = content
+              .flatMap((item) => (item.type === "text" ? [item.text] : []))
+              .join("\n");
+            const verdict = run.guard({ toolName, args, text, isError });
+            if (verdict === undefined) return undefined;
+            if (verdict.kind === "redirect") {
+              this.#currentRecorder()?.record({
+                kind: "metrics",
+                counters: { redirects: 1 },
+                ...LOOP_GUARD,
+              });
+              return {
+                content: [...content, { type: "text", text: verdict.text }],
+              };
+            }
+            this.#currentRecorder()?.record({
+              kind: "metrics",
+              counters: { holds: 1 },
+              ...LOOP_GUARD,
+            });
+            // `#onTurnEnd` holds the run after this batch, as for a policy denial.
+            if (run.batch !== undefined && !run.batch.reasons.has(toolCallId))
+              run.batch.reasons.set(toolCallId, {
+                kind: "guard",
+                toolCallId,
+                toolName,
+                reason: verdict.reason,
+              });
+            return undefined;
+          },
+        );
       // Pause before Pi drains steering and snapshots the next request.
       harness.hooks.on("after_tool_batch", async ({ lane, runId }) => {
         if (lane !== "main") return;
@@ -1491,6 +1552,10 @@ export class JuncoAgent<
         }
         this.#runsByToolSignal.set(signal, run);
         if (isYieldTool(tool)) run.batch?.executedYields.set(id, tool);
+        this.#toolCalls.set(
+          tool.name,
+          (this.#toolCalls.get(tool.name) ?? 0) + 1,
+        );
         // This agent's own owner-bound counterpart of a collection tool.
         const selected = this.#owned.binding?.tools.get(tool) ?? tool;
         const recorder = this.#currentRecorder();
@@ -1748,12 +1813,14 @@ export class JuncoAgent<
     const { waiting, step } = boundary;
     if (waiting === undefined || step.kind !== "yield") return;
     const tool = step.reasons.filter(({ kind }) => kind === "tool").length;
+    const guard = step.reasons.filter(({ kind }) => kind === "guard").length;
     waiting.recorder.record({
       kind: "metrics",
       counters: {
         turns_yielded: 1,
         tool_yield_reasons: tool,
-        policy_yield_reasons: step.reasons.length - tool,
+        guard_yield_reasons: guard,
+        policy_yield_reasons: step.reasons.length - tool - guard,
       },
       ...HANDOFF,
     });
@@ -1925,6 +1992,7 @@ export class JuncoAgent<
     run: RunRecord,
     request: RunRequest,
   ): Promise<AssistantMessage> {
+    await this.#pruneUnusedTools(run.context);
     this.beforeAdmission?.();
     const admitted = valueOrThrow(
       await this.#nativeLane.accept(request, run.context),
@@ -1992,7 +2060,45 @@ export class JuncoAgent<
     }
     return run.lastMessage;
   }
+  /** From the eleventh settled run on, deactivate this agent's never-called tools of a `tool_pruning` collection (TE tool pruning). */
+  #pruneUnusedTools(context: RunRecord["context"]): Promise<void> {
+    const collection = this.collection;
+    if (collection?.tool_pruning !== true || this.#settledRuns < PRUNE_AFTER)
+      return Promise.resolve();
+    // Queued like a caller's setTools/setActiveTools, never interleaved; the lane is idle before
+    // `accept`, so no `#operation` wrapper (it would nest inside this run's own operation).
+    const pending = this.#toolMutation.then(async () => {
+      // The collection's own tools only: explicit replacements, MCP and coordination tools stay.
+      const candidates = new Set(
+        this.#tools
+          .filter(
+            (tool) =>
+              tool.name !== "release" && collection.tools.includes(tool),
+          )
+          .map((tool) => tool.name),
+      );
+      const selection = this.#activeNames.filter(
+        (name) => !candidates.has(name) || this.#toolCalls.has(name),
+      );
+      const pruned = this.#activeNames.length - selection.length;
+      if (pruned === 0) return;
+      validateActiveTools(this.#tools, selection);
+      await this.#nativeLane.setActiveTools(selection, context);
+      this.#activeNames = selection;
+      this.#currentRecorder()?.record({
+        kind: "metrics",
+        counters: { pruned },
+        ...TOOL_PRUNING,
+      });
+    });
+    this.#toolMutation = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
   #settle(run: RunRecord, step: AgenticStep): void {
+    if (step.kind === "settled") this.#settledRuns++;
     this.#readyYield(run);
     if (this.#currentRun === run) this.#currentRun = undefined;
     const stopReason =

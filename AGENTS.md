@@ -83,6 +83,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 | `schedules.MODEL_STRENGTHS` | const | `packages/junco-scheduler/src/scheduler.ts` | The five model strengths, weakest first; a `Ladder` names one model per strength. |
 | `schedules.DEFAULT_MODEL_STRENGTH` | const | `packages/junco-scheduler/src/scheduler.ts` | `2` (`"med"`): the strength work-only policies select at. |
 | `schedules.context` | fn | `src/node-policy.ts` | Pair a passive agency graph with policy, sidecar metadata and agency input semantics. |
+| `schedules.stuck` | fn | `src/node-policy.ts` | Whether `nodeId` is paused at a loop-guard hold: its agent is suspended and its latest pause carries a `guard` reason. |
 | `schedules.drain` | fn | `packages/junco-scheduler/src/context.ts` | Run to quiescence as separate steps, retaining trace and cancellation boundaries between them. |
 | `schedules.triggerInputs` | const | `packages/dataflow-engine/src/scheduler.ts` | The default read plan for a node: every edge an `"all"` rule fires on, or only the first satisfied edge of an `"any"` rule, each read WHOLE. |
 | `schedules.uniformLadder` | const | `src/node-policy.ts` | The same rung at every strength. |
