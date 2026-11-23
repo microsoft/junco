@@ -24,3 +24,4 @@ export {
   type NodeSpec,
   type TriggerSpec,
 } from "./schema.js";
+export { JuncoGraphValidator } from "./validator.js";

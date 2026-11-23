@@ -1,6 +1,18 @@
 import { codeFrameColumns } from "@babel/code-frame";
 import { DataflowDefinitionError } from "dataflow-engine";
 
+export const pointer = (key: string) =>
+  key.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/** Throw a validation error at a JSON Pointer, optionally highlighting the key rather than its value. */
+export type Fail = (
+  path: string,
+  message: string,
+  help: string,
+  code: string,
+  options?: { readonly cause?: unknown; readonly target?: "key" | "value" },
+) => never;
+
 /** Lines 1-based, columns 0-based (UTF-16 units), end exclusive. */
 export type ValidationLocation = {
   readonly start: { readonly line: number; readonly column: number };

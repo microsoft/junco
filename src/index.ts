@@ -35,3 +35,4 @@ export * as tracer from "./std/tracer.js";
 export * as trigger from "./std/trigger.js";
 export * as workflows from "./std/workflows/index.js";
 export * as syntax from "./syntax/index.js";
+export { JuncoGraphValidator } from "./syntax/validator.js";

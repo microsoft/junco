@@ -230,6 +230,7 @@ Also exported directly from `junco`: `JuncoGraph`, `MockJuncoGraph`, `Determinis
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
+| `JuncoGraphValidator` | const | `src/syntax/validator.ts` | Validates a decoded Junco document, including nested graphs, before construction. `validate(value)` returns the document or throws `syntax.ValidationError`; `syntax.parse` uses the same validator. |
 | `TaskSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Task. |
 | `AssistantMessageSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Pi's native AssistantMessage: its content, usage/cost, diagnostics and deferred handle, with required fields, literal alternatives and optional fields. |
 | `MockAgent` | class | `src/mock-agent.ts` | A scripted `JuncoAgentProtocol` replaying its `MockTranscript`: no model requests; profiles come from declared usage. |

@@ -36,16 +36,18 @@ import {
   resolveRung,
 } from "../node-policy.js";
 import type * as tracer from "../std/tracer.js";
+import type { ParseOptions } from "./parse.js";
 import {
   edgeId,
+  type GraphSpec,
   inboundEdges,
+  type JuncoDocument,
+  type NodeSpec,
   outboundEdges,
-  type ParseOptions,
   PLACEHOLDER,
   quantityOf,
   resolveTrigger,
-} from "./parse.js";
-import type { GraphSpec, JuncoDocument, NodeSpec } from "./schema.js";
+} from "./schema.js";
 
 /** YAML schemas are loaded at runtime: their payload/result domains are only known dynamically. */
 type Edge = graph.Edge<TSchema, unknown>;
@@ -708,7 +710,7 @@ async function buildGraph(
       : undefined,
     portProfiles,
   );
-  // parse validated these dynamic integers; Width.create only accepts numeric literals.
+  // The document validator checked these dynamic integers; Width.create only accepts numeric literals.
   const g = new JuncoGraph<TSchema, unknown>(
     source,
     sink,

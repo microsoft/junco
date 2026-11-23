@@ -1,3 +1,5 @@
+import * as graph from "dataflow-engine";
+import { unitOf } from "dataflow-profile";
 import { type Static, type TSchema, Type } from "typebox";
 
 const strict = { additionalProperties: false } as const;
@@ -18,7 +20,7 @@ const edge = Type.Object(
       Type.Union([Type.Literal("value"), Type.Literal("message")]),
     ),
     id: Type.Optional(Type.String()),
-    // A JSON Schema mapping; `parse` validates its contents (Draft 2020-12, local refs only).
+    // JuncoGraphValidator checks the mapping's contents (Draft 2020-12, local refs only).
     schema: Type.Unsafe<TSchema>(Type.Object({})),
     // Record each published value under the recorder's `probe` resource; numeric types only.
     probe: Type.Optional(Type.Boolean()),
@@ -139,3 +141,55 @@ export type GraphSpec = JuncoDocument["graph"];
 export type NodeSpec = GraphSpec["nodes"][string];
 export type EdgeSpec = Static<typeof edge>;
 export type TriggerSpec = Static<typeof trigger>;
+
+export const edgeId = (edge: EdgeSpec): string =>
+  edge.id ?? `${edge.from}${edge.kind === "message" ? "~>" : "->"}${edge.to}`;
+export const inboundEdges = (spec: GraphSpec, id: string): EdgeSpec[] =>
+  (spec.edges ?? []).filter((e) => e.to === id);
+export const outboundEdges = (spec: GraphSpec, id: string): EdgeSpec[] =>
+  (spec.edges ?? []).filter((e) => e.from === id);
+export const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
+
+const QUANTITY = /^(\d+(?:\.\d+)?)\s*([A-Za-z]+)$/;
+/** Convert a schema-validated quantity, rejecting unknown unit symbols for its resource. */
+export function quantityOf<R extends graph.ResourceKind>(
+  kind: R,
+  text: string,
+): graph.ResourceQuantity<R> {
+  const match = QUANTITY.exec(text);
+  if (match === null)
+    throw new graph.DataflowDefinitionError(`invalid quantity "${text}"`);
+  const [, amount, symbol] = match;
+  return unitOf(kind, symbol)(Number(amount));
+}
+
+/** Expand the scalar spellings; an omitted trigger watches all inbound edges. */
+export function declaredTrigger(
+  trigger: TriggerSpec,
+): Exclude<TriggerSpec, string> {
+  if (typeof trigger !== "string") return trigger;
+  if (trigger === "never") return { any: [] };
+  return { all: trigger === "always" ? [] : [trigger] };
+}
+
+export function resolveTrigger<N extends TSchema, T>(
+  spec: GraphSpec,
+  id: string,
+  edges: ReadonlyMap<string, graph.Edge<N, T>>,
+  trigger?: TriggerSpec,
+): graph.TriggerRule<N, T> {
+  const { TriggerRule, TriggerEntry } = graph;
+  const rule = declaredTrigger(
+    trigger ?? { all: inboundEdges(spec, id).map(edgeId) },
+  );
+  const entries = "all" in rule ? rule.all : rule.any;
+  const on = entries.map((entry) => {
+    const edge = edges.get(entry);
+    if (edge === undefined)
+      throw new graph.DataflowDefinitionError(
+        `Node "${id}" trigger references edge "${entry}" which is not one of its inbound edges`,
+      );
+    return TriggerEntry.on(edge);
+  });
+  return "all" in rule ? TriggerRule.allOf(...on) : TriggerRule.anyOf(...on);
+}

@@ -20,7 +20,7 @@ One request → one runnable workflow: `<name>.yml` (declarative graph) + `<name
 
 ## Document syntax
 
-`syntax.parse(source)` validates this schema (TypeBox, `additionalProperties: false`); unknown keys fail. Models and thinking levels belong only in the TypeScript ladder, not YAML.
+Use `syntax.parse(source)` for YAML text, or `JuncoGraphValidator.validate(document)` for a decoded object (`import { JuncoGraphValidator } from "junco"`). Both use the same validator and return the validated document. Unknown keys fail; YAML errors also carry source locations. Models and thinking levels belong only in the TypeScript ladder, not YAML.
 
 ```yaml
 skills:                                # optional registry; path to a SKILL.md, relative to build cwd
@@ -64,7 +64,7 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
 
 `Trigger` is `always`, `never`, a scalar inbound edge ID, or a flat `{ all: [...] }` / `{ any: [...] }` mapping (no nesting, no `not`). Omitted trigger: `always` for a node without inbound edges, otherwise `all` inbound edges in declaration order.
 
-`syntax.parse` checks whether each node and `$sink` can start under those triggers, at every graph level. For example, if a loop head has a `seed` edge from `$source` and a `feedback` edge from the loop body, its default `all` waits for feedback that cannot exist yet. Use `trigger: { any: [seed, feedback] }` to let the seed start the loop. Explicit `never` and `{ any: [] }` may stay parked, but cannot seed another node; `emit` always starts. This check assumes reachable producers can publish on their edges. It does not run availability hooks or prove runtime progress.
+`JuncoGraphValidator` checks whether each node and `$sink` can start under those triggers, at every graph level. For example, if a loop head has a `seed` edge from `$source` and a `feedback` edge from the loop body, its default `all` waits for feedback that cannot exist yet. Use `trigger: { any: [seed, feedback] }` to let the seed start the loop. Explicit `never` and `{ any: [] }` may stay parked, but cannot seed another node; `emit` always starts. This check assumes reachable producers can publish on their edges. It does not run availability hooks or prove runtime progress.
 
 Semantics that decide whether a document runs:
 

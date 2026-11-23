@@ -2,17 +2,18 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
-import { graph } from "junco";
+import { graph, JuncoGraphValidator } from "junco";
 import { Type } from "typebox";
 import { YAMLError } from "yaml";
 import { ValidationError } from "../src/syntax/errors.ts";
+import { type ParseOptions, parse } from "../src/syntax/parse.ts";
 import {
+  type EdgeSpec,
   edgeId,
-  type ParseOptions,
-  parse,
+  type GraphSpec,
   resolveTrigger,
-} from "../src/syntax/parse.ts";
-import type { EdgeSpec, GraphSpec, TriggerSpec } from "../src/syntax/schema.ts";
+  type TriggerSpec,
+} from "../src/syntax/schema.ts";
 
 /** Topology fixtures share one valid payload schema; schema cases replace it. */
 const schema = { type: "number" };
@@ -1594,6 +1595,23 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
     assert.equal(error.path, path);
     for (const id of ids) assert.ok(error.message.includes(id), error.message);
   }
+});
+
+test("standalone validation reports the same graph error without a YAML source location", () => {
+  const doc = base();
+  assert.equal(JuncoGraphValidator.validate(doc), doc);
+  doc.graph.edges.push({ from: "B", to: "B", schema });
+  const located = failure(JSON.stringify(doc));
+  assert.ok(located.location);
+  assert.throws(
+    () => JuncoGraphValidator.validate(doc),
+    (error) =>
+      error instanceof ValidationError &&
+      error.code === "unstartable-trigger" &&
+      error.path === located.path &&
+      error.help === located.help &&
+      error.location === undefined,
+  );
 });
 
 test("a feedback group starts only if its trigger accepts a viable seed", () => {
