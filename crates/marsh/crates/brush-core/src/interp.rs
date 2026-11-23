@@ -642,19 +642,21 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 
         match self {
             Self::Simple(simple) => simple.execute_in_pipeline(pipeline_context, params).await,
-            Self::Compound(compound, redirects) => {
-                // Set up any additional redirects.
-                if let Some(redirects) = redirects {
-                    for redirect in &redirects.0 {
-                        setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-                    }
+            Self::Compound(compound, redirects) => match pipeline_context.shell {
+                commands::ShellForCommand::ParentShell(shell) => {
+                    execute_compound_stage(shell, params, compound, redirects.as_ref())
+                        .await
+                        .map(Into::into)
                 }
-
-                Ok(compound
-                    .execute(&mut pipeline_context.shell, &params)
-                    .await?
-                    .into())
-            }
+                commands::ShellForCommand::OwnedShell { mut target, .. } => {
+                    let observer = target.execution_observer().clone();
+                    let compound = compound.clone();
+                    let redirects = redirects.clone();
+                    commands::spawn_pipeline_stage(&observer, async move {
+                        execute_compound_stage(&mut target, params, &compound, redirects.as_ref()).await
+                    })
+                }
+            },
             Self::Function(func) => Ok(func
                 .execute(&mut pipeline_context.shell, &params)
                 .await?
@@ -683,6 +685,20 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
             }
         }
     }
+}
+
+async fn execute_compound_stage(
+    shell: &mut Shell<impl extensions::ShellExtensions>,
+    mut params: ExecutionParameters,
+    compound: &ast::CompoundCommand,
+    redirects: Option<&ast::RedirectList>,
+) -> Result<ExecutionResult, error::Error> {
+    if let Some(redirects) = redirects {
+        for redirect in &redirects.0 {
+            setup_redirect(shell, &mut params, redirect).await?;
+        }
+    }
+    compound.execute(shell, &params).await
 }
 
 enum WhileOrUntil {

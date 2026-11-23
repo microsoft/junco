@@ -558,6 +558,27 @@ async fn run(shell: &mut ObservedShell, line: &str) -> Result<u8> {
     Ok(result.exit_code.into())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_pipeline_producers_stream_past_pipe_capacity() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("checkpoint");
+    std::fs::File::create(&input)?.set_len(4 * 1024 * 1024)?;
+    let stderr = tempfile::NamedTempFile::new()?;
+    let mut shell = observed_shell(&TestObserver::default(), &stderr).await?;
+    shell.set_working_dir(dir.path())?;
+
+    for script in [
+        "for f in checkpoint; do cat \"$f\"; done | cmp - checkpoint",
+        "emit() { cat checkpoint; }; emit | cmp - checkpoint",
+    ] {
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), run(&mut shell, script))
+            .await??;
+        assert_eq!(status, 0, "{script}");
+    }
+    Ok(())
+}
+
 /// Passes `future` through, requiring it to be `Send` even though the observer's sync guard is
 /// not.
 const fn send<F: Future + Send>(future: F) -> F {

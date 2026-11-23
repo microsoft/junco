@@ -160,6 +160,17 @@ impl<SE: extensions::ShellExtensions> std::ops::DerefMut for ShellForCommand<'_,
     }
 }
 
+/// An in-process pipeline stage may block in a builtin's pipe I/O. Start it on an observed
+/// blocking worker so the interpreter can launch the other stages before waiting for it.
+pub(crate) fn spawn_pipeline_stage(
+    observer: &impl extensions::ExecutionObserver,
+    stage: impl Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
+) -> Result<ExecutionSpawnResult, error::Error> {
+    observer
+        .spawn_blocking_task(move || tokio::runtime::Handle::current().block_on(stage))
+        .map(ExecutionSpawnResult::StartedTask)
+}
+
 /// Composes a `std::process::Command` to execute the given command. Appropriately
 /// configures the command name and arguments, redirections, injected file
 /// descriptors, environment variables, etc.
@@ -461,10 +472,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
     ) -> Result<ExecutionSpawnResult, error::Error> {
         let last_arg = Self::take_last_arg(&args);
 
-        // A pipeline stage's builtin runs on a blocking thread scheduled by the observer; a
-        // refusal fails the pipeline rather than running the stage unobserved.
         let observer = shell.execution_observer().clone();
-        let join_handle = observer.spawn_blocking_task(move || {
+        spawn_pipeline_stage(&observer, async move {
             let cmd_context = ExecutionContext {
                 shell: &mut shell,
                 command_name,
@@ -472,16 +481,13 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
                 process_group_id,
             };
 
-            let rt = tokio::runtime::Handle::current();
-            let result = rt.block_on(execute_builtin_command(&builtin, cmd_context, args));
+            let result = execute_builtin_command(&builtin, cmd_context, args).await;
 
             // Update $_ after command execution.
             shell.update_last_arg_variable(last_arg);
 
             result
-        })?;
-
-        Ok(ExecutionSpawnResult::StartedTask(join_handle))
+        })
     }
 
     async fn execute_via_builtin_in_parent_shell(
@@ -516,30 +522,30 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         self,
         func_registration: functions::Registration,
     ) -> Result<ExecutionSpawnResult, error::Error> {
-        let mut shell = self.shell;
         let last_arg = Self::take_last_arg(&self.args);
 
-        let cmd_context = ExecutionContext {
-            shell: &mut shell,
-            command_name: self.command_name,
-            params: self.params,
-            process_group_id: self.process_group_id,
+        let invoke = async move |shell: &mut Shell<SE>| {
+            let context = ExecutionContext {
+                shell,
+                command_name: self.command_name,
+                params: self.params,
+                process_group_id: self.process_group_id,
+            };
+            let result = invoke_shell_function(func_registration, context, &self.args[1..]).await;
+            // The function body's changes to $_ do not survive the invocation.
+            shell.update_last_arg_variable(last_arg);
+            if let Some(post_execute) = self.post_execute {
+                let _ = post_execute(shell);
+            }
+            result
         };
-
-        // Strip the function name off args.
-        let result = invoke_shell_function(func_registration, cmd_context, &self.args[1..]).await;
-
-        // $_ is reset *after* the function body runs, to the last argument of
-        // the invocation (or the function name itself if zero args). Any
-        // mutations made inside the body are overwritten — this matches bash,
-        // where the caller observes only the invocation's last argument.
-        shell.update_last_arg_variable(last_arg);
-
-        if let Some(post_execute) = self.post_execute {
-            let _ = post_execute(&mut shell);
+        match self.shell {
+            ShellForCommand::ParentShell(shell) => invoke(shell).await.map(Into::into),
+            ShellForCommand::OwnedShell { mut target, .. } => {
+                let observer = target.execution_observer().clone();
+                spawn_pipeline_stage(&observer, async move { invoke(&mut target).await })
+            }
         }
-
-        result
     }
 
     fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
@@ -740,7 +746,7 @@ pub(crate) async fn invoke_shell_function(
     function: functions::Registration,
     mut context: ExecutionContext<'_, impl extensions::ShellExtensions>,
     args: &[CommandArg],
-) -> Result<ExecutionSpawnResult, error::Error> {
+) -> Result<ExecutionResult, error::Error> {
     let ast::FunctionBody(body, redirects) = &function.definition().body;
 
     // Apply any redirects specified at function definition-time.
@@ -788,7 +794,7 @@ pub(crate) async fn invoke_shell_function(
         _ => {}
     }
 
-    Ok(result.into())
+    Ok(result)
 }
 
 pub(crate) async fn invoke_command_in_subshell_and_get_output(
