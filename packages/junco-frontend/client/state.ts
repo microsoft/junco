@@ -49,6 +49,26 @@ export type State = {
 
 export const EMPTY: State = { graphs: {}, tools: [], cards: {}, log: [] };
 
+/** Follow the most recently started top-level run, even when it reuses a graph. */
+export function latestRoot(graphs: State["graphs"]): number | undefined {
+  const children = new Set<number>();
+  for (const info of Object.values(graphs))
+    for (const node of Object.values(info.nodes))
+      if (node.child !== undefined) children.add(node.child);
+  let root: number | undefined;
+  let latest = 0;
+  for (const [key, info] of Object.entries(graphs)) {
+    const g = Number(key);
+    if (children.has(g)) continue;
+    const run = info.run?.run ?? 0;
+    if (root === undefined || run > latest || (run === latest && g > root)) {
+      root = g;
+      latest = run;
+    }
+  }
+  return root;
+}
+
 export const isTask = (p: unknown): p is TaskPayload =>
   typeof p === "object" &&
   p !== null &&

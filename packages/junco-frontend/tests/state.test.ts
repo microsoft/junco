@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { EMPTY, isTask, reduce, type State } from "../client/state.ts";
+import { EMPTY, isTask, latestRoot, reduce, type State } from "../client/state.ts";
 import type { FrontendEvent, FrontendEventBody } from "../server/index.ts";
 
 let seq = 0;
@@ -16,6 +16,24 @@ const task = {
   history: [],
 };
 const where = { graph: 1, run: 1 };
+
+test("the diagram follows the latest root run, not a child or a late completion", () => {
+  const graphs: State["graphs"] = {};
+  expect(latestRoot(graphs)).toBeUndefined();
+  const node = { id: "work", status: "ready", live: "ready" } as const;
+  const first = (graphs[2] = { nodes: { work: node }, links: [] });
+  expect(latestRoot(graphs)).toBe(2);
+  graphs[2] = { ...first, run: { run: 1, phase: "end" } };
+  graphs[11] = { nodes: { work: { ...node, child: 12 } }, links: [], run: { run: 2, phase: "start" } };
+  graphs[12] = { ...first, run: { run: 3, phase: "start" } };
+  expect(latestRoot(graphs)).toBe(11);
+  graphs[2] = { ...first, run: { run: 1, phase: "end" } };
+  expect(latestRoot(graphs)).toBe(11);
+  graphs[2].run = { run: 2, phase: "end" };
+  expect(latestRoot(graphs)).toBe(11);
+  graphs[2].run = { run: 4, phase: "start" };
+  expect(latestRoot(graphs)).toBe(2);
+});
 
 test("a handed-off task's card moves queued → running → waiting, and a return leaves it waiting", () => {
   let state = step(EMPTY, {
