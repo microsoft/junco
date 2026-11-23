@@ -11,6 +11,7 @@ import type {
   Node,
   NodeAvailability,
   NodeIdType,
+  ResourceKind,
 } from "dataflow-engine";
 import {
   DataflowDefinitionError,
@@ -256,6 +257,7 @@ export function context<
   >;
   readonly graph: G & JuncoGraph<N, T, never>;
   readonly ladder?: Ladder;
+  readonly measurementWindows?: ReadonlyMap<ResourceKind, number>;
 }): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G> {
   const { graph, ladder } = options;
   if (ladder !== undefined) validateLadder(ladder);

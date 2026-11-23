@@ -27,14 +27,7 @@ import type {
   ImageContent,
   Model,
 } from "@earendil-works/pi-ai";
-import {
-  bytes,
-  constantProfile,
-  type ParentView,
-  type ProfileSet,
-  type ResourceQuantity,
-  tokens,
-} from "dataflow-engine";
+import type { ParentView } from "dataflow-engine";
 import {
   type AgenticOptions,
   type AgenticStatus,
@@ -119,8 +112,6 @@ export type MockTranscript<
   readonly tools?: readonly T[];
   readonly activeToolNames?: readonly string[];
   readonly resources?: AgentHarnessResources<S, P>;
-  /** Constant resource usage this agent exhibits; see {@link MockAgent.profiles}. */
-  readonly usage?: MockUsage;
   readonly thinkingLevel?: ThinkingLevel;
   readonly streamOptions?: AgentHarnessStreamOptions;
   readonly steeringMode?: QueueMode;
@@ -198,35 +189,6 @@ const closedError = () => new JuncoAgentError("closed", "MockAgent is closed");
 const invalidTranscript = () =>
   new JuncoAgentError("invalid_argument", "Invalid MockAgent transcript");
 
-/** Declared constant memory and token usage of a mock activation. */
-export type MockUsage = {
-  readonly [R in "memory" | "tokens"]?: ResourceQuantity<R>;
-};
-
-/** Constant per-activation profiles for declared mock usage; no runtime measurement. */
-export function constantProfiles(usage: MockUsage): ProfileSet {
-  for (const quantity of [usage.memory, usage.tokens])
-    if (
-      quantity !== undefined &&
-      (!Number.isFinite(quantity.amount) || quantity.amount < 0)
-    )
-      throw invalidTranscript();
-  return Object.freeze({
-    ...(usage.memory === undefined
-      ? {}
-      : { memory: constantProfile("memory", usage.memory) }),
-    ...(usage.tokens === undefined
-      ? {}
-      : { tokens: constantProfile("tokens", usage.tokens) }),
-  });
-}
-
-/** Zero memory and zero tokens: the profiles of a mock that declares no usage. */
-export const NO_USAGE: ProfileSet = constantProfiles({
-  memory: bytes(0),
-  tokens: tokens(0),
-});
-
 function validateRun(run: MockRun): void {
   const { frames } = run;
   // Checked at runtime too: a transcript may come from untyped data.
@@ -239,7 +201,7 @@ function validateRun(run: MockRun): void {
   });
 }
 
-/** A scripted `JuncoAgentProtocol` replaying its {@link MockTranscript}: no model requests; profiles come from declared usage. */
+/** A scripted `JuncoAgentProtocol` replaying its {@link MockTranscript} without model requests. */
 export class MockAgent<
   S extends Skill = Skill,
   P extends PromptTemplate = PromptTemplate,
@@ -249,8 +211,6 @@ export class MockAgent<
 > implements JuncoAgentProtocol<S, P, T, N, V>
 {
   readonly errorHandler: ErrorHandler<N, V> | undefined;
-  /** Profiles a MockJuncoGraph attaches to this agent's node: one constant per declared kind. */
-  readonly profiles: ProfileSet;
   readonly #transcript: MockTranscript<S, P, T, N, V>;
   #runCursor = 0;
   #maintenanceCursor = 0;
@@ -310,7 +270,6 @@ export class MockAgent<
       ...(transcript.activeToolNames ?? this.#tools.map((tool) => tool.name)),
     ];
     validateActiveTools(this.#tools, this.#activeNames);
-    this.profiles = constantProfiles(transcript.usage ?? {});
     this.#resources = transcript.resources ?? {};
     this.#model = transcript.model;
     this.#thinkingLevel = transcript.thinkingLevel ?? "off";

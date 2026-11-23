@@ -14,8 +14,6 @@
  * cycles that never descend into the payload are rejected; recursion through `properties`,
  * `items` and other child positions is allowed. The edge factory supplies the root resource ID.
  */
-import type { ResourceKind } from "dataflow-engine";
-import { UNITS } from "dataflow-profile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Format } from "typebox/format";
 import Schema from "typebox/schema";
@@ -29,7 +27,6 @@ import {
   type JuncoDocument,
   JuncoDocumentSchema,
   PLACEHOLDER,
-  quantityOf,
   type TriggerSpec,
 } from "./schema.js";
 
@@ -590,19 +587,6 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
     checkTrigger("$sink", `${path}/sink/trigger`, spec.sink?.trigger);
     for (const [id, node] of Object.entries(spec.nodes)) {
       const nodePath = `${path}/nodes/${pointer(id)}`;
-      for (const [kind, text] of Object.entries(node.profiles ?? {})) {
-        try {
-          quantityOf(kind as ResourceKind, text);
-        } catch (cause) {
-          fail(
-            `${nodePath}/profiles/${kind}`,
-            (cause as Error).message,
-            `write a number and one of the ${kind} units: ${Object.keys(UNITS[kind as ResourceKind]).join(", ")}`,
-            "profile",
-            { cause },
-          );
-        }
-      }
       const inbound = incoming.get(id) ?? [];
       const outbound = outgoing.get(id) ?? [];
       checkTrigger(id, `${nodePath}/trigger`, node.trigger);

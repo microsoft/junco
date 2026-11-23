@@ -1139,16 +1139,8 @@ test("strict object boundaries and malformed list/map entries", () => {
       "/graph/sink/profiles",
       (d) => (d.graph.sink = { profiles: { memory: "1 MB" } }),
     ],
-    [
-      "/graph/nodes/A/profiles/cpu",
-      (d) => (d.graph.nodes.A.profiles = { cpu: "1 s" }),
-    ],
-    [
-      "/graph/nodes/A/profiles/memory",
-      (d) => (d.graph.nodes.A.profiles = { memory: "fast" }),
-    ],
     ["/graph/edges/0/extra", (d) => (d.graph.edges[0].extra = true)],
-    ...["agent", "emit", "graph"].map((kind): [string, Mutate] => [
+    ...["agent", "emit", "graph", "code"].map((kind): [string, Mutate] => [
       "/graph/nodes/A",
       (d) => {
         d.graph.nodes.A = {
@@ -1158,7 +1150,7 @@ test("strict object boundaries and malformed list/map entries", () => {
               ? { text: "go", spec: "done" }
               : {}),
           kind,
-          extra: true,
+          profiles: { memory: "1 MB" },
         };
       },
     ]),
@@ -1210,56 +1202,6 @@ test("strict object boundaries and malformed list/map entries", () => {
     doc.graph.sink = { trigger };
     rejectsAt(doc, "/graph/sink/trigger");
   }
-});
-
-test("resource quantities parse on every node kind and reject unknown units", () => {
-  const profiles = {
-    memory: "512 MB",
-    runtime: "1.5 s",
-    tokens: "4000 tok",
-    cost: "0.125 USD",
-  };
-  const doc = parse({
-    graph: {
-      nodes: {
-        Start: { kind: "emit", text: "go", spec: "done", profiles },
-        A: { profiles },
-        C: { kind: "code", profiles },
-        Inner: {
-          kind: "graph",
-          profiles,
-          graph: {
-            source: { routes: { "C->Inner": [] } },
-            nodes: { W: {} },
-            edges: [{ from: "W", to: "$sink", schema }],
-          },
-        },
-      },
-      edges: [
-        { from: "Start", to: "A", kind: "message", schema },
-        { from: "A", to: "C", schema },
-        { from: "C", to: "Inner", schema },
-        { from: "Inner", to: "$sink", schema },
-      ],
-    },
-  });
-  for (const node of Object.values(doc.graph.nodes))
-    assert.deepEqual(node.profiles, profiles);
-  const error = failure(
-    variant((d) => {
-      d.graph.nodes.A.profiles = { memory: "1 MBs" };
-    }),
-  );
-  assert.equal(error.code, "profile");
-  assert.equal(error.path, "/graph/nodes/A/profiles/memory");
-  assert.match(error.message, /"MBs"/);
-  assert.match(error.help, /MiB/);
-  const costError = failure(
-    variant((d) => {
-      d.graph.nodes.A.profiles = { cost: "1 dollars" };
-    }),
-  );
-  assert.equal(costError.path, "/graph/nodes/A/profiles/cost");
 });
 
 test("all builtins, collision identities and legal parallel edges", () => {

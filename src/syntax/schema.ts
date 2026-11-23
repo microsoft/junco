@@ -1,5 +1,4 @@
 import * as graph from "dataflow-engine";
-import { unitOf } from "dataflow-profile";
 import { type Static, type TSchema, Type } from "typebox";
 
 const strict = { additionalProperties: false } as const;
@@ -27,19 +26,8 @@ const edge = Type.Object(
   },
   strict,
 );
-const quantity = Type.String({ pattern: "^\\d+(\\.\\d+)?\\s*[A-Za-z]+$" });
-const profiles = Type.Object(
-  {
-    memory: Type.Optional(quantity),
-    runtime: Type.Optional(quantity),
-    tokens: Type.Optional(quantity),
-    cost: Type.Optional(quantity),
-  },
-  strict,
-);
 const common = {
   description: Type.Optional(Type.String()),
-  profiles: Type.Optional(profiles),
 };
 const agentFields = {
   ...common,
@@ -149,19 +137,6 @@ export const inboundEdges = (spec: GraphSpec, id: string): EdgeSpec[] =>
 export const outboundEdges = (spec: GraphSpec, id: string): EdgeSpec[] =>
   (spec.edges ?? []).filter((e) => e.from === id);
 export const PLACEHOLDER = /\{\{\s*([^}]+?)\s*\}\}/g;
-
-const QUANTITY = /^(\d+(?:\.\d+)?)\s*([A-Za-z]+)$/;
-/** Convert a schema-validated quantity, rejecting unknown unit symbols for its resource. */
-export function quantityOf<R extends graph.ResourceKind>(
-  kind: R,
-  text: string,
-): graph.ResourceQuantity<R> {
-  const match = QUANTITY.exec(text);
-  if (match === null)
-    throw new graph.DataflowDefinitionError(`invalid quantity "${text}"`);
-  const [, amount, symbol] = match;
-  return unitOf(kind, symbol)(Number(amount));
-}
 
 /** Expand the scalar spellings; an omitted trigger watches all inbound edges. */
 export function declaredTrigger(

@@ -102,7 +102,6 @@ function snapshot(
         id: node,
         status: "running",
         state: undefined,
-        profiles: {},
       }),
     );
   return Object.freeze({
@@ -115,6 +114,7 @@ function snapshot(
     owned: new Set(ids(options.owned ?? names)),
     context: new Map<NodeIdType, never>(),
     plans: new Map(),
+    measurements: new Map(),
     history: Object.freeze(
       (options.history ?? []).map((event) =>
         Object.freeze({

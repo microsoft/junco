@@ -13,7 +13,6 @@ export {
 export { Deterministic } from "./deterministic.js";
 export { JuncoGraph } from "./junco-graph.js";
 export {
-  constantProfiles,
   MockAgent,
   type MockCall,
   type MockFrame,
@@ -24,10 +23,7 @@ export {
   type MockRun,
   type MockTerminal,
   type MockTranscript,
-  type MockUsage,
-  NO_USAGE,
 } from "./mock-agent.js";
-export { MockJuncoGraph } from "./mock-junco-graph.js";
 export * as errors from "./std/errors.js";
 export * as graph from "./std/graph.js";
 export * as schedules from "./std/schedules/index.js";

@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import {
+  captureUsageContext,
+  recordResourceMeasurement,
+} from "dataflow-engine";
 import type {
   NativeMux,
   NativeResourceEvent,
@@ -64,6 +68,7 @@ export class ShellMuxOperations implements BashOperations {
     readonly policy?: Policy;
     readonly resources?: NativeResourceOptions;
     readonly onResourceEvent?: (event: NativeResourceEvent) => void;
+    readonly measureMemory?: boolean;
   };
   readonly #recorder: MemoryRecorder | undefined;
   #mux: NativeMux | undefined;
@@ -80,6 +85,7 @@ export class ShellMuxOperations implements BashOperations {
     readonly policy?: Policy;
     readonly resources?: NativeResourceOptions;
     readonly onResourceEvent?: (event: NativeResourceEvent) => void;
+    readonly measureMemory?: boolean;
     /**
      * Records each command as `shell/exec`, and, for an owned mux, its resource events
      * (see `ShellMuxLease.create`); a getter is resolved per command and at acquisition.
@@ -101,7 +107,8 @@ export class ShellMuxOperations implements BashOperations {
       }
       if (
         options.resources !== undefined ||
-        options.onResourceEvent !== undefined
+        options.onResourceEvent !== undefined ||
+        options.measureMemory !== undefined
       ) {
         throw new Error(
           "ShellMuxOperations: a borrowed mux keeps the resources it was opened with",
@@ -125,6 +132,7 @@ export class ShellMuxOperations implements BashOperations {
       policy: options?.policy,
       resources: options?.resources,
       onResourceEvent: options?.onResourceEvent,
+      measureMemory: options?.measureMemory,
     };
   }
 
@@ -272,6 +280,7 @@ export class ShellMuxOperations implements BashOperations {
             (entry): entry is [string, string] => entry[1] !== undefined,
           ),
         );
+        const usage = captureUsageContext();
         const started = mux.start(
           {
             command,
@@ -284,6 +293,12 @@ export class ShellMuxOperations implements BashOperations {
             if (error) throw error;
             onData(data);
           },
+          usage?.report === undefined
+            ? undefined
+            : (error, bytes) => {
+                if (error !== null) throw error;
+                recordResourceMeasurement("memory", bytes, usage);
+              },
         );
         run = started;
         this.#runs.add(started);

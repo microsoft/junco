@@ -17,7 +17,9 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::{Id, JoinHandle};
 use tokio::time::Instant;
 
-use crate::frontend::{Frontend, OutputCallback, OutputRoute, PolicyLog, ResourceLog};
+use crate::frontend::{
+    Frontend, MemoryPeakCallback, OutputCallback, OutputRoute, PolicyLog, ResourceLog,
+};
 use crate::process::{Admission, Admitted, ExecLine, ProcessState, ProcessTask, process_channels};
 use crate::tool::JuncoTool;
 use crate::{NativeProcessOptions, NativeRunOptions, NativeRunResult};
@@ -110,7 +112,7 @@ impl RunState {
 /// Per-shell monitors relay events tagged with the shell's policy owner to this shared channel.
 pub(crate) struct ResourceTagging {
     interval: Duration,
-    events: tokio::sync::mpsc::Sender<(Option<String>, marsh_core::ResourceEvent)>,
+    events: Option<tokio::sync::mpsc::Sender<(Option<String>, marsh_core::ResourceEvent)>>,
 }
 
 #[derive(Clone)]
@@ -132,21 +134,59 @@ impl Backend {
         runtime: &Handle,
         owner: Option<&Principal>,
     ) -> marsh_core::PipelineOptions {
+        self.command_monitor(runtime, owner, None).0
+    }
+
+    fn command_monitor(
+        &self,
+        runtime: &Handle,
+        owner: Option<&Principal>,
+        peak: Option<MemoryPeakCallback>,
+    ) -> (
+        marsh_core::PipelineOptions,
+        Option<JoinHandle<Result<(), String>>>,
+    ) {
         let Some(tagging) = &self.monitor else {
-            return self.pipeline_options.clone();
+            return (self.pipeline_options.clone(), None);
         };
+        if tagging.events.is_none() && peak.is_none() {
+            return (self.pipeline_options.clone(), None);
+        }
         let monitor = marsh_core::ResourceMonitorConfig::new(tagging.interval);
         let mut events = monitor.events().expect("a fresh monitor's receiver");
         let sender = tagging.events.clone();
-        let owner = owner.map(|principal| principal.as_str().to_owned());
-        runtime.spawn(async move {
+        let owner = sender
+            .as_ref()
+            .and(owner)
+            .map(|principal| principal.as_str().to_owned());
+        let measured = peak.is_some();
+        let relay = runtime.spawn(async move {
+            let mut failure = None;
             while let Some(event) = events.recv().await {
-                if sender.send((owner.clone(), event)).await.is_err() {
+                // Zero is also Marsh's sentinel for an unavailable memory.peak file.
+                if let (Some(callback), marsh_core::ResourceEvent::Finished { sample, .. }) =
+                    (&peak, &event)
+                    && sample.memory_peak_bytes > 0
+                    && let Err(error) = callback
+                        .call_async_catch(Ok(sample.memory_peak_bytes as f64))
+                        .await
+                {
+                    failure.get_or_insert_with(|| {
+                        format!("ShellMux memory peak callback failed: {error}")
+                    });
+                }
+                if let Some(sender) = &sender
+                    && sender.send((owner.clone(), event)).await.is_err()
+                {
                     break;
                 }
             }
+            failure.map_or(Ok(()), Err)
         });
-        self.pipeline_options.clone().with_resource_monitor(monitor)
+        (
+            self.pipeline_options.clone().with_resource_monitor(monitor),
+            measured.then_some(relay),
+        )
     }
 }
 
@@ -212,7 +252,7 @@ impl Session {
         // in a CopyTree build, a second mux over that backend), never retained here.
         let mux = create_mux(profile, Arc::clone(&frontend)).map_err(|error| error.to_string())?;
         let (resource_log, monitor) = match setup.resource_events {
-            Some((interval, log)) => {
+            Some((interval, Some(log))) => {
                 let (events, mut tagged) = tokio::sync::mpsc::channel(64);
                 let sink = Arc::clone(&log);
                 let forwarder = runtime.spawn(async move {
@@ -222,9 +262,19 @@ impl Session {
                 });
                 (
                     Some(ResourceForwarding { log, forwarder }),
-                    Some(Arc::new(ResourceTagging { interval, events })),
+                    Some(Arc::new(ResourceTagging {
+                        interval,
+                        events: Some(events),
+                    })),
                 )
             }
+            Some((interval, None)) => (
+                None,
+                Some(Arc::new(ResourceTagging {
+                    interval,
+                    events: None,
+                })),
+            ),
             None => (None, None),
         };
         let (closed, _) = watch::channel(None);
@@ -277,6 +327,7 @@ impl Session {
         options: NativeRunOptions,
         owner: Option<Principal>,
         callback: OutputCallback,
+        peak: Option<MemoryPeakCallback>,
     ) -> Result<Arc<RunState>, String> {
         let timeout = native_timeout(options.timeout_ms)?;
         let (state, result_sender) = RunState::pending();
@@ -295,6 +346,7 @@ impl Session {
                 state: run_state,
                 route,
                 timeout,
+                peak,
             }
             .run()
         })?;
@@ -601,6 +653,7 @@ struct RunTask {
     state: Arc<RunState>,
     route: Arc<OutputRoute>,
     timeout: Option<Duration>,
+    peak: Option<MemoryPeakCallback>,
 }
 
 impl RunTask {
@@ -614,6 +667,7 @@ impl RunTask {
             state,
             route,
             timeout,
+            peak,
         } = self;
         let NativeRunOptions {
             command,
@@ -638,7 +692,8 @@ impl RunTask {
         if state.is_cancelled() {
             return Ok(cancelled_result(None, false));
         }
-        let pipeline_options = backend.pipeline_options(&runtime, owner.as_ref());
+        let (pipeline_options, measurements) =
+            backend.command_monitor(&runtime, owner.as_ref(), peak);
         // Never race this future against cancellation: open_shell leases the seed and builds
         // resources, and dropping it could orphan both. A fresh pipe shell every call, so a
         // durable principal's variables never leak from one command into the next.
@@ -670,6 +725,19 @@ impl RunTask {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&shell.sandbox().uid);
+        drop(shell);
+        if let Some(measurements) = measurements {
+            let reported = measurements
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            if let Err(error) = reported {
+                return Err(match result {
+                    Err(primary) => primary.with_cleanup(error),
+                    Ok(_) => error.into(),
+                });
+            }
+        }
         result
     }
 }

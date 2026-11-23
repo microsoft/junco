@@ -8,7 +8,7 @@ Rewrite the selected `<workflow>.yml` in place with confirmed geometry; change i
 ## Preserve
 
 - Keep models, thinking, all five ordered ladder rungs and strength selection/escalation unchanged, along with scheduler algorithms/composition and every limit's value, scope and enclosing enforcement boundary.
-- New geometry inherits effective model/strength, scheduling, window/threads and limits explicitly at every level; parent strength is not recursive. If policy, profiles, readiness or ownership cannot be preserved through bindings alone, report the candidate inapplicable.
+- New geometry inherits effective model/strength, scheduling, window/threads and limits explicitly at every level; parent strength is not recursive. If policy, measurement windows, readiness or ownership cannot be preserved through bindings alone, report the candidate inapplicable.
 - Keep authoritative evaluators/checks, assignment text, helper bodies, contracts, tools and permissions fixed; new agents receive no broader access. Concurrent workers require already-safe independent artifacts.
 - Require explicit paid-run authorization. Never fabricate prerequisites or measurements; synthetic/offline evidence proves wiring, not savings. Never call `schedules.runOptimizer` or the `junco-profile-optimizer` binary, copy their controller or write another.
 - Never overwrite outside edits: precheck both target files before staging/restoring either; report conflicts without overwriting either.

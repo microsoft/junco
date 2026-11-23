@@ -83,6 +83,7 @@ export function genericOracle() {
         ({ id, status, description }) => ({ id, status, description }),
       ),
       context: contextPairs,
+      measurements: [],
       history: snapshot.history,
       lastError: snapshot.lastError?.message ?? null,
     };

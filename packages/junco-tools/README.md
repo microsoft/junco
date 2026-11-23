@@ -387,7 +387,7 @@ Resource control requires Linux cgroup v2 with delegated cpu/memory/pids control
 delegation, external commands fail closed with `cgroup resource control unavailable` on
 standard error instead of running unlimited. Builtin-only pipelines create no cgroup or events.
 
-Monitoring requires both a positive `resources.monitorIntervalMs` (milliseconds) and
+For the mux-wide event stream, set both a positive `resources.monitorIntervalMs` (milliseconds) and
 `onResourceEvent(event)`. `NativeResourceOptions` and `NativeResourceEvent` are package-root type
 exports (`NativeResourceSample` comes from `junco-tools/native`). Events share a `pipelineId`: `started`
 carries the pipeline's source text in `command`; periodic, lossy `sample` events and the
@@ -403,6 +403,16 @@ event stream to end and all callbacks to return; a callback throw rejects that f
 without changing command execution. Borrowed muxes retain their original resource settings.
 `JuncoAgent.create` keeps its default collection settings; pass a configured collection to
 give an agent resource limits.
+
+**Scheduler memory history.** A positive `measurementWindows.get("memory")` enables measurement
+on a collection `fromYaml` creates. For a supplied collection, open it with `{ measureMemory: true }`
+or enable its existing monitor via a recorder or `onResourceEvent` and interval. The interval
+defaults to 1000 ms with `measureMemory`. Native `ShellMuxOperations` reports one final cgroup
+`memory.peak` in bytes per external pipeline to the graph node that started the command, before
+`exec` settles. Commands on the same policy owner remain distinct. Builtins, custom bash
+operations and work outside a reporting node add no sample. This requires delegated cgroup v2
+and a readable `memory.peak` (Linux 5.19+); the native monitor's zero sentinel for an unavailable
+peak is never a measurement. The scheduler does not sample host or agent RSS.
 
 ### Profiling
 

@@ -26,6 +26,9 @@ interface Snapshot<N, E> {
   /** Completed scheduling decisions, oldest first. */
   readonly history: readonly PastDecision[];
 
+  /** Per-node raw measurements retained by the context, oldest first. */
+  readonly measurements: ReadonlyMap<NodeId, ReadonlyMap<ResourceKind, readonly number[]>>;
+
   /** Monotonically increasing runtime version. */
   readonly version: number;
 }
@@ -41,6 +44,10 @@ available: determined by the graph runtime.
 owned: determined by scheduler composition.
 history: makes stateful policies expressible as pure functions.
 graph: read-only structural and metadata information.
+
+`context({ graph, scheduler, measurementWindows: new Map([["memory", 8]]) })` retains at most eight measured byte values per node. Omit `measurementWindows` to collect nothing. Runtime is measured in milliseconds, memory in bytes, tokens in whole tokens, and cost in micro-USD. Missing samples are unknown, not zero. The `pi` wire includes measurements only for available nodes it owns.
+
+`lowest(kind)` and `highest(kind)` rank by the latest observation. Nodes without observations come last; `choose` breaks ties by raw ID. `limit({ memory }, inner)` packs a decision using each node's largest retained byte sample. With no measurement it runs a node alone. For a calibrated cold start, supply `memoryFloor(nodeId)` alongside `memory`: its byte count is a lower bound on the admission estimate even after samples arrive. Graphs carry neither estimates nor models. Memory admission is not an enforced process cap; token and tool limits continue to charge actual usage.
 
 The scheduler does not inspect or mutate edge queues directly unless that is intentionally exposed through Graph. Availability remains authoritative.
 

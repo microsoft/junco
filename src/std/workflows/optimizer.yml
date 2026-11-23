@@ -74,10 +74,10 @@ graph:
           `schedules.roundRobin(undefined, 1)`. Widths of separated branches add up, so the
           graph's capacity must allow the combined width, and the two branches together must
           keep all required work schedulable; separation is no fairness or capacity guarantee.
-          `schedules.lowest(kind)` and `schedules.highest(kind)` (kind "tokens" | "memory" |
-          "runtime") are rank callbacks for choose, not schedulers; use them only when compatible
-          fixed profiles cover every compared node, never with invented forecasts. Keep ties
-          deterministic, progress guaranteed and combined concurrency bounded. Cheap
+          `schedules.lowest(kind)` and `schedules.highest(kind)` are rank callbacks for choose,
+          not schedulers. They compare the latest observations in `snapshot.measurements`; use
+          a resource the target collects through `measurementWindows`, never invented samples.
+          Keep ties deterministic, progress guaranteed and combined concurrency bounded. Cheap
           `schedules.pi` runs only through the target's fixed `optimizerPi` wrapper, never as the
           default replacement for deterministic policies. That wrapper alone owns model/thinking
           authorization against request.allowedModels and records every returned usage before
@@ -95,10 +95,11 @@ graph:
           numbers within request.limitBounds (a missing bound is no numeric upper bound) and
           scope "evaluation" (the default: one run() or step() drive), "batch" (one selected
           decision) or "activation" (one node prime or resume, not an agent's lifetime). Memory
-          is predicted per-decision admission; tokens and tools cap actual usage. For a
-          tool-using cost workload consider a `tools` cap first: it counts every admitted
-          graph-agent tool call together, including coordination and inherited task-child calls,
-          but not yours. A denied call never executes and fails its run, so the batch is invalid,
+          admission uses retained peaks; an unknown node without a calibrated floor runs alone.
+          Tokens and tools cap actual usage. For a tool-using cost workload consider a `tools`
+          cap first: it counts every admitted graph-agent tool call together, including
+          coordination and inherited task-child calls, but not yours. A denied call never
+          executes and fails its run, so the batch is invalid,
           never a cheap success. Tighten caps that succeeded and bracket later proposals with
           lower caps that failed; a smaller cap does not necessarily save cost. The target keeps
           its original hard limits outside your region.

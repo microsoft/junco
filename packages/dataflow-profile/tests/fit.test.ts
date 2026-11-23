@@ -1,11 +1,11 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { DataflowDefinitionError, EdgeId, type PortFeature } from "dataflow-engine";
+import { DataflowDefinitionError, EdgeId } from "dataflow-engine";
 import { fitProfiles } from "../src/fit.js";
 import { evaluate } from "../src/predict.js";
 import { parsePins, parseProfiles, parseSamples } from "../src/schema.js";
-import type { Pin, PinsFile, Sample } from "../src/types.js";
+import type { Pin, PinsFile, PortFeature, Sample } from "../src/types.js";
 
 const fittedAt = "2026-10-12";
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf8");

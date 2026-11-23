@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { DataflowDefinitionError } from "./errors.js";
+import type { ResourceKind } from "./units.js";
 
 /** How long one usage ledger lives: a whole `run()`/`step()`, one scheduler decision, or one node activation. */
 export type UsageLimitScope = "evaluation" | "batch" | "activation";
@@ -102,6 +103,8 @@ export class UsageBudget {
 export type UsageContext = Readonly<{
   budgets: readonly UsageBudget[];
   nodePath: readonly string[];
+  /** The current node's reporter; unlike budgets, reporters never accumulate across nodes. */
+  report?: (kind: ResourceKind, value: number) => void;
 }>;
 
 // Boxed, so an explicitly empty context masks an enclosing one.
@@ -126,6 +129,7 @@ export function runWithUsageBudgets<T>(
   budgets: readonly UsageBudget[],
   nodeId: string,
   work: () => T,
+  report?: (kind: ResourceKind, value: number) => void,
 ): T {
   const ambient = captureUsageContext();
   const merged = [...(ambient?.budgets ?? [])];
@@ -135,9 +139,19 @@ export function runWithUsageBudgets<T>(
     Object.freeze({
       budgets: Object.freeze(merged),
       nodePath: Object.freeze([...(ambient?.nodePath ?? []), nodeId]),
+      ...(report === undefined ? {} : { report }),
     }),
     work,
   );
+}
+
+/** Reports one observed sample in base units; missing or invalid observations never become zero. */
+export function recordResourceMeasurement(
+  kind: ResourceKind,
+  value: number,
+  context: UsageContext | undefined = captureUsageContext(),
+): void {
+  if (Number.isSafeInteger(value) && value >= 0) context?.report?.(kind, value);
 }
 
 function hit(

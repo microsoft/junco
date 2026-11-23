@@ -1,5 +1,5 @@
-import { constantProfile, DataflowDefinitionError, type Estimate, type FeatureVector, type ResourceKind } from "dataflow-engine";
-import { THRESHOLDS, type Model, type Profile, type ProfileRecord, type ProfilesFile } from "./types.js";
+import { DataflowDefinitionError, type ResourceKind } from "dataflow-engine";
+import { THRESHOLDS, type Estimate, type FeatureVector, type Model, type Profile, type ProfileRecord, type ProfilesFile } from "./types.js";
 import { unitOf } from "./units.js";
 
 /** Evaluate a fitted model in its profile's own unit. */
@@ -62,13 +62,15 @@ export function makeProfile<R extends ResourceKind>(record: ProfileRecord<R>): P
   if (!Number.isFinite(bound) || bound < 0) fail("bound", "must be finite and non-negative");
   if (!Number.isFinite(fit.residP95) || fit.residP95 < 0) fail("fit.residP95", "must be finite and non-negative");
   if (fit.r2 !== undefined && !Number.isFinite(fit.r2)) fail("fit.r2", "must be finite");
-  const constant = model.kind === "constant" ? constantProfile(resource, unit(bound)) : undefined;
+  const constant = model.kind === "constant"
+    ? Object.freeze({ value: bound, safe: bound, source: "fallback", reason: "constant" } as const)
+    : undefined;
 
   const predict = (x: FeatureVector): Estimate => {
     if (x.length !== features.length) fail("features", `expected ${features.length} values, got ${x.length}`);
     for (let i = 0; i < x.length; i++)
       if (!Number.isFinite(x[i])) fail("features", "values must be finite");
-    if (model.kind === "constant") return constant!.predict(x);
+    if (model.kind === "constant") return constant!;
     const value = Math.max(0, evaluate(model, x));
     if (!Number.isFinite(value)) fail("model", "prediction must be finite");
     let reason: Estimate["reason"];

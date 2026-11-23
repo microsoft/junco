@@ -12,7 +12,6 @@ import type {
   ParentView,
 } from "./node.js";
 import { Message, snapshotView } from "./node.js";
-import type { Profiles } from "./profile.js";
 import { TriggerEntry, TriggerRule } from "./trigger.js";
 
 /** Registration options for a constant node: identity, prose, its graph state and return value. */
@@ -231,7 +230,6 @@ export class Source<N extends TSchema, T>
 {
   readonly id: NodeId;
   readonly description?: string;
-  readonly profiles?: Profiles<never>;
   readonly schema: N;
   readonly state = this;
   readonly trigger = TriggerRule.always<N, T>();
@@ -242,10 +240,7 @@ export class Source<N extends TSchema, T>
 
   constructor(
     route: (view: ParentView<N, T>) => Message<N>[],
-    options: Pick<
-      NodeOptions<N, T>,
-      "description" | "profiles" | "is_available"
-    > & {
+    options: Pick<NodeOptions<N, T>, "description" | "is_available"> & {
       readonly id: NodeId;
       readonly schema: N;
     },
@@ -253,7 +248,6 @@ export class Source<N extends TSchema, T>
     requireSchema("Source", options.id, options.schema);
     this.id = options.id;
     this.schema = options.schema;
-    if (options.profiles !== undefined) this.profiles = options.profiles;
     if (options.description !== undefined)
       this.description = options.description;
     const gate = options.is_available;
@@ -318,7 +312,6 @@ export class Source<N extends TSchema, T>
 export class Sink<N extends TSchema, T> implements NodeSpec<Sink<N, T>, N, T> {
   readonly id: NodeId;
   readonly description?: string;
-  readonly profiles?: Profiles<never>;
   readonly schema: N;
   readonly state = this;
   readonly trigger: TriggerRule<N, T>;
@@ -336,7 +329,6 @@ export class Sink<N extends TSchema, T> implements NodeSpec<Sink<N, T>, N, T> {
     requireSchema("Sink", options.id, options.schema);
     this.id = options.id;
     this.schema = options.schema;
-    if (options.profiles !== undefined) this.profiles = options.profiles;
     this.trigger = options.trigger;
     if (options.description !== undefined)
       this.description = options.description;

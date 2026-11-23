@@ -45,6 +45,7 @@ import {
   NodeId,
   type NodeIdType,
   type ParentView,
+  recordResourceMeasurement,
   runWithUsageContext,
   type UsageContext,
 } from "dataflow-engine";
@@ -1355,6 +1356,22 @@ export class JuncoAgent<
             this.#runForOperation(request.operationId) ??
             this.#structural.get(request.operationId);
           if (owner !== undefined) this.#failUsage(owner, error);
+        }
+        // Pi publishes committed rows, not estimates or totals. Use the accepted request's
+        // activation even if delivery runs outside its async context.
+        if (request.context?.report !== undefined && !row.adjustment) {
+          recordResourceMeasurement(
+            "tokens",
+            row.usage.totalTokens,
+            request.context,
+          );
+          const usd = row.usage.cost?.total;
+          if (typeof usd === "number" && usd >= 0)
+            recordResourceMeasurement(
+              "cost",
+              Math.round(usd * 1_000_000),
+              request.context,
+            );
         }
       });
       if (tokenMonitor !== undefined)

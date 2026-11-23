@@ -88,7 +88,7 @@
       "expectations": [
         "The original Release scheduler branch, all five ladder model/thinking literals and ordering, { tools: 40 }, evaluator and createAgent ownership remain unchanged; no network model is acquired.",
         "An old→new binding audit ties Solve's high policy to Reviewer and both Worker nodes, with explicit dispatch bindings for __junco_opt_Solve, CandidateA and CandidateB; no new label falls through to med or a different schedule, and Final remains smol.",
-        "The tournament keeps the original Solve boundary and assignment, both candidates complete before ordered fanin, and Reviewer reads the ordered array from payload in the steered JSON user message with id __junco_fanin:output, after its staged instruction and alongside the separate assignment message; profiles, limits, readiness, tools and window/threads retain their effective policy at every level.",
+        "The tournament keeps the original Solve boundary and assignment, both candidates complete before ordered fanin, and Reviewer reads the ordered array from payload in the steered JSON user message with id __junco_fanin:output, after its staged instruction and alongside the separate assignment message; measurement windows, limits, readiness, tools and window/threads retain their effective policy at every level.",
         "Archived candidate .yml and .ts exist, the expected hash comes from that archived TS, an actual offline TS check and measure.ts check succeed on the matched pair, and no paid measurement or confirmation starts.",
         "Stopping restores/retains the incumbent YAML/TS and expectedTsSha256 after both ownership prechecks; no unconfirmed tournament remains at the live paths and no benchmark savings are claimed."
       ]

@@ -15,14 +15,11 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   captureUsageContext,
-  DataflowDefinitionError,
   DummyTracer,
   Edge,
   gigabytes,
-  megabytes,
   NodeId,
   type NodeOptions,
-  type ProfileSet,
   TriggerEntry,
   TriggerRule,
   tokens,
@@ -32,7 +29,6 @@ import {
 import {
   AssistantMessageSchema,
   JuncoAgent,
-  JuncoAgentError,
   type TaskSchema,
 } from "junco-agent";
 import { LockPolicy, TaskTool } from "junco-tools";
@@ -42,7 +38,6 @@ import {
   Deterministic,
   JuncoGraph,
   MockAgent,
-  MockJuncoGraph,
   schedules,
   graph as std,
 } from "../src/index.ts";
@@ -87,139 +82,81 @@ const memberWaves = (waves: string[][], names: string[]) =>
     .map((wave) => wave.filter((name) => names.includes(name)))
     .filter((wave) => wave.length > 0);
 
-// Profiles describe mock usage, not the harness resources in MockTranscript.resources.
-test("MockAgent usage becomes constant node profiles", async () => {
-  const agent = new MockAgent({
-    runs: [],
-    usage: { memory: megabytes(3000), tokens: tokens(100) },
-  });
-  const empty = new MockAgent({ runs: [] });
-  const ports = terminalPorts();
-  const graph = new MockJuncoGraph(
-    ports.source,
-    ports.sink,
-    Width.create(1),
-    UNBOUNDED,
-    new DummyTracer(),
-    LockPolicy,
-  );
-  try {
-    assert.equal(agent.profiles.memory!.unit, megabytes);
-    assert.equal(agent.profiles.memory!.predict([]).safe, 3000);
-    const estimate = agent.profiles.tokens!.predict([]);
-    assert.equal(estimate.safe, 100);
-    assert.equal(estimate.source, "fallback");
-    assert.equal(estimate.reason, "constant");
-    assert.equal(agent.profiles.tokens!.predict([]), estimate);
-    assert.ok(Object.isFrozen(estimate));
-    assert.deepEqual(empty.profiles, {});
-    for (const amount of [-1, NaN, Infinity])
-      assert.throws(
-        () => new MockAgent({ runs: [], usage: { memory: megabytes(amount) } }),
-        (error: unknown) =>
-          error instanceof JuncoAgentError && error.code === "invalid_argument",
+test("memory admission packs calibrated floors and isolates unmeasured mock members", async () => {
+  const floors: Readonly<Record<string, number>> = {
+    A: 3e9,
+    B: 3e9,
+    C: 2e9,
+    D: 1e9,
+  };
+  const names = Object.keys(floors);
+  for (const calibrated of [false, true]) {
+    const { ports, graph } = agencyGraph();
+    try {
+      const members = names.map((name) =>
+        graph.addNode(
+          member(
+            name,
+            new MockAgent({ prompt: "go", runs: [yieldsThen(0, name)] }),
+          ),
+        ),
       );
-    const node = graph.addNode(member("empty", empty));
-    assert.equal(
-      (graph.getNode(node)!.profiles as ProfileSet).memory!.predict([]).safe,
-      0,
-    );
-    assert.equal(
-      (graph.getNode(graph.sink.id)!.profiles as ProfileSet).tokens!.predict([])
-        .safe,
-      0,
-    );
-  } finally {
-    await graph.close();
-    await agent.return();
+      ports.connect(graph, members[3]!);
+      const { waves, scheduler } = recorded(
+        schedules.limit(
+          {
+            memory: gigabytes(4),
+            ...(calibrated ? { memoryFloor: (id: string) => floors[id] } : {}),
+          },
+          schedules.parallel(),
+        ),
+      );
+      const results = await schedules
+        .context({
+          graph,
+          measurementWindows: new Map([["memory", 1]]),
+          scheduler: (snapshot, signal) => {
+            assert.equal(snapshot.measurements.size, 0);
+            return scheduler(snapshot, signal);
+          },
+        })
+        .run();
+      if (calibrated)
+        assert.deepEqual(memberWaves(waves, names), [
+          ["A", "D"],
+          ["A", "D"],
+          ["B"],
+          ["B"],
+          ["C"],
+          ["C"],
+        ]);
+      else assert.ok(waves.every((wave) => wave.length === 1));
+      members.forEach((id, i) =>
+        assert.equal(textOf(results.get(id)!), names[i]),
+      );
+      assert.equal(textOf(results.get(ports.sink.id)!), "D");
+    } finally {
+      await graph.close();
+    }
   }
 });
 
-for (const Graph of [MockJuncoGraph, JuncoGraph]) {
-  const mocked = Graph === MockJuncoGraph;
-  test(
-    mocked
-      ? "mock members under a memory limit never share a column beyond 4 GB"
-      : "a plain JuncoGraph's ports are unprofiled, so limit rejects them",
-    async () => {
-      const names = ["A", "B", "C", "D"];
-      const agents = names.map(
-        (name, i) =>
-          new MockAgent({
-            prompt: "go",
-            runs: [yieldsThen(0, name)],
-            usage: { memory: megabytes([3000, 3000, 2000, 1000][i]!) },
-          }),
-      );
-      const ports = terminalPorts();
-      const graph = new Graph(
-        ports.source,
-        ports.sink,
-        Width.create(1),
-        UNBOUNDED,
-        new DummyTracer(),
-        LockPolicy,
-      );
-      try {
-        const members = names.map((name, i) =>
-          graph.addNode({
-            ...member(name, agents[i]!),
-            ...(mocked ? {} : { profiles: agents[i]!.profiles }),
-          }),
-        );
-        ports.connect(graph, members[3]!);
-        const limited: Policy = schedules.limit<
-          Agentic<typeof TaskSchema, AssistantMessage>,
-          typeof TaskSchema,
-          AssistantMessage,
-          schedules.AgencyNodeMetadata
-        >({ memory: gigabytes(4) }, schedules.parallel());
-        if (mocked) {
-          const { waves, scheduler } = recorded(limited);
-          const results = await schedules.context({ graph, scheduler }).run();
-          assert.deepEqual(memberWaves(waves, names), [
-            ["A", "D"],
-            ["A", "D"],
-            ["B"],
-            ["B"],
-            ["C"],
-            ["C"],
-          ]);
-          assert.ok(
-            waves.every((wave) => !(wave.includes("A") && wave.includes("B"))),
-          );
-          members.forEach((node, i) => {
-            assert.equal(textOf(results.get(node)!), names[i]);
-          });
-          assert.equal(textOf(results.get(ports.sink.id)!), "D");
-        } else {
-          await assert.rejects(
-            () => schedules.context({ graph, scheduler: limited }).run(),
-            (error: unknown) =>
-              error instanceof DataflowDefinitionError &&
-              error.message.includes('"$sink"') &&
-              error.message.includes("has no memory profile"),
-          );
-        }
-      } finally {
-        await graph.close();
-      }
-    },
-  );
-}
-
-test("the cheapest mock racer reaches an anyOf consumer; losers never start", async () => {
-  const names = ["R1", "R2", "R3"];
+test("a scheduler's token estimates pick the cheapest racer; losers never start", async () => {
+  const estimatedTokens: Readonly<Record<string, number>> = {
+    R1: 900,
+    R2: 100,
+    R3: 300,
+  };
+  const names = Object.keys(estimatedTokens);
   const agents = names.map(
-    (name, i) =>
+    (name) =>
       new MockAgent({
         prompt: "go",
         runs: [yieldsThen(0, name)],
-        usage: { tokens: tokens([900, 100, 300][i]!) },
       }),
   );
   const ports = terminalPorts();
-  const graph = new MockJuncoGraph(
+  const graph = new JuncoGraph(
     ports.source,
     ports.sink,
     Width.create(1),
@@ -270,7 +207,12 @@ test("the cheapest mock racer reaches an anyOf consumer; losers never start", as
         typeof TaskSchema,
         AssistantMessage,
         schedules.AgencyNodeMetadata
-      >({ rank: schedules.lowest("tokens"), width: () => 1 }),
+      >({
+        // Non-racer work (the join and ports) takes priority over starting another racer.
+        rank: (_, a, b) =>
+          (estimatedTokens[a] ?? -1) - (estimatedTokens[b] ?? -1),
+        width: () => 1,
+      }),
     );
     const results = await schedules.context({ graph, scheduler }).run();
     assert.deepEqual(memberWaves(waves, [...names, "join"]), [

@@ -4,6 +4,7 @@ import {
   type EdgeIdType,
   type InputSchedule,
   type NodeIdType,
+  type ResourceKind,
 } from "dataflow-engine";
 import type { TSchema } from "typebox";
 import { copyUsageLimits } from "./usage-limits.js";
@@ -60,6 +61,11 @@ export type Snapshot<S, N extends TSchema, T, C> = DataflowObservation<
   readonly available: ReadonlySet<NodeIdType>;
   readonly owned: ReadonlySet<NodeIdType>;
   readonly context: ReadonlyMap<NodeIdType, C>;
+  /** Observed samples, oldest first: memory bytes, runtime ms, tokens or micro-USD. Missing means unmeasured. */
+  readonly measurements: ReadonlyMap<
+    NodeIdType,
+    ReadonlyMap<ResourceKind, readonly number[]>
+  >;
   /** Input consumption planned for each available node in this decision. */
   readonly plans: ReadonlyMap<NodeIdType, InputSchedule>;
   readonly history: readonly Decision[];

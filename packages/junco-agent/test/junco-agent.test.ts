@@ -3622,6 +3622,43 @@ async function usageFailure(work: Promise<unknown>): Promise<UsageLimitError> {
 }
 
 test(
+  "committed usage reports tokens and micro-USD to the request's activation without a budget or recorder",
+  async () => {
+    const { agent } = await fixedAgent(
+      [
+        [toolTurn(yieldCall("pause", "y1")), 5, 0.0012346],
+        [fauxAssistantMessage("done"), 8, 0],
+      ],
+      { tools: [new YieldTool()], prompt: "go" },
+    );
+    const next = (node: string, samples: [string, number][]) =>
+      runWithUsageBudgets(
+        [],
+        node,
+        () => agent.runWithNodeContext({}, () => agent.next()),
+        (kind, value) => samples.push([kind, value]),
+      );
+    const first: [string, number][] = [];
+    const second: [string, number][] = [];
+    try {
+      assert.equal(step(await next("first", first)).kind, "yield");
+      assert.equal(settledText(await next("second", second)), "done");
+      assert.deepEqual(first, [
+        ["tokens", 5],
+        ["cost", 1235],
+      ]);
+      assert.deepEqual(second, [
+        ["tokens", 8],
+        ["cost", 0],
+      ]);
+    } finally {
+      await agent.return();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
   "usage limits: a denied tool call stops the run before any later effect or provider request",
   async () => {
     const counted = countingTool("mock_tool");

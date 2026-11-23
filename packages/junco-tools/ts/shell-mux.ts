@@ -53,11 +53,13 @@ export const ShellMuxLease = {
        */
       readonly resources?: NativeResourceOptions;
       /**
-       * Receives each monitor event of this mux's pipelines; required by and requiring
-       * `resources.monitorIntervalMs`. A throw is reported by `release()`. The stream ends with
-       * the mux: `release()` resolves only after the last event returned.
+       * Receives each monitor event of this mux's pipelines. Requires `resources.monitorIntervalMs`
+       * unless `recorder` or `measureMemory` supplies the default. A throw is reported by
+       * `release()`, which resolves only after the last event returned.
        */
       readonly onResourceEvent?: (event: NativeResourceEvent) => void;
+      /** Enable per-command memory peak reporting (Linux cgroup v2 with delegated controllers). */
+      readonly measureMemory?: boolean;
       /**
        * Receives every resource event as well, beside `onResourceEvent`; enables monitoring at
        * `resources.monitorIntervalMs` (default 1000).
@@ -72,11 +74,12 @@ export const ShellMuxLease = {
     >();
     let onResourceEvent = options.onResourceEvent;
     let resources = options.resources;
-    if (recorder !== undefined) {
+    if (options.measureMemory || recorder !== undefined)
       resources = {
         ...resources,
         monitorIntervalMs: resources?.monitorIntervalMs ?? 1000,
       };
+    if (recorder !== undefined) {
       // Opaque: pipeline IDs are unique only within this lease.
       const source = {};
       // `owner\0pipelineId` → the view its first event resolved, until it finishes.
@@ -126,6 +129,7 @@ export const ShellMuxLease = {
         policy: policy.toNative(native),
         policyDebug: level <= LogLevel.DEBUG,
         resources,
+        ...(options.measureMemory ? { measureMemory: true } : {}),
       },
       level <= LogLevel.INFO ? logPolicyDecision : undefined,
       onResourceEvent === undefined

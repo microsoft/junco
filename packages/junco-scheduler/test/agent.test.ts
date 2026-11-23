@@ -277,7 +277,7 @@ test("the request uses one strict tool, caller prompt first, snapshot last and n
   ]);
 });
 
-test("wire snapshots whitelist native fields and only available owned metadata", async () => {
+test("wire snapshots only disclose available owned nodes' metadata and raw measurements", async () => {
   const STATE = "private-state";
   const PAYLOAD = "private-message";
   const RESULT = "private-result";
@@ -312,12 +312,15 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   };
   type Metadata = Exclude<ReturnType<typeof describeNode>, undefined>;
   const shown: SchedulerRequest<Metadata>[] = [];
+  let plainReady = true;
   for (const name of ["worker", "plain", "unowned", "dormant"])
     graph.addNode({
       id: id(name),
       state: { secret: STATE },
       description: name === "worker" ? "" : undefined,
       trigger: name === "dormant" ? TriggerRule.never() : TriggerRule.always(),
+      is_available: (_view, triggered) =>
+        triggered && (name !== "plain" || plainReady),
       step: twoStep([], name),
     });
   const queued = Edge.message<typeof StringSchema, string>(
@@ -337,13 +340,15 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   const execution = context({
     graph,
     describeNode,
+    measurementWindows: new Map([["runtime", 2]]),
     scheduler: separate(
       (_snapshot, name) => name === "worker" || name === "plain",
       scheduler,
-      () => ({ selected: [] }),
+      parallel(),
     ),
   });
   await execution.step();
+  plainReady = false;
   await execution.step();
   assert.deepEqual(
     shown.map((request) => request.nodes),
@@ -352,10 +357,7 @@ test("wire snapshots whitelist native fields and only available owned metadata",
         { id: "worker", status: "ready", description: "" },
         { id: "plain", status: "ready" },
       ],
-      [
-        { id: "worker", status: "running", description: "" },
-        { id: "plain", status: "running" },
-      ],
+      [{ id: "worker", status: "running", description: "" }],
     ],
   );
   assert.deepEqual(shown[0]?.context, [
@@ -364,6 +366,15 @@ test("wire snapshots whitelist native fields and only available owned metadata",
   assert.deepEqual(shown[1]?.context, [
     ["worker", { trigger: "all", satisfied: 0 }],
   ]);
+  assert.deepEqual(shown[0]?.measurements, []);
+  const samples = shown[1]?.measurements;
+  assert.deepEqual(
+    samples?.map(([name]) => name),
+    ["worker"],
+  );
+  const runtime = samples?.[0]?.[1].runtime;
+  assert.equal(runtime?.length, 1);
+  assert.ok(runtime && Number.isSafeInteger(runtime[0]) && runtime[0]! >= 0);
   assert.deepEqual(shown[1]?.history, [
     {
       selected: [

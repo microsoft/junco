@@ -1,5 +1,17 @@
-import type { Measure, PortFeature, ProfileData, ResourceKind } from "dataflow-engine";
+import type { EdgeIdType, ResourceKind, ResourceUnit } from "dataflow-engine";
 import type { UnitSymbol } from "./units.js";
+
+export type Measure = "bytes" | "count" | "tokens";
+export type PortFeature =
+  | { readonly port: EdgeIdType; readonly measure: Measure }
+  | { readonly derived: "sum" | "max"; readonly measure: Measure; readonly ports: readonly EdgeIdType[] };
+export type FeatureVector = readonly number[];
+export type Estimate = {
+  readonly value: number;
+  readonly safe: number;
+  readonly source: "model" | "fallback";
+  readonly reason?: "out_of_range" | "low_r2" | "few_samples" | "constant";
+};
 
 export type Model =
   | { readonly kind: "constant" }
@@ -18,7 +30,10 @@ export type ProfileRecord<R extends ResourceKind = ResourceKind> = {
   /** Largest observed per-activation value; the fallback floor. */
   readonly bound: number;
 };
-export type Profile<R extends ResourceKind = ResourceKind> = Omit<ProfileRecord<R>, "unit"> & ProfileData<R>;
+export type Profile<R extends ResourceKind = ResourceKind> = Omit<ProfileRecord<R>, "unit"> & {
+  readonly unit: ResourceUnit<R>;
+  predict(x: FeatureVector): Estimate;
+};
 export type ProfilesFile = {
   readonly version: 1;
   readonly measured?: { readonly metric: string; readonly host: string; readonly fittedAt: string };

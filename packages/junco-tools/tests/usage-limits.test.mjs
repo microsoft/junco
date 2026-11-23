@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  captureUsageContext,
   isUsageLimitError,
+  recordResourceMeasurement,
   runWithUsageBudgets,
   UsageBudget,
 } from "dataflow-engine";
@@ -21,6 +23,30 @@ import {
   seedFixture,
   text,
 } from "./helpers.mjs";
+
+test("measurement scopes mask their parents and captured samples stay with the originating node", () => {
+  const samples = [];
+  const captured = runWithUsageBudgets(
+    [],
+    "a",
+    captureUsageContext,
+    (kind, value) => samples.push([kind, value]),
+  );
+  runWithUsageBudgets(
+    [],
+    "b",
+    () => {
+      runWithUsageBudgets([], "unmeasured", () =>
+        recordResourceMeasurement("tokens", 88),
+      );
+      for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+        recordResourceMeasurement("tokens", value, captured);
+      recordResourceMeasurement("cost", 0, captured);
+    },
+    () => assert.fail("sibling received another node's sample"),
+  );
+  assert.deepEqual(samples, [["cost", 0]]);
+});
 
 /** `work` under a fresh `agent` activation holding `budget`. */
 const within = (budget, work) => runWithUsageBudgets([budget], "agent", work);

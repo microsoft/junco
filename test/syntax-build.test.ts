@@ -17,7 +17,6 @@ import {
   type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
-import { megabytes } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import {
   agent,
@@ -2836,87 +2835,36 @@ test("code without a configured definition is a definition error", async () => {
   assert.deepEqual(log, []);
 });
 
-test("declared profiles admit a strict memory schedule and name an undeclared agent", async () => {
-  for (const declared of [true, false]) {
-    const doc = document();
-    const inner = doc.graph.nodes.Inner!;
-    assert.equal(inner.kind, "graph");
-    if (inner.kind !== "graph") assert.fail("expected nested graph");
-    inner.graph.nodes.Worker!.profiles = { memory: "100 MB" };
-    if (declared) doc.graph.nodes.Final!.profiles = { memory: "100 MB" };
-    const execution = await build(doc, {
+test("fromYaml collects only requested measurements, separately at each graph level", async () => {
+  for (const enabled of [false, true]) {
+    const measured = new Set<string>();
+    const execution = await JuncoGraph.fromYaml(document(), {
       ...options(),
-      scheduler: () =>
-        schedules.limit({ memory: megabytes(1024) }, schedules.parallel()),
-      createAgent: async (spec) =>
-        mock(
-          spec.node === "Worker" ? "leaf" : "done",
-          spec.node === "Worker" ? "work" : undefined,
-        ),
+      measurementWindows: enabled ? new Map([["runtime", 1]]) : undefined,
+      scheduler: (_, path) => (snapshot) => {
+        if (!enabled || snapshot.history.length === 0)
+          assert.equal(snapshot.measurements.size, 0);
+        for (const [id, resources] of snapshot.measurements) {
+          assert.ok(snapshot.nodes.has(id));
+          assert.deepEqual([...resources.keys()], ["runtime"]);
+          const samples = resources.get("runtime")!;
+          assert.equal(samples.length, 1);
+          assert.ok(Number.isSafeInteger(samples[0]) && samples[0]! >= 0);
+          measured.add(`${path}/${id}`);
+        }
+        return { selected: schedules.select(snapshot, snapshot.available) };
+      },
+      createAgent: async ({ node }) =>
+        node === "Worker" ? mock("leaf", "work") : mock("done"),
     });
     try {
-      if (declared) {
-        await execution.run();
-        assert.equal(resultText(execution.graph), "done");
-      } else {
-        await assert.rejects(
-          execution.run(),
-          (error) =>
-            nodeFailure(/limit: node "Final" has no memory profile/)(error) ||
-            (error instanceof graph.DataflowDefinitionError &&
-              /limit: node "Final" has no memory profile/.test(error.message)),
-        );
-      }
+      await execution.run();
+      assert.equal(resultText(execution.graph), "done");
+      assert.equal(measured.has("/Final"), enabled);
+      assert.equal(measured.has("Inner/Worker"), enabled);
     } finally {
-      await execution.graph[Symbol.asyncDispose]();
+      await execution.graph.close();
     }
-  }
-});
-
-test("fitted profiles keyed by node path win over declarations", async () => {
-  const doc = document();
-  const inner = doc.graph.nodes.Inner!;
-  if (inner.kind !== "graph") assert.fail("expected nested graph");
-  inner.graph.nodes.Worker!.profiles = { memory: "1 MB" };
-  const execution = await build(doc, {
-    ...options(),
-    createAgent: async () => mock("done"),
-    profiles: {
-      version: 1,
-      nodes: {
-        "Inner/Worker": {
-          memory: {
-            resource: "memory",
-            unit: "MB",
-            features: [],
-            model: { kind: "constant" },
-            fit: { n: 5, residP95: 0, fittedAt: "2026-10-20" },
-            range: [],
-            bound: 256,
-          },
-        },
-      },
-    },
-  });
-  try {
-    const nested = execution.graph.getNode(graph.NodeId.create("Inner"))!.state;
-    assert.ok(nested instanceof graph.JuncoGraph);
-    assert.equal(
-      (
-        nested.getNode(graph.NodeId.create("Worker"))!
-          .profiles as graph.ProfileSet
-      ).memory!.predict([]).safe,
-      256,
-    );
-    assert.equal(
-      (
-        execution.graph.getNode(execution.graph.sink.id)!
-          .profiles as graph.ProfileSet
-      ).memory!.predict([]).safe,
-      0,
-    );
-  } finally {
-    await execution.graph[Symbol.asyncDispose]();
   }
 });
 

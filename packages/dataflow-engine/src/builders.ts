@@ -11,7 +11,6 @@ import type {
   ParentView,
   StepFn,
 } from "./node.js";
-import type { Profiles, ResourceKind } from "./profile.js";
 import type { TriggerRule } from "./trigger.js";
 
 /** Shared empty result for `from`. Safe to alias: the return type is a readonly array. */
@@ -37,21 +36,18 @@ export const from = <G extends TSchema, N extends G, T>(
  * what a pure sink wants. `options` supplies everything but the body; its own properties are copied
  * onto the spec.
  */
-export class StepNode<S, N extends TSchema, T, K extends ResourceKind = never>
-  implements NodeSpec<S, N, T>
-{
+export class StepNode<S, N extends TSchema, T> implements NodeSpec<S, N, T> {
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;
   declare readonly is_available?: AvailabilityFn<N, T>;
   declare readonly on_error?: ErrorFn<S, N, T>;
   declare readonly state: S;
-  declare readonly profiles: Profiles<K>;
   readonly step: StepFn<S, N, T>;
 
   constructor(
     fn: (state: S, view: ParentView<N, T>) => Message<N>[],
-    options: Omit<NodeSpec<S, N, T, K>, "step">,
+    options: Omit<NodeSpec<S, N, T>, "step">,
   ) {
     Object.assign(this, options);
     // Annotated explicitly so the `never` return inferred from `while (true)` cannot fight `T`.
@@ -69,22 +65,19 @@ export class StepNode<S, N extends TSchema, T, K extends ResourceKind = never>
  * the real batch. A source therefore runs in two turns: turn one yields its batch, turn two returns
  * `ret`. `options` supplies everything but the body; its own properties are copied onto the spec.
  */
-export class EmitOnce<S, N extends TSchema, T, K extends ResourceKind = never>
-  implements NodeSpec<S, N, T>
-{
+export class EmitOnce<S, N extends TSchema, T> implements NodeSpec<S, N, T> {
   declare readonly id?: NodeId;
   declare readonly description?: string;
   declare readonly trigger: TriggerRule<N, T>;
   declare readonly is_available?: AvailabilityFn<N, T>;
   declare readonly on_error?: ErrorFn<S, N, T>;
   declare readonly state: S;
-  declare readonly profiles: Profiles<K>;
   readonly step: () => NodeGenerator<N, T>;
 
   constructor(
     batch: () => Message<N>[],
     ret: T,
-    options: Omit<NodeSpec<S, N, T, K>, "step">,
+    options: Omit<NodeSpec<S, N, T>, "step">,
   ) {
     Object.assign(this, options);
     this.step = async function* (): NodeGenerator<N, T> {

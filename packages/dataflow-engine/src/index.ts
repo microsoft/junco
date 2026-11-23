@@ -31,28 +31,6 @@ export type {
 export { Message, messagesOf } from "./node.js";
 export type { Pretty } from "./pretty.js";
 export { renderPretty } from "./pretty.js";
-export type {
-  DimensionOf,
-  Estimate,
-  FeatureVector,
-  Measure,
-  PortFeature,
-  ProfileData,
-  ProfileSet,
-  Profiles,
-  ProfilesOption,
-  ResourceKind,
-  ResourceQuantity,
-  ResourceUnit,
-} from "./profile.js";
-export {
-  COMPOSE,
-  constantProfile,
-  measureFeatures,
-  NO_PROFILES,
-  RESOURCE_KINDS,
-  RESOURCES,
-} from "./profile.js";
 export { Queue } from "./queue.js";
 export type {
   InputSchedule,
@@ -71,6 +49,12 @@ export {
   TriggerEntry,
   TriggerRule,
 } from "./trigger.js";
+export type {
+  DimensionOf,
+  ResourceKind,
+  ResourceQuantity,
+  ResourceUnit,
+} from "./units.js";
 export {
   bytes,
   dollars,
@@ -82,6 +66,8 @@ export {
   Money,
   mebibytes,
   megabytes,
+  RESOURCE_KINDS,
+  RESOURCES,
   Tokens,
   tokens,
 } from "./units.js";
@@ -99,6 +85,7 @@ export {
   chargeTokenUsage,
   holdsUsageFailure,
   isUsageLimitError,
+  recordResourceMeasurement,
   runWithUsageBudgets,
   runWithUsageContext,
   UsageBudget,

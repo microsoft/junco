@@ -1,5 +1,5 @@
 /// <reference lib="es2024.promise" />
-import { test } from "bun:test";
+import { spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import fc from "fast-check";
@@ -22,9 +22,11 @@ import type {
   NodeGenerator,
   NodeIdType,
   ParentView,
+  ResourceKind,
   Schedule,
 } from "../src/index.ts";
 import {
+  admitToolCall,
   DataflowDefinitionError,
   DataflowGraph,
   DataflowNodeError,
@@ -34,6 +36,7 @@ import {
   from,
   Message,
   NodeId,
+  recordResourceMeasurement,
   Sink,
   Source,
   StepNode,
@@ -41,6 +44,8 @@ import {
   TriggerRule,
   triggerInputs,
   UNBOUNDED,
+  UsageBudget,
+  UsageLimitError,
   Width,
 } from "../src/index.ts";
 import { nativeReads, queued } from "./support.ts";
@@ -1975,6 +1980,7 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   assert.deepEqual([...before.nodes.keys()], [source, target]);
   assert.equal(before.nodes.get(source)?.description, "");
   assert.equal(before.nodes.get(source)?.state, state);
+  assert.equal(Object.hasOwn(before.nodes.get(source)!, "profiles"), false);
   const inputs = before.inputs.get(target)!;
   assert.deepEqual([...inputs.messages.keys()], [feed.id, empty.id]);
   assert.deepEqual(inputs.messages.get(empty.id), []);
@@ -2047,6 +2053,87 @@ test("observations detach native containers, preserve borrowed payloads, and nev
   assert.deepEqual(reports, [[source], [source]]);
   assert.equal(E.isLeft(feed.transport) && feed.transport.left.length, 1);
   assert.equal(inputs.messages.get(feed.id)?.length, 1);
+});
+
+test("raw measurements identify the node; the optional clock times prime and resume, not skipped turns", async () => {
+  let now = 100;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    for (const measureRuntime of [false, true]) {
+      const graph = new DataflowGraph<void, N, string, never>(
+        UNBOUNDED,
+        UNBOUNDED,
+      );
+      const bytes = Uint8Array.of(1, 2, 3);
+      const id = graph.addNode({
+        state: undefined,
+        trigger: TriggerRule.always(),
+        async *step() {
+          now += 3.25;
+          yield [];
+          recordResourceMeasurement("memory", bytes.byteLength);
+          now += 6.75;
+          return "done";
+        },
+      });
+      const entry = { id, inputs: new Map() };
+      const samples: [NodeIdType, ResourceKind, number][] = [];
+      clock.mockClear();
+      await graph.evaluate((execute) =>
+        execute([[entry, entry, entry]], {
+          measureRuntime,
+          onMeasurement: (id, kind, value) => samples.push([id, kind, value]),
+        }),
+      );
+      assert.equal(clock.mock.calls.length, measureRuntime ? 4 : 0);
+      assert.deepEqual(
+        samples,
+        measureRuntime
+          ? [
+              [id, "runtime", 3],
+              [id, "memory", bytes.byteLength],
+              [id, "runtime", 7],
+            ]
+          : [[id, "memory", bytes.byteLength]],
+      );
+    }
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test("a usage failure times the failing activation, not a later activation denied before it starts", async () => {
+  const graph = newGraph();
+  const register = () =>
+    graph.addNode({
+      state: undefined,
+      trigger: TriggerRule.always(),
+      async *step() {
+        admitToolCall();
+        yield [];
+        return "done";
+      },
+    });
+  const started = register();
+  const refused = register();
+  const budget = new UsageBudget("evaluation", { tools: 0 });
+  const timed: NodeIdType[] = [];
+  for (const id of [started, refused]) {
+    await assert.rejects(
+      graph.evaluate((execute) =>
+        execute([[{ id, inputs: new Map() }]], {
+          usageBudgets: new Map([[id, [budget]]]),
+          measureRuntime: true,
+          onMeasurement: (node, kind) => {
+            if (kind === "runtime") timed.push(node);
+          },
+        }),
+      ),
+      UsageLimitError,
+    );
+  }
+  assert.deepEqual(timed, [started]);
+  assert.equal(graph.getNode(refused)!.status, "ready");
 });
 
 test("activation settlement invalidates observations captured while work is pending, including failure", async () => {

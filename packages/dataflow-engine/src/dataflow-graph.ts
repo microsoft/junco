@@ -18,13 +18,6 @@ import { NodeId } from "./identity.js";
 import type { Lookup, Message, Node, NodeSpec, ParentView } from "./node.js";
 import { snapshotView } from "./node.js";
 import type { Pretty } from "./pretty.js";
-import {
-  NO_PROFILES,
-  type ProfileData,
-  type ProfileSet,
-  type Profiles,
-  type ResourceKind,
-} from "./profile.js";
 import type { Queue } from "./queue.js";
 import type {
   InputSchedule,
@@ -33,6 +26,7 @@ import type {
   Schedule,
 } from "./scheduler.js";
 import { satisfiedEdges } from "./trigger.js";
+import type { ResourceKind } from "./units.js";
 import {
   assertUsageAllowed,
   holdsUsageFailure,
@@ -156,15 +150,11 @@ export type DataflowRunOptions = {
   readonly signal?: AbortSignal;
 };
 
-/** A policy's read-only view of the graph: node status/state/profiles, links, pending inputs, results and a change `version`. */
+/** A policy's read-only view of node status/state, links, pending inputs, results and a change `version`. */
 export type DataflowObservation<S, N extends TSchema, T> = {
   readonly nodes: ReadonlyMap<
     NodeId,
-    Readonly<
-      Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & {
-        readonly profiles: ProfileSet;
-      }
-    >
+    Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>
   >;
   readonly links: readonly (readonly [
     from: NodeId,
@@ -177,7 +167,7 @@ export type DataflowObservation<S, N extends TSchema, T> = {
   readonly version: number;
 };
 
-/** Executes one planned `Schedule` inside `evaluate`; options resolve each entry's inputs, observe columns and add per-node usage budgets. */
+/** Executes one planned `Schedule` inside `evaluate`. */
 export type DataflowExecution<N extends TSchema, T> = (
   schedule: Schedule,
   options?: {
@@ -188,19 +178,19 @@ export type DataflowExecution<N extends TSchema, T> = (
     readonly onColumn?: (selected: readonly NodeId[]) => void;
     /** Each selected node's own usage ledgers, added inside the ambient ones for its activation. */
     readonly usageBudgets?: ReadonlyMap<NodeId, readonly UsageBudget[]>;
+    /** Raw observations from executed activations, in the resource's integer base unit. */
+    readonly onMeasurement?: (
+      id: NodeId,
+      kind: ResourceKind,
+      value: number,
+    ) => void;
+    /** Time each generator activation with a monotonic clock, reporting elapsed milliseconds. */
+    readonly measureRuntime?: boolean;
   },
 ) => Promise<void>;
 
 /** Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. */
-export class DataflowGraph<
-  S,
-  N extends TSchema,
-  T,
-  EH,
-  K extends ResourceKind = never,
-> implements Pretty
-{
-  // Keep ngraph's mutable storage kind-erased; addNode enforces K at the public boundary.
+export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
   readonly #graph: Graph<Node<S, N, T>, Edge<N, T>>;
   /** Per-node runtime state, keyed by node id. */
   readonly #runtime = new Map<NodeId, NodeRuntime<N, T>>();
@@ -228,7 +218,7 @@ export class DataflowGraph<
    *
    * @throws {DataflowDefinitionError} on an explicit duplicate id.
    */
-  addNode(spec: NodeSpec<S, N, T, K>): NodeId {
+  addNode(spec: NodeSpec<S, N, T>): NodeId {
     let id: NodeId;
     if (spec.id === undefined) {
       id = NodeId.create(String(this.#nextNodeIndex++));
@@ -244,23 +234,11 @@ export class DataflowGraph<
       }
     }
 
-    // `profiles` is optional only for K = never; re-assert the resolved branch.
-    const profiles = (spec.profiles ?? NO_PROFILES) as Profiles<K>;
-    for (const [kind, profile] of Object.entries(profiles) as [
-      string,
-      ProfileData,
-    ][])
-      if (profile.resource !== kind)
-        throw new DataflowDefinitionError(
-          `Dataflow node "${id}" maps resource "${kind}" to a profile for "${profile.resource}"`,
-        );
-
     const inbound = new Map<EdgeId, Edge<N, T>>();
     this.#runtime.set(id, { inbound, probe: probeOf<N, T>(inbound) });
 
-    const node: Node<S, N, T, K> = {
+    const node: Node<S, N, T> = {
       id,
-      profiles,
       state: spec.state,
       status: "ready",
       trigger: spec.trigger,
@@ -320,8 +298,8 @@ export class DataflowGraph<
   }
 
   /** The node registered under `id`, or `undefined` if none. */
-  getNode(id: NodeId): Node<S, N, T, K> | undefined {
-    return this.#graph.getNode(id)?.data as Node<S, N, T, K> | undefined;
+  getNode(id: NodeId): Node<S, N, T> | undefined {
+    return this.#graph.getNode(id)?.data;
   }
 
   /** `id`'s runtime state; `addNode` registers one for every node. */
@@ -347,11 +325,7 @@ export class DataflowGraph<
     if (this.#observation?.version === this.#version) return this.#observation;
     const nodes = new Map<
       NodeId,
-      Readonly<
-        Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & {
-          readonly profiles: ProfileSet;
-        }
-      >
+      Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>
     >();
     const inputs = new Map<NodeId, ParentView<N, T>>();
     this.forEachNode((id, node) => {
@@ -361,7 +335,6 @@ export class DataflowGraph<
           id,
           status: node.status,
           state: node.state,
-          profiles: node.profiles,
           ...(node.description === undefined
             ? {}
             : { description: node.description }),
@@ -392,9 +365,9 @@ export class DataflowGraph<
   }
 
   /** Visit every registered node in graph iteration order. */
-  forEachNode(callback: (id: NodeId, node: Node<S, N, T, K>) => void): void {
+  forEachNode(callback: (id: NodeId, node: Node<S, N, T>) => void): void {
     this.#graph.forEachNode((graphNode) => {
-      callback(graphNode.id as NodeId, graphNode.data as Node<S, N, T, K>);
+      callback(graphNode.id as NodeId, graphNode.data);
     });
   }
 
@@ -421,13 +394,10 @@ export class DataflowGraph<
       document.push(PP.lineBreak, `${"  ".repeat(depth)}${statement}`);
     };
 
-    function appendGraph<
-      GS,
-      GN extends TSchema,
-      GT,
-      GEH,
-      GK extends ResourceKind,
-    >(graph: DataflowGraph<GS, GN, GT, GEH, GK>, depth: number): boolean {
+    function appendGraph<GS, GN extends TSchema, GT, GEH>(
+      graph: DataflowGraph<GS, GN, GT, GEH>,
+      depth: number,
+    ): boolean {
       const synthetic = new Map<NodeId, string>();
       graph.forEachNode((id, node) => {
         const key = `n${next++}`;
@@ -535,24 +505,6 @@ export class DataflowGraph<
     return batch;
   }
 
-  #assertProfiles(): void {
-    this.forEachNode((id, node) => {
-      const inbound = this.#runtimeOf(id).inbound;
-      for (const profile of Object.values(node.profiles) as ProfileData[]) {
-        for (const feature of profile.features) {
-          const ports = "port" in feature ? [feature.port] : feature.ports;
-          for (const port of ports) {
-            const edge = inbound.get(port);
-            if (edge === undefined || !E.isLeft(edge.transport))
-              throw new DataflowDefinitionError(
-                `Dataflow node "${id}" profile "${profile.resource}" reads port "${port}", which is not one of its inbound message edges`,
-              );
-          }
-        }
-      }
-    });
-  }
-
   protected get activeEvaluation(): Promise<void> | undefined {
     return this.#evaluation;
   }
@@ -569,7 +521,6 @@ export class DataflowGraph<
       throw new DataflowDefinitionError(
         "Dataflow execution is already in flight",
       );
-    this.#assertProfiles();
     const gate = Promise.withResolvers<void>();
     this.#evaluation = gate.promise;
     let active = true;
@@ -662,6 +613,7 @@ export class DataflowGraph<
   ): Promise<void> {
     signal?.throwIfAborted();
     const turns = this.#assertSchedule(schedule, this.#available());
+    const onMeasurement = options?.onMeasurement;
     for (let w = 0; w < turns; w++) {
       signal?.throwIfAborted();
       const live = this.#available();
@@ -682,13 +634,25 @@ export class DataflowGraph<
       // `allSettled`, not `all`: a second lane's rejection can never surface as an unhandled
       // rejection, and the error thrown is deterministically the lowest-lane one.
       const settled = await Promise.allSettled(
-        column.map((entry) =>
-          runWithUsageBudgets(
+        column.map((entry) => {
+          const report =
+            onMeasurement === undefined
+              ? undefined
+              : (kind: ResourceKind, value: number) =>
+                  this.#observe(() => onMeasurement(entry.id, kind, value));
+          return runWithUsageBudgets(
             options?.usageBudgets?.get(entry.id) ?? [],
             entry.id,
-            () => this.#runNode(entry, execution, signal),
-          ),
-        ),
+            () =>
+              this.#runNode(
+                entry,
+                execution,
+                signal,
+                options?.measureRuntime ? report : undefined,
+              ),
+            report,
+          );
+        }),
       );
       options?.onColumn?.(Object.freeze(column.map((entry) => entry.id)));
       const failed = settled.find((outcome) => outcome.status === "rejected");
@@ -698,7 +662,7 @@ export class DataflowGraph<
   }
 
   /**
-   * Invoke one tracer or edge-probe callback, isolating the computation from it: a synchronous
+   * Invoke one observer, isolating the computation from it: a synchronous
    * observer exception is reported and swallowed, so it can neither become a node error nor mask
    * one.
    */
@@ -706,7 +670,7 @@ export class DataflowGraph<
     try {
       return callback();
     } catch (error) {
-      console.warn("[dataflow-engine] DataflowTracer callback failed", error);
+      console.warn("[dataflow-engine] observer callback failed", error);
       return undefined;
     }
   }
@@ -824,6 +788,7 @@ export class DataflowGraph<
     { id, inputs }: NodeSchedule,
     execution: DataflowRunTrace<N, T> | undefined,
     signal: AbortSignal | undefined,
+    reportRuntime: ((kind: ResourceKind, value: number) => void) | undefined,
   ): Promise<void> {
     const node = this.#graph.getNode(id)?.data;
     if (node === undefined)
@@ -833,6 +798,7 @@ export class DataflowGraph<
     const runtime = this.#runtimeOf(id);
     assertUsageAllowed();
     let activation: DataflowStepTrace<N, T> | undefined;
+    let started: number | undefined;
     /** The current throw, if any, came from the node body. */
     let inBody = false;
     this.#version++;
@@ -845,6 +811,7 @@ export class DataflowGraph<
             execution.startNode(id, "prime", undefined),
           );
         inBody = true;
+        if (reportRuntime !== undefined) started = performance.now();
         node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
         step = await node.generator.next();
@@ -866,6 +833,7 @@ export class DataflowGraph<
             execution.startNode(id, "resume", view),
           );
         inBody = true;
+        if (reportRuntime !== undefined) started = performance.now();
         step = await node.generator.next(view);
         assertUsageAllowed();
         inBody = false;
@@ -906,6 +874,8 @@ export class DataflowGraph<
       for (const message of messages) this.emit(id, message);
     } finally {
       this.#version++;
+      if (started !== undefined)
+        reportRuntime?.("runtime", Math.round(performance.now() - started));
     }
   }
 

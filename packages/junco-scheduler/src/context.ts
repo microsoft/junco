@@ -5,10 +5,12 @@ import {
   type InputSchedule,
   type NodeAvailability,
   type NodeIdType,
+  type ResourceKind,
   triggerInputs,
   type UsageBudget,
 } from "dataflow-engine";
 import type { TSchema } from "typebox";
+import { Measurements } from "./measurements.js";
 import {
   type Decision,
   type NodeModel,
@@ -44,6 +46,8 @@ export function context<
 >(options: {
   readonly scheduler: Scheduler<NoInfer<S>, NoInfer<N>, NoInfer<T>, NoInfer<C>>;
   readonly graph: G & DataflowGraph<S, N, T, never>;
+  /** Maximum samples retained per node for each resource. Omitted resources and zero retain nothing. */
+  readonly measurementWindows?: ReadonlyMap<ResourceKind, number>;
   readonly describeNode?: (
     id: NodeIdType,
     candidate: NodeAvailability<N, T>,
@@ -58,6 +62,10 @@ export function context<
   ) => void | Promise<void>;
 }): SchedulerContext<S, N, T, C, G> {
   const { graph, scheduler, describeNode, readInputs } = options;
+  const measurements =
+    options.measurementWindows === undefined
+      ? undefined
+      : new Measurements(options.measurementWindows);
   const inputs =
     readInputs ??
     ((_id: NodeIdType, candidate: NodeAvailability<N, T>) =>
@@ -87,6 +95,7 @@ export function context<
           available: new Set(candidates.keys()),
           owned: new Set(observation.nodes.keys()),
           context: metadata,
+          measurements: measurements?.snapshot() ?? new Map(),
           plans,
           history: Object.freeze([...history]),
           threads: graph.threads,
@@ -136,6 +145,8 @@ export function context<
         );
         await options.prepare?.(decision.selected, signal);
         await execute(schedule, {
+          onMeasurement: measurements?.report,
+          measureRuntime: measurements?.measureRuntime,
           usageBudgets: usageBudgets(decision.selected, evaluation),
           onColumn: (selected) => {
             if (selected.length > 0)

@@ -2,14 +2,12 @@ import {
   choose,
   context,
   limit,
-  lowest,
   nodeIds,
   parallel,
   type Scheduler,
 } from "junco-scheduler";
 import { Type } from "typebox";
 import {
-  constantProfile,
   DataflowGraph,
   type DataflowTracer,
   Edge,
@@ -17,42 +15,37 @@ import {
   from,
   gigabytes,
   Message,
-  megabytes,
   NodeId,
   StepNode,
   TriggerEntry,
   TriggerRule,
-  tokens,
   UNBOUNDED,
 } from "../src/index.ts";
 
 const StringSchema = Type.String();
 
-/** Admit each activation under 4 GB; retained memory needs separate headroom. */
+/** Pack activations under 4 GB using calibrated byte floors; retained memory needs headroom. */
 export async function runMemoryLimit(tracer?: DataflowTracer): Promise<{
   readonly waves: readonly (readonly string[])[];
   readonly consumed: readonly string[];
   readonly sourceResult: string | undefined;
 }> {
-  const graph = new DataflowGraph<
-    void,
-    typeof StringSchema,
-    string,
-    never,
-    "memory"
-  >(UNBOUNDED, UNBOUNDED, tracer);
+  const graph = new DataflowGraph<void, typeof StringSchema, string, never>(
+    UNBOUNDED,
+    UNBOUNDED,
+    tracer,
+  );
   const edges = ["toA", "toB", "toC", "toD"].map((name) =>
     Edge.message<typeof StringSchema, string>(name, StringSchema),
   );
   const source = graph.addNode(
-    new EmitOnce<void, typeof StringSchema, string, "memory">(
+    new EmitOnce<void, typeof StringSchema, string>(
       () => edges.map((edge) => Message.create(edge, "go")),
       "source done",
       {
         id: NodeId.create("source"),
         state: undefined,
         trigger: TriggerRule.always(),
-        profiles: { memory: constantProfile("memory", megabytes(1)) },
       },
     ),
   );
@@ -60,7 +53,7 @@ export async function runMemoryLimit(tracer?: DataflowTracer): Promise<{
   for (const [i, name] of ["A", "B", "C", "D"].entries()) {
     const edge = edges[i];
     const sink = graph.addNode(
-      new StepNode<void, typeof StringSchema, string, "memory">(
+      new StepNode<void, typeof StringSchema, string>(
         () => {
           consumed.push(name);
           return [];
@@ -69,20 +62,21 @@ export async function runMemoryLimit(tracer?: DataflowTracer): Promise<{
           id: NodeId.create(name),
           state: undefined,
           trigger: TriggerRule.when(edge),
-          profiles: {
-            memory: constantProfile(
-              "memory",
-              megabytes([3000, 3000, 2000, 900][i]),
-            ),
-          },
         },
       ),
     );
     graph.addEdge(source, sink, edge);
   }
   const waves: string[][] = [];
+  const floorBytes: Record<string, number> = {
+    source: 1e6,
+    A: 3e9,
+    B: 3e9,
+    C: 2e9,
+    D: 9e8,
+  };
   const inner = limit<void, typeof StringSchema, string, never>(
-    { memory: gigabytes(4) },
+    { memory: gigabytes(4), memoryFloor: (node) => floorBytes[node] },
     parallel(),
   );
   const scheduler: Scheduler<void, typeof StringSchema, string, never> = async (
@@ -97,20 +91,18 @@ export async function runMemoryLimit(tracer?: DataflowTracer): Promise<{
   return { waves, consumed, sourceResult: results.get(source) };
 }
 
-/** The zero-cost anyOf consumer completes before unstarted racers can run. */
+/** Rank a one-shot race by calibrated token costs; the zero-cost anyOf join can finish first. */
 export async function runTokenRace(tracer?: DataflowTracer): Promise<{
   readonly winner: string | undefined;
   readonly waves: readonly (readonly string[])[];
   readonly started: readonly string[];
   readonly completedRacers: readonly string[];
 }> {
-  const graph = new DataflowGraph<
-    void,
-    typeof StringSchema,
-    string,
-    never,
-    "tokens"
-  >(UNBOUNDED, UNBOUNDED, tracer);
+  const graph = new DataflowGraph<void, typeof StringSchema, string, never>(
+    UNBOUNDED,
+    UNBOUNDED,
+    tracer,
+  );
   const edges = ["e1", "e2", "e3"].map((name) =>
     Edge.message<typeof StringSchema, string>(name, StringSchema),
   );
@@ -121,9 +113,6 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
       id: NodeId.create(name),
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: {
-        tokens: constantProfile("tokens", tokens([900, 100, 300][i])),
-      },
       is_available: (_view, triggered) =>
         triggered && (winner === undefined || started.has(name)),
       step: async function* () {
@@ -137,7 +126,6 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     id: NodeId.create("join"),
     state: undefined,
     trigger: TriggerRule.anyOf(...edges.map((edge) => TriggerEntry.on(edge))),
-    profiles: { tokens: constantProfile("tokens", tokens(0)) },
     step: async function* () {
       const view = yield [];
       winner = edges.flatMap((edge) => [...from(view, edge)])[0];
@@ -148,8 +136,14 @@ export async function runTokenRace(tracer?: DataflowTracer): Promise<{
     graph.addEdge(racer, join, edges[i]);
   });
   const waves: string[][] = [];
+  const tokenEstimate: Record<string, number> = {
+    R1: 900,
+    R2: 100,
+    R3: 300,
+    join: 0,
+  };
   const inner = choose<void, typeof StringSchema, string, never>({
-    rank: lowest("tokens"),
+    rank: (_snapshot, a, b) => tokenEstimate[a]! - tokenEstimate[b]!,
     width: () => 1,
   });
   const scheduler: Scheduler<void, typeof StringSchema, string, never> = async (

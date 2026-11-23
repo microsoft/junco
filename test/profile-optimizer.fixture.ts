@@ -641,8 +641,8 @@ const NUMERIC_YAML = (description = "Reports peak concurrency.") => `graph:
   name: NumericTarget
   nodes:
     Seed: { kind: code, trigger: always }
-    A: { kind: code, profiles: { memory: 1 B } }
-    B: { kind: code, profiles: { memory: 1 B } }
+    A: { kind: code }
+    B: { kind: code }
     Quality: { kind: code }
     Terminal: { kind: code, description: "${description}" }
   edges:

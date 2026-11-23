@@ -1,6 +1,6 @@
-import { DataflowDefinitionError, EdgeId, measureFeatures, RESOURCE_KINDS, type PortFeature, type ResourceKind } from "dataflow-engine";
+import { DataflowDefinitionError, EdgeId, type EdgeIdType, RESOURCE_KINDS, type ResourceKind } from "dataflow-engine";
 import { evaluate } from "./predict.js";
-import { THRESHOLDS, type Model, type Pin, type PinsFile, type ProfileRecord, type ProfilesFile, type Sample } from "./types.js";
+import { THRESHOLDS, type Measure, type Model, type Pin, type PinsFile, type PortFeature, type ProfileRecord, type ProfilesFile, type Sample } from "./types.js";
 import { unitOf, type UnitSymbol } from "./units.js";
 
 export type FitRow = {
@@ -16,6 +16,27 @@ export type FitRow = {
 };
 
 type Candidate = { model: Model; features: readonly PortFeature[]; x: number[][]; r2?: number; score: number };
+
+/** Read or fold a sample's port features; a missing input makes the vector unavailable. */
+function measureFeatures(features: readonly PortFeature[], read: (port: EdgeIdType, measure: Measure) => number | undefined): number[] | undefined {
+  const values: number[] = [];
+  for (const feature of features) {
+    if ("port" in feature) {
+      const value = read(feature.port, feature.measure);
+      if (value === undefined) return undefined;
+      values.push(value);
+    } else {
+      let value = 0;
+      for (const port of feature.ports) {
+        const next = read(port, feature.measure);
+        if (next === undefined) return undefined;
+        value = feature.derived === "sum" ? value + next : Math.max(value, next);
+      }
+      values.push(value);
+    }
+  }
+  return values;
+}
 
 /** Normal equations with partial pivoting; singular candidates are not usable. */
 function linear(x: readonly (readonly number[])[], y: readonly number[]): Extract<Model, { kind: "linear" }> | undefined {

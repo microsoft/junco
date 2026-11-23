@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { runWithUsageBudgets } from "dataflow-engine";
 import {
   EmptyPolicy,
   isMarshPolicyDenied,
@@ -284,6 +285,52 @@ test("a collection's resources limit and monitor only its own commands", {
   } finally {
     await cleanup(
       ...collections.map((collection) => () => collection.close()),
+      () => rm(root, { recursive: true, force: true }),
+    );
+  }
+});
+
+test("memory histories receive each native pipeline's peak before command completion, even on a shared owner", {
+  timeout: 60_000,
+}, async () => {
+  const { root, seed } = await seedFixture();
+  const collection = await ToolCollection.create(seed, {
+    native: await copyTreeNative(),
+    measureMemory: true,
+  });
+  const binding = collection.bind();
+  const read = "/bin/dd if=/dev/zero of=/dev/null bs=1M count=1";
+  try {
+    const run = async (node, command) => {
+      const samples = [];
+      const result = await runWithUsageBudgets(
+        [],
+        node,
+        () => binding.exec(command, seed, { onData() {} }),
+        (kind, value) => {
+          assert.equal(kind, "memory");
+          assert.ok(
+            Number.isSafeInteger(value) && value > 0,
+            `not a measured cgroup peak: ${value}`,
+          );
+          samples.push(value);
+        },
+      );
+      assert.equal(result.exitCode, 0);
+      return samples.length;
+    };
+    assert.deepEqual(
+      await Promise.all([
+        run("two", `${read}; ${read}`),
+        run("one", read),
+        run("builtin", ":"),
+      ]),
+      [2, 1, 0],
+    );
+  } finally {
+    await cleanup(
+      () => binding.close(),
+      () => collection.close(),
       () => rm(root, { recursive: true, force: true }),
     );
   }

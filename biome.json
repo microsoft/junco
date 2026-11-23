@@ -59,7 +59,6 @@
     },
     {
       "includes": [
-        "**/tests/profile.typecheck.ts",
         "packages/junco-scheduler/test/agent.test.ts",
         "packages/junco-scheduler/test/scheduler-dsl.property.test.ts",
         "packages/junco-scheduler/test/scheduler.test.ts",

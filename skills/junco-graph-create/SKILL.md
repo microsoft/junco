@@ -200,7 +200,7 @@ Rules: start dependent bodies with `const inputs = yield []`; read values with `
 | Nested agency | `kind: graph` with `source.routes`/`sink.returns` | none |
 | Host-state gating (pause a member) | — | `BuildOptions.available` or code `is_available` reading `graph.getNode(id).status` |
 | Pick best of candidates | all returned: splice `workflows.allFanIn`; streaming as candidates arrive: splice `workflows.anyFanIn` | `...schedules.anyFanIn()` for AnyFanIn |
-| Memory/token/runtime ordering | — | escape hatch: `schedules.limit`/`lowest`/`highest` need per-node `profiles`, which YAML has no field for |
+| Memory/token/runtime/cost ordering | — | configure `measurementWindows` in TS; rank recorded samples with `schedules.lowest` / `highest` or your own policy |
 
 ## Standard library (`src/std`, exported from `junco`)
 
@@ -240,7 +240,7 @@ Only for documents with agents. Deterministic-only documents skip this.
 
 ## Escape hatches
 
-Read `references/typescript-api.md` (namespace signature excerpts, composition patterns, hand-wired example) only when the document cannot express the task: resource `profiles` with `schedules.limit`/`lowest`/`highest`, graph compaction, custom tracer callbacks, non-chat message/result types, or availability beyond `available`/`is_available`. Prefer putting the exception in a `kind: code` node over abandoning YAML for the whole graph.
+Read `references/typescript-api.md` (namespace signature excerpts, composition patterns, hand-wired example) when the document cannot express the task: graph compaction, custom tracer callbacks, non-chat message/result types, or availability beyond `available`/`is_available`. Resource measurement windows and resource-aware scheduling are ordinary `fromYaml` configuration.
 
 Repository work (such as refactor, translate, verify or audit) follows `references/repository-workflows.md`: inspect source with omp's available tools and author task-oriented YAML directly. Generated Junco agents use `code_graph` at execution time when their roles need repository exploration; do not require omp to call it first. Clusters are evidence, not work packages or a schedule. Preserve requested permissions, handoffs and concurrency; route every required report to the requested terminal output.
 

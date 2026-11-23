@@ -10,7 +10,6 @@ import {
 import { contentText } from "@earendil-works/pi-ai";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import * as graph from "dataflow-engine";
-import { type ProfilesFile, profilesOf, unitOf } from "dataflow-profile";
 import * as E from "fp-ts/lib/Either.js";
 import * as O from "fp-ts/lib/Option.js";
 import * as agent from "junco-agent";
@@ -45,7 +44,6 @@ import {
   type NodeSpec,
   outboundEdges,
   PLACEHOLDER,
-  quantityOf,
   resolveTrigger,
 } from "./schema.js";
 
@@ -144,8 +142,11 @@ export type BuildOptions<C = unknown> = {
   readonly tool_pruning?: boolean;
   /** Failure-loop guard of every agent the build creates (`createJuncoAgent`); `createAgent` receives it as `spec.loopGuard`. */
   readonly loopGuard?: agent.LoopGuard;
-  /** Fitted profiles keyed by id or parentNodeId/id; a present node overrides its YAML profiles. */
-  readonly profiles?: ProfilesFile;
+  /**
+   * Samples retained per node and resource at each graph level; zero or omitted means none.
+   * For native memory on a caller-owned collection, open it with `measureMemory: true`.
+   */
+  readonly measurementWindows?: ReadonlyMap<graph.ResourceKind, number>;
   /** Code-node definitions by node id, exported by the same-named workflow module. */
   readonly code?: Readonly<Record<string, DeterministicNode<C>>>;
   /** The runtime and the rungs agents may use; required when build creates agents, optional otherwise (model switching only). */
@@ -164,7 +165,7 @@ export type BuildOptions<C = unknown> = {
    * Prepared agents keyed by node path (`Worker` or `Child/Worker`), exclusive with createAgent.
    * Ownership transfers at build entry: failure closes every supplied agent; success leaves
    * registered agents owned by the graph. Models, tools, skills and system prompts are already
-   * configured on these agents; node prompts and profiles still apply.
+   * configured on these agents; node prompts still apply.
    */
   readonly agents?: Readonly<Record<string, YamlAgent>>;
   /** Factory agents stay caller-owned on construction failure; `createAgentOwnership` decides on success. */
@@ -371,46 +372,6 @@ const isAgent = (
 const hasAgents = (spec: GraphSpec) =>
   [...walk(spec)].some(({ node }) => isAgent(node));
 
-/** A profiled build's cost of ports and non-agent nodes. */
-const ZERO: graph.ProfileSet = Object.freeze({
-  memory: graph.constantProfile("memory", unitOf("memory", "B")(0)),
-  runtime: graph.constantProfile("runtime", unitOf("runtime", "ms")(0)),
-  tokens: graph.constantProfile("tokens", unitOf("tokens", "tok")(0)),
-  cost: graph.constantProfile("cost", unitOf("cost", "USD")(0)),
-});
-
-const hasProfiles = (spec: GraphSpec) =>
-  [...walk(spec)].some(({ node }) => node.profiles !== undefined);
-
-const constant = <R extends graph.ResourceKind>(kind: R, text: string) =>
-  graph.constantProfile(kind, quantityOf(kind, text));
-
-function nodeProfiles(
-  c: Construction,
-  key: string,
-  node: NodeSpec,
-): graph.ProfileSet | undefined {
-  const file = c.options.profiles;
-  if (file !== undefined && Object.hasOwn(file.nodes, key))
-    return profilesOf(
-      file,
-      key,
-      Object.keys(file.nodes[key]) as graph.ResourceKind[],
-    );
-  if (node.profiles !== undefined)
-    return Object.fromEntries(
-      Object.entries(node.profiles).map(([kind, text]) => [
-        kind,
-        constant(kind as graph.ResourceKind, text),
-      ]),
-    );
-  // Non-agent work costs nothing; an undeclared agent keeps no profile so a strict schedule names it.
-  return c.profiled &&
-    (node.kind === "emit" || node.kind === "graph" || node.kind === "code")
-    ? ZERO
-    : undefined;
-}
-
 /** Edge `id` of `edges`; parse guarantees every referenced edge is declared. */
 function edgeOf(edges: ReadonlyMap<string, Edge>, id: string): Edge {
   const edge = edges.get(id);
@@ -465,7 +426,6 @@ function createSource(
   spec: GraphSpec,
   label: string,
   edges: ReadonlyMap<string, Edge>,
-  profiles: graph.ProfileSet | undefined,
   is_available: Available | undefined,
 ): graph.Source<TSchema, unknown> {
   const routes = spec.source?.routes;
@@ -497,7 +457,6 @@ function createSource(
           .flat()
           .map((target) => edgeOf(edges, target)),
       ),
-      ...(profiles ? { profiles } : {}),
       ...(is_available ? { is_available } : {}),
     },
   );
@@ -510,14 +469,12 @@ function createSink(
   root: boolean,
   result: (id: string) => O.Option<unknown>,
   is_available: Available | undefined,
-  profiles: graph.ProfileSet | undefined,
 ): graph.Sink<TSchema, unknown> {
   const options = {
     id: graph.NodeId.create("$sink"),
     description: spec.sink?.description,
     trigger: resolveTrigger(spec, "$sink", edges, spec.sink?.trigger),
     ...(is_available ? { is_available } : {}),
-    ...(profiles ? { profiles } : {}),
   };
   if (spec.sink?.stream === true) {
     const inbound = inboundEdges(spec, "$sink").map((e) =>
@@ -686,14 +643,12 @@ async function buildGraph(
     spec,
     recorder === undefined ? undefined : () => g.recorder,
   );
-  const portProfiles = c.profiled ? ZERO : undefined;
   // Port hooks bind once `g` exists; ports consult them only during execution.
   let sourceHook: Available | undefined;
   const source = createSource(
     spec,
     label,
     edges,
-    portProfiles,
     c.options.available?.$source
       ? (v, t) => (sourceHook ? sourceHook(v, t) : t)
       : undefined,
@@ -708,7 +663,6 @@ async function buildGraph(
     c.options.available?.$sink
       ? (v, t) => (sinkHook ? sinkHook(v, t) : t)
       : undefined,
-    portProfiles,
   );
   // The document validator checked these dynamic integers; Width.create only accepts numeric literals.
   const g = new JuncoGraph<TSchema, unknown>(
@@ -732,6 +686,7 @@ async function buildGraph(
   const execution = context({
     scheduler: c.options.scheduler(label, path),
     graph: g,
+    measurementWindows: c.options.measurementWindows,
     ...(c.options.ladder === undefined
       ? {}
       : { ladder: c.options.ladder.rungs }),
@@ -743,12 +698,10 @@ async function buildGraph(
       .map((e) => edgeOf(edges, edgeId(e)));
     const is_available = hook(id);
     const key = path === "" ? id : `${path}/${id}`;
-    const profiles = nodeProfiles(c, key, node);
     const registration: Registration = {
       id: graph.NodeId.create(id),
       description: node.description,
       ...(is_available ? { is_available } : {}),
-      ...(profiles ? { profiles } : {}),
     };
     if (node.kind === "emit") {
       registerEmit(g, registration, node, outbound);
@@ -873,7 +826,6 @@ type Construction = {
   readonly options: BuildOptions;
   readonly policy: tools.Policy;
   readonly collection: tools.ToolCollection | undefined;
-  readonly profiled: boolean;
   readonly specs: Iterator<AgentSpec>;
   readonly agents: ReadonlyMap<string, YamlAgent> | undefined;
   /** Owned agents in acquisition order, including prepared agents not yet registered. */
@@ -887,7 +839,6 @@ type Registration = {
   readonly id: graph.NodeIdType;
   readonly description: string | undefined;
   readonly is_available?: Available;
-  readonly profiles?: graph.ProfileSet;
 };
 type Available = graph.AvailabilityFn<TSchema, unknown>;
 
@@ -930,7 +881,6 @@ export async function build<C = unknown>(
     partialRoots: new Set<JuncoGraph<TSchema, unknown>>(),
   };
   let creates: boolean;
-  let profiled: boolean;
   let policy: tools.Policy;
   try {
     if (agents && options.createAgent !== undefined)
@@ -975,7 +925,6 @@ export async function build<C = unknown>(
       throw new graph.DataflowDefinitionError(
         "junco-syntax: a ladder is required to create agents; pass ladder or createAgent",
       );
-    profiled = options.profiles !== undefined || hasProfiles(doc.graph);
     policy = options.policy ?? tools.LockPolicy;
   } catch (error) {
     return rollback(owned, error);
@@ -989,7 +938,6 @@ export async function build<C = unknown>(
         options: options as BuildOptions,
         policy,
         collection,
-        profiled,
         specs: (agents
           ? []
           : await resolveAgents(doc, { ...options, collection }))[
@@ -1023,6 +971,9 @@ export async function build<C = unknown>(
         policy,
         ...(options.recorder ? { recorder: options.recorder } : {}),
         ...(options.resources ? { resources: options.resources } : {}),
+        ...((options.measurementWindows?.get("memory") ?? 0) > 0
+          ? { measureMemory: true }
+          : {}),
         ...(options.onResourceEvent
           ? { onResourceEvent: options.onResourceEvent }
           : {}),

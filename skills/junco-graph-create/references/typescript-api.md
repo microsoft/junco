@@ -2,7 +2,7 @@
 
 Escape hatch for what Junco YAML cannot express: `kind: code` node bodies (`graph.nodes.Deterministic`, `graph.Message`, `graph.from`, `TriggerRule`), resource scheduling with `schedules.limit`/`lowest`/`highest`, graph compaction, tracer internals, and hand-wired `DataflowGraph`/`JuncoGraph` programs. Read only the heading you need.
 
-Contents: `## Public API` → `### graph`, `### graph.nodes`, `### workflows and schedules.ralph`, `### graph.trigger`, `### agent`, `### tools`, `### mcp`, `### schedules`, `### Resource profiles and schedules`, `### Graph compaction`, `### tracer`, `### Supporting Pi APIs`; `## Composition patterns`; `## Executable example` (hand-wired `DataflowGraph`).
+Contents: `## Public API` → `### graph`, `### graph.nodes`, `### workflows and schedules.ralph`, `### graph.trigger`, `### agent`, `### tools`, `### mcp`, `### schedules`, `### Resource measurements and schedules`, `### Graph compaction`, `### tracer`, `### Supporting Pi APIs`; `## Composition patterns`; `## Executable example` (hand-wired `DataflowGraph`).
 
 ## Public API
 
@@ -24,7 +24,7 @@ export type DataflowRunOptions = {
 };
 
 export type DataflowObservation<S, N, T> = {
-  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state"> & { readonly profiles: ProfileSet }>>;
+  readonly nodes: ReadonlyMap<NodeId, Readonly<Pick<Node<S, N, T>, "id" | "status" | "description" | "state">>>;
   readonly links: readonly (readonly [from: NodeId, to: NodeId, id: EdgeId, kind: "message" | "value"])[];
   readonly inputs: ReadonlyMap<NodeId, ParentView<N, T>>;
   readonly results: ReadonlyMap<NodeId, T>;
@@ -36,14 +36,16 @@ export type DataflowExecution<N, T> = (
   options?: {
     readonly resolveInputs?: (entry: NodeSchedule, live: NodeAvailability<N, T>) => InputSchedule;
     readonly onColumn?: (selected: readonly NodeId[]) => void;
+    readonly onMeasurement?: (id: NodeId, resource: ResourceKind, value: number) => void;
+    readonly measureRuntime?: boolean;
   },
 ) => Promise<void>;
 
-export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never> implements Pretty
+export class DataflowGraph<S, N, T, EH> implements Pretty
   constructor(readonly window: Width, readonly threads: Width, readonly tracer?: DataflowTracer)
-  addNode(spec: NodeSpec<S, N, T, K>): NodeId
+  addNode(spec: NodeSpec<S, N, T>): NodeId
   addEdge(from: NodeId, to: NodeId, edge: Edge<N, T>): this
-  getNode(id: NodeId): Node<S, N, T, K> | undefined
+  getNode(id: NodeId): Node<S, N, T> | undefined
   result(id: NodeId): O.Option<T>
   results(): ReadonlyMap<NodeId, T>
   observe(): DataflowObservation<S, N, T>
@@ -55,7 +57,7 @@ export class DataflowGraph<S, N, T, EH, K extends ResourceKind = never> implemen
   emit(fromId: NodeId, message: Message<N>): void
 ```
 
-`O.Option` is fp-ts's `Option`; use `O.isSome(result)` (or its `_tag`) to distinguish a present `undefined` from absence. Context `run()`/`step()` return the cumulative native result map. `Edge<N,T>` and `Node<S,N,T>` are native graph types. Graphs own no policy or drive loop: pair one externally with a scheduler context. `workflow.tracer` remains the constructor's readonly observer (on a `JuncoGraph`, possibly automatic). `K` lists the resource kinds every node must profile (`"memory" | "runtime" | "tokens"`); the default `never` makes `profiles` optional. `JuncoGraph` fixes `K = never`, so agency registrations profile nodes individually.
+`O.Option` is fp-ts's `Option`; use `O.isSome(result)` (or its `_tag`) to distinguish a present `undefined` from absence. Context `run()`/`step()` return the cumulative native result map. Graphs own no policy or drive loop: pair one externally with a scheduler context. Resource measurements belong to that context, not to node registration or `graph.observe()`.
 
 Verbatim signature excerpts (node protocol types):
 
@@ -86,14 +88,14 @@ export type AvailabilityFn<N, T> = (
   triggered: boolean,
 ) => boolean;
 
-export type NodeOptions<N, T, K extends ResourceKind = never> = {
+export type NodeOptions<N, T> = {
   readonly id?: NodeId;
   readonly description?: string;
   readonly trigger: TriggerRule<N, T>;
   readonly is_available?: AvailabilityFn<N, T>;
-} & ProfilesOption<K>;
+};
 
-export type NodeSpec<S, N, T, K extends ResourceKind = never> = NodeOptions<N, T, K> & {
+export type NodeSpec<S, N, T> = NodeOptions<N, T> & {
   readonly state: S;
   readonly step: StepFn<S, N, T>;
   readonly on_error?: ErrorFn<S, N, T>;
@@ -894,6 +896,7 @@ export type Snapshot<S, N, T, C> = DataflowObservation<S, N, T> & {
   readonly available: ReadonlySet<NodeIdType>;
   readonly owned: ReadonlySet<NodeIdType>;
   readonly context: ReadonlyMap<NodeIdType, C>;
+  readonly measurements: ReadonlyMap<NodeIdType, ReadonlyMap<ResourceKind, readonly number[]>>;
   /** Input consumption planned for each available node in this decision. */
   readonly plans: ReadonlyMap<NodeIdType, InputSchedule>;
   readonly history: readonly Decision[];
@@ -940,6 +943,7 @@ export function context<
 >(options: {
   readonly scheduler: Scheduler<NoInfer<S>, NoInfer<N>, NoInfer<T>, NoInfer<C>>;
   readonly graph: G & DataflowGraph<S, N, T, never>;
+  readonly measurementWindows?: ReadonlyMap<ResourceKind, number>;
   readonly describeNode?: (id: NodeIdType, candidate: NodeAvailability<N, T>) => C | undefined;
   readonly readInputs?: (id: NodeIdType, candidate: NodeAvailability<N, T>) => InputSchedule;
   readonly prepare?: (selected: readonly NodeModel[], signal?: AbortSignal) => void | Promise<void>;
@@ -971,6 +975,7 @@ export function context<N, T, G extends JuncoGraph<N, T, never>>(options: {
   readonly scheduler: Scheduler<NoInfer<Agentic<N, T>>, NoInfer<N>, NoInfer<T>, AgencyNodeMetadata>;
   readonly graph: G & JuncoGraph<N, T, never>;
   readonly ladder?: Ladder;
+  readonly measurementWindows?: ReadonlyMap<ResourceKind, number>;
 }): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, G>;
 ```
 
@@ -994,13 +999,14 @@ export type SchedulerRequest<C> = {
   readonly threads: number | null;
   readonly nodes: readonly Readonly<Pick<Node<never, never, never>, "id" | "status" | "description">>[];
   readonly context: readonly (readonly [NodeIdType, C])[];
+  readonly measurements: readonly (readonly [NodeIdType, Readonly<Partial<Record<ResourceKind, readonly number[]>>>])[];
   readonly history: readonly Decision[];
 };
 
 export function pi(options: PiOptions): ReturnType<typeof parallel>;
 ```
 
-`pi` uses core `agent(invoke)`: one `models.completeSimple(model,context,options)` per scheduler invocation, forwarding the graph signal. It owns no model runtime, session, iterator, persistent conversation or lifecycle resource and has no fixed/default model. The final user message starts exactly `SchedulerSnapshot:\n`, preceded by any caller prompt. Encoding includes only available-owned native IDs/status/defined descriptions (including `""`), defined external `[id,C]` metadata, projected history, version, threads (`null` for Infinity), and `lastError` (previous decision rejection text or `null`)—never native state, inputs, retained results or queues. Metadata must be JSON-serializable; stringify failures precede provider calls. For data-aware models use `agent` with an intentional summary.
+`pi` uses core `agent(invoke)`: one `models.completeSimple(model,context,options)` per scheduler invocation, forwarding the graph signal. The final user message starts exactly `SchedulerSnapshot:\n`. It includes only available-owned node IDs, statuses, descriptions, metadata and resource measurements, plus projected decision history, version, thread count (`null` for Infinity) and `lastError`. Native state, inputs, results and queues stay out of the model request. Metadata must be JSON-serializable.
 
 Require exactly one `schedule({ waves: string[][] })` tool call and native `stopReason === "toolUse"`. Strict schemas reject numeric IDs, unknown/extra keys and malformed calls before graph work. `agent` scans waves in order, stable-deduplicates/filters to available owned IDs and selects the first non-empty wave with default planned reads; later waves are never cached. No available owned work means no oracle call. Provider errors/cancellation propagate without retries; there are no text-only completions, silent repairs or fallbacks. Decision-validation retries belong to the context as described above. Judge models/random oracles by each actual normalized response, not equality across independent invocations.
 
@@ -1039,123 +1045,23 @@ finally {
 
 Use `schedules.parallel()` in the same external pair for deterministic select-all; `schedules.roundRobin()` with thread bound 1 for one-at-a-time fairness. Never pass policies to graph constructors. Manually orchestrated persistent-agent rounds may use fresh graph/context/ports and reuse members; close round graphs only after members' final owning use. The Ralph workflow instead re-arms one agent in the same graph/session through its value self-edge and `schedules.ralph` hooks. Compact only the requested settled round graph; close resources and finish a retained shared TUI once at orchestration end, guarded by `instanceof tracer.TuiTracer`. Scheduling needs no session acquisition/close.
 
-### Resource profiles and schedules
+### Resource measurements and schedules
 
-A profile predicts one node activation's cost in a fixed dimension; resource policies read snapshot predictions. Import constructors, units and profile types from `dataflow-engine` (a public `junco` dependency, not re-exported by `graph`); policies are `schedules.limit`, `schedules.lowest`, `schedules.highest`.
-
-Verbatim signature excerpts (`dataflow-engine`; `Quantity`/`Unit` are `@buge/ts-units` types, `seconds` for runtime comes from `@buge/ts-units/time`):
-
-```text
-export const RESOURCES = { memory: Information, runtime: Time, tokens: Tokens } as const;
-export type ResourceKind = keyof typeof RESOURCES;
-export type ResourceUnit<R extends ResourceKind> = Unit<number, DimensionOf<R>>;
-export type ResourceQuantity<R extends ResourceKind> = Quantity<number, DimensionOf<R>>;
-export type Measure = "bytes" | "count" | "tokens";
-export type PortFeature =
-  | { readonly port: EdgeId; readonly measure: Measure }
-  | { readonly derived: "sum" | "max"; readonly measure: Measure; readonly ports: readonly EdgeId[] };
-export type FeatureVector = readonly number[];
-export type Estimate = {
-  readonly value: number;
-  readonly safe: number;
-  readonly source: "model" | "fallback";
-  readonly reason?: "out_of_range" | "low_r2" | "few_samples" | "constant";
-};
-export interface ProfileData<R extends ResourceKind = ResourceKind> {
-  readonly resource: R;
-  readonly unit: ResourceUnit<R>;
-  readonly features: readonly PortFeature[];
-  predict(x: FeatureVector): Estimate;
-}
-export type Profiles<K extends ResourceKind> = { readonly [R in K]: ProfileData<R> };
-export type ProfilesOption<K extends ResourceKind> =
-  [K] extends [never] ? { readonly profiles?: Profiles<never> } : { readonly profiles: Profiles<K> };
-export type ProfileSet = { readonly [R in ResourceKind]?: ProfileData<R> };
-export function constantProfile<R extends ResourceKind>(resource: R, quantity: ResourceQuantity<NoInfer<R>>): ProfileData<R>;
-export const bytes: Unit<number, Information>; // also kilobytes, megabytes, gigabytes, kibibytes, mebibytes, gibibytes
-export const tokens: Unit<number, Tokens>;
-```
-
-Units are callable: `megabytes(3000)` is a `ResourceQuantity<"memory">`; `megabytes(3000).in(gigabytes).amount` is `3`.
-
-Verbatim signature excerpts (`junco-scheduler`, re-exported by `schedules`; `Rank` is implementation-local):
-
-```text
-type Rank = <S, N, T, C>(snapshot: Snapshot<S, N, T, C>, left: NodeIdType, right: NodeIdType) => number;
-export function lowest(kind: ResourceKind): Rank;
-export function highest(kind: ResourceKind): Rank;
-export function limit<S, N, T, C>(
-  limits: { readonly memory: ResourceQuantity<"memory"> },
-  scheduler: Scheduler<S, N, T, C>,
-): Scheduler<S, N, T, C>;
-```
-
-Verbatim signature excerpts (package top level; test doubles for credential-free resource runs, not for generated workflows):
-
-```text
-export type MockUsage = { readonly [R in "memory" | "tokens"]?: ResourceQuantity<R> };
-export function constantProfiles(usage: MockUsage): ProfileSet;
-export const NO_USAGE: ProfileSet; // zero memory and zero tokens
-export class MockJuncoGraph<N = Task, T = AssistantMessage, EH = never> extends JuncoGraph<N, T, EH>
-  override addNode(spec: AgenticNode<N, T>): NodeIdType
-```
-
-- **Profiles are registration data.** Put `profiles` beside `trigger` in `NodeOptions`: `{ ...options, state, policy, profiles: { memory: constantProfile("memory", megabytes(3000)) } }`. Keys must match profile `resource`; otherwise `addNode` throws `Dataflow node "<id>" maps resource "<kind>" to a profile for "<resource>"`. Native `DataflowGraph<…, K>` with `K = "memory"` requires every node's `profiles.memory` at compile time. `JuncoGraph` uses `K = never`: agents, coroutines, nested contexts and full specs from `JuncoGraph.map`/`spawn` opt in individually, without completeness checks. `Source` accepts no `profiles`; `Sink` discards its options' `profiles`. Neither port, `JuncoAgent` nor `Deterministic` carries its own profiles. `graph.observe().nodes` exposes node `profiles` as `ProfileSet`.
-- **Constant costs.** The engine's only constructor, `constantProfile(kind, quantity)`, takes a finite non-negative amount (including zero) in its own unit; it has `features: []` and every `predict` returns the same frozen `{ value, safe, source: "fallback", reason: "constant" }`. Invalid amounts throw `DataflowDefinitionError("constantProfile: <kind> must be a finite non-negative quantity")`. Dimensions are typed: `constantProfile("memory", tokens(1))` cannot compile. Task-supplied predictors may use hand-written `ProfileData`; keep `predict` pure.
-- **Fitted costs.** Add separate workspace package `dataflow-profile` to workflow dependencies; `junco` does not depend on it. `profilesOf(parseProfiles(readFileSync(path, "utf8")), "<node>", ["memory"]).memory` loads a fitted record whose `features` name inbound **message** edge IDs measured by `count`. Evaluation rejects ports other than that node's inbound message edges. Estimating `bytes`/`tokens` throws `estimate: node "<id>" profile "<kind>" measures "<measure>" on port "<port>"; only "count" features can be estimated from a planned batch`. Counts use `snapshot.plans` (this decision's planned consumption), not whole queues.
-- **`limit({ memory }, inner)`.** Calls `inner`, validates its decision, then visits selected IDs in order, admitting nodes whose `safe` memory in base units (`safe * unit.scale`) fits with prior admissions: Σ safe ≤ allowance per concurrent column. Nonfitting nodes stay available; if none fit, throws `limit: node "<id>" needs memory=<quantity> alone, exceeding <allowance>`. Every selected node requires a `memory` profile (`limit: node "<id>" has no memory profile`); allowance must be finite/positive (`limit: memory must be a positive quantity`). Retained memory across yields is untracked: leave headroom. Wrap the outermost policy; wrapping one `separate` branch gives that branch the whole allowance.
-- **`choose({ rank: lowest(kind) })` / `highest(kind)`.** Rank available owned work by predicted `safe` base-unit cost, breaking ties by raw ID. Comparators cache one prediction/node/snapshot and are reusable across decisions. Comparing an unprofiled candidate throws `lowest: node "<id>" has no <kind> profile` (or `highest: …`); lone candidates require no comparison, so this cannot check completeness. `width: () => 1` starts only the cheapest. With positive-cost racers, a zero-cost `anyOf` consumer wins the next decision once a racer emits; losers gated on the winner never start.
-- **Agency graphs: separate the ports.** Unprofiled `$source`/`$sink` fail `limit` when selected and `lowest`/`highest` when compared. Partition authority: `schedules.separate((_snapshot, id) => id === source.id || id === sink.id, schedules.parallel(), <limited or ranked policy>)`. Ports run unbounded (zero cost); members obey the bound, with the limited branch retaining the full allowance. Put task-uncosted members in the unbounded branch too; never fabricate policy-satisfying costs.
-- **Credential-free resource behavior.** `new MockAgent({ runs, usage: { memory: megabytes(3000), tokens: tokens(100) } })` exposes constant `.profiles`; invalid amounts throw `JuncoAgentError` `invalid_argument`. `MockJuncoGraph` attaches mock members' declared profiles and `NO_USAGE` to all other unprofiled nodes, including ports: `limit`/`lowest`/`highest` can select these memory/tokens zero-cost defaults. Explicit non-empty `profiles` replace defaults wholesale; partial sets never merge and must cover the policy's resource. Tests/demos only; generated workflows register `agent.JuncoAgent` with explicit `profiles`.
-
-For an agency whose members `a`–`d` (already-acquired `agent.JuncoAgent`s with staged prompts, held in `members: Record<"a" | "b" | "c" | "d", agent.JuncoAgent>`) peak at 3000/3000/2000/1000 MB under a 4 GB allowance:
+Pass `measurementWindows` to `schedules.context` or `JuncoGraph.fromYaml`. Each entry sets how many actual measurements to retain for that resource **per node**, oldest first. Sizes are non-negative safe integers. An omitted resource or zero collects no history. The context retains samples across `step()` and `run()` calls; a new context starts empty. Nested graphs have separate histories.
 
 ```ts
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { constantProfile, gigabytes, megabytes } from "dataflow-engine";
-import * as O from "fp-ts/lib/Option.js";
-import { graph, schedules, tools, tracer } from "junco";
-
-type Policy = schedules.Scheduler<graph.nodes.Agentic, graph.nodes.Task, AssistantMessage, schedules.AgencyNodeMetadata>;
-const costs = { a: 3000, b: 3000, c: 2000, d: 1000 } as const;
-const terminal = graph.NodeId.create("d");
-const final = graph.Edge.value<graph.nodes.Task, AssistantMessage>("d->$sink");
-const source = new graph.nodes.Source<graph.nodes.Task, AssistantMessage>(() => {
-  throw new graph.DataflowDefinitionError("Bounded workflow does not accept external input");
-}, { id: graph.NodeId.create("$source") });
-const sink = new graph.nodes.Sink<graph.nodes.Task, AssistantMessage>(async function* (): graph.NodeGenerator<graph.nodes.Task, AssistantMessage> {
-  yield [];
-  const result = execution.graph.result(terminal);
-  if (!O.isSome(result)) throw new Error("d did not produce a result");
-  return result.value;
-}, { id: graph.NodeId.create("$sink"), trigger: graph.trigger.TriggerRule.when(final) });
-// Ports carry no profiles: they schedule in the unbounded branch, members under the 4 GB column bound.
-const scheduler: Policy = schedules.separate(
-  (_snapshot, id) => id === source.id || id === sink.id,
-  schedules.parallel(),
-  schedules.limit({ memory: gigabytes(4) }, schedules.parallel()),
-);
-const observer = tracer.TuiTracer.shared();
-const execution = schedules.context({
-  graph: new graph.JuncoGraph(source, sink, graph.Width.create(1), graph.UNBOUNDED, observer, tools.LockPolicy),
-  scheduler,
+const execution = await JuncoGraph.fromYaml(source, {
+  ...options,
+  measurementWindows: new Map([["runtime", 8], ["tokens", 4]]),
+  scheduler: () => schedules.choose({ rank: schedules.highest("runtime") }),
 });
-for (const [name, megabyteCost] of Object.entries(costs) as [keyof typeof costs, number][]) {
-  execution.graph.addNode({
-    id: graph.NodeId.create(name), state: members[name], policy: tools.LockPolicy,
-    trigger: graph.trigger.TriggerRule.always(),
-    profiles: { memory: constantProfile("memory", megabytes(megabyteCost)) },
-  });
-}
-execution.graph.addEdge(terminal, sink.id, final);
-try { await execution.run(); }
-finally {
-  try { await execution.graph.close(); }
-  finally { if (observer instanceof tracer.TuiTracer) await observer.finish(); }
-}
 ```
 
-Member columns admit `a` and `d` together (4000 MB), then `b`, then `c`; `a` and `b` never share a column. Cheapest-first racing swaps the limited branch for `schedules.choose({ rank: schedules.lowest("tokens"), width: () => 1 })` with `profiles: { tokens: constantProfile("tokens", tokens(n)) }` on each racer and `tokens(0)` on the `anyOf` join; the runnable native versions of both graphs are `packages/dataflow-engine/examples/resource-scenarios.ts` (reading material, never an import path).
+Inside a policy, `snapshot.measurements.get(nodeId)?.get("runtime")` contains up to eight activation durations in integer milliseconds in this example. The other units are bytes (`memory`, monitored native pipeline peaks), tokens (`tokens`, committed model usage) and millionths of a US dollar (`cost`, committed model usage). An absent series means **no measurement**, not zero. Reading the snapshot does not consume samples. There is no fitted profile in the graph or built-in prediction in the view; a custom scheduler may use its own estimator.
+
+Code nodes can publish a measured value with `graph.recordResourceMeasurement(resource, integer)` during an activation. Runtime samples do not require a recorder. For memory, a builder-owned collection enables native monitoring for a positive memory window; enable monitoring when creating a caller-owned collection instead. No synthetic memory or token samples are added for nodes that didn't measure them.
+
+`lowest(kind)` and `highest(kind)` compare the most recent measurement; unmeasured nodes sort after measured nodes, with equal ranks resolved by `choose`. `limit({ memory }, inner)` uses the peak retained byte measurement for each selected node. Without a known requirement it admits an unmeasured node alone. This is admission policy, not an OS ceiling. Use native `resources.memoryBytes` for a hard pipeline ceiling. Actual token and tool budgets do not require measurement history.
 
 ### Graph compaction
 

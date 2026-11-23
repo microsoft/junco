@@ -141,7 +141,6 @@ function snapshot(f: Fixture): View {
         Object.freeze({
           id: node,
           status: "running" as const,
-          profiles: {},
           state: Object.freeze({ priority: f.priorities[i]! }),
         }),
       ]),
@@ -164,6 +163,7 @@ function snapshot(f: Fixture): View {
     available: new Set(f.available),
     owned: new Set(f.owned),
     plans: new Map(),
+    measurements: new Map(),
     history: Object.freeze(
       f.history.map((selected) =>
         Object.freeze({

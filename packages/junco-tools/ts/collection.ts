@@ -47,6 +47,8 @@ export interface ToolCollectionOptions {
   resources?: NativeResourceOptions;
   /** Receives each resource monitor event; see `ShellMuxLease.create`. */
   onResourceEvent?: (event: NativeResourceEvent) => void;
+  /** Enable cgroup memory.peak samples for shell commands started by a measuring scheduler. */
+  measureMemory?: boolean;
   /** Display/ordering label for the default bash operations; never a policy identity. */
   principal?: string;
   /**
@@ -269,6 +271,7 @@ export class ToolCollection {
       policy: options.policy,
       resources: options.resources,
       onResourceEvent: options.onResourceEvent,
+      measureMemory: options.measureMemory,
       recorder,
     });
     const { native } = lease;

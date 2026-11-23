@@ -3,24 +3,15 @@ import assert from "node:assert/strict";
 import {
   admitToolCall,
   chargeTokenUsage,
-  constantProfile,
   DataflowDefinitionError,
   DataflowGraph,
-  EdgeId,
-  type FeatureVector,
   gibibytes,
   gigabytes,
-  type InputSchedule,
   isUsageLimitError,
   megabytes,
   NodeId,
   type NodeIdType,
-  type ParentView,
-  type PortFeature,
-  type ProfileData,
-  type ProfileSet,
   type ResourceKind,
-  type ResourceUnit,
   TriggerRule,
   tokens,
   UNBOUNDED,
@@ -47,42 +38,19 @@ import {
 const StringSchema = Type.String();
 
 const id = NodeId.create;
-const port = EdgeId.create;
 type View = Snapshot<void, typeof StringSchema, string, never>;
 type Policy = Scheduler<void, typeof StringSchema, string, never>;
 
-function stub<R extends ResourceKind>(
-  resource: R,
-  unit: ResourceUnit<R>,
-  features: PortFeature[],
-  safe: (x: FeatureVector) => number,
-  calls?: FeatureVector[],
-  predictedValue?: number,
-): ProfileData<R> {
-  return {
-    resource,
-    unit,
-    features,
-    predict: (x) => {
-      calls?.push([...x]);
-      const value = safe(x);
-      return { value: predictedValue ?? value, safe: value, source: "model" };
-    },
-  };
-}
-const memory = (safe: number) => ({
-  memory: stub("memory", megabytes, [], () => safe),
-});
-const tokenCost = (safe: number, calls?: FeatureVector[]) => ({
-  tokens: stub("tokens", tokens, [], () => safe, calls),
-});
+const memory = (...mb: number[]) =>
+  new Map([["memory" as const, mb.map((n) => n * megabytes.scale)]]);
 
 function snapshot(
-  profiles: Record<string, ProfileSet>,
-  inputs: View["inputs"] = new Map(),
-  plans?: View["plans"],
+  histories: Record<
+    string,
+    ReadonlyMap<ResourceKind, readonly number[]> | undefined
+  >,
 ): View {
-  const names = Object.keys(profiles).map(id);
+  const names = Object.keys(histories).map(id);
   return Object.freeze({
     nodes: new Map(
       names.map((node) => [
@@ -91,172 +59,46 @@ function snapshot(
           id: node,
           status: "running" as const,
           state: undefined,
-          profiles: profiles[node]!,
         },
       ]),
     ),
-    inputs: new Map(
-      names.map((node) => [
-        node,
-        inputs.get(node) ?? { messages: new Map(), values: new Map() },
-      ]),
+    measurements: new Map(
+      names.flatMap((node) => {
+        const samples = histories[node];
+        return samples === undefined ? [] : [[node, samples] as const];
+      }),
     ),
+    inputs: new Map(),
     links: [],
     results: new Map(),
     version: 0,
     available: new Set(names),
     owned: new Set(names),
     context: new Map<NodeIdType, never>(),
-    plans: plans ?? new Map(names.map((node) => [node, new Map()])),
+    plans: new Map(names.map((node) => [node, new Map()])),
     history: [],
     threads: Infinity,
   });
 }
 
-test("resource features estimate only the planned count batch", async () => {
-  const cases: {
-    features: PortFeature[];
-    queues: Record<string, string[]>;
-    plan: InputSchedule;
-    expected: number;
-  }[] = [
-    {
-      features: [{ port: port("in"), measure: "count" }],
-      queues: { in: ["a", "b", "c"] },
-      plan: new Map([[port("in"), 2]]),
-      expected: 2,
-    },
-    {
-      features: [{ port: port("in"), measure: "count" }],
-      queues: { in: ["a", "b", "c"] },
-      plan: new Map([[port("in"), "all"]]),
-      expected: 3,
-    },
-    {
-      features: [{ port: port("in"), measure: "count" }],
-      queues: { in: ["a", "b", "c"] },
-      plan: new Map(),
-      expected: 0,
-    },
-    {
-      features: [{ port: port("in"), measure: "count" }],
-      queues: { in: ["a"] },
-      plan: new Map([[port("in"), 9]]),
-      expected: 1,
-    },
-    {
-      features: [{ port: port("in"), measure: "count" }],
-      queues: { in: ["a"] },
-      plan: new Map([[port("in"), "none"]]),
-      expected: 0,
-    },
-    ...(["sum", "max"] as const).map((derived) => ({
-      features: [
-        { derived, measure: "count" as const, ports: [port("a"), port("b")] },
-      ],
-      queues: { a: ["a"], b: ["b", "c"] },
-      plan: new Map([
-        [port("a"), "all" as const],
-        [port("b"), "all" as const],
-      ]),
-      expected: derived === "sum" ? 3 : 2,
-    })),
-  ];
-  for (const row of cases) {
-    const calls: FeatureVector[] = [];
-    const view: ParentView<typeof StringSchema, string> = {
-      messages: new Map(
-        Object.entries(row.queues).map(([p, q]) => [port(p), q]),
-      ),
-      values: new Map(),
-    };
-    const s = snapshot(
-      {
-        n: { memory: stub("memory", megabytes, row.features, () => 1, calls) },
-      },
-      new Map([[id("n"), view]]),
-      new Map([[id("n"), row.plan]]),
-    );
-    await limit({ memory: gigabytes(1) }, parallel())(s);
-    assert.deepEqual(calls, [[row.expected]]);
-  }
-  for (const measure of ["bytes", "tokens"] as const) {
+test("rank by latest observation, then unmeasured nodes; ties break by raw ID", async () => {
+  for (const kind of ["cost", "tokens", "runtime", "memory"] as const) {
     const s = snapshot({
-      n: {
-        memory: stub(
-          "memory",
-          megabytes,
-          [{ port: port("in"), measure }],
-          () => 1,
-        ),
-      },
+      d: new Map([[kind, [0, 20]]]),
+      z: undefined,
+      c: new Map([[kind, [100, 5]]]),
+      b: new Map([[kind, [5]]]),
+      a: new Map([[kind, []]]),
+      e: new Map([[kind, [0]]]),
     });
-    await assert.rejects(
-      async () => limit({ memory: gigabytes(1) }, parallel())(s),
-      /only "count" features/,
-    );
+    for (const [rank, order] of [
+      [lowest, ["e", "b", "c", "d", "a", "z"]],
+      [highest, ["d", "b", "c", "e", "a", "z"]],
+    ] as const) {
+      const decision = await choose({ rank: rank(kind), width: () => 6 })(s);
+      assert.deepEqual(nodeIds(decision.selected), order);
+    }
   }
-});
-
-test("lowest and highest rank safe estimates, cache predictions and break ties by raw ID", async () => {
-  for (const [rank, expected] of [
-    [lowest, ["b", "a", "c"]],
-    [highest, ["c", "a", "b"]],
-  ] as const) {
-    const calls = [[], [], []] as FeatureVector[][];
-    const s = snapshot({
-      a: tokenCost(300, calls[0]),
-      b: tokenCost(100, calls[1]),
-      c: tokenCost(900, calls[2]),
-    });
-    const comparator = rank("tokens");
-    assert.deepEqual(
-      nodeIds((await choose({ rank: comparator, width: () => 3 })(s)).selected),
-      expected.map(id),
-    );
-    assert.deepEqual(
-      calls.map((c) => c.length),
-      [1, 1, 1],
-    );
-    assert.deepEqual(
-      nodeIds((await choose({ rank: comparator, width: () => 1 })(s)).selected),
-      [id(expected[0])],
-    );
-    assert.deepEqual(
-      calls.map((c) => c.length),
-      [1, 1, 1],
-    );
-    const ties = snapshot({ b: tokenCost(100), a: tokenCost(100) });
-    assert.deepEqual(
-      nodeIds(
-        (await choose({ rank: rank("tokens"), width: () => 2 })(ties)).selected,
-      ),
-      [id("a"), id("b")],
-    );
-    await assert.rejects(
-      async () =>
-        choose({ rank: rank("tokens") })(
-          snapshot({ a: tokenCost(100), b: {} }),
-        ),
-      new RegExp(`${rank.name}: node "b" has no tokens profile`),
-    );
-  }
-  const s = snapshot({
-    a: { memory: stub("memory", gibibytes, [], () => 1) },
-    b: memory(3000),
-  });
-  assert.deepEqual(
-    nodeIds(
-      (await choose({ rank: lowest("memory"), width: () => 2 })(s)).selected,
-    ),
-    [id("a"), id("b")],
-  );
-  assert.deepEqual(
-    nodeIds(
-      (await choose({ rank: highest("memory"), width: () => 2 })(s)).selected,
-    ),
-    [id("b"), id("a")],
-  );
 });
 
 test("limit preserves inner order, skips oversized work and rejects invalid decisions", async () => {
@@ -288,7 +130,7 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
         await limited(
           snapshot({
             A: memory(3000),
-            B: { memory: stub("memory", gibibytes, [], () => 3) },
+            B: new Map([["memory", [3 * gibibytes.scale]]]),
           }),
         )
       ).selected,
@@ -299,9 +141,9 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
     async () => limited(snapshot({ n: memory(5000) })),
     /alone, exceeding/,
   );
-  await assert.rejects(
-    async () => limited(snapshot({ n: {} })),
-    /has no memory profile/,
+  assert.deepEqual(
+    nodeIds((await limited(snapshot({ n: undefined }))).selected),
+    [id("n")],
   );
   assert.throws(
     () => limit({ memory: megabytes(0) }, parallel()),
@@ -327,70 +169,62 @@ test("limit preserves inner order, skips oversized work and rejects invalid deci
   );
 });
 
-test("one rank comparator caches each snapshot independently", async () => {
-  const calls = [[], [], [], []] as FeatureVector[][];
-  const first = snapshot({
-    a: tokenCost(300, calls[0]),
-    b: tokenCost(100, calls[1]),
-  });
-  const second = snapshot({
-    a: tokenCost(10, calls[2]),
-    b: tokenCost(200, calls[3]),
-  });
-  const scheduler = choose({ rank: lowest("tokens"), width: () => 1 });
-  for (const [view, expected] of [
-    [first, "b"],
-    [second, "a"],
-    [first, "b"],
-  ] as const)
-    assert.deepEqual(nodeIds((await scheduler(view)).selected), [id(expected)]);
-  assert.deepEqual(
-    calls.map((c) => c.length),
-    [1, 1, 1, 1],
-  );
+test("memory admission uses the retained peak, never pairs unknowns, and honors measured zero", async () => {
+  const policy = limit({ memory: megabytes(10) }, parallel());
+  for (const [samples, expected] of [
+    [{ a: memory(8, 1), b: memory(3), c: memory(2) }, ["a", "c"]],
+    [{ a: undefined, b: memory(0), c: undefined }, ["a"]],
+    [{ a: memory(0), b: memory(), c: memory(10) }, ["a", "c"]],
+    [{ a: memory(20), b: undefined, c: memory(0) }, ["b"]],
+  ] as const) {
+    assert.deepEqual(
+      nodeIds((await policy(snapshot(samples))).selected),
+      expected,
+    );
+  }
 });
 
-test("memory admission and token ranking use safe rather than value", async () => {
+test("calibrated byte floors cannot reduce observed memory or pair an uncalibrated cold start", async () => {
   const s = snapshot({
-    a: {
-      memory: stub("memory", megabytes, [], () => 3000, undefined, 0),
-      tokens: stub("tokens", tokens, [], () => 900, undefined, 1),
-    },
-    b: {
-      memory: stub("memory", megabytes, [], () => 3000, undefined, 0),
-      tokens: stub("tokens", tokens, [], () => 100, undefined, 900),
-    },
+    a: memory(1),
+    b: memory(6),
+    c: undefined,
+    d: undefined,
   });
-  assert.deepEqual(
-    nodeIds((await limit({ memory: gigabytes(4) }, parallel())(s)).selected),
-    [id("a")],
-  );
-  assert.deepEqual(
-    nodeIds(
-      (await choose({ rank: lowest("tokens"), width: () => 1 })(s)).selected,
-    ),
-    [id("b")],
-  );
-  assert.deepEqual(
-    nodeIds(
-      (await choose({ rank: highest("tokens"), width: () => 1 })(s)).selected,
-    ),
-    [id("a")],
-  );
+  const floors: Record<string, number> = { a: 8e6, b: 0, d: 2e6 };
+  const options = {
+    memory: megabytes(10),
+    memoryFloor: (node: NodeIdType) => floors[node],
+  };
+  assert.deepEqual(nodeIds((await limit(options, parallel())(s)).selected), [
+    "a",
+    "d",
+  ]);
+  for (const invalid of [-1, 0.5, Infinity, NaN, 2 ** 53])
+    await assert.rejects(
+      async () =>
+        limit({ ...options, memoryFloor: () => invalid }, parallel())(s),
+      /non-negative safe integer in bytes/,
+    );
 });
 
 test("limit checks cancellation before invocation and after awaited inner work", async () => {
-  const calls: FeatureVector[] = [];
-  const s = snapshot({
-    a: { memory: stub("memory", megabytes, [], () => 1, calls) },
-  });
+  const calls: NodeIdType[] = [];
+  const s = snapshot({ a: memory(1) });
+  const options = {
+    memory: gigabytes(4),
+    memoryFloor: (node: NodeIdType) => {
+      calls.push(node);
+      return 0;
+    },
+  };
   const reason = new Error("cancel resource scheduling");
   const before = new AbortController();
   before.abort(reason);
   let invoked = false;
   await assert.rejects(
     async () =>
-      limit({ memory: gigabytes(4) }, (view) => {
+      limit(options, (view) => {
         invoked = true;
         return { selected: select(view, [id("a")]) };
       })(s, before.signal),
@@ -400,7 +234,7 @@ test("limit checks cancellation before invocation and after awaited inner work",
   const after = new AbortController();
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const pending = limit({ memory: gigabytes(4) }, async (view) => {
+  const pending = limit(options, async (view) => {
     entered.resolve();
     await release.promise;
     return { selected: select(view, [id("a")]) };
@@ -422,14 +256,13 @@ type UsagePolicy = Scheduler<void, never, string, never>;
 
 /**
  * One node per `plan` entry, making `plan[name][k]` tool calls in its k-th activation and
- * returning after the last, with a constant memory profile of `memory[name]` megabytes (default 0).
+ * returning after the last.
  */
 function callers(
   scheduler: UsagePolicy,
   plan: Record<string, readonly number[]>,
-  memory: Record<string, number> = {},
 ) {
-  const graph = new DataflowGraph<void, never, string, never, "memory">(
+  const graph = new DataflowGraph<void, never, string, never>(
     Width.create(1),
     UNBOUNDED,
   );
@@ -439,9 +272,6 @@ function callers(
       id: id(name),
       state: undefined,
       trigger: TriggerRule.always(),
-      profiles: {
-        memory: constantProfile("memory", megabytes(memory[name] ?? 0)),
-      },
       step: async function* () {
         for (const [index, count] of activations.entries()) {
           for (let call = 0; call < count; call++) {
@@ -575,18 +405,16 @@ test("nested limits each count every call exactly once", async () => {
   assert.equal(innerError.details.scope, "activation");
 });
 
-test("memory stays a per-decision prediction beside usage budgets; skipped work consumes nothing", async () => {
+test("memory admission beside a hard usage budget charges only admitted work", async () => {
   const perBatch = callers(
     limit({ memory: megabytes(10), tools: 1, scope: "batch" }, parallel()),
     { a: [1], b: [1] },
-    { a: 6, b: 6 },
   );
   await perBatch.execution.run();
   assert.deepEqual(perBatch.calls, ["a", "b"]);
   const perRun = callers(
     limit({ memory: megabytes(10), tools: 1 }, parallel()),
     { a: [1], b: [1] },
-    { a: 6, b: 6 },
   );
   await exhausted(perRun.execution.run());
   assert.deepEqual(perRun.calls, ["a"]);
@@ -624,6 +452,8 @@ test("token limits normalize their unit; invalid usage options are rejected", as
     { tools: -1 },
     { tools: 1, scope: "global" },
     { memory: gigabytes(1), scope: "batch" },
+    { tools: 1, memoryFloor: () => 1 },
+    { memory: gigabytes(1), memoryFloor: 1 },
     { tokens: megabytes(1) },
     { tokens: tokens(1.5) },
     { tokens: tokens(-1) },

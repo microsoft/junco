@@ -548,6 +548,7 @@ export async function typedSchedulerPolicyReadsPerEdge(
     context: new Map(),
     plans: new Map(),
     history: [],
+    measurements: new Map(),
     threads: g.threads,
   });
   const results: ReadonlyMap<graph.NodeIdType, string> = await execution.run();

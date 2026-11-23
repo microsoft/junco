@@ -1,11 +1,6 @@
 import {
   DataflowDefinitionError,
-  type EdgeIdType,
-  type InputSchedule,
-  type Measure,
-  measureFeatures,
   type NodeIdType,
-  type ParentView,
   type ResourceKind,
   type ResourceQuantity,
   UsageBudget,
@@ -20,97 +15,38 @@ import {
 } from "./scheduler.js";
 import { copyUsageLimits, type UsageLimitDefinition } from "./usage-limits.js";
 
-function countPort<N extends TSchema, T>(
-  id: NodeIdType,
-  resource: ResourceKind,
-  port: EdgeIdType,
-  measure: Measure,
-  view: ParentView<N, T>,
-  plan: InputSchedule,
-): number {
-  if (measure !== "count")
-    throw new DataflowDefinitionError(
-      `estimate: node "${id}" profile "${resource}" measures "${measure}" on port "${port}"; only "count" features can be estimated from a planned batch`,
-    );
-  const queue = view.messages.get(port);
-  const n = plan.get(port);
-  return queue === undefined || n === undefined || n === "none"
-    ? 0
-    : n === "all"
-      ? queue.length
-      : Math.min(n, queue.length);
-}
-
-function safeCost<S, N extends TSchema, T, C>(
-  snapshot: Snapshot<S, N, T, C>,
-  id: NodeIdType,
-  kind: ResourceKind,
-  who: "limit" | "lowest" | "highest",
-): number {
-  const profile = snapshot.nodes.get(id)?.profiles[kind];
-  if (profile === undefined)
-    throw new DataflowDefinitionError(
-      `${who}: node "${id}" has no ${kind} profile`,
-    );
-  const plan = snapshot.plans.get(id);
-  if (plan === undefined)
-    throw new DataflowDefinitionError(`${who}: node "${id}" is not available`);
-  const view = snapshot.inputs.get(id);
-  if (view === undefined)
-    throw new DataflowDefinitionError(`${who}: node "${id}" has no inputs`);
-  const features = measureFeatures(profile.features, (port, measure) =>
-    countPort(id, profile.resource, port, measure, view, plan),
-  );
-  if (features === undefined)
-    throw new DataflowDefinitionError(
-      `${who}: node "${id}" ${kind} features unmeasurable`,
-    );
-  return profile.predict(features).safe * profile.unit.scale;
-}
-
 type Rank = <S, N extends TSchema, T, C>(
   snapshot: Snapshot<S, N, T, C>,
   left: NodeIdType,
   right: NodeIdType,
 ) => number;
 
-function ranked(
-  kind: ResourceKind,
-  order: 1 | -1,
-  who: "lowest" | "highest",
-): Rank {
-  const cache = new WeakMap<object, Map<NodeIdType, number>>();
+function ranked(kind: ResourceKind, order: 1 | -1): Rank {
   return (snapshot, left, right) => {
-    let costs = cache.get(snapshot);
-    if (costs === undefined) {
-      costs = new Map();
-      cache.set(snapshot, costs);
-    }
-    const cost = (id: NodeIdType): number => {
-      const cached = costs.get(id);
-      if (cached !== undefined) return cached;
-      const value = safeCost(snapshot, id, kind, who);
-      costs.set(id, value);
-      return value;
-    };
-    return order * (cost(left) - cost(right));
+    const a = snapshot.measurements.get(left)?.get(kind)?.at(-1);
+    const b = snapshot.measurements.get(right)?.get(kind)?.at(-1);
+    if (a === undefined) return b === undefined ? 0 : 1;
+    if (b === undefined) return -1;
+    return order * (a - b);
   };
 }
 
-/** Rank for `choose`: lower predicted `kind` cost first (the profile's `safe` estimate, base units). */
+/** Rank for `choose`: lowest latest measurement first; unmeasured nodes tie after measured nodes. */
 export function lowest(kind: ResourceKind): Rank {
-  return ranked(kind, 1, "lowest");
+  return ranked(kind, 1);
 }
 
-/** Rank for `choose`: higher predicted `kind` cost first, e.g. `highest("runtime")` starts the longest work first. */
+/** Rank for `choose`: highest latest measurement first; unmeasured nodes tie after measured nodes. */
 export function highest(kind: ResourceKind): Rank {
-  return ranked(kind, -1, "highest");
+  return ranked(kind, -1);
 }
 
 /** Allowances for `limit`: a per-decision memory admission bound and token/tool budgets per `scope`. */
 export type LimitOptions = {
-  /** Predicted peak memory of one decision's batch. */
+  /** Memory admission allowance for one decision (not an enforced process memory cap). */
   readonly memory?: ResourceQuantity<"memory">;
+  /** Optional calibrated byte floor per node, including cold starts. Undefined means no calibration. */
+  readonly memoryFloor?: (node: NodeIdType) => number | undefined;
   /** Committed model tokens (input, output and cache) per `scope`. */
   readonly tokens?: ResourceQuantity<"tokens">;
   /** Admitted tool calls, every tool counted together, per `scope`. */
@@ -148,14 +84,11 @@ function tokenAmount(quantity: ResourceQuantity<"tokens">): number {
 /**
  * Bound `scheduler`'s work by `limits`.
  *
- * `memory` admits, in the inner decision's order, only nodes whose predicted peak memory (the
- * `memory` profile's `safe` estimate on the batch each would consume) fits beside the nodes
- * already admitted: Σ safe ≤ memory. One decision is one concurrently executed column, so the
- * sum is that column's predicted peak; memory a node retains across yields is not tracked —
- * leave headroom. Every selected node needs a memory profile. A skipped node stays available; a
- * policy that ranks small work first can delay a large node while small work keeps arriving.
- * Wrap the outermost scheduler: `separate` branches wrapped individually each receive the whole
- * allowance.
+ * `memory` admits nodes in the inner decision's order using their peak retained memory sample
+ * in bytes, raised to `memoryFloor(node)` when supplied. A node without either value runs
+ * alone, since its memory need is unknown. A known need exceeding the allowance cannot run.
+ * This estimates the concurrent batch, not memory retained across yields; leave headroom.
+ * Wrap the outermost scheduler so `separate` branches share one allowance.
  *
  * `tokens` and `tools` are enforced budgets on the admitted nodes' actual usage, shared by every
  * node this combinator instance admits within `scope`: one `run()`/`step()` invocation
@@ -171,12 +104,13 @@ export function limit<S, N extends TSchema, T, C>(
   for (const key of Object.keys(limits))
     if (
       key !== "memory" &&
+      key !== "memoryFloor" &&
       key !== "tokens" &&
       key !== "tools" &&
       key !== "scope"
     )
       throw new DataflowDefinitionError(`limit: unknown limit "${key}"`);
-  const { memory, tokens, tools, scope } = limits;
+  const { memory, memoryFloor, tokens, tools, scope } = limits;
   if (memory === undefined && tokens === undefined && tools === undefined)
     throw new DataflowDefinitionError(
       "limit: needs a memory, tokens or tools limit",
@@ -187,6 +121,13 @@ export function limit<S, N extends TSchema, T, C>(
   )
     throw new DataflowDefinitionError(
       "limit: memory must be a positive quantity",
+    );
+  if (
+    memoryFloor !== undefined &&
+    (memory === undefined || typeof memoryFloor !== "function")
+  )
+    throw new DataflowDefinitionError(
+      "limit: memoryFloor requires a memory limit and a byte estimator",
     );
   let usage: UsageLimitDefinition | undefined;
   if (tokens !== undefined || tools !== undefined) {
@@ -219,7 +160,20 @@ export function limit<S, N extends TSchema, T, C>(
     const selected: NodeModel[] = [];
     let smallest: { id: NodeIdType; need: number } | undefined;
     for (const entry of decision.selected) {
-      const need = safeCost(snapshot, entry.nodeId, "memory", "limit");
+      let need = memoryFloor?.(entry.nodeId);
+      if (need !== undefined && !(Number.isSafeInteger(need) && need >= 0))
+        throw new DataflowDefinitionError(
+          `limit: memoryFloor for node "${entry.nodeId}" must be a non-negative safe integer in bytes`,
+        );
+      const samples = snapshot.measurements.get(entry.nodeId)?.get("memory");
+      if (samples !== undefined)
+        for (const sample of samples)
+          if (need === undefined || sample > need) need = sample;
+      if (need === undefined) {
+        if (selected.length > 0) continue;
+        selected.push(admit(entry));
+        break;
+      }
       if (load + need <= limitBase) {
         selected.push(admit(entry));
         load += need;

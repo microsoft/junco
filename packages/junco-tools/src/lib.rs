@@ -33,7 +33,7 @@ use napi::bindgen_prelude::{Buffer, Either, PromiseRaw, Undefined};
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
-use frontend::{OutputCallback, PolicyCallback, ResourceCallback};
+use frontend::{MemoryPeakCallback, OutputCallback, PolicyCallback, ResourceCallback};
 use mux::{RunState, Session};
 use policy::NativePolicy;
 use process::{CloseTimeout, ProcessState};
@@ -54,6 +54,8 @@ pub struct NativeMuxOptions {
     pub policy_debug: Option<bool>,
     /// Resource limits and monitoring of this mux's commands; none when omitted.
     pub resources: Option<NativeResourceOptions>,
+    /// Allow a run to receive its own pipeline memory peaks without a mux-wide event callback.
+    pub measure_memory: Option<bool>,
 }
 
 /// Resource limits and monitoring of every shell command and persistent process this mux
@@ -69,8 +71,8 @@ pub struct NativeResourceOptions {
     pub cpus: Option<f64>,
     /// Maximum task count; a positive integer no greater than 4294967295.
     pub pids: Option<f64>,
-    /// Sampling interval, in milliseconds, of the monitor whose events `onResourceEvent`
-    /// receives; positive. Each requires the other.
+    /// Positive monitor interval in milliseconds. Requires a mux-wide `onResourceEvent`
+    /// callback or `measureMemory` for per-command reporting.
     pub monitor_interval_ms: Option<f64>,
 }
 
@@ -115,7 +117,7 @@ pub struct NativePolicyDecision {
     pub allowed_fixes: Option<Vec<String>>,
 }
 
-type ResourceEvents = (Duration, Arc<frontend::ResourceLog>);
+type ResourceEvents = (Duration, Option<Arc<frontend::ResourceLog>>);
 
 /// What `NativeMuxOptions` and the open callbacks select, refused before anything is discovered.
 pub(crate) struct MuxSetup {
@@ -123,7 +125,7 @@ pub(crate) struct MuxSetup {
     pub(crate) shell_policy: Arc<dyn marsh_core::Policy>,
     pub(crate) policy_log: Option<Arc<frontend::PolicyLog>>,
     pub(crate) pipeline_options: marsh_core::PipelineOptions,
-    /// The monitor interval and the sink, when monitoring is on.
+    /// Monitor interval and optional mux-wide event sink.
     pub(crate) resource_events: Option<ResourceEvents>,
 }
 
@@ -132,6 +134,9 @@ fn mux_options(
     on_policy_decision: Option<PolicyCallback>,
     on_resource_event: Option<ResourceCallback>,
 ) -> Result<MuxSetup> {
+    let measure_memory = options
+        .as_ref()
+        .is_some_and(|options| options.measure_memory == Some(true));
     let (sandbox, policy, debug, resources) = options.map_or((None, None, None, None), |options| {
         (
             options.sandbox,
@@ -152,7 +157,8 @@ fn mux_options(
     let shell_policy = policy.map_or_else(|| NativePolicy::lock().0, |policy| policy.0);
     let policy_log = on_policy_decision
         .map(|callback| frontend::PolicyLog::new(callback, debug.unwrap_or(false)));
-    let (pipeline_options, resource_events) = pipeline_options(resources, on_resource_event)?;
+    let (pipeline_options, resource_events) =
+        pipeline_options(resources, on_resource_event, measure_memory)?;
     Ok(MuxSetup {
         sandbox,
         shell_policy,
@@ -165,6 +171,7 @@ fn mux_options(
 fn pipeline_options(
     resources: Option<NativeResourceOptions>,
     on_resource_event: Option<ResourceCallback>,
+    measure_memory: bool,
 ) -> Result<(marsh_core::PipelineOptions, Option<ResourceEvents>)> {
     use marsh_core::{CpuLimit, MemoryLimit, PipelineOptions, ResourceLimits};
 
@@ -225,6 +232,9 @@ fn pipeline_options(
         options = options.with_resource_limits(limits);
     }
     let events = match (interval, on_resource_event) {
+        (interval, None) if measure_memory => {
+            Some((interval.unwrap_or(Duration::from_secs(1)), None))
+        }
         (Some(_), None) => {
             return Err(Error::from_reason(
                 "Invalid resources option: monitorIntervalMs requires an onResourceEvent callback",
@@ -235,7 +245,9 @@ fn pipeline_options(
                 "onResourceEvent requires resources.monitorIntervalMs",
             ));
         }
-        (Some(interval), Some(callback)) => Some((interval, frontend::ResourceLog::new(callback))),
+        (Some(interval), Some(callback)) => {
+            Some((interval, Some(frontend::ResourceLog::new(callback))))
+        }
         (None, None) => None,
     };
     Ok((options, events))
@@ -478,17 +490,21 @@ impl NativeMux {
         self.session.seed().to_string_lossy().into_owned()
     }
 
+    /// A monitored command sends `onMemoryPeak` one cgroup peak per measured pipeline.
+    /// Its wait fence drains those callbacks, independently of the mux-wide event stream.
     #[napi]
     pub fn start(
         &self,
         options: NativeRunOptions,
         #[napi(ts_arg_type = "(error: Error | null, data: Buffer) => void")]
         on_data: OutputCallback,
+        #[napi(ts_arg_type = "(error: Error | null, bytes: number) => void")]
+        on_memory_peak: Option<MemoryPeakCallback>,
     ) -> Result<NativeRun> {
         Ok(NativeRun {
             state: self
                 .session
-                .start(options, self.owner.clone(), on_data)
+                .start(options, self.owner.clone(), on_data, on_memory_peak)
                 .map_err(Error::from_reason)?,
         })
     }

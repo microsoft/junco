@@ -15,6 +15,7 @@ pub(crate) type PolicyCallback =
     ThreadsafeFunction<NativePolicyDecision, (), NativePolicyDecision, Status, true, true>;
 pub(crate) type ResourceCallback =
     ThreadsafeFunction<NativeResourceEvent, (), NativeResourceEvent, Status, true, true>;
+pub(crate) type MemoryPeakCallback = ThreadsafeFunction<f64, (), f64, Status, true, true>;
 
 #[derive(Default)]
 struct RouteProgress {

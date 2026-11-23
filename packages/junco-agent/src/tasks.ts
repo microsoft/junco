@@ -447,32 +447,39 @@ export class TaskScope {
     const { usage, recorder } = placement;
     const nodeId = NodeId.create(id);
     return runWithUsageContext(usage, () =>
-      runWithUsageBudgets([], id, () =>
-        child.runWithNodeContext(
-          {
-            nodeId,
-            ...(recorder === undefined ? {} : { recorder, recorderNodeId: id }),
-            complaint: { nodeId, messages: [] },
-          },
-          async () => {
-            child.stagePrompt(record.prompt);
-            while (true) {
-              const result = await child.next();
-              if (result.done === true)
-                throw new JuncoAgentError(
-                  "closed",
-                  "Subagent closed before settlement",
-                );
-              const step = result.value;
-              if (step.kind === "settled") return step.message;
-              if (step.kind === "failed") throw step.error;
-              // A background subagent resumes its own pauses; only cancellation stops it.
-              await setImmediate(undefined, {
-                signal: this.#controller.signal,
-              });
-            }
-          },
-        ),
+      runWithUsageBudgets(
+        [],
+        id,
+        () =>
+          child.runWithNodeContext(
+            {
+              nodeId,
+              ...(recorder === undefined
+                ? {}
+                : { recorder, recorderNodeId: id }),
+              complaint: { nodeId, messages: [] },
+            },
+            async () => {
+              child.stagePrompt(record.prompt);
+              while (true) {
+                const result = await child.next();
+                if (result.done === true)
+                  throw new JuncoAgentError(
+                    "closed",
+                    "Subagent closed before settlement",
+                  );
+                const step = result.value;
+                if (step.kind === "settled") return step.message;
+                if (step.kind === "failed") throw step.error;
+                // A background subagent resumes its own pauses; only cancellation stops it.
+                await setImmediate(undefined, {
+                  signal: this.#controller.signal,
+                });
+              }
+            },
+          ),
+        // Tasks run inside the admitting graph node; they have no scheduler history of their own.
+        usage?.report,
       ),
     );
   }
