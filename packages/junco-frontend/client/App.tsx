@@ -15,12 +15,8 @@ type Selection =
 export function App() {
   const state = useJuncoState();
   const [selected, setSelected] = useState<Selection>();
-  // Stable: GraphView re-renders its diagram whenever this identity changes.
-  const selectNode = useCallback(
-    (ref: NodeRef, token: string) => setSelected((current) =>
-      current?.kind === "node" && current.token === token ? undefined : { kind: "node", token, ...ref }
-    ),
-    [],
+  const selectNode = (ref: NodeRef, token: string) => setSelected((current) =>
+    current?.kind === "node" && current.token === token ? undefined : { kind: "node", token, ...ref }
   );
   const dismiss = useCallback(() => setSelected(undefined), []);
   const card = selected?.kind === "task" ? state.cards[selected.id] : undefined;
@@ -39,7 +35,7 @@ export function App() {
         <span className="muted">{state.log.length} events</span>
       </header>
       <main className="grid">
-        <section className="panel">
+        <section className="panel graph-panel">
           <h2>Graph</h2>
           <GraphView state={state} onSelect={selectNode} />
         </section>

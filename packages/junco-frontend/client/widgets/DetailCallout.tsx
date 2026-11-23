@@ -23,7 +23,7 @@ export function DetailCallout({ selector, label, onDismiss, children }: {
 
     let trigger = initial;
     const position = (): boolean => {
-      // Mermaid replaces the SVG, but an occurrence keeps its selector across status updates.
+      // A direction change replaces the SVG but keeps the node's occurrence selector.
       if (!trigger.isConnected) {
         resize.unobserve(trigger);
         trigger.removeAttribute("aria-expanded");

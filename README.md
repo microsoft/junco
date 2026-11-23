@@ -165,6 +165,8 @@ cd "$HOME/work/seed" && bun run /path/to/junco/examples/first/first.ts
 
 The [web monitor](packages/junco-frontend/) shows Graph and Tool calls above a full-width Tasks board. Row labels show the last eight characters of the task ID; hover a label to see the full ID. Click a card or graph node, or focus it and press Enter or Space, to open its live details without moving the board. Escape closes the details and returns focus to the trigger.
 
+The Graph panel fits the whole diagram below the run label. It chooses left-to-right or top-to-bottom, whichever makes the labels larger in the available space, and updates that choice when the panel resizes.
+
 ### The three skills
 
 Installed skills answer plain requests; no slash command.
