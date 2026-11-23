@@ -45,11 +45,14 @@ header h1 {
 }
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: 1fr 1fr;
   gap: 8px;
   padding: 8px;
   min-height: 0;
+}
+.tasks-panel {
+  grid-column: 1 / -1;
 }
 .panel {
   min-height: 0;
@@ -157,6 +160,14 @@ th {
   border-left: 3px solid var(--status);
   border-radius: 6px;
 }
+g[data-node-anchor] {
+  cursor: pointer;
+}
+.card:focus-visible,
+g[data-node-anchor]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .card:hover {
   border-color: var(--accent);
   border-left-color: var(--status);
@@ -175,4 +186,49 @@ th {
 }
 .card.error {
   --status: var(--err);
+}
+.callout {
+  position: fixed;
+  z-index: 2;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(28rem, calc(100vw - 16px));
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+}
+.callout[data-side="above"] {
+  bottom: var(--inset);
+}
+.callout[data-side="below"] {
+  top: var(--inset);
+}
+.callout::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--tip) - 1px);
+  width: 10px;
+  height: 10px;
+  background: var(--panel);
+  border: solid var(--accent);
+  border-width: 0 1px 1px 0;
+  pointer-events: none;
+}
+.callout[data-side="above"]::after {
+  bottom: 0;
+  transform: translate(-50%, 55%) rotate(45deg);
+}
+.callout[data-side="below"]::after {
+  top: 0;
+  transform: translate(-50%, -55%) rotate(225deg);
+}
+.callout-body {
+  overflow: auto;
+  padding: 4px 12px 10px;
+}
+.callout-close {
+  float: right;
+  margin: 6px 0 6px 8px;
+  cursor: pointer;
 }

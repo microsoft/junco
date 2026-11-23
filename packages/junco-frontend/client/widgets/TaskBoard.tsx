@@ -17,7 +17,7 @@ export function TaskBoard({
     <div
       className="board"
       style={{
-        gridTemplateColumns: `minmax(8em, max-content) repeat(${columns.length}, minmax(14em, 1fr))`,
+        gridTemplateColumns: `max-content repeat(${columns.length}, minmax(14em, 1fr))`,
       }}
     >
       <div />
@@ -28,7 +28,7 @@ export function TaskBoard({
       ))}
       {rows.map((taskId) => (
         <Fragment key={taskId}>
-          <div className="board-row">{taskId}</div>
+          <div className="board-row" title={taskId}>{taskId.slice(-8)}</div>
           {columns.map((node) => {
             const card = cards[cardId(taskId, node)];
             return (
@@ -37,6 +37,8 @@ export function TaskBoard({
                   <button
                     type="button"
                     className={`card ${card.status}`}
+                    data-card-id={card.id}
+                    aria-haspopup="dialog"
                     onClick={() => onSelect(card.id)}
                   >
                     <b>{card.status}</b>

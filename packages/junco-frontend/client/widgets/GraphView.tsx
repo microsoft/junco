@@ -45,10 +45,7 @@ export function mermaidOf(graphs: State["graphs"]): {
         lines.push("end");
         continue;
       }
-      lines.push(
-        `${key}${label}:::${node.live}`,
-        `click ${key} juncoNodeClick`,
-      );
+      lines.push(`${key}${label}:::${node.live}`, `class ${key} junco-${key}`);
       ids.set(key, { graph: g, node: node.id });
     }
     for (const link of info.links)
@@ -71,7 +68,7 @@ export function GraphView({
   onSelect,
 }: {
   state: State;
-  onSelect: (ref: NodeRef) => void;
+  onSelect: (ref: NodeRef, token: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const { root, text, ids } = useMemo(() => mermaidOf(state.graphs), [state.graphs]);
@@ -81,16 +78,25 @@ export function GraphView({
     let cancelled = false;
     mermaid
       .render(`junco-graph-${++renders}`, text)
-      .then(({ svg, bindFunctions }) => {
+      .then(({ svg }) => {
         if (cancelled || ref.current !== mount) return;
         mount.innerHTML = svg;
-        Object.assign(window, {
-          juncoNodeClick: (key: string) => {
-            const hit = ids.get(key);
-            if (hit !== undefined) onSelect(hit);
-          },
-        });
-        bindFunctions?.(mount);
+        for (const [key, hit] of ids) {
+          const group = mount.querySelector<SVGGElement>(`g.junco-${key}`);
+          if (!group) continue;
+          const token = `${key}:${hit.graph}:${hit.node}`;
+          group.dataset.nodeAnchor = token;
+          group.setAttribute("role", "button");
+          group.setAttribute("tabindex", "0");
+          group.setAttribute("aria-label", `g${hit.graph}/${hit.node}`);
+          group.setAttribute("aria-haspopup", "dialog");
+          group.addEventListener("click", () => onSelect(hit, token));
+          group.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            if (!event.repeat) onSelect(hit, token);
+          });
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled && ref.current === mount) mount.textContent = String(error);
