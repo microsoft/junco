@@ -71,6 +71,13 @@ export function quantityOf<R extends graph.ResourceKind>(
   return unitOf(kind, symbol)(Number(amount));
 }
 
+/** Expand the scalar spellings; an omitted trigger watches all inbound edges. */
+function declaredTrigger(trigger: TriggerSpec): Exclude<TriggerSpec, string> {
+  if (typeof trigger !== "string") return trigger;
+  if (trigger === "never") return { any: [] };
+  return { all: trigger === "always" ? [] : [trigger] };
+}
+
 export function resolveTrigger<N extends TSchema, T>(
   spec: GraphSpec,
   id: string,
@@ -78,16 +85,10 @@ export function resolveTrigger<N extends TSchema, T>(
   trigger?: TriggerSpec,
 ): graph.TriggerRule<N, T> {
   const { TriggerRule, TriggerEntry } = graph;
-  if (trigger === "always") return TriggerRule.always();
-  if (trigger === "never") return TriggerRule.never();
-  const entries =
-    typeof trigger === "string"
-      ? [trigger]
-      : trigger === undefined
-        ? inboundEdges(spec, id).map(edgeId)
-        : "all" in trigger
-          ? trigger.all
-          : trigger.any;
+  const rule = declaredTrigger(
+    trigger ?? { all: inboundEdges(spec, id).map(edgeId) },
+  );
+  const entries = "all" in rule ? rule.all : rule.any;
   const on = entries.map((entry) => {
     const edge = edges.get(entry);
     if (edge === undefined)
@@ -96,9 +97,7 @@ export function resolveTrigger<N extends TSchema, T>(
       );
     return TriggerEntry.on(edge);
   });
-  return typeof trigger === "object" && "any" in trigger
-    ? TriggerRule.anyOf(...on)
-    : TriggerRule.allOf(...on);
+  return "all" in rule ? TriggerRule.allOf(...on) : TriggerRule.anyOf(...on);
 }
 const pointer = (key: string) =>
   key.replaceAll("~", "~0").replaceAll("/", "~1");
@@ -839,21 +838,22 @@ export function parse(
       incoming.get(edge.to)?.push(edge);
       outgoing.get(edge.from)?.push(edge);
     }
+    const canStart = new Set<string>(wired ? ["$source"] : []);
+    const pendingInputs = new Map<string, number>();
+    const watched = new Set<string>();
     function checkTrigger(id: string, at: string, trigger?: TriggerSpec): void {
       const inbound = (incoming.get(id) ?? []).map(edgeId);
-      const [entries, base]: [readonly string[], string] =
-        typeof trigger === "object"
-          ? "all" in trigger
-            ? [trigger.all, `${at}/all`]
-            : [trigger.any, `${at}/any`]
-          : trigger === undefined || trigger === "always" || trigger === "never"
-            ? [[], at]
-            : [[trigger], at];
+      const rule = declaredTrigger(trigger ?? { all: inbound });
+      const all = "all" in rule;
+      const entries = all ? rule.all : rule.any;
+      const base =
+        typeof trigger === "object" ? `${at}/${all ? "all" : "any"}` : at;
       if (typeof trigger === "object")
         unique(entries, base, `Node "${id}" trigger`);
-      else if (entries[0] !== undefined) identifier(entries[0], base);
+      else if (typeof trigger === "string" && entries[0] !== undefined)
+        identifier(entries[0], base);
       for (const [index, e] of entries.entries())
-        if (!inbound.includes(e))
+        if (trigger !== undefined && !inbound.includes(e))
           fail(
             typeof trigger === "object" ? `${base}/${index}` : base,
             `Node "${id}" trigger references edge "${e}" which is not one of its inbound edges`,
@@ -862,6 +862,13 @@ export function parse(
               : `add an edge with id "${e}" into "${id}", or remove the trigger`,
             "trigger",
           );
+      // emit always starts; explicit never (including any: []) parks without seeding consumers.
+      if (spec.nodes[id]?.kind === "emit" || (all && entries.length === 0))
+        canStart.add(id);
+      else if (entries.length > 0) {
+        pendingInputs.set(id, all ? entries.length : 1);
+        for (const e of entries) watched.add(e);
+      }
     }
     const predecessors = [
       ...new Set((incoming.get("$sink") ?? []).map((e) => e.from)),
@@ -1104,6 +1111,31 @@ export function parse(
         "no-sink-path",
         { target: "key" },
       );
+    // Set iteration is the worklist: each possible producer releases its watched edges once.
+    for (const producer of canStart) {
+      for (const e of outgoing.get(producer) ?? []) {
+        const needed = pendingInputs.get(e.to);
+        if (needed === undefined || !watched.has(edgeId(e))) continue;
+        if (needed === 1) {
+          pendingInputs.delete(e.to);
+          canStart.add(e.to);
+        } else pendingInputs.set(e.to, needed - 1);
+      }
+    }
+    const blocked = ids.filter((id) => pendingInputs.has(id));
+    const [first] = blocked;
+    if (first !== undefined) {
+      const sink = first === "$sink";
+      const at = sink ? (spec.sink ? `${path}/sink` : path) : nodeAt(blocked);
+      const trigger = sink ? spec.sink?.trigger : spec.nodes[first]?.trigger;
+      fail(
+        trigger === undefined ? at : `${at}/trigger`,
+        `Cannot start under the declared triggers: ${list(blocked)}`,
+        "give a blocked node a trigger that can fire without feedback, e.g. { any: [seed, feedback] } with a reachable seed edge",
+        "unstartable-trigger",
+        { target: !sink && trigger === undefined ? "key" : "value" },
+      );
+    }
     for (const [id, node] of Object.entries(spec.nodes))
       if (node.kind === "graph")
         checkGraph(

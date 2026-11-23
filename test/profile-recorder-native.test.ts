@@ -361,6 +361,7 @@ test("graph resources reach bash as cgroup pid limits", async () => {
         JuncoGraph.fromYaml(
           {
             graph: {
+              sink: { trigger: "never" },
               nodes: {
                 Start: { kind: "emit", text: "resource probe", spec: "done" },
                 Terminal: { kind: "code", trigger: "never" },

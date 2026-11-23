@@ -1437,15 +1437,13 @@ test("recursive validation accepts connected graphs with cycles", () => {
   rejectsAt(doc, "/graph/nodes/A/graph");
   child.sink = { returns: "W" };
   assert.equal(parse(doc), doc);
-  const free = variant((d) => {
-    d.graph.nodes.Root = {};
-    d.graph.edges.push({ from: "Root", to: "A", schema });
-    d.graph.edges.push(
-      { from: "B", to: "A", kind: "message", schema },
-      { from: "A", to: "A", kind: "message", schema },
-    );
-  });
-  assert.equal(parse(free), free);
+  child.edges.push({ from: "W", to: "W", schema });
+  child.nodes.W.trigger = "W->W";
+  const blocked = failure(doc);
+  assert.equal(blocked.code, "unstartable-trigger");
+  assert.equal(blocked.path, "/graph/nodes/A/graph/nodes/W/trigger");
+  child.nodes.W.trigger = "$source~>W";
+  assert.equal(parse(doc), doc);
   rejectsAt(
     variant((d) => {
       d.graph.nodes["a/b~c"] = { prompt: "{{missing}}" };
@@ -1454,9 +1452,14 @@ test("recursive validation accepts connected graphs with cycles", () => {
   );
 });
 
-test("emit fan-out degrees", () => {
+test("emit seeds its fan-out even with a never trigger", () => {
   const doc = variant((d) => {
-    d.graph.nodes.A = { kind: "emit", text: "go", spec: "done" };
+    d.graph.nodes.A = {
+      kind: "emit",
+      text: "go",
+      spec: "done",
+      trigger: "never",
+    };
     for (const e of d.graph.edges) e.kind = "message";
     d.graph.nodes.C = {};
     d.graph.edges.push(
@@ -1497,6 +1500,13 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
     },
   );
   emit.graph.nodes.E = { kind: "emit", text: "go", spec: "done" };
+  const cycle = g([
+    ["B", "$sink"],
+    ["B", "A"],
+    ["A", "B"],
+    ["Root", "A"],
+  ]);
+  cycle.graph.nodes.A = { trigger: "Root->A" };
   for (const doc of [
     g([
       ["A", "B"],
@@ -1515,12 +1525,7 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
       },
     ),
     emit,
-    g([
-      ["Root", "A"],
-      ["A", "B"],
-      ["B", "A"],
-      ["B", "$sink"],
-    ]),
+    cycle,
   ])
     assert.equal(parse(doc), doc);
   const twoRoots = g(
@@ -1588,6 +1593,72 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
     assert.equal(error.code, code);
     assert.equal(error.path, path);
     for (const id of ids) assert.ok(error.message.includes(id), error.message);
+  }
+});
+
+test("a feedback group starts only if its trigger accepts a viable seed", () => {
+  const doc = variant((d) => {
+    d.graph.nodes.Root = {};
+    d.graph.sink = { returns: "Root", trigger: "Root->$sink" };
+    d.graph.edges.push(
+      { from: "Root", to: "A", schema },
+      { from: "Root", to: "$sink", schema },
+      { from: "B", to: "A", kind: "message", schema },
+      { from: "A", to: "A", kind: "message", schema },
+    );
+  });
+  for (const node of [
+    {},
+    { trigger: "B~>A" },
+    { trigger: { any: ["B~>A", "A~>A"] } },
+    { trigger: { all: ["Root->A", "B~>A"] } },
+  ]) {
+    doc.graph.nodes.A = node;
+    const error = failure(doc);
+    assert.equal(error.code, "unstartable-trigger");
+    assert.equal(
+      error.path,
+      node.trigger ? "/graph/nodes/A/trigger" : "/graph/nodes/A",
+    );
+    assert.match(error.message, /\bB\b/);
+  }
+  for (const trigger of [
+    "Root->A",
+    { all: ["Root->A"] },
+    { any: ["B~>A", "Root->A"] },
+    "always",
+    { all: [] },
+  ]) {
+    doc.graph.nodes.A = { trigger };
+    assert.equal(parse(doc), doc);
+  }
+});
+
+test("parked nodes are legal but do not supply their consumers", () => {
+  for (const trigger of ["never", { any: [] }]) {
+    const doc = variant((d) => {
+      d.graph.nodes.A = { trigger };
+    });
+    const blocked = failure(doc);
+    assert.equal(blocked.code, "unstartable-trigger");
+    assert.equal(blocked.path, "/graph/nodes/B");
+    doc.graph.nodes.B.trigger = "always";
+    assert.equal(parse(doc), doc);
+
+    doc.graph.nodes.B.trigger = trigger;
+    for (const [sink, path] of [
+      [undefined, "/graph"],
+      [{ returns: "B" }, "/graph/sink"],
+      [{ trigger: "B->$sink" }, "/graph/sink/trigger"],
+    ] as const) {
+      if (sink !== undefined) doc.graph.sink = sink;
+      const error = failure(doc);
+      assert.equal(error.code, "unstartable-trigger");
+      assert.equal(error.path, path);
+      assert.match(error.message, /\$sink/);
+    }
+    doc.graph.sink = { trigger };
+    assert.equal(parse(doc), doc);
   }
 });
 

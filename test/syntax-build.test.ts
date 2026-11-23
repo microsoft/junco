@@ -1796,6 +1796,7 @@ for (const trigger of [
     const execution = await build(
       parse({
         graph: {
+          sink: trigger === "never" ? { trigger } : undefined,
           nodes: {
             Start: { kind: "code", trigger: "always" },
             Left: { prompt: "left" },
@@ -2623,6 +2624,7 @@ test("builtin info exposes routes without receiver contracts", async () => {
     execution = await build(
       parse({
         graph: {
+          sink: { trigger: "never" },
           nodes: {
             Sender: {
               prompt: "Inspect the receiver's routes using info.",
