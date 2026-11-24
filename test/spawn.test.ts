@@ -333,7 +333,6 @@ describe("graph.JuncoGraph.spawn", () => {
       () => ({ trigger: trigger.TriggerRule.never(), state: idle(new Set()) }),
       quiet,
       undefined,
-      undefined,
       Type.Number({ minimum: 5 }),
     );
     const g = execution.graph;

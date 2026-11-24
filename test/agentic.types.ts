@@ -1473,8 +1473,7 @@ export async function profileRecordersNarrowByResource(
     new tracer.DummyTracer(),
     LockPolicy,
     collection,
-    full,
-    "root",
+    full.add_context("root"),
   );
   const graphView: ProfileRecorder<"tokens"> | undefined = graph.recorder;
   const agentView: ProfileRecorder<"edits"> | undefined = agent.recorder;

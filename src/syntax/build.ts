@@ -92,12 +92,10 @@ export type AgentSpec = {
   readonly skills: Skill[];
   readonly cwd: string;
   readonly collection?: tools.ToolCollection;
-  /** The immediate parent graph's recorder view; the agent's context is `recorderNodeId` in it. */
+  /** Recorder view scoped to this agent. */
   readonly recorder?: tools.ProfileRecorder<
     "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
-  /** The agent's local node ID. */
-  readonly recorderNodeId?: string;
   /** The build's `loopGuard`, shared by every agent it creates. */
   readonly loopGuard?: agent.LoopGuard;
 };
@@ -109,11 +107,10 @@ export type CodeContext<C = unknown> = {
   readonly edges: ReadonlyMap<string, Edge>;
   readonly policy: tools.Policy;
   readonly collection?: tools.ToolCollection;
-  /** The enclosing graph's recorder view; the node's context is `recorderNodeId` in it. */
+  /** Current recorder view scoped to this code node. */
   readonly recorder?: tools.ProfileRecorder<
     "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
-  readonly recorderNodeId?: string;
   readonly context: C;
   readonly signal?: AbortSignal;
 };
@@ -156,12 +153,10 @@ export type BuildOptions<C = unknown> = {
   /** Runtime and model rungs; required if any graph level declares an agent. */
   readonly ladder?: ModelLadder;
   readonly tracer?: tracer.DataflowTracer;
-  /** Profiling session of every graph, agent and created collection; independent of `tracer`. */
+  /** Recorder view for the root graph and builder-created collection; independent of `tracer`. */
   readonly recorder?: tools.ProfileRecorder<
     "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
-  /** The root graph's context in `recorder` (default: the recorder's own context). */
-  readonly recorderNodeId?: string;
   /** Borrowed collections by qualified agent ID. Missing entries use the graph-wide fallback. */
   readonly tools?: ReadonlyMap<graph.NodeIdType, tools.ToolCollection>;
   /** A supplied session transfers to the graph at entry, including on parse or preflight failure. */
@@ -287,7 +282,6 @@ export function createJuncoAgent(
     tool_block: spec.tool_block,
     collection: spec.collection,
     recorder: spec.recorder,
-    recorderNodeId: spec.recorderNodeId,
     loopGuard: init.loopGuard ?? spec.loopGuard,
     resources: { skills: spec.skills, promptTemplates: init.resources?.promptTemplates },
   });
@@ -473,7 +467,7 @@ async function registerAgent(
   const specForNode = c.specs.get(key)!;
   const init = c.agentOptions.get(key);
   const creating = createJuncoAgent({
-    ...specForNode, collection: specForNode.collection ?? c.collection, recorder: g.recorder, recorderNodeId: id,
+    ...specForNode, collection: specForNode.collection ?? c.collection, recorder: g.recorder?.add_context(id),
   }, c.options.ladder!, init);
   if (init?.session !== undefined) c.sessions.delete(init.session);
   const instance = await creating;
@@ -505,7 +499,6 @@ async function buildGraph(
   parentOutputs: readonly Edge[],
   path: string,
   recorder: BuildOptions["recorder"],
-  recorderNodeId: string | undefined,
 ): Promise<Execution> {
   c.options.signal?.throwIfAborted();
   const edges = createEdges(
@@ -532,7 +525,6 @@ async function buildGraph(
     c.policy,
     c.collection,
     recorder,
-    recorderNodeId,
   );
   c.partialRoots.add(g);
   const execution = context({
@@ -565,8 +557,7 @@ async function buildGraph(
         g.tracer,
         outbound,
         key,
-        g.recorder,
-        id,
+        g.recorder?.add_context(id),
       );
       g.addNode({
         ...registration,
@@ -589,8 +580,7 @@ async function buildGraph(
         edges,
         policy: c.policy,
         collection: c.collection,
-        recorder: g.recorder,
-        recorderNodeId: id,
+        get recorder() { return g.recorder?.add_context(id); },
         context: c.options.context,
         signal: c.options.signal,
       });
@@ -831,7 +821,7 @@ async function construct<C>(document: () => JuncoDocument, options: BuildOptions
       specs, agentOptions, sessions, acquired, partialRoots,
     };
     const execution = await buildGraph(c, doc.graph, doc.graph.name ?? "graph", options.tracer, [], "",
-      options.recorder, options.recorderNodeId);
+      options.recorder);
     options.signal?.throwIfAborted();
     // This fallback has no extension; graph leases and agent bindings now hold it.
     const creator = created;

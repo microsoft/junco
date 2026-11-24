@@ -97,9 +97,7 @@ export function memory(options: MemoryScheduleOptions) {
             return transport.left;
           })
         : [];
-    const tools = options.memory.tools(() =>
-      graph.recorder?.add_context(context.node),
-    );
+    const tools = options.memory.tools(() => context.recorder);
     const saveTool = tools.find((tool) => tool.name === "save_memory");
     const searchTool = tools.find((tool) => tool.name === "search_memory");
     if (saveTool === undefined || searchTool === undefined)

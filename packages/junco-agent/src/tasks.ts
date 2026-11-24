@@ -454,9 +454,7 @@ export class TaskScope {
           child.runWithNodeContext(
             {
               nodeId,
-              ...(recorder === undefined
-                ? {}
-                : { recorder, recorderNodeId: id }),
+              recorder: recorder?.add_context(id),
               complaint: { nodeId, messages: [] },
             },
             async () => {

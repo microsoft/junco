@@ -202,12 +202,10 @@ export type JuncoAgentNodeContext<N extends TSchema = TSchema> = {
   readonly messaging?: SendToolHost<N> &
     NonNullable<ConstructorParameters<typeof InfoTool>[0]>;
   readonly complaint?: Omit<ComplaintContext<N>, "prompt">;
-  /** The graph's own view of the profiling session; the agent records under its node ID there. */
+  /** Exact profiling destination for this activation. */
   readonly recorder?: ProfileRecorder<
     "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
   >;
-  /** This activation's final graph node ID; default the agent's own {@link JuncoAgent.nodeId}. */
-  readonly recorderNodeId?: string;
 };
 
 /** Checks a hosted `task` launch before admission; throwing rejects it. See {@link JuncoAgent.setTaskPolicy}. */
@@ -634,6 +632,9 @@ type Demand<N extends TSchema, V> = PromiseWithResolvers<
 /** Lifecycle-only storage of agents whose prompt callbacks admit different input domains. */
 // biome-ignore lint/suspicious/noExplicitAny: identity-only erasure of the two input domains.
 type AnyJuncoAgent = JuncoAgent<Skill, PromptTemplate, AgentTool, any, any>;
+function freshAgentNodeId(): NodeIdType {
+  return NodeId.create(`agent-${crypto.randomUUID()}`);
+}
 const closedError = () => new JuncoAgentError("closed", "JuncoAgent is closed");
 const RUN = {
   resource: "operations",
@@ -902,7 +903,7 @@ export class JuncoAgent<
     return this.#harness;
   }
   /** This agent's identity for complaints made outside a bound graph node. */
-  readonly nodeId: NodeIdType = NodeId.create(`agent-${crypto.randomUUID()}`);
+  readonly nodeId: NodeIdType;
   /** This agent's complaint tool, present only when not blocked. */
   readonly #complainTool: ComplainTool = new ComplainTool();
   /** The enabled collection release tool, assigned during initialization. */
@@ -937,12 +938,6 @@ export class JuncoAgent<
   #close: Promise<void> | undefined;
   /** The graph activation {@link runWithNodeContext} binds for its work. */
   #nodeContext: JuncoAgentNodeContext | undefined;
-  /** This agent's view of its constructor recorder, used outside graph placements. */
-  readonly #ownRecorder:
-    | ProfileRecorder<
-        "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
-      >
-    | undefined;
   /** The graph placement {@link runWithNodeContext} binds. */
   #placement:
     | ProfileRecorder<
@@ -961,7 +956,7 @@ export class JuncoAgent<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
       >
     | undefined {
-    return this.#placement ?? this.#ownRecorder;
+    return this.#placement ?? this.#options.recorder;
   }
   /** Where current work records: the bound placement, else the latest run's, else this agent's own. */
   #currentRecorder():
@@ -969,7 +964,7 @@ export class JuncoAgent<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
       >
     | undefined {
-    return this.#placement ?? this.#runPlacement ?? this.#ownRecorder;
+    return this.#placement ?? this.#runPlacement ?? this.#options.recorder;
   }
   /**
    * The usage context {@link runWithNodeContext} captured for its activation. A box whose
@@ -1124,12 +1119,12 @@ export class JuncoAgent<
   protected constructor(
     options: AgenticOptions<S, P, T, N, V>,
     owned: OwnedResources = {},
+    nodeId: NodeIdType = freshAgentNodeId(),
   ) {
+    this.nodeId = nodeId;
     if (options.tokenMonitor !== undefined)
       validateTokenMonitor(options.tokenMonitor);
-    this.#ownRecorder = options.recorder?.add_context(
-      options.recorderNodeId ?? this.nodeId,
-    );
+    options.recorder?.add_context("");
     this.#blocked = normalizeToolBlock(options.tool_block);
     this.#options = options;
     this.errorHandler = options.errorHandler;
@@ -1159,7 +1154,6 @@ export class JuncoAgent<
       resources: _resources,
       collection: _collection,
       recorder: _recorder,
-      recorderNodeId: _recorderNodeId,
       tokenMonitor,
       activeToolNames,
       cwd,
@@ -1376,7 +1370,7 @@ export class JuncoAgent<
       });
       if (tokenMonitor !== undefined)
         await this.#monitorUsage(harness, tokenMonitor);
-      if (this.#ownRecorder !== undefined)
+      if (this.#options.recorder !== undefined)
         harness.events.on("usage", ({ row }) => {
           const recorder: ProfileRecorder<"tokens" | "cost"> | undefined =
             this.#currentRecorder();
@@ -1984,7 +1978,7 @@ export class JuncoAgent<
     );
     this.#taskResults = [];
     this.#currentRun = run;
-    this.#runPlacement = this.#placement ?? this.#ownRecorder;
+    this.#runPlacement = this.#placement ?? this.#options.recorder;
     run.finish = beginOperation(this.#runPlacement, RUN);
     const settlement = trackPromise(
       this.#operations,
@@ -2271,16 +2265,14 @@ export class JuncoAgent<
   ): Promise<R> {
     if (this.#nodeContext !== undefined)
       throw new JuncoAgentError("busy", "A node context is already bound");
-    const parent = context.recorder;
+    const placement = context.recorder;
     // One profiling session per hierarchy: a placed agent records into the graph's session.
-    if (parent !== undefined && parent.root !== this.#options.recorder?.root)
+    if (placement !== undefined && placement.root !== this.#options.recorder?.root)
       throw new JuncoAgentError(
         "invalid_argument",
         "ProfileRecorder instance mismatch",
       );
-    const placement = parent?.add_context(
-      context.recorderNodeId ?? this.nodeId,
-    );
+    placement?.add_context("");
     const usage = this.#usagePlacement;
     this.#nodeContext = context;
     this.#placement = placement;
@@ -2609,6 +2601,7 @@ export class JuncoAgent<
               tools,
               tools.map((tool) => tool.name),
             );
+            const childId = freshAgentNodeId();
             child = new JuncoAgent<S, P, AgentTool, C, W>(
               {
                 session,
@@ -2629,9 +2622,10 @@ export class JuncoAgent<
                 tool_block,
                 resources,
                 tokenMonitor: this.#options.tokenMonitor,
-                recorder: this.#options.recorder,
+                recorder: this.#options.recorder?.add_context(childId),
               },
               owned,
+              childId,
             );
           } catch (error) {
             // Awaited here, so a rejection reaches the batch rollback of earlier children.

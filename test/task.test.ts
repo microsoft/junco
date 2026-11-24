@@ -2677,7 +2677,6 @@ describe("graph recorder bridge", () => {
             "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
           >
         | undefined,
-      id: string,
       member: (g: JuncoGraph) => graph.NodeIdType,
     ) => {
       const ports = terminalPorts();
@@ -2690,16 +2689,15 @@ describe("graph recorder bridge", () => {
         LockPolicy,
         undefined,
         view,
-        id,
       );
       ports.connect(g, member(g));
       return schedules.context({ graph: g, scheduler: schedules.parallel() });
     };
-    return level(recorder, "nodeId1", (outer) =>
+    return level(recorder.add_context("nodeId1"), (outer) =>
       outer.addNode({
         id: graph.NodeId.create("nodeId2"),
         trigger: trigger.TriggerRule.always(),
-        state: level(outer.recorder, "nodeId2", (inner) =>
+        state: level(outer.recorder?.add_context("nodeId2"), (inner) =>
           inner.addNode({
             id: graph.NodeId.create("NodeId_f"),
             trigger: trigger.TriggerRule.always(),

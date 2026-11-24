@@ -3269,8 +3269,7 @@ test(
       model: fixed.model,
       tool_block: NATIVE_TOOL_BLOCK,
       systemPrompt: "sys",
-      recorder,
-      recorderNodeId: "solo",
+      recorder: recorder.add_context("solo"),
     });
     try {
       assert.deepEqual(events, []);
@@ -3304,10 +3303,11 @@ test(
       try {
         assert.ok(child);
         assert.equal(child.recorder?.root, recorder);
-        assert.equal(child.recorder?.path, child.nodeId);
+        const childPath = `solo::${child.nodeId}`;
+        assert.equal(child.recorder?.path, childPath);
         await child.prompt("child task");
-        assert.equal(profileUsage(events, "tokens", child, child.nodeId), 7);
-        assert.equal(profileUsage(events, "cost", child, child.nodeId), 0.375);
+        assert.equal(profileUsage(events, "tokens", child, childPath), 7);
+        assert.equal(profileUsage(events, "cost", child, childPath), 0.375);
         assert.equal(profileUsage(events, "tokens", agent, "solo"), 3);
         assert.equal(profileUsage(events, "cost", agent, "solo"), 0.125);
       } finally {
@@ -3364,6 +3364,7 @@ test(
         starts: 1,
         outcomes: ["success"],
       });
+      assert.ok(events.every(({ path }) => path === ""));
     } finally {
       await agent.return();
     }
@@ -3468,14 +3469,14 @@ test(
     const { recorder, events } = profileRecorder();
     const { agent } = await fixedAgent(
       [[fauxAssistantMessage("placed"), 5, 0.25]],
-      { recorder, recorderNodeId: "own" },
+      { recorder: recorder.add_context("own") },
     );
     const { agent: bare } = await newAgent([]);
     const other = profileRecorder().recorder;
     try {
       const graph = recorder.add_context("nodeId1").add_context("nodeId2");
       await agent.runWithNodeContext(
-        { recorder: graph, recorderNodeId: "NodeId_f" },
+        { recorder: graph.add_context("NodeId_f") },
         async () => {
           assert.equal(agent.recorder?.path, "nodeId1::nodeId2::NodeId_f");
           await assert.rejects(

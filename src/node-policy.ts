@@ -181,7 +181,7 @@ export type NodeRegistration<N extends TSchema = TSchema> = Pick<
   /** Emits `message` as is; an agent node's `send` has already attached its task provenance. */
   send(message: Message<N>): void;
   readonly tracer: DataflowTracer;
-  /** The owning graph's current recorder view, if it records. */
+  /** This node's view under the owning graph's current recorder placement. */
   readonly recorder:
     | ProfileRecorder<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"

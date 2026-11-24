@@ -297,7 +297,7 @@ await profile.complete(graphHash, resourceEvents /* , fixed adapter metrics, whe
 
 Integration notes:
 
-- **Recorder ownership.** Pass the recorder to `fromYaml`; the graph supplies each agent's recorder context. With low-level `JuncoGraph.create`, pass it in the collection options. Integrate an existing recorder consistently or report an ownership conflict. If the runner passes `recorderNodeId`, prefix probe `node` paths with it.
+- **Recorder ownership.** Pass the recorder view to `fromYaml`; the graph scopes it for each agent. A bare session adds no prefix. If the runner passes `{ recorder: session.add_context("batch") }`, prefix expected probe `node` paths with `batch`: a root edge records at `batch`, a nested `Child` graph's edge at `batch::Child`. With low-level `JuncoGraph.create`, pass the view in the collection options and forward the build callback's recorder to the graph. Integrate an existing recorder consistently or report the ownership conflict.
 - **Caller-owned resources.** Configure monitoring when opening each borrowed collection (`collection` or a `tools` map entry). `BuildOptions.resources` can configure only an internally created default; it never retrofits mapped collections. Close the graph, all caller-owned collections, then the recorder, including on failure.
 - **Cleanup order.** Evaluation joins tracer delivery before settling. Graph and owned resources close first, a retained interactive TUI is finished next (if selected), and the recorder closes last; build failures still close. Run and cleanup failures are reported together.
 - **Cost mode.** An all-request USD objective needs `profile.createRecorder("usage")`; semantics under [cost](#metrics-and-measurement-coverage).

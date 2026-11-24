@@ -308,7 +308,7 @@ export class JuncoGraph<
   #observation: DataflowObservation<Agentic<N, T>, N, T> | undefined;
   /** The caller's tracer; {@link tracer} is a recorder bridge around it when a recorder is set. */
   readonly #delegate: DataflowTracer;
-  /** This graph's own context: the constructor recorder at `recorderNodeId`. */
+  /** This graph's recorder when no drive placement is active. */
   readonly #recorder:
     | ProfileRecorder<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
@@ -339,7 +339,6 @@ export class JuncoGraph<
     recorder?: ProfileRecorder<
       "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
     >,
-    recorderNodeId?: string,
   ) {
     if (!(source instanceof Source) || !(sink instanceof Sink))
       throw new TypeError("JuncoGraph requires Source and Sink ports");
@@ -363,7 +362,7 @@ export class JuncoGraph<
       recorder === undefined ? delegate : new RecorderBridge(delegate),
     );
     this.#delegate = delegate;
-    this.#recorder = recorder?.add_context(recorderNodeId ?? "");
+    this.#recorder = recorder?.add_context("");
     this.policy = policy;
     this.source = source;
     this.sink = sink;
@@ -489,7 +488,6 @@ export class JuncoGraph<
       readonly recorder?: ProfileRecorder<
         "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
       >;
-      readonly recorderNodeId?: string;
     },
   ): SchedulerContext<
     Agentic<N, T>,
@@ -507,7 +505,6 @@ export class JuncoGraph<
       options.policy,
       undefined,
       options.recorder,
-      options.recorderNodeId,
     );
     try {
       const edges = new Map<string, Edge<N, T>>();
@@ -569,7 +566,6 @@ export class JuncoGraph<
     recorder?: ProfileRecorder<
       "memory" | "tokens" | "cost" | "edits" | "operations" | "probe"
     >,
-    recorderNodeId?: string,
     messageSchema: N = source.schema,
   ): SchedulerContext<
     Agentic<N, T>,
@@ -587,7 +583,6 @@ export class JuncoGraph<
       JuncoGraph.#nodePolicy(root),
       undefined,
       recorder,
-      recorderNodeId,
     );
     try {
       graph.appendChildren(graph.addNode(root), inputs, child, messageSchema);
@@ -830,19 +825,17 @@ export class JuncoGraph<
       repeatOnReturn = true;
     } else throw new TypeError("An agentic node requires a step");
     const id = this.registerNode(complete, repeatOnReturn);
-    const current = (): AbortSignal => this.signal;
-    const recorder = () => this.recorder;
-    const sendParameters = () => this.#sendParameters(id);
+    const graph = this;
     const registration: NodeRegistration<N> = {
       tracer: this.#delegate,
       get recorder() {
-        return recorder();
+        return graph.recorder?.add_context(id);
       },
       get signal() {
-        return current();
+        return graph.signal;
       },
       get sendParameters() {
-        return sendParameters();
+        return graph.#sendParameters(id);
       },
       send: (message) => {
         this.signal.throwIfAborted();

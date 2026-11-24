@@ -152,13 +152,14 @@ export class JuncoGraph<N = Task, T = AssistantMessage, EH = never>
     tracer: DataflowTracer | undefined,
     policy: ToolCollection["policy"],
     collection?: ToolCollection,
+    recorder?: ProfileRecorder<"memory" | "tokens" | "cost" | "edits" | "operations" | "probe">,
   )
   readonly source: Source<N, T>
   readonly sink: Sink<N, T>
   static async create<N, T, EH, C = AgencyNodeMetadata>(
     cwd: string,
     options: ToolCollectionOptions,
-    build: (collection: ToolCollection) =>
+    build: (collection: ToolCollection, recorder: ToolCollectionOptions["recorder"]) =>
       SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>> |
       Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>,
   ): Promise<SchedulerContext<Agentic<N, T>, N, T, C, JuncoGraph<N, T, EH>>>
@@ -178,6 +179,7 @@ export class JuncoGraph<N = Task, T = AssistantMessage, EH = never>
       readonly sink: Sink<N, T>;
       readonly policy: ToolCollection["policy"];
       readonly tracer?: DataflowTracer;
+      readonly recorder?: ProfileRecorder<"memory" | "tokens" | "cost" | "edits" | "operations" | "probe">;
     },
   ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>>
   static spawn<Input, N = Task, T = AssistantMessage>(
@@ -187,11 +189,14 @@ export class JuncoGraph<N = Task, T = AssistantMessage, EH = never>
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
     tracer: DataflowTracer = TuiTracer.shared(),
+    recorder?: ProfileRecorder<"memory" | "tokens" | "cost" | "edits" | "operations" | "probe">,
+    messageSchema: N = source.schema,
   ): SchedulerContext<Agentic<N, T>, N, T, AgencyNodeMetadata, JuncoGraph<N, T>>
   appendChildren<Input>(
     rootId: NodeIdType,
     inputs: readonly Input[],
     child: (input: Input) => AgenticNode<N, T>,
+    messageSchema: N = this.source.schema,
   ): void
 ```
 
@@ -563,7 +568,7 @@ export class JuncoAgent<
   compact(options?: { customInstructions?: string }): Promise<void>
   abort(): Promise<{ readonly clearedSteer: AgentMessage[]; readonly clearedFollowUp: AgentMessage[] }>
   // JuncoAgent only, not Agentic:
-  runWithNodeContext<N, R>(context: JuncoAgentNodeContext<N>, work: () => Promise<R>): Promise<R> // { messaging?, briefing?, complaint?, recorder?, recorderNodeId? }; overlapping binding rejects busy; graph-registered agents do this
+  runWithNodeContext<N, R>(context: JuncoAgentNodeContext<N>, work: () => Promise<R>): Promise<R> // { nodeId?, messaging?, complaint?, recorder? }; recorder is the exact activation view; overlapping binding rejects busy
   setTaskPolicy(policy: TaskPolicy | undefined): void // throw to reject a task launch (not a decision) as a tool error
   setTaskBatch(input: TaskInput): Promise<void> // idle only; model launches the stored batch once with task({}); children get an ordinary task tool
   setTaskFailurePolicy(policy: TaskFailurePolicy): void // default { retries: 0 }; snapshotted per admitted task; not inherited

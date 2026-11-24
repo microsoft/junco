@@ -206,7 +206,6 @@ export class AgentDriver<N extends TSchema, V> {
   ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
     const tracer = this.#registration?.tracer;
-    const recorder = this.#registration?.recorder;
     const detach = observesAgents(tracer)
       ? tracer.observeAgent(node, agent.events)
       : undefined;
@@ -218,9 +217,7 @@ export class AgentDriver<N extends TSchema, V> {
           nodeId: node.id,
           messaging: this.#messaging(),
           complaint: { nodeId: node.id, messages },
-          ...(recorder === undefined
-            ? {}
-            : { recorder, recorderNodeId: String(node.id) }),
+          recorder: this.#registration?.recorder,
         },
         () => this.#advance(view, messages),
       );
@@ -267,7 +264,7 @@ export class AgentDriver<N extends TSchema, V> {
         error,
         attempt: ++this.#attempt,
         agent: this.#agent,
-        recorder: this.#registration?.recorder?.add_context(String(node.id)),
+        recorder: this.#registration?.recorder,
         signal,
       });
       if (!("retryAfterMs" in recovery)) {

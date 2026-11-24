@@ -35,6 +35,7 @@ import { renderTask } from "../src/agent-node.ts";
 import {
   type BuildOptions,
   build,
+  type CodeContext,
   type DeterministicNode,
   resolveAgents,
 } from "../src/syntax/build.ts";
@@ -1358,6 +1359,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     "p",
     ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
   );
+  const { recorder, probes } = probeRecorder();
   const execution = await build(
     parse({
       graph: {
@@ -1396,6 +1398,7 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     }),
     {
       ...options(),
+      recorder: recorder.add_context("root"),
       ladder: new schedules.ModelLadder(models, {
         smol: { model: "p/s" },
         low: { model: "p/l" },
@@ -1415,6 +1418,21 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     },
   );
   try {
+    for (const path of Object.keys(rungs)) {
+      let state: unknown = execution.graph;
+      for (const id of path.split("/")) {
+        assert.ok(state instanceof JuncoGraph);
+        state = state.getNode(graph.NodeId.create(id))?.state;
+      }
+      assert.ok(state instanceof agent.JuncoAgent);
+      state.recorder?.record({ kind: "probe", resource: "probe", edgeId: path, value: 1 });
+    }
+    assert.deepEqual(probes, [
+      ["root::Left::Worker", "Left/Worker", 1],
+      ["root::Right::Worker", "Right/Worker", 1],
+      ["root::Deep::Inner::Worker", "Deep/Inner/Worker", 1],
+      ["root::Final", "Final", 1],
+    ]);
     enqueuePrompts(execution, "seed", {
       kind: "prompt",
       text: "assignment",
@@ -2293,7 +2311,7 @@ test("node maps reject non-agents, unknown paths and invalid values before acqui
     await assert.rejects(build(doc, { ...base, tools: invalid as BuildOptions["tools"] }), /map|ToolCollection/i);
   for (const field of [
     "provider", "model", "models", "thinkingLevel", "prompt", "systemPrompt", "tools",
-    "recorder", "recorderNodeId", "parallelToolCalls", "resources",
+    "recorder", "parallelToolCalls", "resources",
   ]) {
     const value = field === "resources" ? { skills: [] } : null;
     const config = new Map([[graph.NodeId.create("Final"), { [field]: value }]]);
@@ -3158,13 +3176,12 @@ test("streaming sinks deliver every batch without a terminal result", async () =
 
 test("probed edges record each publication once in their owning graph's context", async () => {
   const { recorder, probes } = probeRecorder();
+  const code = nestedCode(7);
+  let echo: CodeContext | undefined;
   const execution = await codeBuild(
     nestedNumbers(number, true),
-    nestedCode(7),
-    {
-      recorder,
-      recorderNodeId: "root",
-    },
+    { ...code, Echo(context) { echo = context; return code.Echo(context); } },
+    { recorder: recorder.add_context("root") },
   );
   try {
     await execution.run();
@@ -3181,6 +3198,15 @@ test("probed edges record each publication once in their owning graph's context"
         ["root", "childValue", 7],
       ]),
     );
+    assert.ok(echo);
+    const context = echo;
+    const probe = () => context.recorder?.record({ kind: "probe", resource: "probe", edgeId: "placement", value: 7 });
+    await context.graph.runWithRecorder(recorder.add_context("moved"), probe);
+    probe();
+    assert.deepEqual(probes.slice(-2), [
+      ["moved::Echo", "placement", 7],
+      ["root::Child::Echo", "placement", 7],
+    ]);
   } finally {
     await execution.graph.close();
   }
