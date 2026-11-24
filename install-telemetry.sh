@@ -184,7 +184,7 @@ compose config -q
 compose config --format json > "$work/new-compose.json"
 jq -e '.name == "junco-telemetry"' "$work/new-compose.json" >/dev/null || fail 'Compose must own exactly project junco-telemetry.'
 jq -e --argjson expected "$(printf '%s\n' "${services[@]}" | jq -R . | jq -s 'sort')" '(.services | keys | sort) == $expected' "$work/new-compose.json" >/dev/null || fail 'Unexpected active Compose services.'
-jq -e '[.services | to_entries[] | .key as $service | .value.ports[]? | {service:$service,target,published,host_ip}] | sort_by(.published) | length == 3 and .[0].service == "grafana-proxy" and .[0].target == 80 and .[0].published == "8000" and .[1].service == "prometheus" and .[1].target == 9090 and .[1].published == "8001" and .[0].host_ip == .[1].host_ip and .[2] == {service:"iggy",target:8090,published:"8090",host_ip:"127.0.0.1"}' "$work/new-compose.json" >/dev/null || fail 'Unexpected telemetry port publications.'
+jq -e '[.services | to_entries[] | .key as $service | .value.ports[]? | {service:$service,target,published,host_ip}] | sort_by(.published) | length == 3 and .[0].service == "grafana-proxy" and .[0].target == 80 and .[0].published == "8000" and .[1].service == "prometheus" and .[1].target == 9090 and .[1].published == "8001" and .[0].host_ip == .[1].host_ip and .[2] == {service:"iggy",target:8090,published:"8090",host_ip:.[0].host_ip}' "$work/new-compose.json" >/dev/null || fail 'Unexpected telemetry port publications.'
 jq -e '.services.grafana.environment | .GF_AUTH_ANONYMOUS_ENABLED == "true" and .GF_AUTH_ANONYMOUS_ORG_ROLE == "Admin" and .GF_AUTH_BASIC_ENABLED == "false" and .GF_AUTH_DISABLE_LOGIN_FORM == "true"' "$work/new-compose.json" >/dev/null || fail 'Anonymous Grafana configuration changed.'
 jq -e '.services.prometheus.image == "prom/prometheus:v3.15.1" and (.services.prometheus.command | index("--web.enable-otlp-receiver")) != null and any(.services.prometheus.volumes[]; .source == "prometheus_data" and .target == "/prometheus") and .volumes.prometheus_data.name == "junco-telemetry_prometheus_data"' "$work/new-compose.json" >/dev/null || fail 'Prometheus storage/OTLP changed.'
 for service in "${services[@]}"; do
@@ -509,4 +509,4 @@ printf '%s\n' "$root" > "$state_tmp"
 mv -fT -- "$state_tmp" "$state_dir/installed"
 printf 'Installation completed at %s\n' "$(date -u +%FT%TZ)" > "$backup/success"
 complete=1
-printf 'Backups: %s\nGrafana: http://localhost:8000/\nPrometheus: http://localhost:8001/\nIggy TCP: 127.0.0.1:8090\n' "$backup"
+printf 'Backups: %s\nGrafana: http://localhost:8000/\nPrometheus: http://localhost:8001/\nIggy TCP: %s:8090\n' "$backup" "$(jq -r '.services.iggy.environment.IGGY_NODE_ADVERTISED_ADDRESS' "$work/new-compose.json")"

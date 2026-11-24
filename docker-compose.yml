@@ -5,11 +5,11 @@ services:
     image: apache/iggy:0.10.0
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${JUNCO_BIND_ADDRESS:-127.0.0.1}:8090:8090"
     env_file: ${HOME}/.config/junco/iggy.env
     environment:
       IGGY_TCP_ADDRESS: 0.0.0.0:8090
-      IGGY_NODE_ADVERTISED_ADDRESS: localhost
+      IGGY_NODE_ADVERTISED_ADDRESS: ${JUNCO_IGGY_ADVERTISED_ADDRESS:-localhost}
       IGGY_SHARDING_CPU_ALLOCATION: "1"
     # Iggy's io_uring runtime is blocked by Docker's default seccomp profile.
     security_opt:

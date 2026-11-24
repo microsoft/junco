@@ -52,7 +52,7 @@ install -d -m 700 ~/.config/junco
 docker compose up -d --wait iggy
 ```
 
-Iggy listens on `127.0.0.1:8090` (TCP) and persists messages in `iggy_data`. Changing the env file does not rotate an existing account's password. Workflows that export traces to Opik now need a separate Opik endpoint (`OPIK_URL_OVERRIDE`); Iggy does not accept Opik traces.
+Iggy publishes TCP port `8090` on `JUNCO_BIND_ADDRESS` and persists messages in `iggy_data`. Set `JUNCO_IGGY_ADVERTISED_ADDRESS` in `.env` to the IP or DNS name clients can reach. TCP is not encrypted; restrict access to trusted networks or configure TLS. Changing the credentials file does not rotate an existing account's password. Workflows that export traces to Opik need a separate Opik endpoint (`OPIK_URL_OVERRIDE`); Iggy does not accept Opik traces.
 
 ### Install
 
