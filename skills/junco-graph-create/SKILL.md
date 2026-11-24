@@ -51,7 +51,7 @@ Graph:
       id?: string
       # kind default value; id default "<from>-><to>" for value, "<from>~><to>" for message
 
-Node: common fields description?, trigger?; discriminated by kind (default agent)
+Node: common fields description?, trigger?, repeat?; discriminated by kind (default agent)
   kind: agent
     system?: string
     tools?: [string]                                   # ADDITIONAL collection or config.tools entries by name
@@ -66,6 +66,8 @@ Node: common fields description?, trigger?; discriminated by kind (default agent
 ```
 
 `Trigger` is `always`, `never`, a scalar inbound edge ID, or a flat `{ all: [...] }` / `{ any: [...] }` mapping (no nesting, no `not`). Omitted trigger: `always` for a node without inbound edges, otherwise `all` inbound edges in declaration order.
+
+`repeat: N` caps new work at **N total admissions** per node instance, not N additional runs. Use a nonnegative safe integer; `0` disables the node and omission leaves it uncapped. A prompt run may span several model turns. For code and graph nodes, empty priming and input-free continuations do not spend the limit; a new delivery does. One-shot nodes still finish after their first terminal return.
 
 `JuncoGraphValidator` checks whether each node and `$sink` can start under those triggers, at every graph level. For example, if a loop head has a `seed` edge from `$source` and a `feedback` edge from the loop body, its default `all` waits for feedback that cannot exist yet. Use `trigger: { any: [seed, feedback] }` to let the seed start the loop. Explicit `never` and `{ any: [] }` may stay parked, but cannot seed another node. Emit honors its trigger. This check assumes reachable producers can publish on their edges. It does not prove runtime progress.
 

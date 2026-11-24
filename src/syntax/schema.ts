@@ -29,6 +29,7 @@ const edge = Type.Object(
 );
 const common = {
   description: Type.Optional(Type.String()),
+  repeat: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
 };
 const agentFields = {
   ...common,

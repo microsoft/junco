@@ -156,6 +156,8 @@ export type Node<S, N extends TSchema, T> = Identifiable<NodeId> &
 
 /** What a caller passes to `DataflowGraph.addNode`: common options plus state, body and failure hook. */
 export type NodeSpec<S, N extends TSchema, T> = NodeOptions<N, T> & {
+  /** Maximum work admissions over the node's lifetime. Omitted means uncapped. */
+  readonly repeat?: number;
   readonly state: S;
   readonly step: StepFn<S, N, T>;
   readonly on_error?: ErrorFn<S, N, T>;

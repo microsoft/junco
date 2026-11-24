@@ -153,6 +153,82 @@ const options = () => ({
 });
 const fauxLadder = schedules.uniformLadder({ model: "faux/faux-1" });
 
+for (const repeat of [0, 1, 2, undefined]) {
+  test(`YAML repeat=${repeat} limits prompt runs, not model turns`, async () => {
+    const { models, faux } = await fauxRuntime([
+      fauxAssistantMessage([fauxToolCall("yield", { reason: "continue this run" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("first"),
+      fauxAssistantMessage("second"),
+    ]);
+    const { collection } = countedCollection();
+    const execution = await JuncoGraph.fromYaml(`graph:
+  nodes:
+    Seed: {kind: emit, text: Begin, spec: Done}
+    A:
+      prompt: Generate a unit test
+      trigger: always
+      ${repeat === undefined ? "" : `repeat: ${repeat}`}
+  sink: {stream: true, trigger: never}
+  edges:
+    - {from: Seed, to: A, kind: message, schema: {}}
+    - {from: A, to: A, schema: {}}
+    - {from: A, to: $sink, kind: message, on: return, id: product, schema: {}}
+`, { ...options(), collection, ladder: new schedules.ModelLadder(models, fauxLadder) });
+    const g = execution.graph;
+    const products = () => g.observe().inputs.get(g.sink.id)!.messages.get(graph.EdgeId.create("product")) ?? [];
+    const expected = repeat ?? 2;
+    try {
+      for (let i = 0; i < 12 && (products().length < expected || g.available().has(graph.NodeId.create("Seed"))); i++)
+        await execution.step();
+      assert.deepEqual(products().map(x => contentText((x as AssistantMessage).content)), ["first", "second"].slice(0, expected));
+      assert.equal(g.available().has(graph.NodeId.create("A")), repeat === undefined);
+      if (repeat !== undefined) await execution.run();
+      assert.equal(faux.state.callCount, expected === 0 ? 0 : expected + 1);
+    } finally {
+      await g.close();
+      await collection.close();
+    }
+  });
+}
+
+test("YAML repeat lets a code node finish its last continuation", async () => {
+  let calls = 0;
+  const execution = await JuncoGraph.fromYaml({
+    graph: {
+      nodes: { Work: { kind: "code", trigger: "always", repeat: 2 } },
+      sink: { stream: true },
+      edges: [{ from: "Work", to: "$sink", id: "out", kind: "message", schema: { type: "string" } }],
+    },
+  }, {
+    ...options(),
+    code: { Work: ({ edges, policy }) => new Deterministic<TSchema, unknown>(async function* () {
+      const out = edges.get("out")!;
+      yield [];
+      while (true) {
+        calls++;
+        yield { resume: [graph.Message.create(out, `start ${calls}`)] };
+        yield [graph.Message.create(out, `finish ${calls}`)];
+      }
+    }, policy) },
+  });
+  try {
+    for (let i = 0; i < 12 && execution.graph.available().size; i++) await execution.step();
+    assert.equal(execution.graph.available().size, 0);
+    const delivered: unknown[] = [];
+    execution.graph.sink.drain(m => delivered.push(m.payload));
+    assert.deepEqual(delivered, ["start 1", "finish 1", "start 2", "finish 2"]);
+  } finally {
+    await execution.graph.close();
+  }
+});
+
+test("YAML repeat rejects non-counts at validation", () => {
+  for (const repeat of [-1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => parse({
+      graph: { nodes: { A: { prompt: "Work", repeat } }, edges: [{ from: "A", to: "$sink", schema: {} }] },
+    }), ValidationError);
+});
+
 test("default agents require a ladder", async () => {
   await assert.rejects(
     build(document(), options()),

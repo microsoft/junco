@@ -642,6 +642,7 @@ async function buildGraph(
     const registration: Registration = {
       id: graph.NodeId.create(id),
       description: node.description,
+      repeat: node.repeat,
       trigger: resolveTrigger(spec, id, edges, node.trigger),
     };
     if (node.kind === "emit") {
@@ -803,6 +804,7 @@ type Construction = {
 type Registration = {
   readonly id: graph.NodeIdType;
   readonly description: string | undefined;
+  readonly repeat?: number;
   readonly trigger: graph.TriggerRule<TSchema, unknown>;
 };
 

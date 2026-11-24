@@ -32,7 +32,7 @@ export type NodeAvailability<N extends TSchema, T> = {
   /** LIVE, non-destructive view of the node's inbound edges: queues are unconsumed. */
   readonly view: ParentView<N, T>;
   readonly trigger: TriggerRule<N, T>;
-  /** The operation owes another turn but its trigger does not independently fire. */
+  /** The current operation may continue, but the trigger or repeat limit admits no new input. */
   readonly continuationOnly: boolean;
   /** Rule edges carrying something right now, in rule insertion order. */
   readonly satisfied: readonly EdgeId[];
@@ -48,13 +48,15 @@ export type NodeAvailability<N extends TSchema, T> = {
  * honours it. A scheduler wanting fixed-size batches, or a partial drain, builds its own
  * {@link InputSchedule} instead — that is the entire point of the count living here.
  *
- * A partially satisfied `"all"` rule reads nothing, including on continuation-only turns.
+ * Continuation-only turns and partially satisfied `"all"` rules read nothing.
  */
 export const triggerInputs = <N extends TSchema, T>({
+  continuationOnly,
   trigger,
   satisfied,
 }: NodeAvailability<N, T>): InputSchedule => {
   const inputs = new Map<EdgeId, MessageSchedule>();
+  if (continuationOnly) return inputs;
   if (trigger.kind === "all") {
     if (satisfied.length !== trigger.rule.length) return inputs;
     for (const edgeId of trigger.rule) inputs.set(edgeId, "all");

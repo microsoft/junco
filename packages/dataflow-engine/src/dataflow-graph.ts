@@ -63,6 +63,7 @@ type NodeRuntime<N extends TSchema, T> = {
   readonly probe: ParentView<N, T>;
   continuation: boolean;
   readonly repeatOnReturn: boolean;
+  remaining: number | undefined;
   readonly source?: Source<N, T>;
 };
 
@@ -226,6 +227,8 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
 
   protected registerNode(spec: NodeSpec<S, N, T>, repeatOnReturn: boolean): NodeId {
     rejectLegacyAvailability(spec);
+    if (spec.repeat !== undefined && (!Number.isSafeInteger(spec.repeat) || spec.repeat < 0))
+      throw new DataflowDefinitionError("repeat must be a nonnegative safe integer");
     let id: NodeId;
     if (spec.id === undefined) {
       id = NodeId.create(String(this.#nextNodeIndex++));
@@ -247,6 +250,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       probe: probeOf<N, T>(inbound),
       continuation: false,
       repeatOnReturn,
+      remaining: spec.repeat,
       ...(spec.state instanceof Source && spec.step === spec.state.step
         ? { source: spec.state }
         : {}),
@@ -489,9 +493,9 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       const { trigger } = node;
       const satisfied = satisfiedEdges(trigger, runtime.inbound, node.id);
       const triggered =
-        trigger.kind === "all"
+        runtime.remaining !== 0 && (trigger.kind === "all"
           ? satisfied.length === trigger.rule.length
-          : satisfied.length > 0;
+          : satisfied.length > 0);
       if ((!triggered && !runtime.continuation) || (runtime.source && !runtime.source.peek())) return;
       available.set(node.id, {
         view: runtime.probe,
@@ -849,6 +853,7 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
 
     try {
       let step: IteratorResult<NodeYield<N>, T | FinalMessages<N>>;
+      let newAdmission: boolean;
       if (node.status === "ready") {
         if (execution !== undefined)
           activation = this.#observe(() =>
@@ -859,6 +864,8 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         node.generator = node.step(); // method call, so a non-arrow body sees the node as `this`
         node.status = "running";
         step = await node.generator.next();
+        // An empty priming yield only asks for the first delivery; a source may publish immediately.
+        newAdmission = step.done === true || !Array.isArray(step.value) || step.value.length > 0;
         assertUsageAllowed();
         inBody = false;
       } else {
@@ -868,10 +875,9 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           );
         }
         // Synchronous before this branch's first `await`, so concurrent lanes consume in lane order.
-        const view = continuationOnly ? emptyView : viewOf<N, T>(
-          this.#consume(runtime, inputs),
-          runtime.probe.values,
-        );
+        const batch = continuationOnly ? undefined : this.#consume(runtime, inputs);
+        newAdmission = !runtime.continuation || batch !== undefined;
+        const view = continuationOnly ? emptyView : viewOf<N, T>(batch, runtime.probe.values);
         if (execution !== undefined)
           activation = this.#observe(() =>
             execution.startNode(id, "resume", view),
@@ -882,6 +888,10 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         assertUsageAllowed();
         inBody = false;
       }
+      // A prompt (including a wait for input) is one run through settlement. A coroutine
+      // admits work on a trigger delivery, not on an input-free continuation of that work.
+      if (runtime.remaining !== undefined && (runtime.repeatOnReturn ? step.done : newAdmission))
+        runtime.remaining--;
 
       const finished = activation;
       if (step.done === true) {
@@ -1042,7 +1052,9 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
   /** A delivery on a node's own feedback edge after it returned starts another run of the node. */
   #rearm(node: Node<S, N, T>): void {
     if (node.status !== "done") return;
-    this.#runtimeOf(node.id).continuation = false;
+    const runtime = this.#runtimeOf(node.id);
+    if (runtime.remaining === 0) return;
+    runtime.continuation = false;
     node.status = "ready";
     node.generator = undefined;
   }
