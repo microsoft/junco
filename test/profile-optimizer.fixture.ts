@@ -4,6 +4,7 @@
 // descent, novelty, score-table, failure and ownership scenarios; plus the Node import boundary and
 // the built CLI's malformed-input exit. Offline: the editor and the target agents are scripted faux
 // providers, so no measurement here is a real-world saving.
+// Run with JUNCO_BTRFS_TEST_ROOT pointing to a writable Btrfs directory mounted with user_subvol_rm_allowed.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2677,10 +2678,11 @@ process.stderr.write("NODE_BOUNDARY_OK");
 }
 
 const main = async () => {
-  // Generated children need a dedicated native seed, including when the checkout is on ext4.
-  const base = process.env.JUNCO_BTRFS_TEST_ROOT ?? join(ROOT, ".junco");
-  if (!process.env.JUNCO_BTRFS_TEST_ROOT) await mkdir(base, { recursive: true });
-  const root = await mkdtemp(join(base, "profile-optimizer-check-"));
+  // The editor needs a seed subvolume, not an ordinary directory on the CI mount.
+  const { createBtrfsFixture }: {
+    createBtrfsFixture(): Promise<{ seed: string; close(): Promise<void> }>;
+  } = require("../packages/junco-tools/tests/btrfs-fixture.mjs");
+  const { seed: root, close } = await createBtrfsFixture();
   let ok = false;
   try {
     const modules = join(root, "node_modules");
@@ -2706,7 +2708,7 @@ const main = async () => {
     await externalCleanupScenario(join(root, "external-cleanup"));
     ok = true;
   } finally {
-    if (ok) await rm(root, { recursive: true, force: true });
+    if (ok) await close();
     else
       console.error(
         `profile optimizer check failed; artifacts retained at ${root}`,
