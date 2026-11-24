@@ -1216,7 +1216,7 @@ type CandidateBatchRunOptions = {
   readonly root: string;
   readonly collection: tools.ToolCollection;
   readonly ladder: schedules.ModelLadder;
-  readonly recorder?: syntax.BuildOptions["recorder"];
+  readonly recorder?: syntax.JuncoArgs["recorder"];
 };
 
 // ## 8b. FinalizeBatch code node
@@ -1424,21 +1424,14 @@ export async function runCandidateBatch(options: CandidateBatchRunOptions, signa
     graphLanes.push(entry);
     code[`ProposalDecision:${work.rank}`] = proposalDecision(snapshot, entry);
   }
-  const buildOptions: syntax.BuildOptions<FinalizeBatchContext> = {
-    cwd: root,
-    scheduler: () => schedules.strength(laneStrength, schedules.parallel()),
-    tracer: options.observer,
-    collection,
-    policy: tools.LockPolicy,
-    tools: members,
-    context: { lanes: graphLanes, outcomes, apply: options.apply, signal },
-    code,
-    ladder,
-    recorder,
-    signal,
-  };
   {
-    const execution = await JuncoGraph.fromYaml(doc, buildOptions);
+    const execution = await JuncoGraph.fromYaml<FinalizeBatchContext>(doc, {
+      args: {
+        cwd: root, tracer: options.observer, collection, policy: tools.LockPolicy, tools: members,
+        context: { lanes: graphLanes, outcomes, apply: options.apply, signal }, code, recorder, signal,
+      },
+      parameters: { scheduler: () => schedules.strength(laneStrength, schedules.parallel()), ladder },
+    });
     await using workflow = execution.graph;
     for (const { work, researchNames } of graphLanes) {
       const member = workflow.getNode(graph.NodeId.create(`Proposer:${work.rank}`))!.state as YamlAgent;
@@ -1498,7 +1491,7 @@ function liveRunner(options: {
   readonly graft: mcp.JuncoMcpTools;
   readonly resources: AsyncDisposableStack;
   readonly observer: tracer.DataflowTracer;
-  readonly recorder: syntax.BuildOptions["recorder"];
+  readonly recorder: syntax.JuncoArgs["recorder"];
   readonly onApplied: (refactor: AcceptedRefactor, files: readonly string[]) => void;
 }): { readonly runBatch: BatchRunner; readonly refreshSnapshot: SnapshotRefresher } {
   const { root, collection, observer, recorder } = options;

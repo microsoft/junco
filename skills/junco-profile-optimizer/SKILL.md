@@ -22,7 +22,7 @@ This skill inspects an existing pair, asks for missing intent, prepares the targ
 Read the pair and how it is invoked today (scripts, README, CI, the user's command). Establish from the files:
 
 - Graph structure: nodes, edge IDs (`edge.id ?? from + ("~>" for message | "->" for value) + to`), wrapper-node paths of nested graphs, existing `probe` flags and numeric edges (`schema.type` `number`/`integer`).
-- The runner: `JuncoGraph.fromYaml` call, `params`/`sourceName`, scheduler factory and its label dispatch, ladder and strength selection, existing `schedules.limit` wrappers (the hard ceilings), recorder/tracer, graph-wide `collection`, node-indexed `tools` and `agentOptions`, terminal assertion and cleanup order.
+- The runner: `JuncoGraph.fromYaml` call, `args.params`/`args.sourceName`, scheduler factory and its label dispatch, ladder and strength selection, existing `schedules.limit` wrappers (the hard ceilings), recorder/tracer, graph-wide `collection`, node-indexed `tools` and `agentOptions`, terminal assertion and cleanup order.
 - Agents and their models; deterministic targets (no agent nodes) have no ladder axis. Admitted agent tools (a tool-call cap needs at least one).
 - The models pi offers: every `provider/model` with a saved login, local/self-hosted providers from `~/.pi/agent/models.json` included, with its thinking levels and catalog price ([Model domain](references/profiling.md#model-domain)).
 - Whether repeated runs are safe as-is or need an existing reset command.

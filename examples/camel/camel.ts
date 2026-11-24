@@ -270,9 +270,8 @@ async function main(signal: AbortSignal): Promise<void> {
     const observer = tracer.TuiTracer.shared();
     lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     const execution = await JuncoGraph.fromYaml(source, {
-      cwd: repositoryRoot, ladder, code: { Interpreter, Executor },
-      scheduler: () => schedules.parallel(), recorder, context, params: { query }, signal,
-      tracer: observer,
+      args: { cwd: repositoryRoot, code: { Interpreter, Executor }, context, params: { query }, recorder, signal, tracer: observer },
+      parameters: { scheduler: () => schedules.parallel(), ladder },
     });
     lifetime.adopt(execution.graph, (owned) => owned.close());
     const results = await execution.run({ signal });

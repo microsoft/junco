@@ -410,7 +410,7 @@ export class JuncoGraph<
   }
 
   /**
-   * The workflow a YAML document (text or parsed object) and its config define; see `syntax`.
+   * Load a YAML workflow with its program inputs (`args`) and execution settings (`parameters`).
    * Supplied sessions transfer ownership at entry, including when parsing fails. Its schemas are
    * loaded at runtime, so its domains are `TSchema`/`unknown`; consumers narrow with `Value.Check`.
    */

@@ -18,8 +18,8 @@ async function build(source: string, respond: FauxResponseFactory) {
   await using setup = new AsyncDisposableStack();
   const collection = setup.adopt(countedCollection().collection, (c) => c.close());
   const execution = await JuncoGraph.fromYaml(source, {
-    cwd, collection, ladder: await offlineLadder(respond),
-    scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(), code: { Reports },
+    args: { cwd, collection, tracer: new tracer.DummyTracer(), code: { Reports } },
+    parameters: { scheduler: () => schedules.parallel(), ladder: await offlineLadder(respond) },
   });
   setup.defer(() => execution.graph.close());
   const owned = setup.move();

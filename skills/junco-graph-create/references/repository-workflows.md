@@ -56,7 +56,7 @@ Prefer flat workers unless a requested loop or nested agency needs wrappers. Use
 
 ## 8. Route all required output
 
-Choose the terminal from the requested output, never from the first code-graph root. Every required report must reach it. For deterministic aggregation, reuse SKILL.md's `kind: code` join pattern in the paired TypeScript: wait for all required values, validate normal completion and nonblank `contentText`, then retain each report exactly once in the combined terminal output. Register exported code definitions in `config.code`. Use an agent synthesizer only for a real judgment task, not merely because several reports exist. Set `sink.returns` explicitly when needed.
+Choose the terminal from the requested output, never from the first code-graph root. Every required report must reach it. For deterministic aggregation, reuse SKILL.md's `kind: code` join pattern in the paired TypeScript: wait for all required values, validate normal completion and nonblank `contentText`, then retain each report exactly once in the combined terminal output. Register exported code definitions in `args.code`. Use an agent synthesizer only for a real judgment task, not merely because several reports exist. Set `sink.returns` explicitly when needed.
 
 ## 9. Use task-based scheduling
 
@@ -91,8 +91,7 @@ import { JuncoGraph, syntax } from "junco";
 import source from "./<name>.yml" with { type: "text" };
 
 export async function run(config: syntax.FromYamlOptions): Promise<string> {
-  const document = syntax.parse(source);
-  const execution = await JuncoGraph.fromYaml(document, config);
+  const execution = await JuncoGraph.fromYaml(source, config);
   let terminalText: string;
   try {
     await execution.run();
@@ -107,6 +106,6 @@ export async function run(config: syntax.FromYamlOptions): Promise<string> {
 }
 ```
 
-In the delivered pair, supply `cwd: "<repo>"`, the chosen scheduler, verified shared models/ladder and required `code` definitions to `run`; guard live acquisition/invocation with `if (import.meta.main)` when exporting for tests. Do not leave illustrative placeholders in delivered files. Execute `bun run <name>.ts` only when permissions and prerequisites allow. The helper leaves caller-supplied tracer lifetime to the caller. For an interactive runner, retain `const observer = tracer.TuiTracer.shared()` before construction, pass it as `tracer: observer`, and after graph close call `observer.finish()` in a nested `finally` only if `observer instanceof tracer.TuiTracer` (import `tracer` from `junco`). Keep operational prints after terminal restoration; never retrieve the observer through `graph.tracer`, which a recorder may wrap.
+In the delivered pair, supply `args.cwd` and required `args.code` definitions, plus the chosen `parameters.scheduler` and verified `parameters.ladder` to `run`; guard live acquisition/invocation with `if (import.meta.main)` when exporting for tests. Do not leave illustrative placeholders in delivered files. Execute `bun run <name>.ts` only when permissions and prerequisites allow. The helper leaves caller-supplied tracer lifetime to the caller. For an interactive runner, retain `const observer = tracer.TuiTracer.shared()` before construction, pass it as `args.tracer`, and after graph close call `observer.finish()` in a nested `finally` only if `observer instanceof tracer.TuiTracer` (import `tracer` from `junco`). Keep operational prints after terminal restoration; never retrieve the observer through `graph.tracer`, which a recorder may wrap.
 
 Return the pair and run command, concise authoring source evidence and coverage limits, the requested permission/concurrency choices, and actual output or the exact missing prerequisite. Distinguish runtime graph exploration assigned in prompts from queries actually executed by Junco agents. Never substitute a CLI summary or unobserved success for the requested result.

@@ -265,10 +265,8 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       },
     }),
     {
-      cwd: process.cwd(),
-      scheduler: () => schedules.parallel(),
-      tracer: new tracer.DummyTracer(),
-      collection, ladder,
+      args: { cwd: process.cwd(), collection, tracer: new tracer.DummyTracer() },
+      parameters: { scheduler: () => schedules.parallel(), ladder },
     },
   );
   const agents = ["Producer", "Consumer"].map((id) => execution.graph.getNode(NodeId.create(id))?.state);
@@ -376,14 +374,12 @@ export async function runNumericNestingFixture(): Promise<NumericNestingSummary>
       },
     }),
     {
-      cwd: process.cwd(),
-      scheduler: () => schedules.parallel(),
-      tracer: new tracer.DummyTracer(),
-      code: {
-        Seven: Constant(7),
-        Echo: Forward("$source~>Echo"),
-        Terminal,
+      args: {
+        cwd: process.cwd(),
+        tracer: new tracer.DummyTracer(),
+        code: { Seven: Constant(7), Echo: Forward("$source~>Echo"), Terminal },
       },
+      parameters: { scheduler: () => schedules.parallel() },
     },
   );
   let result: unknown;

@@ -214,12 +214,8 @@ try {
   });
   try {
     const execution = await JuncoGraph.fromYaml(yaml, {
-      cwd: seed,
-      collection,
-      recorder,
-      tracer: new tracer.DummyTracer(),
-      scheduler: () => schedules.parallel(),
-      ladder: await offlineLadder(respond),
+      args: { cwd: seed, collection, recorder, tracer: new tracer.DummyTracer() },
+      parameters: { scheduler: () => schedules.parallel(), ladder: await offlineLadder(respond) },
     });
     try {
       const outer = execution.graph.getNode(graph.NodeId.create("nodeId1"))?.state;

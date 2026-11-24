@@ -385,11 +385,8 @@ import { graph, JuncoGraph, schedules, Task, workflows } from "junco";
 
 // ladder is a ModelLadder pairing the runtime and five authoring-verified rungs.
 const childContext = await JuncoGraph.fromYaml(workflows.ralph, {
-  cwd,
-  ladder,
-  tracer: observer,
-  scheduler: () => schedules.parallel(),
-  ...schedules.ralph({ rounds: 2 }),
+  args: { cwd, tracer: observer, ...schedules.ralph({ rounds: 2 }) },
+  parameters: { scheduler: () => schedules.parallel(), ladder },
 });
 try {
   childContext.graph.source.enqueue({
@@ -403,7 +400,7 @@ try {
 }
 ```
 
-`fromYaml(source, { ...config, params })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` supplies `{ code }`. Rounds must be positive safe integers (default two). Deliver one ordered batch of image-free objective tasks; the controller sends revision/retry work on the same session and publishes acceptance only after its terminal decision.
+`fromYaml(source, { args: { ...args, params }, parameters })` (or `syntax.parse`) substitutes generic `{{ params.name }}` text before parsing YAML; quote placeholders because substitution is verbatim. Missing params fail; parsed objects reject params. Ralph itself has no model parameter: pass a complete ladder. `schedules.ralph({ rounds })` supplies `{ code }`. Rounds must be positive safe integers (default two). Deliver one ordered batch of image-free objective tasks; the controller sends revision/retry work on the same session and publishes acceptance only after its terminal decision.
 
 For nesting, pre-acquire the built context and register `{ ...nodeOptions, state: childContext }`, with no own spec-level policy; the native state is its graph. A direct assignment can be enqueued once on the child's `assignment` route before registration. For parent-edge ingress, preserve source credits with `{ ...inner.source, routes }` in a document copy whose `graph.source.routes` maps that parent edge ID to `["$source~>Ralph"]`; do not mutate the parsed document or assume topology edges forward assignments automatically. With YAML nesting, ordinary parent message edges are forwarded by the wrapper and return FIFOs receive its exact settlement once. Close through the owning root recursively, then finish a retained shared TUI once after all users stop, guarded by `instanceof tracer.TuiTracer`; caller-supplied observers need no final call. Do not stage the Ralph worker yourself: its availability hooks stage each round.
 
@@ -1054,13 +1051,16 @@ Use `schedules.parallel()` in the same external pair for deterministic select-al
 
 ### Resource measurements and schedules
 
-Pass `measurementWindows` to `schedules.context` or `JuncoGraph.fromYaml`. Each entry sets how many actual measurements to retain for that resource **per node**, oldest first. Sizes are non-negative safe integers. An omitted resource or zero collects no history. The context retains samples across `step()` and `run()` calls; a new context starts empty. Nested graphs have separate histories.
+Pass `measurementWindows` to `schedules.context` or set `parameters.measurementWindows` in `JuncoGraph.fromYaml`. Each entry sets how many actual measurements to retain for that resource **per node**, oldest first. Sizes are non-negative safe integers. An omitted resource or zero collects no history. The context retains samples across `step()` and `run()` calls; a new context starts empty. Nested graphs have separate histories.
 
 ```ts
 const execution = await JuncoGraph.fromYaml(source, {
-  ...options,
-  measurementWindows: new Map([["runtime", 8], ["tokens", 4]]),
-  scheduler: () => schedules.choose({ rank: schedules.highest("runtime") }),
+  args,
+  parameters: {
+    ...parameters,
+    measurementWindows: new Map([["runtime", 8], ["tokens", 4]]),
+    scheduler: () => schedules.choose({ rank: schedules.highest("runtime") }),
+  },
 });
 ```
 

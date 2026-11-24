@@ -57,12 +57,8 @@ async function main(signal: AbortSignal): Promise<void> {
     const observer = tracer.TuiTracer.shared();
     lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
     const execution = await JuncoGraph.fromYaml(source, {
-      cwd: DIR,
-      scheduler: () => schedules.parallel(),
-      ladder: new schedules.ModelLadder(models, LADDER),
-      tracer: observer,
-      signal,
-      ...schedules.ralph({ until }),
+      args: { cwd: DIR, tracer: observer, signal, ...schedules.ralph({ until }) },
+      parameters: { scheduler: () => schedules.parallel(), ladder: new schedules.ModelLadder(models, LADDER) },
     });
     lifetime.adopt(execution.graph, (g) => g.close());
     const ASSIGNMENT = `Make \`sort\` in ${SOURCE} faster. Build and test with exactly: \`${BUILD} && ./sort\` (run from ${DIR}). It currently prints PASS ${baseline.ms} ms; every test must keep passing.`;

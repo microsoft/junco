@@ -2051,21 +2051,22 @@ class OptimizerCampaign implements SessionServices {
         extend: async () => ({ tools: controller.tools(), close: async () => {} }),
       });
       const execution = await JuncoGraph.fromYaml<OptimizerController>(source, {
-        sourceName: "optimizer.yml",
-        cwd: request.sessionDir,
-        scheduler: () => roundRobin(undefined, 1),
-        tracer: new DummyTracer(),
-        recorder,
-        ladder,
-        tools: new Map([[NodeId.create("Editor"), editor]]),
-        code: {
-          Init: controller.init,
-          Evaluate: controller.evaluate,
-          Feedback: controller.feedback,
-          Final: controller.finalNode,
+        args: {
+          sourceName: "optimizer.yml",
+          cwd: request.sessionDir,
+          tracer: new DummyTracer(),
+          recorder,
+          tools: new Map([[NodeId.create("Editor"), editor]]),
+          code: {
+            Init: controller.init,
+            Evaluate: controller.evaluate,
+            Feedback: controller.feedback,
+            Final: controller.finalNode,
+          },
+          context: controller,
+          signal,
         },
-        context: controller,
-        signal,
+        parameters: { scheduler: () => roundRobin(undefined, 1), ladder },
       });
       graph = execution.graph;
       // ponytail: full history rides every editor handoff; a long search can exhaust the provider's

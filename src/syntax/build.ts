@@ -118,40 +118,13 @@ export type CodeContext<C = unknown> = {
 export type DeterministicNode<C = unknown> = (
   context: CodeContext<C>,
 ) => Deterministic<TSchema, unknown> | Promise<Deterministic<TSchema, unknown>>;
-export type BuildOptions<C = unknown> = {
+/** Program inputs and capabilities supplied to a YAML workflow. */
+export type JuncoArgs<C = unknown> = ParseOptions & {
   readonly cwd: string;
-  /**
-   * A fresh policy per graph level: `graph` is the level's display label (labels may repeat),
-   * `graphPath` its unique wrapper path (`""` at the root, `Child` or `Child/Grandchild` nested).
-   */
-  readonly scheduler: (
-    graph: string,
-    graphPath: string,
-  ) => Scheduler<
-    Agentic<TSchema, unknown>,
-    TSchema,
-    unknown,
-    AgencyNodeMetadata
-  >;
   readonly policy?: tools.Policy;
   readonly collection?: tools.ToolCollection;
-  /** Limits/monitoring of the native fallback collection, when this build creates one. */
-  readonly resources?: tools.NativeResourceOptions;
-  /** Monitor callback; pair with resources.monitorIntervalMs. Recorders take `recorder` instead. */
-  readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
-  /** `tool_pruning` of the collection build creates; rejected with a supplied collection, like `resources`. */
-  readonly tool_pruning?: boolean;
-  /** Default failure-loop guard for agents without a node override. */
-  readonly loopGuard?: agent.LoopGuard;
-  /**
-   * Samples retained per node and resource at each graph level; zero or omitted means none.
-   * For native memory on a caller-owned collection, open it with `measureMemory: true`.
-   */
-  readonly measurementWindows?: ReadonlyMap<graph.ResourceKind, number>;
   /** Code-node definitions by node id, exported by the same-named workflow module. */
   readonly code?: Readonly<Record<string, DeterministicNode<C>>>;
-  /** Runtime and model rungs; required if any graph level declares an agent. */
-  readonly ladder?: ModelLadder;
   readonly tracer?: tracer.DataflowTracer;
   /** Recorder view for the root graph and builder-created collection; independent of `tracer`. */
   readonly recorder?: tools.ProfileRecorder<
@@ -166,7 +139,42 @@ export type BuildOptions<C = unknown> = {
   readonly context?: C;
   readonly signal?: AbortSignal;
 };
-export type FromYamlOptions<C = unknown> = BuildOptions<C> & ParseOptions;
+/** Execution settings that may vary between runs of the same program. */
+export type JuncoParameters = {
+  /**
+   * A fresh policy per graph level: `graph` is the level's display label (labels may repeat),
+   * `graphPath` its unique wrapper path (`""` at the root, `Child` or `Child/Grandchild` nested).
+   */
+  readonly scheduler: (
+    graph: string,
+    graphPath: string,
+  ) => Scheduler<
+    Agentic<TSchema, unknown>,
+    TSchema,
+    unknown,
+    AgencyNodeMetadata
+  >;
+  /** Runtime and model rungs; required if any graph level declares an agent. */
+  readonly ladder?: ModelLadder;
+  /** Limits/monitoring of the native fallback collection, when this build creates one. */
+  readonly resources?: tools.NativeResourceOptions;
+  /** Monitor callback; pair with resources.monitorIntervalMs. Recorders take `recorder` instead. */
+  readonly onResourceEvent?: (event: tools.NativeResourceEvent) => void;
+  /** `tool_pruning` of the collection build creates; rejected with a supplied collection, like `resources`. */
+  readonly tool_pruning?: boolean;
+  /** Default failure-loop guard for agents without a node override. */
+  readonly loopGuard?: agent.LoopGuard;
+  /**
+   * Samples retained per node and resource at each graph level; zero or omitted means none.
+   * For native memory on a caller-owned collection, open it with `measureMemory: true`.
+   */
+  readonly measurementWindows?: ReadonlyMap<graph.ResourceKind, number>;
+};
+
+export type FromYamlOptions<C = unknown> = {
+  readonly args: JuncoArgs<C>;
+  readonly parameters: JuncoParameters;
+};
 
 /** The trimmed text of `member`'s normally completed assistant result; throws on a missing, non-assistant, abnormal or blank result. */
 export function finalText(message: unknown, member: string): string {
@@ -214,10 +222,7 @@ async function loadSkill(name: string, path: string): Promise<Skill> {
 
 export async function resolveAgents(
   doc: JuncoDocument,
-  options: Pick<
-    BuildOptions,
-    "cwd" | "tools" | "collection" | "toolSource" | "loopGuard"
-  >,
+  options: Pick<JuncoArgs, "cwd" | "tools" | "collection" | "toolSource"> & Pick<JuncoParameters, "loopGuard">,
 ): Promise<readonly AgentSpec[]> {
   const loaded = new Map<string, Skill>();
   const result: AgentSpec[] = [];
@@ -306,7 +311,7 @@ function edgeOf(edges: ReadonlyMap<string, Edge>, id: string): Edge {
  */
 function createEdges(
   spec: GraphSpec,
-  recorder: (() => BuildOptions["recorder"]) | undefined,
+  recorder: (() => JuncoArgs["recorder"]) | undefined,
 ): Map<string, Edge> {
   return new Map(
     (spec.edges ?? []).map((edge): [string, Edge] => {
@@ -454,8 +459,8 @@ function registerEmit(
   g.addNode({ ...registration, state });
 }
 
-async function registerAgent(
-  c: Construction,
+async function registerAgent<C>(
+  c: Construction<C>,
   g: JuncoGraph<TSchema, unknown>,
   spec: GraphSpec,
   id: string,
@@ -468,11 +473,11 @@ async function registerAgent(
   const init = c.agentOptions.get(key);
   const creating = createJuncoAgent({
     ...specForNode, collection: specForNode.collection ?? c.collection, recorder: g.recorder?.add_context(id),
-  }, c.options.ladder!, init);
+  }, c.parameters.ladder!, init);
   if (init?.session !== undefined) c.sessions.delete(init.session);
   const instance = await creating;
   c.acquired.push(instance);
-  c.options.signal?.throwIfAborted();
+  c.args.signal?.throwIfAborted();
   if (compiled) instance.stagePrompt(compiled.prompt, { images: init?.images });
   const registered = g.addNode({
     ...registration,
@@ -491,16 +496,16 @@ async function registerAgent(
   if (compiled) policy.promptReturnEdges = compiled.promptReturnEdges;
 }
 
-async function buildGraph(
-  c: Construction,
+async function buildGraph<C>(
+  c: Construction<C>,
   spec: GraphSpec,
   label: string,
   observer: tracer.DataflowTracer | undefined,
   parentOutputs: readonly Edge[],
   path: string,
-  recorder: BuildOptions["recorder"],
+  recorder: JuncoArgs["recorder"],
 ): Promise<Execution> {
-  c.options.signal?.throwIfAborted();
+  c.args.signal?.throwIfAborted();
   const edges = createEdges(
     spec,
     recorder === undefined ? undefined : () => g.recorder,
@@ -528,15 +533,15 @@ async function buildGraph(
   );
   c.partialRoots.add(g);
   const execution = context({
-    scheduler: c.options.scheduler(label, path),
+    scheduler: c.parameters.scheduler(label, path),
     graph: g,
-    measurementWindows: c.options.measurementWindows,
-    ...(c.options.ladder === undefined
+    measurementWindows: c.parameters.measurementWindows,
+    ...(c.parameters.ladder === undefined
       ? {}
-      : { ladder: c.options.ladder.rungs }),
+      : { ladder: c.parameters.ladder.rungs }),
   });
   for (const [id, node] of Object.entries(spec.nodes)) {
-    c.options.signal?.throwIfAborted();
+    c.args.signal?.throwIfAborted();
     const outbound = outboundEdges(spec, id)
       .filter((e) => e.kind === "message" && e.on !== "return")
       .map((e) => edgeOf(edges, edgeId(e)));
@@ -568,10 +573,10 @@ async function buildGraph(
       });
       c.partialRoots.delete(child.graph);
     } else if (node.kind === "code") {
-      const definition = c.options.code?.[id];
+      const definition = c.args.code?.[id];
       if (definition === undefined)
         throw new graph.DataflowDefinitionError(
-          `junco-syntax: code node "${id}" has no definition in options.code`,
+          `junco-syntax: code node "${id}" has no definition in args.code`,
         );
       const state: unknown = await definition({
         graph: g,
@@ -581,8 +586,8 @@ async function buildGraph(
         policy: c.policy,
         collection: c.collection,
         get recorder() { return g.recorder?.add_context(id); },
-        context: c.options.context,
-        signal: c.options.signal,
+        context: c.args.context!,
+        signal: c.args.signal,
       });
       if (!(state instanceof Deterministic)) {
         // The old factory shape may already have acquired a collection lease.
@@ -610,7 +615,7 @@ async function buildGraph(
 }
 
 async function rollback(
-  c: Pick<Construction, "acquired" | "partialRoots" | "sessions">,
+  c: Pick<Construction<unknown>, "acquired" | "partialRoots" | "sessions">,
   creator: tools.ToolCollection | undefined,
   error: unknown,
 ): Promise<never> {
@@ -698,8 +703,7 @@ function compilePrompt(text: string, node: string, inbound: readonly EdgeSpec[])
 }
 
 /** Per-build state shared by every graph level; agents/graphs here are released on failure. */
-type Construction = {
-  readonly options: BuildOptions;
+type Construction<C> = FromYamlOptions<C> & {
   readonly policy: tools.Policy;
   readonly collection: tools.ToolCollection | undefined;
   readonly specs: ReadonlyMap<graph.NodeIdType, AgentSpec>;
@@ -719,67 +723,75 @@ type Registration = {
 
 export function build<C = unknown>(
   doc: JuncoDocument,
-  options: BuildOptions<C>,
+  config: FromYamlOptions<C>,
 ): Promise<Execution> {
-  return construct(() => doc, options);
+  return construct(config, () => doc);
 }
 
-export function buildYaml<C>(source: string | object, options: FromYamlOptions<C>): Promise<Execution> {
-  return construct(() => parse(source, options), options);
+export function buildYaml<C>(source: string | object, config: FromYamlOptions<C>): Promise<Execution> {
+  return construct(config, (args) => parse(source, args));
 }
 
-async function construct<C>(document: () => JuncoDocument, options: BuildOptions<C>): Promise<Execution> {
+async function construct<C>(
+  config: FromYamlOptions<C>,
+  document: (args: JuncoArgs<C>) => JuncoDocument,
+): Promise<Execution> {
   const sessions = new Set<Session>();
   const acquired: AsyncDisposable[] = [];
   const partialRoots = new Set<JuncoGraph<TSchema, unknown>>();
   let created: tools.ToolCollection | undefined;
   try {
+    const args = config?.args;
     let duplicate = false;
-    for (const init of options.agentOptions?.values?.() ?? []) {
+    for (const init of args?.agentOptions?.values?.() ?? []) {
       const session = init?.session;
       if (session === undefined) continue;
       if (sessions.has(session)) duplicate = true;
       sessions.add(session);
     }
+    const parameters = config?.parameters;
+    if (!args || typeof args !== "object" || Array.isArray(args) ||
+      !parameters || typeof parameters !== "object" || Array.isArray(parameters))
+      throw new graph.DataflowDefinitionError("junco-syntax: fromYaml requires { args, parameters }");
     if (duplicate)
       throw new graph.DataflowDefinitionError("junco-syntax: cannot assign the same session to multiple agent paths");
-    options.signal?.throwIfAborted();
+    args.signal?.throwIfAborted();
     for (const name of ["agents", "createAgent", "createAgentOwnership"])
-      if (name in options)
+      if (name in args)
         throw new graph.DataflowDefinitionError(`junco-syntax: ${name} is no longer supported; YAML owns its agents`);
-    if ("available" in options)
+    const doc = document(args);
+    if ("available" in config || "available" in args || "available" in parameters)
       throw new graph.DataflowDefinitionError(
         "junco-syntax: available is no longer supported; declare admission with trigger",
       );
-    const doc = document();
     const maps = {
-      ...(options.tools === undefined ? {} : { tools: { map: options.tools } }),
-      ...(options.agentOptions === undefined ? {} : { agentOptions: { map: options.agentOptions } }),
+      ...(args.tools === undefined ? {} : { tools: { map: args.tools } }),
+      ...(args.agentOptions === undefined ? {} : { agentOptions: { map: args.agentOptions } }),
     };
-    if (options.tools !== undefined || options.agentOptions !== undefined)
+    if (args.tools !== undefined || args.agentOptions !== undefined)
       JuncoGraphValidator.validateNodeMaps(doc, maps);
-    const policy = options.policy ?? tools.LockPolicy;
-    checkPolicy(policy, options.collection);
-    checkRecorder(options.recorder, options.collection?.recorder);
+    const policy = args.policy ?? tools.LockPolicy;
+    checkPolicy(policy, args.collection);
+    checkRecorder(args.recorder, args.collection?.recorder);
     const members = new Map<graph.NodeIdType, Extract<NodeSpec, { kind?: "agent" }>>();
     for (const { id, node, key } of walk(doc.graph)) {
       if (isAgent(node)) members.set(key, node);
-      else if (node.kind === "code" && options.code?.[id] === undefined)
-        throw new graph.DataflowDefinitionError(`junco-syntax: code node "${id}" has no definition in options.code`);
+      else if (node.kind === "code" && args.code?.[id] === undefined)
+        throw new graph.DataflowDefinitionError(`junco-syntax: code node "${id}" has no definition in args.code`);
     }
     for (const [name, { map }] of Object.entries(maps))
       for (const key of map.keys())
         if (!members.has(key))
           throw new ValidationError({ code: "node-map", path: `/options/${name}`,
             message: `"${key}" is not an agent`, help: "configure only agent node paths" });
-    for (const [key, collection] of options.tools ?? []) {
+    for (const [key, collection] of args.tools ?? []) {
       if (!(collection instanceof tools.ToolCollection))
         throw new TypeError(`junco-syntax: tools for "${key}" must be a ToolCollection`);
       checkPolicy(policy, collection);
-      checkRecorder(options.recorder, collection.recorder);
+      checkRecorder(args.recorder, collection.recorder);
     }
     const agentOptions = new Map<graph.NodeIdType, YamlAgentOptions>();
-    for (const [key, init] of options.agentOptions ?? []) {
+    for (const [key, init] of args.agentOptions ?? []) {
       if (typeof init !== "object" || init === null || Array.isArray(init))
         throw new TypeError(`junco-syntax: agentOptions for "${key}" must be an object`);
       for (const field of Object.keys(init))
@@ -792,37 +804,39 @@ async function construct<C>(document: () => JuncoDocument, options: BuildOptions
         throw new TypeError(`junco-syntax: images for "${key}" require a YAML prompt`);
       agentOptions.set(key, { ...init, session: init.session });
     }
-    if (members.size && options.ladder === undefined)
+    if (members.size && parameters.ladder === undefined)
       throw new graph.DataflowDefinitionError("junco-syntax: a ladder is required for agent nodes");
-    const creates = options.collection === undefined && members.size > (options.tools?.size ?? 0);
+    const creates = args.collection === undefined && members.size > (args.tools?.size ?? 0);
     if (
       !creates &&
-      (options.resources !== undefined || options.onResourceEvent !== undefined)
+      (parameters.resources !== undefined || parameters.onResourceEvent !== undefined)
     )
       throw new graph.DataflowDefinitionError(
         "junco-syntax: resources and onResourceEvent apply to the collection build creates; open the supplied collection with them instead",
       );
-    if (!creates && options.tool_pruning !== undefined)
+    if (!creates && parameters.tool_pruning !== undefined)
       throw new graph.DataflowDefinitionError(
         "junco-syntax: tool_pruning applies to the collection build creates; open the supplied collection with { tool_pruning: true } instead",
       );
     // Skill loading can suspend; retain the grants we just checked, not a caller's mutable Map.
-    const mapped = options.tools === undefined ? undefined : new Map(options.tools);
-    const specs = new Map((await resolveAgents(doc, { ...options, tools: mapped })).map((spec) => [spec.path, spec]));
-    options.signal?.throwIfAborted();
+    const mapped = args.tools === undefined ? undefined : new Map(args.tools);
+    const specs = new Map((await resolveAgents(doc, {
+      cwd: args.cwd, tools: mapped, collection: args.collection, toolSource: args.toolSource,
+      loopGuard: parameters.loopGuard,
+    })).map((spec) => [spec.path, spec]));
+    args.signal?.throwIfAborted();
     if (creates)
-      created = await tools.ToolCollection.create(options.cwd, {
-        policy, recorder: options.recorder, resources: options.resources,
-        onResourceEvent: options.onResourceEvent, tool_pruning: options.tool_pruning,
-        measureMemory: (options.measurementWindows?.get("memory") ?? 0) > 0,
+      created = await tools.ToolCollection.create(args.cwd, {
+        policy, recorder: args.recorder, resources: parameters.resources,
+        onResourceEvent: parameters.onResourceEvent, tool_pruning: parameters.tool_pruning,
+        measureMemory: (parameters.measurementWindows?.get("memory") ?? 0) > 0,
       });
-    const c: Construction = {
-      options: options as BuildOptions, policy, collection: options.collection ?? created,
+    const c: Construction<C> = {
+      args, parameters, policy, collection: args.collection ?? created,
       specs, agentOptions, sessions, acquired, partialRoots,
     };
-    const execution = await buildGraph(c, doc.graph, doc.graph.name ?? "graph", options.tracer, [], "",
-      options.recorder);
-    options.signal?.throwIfAborted();
+    const execution = await buildGraph(c, doc.graph, doc.graph.name ?? "graph", args.tracer, [], "", args.recorder);
+    args.signal?.throwIfAborted();
     // This fallback has no extension; graph leases and agent bindings now hold it.
     const creator = created;
     created = undefined;

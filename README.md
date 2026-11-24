@@ -87,7 +87,7 @@ sudo btrfs subvolume create /mnt/junco/seed && sudo chown "$USER" /mnt/junco/see
 
 ### My first Junco workflow
 
-A workflow has two files. `name.yml` declares the nodes, edges and triggers. `name.ts` builds it with `JuncoGraph.fromYaml(source, { cwd, scheduler, ladder, ... })`, awaits `execution.run()` and closes the graph; `cwd` selects the seed. In [`examples/first`](examples/first), two agents answer one question by browsing with the Playwright MCP server, and a reviewer merges their answers:
+A workflow has two files. `name.yml` declares the nodes, edges and triggers. `name.ts` builds it with `JuncoGraph.fromYaml(source, { args: { cwd }, parameters: { scheduler, ladder } })`, awaits `execution.run()` and closes the graph; `cwd` selects the seed. In [`examples/first`](examples/first), two agents answer one question by browsing with the Playwright MCP server, and a reviewer merges their answers:
 
 ```yaml
 graph:
@@ -149,11 +149,8 @@ try {
     browsers.set(graph.NodeId.create(node), collections.adopt(browser, (c) => c.close()));
   }
   const execution = await JuncoGraph.fromYaml(source, {
-    cwd: process.cwd(),
-    scheduler: () => schedules.parallel(),
-    ladder,
-    tools: browsers,
-    tracer: observer,
+    args: { cwd: process.cwd(), tools: browsers, tracer: observer },
+    parameters: { scheduler: () => schedules.parallel(), ladder },
   });
   try {
     const results = await execution.run();

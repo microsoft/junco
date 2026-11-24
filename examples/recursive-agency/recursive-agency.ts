@@ -129,13 +129,11 @@ async function main(signal: AbortSignal) {
   lifetime.defer(() => observer instanceof tracer.TuiTracer ? observer.finish() : undefined);
   const root = {
     context: await JuncoGraph.fromYaml(source, {
-      cwd: process.cwd(),
-      scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
-      code: { Join },
-      recorder,
-      tracer: observer,
-      ladder,
-      signal,
+      args: { cwd: process.cwd(), code: { Join }, recorder, tracer: observer, signal },
+      parameters: {
+        scheduler: (name) => fauxScheduler(name, decide[name]!, name === "root" ? decisions : []),
+        ladder,
+      },
     }),
     decisions,
   };

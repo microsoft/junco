@@ -1459,10 +1459,27 @@ export function yamlConstructorOptions(
   template: PromptTemplate,
 ) {
   const init: syntax.YamlAgentOptions = { session, steeringMode: "all", resources: { promptTemplates: [template] } };
-  const config: Pick<syntax.FromYamlOptions, "agentOptions" | "tools"> = {
+  const args: syntax.JuncoArgs = {
+    cwd: ".",
     agentOptions: new Map([[node, init]]),
     tools: new Map([[node, collection]]),
   };
+  const parameters: syntax.JuncoParameters = { scheduler: () => schedules.parallel() };
+  const config: syntax.FromYamlOptions = { args, parameters };
+  // @ts-expect-error the scheduler belongs to parameters
+  graph.JuncoGraph.fromYaml("", { args: { ...args, scheduler: parameters.scheduler }, parameters });
+  // @ts-expect-error code is a program capability
+  graph.JuncoGraph.fromYaml("", { args, parameters: { ...parameters, code: {} } });
+  // @ts-expect-error execution parameters are required
+  graph.JuncoGraph.fromYaml("", { args });
+  // @ts-expect-error program arguments are required
+  graph.JuncoGraph.fromYaml("", { parameters });
+  // @ts-expect-error the old flat configuration is not a supported overload
+  graph.JuncoGraph.fromYaml("", { cwd: ".", scheduler: parameters.scheduler });
+  // @ts-expect-error admission is declared by a YAML trigger, not by program arguments
+  graph.JuncoGraph.fromYaml("", { args: { ...args, available: true }, parameters });
+  // @ts-expect-error tuning parameters cannot override admission
+  graph.JuncoGraph.fromYaml("", { args, parameters: { ...parameters, available: true } });
   // @ts-expect-error a caller cannot replace the YAML agent's ladder model
   const wrongModel: syntax.YamlAgentOptions = { model: "other" };
   // @ts-expect-error skill grants belong to the YAML document
@@ -1473,7 +1490,7 @@ export function yamlConstructorOptions(
 export function fanInSelectorTypes() {
   const all: string = workflows.allFanIn;
   const any: string = workflows.anyFanIn;
-  const merged: Pick<syntax.FromYamlOptions, "code"> = {
+  const merged: Pick<syntax.JuncoArgs, "code"> = {
     code: { ...schedules.ralph().code, ...schedules.anyFanIn().code },
   };
   return [all, any, merged];
@@ -1525,7 +1542,7 @@ export function memoryWorkflowTypes(memory: tools.JuncoMemory) {
     readonly AnyFanInPublish: syntax.DeterministicNode;
   } = controller.code;
   const exactCodeKeys: keyof typeof controller.code = "Memory";
-  const config: Pick<syntax.FromYamlOptions, "code"> = controller;
+  const config: Pick<syntax.JuncoArgs, "code"> = controller;
   schedules.memory({ memory });
   // @ts-expect-error a caller-owned memory wrapper is required
   schedules.memory({});

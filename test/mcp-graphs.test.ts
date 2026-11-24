@@ -261,7 +261,8 @@ test(
       } };
       for (let index = 0; index < 2; index++) {
         const context = await JuncoGraph.fromYaml(document, {
-          cwd: seed, collection: built, ladder, scheduler: () => schedules.parallel(), tracer: new DummyTracer(),
+          args: { cwd: seed, collection: built, tracer: new DummyTracer() },
+          parameters: { ladder, scheduler: () => schedules.parallel() },
         });
         const forgetGraph = defer(() => context.graph.close());
         runs.push({ context, forgetGraph });

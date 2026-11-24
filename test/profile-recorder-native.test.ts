@@ -77,26 +77,25 @@ async function runRecorded(
   });
   try {
     const execution = await JuncoGraph.fromYaml(DOCUMENT, {
-      cwd: seed,
-      collection,
-      recorder,
-      tracer: new tracer.DummyTracer(),
-      scheduler: () => schedules.parallel(),
-      ladder: await offlineLadder([
-        (context) => {
-          const texts = context.messages
-            .filter((message) => message.role === "user")
-            .map((message) => typeof message.content === "string" ? message.content : contentText(message.content));
-          assert.equal(texts.length, 2);
-          assert.equal(texts[0], "Measure resources");
-          assert.match(
-            texts[1]!,
-            /^measure\n\nTask: \{"taskId":"[0-9a-f-]{36}","spec":"done","deps":\[\],"history":\[\]\}$/,
-          );
-          return fauxAssistantMessage(fauxToolCall("bash", { command: COMMAND }), { stopReason: "toolUse" });
-        },
-        lastResult,
-      ]),
+      args: { cwd: seed, collection, recorder, tracer: new tracer.DummyTracer() },
+      parameters: {
+        scheduler: () => schedules.parallel(),
+        ladder: await offlineLadder([
+          (context) => {
+            const texts = context.messages
+              .filter((message) => message.role === "user")
+              .map((message) => typeof message.content === "string" ? message.content : contentText(message.content));
+            assert.equal(texts.length, 2);
+            assert.equal(texts[0], "Measure resources");
+            assert.match(
+              texts[1]!,
+              /^measure\n\nTask: \{"taskId":"[0-9a-f-]{36}","spec":"done","deps":\[\],"history":\[\]\}$/,
+            );
+            return fauxAssistantMessage(fauxToolCall("bash", { command: COMMAND }), { stopReason: "toolUse" });
+          },
+          lastResult,
+        ]),
+      },
     });
     try {
       const worker = execution.graph.getNode(graph.NodeId.create("Worker"))?.state;
@@ -340,11 +339,8 @@ test("graph resources reach bash as cgroup pid limits", async () => {
             },
           },
           {
-            cwd: seed,
-            collection,
-            tracer: new tracer.DummyTracer(),
-            scheduler: () => schedules.parallel(),
-            code: { Terminal: Constant(null) },
+            args: { cwd: seed, collection, tracer: new tracer.DummyTracer(), code: { Terminal: Constant(null) } },
+            parameters: { scheduler: () => schedules.parallel() },
           },
         ),
     );

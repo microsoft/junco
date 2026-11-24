@@ -5,11 +5,8 @@ import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "jun
 import type { TSchema } from "typebox";
 import { countedCollection, offlineLadder } from "./support.ts";
 
-const options = () => ({
-  cwd: process.cwd(),
-  scheduler: () => schedules.parallel(),
-  tracer: new tracer.DummyTracer(),
-});
+const args = { cwd: process.cwd(), tracer: new tracer.DummyTracer() };
+const parameters: syntax.JuncoParameters = { scheduler: () => schedules.parallel() };
 
 const nested = (worker: object) => ({
   graph: {
@@ -40,10 +37,12 @@ test("explicit and implicit agents may omit a prompt but cannot supply a blank o
       assert.throws(() => syntax.parse(source), promptError);
       await assert.rejects(
         JuncoGraph.fromYaml(source, {
-          ...options(),
-          scheduler: () => {
-            acquisitions++;
-            return schedules.parallel();
+          args,
+          parameters: {
+            scheduler: () => {
+              acquisitions++;
+              return schedules.parallel();
+            },
           },
         }),
         promptError,
@@ -53,7 +52,10 @@ test("explicit and implicit agents may omit a prompt but cannot supply a blank o
   assert.equal(acquisitions, 0);
 });
 
-for (const failure of ["invalid prompt", "legacy available"] as const)
+for (const [failure, stale] of [
+  ["invalid prompt"], ["missing parameters"],
+  ["available in envelope", "envelope"], ["available in args", "args"], ["available in parameters", "parameters"],
+] as const)
   test(`${failure} releases the transferred session once without a request`, async () => {
     const repo = new MemorySessionRepo();
     const session = await repo.create({}, BACKGROUND_CONTEXT);
@@ -62,13 +64,20 @@ for (const failure of ["invalid prompt", "legacy available"] as const)
     session.close = async (context) => { disposals++; return close(context); };
     const { collection, events, active } = countedCollection();
     const config = {
-      ...options(),
-      collection,
-      ladder: await offlineLadder(() => { requests++; assert.fail("unexpected request"); }),
-      agentOptions: new Map([[graph.NodeId.create("Child/Worker"), { session }]]),
+      args: {
+        ...args, collection,
+        agentOptions: new Map([[graph.NodeId.create("Child/Worker"), { session }]]),
+      },
+      parameters: {
+        ...parameters,
+        ladder: await offlineLadder(() => { requests++; assert.fail("unexpected request"); }),
+      },
     };
-    if (failure === "legacy available")
-      Object.defineProperty(config, "available", {
+    if (failure === "missing parameters")
+      Reflect.deleteProperty(config, "parameters");
+    else if (stale)
+      Object.defineProperty(stale === "envelope" ? config : config[stale], "available", {
+        enumerable: true,
         get: () => assert.fail("legacy options must not be read or invoked"),
       });
     try {
@@ -76,7 +85,9 @@ for (const failure of ["invalid prompt", "legacy available"] as const)
       await assert.rejects(
         JuncoGraph.fromYaml(doc, config),
         failure === "invalid prompt" ? promptError : (error) =>
-          error instanceof graph.DataflowDefinitionError && /available.*trigger/.test(error.message),
+          error instanceof graph.DataflowDefinitionError && (failure === "missing parameters"
+            ? error.message === "junco-syntax: fromYaml requires { args, parameters }"
+            : /available.*trigger/.test(error.message)),
       );
       assert.equal(disposals, 1);
       assert.equal(requests, 0);
@@ -107,9 +118,12 @@ test("a stale factory registration is rejected by node name and releases its unr
   };
   await assert.rejects(
     JuncoGraph.fromYaml(nested({ kind: "code" }), {
-      ...options(),
-      // @ts-expect-error A stale JavaScript factory returns a registration rather than its state.
-      code: { Worker: legacy },
+      args: {
+        ...args,
+        // @ts-expect-error A stale JavaScript factory returns a registration rather than its state.
+        code: { Worker: legacy },
+      },
+      parameters,
     }),
     (error) => error instanceof graph.DataflowDefinitionError && /Child\/Worker.*Deterministic/.test(error.message),
   );
@@ -127,7 +141,7 @@ test("a never-triggered emit stays parked", async () => {
         edges: [{ from: "Seed", to: "$sink", kind: "message", schema: {} }],
       },
     },
-    options(),
+    { args, parameters },
   );
   try {
     assert.equal(execution.graph.available().size, 0);

@@ -149,7 +149,7 @@ const optimizerLimits: OptimizerLimits = {};
 
 export const ladder = optimizerLadder;
 export const strengthOf = optimizerStrengthOf;
-export const scheduler: syntax.BuildOptions["scheduler"] = (label, graphPath) => profile.scheduler(label, graphPath);
+export const scheduler: syntax.JuncoParameters["scheduler"] = (label, graphPath) => profile.scheduler(label, graphPath);
 
 /** The workflow's original hard ceilings, outermost around every candidate (or undefined). */
 const HARD_LIMITS: schedules.LimitOptions | undefined = undefined;
@@ -257,7 +257,7 @@ class OptimizerProfile {
   /** A fresh candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
   scheduler(label: string, graphPath: string) {
     // Candidates may still ignore graphPath; the build passes both arguments.
-    const factory: syntax.BuildOptions["scheduler"] = optimizerScheduler;
+    const factory: syntax.JuncoParameters["scheduler"] = optimizerScheduler;
     let policy = factory(label, graphPath);
     if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
     const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
@@ -929,15 +929,21 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
 }
 
 /** The runner's options; this module supplies the scheduler and code. */
-export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
+export type RunOptions = {
+  readonly args: Omit<syntax.JuncoArgs<Host>, "code" | "context"> & { readonly context: Host };
+  readonly parameters: Omit<syntax.JuncoParameters, "scheduler">;
+};
 
 /** Builds and runs the workflow with the runner's ladder and returns Finish's report. */
-export async function run(config: RunOptions, observe?: (graph: JuncoGraph<TSchema, unknown>) => void): Promise<string> {
-  const context: Context = { ...config.context, race: {} };
-  const execution = await JuncoGraph.fromYaml<Context>(runDocument, { ...config, scheduler, code, context });
+export async function run({ args, parameters }: RunOptions, observe?: (graph: JuncoGraph<TSchema, unknown>) => void): Promise<string> {
+  const context: Context = { ...args.context, race: {} };
+  const execution = await JuncoGraph.fromYaml<Context>(runDocument, {
+    args: { ...args, code, context },
+    parameters: { ...parameters, scheduler },
+  });
   try {
     observe?.(execution.graph);
-    await execution.run({ signal: config.signal });
+    await execution.run({ signal: args.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);
     if (terminal._tag !== "Some") throw new Error(`workflow stopped without a terminal report; unfinished: ${unfinished(execution.graph)}`);
     return syntax.finalText(terminal.value, "Finish");

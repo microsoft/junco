@@ -147,7 +147,7 @@ export const assignment =
     }, policy);
   };
 
-/** `config.code` plus the three reserved helpers; a same-named existing entry is a collision. */
+/** `args.code` plus the three reserved helpers; a same-named existing entry is a collision. */
 export function withOptimizerCode<C>(
   existing: Readonly<Record<string, syntax.DeterministicNode<C>>> | undefined,
   templates: Readonly<Record<string, string>>,
@@ -159,7 +159,7 @@ export function withOptimizerCode<C>(
   };
   for (const id of Object.keys(added))
     if (existing !== undefined && Object.hasOwn(existing, id))
-      throw new Error(`config.code already defines reserved "${id}"`);
+      throw new Error(`args.code already defines reserved "${id}"`);
   return { ...existing, ...added };
 }
 
@@ -324,7 +324,7 @@ const peerInbox = (recipient: string): syntax.DeterministicNode => ({ graph: wor
 };
 
 /** Flush mailboxes between model decisions, never alongside a potentially settling recipient. */
-const scheduler: syntax.BuildOptions["scheduler"] = (_label, path) =>
+const scheduler: syntax.JuncoParameters["scheduler"] = (_label, path) =>
   path ? schedules.parallel() : (snapshot) => {
     const inboxes = [...snapshot.available].filter((id) => id === "Inbox1" || id === "Inbox2");
     return { selected: schedules.select(snapshot, inboxes.length ? inboxes : snapshot.available) };
@@ -467,7 +467,7 @@ export type YamlExecution = schedules.SchedulerContext<
   JuncoGraph<TSchema, unknown>
 >;
 
-export type PairOptions = Pick<syntax.BuildOptions, "tracer" | "recorder"> & {
+export type PairOptions = Pick<syntax.JuncoArgs, "tracer" | "recorder"> & {
   readonly ladder: schedules.ModelLadder;
   readonly cwd?: string;
   readonly collection: tools.ToolCollection;
@@ -489,14 +489,15 @@ export async function createPair(request: PairRequest, options: PairOptions, wor
   };
   const { ladder, tracer: observer, recorder } = options;
   const execution = await JuncoGraph.fromYaml(workflow, {
-    cwd: options.cwd ?? process.cwd(),
-    scheduler,
-    ladder,
-    code: withOptimizerCode({ Inbox1: peerInbox("Agent1"), Inbox2: peerInbox("Agent2"), ...ralphUntil(RALPH_CHECKS, 3).code }, ASSIGNMENTS),
-    ...(observer === undefined ? {} : { tracer: observer }),
-    ...(recorder === undefined ? {} : { recorder }),
-    collection: options.collection,
-    signal: options.signal,
+    args: {
+      cwd: options.cwd ?? process.cwd(),
+      code: withOptimizerCode({ Inbox1: peerInbox("Agent1"), Inbox2: peerInbox("Agent2"), ...ralphUntil(RALPH_CHECKS, 3).code }, ASSIGNMENTS),
+      ...(observer === undefined ? {} : { tracer: observer }),
+      ...(recorder === undefined ? {} : { recorder }),
+      collection: options.collection,
+      signal: options.signal,
+    },
+    parameters: { scheduler, ladder },
   });
   try {
     const visit = (level: YamlExecution["graph"], parent = ""): void => {

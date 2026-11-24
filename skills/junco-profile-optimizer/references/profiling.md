@@ -114,7 +114,6 @@ type OptimizerLimits = {
 
 /** The workflow's original hard ceilings, outermost around every candidate (or undefined). */
 const HARD_LIMITS: schedules.LimitOptions | undefined = /* existing limit options */ undefined;
-const PARAMS: Record<string, string> = /* the existing fromYaml params */ {};
 
 interface ProfileRun {
   version: 1;
@@ -195,7 +194,7 @@ class OptimizerProfile {
   /** A fresh candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
   scheduler(label: string, graphPath: string) {
     // Candidates may still ignore graphPath; the build passes both arguments.
-    const factory: syntax.BuildOptions["scheduler"] = optimizerScheduler;
+    const factory: syntax.JuncoParameters["scheduler"] = optimizerScheduler;
     let policy = factory(label, graphPath);
     if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
     const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
@@ -262,7 +261,8 @@ class OptimizerProfile {
 
 const profile = await OptimizerProfile.load();
 const yamlText = await readFile(new URL("./workflow.yml", import.meta.url), "utf8");
-const document = syntax.parse(yamlText, { params: PARAMS, sourceName: "workflow.yml" });
+const { params, ...buildArgs } = args;
+const document = syntax.parse(yamlText, { sourceName: args.sourceName ?? "workflow.yml", ...(params === undefined ? {} : { params }) });
 const graphHash = profile.validate(document);
 const recorder = profile.createRecorder();
 const observer = /* the existing tracer */ new tracer.DummyTracer();
@@ -272,13 +272,18 @@ let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
 try {
   // A parsed document carries no params: they were applied above.
   execution = await JuncoGraph.fromYaml(profile.withProbes(document), {
-    /* the existing options, unchanged, except: */
-    scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
-    ...(optimizerLadder === undefined ? {} : { ladder: new schedules.ModelLadder(models, optimizerLadder) }),
-    tracer: observer,
-    ...(recorder === undefined ? {} : { recorder }),
-    // Only when this build creates its collection and monitors (resources.monitorIntervalMs):
-    // onResourceEvent: (event) => { resourceEvents++; existingOnResourceEvent?.(event); },
+    args: {
+      ...buildArgs,
+      tracer: observer,
+      ...(recorder === undefined ? {} : { recorder }),
+    },
+    parameters: {
+      ...parameters,
+      scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
+      ...(optimizerLadder === undefined ? {} : { ladder: new schedules.ModelLadder(models, optimizerLadder) }),
+      // Only when this build creates its collection and monitors (resources.monitorIntervalMs):
+      // onResourceEvent: (event) => { resourceEvents++; existingOnResourceEvent?.(event); },
+    },
   });
   await execution.run();
   /* the existing terminal assertion; throw when it fails */
@@ -297,8 +302,8 @@ await profile.complete(graphHash, resourceEvents /* , fixed adapter metrics, whe
 
 Integration notes:
 
-- **Recorder ownership.** Pass the recorder view to `fromYaml`; the graph scopes it for each agent. A bare session adds no prefix. If the runner passes `{ recorder: session.add_context("batch") }`, prefix expected probe `node` paths with `batch`: a root edge records at `batch`, a nested `Child` graph's edge at `batch::Child`. With low-level `JuncoGraph.create`, pass the view in the collection options and forward the build callback's recorder to the graph. Integrate an existing recorder consistently or report the ownership conflict.
-- **Caller-owned resources.** Configure monitoring when opening each borrowed collection (`collection` or a `tools` map entry). `BuildOptions.resources` can configure only an internally created default; it never retrofits mapped collections. Close the graph, all caller-owned collections, then the recorder, including on failure.
+- **Recorder ownership.** Pass the recorder view to `fromYaml`; the graph scopes it for each agent. A bare session adds no prefix. If the runner sets `args.recorder` to `session.add_context("batch")`, prefix expected probe `node` paths with `batch`: a root edge records at `batch`, a nested `Child` graph's edge at `batch::Child`. With low-level `JuncoGraph.create`, pass the view in the collection options and forward the build callback's recorder to the graph. Integrate an existing recorder consistently or report the ownership conflict.
+- **Caller-owned resources.** Configure monitoring when opening each borrowed collection (`collection` or a `tools` map entry). `parameters.resources` can configure only an internally created default; it never retrofits mapped collections. Close the graph, all caller-owned collections, then the recorder, including on failure.
 - **Cleanup order.** Evaluation joins tracer delivery before settling. Graph and owned resources close first, a retained interactive TUI is finished next (if selected), and the recorder closes last; build failures still close. Run and cleanup failures are reported together.
 - **Cost mode.** An all-request USD objective needs `profile.createRecorder("usage")`; semantics under [cost](#metrics-and-measurement-coverage).
 - **Scheduler USD.** `optimizerPi` wraps only the scheduler's `completeSimple`. On every returned response, record `{ resource: "cost", kind: "usage", source: schedulerSource, usage: response.usage }` through a scheduler recorder context before `schedules.pi` checks cancellation, stop reason or scheduling output. Missing/nonfinite/negative cost invalidates the run. A thrown request with unknown usage is an accounting error, never a free request or a fallback. Agentic scheduling may order ready work, not omit required consultations or choose work-agent rungs.

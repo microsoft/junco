@@ -166,7 +166,7 @@ async function loadVerusMcp(bridgeDir: string): Promise<mcp.McpBuilder> {
 }
 
 type VerusFeedback = Readonly<{ review: string; cleanup: string }>;
-type LoopOptions = Pick<syntax.BuildOptions, "signal" | "tracer" | "recorder"> & {
+type LoopOptions = Pick<syntax.JuncoArgs, "signal" | "tracer" | "recorder"> & {
   readonly ladder: schedules.ModelLadder;
   readonly tools: ReadonlyMap<graph.NodeIdType, tools.ToolCollection>;
 };
@@ -176,19 +176,18 @@ function assignmentFor(workspace: VerusWorkspace, feedback?: VerusFeedback): str
 }
 
 /** Keep all three sessions and their diagnostics subscriptions until cancellation, also after success. */
-export async function runVerusLoop(workspace: VerusWorkspace, options: LoopOptions): Promise<void> {
-  const { signal } = options;
+export async function runVerusLoop(workspace: VerusWorkspace, { signal, tracer, recorder, tools, ladder }: LoopOptions): Promise<void> {
   signal?.throwIfAborted();
   for (const role of roles) {
-    if (!options.tools.has(graph.NodeId.create(role))) throw new Error(`Missing Verus collection for ${role}`);
+    if (!tools.has(graph.NodeId.create(role))) throw new Error(`Missing Verus collection for ${role}`);
   }
   let runs = 0;
   let failure: Error | undefined;
   const verification = { runs: () => { if (failure) throw failure; return runs; } };
   const context: VerusRoundContext = { assignment: assignmentFor(workspace), verification };
   const execution = await JuncoGraph.fromYaml(source, {
-    ...options, cwd: workspace.outputDir, scheduler: () => schedules.parallel(), context,
-    code: { PrepareReviewer, PrepareCleanup },
+    args: { cwd: workspace.outputDir, tools, signal, tracer, recorder, context, code: { PrepareReviewer, PrepareCleanup } },
+    parameters: { scheduler: () => schedules.parallel(), ladder },
   });
   await using resources = new AsyncDisposableStack();
   resources.use(execution.graph);

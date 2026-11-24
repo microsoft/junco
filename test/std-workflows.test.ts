@@ -85,7 +85,7 @@ function textOf(result: unknown): string {
 /** `source` over one native agent answering `responses` in order, recording each user prompt. */
 async function nativeWorkflow(
   source: string,
-  controller: Pick<syntax.FromYamlOptions, "code">,
+  controller: Pick<syntax.JuncoArgs, "code">,
   responses: readonly (string | AssistantMessage)[],
   beforeReply?: (index: number) => void | Promise<void>,
 ) {
@@ -299,10 +299,9 @@ type RoleScript = {
 };
 type Execution = Awaited<ReturnType<typeof JuncoGraph.fromYaml>>;
 const OUT = "AnyFanInPublish~>$sink";
-const yamlOptions = () => ({
-  cwd: process.cwd(),
-  scheduler: () => schedules.parallel(),
-  tracer: new tracer.DummyTracer(),
+const yamlOptions = (args: Partial<syntax.JuncoArgs>, parameters: Partial<syntax.JuncoParameters> = {}) => ({
+  args: { cwd: process.cwd(), tracer: new tracer.DummyTracer(), ...args },
+  parameters: { scheduler: () => schedules.parallel(), ...parameters },
 });
 const selectorOf = (...steps: FauxResponseStep[]): RoleScript =>
   ({ steps, requests: [], turns: [] });
@@ -320,7 +319,7 @@ afterAll(async () => {
 async function scriptedWorkflow(
   source: Parameters<typeof JuncoGraph.fromYaml>[0],
   roles: Record<string, RoleScript>,
-  controller: Pick<syntax.FromYamlOptions, "code"> = {},
+  controller: Pick<syntax.JuncoArgs, "code"> = {},
 ) {
   const ladder = await offlineLadder((context, options, state, model) => {
     const path = captureUsageContext()?.nodePath.join("/");
@@ -331,12 +330,12 @@ async function scriptedWorkflow(
     role.requests.push(userTexts(context.messages));
     return typeof step === "function" ? step(context, options, state, model) : step;
   });
-  const execution = await JuncoGraph.fromYaml(source, {
-    ...yamlOptions(), ...controller, collection, ladder,
+  const execution = await JuncoGraph.fromYaml(source, yamlOptions({
+    ...controller, collection,
     agentOptions: new Map(Object.keys(roles).map((path) => [
       graph.NodeId.create(path), { steeringMode: "all", retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 } },
     ])),
-  });
+  }, { ladder }));
   try {
     for (const [path, script] of Object.entries(roles)) {
       const parts = path.split("/");
@@ -1535,7 +1534,7 @@ async function memoryFanIn(
 function memoryWorkflow(source: string, role: RoleScript, fixture: RealMemory) {
   const controller = schedules.memory({ memory: fixture.memory });
   if (source === workflows.memoryFanOut)
-    return JuncoGraph.fromYaml(source, { ...yamlOptions(), ...controller });
+    return JuncoGraph.fromYaml(source, yamlOptions(controller));
   return scriptedWorkflow(source, {
     [source === workflows.memoryFanIn ? "Select/AnyFanIn" : "Ralph"]: role,
   }, controller);
@@ -1933,10 +1932,7 @@ test("memory: fan-out recalls only on assignments, preserves update identity and
     await fixture.invoke("forget_memory", { id: saved.id }, "Worker"),
     { id: saved.id, forgotten: false },
   );
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, {
-    ...yamlOptions(),
-    ...schedules.memory({ memory: fixture.memory }),
-  });
+  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
   try {
     await execution.run();
     for (let probe = 0; probe < 4; probe++) execution.graph.available();
@@ -2009,10 +2005,7 @@ test("memory: fan-out recalls only on assignments, preserves update identity and
 
 test("memory: fan-out consumes both routes in declared order without losing views during flush", async () => {
   await using fixture = await realMemory();
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, {
-    ...yamlOptions(),
-    ...schedules.memory({ memory: fixture.memory }),
-  });
+  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
   const initial = prompt("junco initial assignment");
   const next = prompt("junco second assignment", "Memory#2");
   const update = assistant("junco selected update");
@@ -2533,10 +2526,7 @@ test("memory: missing persistence tools fail before execution", async () => {
     let execution: Execution | undefined;
     try {
       await assert.rejects(async () => {
-        execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, {
-          ...yamlOptions(),
-          ...schedules.memory({ memory: fixture.memory }),
-        });
+        execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
       }, TypeError);
       assert.deepEqual(fixture.calls, []);
     } finally {
@@ -2582,10 +2572,7 @@ test("memory: malformed schema inputs fail before storage without weakening work
 
 test("memory: a later invalid fan-out item leaves earlier publication intact and holds ingress", async () => {
   await using fixture = await realMemory();
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, {
-    ...yamlOptions(),
-    ...schedules.memory({ memory: fixture.memory }),
-  });
+  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
   const good = assistant("valid update");
   const later = assistant("later delivery");
   try {
@@ -2610,10 +2597,7 @@ test("memory: fan-out rejects abnormal and blank updates without saving, searchi
     assistant("junco abnormal update", "error"),
   ]) {
     await using fixture = await realMemory();
-    const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, {
-      ...yamlOptions(),
-      ...schedules.memory({ memory: fixture.memory }),
-    });
+    const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
     try {
       enqueueRoute(execution, "updates", update);
       const error = underlying(await rejection(execution.run()));

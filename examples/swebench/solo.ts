@@ -38,7 +38,7 @@ export const BRANCHES = { A: { agent: "Solo", sandboxes: ["candidateA", "acceptA
 // User-selected baseline; the runner checks live availability and supported thinking before acquiring Solo.
 export const ladder = schedules.uniformLadder({ model: "github-copilot/claude-opus-5.5", thinking: "high" });
 export const strengthOf = (_path: string): schedules.ModelStrengthName => "med";
-export const scheduler: syntax.BuildOptions["scheduler"] = () => schedules.strength(() => "med", schedules.parallel());
+export const scheduler: syntax.JuncoParameters["scheduler"] = () => schedules.strength(() => "med", schedules.parallel());
 
 type Code = syntax.DeterministicNode<Host>;
 const prompt = (text: string, spec: string) => graph.nodes.Task.create({ kind: "prompt", text, spec });
@@ -135,14 +135,20 @@ function unfinished(g: JuncoGraph<TSchema, unknown>): string {
   return pending.join(", ") || "none";
 }
 
-export type RunOptions = Omit<syntax.FromYamlOptions<Host>, "scheduler" | "code" | "context"> & { readonly context: Host };
+export type RunOptions = {
+  readonly args: Omit<syntax.JuncoArgs<Host>, "code" | "context"> & { readonly context: Host };
+  readonly parameters: Omit<syntax.JuncoParameters, "scheduler">;
+};
 
 /** Builds and runs the baseline, returning Deliver's terminal report after closing graph resources. */
-export async function run(config: RunOptions, observe?: (graph: JuncoGraph<TSchema, unknown>) => void): Promise<string> {
-  const execution = await JuncoGraph.fromYaml<Host>(document, { ...config, scheduler, code });
+export async function run({ args, parameters }: RunOptions, observe?: (graph: JuncoGraph<TSchema, unknown>) => void): Promise<string> {
+  const execution = await JuncoGraph.fromYaml<Host>(document, {
+    args: { ...args, code },
+    parameters: { ...parameters, scheduler },
+  });
   try {
     observe?.(execution.graph);
-    await execution.run({ signal: config.signal });
+    await execution.run({ signal: args.signal });
     const terminal = execution.graph.result(execution.graph.sink.id);
     if (terminal._tag !== "Some") throw new Error(`workflow stopped without a terminal report; unfinished: ${unfinished(execution.graph)}`);
     return syntax.finalText(terminal.value, "Deliver");

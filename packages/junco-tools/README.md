@@ -404,7 +404,7 @@ without changing command execution. Borrowed muxes retain their original resourc
 `JuncoAgent.create` keeps its default collection settings; pass a configured collection to
 give an agent resource limits.
 
-**Scheduler memory history.** A positive `measurementWindows.get("memory")` enables measurement
+**Scheduler memory history.** A positive `parameters.measurementWindows.get("memory")` enables measurement
 on a collection `fromYaml` creates. For a supplied collection, open it with `{ measureMemory: true }`
 or enable its existing monitor via a recorder or `onResourceEvent` and interval. The interval
 defaults to 1000 ms with `measureMemory`. Native `ShellMuxOperations` reports one final cgroup

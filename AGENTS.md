@@ -44,11 +44,11 @@ no API key, $0).
 
 `import { errors, graph, schedules, tracer, trigger, workflows } from "junco"` (`src/index.ts`). Each summary is the first sentence of the export's JSDoc; the JSDoc at the definition is the full reference. `test/std-namespaces.test.ts` fails when a runtime export of these namespaces has no row here. Human version: https://github.com/microsoft/junco/wiki/Standard-Library.
 
-### `workflows` — graph documents for `JuncoGraph.fromYaml(text, config)`
+### `workflows` — graph documents for `JuncoGraph.fromYaml(text, { args, parameters })`
 
 Reuse these instead of hand-writing the topology. Source routes are the keys of `source.routes`; feed a root graph with `execution.graph.source.enqueue({ messages: new Map([[graph.EdgeId.create("<route>"), [Task.create({ kind: "prompt", text, spec })]]]), values: new Map() })` (`Task.create` mints the required `taskId` with empty `deps` and `history`), or route a parent edge onto them when embedding (`kind: graph`).
 
-`fromYaml` owns the agents it constructs. Supply a `schedules.ModelLadder` whenever the document contains agents. `tools` and `agentOptions` are sparse `ReadonlyMap`s keyed by qualified `graph.NodeIdType` (e.g. `graph.NodeId.create("Left/Worker")`; escape `~` as `~0` and `/` as `~1` within each segment). A node-specific native collection replaces the graph default; omitted agents share the fallback. Use YAML `tool_block` for exclusions. Caller-supplied collections outlive the graph; sessions supplied through `syntax.YamlAgentOptions` transfer at build entry. See the [YAML runner contract](skills/junco-graph-create/SKILL.md#runner).
+`fromYaml` owns the agents it constructs. Supply a `schedules.ModelLadder` in `parameters.ladder` whenever the document contains agents. `args.tools` and `args.agentOptions` are sparse `ReadonlyMap`s keyed by qualified `graph.NodeIdType` (e.g. `graph.NodeId.create("Left/Worker")`; escape `~` as `~0` and `/` as `~1` within each segment). A node-specific native collection replaces the graph default; omitted agents share the fallback. Use YAML `tool_block` for exclusions. Caller-supplied collections outlive the graph; sessions supplied through `syntax.YamlAgentOptions` transfer at build entry. See the [YAML runner contract](skills/junco-graph-create/SKILL.md#runner).
 
 | Export | Source | Summary | Routes / output | Drive with |
 | --- | --- | --- | --- | --- |
@@ -62,7 +62,7 @@ Reuse these instead of hand-writing the topology. Source routes are the keys of 
 
 ### `schedules` — policies, combinators and workflow controllers
 
-`config.scheduler: (label, graphPath) => policy`. Workflow controllers supply `{ code }` to `fromYaml`; merge their `code` maps when composing workflows. Preserve the nested `source.trigger` when rekeying `source.routes`.
+`parameters.scheduler: (label, graphPath) => policy`. Workflow controllers supply `{ code }` to `args`; merge their `code` maps when composing workflows. Preserve the nested `source.trigger` when rekeying `source.routes`.
 `schedules.ralph({ retries })` and `schedules.memory({ ralph: { retries } })` re-run provider-error results (`stopReason: "error"`) in the same round, at most `retries` times per graph level; memory Ralph neither saves nor decides an error result. The default is zero; other invalid results and exhausted retries retain their existing failure behavior.
 
 
@@ -140,7 +140,7 @@ Compose `errors.record(errors.retry({ afterMs: 100, times: 2 }, errors.escalate(
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
-| `graph.JuncoGraph` | class | `src/junco-graph.ts` | A passive native work graph owning its agents, child graphs and coroutines. `fromYaml(source, config)` builds the workflow a YAML document and its config define. |
+| `graph.JuncoGraph` | class | `src/junco-graph.ts` | A passive native work graph owning its agents, child graphs and coroutines. `fromYaml(source, { args, parameters })` builds the workflow a YAML document and its config define. |
 | `graph.DataflowGraph` | class | `packages/dataflow-engine/src/dataflow-graph.ts` | Native work topology and concrete lanes-by-turns executor; policy lives outside the graph. |
 | `graph.Edge` | const | `packages/dataflow-engine/src/edges.ts` | Constructs message FIFOs (`message`), retained value cells (`value`) and FIFOs fed by successful returns (`returned`). |
 | `graph.EdgeId` | const | `packages/dataflow-engine/src/identity.ts` | Construction of `EdgeId`s. |
@@ -230,6 +230,7 @@ Also exported directly from `junco`: `JuncoGraph`, `Deterministic`, `Agentic`, `
 
 | Export | Kind | Source | Summary |
 | --- | --- | --- | --- |
+| `JuncoArgs<C>`, `JuncoParameters` | types | `src/syntax/build.ts` | Required groups in `syntax.FromYamlOptions<C>`: program inputs and capabilities (`args`) and execution settings (`parameters`). |
 | `JuncoGraphValidator` | const | `src/syntax/validator.ts` | `validate(value)` validates a decoded document recursively; `syntax.parse` uses the same validator. `validateNodeMaps(document, { grants: { map, complete: true } })` checks qualified IDs (all node kinds and actual ports); `complete` additionally requires every ID. Both throw `syntax.ValidationError` on invalid input. |
 | `TaskSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Task. |
 | `AssistantMessageSchema` | const | `packages/junco-agent/src/agentic.ts` | Runtime schema of Pi's native AssistantMessage: its content, usage/cost, diagnostics and deferred handle, with required fields, literal alternatives and optional fields. |

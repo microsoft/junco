@@ -132,18 +132,17 @@ const ladder = await offlineLadder((context) => {
 });
 const judged: number[] = [];
 const execution = await JuncoGraph.fromYaml(workflows.ralph, {
-  cwd: process.cwd(),
-  scheduler: () => schedules.parallel(),
-  collection,
-  ladder,
-  tracer: new tracerApi.DummyTracer(),
-  // Uncapped: only the predicate ends the loop; the window watchdog below is the fixture's guard.
-  ...schedules.ralph({
-    until: (result, { round }) => {
-      judged.push(round);
-      return contentText(result.content) === "draft-3";
-    },
-  }),
+  args: {
+    cwd: process.cwd(), collection, tracer: new tracerApi.DummyTracer(),
+    // Uncapped: only the predicate ends the loop; the window watchdog below is the fixture's guard.
+    ...schedules.ralph({
+      until: (result, { round }) => {
+        judged.push(round);
+        return contentText(result.content) === "draft-3";
+      },
+    }),
+  },
+  parameters: { scheduler: () => schedules.parallel(), ladder },
 });
 const graph = execution.graph;
 const agent = graph.getNode(graphApi.NodeId.create("Ralph"))!.state;
@@ -197,17 +196,17 @@ console.log(
 );
 
 const fanInOptions = {
-  cwd: process.cwd(),
-  scheduler: () => schedules.parallel(),
-  collection,
-  ladder,
-  tracer: new tracerApi.DummyTracer(),
+  args: { cwd: process.cwd(), collection, tracer: new tracerApi.DummyTracer() },
+  parameters: { scheduler: () => schedules.parallel(), ladder },
 };
 const candidates = graphApi.EdgeId.create("candidates");
 
 const all = await JuncoGraph.fromYaml(workflows.allFanIn, {
-  ...fanInOptions,
-  agentOptions: new Map([[graphApi.NodeId.create("AllFanIn"), { steeringMode: "all" }]]),
+  args: {
+    ...fanInOptions.args,
+    agentOptions: new Map([[graphApi.NodeId.create("AllFanIn"), { steeringMode: "all" }]]),
+  },
+  parameters: fanInOptions.parameters,
 });
 try {
   all.graph.source.enqueue({
@@ -237,9 +236,12 @@ try {
 }
 
 const any = await JuncoGraph.fromYaml(workflows.anyFanIn, {
-  ...fanInOptions,
-  agentOptions: new Map([[graphApi.NodeId.create("AnyFanIn"), { steeringMode: "all" }]]),
-  ...schedules.anyFanIn(),
+  args: {
+    ...fanInOptions.args,
+    agentOptions: new Map([[graphApi.NodeId.create("AnyFanIn"), { steeringMode: "all" }]]),
+    ...schedules.anyFanIn(),
+  },
+  parameters: fanInOptions.parameters,
 });
 const streamed: string[] = [];
 let previousUsers = 0;

@@ -411,7 +411,7 @@ type TargetParts = {
   readonly hardLimits?: string;
   readonly params?: string;
   readonly code: string;
-  readonly options?: string;
+  readonly parameters?: string;
   /** A boolean expression over the terminal `value`: the workflow's existing assertion. */
   readonly check: string;
   readonly beforeBuild?: string;
@@ -530,7 +530,7 @@ class OptimizerProfile {
   /** A fresh candidate policy: tuned scheduler, optional strength, extra limits, hard limits outermost. */
   scheduler(label: string, graphPath: string) {
     // Candidates may still ignore graphPath; the build passes both arguments.
-    const factory: syntax.BuildOptions["scheduler"] = optimizerScheduler;
+    const factory: syntax.JuncoParameters["scheduler"] = optimizerScheduler;
     let policy = factory(label, graphPath);
     if (optimizerStrength !== undefined) policy = schedules.strength(optimizerStrength, policy);
     const { memoryBytes, tokens: tokenCap, tools, scope } = optimizerLimits;
@@ -613,12 +613,11 @@ const failures: unknown[] = [];
 let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
 try {
   execution = await JuncoGraph.fromYaml(profile.withProbes(document), {
-    cwd: import.meta.dir,
-    scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
-    tracer: observer,
-    code: CODE,
-    ...(recorder === undefined ? {} : { recorder }),
-    ${p.options ?? ""}
+    args: { cwd: import.meta.dir, tracer: observer, code: CODE, ...(recorder === undefined ? {} : { recorder }) },
+    parameters: {
+      scheduler: (label, graphPath) => profile.scheduler(label, graphPath),
+      ${p.parameters ?? ""}
+    },
   });
   await execution.run();
   const result = execution.graph.result(execution.graph.sink.id);
@@ -1413,7 +1412,7 @@ async function tokenScenario(dir: string): Promise<void> {
     code: TOKEN_CODE,
     beforeBuild:
       "const ladder = new schedules.ModelLadder(models, optimizerLadder!);",
-    options: "ladder,",
+    parameters: "ladder,",
     check: "value === 1",
   });
   const log: EditorLog = { states: [] };

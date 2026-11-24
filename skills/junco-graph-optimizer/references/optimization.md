@@ -35,7 +35,7 @@ Read the pair, actual invocation (scripts, README, CI), TS build options and the
 
 - Nodes, edge IDs (`edge.id ?? from + ("~>" message | "->" value) + to`), nested wrapper paths, labels (`name ?? node id`), triggers, `source.routes`, `sink.returns`, and agents that `send` on message edges.
 - For each target, record the registered instruction, interpolated value and return-message placeholders, and scheduler-delivered message edges/order separately. YAML prompt text alone is no longer the complete assignment; message content arrives by steering. Preserve all of it when freezing the helper template.
-- TS bindings: code node/edge IDs, prepared `agents` maps keyed by exact agent paths, measurement windows, terminal checks, `scheduler(label)` dispatch, ladder/limits, controller definitions (including `schedules.ralph`), `config.code` keys, recorder/tracer/collection ownership.
+- TS bindings: code node/edge IDs, `args.tools` and `args.agentOptions` maps keyed by exact agent paths, measurement windows, terminal checks, `scheduler(label, graphPath)` dispatch, ladder/limits, controller definitions (including `schedules.ralph`), `args.code` keys, recorder/tracer/collection ownership.
 - Matching indexed building blocks (such as `workflows.ralph`, fan-in workflows and graph node bodies), their input routes, edge transports, outputs and required controller registrations. Read the definition's JSDoc before reuse; establish compatibility during preparation, then use only what the prepared runner supports.
 - Existing authoritative whole-workload evaluator; for each Ralph target, an existing synchronous checker of one completed result. Do not invent either. Inspect tools/MCP/skills and repeat safety/reset requirements. Apply the Helper module's reserved-namespace collision refusal before preparation.
 
@@ -70,7 +70,7 @@ Pair lifecycle (including unchanged-TS trials):
 
 ## Helper module
 
-Before changing the runner, search `original.yml` and `original.ts` for the text `__junco_`. Any hit at any graph depth (node ID, edge ID, graph name, `config.code` key) is a collision: stop and report it. Then paste this block unchanged into `workflow.ts` (below its imports; merge duplicate imports). It is dormant until a YAML candidate uses the reserved IDs.
+Before changing the runner, search `original.yml` and `original.ts` for the text `__junco_`. Any hit at any graph depth (node ID, edge ID, graph name, `args.code` key) is a collision: stop and report it. Then paste this block unchanged into `workflow.ts` (below its imports; merge duplicate imports). It is dormant until a YAML candidate uses the reserved IDs.
 
 ```ts helpers.ts
 import { rename, readFile, writeFile } from "node:fs/promises";
@@ -195,7 +195,7 @@ export const assignment =
     }, policy);
   };
 
-/** `config.code` plus the three reserved helpers; a same-named existing entry is a collision. */
+/** `args.code` plus the three reserved helpers; a same-named existing entry is a collision. */
 export function withOptimizerCode<C>(
   existing: Readonly<Record<string, syntax.DeterministicNode<C>>> | undefined,
   templates: Readonly<Record<string, string>>,
@@ -209,7 +209,7 @@ export function withOptimizerCode<C>(
   };
   for (const id of Object.keys(added))
     if (existing !== undefined && Object.hasOwn(existing, id))
-      throw new Error(`config.code already defines reserved "${id}"`);
+      throw new Error(`args.code already defines reserved "${id}"`);
   const code = { ...existing, ...added };
   if (Object.keys(checks).length === 0) return code;
   const optimized = ralphUntil(checks, rounds).code.RalphControl;
@@ -289,7 +289,7 @@ export async function writeCompletion(
 
 Helper contracts:
 
-- One local ID serves every nested level: `options.code` is keyed by local node ID, and each helper binds only the edges declared at its own level.
+- One local ID serves every nested level: `args.code` is keyed by local node ID, and each helper binds only the edges declared at its own level.
 - `__junco_fanout` and `__junco_assignment` finish with `graph.FinalMessages`. `__junco_fanin` validates each delivered view before advancing its `ConstFanin` and closes the delegated body on exit. Give `__junco_fanin` `trigger: { any: [...its inputs] }`; it emits the array only after every input arrived, in declaration order.
 - Missing/blank/abnormal/non-text input, a missing route or output, or a template/input mismatch throws — data is never dropped. A consumer of `__junco_fanin:output` receives the ordered array as a steered user message encoded as `JSON.stringify({ id: "__junco_fanin:output", payload: reports })`; it reads `payload`, never a tool or YAML prompt placeholder. Every agent stages its instruction before the delivered user messages. Values are not steered; YAML agent placeholders can also render return FIFOs instead of steering those results.
 - Only the edges are new; no tools, permissions or isolation are added.
@@ -314,9 +314,8 @@ const RALPH_CHECKS: Record<string, schedules.RalphPredicate> = {
 };
 
 const run = await readGraphRun();
-const document = syntax.parse(await readFile(new URL("./workflow.yml", import.meta.url), "utf8"), {
-  /* the existing params / sourceName */
-});
+const { params: _params, ...buildArgs } = args;
+const document = syntax.parse(await readFile(new URL("./workflow.yml", import.meta.url), "utf8"), args);
 const hash = graphHash(document);
 if (run !== undefined && run.expectedGraphHash !== hash)
   throw new Error("the candidate graph differs from its run request"); // before any agent exists
@@ -328,10 +327,13 @@ let metrics: Record<string, number> = {};
 let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
 try {
   execution = await JuncoGraph.fromYaml(document, {
-    /* every existing option, unchanged, except: */
-    code: withOptimizerCode(/* existing config.code */ undefined, ASSIGNMENTS, RALPH_CHECKS /* , caller-authorized cap */),
-    tracer: observer,
-    ...(recorder === undefined ? {} : { recorder }),
+    args: {
+      ...buildArgs,
+      code: withOptimizerCode(args.code, ASSIGNMENTS, RALPH_CHECKS /* , caller-authorized cap */),
+      tracer: observer,
+      ...(recorder === undefined ? {} : { recorder }),
+    },
+    parameters,
   });
   await execution.run();
   /* the existing terminal assertion; throw when it fails */
@@ -353,7 +355,7 @@ Integration rules:
 
 - Without `JUNCO_GRAPH_RUN_DIR` the workflow behaves exactly as before: no recorder, no receipt, helpers dormant.
 - **Recorder.** Pass the recorder to `fromYaml`; the graph places its agents in their node contexts. For a borrowed collection, preserve its recorder root; configure any native monitoring when opening that collection. Integrate an existing recorder or report the ownership conflict rather than replacing it. Usage mode records every request's cost, failed and aborted ones included; activation rows then omit cost. An existing model-backed scheduler must record its own request usage to the same recorder without changing decisions; if complete request accounting is impossible, report that prerequisite and make no total-cost claims.
-- **Code.** `withOptimizerCode` merges into the existing `config.code` and throws on collisions.
+- **Code.** `withOptimizerCode` merges into the existing `args.code` and throws on collisions.
 - **Ralph control.** Only a graph containing `RalphControl` executes the controller factory. Dispatch by prepared label, retaining the original controller and its limits elsewhere; reject label collisions during preparation.
 - **Checks.** `RALPH_CHECKS` entries call an existing deterministic checker or authoritative host-state probe synchronously and judge the current result, assignment and round — never a stale flag, never the model's own claim. An async-only evaluator is a prerequisite to report: a Promise is not a decision (`until` throws on one). A whole-workload metric does not validate an intermediate node.
 - **Geometry bindings.** Rekey only the necessary local-ID membership/order, graph-label dispatch, qualified `tools` and `agentOptions` entries, controller/code registrations and edge/path references. Remove obsolete entries: a former agent ID that now names a wrapper cannot be a tool or option key. Preserve each new role's effective tool grant, including inherited defaults. Never share a session between roles. Keep measurement windows fixed; new nodes start without samples.

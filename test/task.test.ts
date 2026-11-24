@@ -1534,7 +1534,10 @@ describe("native task lifecycle and complaints", () => {
     - { from: $source, to: caller, kind: message, schema: { type: object } }
     - { from: caller, to: caller, schema: &report { type: object, required: [role, content] } }
     - { from: caller, to: $sink, kind: message, on: return, schema: *report }
-`, { cwd: process.cwd(), scheduler: () => schedules.parallel(), tracer: quiet, ladder, collection });
+`, {
+      args: { cwd: process.cwd(), tracer: quiet, collection },
+      parameters: { scheduler: () => schedules.parallel(), ladder },
+    });
     const id = graph.NodeId.create("caller");
     const caller = execution.graph.getNode(id)?.state;
     assert.ok(caller instanceof agentApi.JuncoAgent);

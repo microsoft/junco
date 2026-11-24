@@ -246,11 +246,11 @@ const ReviewAssignment: syntax.DeterministicNode<RoundContext> = ({ context, edg
 // partial research there and yields; the Architect starts from it while the Librarian waits,
 // paused, until the Architect returns. The review assignment always joins both final reports.
 
-type CommitteeOptions = Pick<syntax.BuildOptions, "cwd" | "collection" | "tools" | "recorder" | "tracer" | "signal"> & {
+type CommitteeOptions = Pick<syntax.JuncoArgs, "cwd" | "collection" | "tools" | "recorder" | "tracer" | "signal"> & {
   readonly ladder: schedules.ModelLadder;
 };
 
-export async function createCommittee(request: string, search: SearchCounts, options: CommitteeOptions) {
+export async function createCommittee(request: string, search: SearchCounts, { cwd, collection, tools, recorder, tracer, signal, ladder }: CommitteeOptions) {
   const context: RoundContext = { request, search, round: 1, published: new Map(), acceptedPartial: false,
     failuresBefore: search.failures(), searchesBefore: search.searches() };
   let previous: ReadonlyMap<graphApi.NodeIdType, unknown> = new Map();
@@ -279,14 +279,17 @@ export async function createCommittee(request: string, search: SearchCounts, opt
     }).map(([id]) => id);
   };
   const execution: YamlExecution = await JuncoGraph.fromYaml(source, {
-    ...options, context, code: { ResearchAssignment, DesignAssignment, ResearchRelease, ReviewAssignment },
-    scheduler: () => schedules.strength((_, id) => id === "Architect" ? "high" : id === "Reducer" ? "xhigh" : "med",
-      snapshot => ({ selected: schedules.select(snapshot, available()) })),
+    args: { cwd, collection, tools, recorder, tracer, signal, context, code: { ResearchAssignment, DesignAssignment, ResearchRelease, ReviewAssignment } },
+    parameters: {
+      ladder,
+      scheduler: () => schedules.strength((_, id) => id === "Architect" ? "high" : id === "Reducer" ? "xhigh" : "med",
+        snapshot => ({ selected: schedules.select(snapshot, available()) })),
+    },
   });
   const run = async () => {
-    options.signal?.throwIfAborted();
-    while (available().length) await execution.step({ signal: options.signal });
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
+    while (available().length) await execution.step({ signal });
+    signal?.throwIfAborted();
     const result = execution.graph.results().get(reducer);
     if (result === previous.get(reducer)) throw new Error("Reducer did not complete this round");
     return result;

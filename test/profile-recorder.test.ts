@@ -67,20 +67,24 @@ const text = (value: unknown) => {
 const options = async (
   cwd: string,
   resources: AsyncDisposableStack,
+  recorder: NonNullable<syntax.JuncoArgs["recorder"]>,
   final = fauxAssistantMessage("FINAL-OUT"),
 ) => ({
-  cwd,
-  collection: resources.adopt(countedCollection().collection, (c) => c.close()),
-  ladder: await offlineLadder(({ messages }) => {
-    const first = messages.find((m) => m.role === "user");
-    assert.ok(first);
-    const instruction = typeof first.content === "string" ? first.content : contentText(first.content);
-    if (instruction === "work") return fauxAssistantMessage("WORKER-OUT");
-    assert.equal(instruction, "Process the report in the user message following this prompt.");
-    return final;
-  }),
-  scheduler: () => schedules.parallel(),
-  tracer: new tracer.DummyTracer(),
+  args: {
+    cwd, recorder, tracer: new tracer.DummyTracer(),
+    collection: resources.adopt(countedCollection().collection, (c) => c.close()),
+  },
+  parameters: {
+    ladder: await offlineLadder(({ messages }) => {
+      const first = messages.find((m) => m.role === "user");
+      assert.ok(first);
+      const instruction = typeof first.content === "string" ? first.content : contentText(first.content);
+      if (instruction === "work") return fauxAssistantMessage("WORKER-OUT");
+      assert.equal(instruction, "Process the report in the user message following this prompt.");
+      return final;
+    }),
+    scheduler: () => schedules.parallel(),
+  },
 });
 
 test("recorded nested activations fit offline profiles by node path", async () => {
@@ -91,14 +95,17 @@ test("recorded nested activations fit offline profiles by node path", async () =
     await using resources = new AsyncDisposableStack();
     resources.defer(() => recorder.close());
     const doc = document();
+    const { args, parameters } = await options(directory, resources, recorder);
     const execution = await JuncoGraph.fromYaml(doc, {
-      ...await options(directory, resources),
-      recorder,
-      measurementWindows: new Map([["memory", 1]]),
-      scheduler: () => (snapshot) => {
-        // No shell pipelines ran to supply scheduler memory measurements.
-        assert.equal(snapshot.measurements.size, 0);
-        return { selected: schedules.select(snapshot, snapshot.available) };
+      args,
+      parameters: {
+        ...parameters,
+        measurementWindows: new Map([["memory", 1]]),
+        scheduler: () => (snapshot) => {
+          // No shell pipelines ran to supply scheduler memory measurements.
+          assert.equal(snapshot.measurements.size, 0);
+          return { selected: schedules.select(snapshot, snapshot.available) };
+        },
       },
     });
     try {
@@ -165,15 +172,18 @@ test("failed activations are excluded while successful activations survive a fai
     resources.defer(() => recorder.close());
     const failure = fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider down" });
     let cause: unknown;
+    const { args, parameters } = await options(directory, resources, recorder, failure);
     const execution = await JuncoGraph.fromYaml(document(), {
-      ...await options(directory, resources, failure),
-      recorder,
-      agentOptions: new Map<graph.NodeIdType, syntax.YamlAgentOptions>([
-        [graph.NodeId.create("Final"), { errorHandler: ({ error }) => {
-          cause = error;
-          throw error;
-        } }],
-      ]),
+      args: {
+        ...args,
+        agentOptions: new Map<graph.NodeIdType, syntax.YamlAgentOptions>([
+          [graph.NodeId.create("Final"), { errorHandler: ({ error }) => {
+            cause = error;
+            throw error;
+          } }],
+        ]),
+      },
+      parameters,
     });
     try {
       await assert.rejects(
@@ -215,10 +225,7 @@ test("flush reports an append failure queued at run end", async () => {
     const recorder = new tracer.JsonlRecorder({ path: directory });
     await using resources = new AsyncDisposableStack();
     resources.defer(async () => { await assert.rejects(recorder.close(), { code: "EISDIR" }); });
-    const execution = await JuncoGraph.fromYaml(document(), {
-      ...await options(directory, resources),
-      recorder,
-    });
+    const execution = await JuncoGraph.fromYaml(document(), await options(directory, resources, recorder));
     try {
       await execution.run();
       await assert.rejects(recorder.flush(), { code: "EISDIR" });

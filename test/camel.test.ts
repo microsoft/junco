@@ -77,13 +77,11 @@ async function build(plan: AssistantMessage, reply = bobReply) {
   const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "camel-")), (p) => rm(p, { recursive: true, force: true }));
   const collection = setup.adopt(await tools.ToolCollection.create(cwd, { native: await copyTreeNative(), sandbox: "always" }), (c) => c.close());
   const execution = await JuncoGraph.fromYaml(source, {
-    cwd,
-    scheduler: () => schedules.parallel(),
-    tracer: new tracer.DummyTracer(),
-    code: { Interpreter, Executor },
-    context,
-    params: { query: BOB_QUERY },
-    collection, ladder,
+    args: {
+      cwd, collection, tracer: new tracer.DummyTracer(),
+      code: { Interpreter, Executor }, context, params: { query: BOB_QUERY },
+    },
+    parameters: { scheduler: () => schedules.parallel(), ladder },
   });
   setup.defer(() => execution.graph.close());
   for (const id of ["PLLM", "QLLM"]) {

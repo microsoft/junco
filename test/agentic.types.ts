@@ -72,7 +72,9 @@ import {
   type CompactionPolicy,
   Deterministic,
   graph as graphApi,
+  type JuncoArgs,
   JuncoGraph,
+  type JuncoParameters,
   MockAgent,
   type MockCall,
   type MockFrame,
@@ -1650,7 +1652,21 @@ export async function schemaDomainsStayExact(
   // @ts-expect-error a number-only result graph requires an explicit step
   numberOnly.addNode({ ...policy, state: numberAgent, prompt: "go" });
   // fromYaml promises only the runtime-loaded domains.
-  const loaded = await JuncoGraph.fromYaml("", config);
+  exact<typeof config.args, JuncoArgs>(true);
+  exact<typeof config.parameters, JuncoParameters>(true);
+  const loaded = await JuncoGraph.fromYaml("", {
+    args: {
+      cwd: ".",
+      context: { topic: "review" },
+      code: {
+        Review: ({ context, policy }) => {
+          exact<typeof context, { topic: string }>(true);
+          return new Deterministic<TSchema, unknown>(async function* () { return context.topic; }, policy);
+        },
+      },
+    },
+    parameters: config.parameters,
+  });
   exact<
     typeof loaded,
     SchedulerContext<

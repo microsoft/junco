@@ -26,25 +26,26 @@ export interface MixedGraph {
 }
 
 export const MixedGraph = {
-  async create(options: Pick<syntax.BuildOptions, "collection" | "tracer" | "recorder"> & { ladder: schedules.ModelLadder }): Promise<MixedGraph> {
+  async create({ collection, tracer, recorder, ladder }: Pick<syntax.JuncoArgs, "collection" | "tracer" | "recorder"> & { ladder: schedules.ModelLadder }): Promise<MixedGraph> {
     const reviewerId = graph.NodeId.create("Reviewer");
     const ralph = schedules.ralph({ rounds: 2 });
     const execution = await JuncoGraph.fromYaml(source, {
-      cwd: process.cwd(),
-      scheduler: () => schedules.parallel(),
-      code: {
-        ...ralph.code,
-        ValidateDraft: ({ edges, policy }) => new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
-          const inputs = yield [];
-          const source = edges.get("Ralph~>Reviewer")!;
-          const output = edges.get("ValidateDraft~>Reviewer")!;
-          return new graph.FinalMessages(graph.from(inputs, source).map((draft) => {
-            syntax.finalText(draft, source.id);
-            return graph.Message.create(output, draft);
-          }));
-        }, policy),
+      args: {
+        cwd: process.cwd(), collection, tracer, recorder,
+        code: {
+          ...ralph.code,
+          ValidateDraft: ({ edges, policy }) => new graph.nodes.Deterministic<TSchema, unknown>(async function* () {
+            const inputs = yield [];
+            const source = edges.get("Ralph~>Reviewer")!;
+            const output = edges.get("ValidateDraft~>Reviewer")!;
+            return new graph.FinalMessages(graph.from(inputs, source).map((draft) => {
+              syntax.finalText(draft, source.id);
+              return graph.Message.create(output, draft);
+            }));
+          }, policy),
+        },
       },
-      ...options,
+      parameters: { scheduler: () => schedules.parallel(), ladder },
     });
     return { execution, reviewerId };
   },

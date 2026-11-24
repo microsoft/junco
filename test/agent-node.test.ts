@@ -360,7 +360,10 @@ test("YAML firings respect promptless input, a staged override, then the origina
         { from: "Reviewer", to: "$sink", schema: {} },
       ],
     },
-  }, { cwd: process.cwd(), collection, ladder, scheduler: () => schedules.parallel(), tracer: new DummyTracer() });
+  }, {
+    args: { cwd: process.cwd(), collection, tracer: new DummyTracer() },
+    parameters: { ladder, scheduler: () => schedules.parallel() },
+  });
   const graph = execution.graph;
   closers.push(() => graph.close());
   const worker = graph.getNode(NodeId.create("Worker"))!.state;

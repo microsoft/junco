@@ -680,14 +680,16 @@ async function worker(problemDir: string, manifestPath: string, artifacts: strin
     }
     controller.signal.throwIfAborted();
     const text = await workflow.run({
-      cwd: dir,
-      ladder,
-      tools: collections,
-      tracer: observer,
-      recorder,
-      signal: controller.signal,
-      context: host,
-      agentOptions: await recordedSessions(assignments, dir, repo, index),
+      args: {
+        cwd: dir,
+        tools: collections,
+        tracer: observer,
+        recorder,
+        signal: controller.signal,
+        context: host,
+        agentOptions: await recordedSessions(assignments, dir, repo, index),
+      },
+      parameters: { ladder },
     }, (g) => collectAgents(g, acquired));
     if (typeof text !== "string" || !text.trim()) throw new Error("workflow returned blank terminal text");
     outcome = { workflow_status: "completed", terminal_text: text, error: null };
@@ -808,14 +810,18 @@ async function preflight(): Promise<void> {
     });
     releases.push(() => collection.close());
     const execution = await JuncoGraph.fromYaml(document, {
-      cwd,
-      ladder,
-      scheduler: () => schedules.strength((_snapshot, id) => PREFLIGHT_STRENGTH(id), schedules.parallel()),
-      code: { Relay },
-      tools: new Map([[graph.NodeId.create("Probe"), collection]]),
-      tracer: observer,
-      recorder,
-      agentOptions: await recordedSessions(assignments, cwd, repo, index),
+      args: {
+        cwd,
+        code: { Relay },
+        tools: new Map([[graph.NodeId.create("Probe"), collection]]),
+        tracer: observer,
+        recorder,
+        agentOptions: await recordedSessions(assignments, cwd, repo, index),
+      },
+      parameters: {
+        ladder,
+        scheduler: () => schedules.strength((_snapshot, id) => PREFLIGHT_STRENGTH(id), schedules.parallel()),
+      },
     });
     try {
       await execution.run();

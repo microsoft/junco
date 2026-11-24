@@ -114,8 +114,8 @@ graph:
 `);
   const { collection, active } = countedCollection();
   const execution = await JuncoGraph.fromYaml(document, {
-    cwd: dir, scheduler: () => schedules.parallel(), tracer: new tracer.DummyTracer(),
-    ladder, collection,
+    args: { cwd: dir, collection, tracer: new tracer.DummyTracer() },
+    parameters: { scheduler: () => schedules.parallel(), ladder },
   });
   let value: unknown;
   let failure: string | undefined;
@@ -381,14 +381,16 @@ async function scenario(
   const ladder = await offlineLadder([...scriptsByPath.values()].flatMap((turns) => turns.map(() => respond)));
   const { collection, active } = countedCollection();
   const execution = await JuncoGraph.fromYaml<cb.Context>(source, {
-    cwd: tmpdir(),
-    scheduler: workflow.scheduler,
-    code: { ...workflow.code, ...participants, ...code(h) },
-    ladder, collection,
-    context: { ...h.host, race: {} },
-    signal: h.abort.signal,
-    tracer: new tracer.DummyTracer(),
-    ...(recorder === undefined ? {} : { recorder }),
+    args: {
+      cwd: tmpdir(),
+      code: { ...workflow.code, ...participants, ...code(h) },
+      collection,
+      context: { ...h.host, race: {} },
+      signal: h.abort.signal,
+      tracer: new tracer.DummyTracer(),
+      ...(recorder === undefined ? {} : { recorder }),
+    },
+    parameters: { scheduler: workflow.scheduler, ladder },
   });
   let report: string | undefined;
   let plannerResult: unknown;
@@ -438,7 +440,8 @@ group("solo baseline", () => {
     const ladder = await offlineLadder([fauxAssistantMessage("solo report", { stopReason: stop, ...(stop === "error" ? { errorMessage: "solo error" } : {}) })]);
     try {
       return await solo.run({
-        cwd: tmpdir(), context: h.host, ladder, collection, tracer: new tracer.DummyTracer(),
+        args: { cwd: tmpdir(), context: h.host, collection, tracer: new tracer.DummyTracer() },
+        parameters: { ladder },
       }, (g) => {
         const members = new Map();
         collectAgents(g, members);
@@ -1078,9 +1081,14 @@ async function nestedWorkers(shells: boolean): Promise<void> {
   const counted = shells ? undefined : countedCollection();
   if (counted) lifetime.defer(() => counted.collection.close());
   const execution = await JuncoGraph.fromYaml(document, {
-    cwd, tools: collections, collection: counted?.collection, ladder, tracer: new tracer.DummyTracer(),
-    scheduler: (_, prefix) => schedules.strength((_snapshot, id) => strengthOf(`${prefix}/${id}`), schedules.parallel()),
-    agentOptions: await recordedSessions(assignments, cwd, repo, index),
+    args: {
+      cwd, tools: collections, collection: counted?.collection, tracer: new tracer.DummyTracer(),
+      agentOptions: await recordedSessions(assignments, cwd, repo, index),
+    },
+    parameters: {
+      ladder,
+      scheduler: (_, prefix) => schedules.strength((_snapshot, id) => strengthOf(`${prefix}/${id}`), schedules.parallel()),
+    },
   });
   try {
     collectAgents(execution.graph, members);

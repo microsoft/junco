@@ -1,11 +1,12 @@
 export {
   type AgentSpec,
-  type BuildOptions,
   type CodeContext,
   createJuncoAgent,
   type DeterministicNode,
   type FromYamlOptions,
   finalText,
+  type JuncoArgs,
+  type JuncoParameters,
   resolveAgents,
   type YamlAgentOptions,
 } from "./build.js";

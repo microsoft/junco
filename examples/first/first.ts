@@ -21,11 +21,8 @@ let answer: string;
     browsers.set(graph.NodeId.create(node), lifetime.adopt(collection, (c) => c.close()));
   }
   const execution = await JuncoGraph.fromYaml(source, {
-    cwd: process.cwd(),
-    scheduler: () => schedules.parallel(),
-    ladder,
-    tools: browsers,
-    tracer: observer,
+    args: { cwd: process.cwd(), tools: browsers, tracer: observer },
+    parameters: { scheduler: () => schedules.parallel(), ladder },
   });
   lifetime.defer(() => execution.graph.close());
   const results = await execution.run();
