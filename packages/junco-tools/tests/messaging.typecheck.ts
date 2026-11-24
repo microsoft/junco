@@ -14,6 +14,7 @@ const NumberSchema = Type.Number();
 type Num = typeof NumberSchema;
 declare const sendHost: SendToolHost<Num>;
 declare const signal: AbortSignal;
+const meta = { handoff: "h", task: "t", spec: "s" };
 
 /** Unhosted tools promise no payload domain. */
 const unsent = new SendTool();
@@ -25,7 +26,7 @@ export const sendNumber = SendTool.invoke(
   unsent,
   sendHost,
   "c",
-  { id: "n", payload: 7 },
+  { ...meta, id: "n", payload: 7 },
   signal,
 );
 export const sendString = SendTool.invoke(
@@ -33,7 +34,7 @@ export const sendString = SendTool.invoke(
   sendHost,
   "c",
   // @ts-expect-error a string is outside the numeric host's domain
-  { id: "n", payload: "7" },
+  { ...meta, id: "n", payload: "7" },
   signal,
 );
 
