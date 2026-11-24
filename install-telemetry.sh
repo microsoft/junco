@@ -10,7 +10,7 @@ umask 077
 export LC_ALL=C
 
 fail() { failed_command="preflight: $*"; failed_line=${BASH_LINENO[0]}; printf 'install-telemetry: %s\n' "$*" >&2; exit 1; }
-for command in docker systemctl systemd-analyze curl jq tar flock runuser realpath stat getent ss mktemp install cp mv rm chmod chown date env cmp df find; do
+for command in docker systemctl systemd-analyze curl jq tar flock runuser realpath stat getent ss mktemp install cp mv rm chmod chown date env cmp df find timeout; do
   command -v "$command" >/dev/null || fail "Missing prerequisite: $command"
 done
 exec 9>/run/junco-telemetry-install.lock
@@ -29,14 +29,10 @@ IFS=: read -r owner _ uid gid _ owner_home _ <<< "$passwd"
 [[ $owner_home != *$'\n'* && $owner_home != *$'\r'* ]] || fail 'Newlines in paths are unsupported.'
 IFS= read -r -d '' docker < <(realpath -ze -- "$(command -v docker)")
 [[ $docker != *$'\n'* && $docker != *$'\r'* ]] || fail 'Newlines in paths are unsupported.'
-IFS= read -r -d '' opik_root < <(realpath -ze -- "$root/../opik")
-[[ $opik_root != *$'\n'* && $opik_root != *$'\r'* ]] || fail 'Newlines in paths are unsupported.'
-upstream=$opik_root/deployment/docker-compose/docker-compose.yaml
 compose_file=$root/docker-compose.yml
 legacy_grafana=''
 grafana_bind=''
 adopt_bind=0
-baseline_receipt=${JUNCO_OPIK_BASELINE_RECEIPT:-}
 unit_dir=/etc/systemd/system
 managed_unit=junco-telemetry.service
 state_dir=/var/lib/junco-telemetry
@@ -45,20 +41,18 @@ backup=''
 work=$(mktemp -d /run/junco-telemetry-install.XXXXXXXX)
 cutover=0
 complete=0
-sdk_changed=0
 managed_present=0
 reinstall=0
 failed_command='installation preflight'
 failed_line=0
 unit_tmp=''
-config_tmp=''
 state_tmp=''
 rollback_dir=''
 state_changed=0
 rollback_dropin=/run/systemd/system/junco-telemetry.service.d/90-install-rollback.conf
-legacy_units=(grafana-compose.service grafana.service opik.service)
-volumes=(grafana_data opik-opik_mysql opik-opik_redis-data opik-opik_clickhouse opik-opik_clickhouse-server opik-opik_clickhouse-config opik-opik_zookeeper opik-opik_minio-data)
-services=(grafana grafana-proxy prometheus mysql redis clickhouse-init zookeeper clickhouse minio mc backend python-backend frontend)
+legacy_units=(grafana-compose.service grafana.service)
+volumes=(grafana_data)
+services=(grafana grafana-proxy prometheus iggy)
 declare -A old_enabled old_active old_present
 
 # Root, checkout owner and systemd deliberately use the same local Docker socket.
@@ -84,24 +78,6 @@ atomic_copy() {
   temporary=$(mktemp "${destination%/*}/.junco-restore.XXXXXXXX") || return
   cp --preserve=all -- "$source" "$temporary" && mv -fT -- "$temporary" "$destination" || { rm -f -- "$temporary"; return 1; }
 }
-capture_baseline() {
-  local destination=$1
-  curl -q --noproxy '*' --fail --silent --show-error --max-time 30 --get http://localhost:5173/api/v1/private/projects --data-urlencode 'name=junco-swebench-smoke' > "$destination/baseline-project.json"
-  curl -q --noproxy '*' --fail --silent --show-error --max-time 30 --get http://localhost:5173/api/v1/private/traces/ --data-urlencode 'project_id=01a19a1d-6d3d-775d-bce3-6e74e89bdca3' --data-urlencode 'size=100' > "$destination/baseline-traces.json"
-  curl -q --noproxy '*' --fail --silent --show-error --max-time 30 --get http://localhost:5173/api/v1/private/spans/ --data-urlencode 'project_id=01a19a1d-6d3d-775d-bce3-6e74e89bdca3' --data-urlencode 'trace_id=01a19a39-5c23-72ab-ac69-03b59745720b' --data-urlencode 'size=100' > "$destination/baseline-spans.json"
-}
-normalize_baseline() {
-  local directory=$1
-  jq -eS '[.content[] | select(.id == "01a19a1d-6d3d-775d-bce3-6e74e89bdca3" and .name == "junco-swebench-smoke") | {id,name,created_at}] | if length == 1 then . else error("baseline project missing") end' "$directory/baseline-project.json" > "$directory/project.identity.json"
-  jq -eS '[.content[] | select(.id == "01a19a39-5c23-72ab-ac69-03b59745720b" and .project_id == "01a19a1d-6d3d-775d-bce3-6e74e89bdca3" and .name == "preflight" and .start_time == "2026-11-02T03:06:52.835Z" and .end_time == "2026-11-02T03:06:57.523Z" and .span_count == 8) | {id,project_id,name,start_time,end_time,input,output,metadata,created_at,created_by,source,environment}] | if length == 1 then . else error("baseline trace missing or incomplete") end' "$directory/baseline-traces.json" > "$directory/trace.identity.json"
-  jq -eS '.content | sort_by(.id) | if length == 8 and all(.[]; .project_id == "01a19a1d-6d3d-775d-bce3-6e74e89bdca3" and .trace_id == "01a19a39-5c23-72ab-ac69-03b59745720b" and .start_time != null and .end_time != null) and (map(.id) == ["01a19a39-5c2d-7648-a054-9706086b967a","01a19a39-5c2e-752e-bf1c-66f0ae1a7abb","01a19a39-623b-70f3-8a47-e5d0327ba793","01a19a39-623c-76e7-aa72-4e3a5d4e90dc","01a19a39-623d-74cf-9a11-426addc33253","01a19a39-623e-7184-b6d5-d98ae9fd6030","01a19a39-6e72-7558-92de-b30251df573a","01a19a39-6e73-767c-9c0a-60e39ecaa3e4"]) then map({id,project_id,trace_id,parent_span_id,name,type,start_time,end_time,input,output,metadata,created_at,created_by,source,environment}) else error("baseline eight spans missing or incomplete") end' "$directory/baseline-spans.json" > "$directory/spans.identity.json"
-}
-compare_baseline() {
-  local previous=$1 current=$2 kind
-  for kind in project trace spans; do
-    jq -e --slurpfile previous "$previous/$kind.identity.json" '. == $previous[0]' "$current/$kind.identity.json" >/dev/null || fail "Preserved Opik baseline $kind changed."
-  done
-}
 rollback_errors=0
 recover() { "$@" || { printf 'Rollback command failed:' >&2; printf ' %q' "$@" >&2; printf '\n' >&2; rollback_errors=1; }; }
 restore_enablement() {
@@ -120,7 +96,6 @@ rollback() {
     recover systemctl stop "$managed_unit"
   fi
   recover docker_root compose -p junco-telemetry -f "$backup/new-compose.json" stop --timeout 120
-  if (( sdk_changed )); then recover atomic_copy "$backup/opik.config" "$sdk_config"; fi
   for name in "${legacy_units[@]}" "$managed_unit"; do
     if [[ ${old_present[$name]} == 1 ]]; then
       recover atomic_copy "$backup/$name" "$unit_dir/$name"
@@ -167,12 +142,9 @@ rollback() {
       printf 'Prior service restart failed; retained rollback override %s (Restart=no).\n' "$rollback_dropin" >&2
       rollback_errors=1
     fi
-  else
-    for project in grafana opik-opik; do
-      mapfile -t running_services < "$backup/$project.running-services"
-      (( ${#running_services[@]} )) || continue
-      recover docker_root compose -p "$project" -f "$backup/$project-compose.json" up -d --no-build --pull never --no-deps "${running_services[@]}"
-    done
+  elif [[ -s $backup/grafana.running-services ]]; then
+    mapfile -t running_services < "$backup/grafana.running-services"
+    recover docker_root compose -p grafana -f "$backup/grafana-compose.json" up -d --no-build --pull never --no-deps "${running_services[@]}"
   fi
   (( rollback_errors == 0 )) || printf 'Some rollback operations failed; saved configs and archives are retained for recovery.\n' >&2
   if (( ! managed_present && state_changed )); then
@@ -190,7 +162,6 @@ finish() {
     [[ -z $backup ]] || printf 'Retained backups: %s\n' "$backup" >&2
   fi
   [[ -z $unit_tmp ]] || rm -f -- "$unit_tmp"
-  [[ -z $config_tmp ]] || rm -f -- "$config_tmp"
   [[ -z $state_tmp ]] || rm -f -- "$state_tmp"
   rm -rf -- "$work"
   exit "$status"
@@ -205,21 +176,17 @@ systemctl show --property=SystemState --value >/dev/null
 docker_root info >/dev/null
 docker_owner info >/dev/null
 docker_owner compose version >/dev/null
-for asset in "$compose_file" "$root/telemetry/opik.override.yml" "$root/telemetry/prometheus.yml" "$root/telemetry/grafana-datasources.yml" "$root/telemetry/grafana-proxy.conf" "$upstream" "$opik_root/deployment/docker-compose/nginx_default_local.conf" "$opik_root/deployment/docker-compose/clickhouse_config/additional_config.xml" "$opik_root/deployment/docker-compose/clickhouse_config/users.d/enable_time_type.xml" "$opik_root/deployment/docker-compose/clickhouse_config/users.d/distributed_insert_queue.xml"; do
+for asset in "$compose_file" "$root/telemetry/prometheus.yml" "$root/telemetry/grafana-datasources.yml" "$root/telemetry/grafana-proxy.conf"; do
   [[ -f $asset && -r $asset ]] || fail "Missing included deployment asset: $asset"
   runuser -u "$owner" -- test -r "$asset" || fail "Checkout owner cannot read asset: $asset"
 done
 compose config -q
 compose config --format json > "$work/new-compose.json"
 jq -e '.name == "junco-telemetry"' "$work/new-compose.json" >/dev/null || fail 'Compose must own exactly project junco-telemetry.'
-if jq -e '.services["minio-init"] != null' "$work/new-compose.json" >/dev/null; then
-  services+=(minio-init)
-  jq -e '.services.minio.depends_on["minio-init"].condition == "service_completed_successfully" and any(.services["minio-init"].volumes[]; .type == "volume" and .source == "minio-data" and .target == "/data")' "$work/new-compose.json" >/dev/null || fail 'Upstream minio-init dependency/store is not preserved.'
-fi
 jq -e --argjson expected "$(printf '%s\n' "${services[@]}" | jq -R . | jq -s 'sort')" '(.services | keys | sort) == $expected' "$work/new-compose.json" >/dev/null || fail 'Unexpected active Compose services.'
-jq -e '[.services | to_entries[] | .key as $service | .value.ports[]? | {service:$service,target,published,host_ip}] | sort_by(.published) | length == 3 and .[0].service == "frontend" and .[0].target == 5173 and .[0].published == "5173" and .[1].service == "grafana-proxy" and .[1].target == 80 and .[1].published == "8000" and .[2].service == "prometheus" and .[2].target == 9090 and .[2].published == "8001" and (map(.host_ip) | unique | length == 1)' "$work/new-compose.json" >/dev/null || fail 'Unexpected telemetry port publications.'
+jq -e '[.services | to_entries[] | .key as $service | .value.ports[]? | {service:$service,target,published,host_ip}] | sort_by(.published) | length == 3 and .[0].service == "grafana-proxy" and .[0].target == 80 and .[0].published == "8000" and .[1].service == "prometheus" and .[1].target == 9090 and .[1].published == "8001" and .[0].host_ip == .[1].host_ip and .[2] == {service:"iggy",target:8090,published:"8090",host_ip:"127.0.0.1"}' "$work/new-compose.json" >/dev/null || fail 'Unexpected telemetry port publications.'
 jq -e '.services.grafana.environment | .GF_AUTH_ANONYMOUS_ENABLED == "true" and .GF_AUTH_ANONYMOUS_ORG_ROLE == "Admin" and .GF_AUTH_BASIC_ENABLED == "false" and .GF_AUTH_DISABLE_LOGIN_FORM == "true"' "$work/new-compose.json" >/dev/null || fail 'Anonymous Grafana configuration changed.'
-jq -e '.services.prometheus.image == "prom/prometheus:v3.15.1" and (.services.prometheus.command | index("--web.enable-otlp-receiver")) != null and any(.services.prometheus.volumes[]; .source == "prometheus_data" and .target == "/prometheus") and .volumes.prometheus_data.name == "junco-telemetry_prometheus_data" and .services["python-backend"].environment.OPIK_REVERSE_PROXY_URL == "http://frontend:5173/api"' "$work/new-compose.json" >/dev/null || fail 'Prometheus storage/OTLP or internal Opik routing changed.'
+jq -e '.services.prometheus.image == "prom/prometheus:v3.15.1" and (.services.prometheus.command | index("--web.enable-otlp-receiver")) != null and any(.services.prometheus.volumes[]; .source == "prometheus_data" and .target == "/prometheus") and .volumes.prometheus_data.name == "junco-telemetry_prometheus_data"' "$work/new-compose.json" >/dev/null || fail 'Prometheus storage/OTLP changed.'
 for service in "${services[@]}"; do
   jq -e --arg service "$service" '.services[$service] | . != null and ((.profiles // []) | length == 0) and .build == null and (.image | type == "string")' "$work/new-compose.json" >/dev/null || fail "Missing/default-profile/image-only service: $service"
 done
@@ -316,38 +283,35 @@ for volume in "${volumes[@]}"; do
   fi
   docker_root volume inspect "$volume" > "$work/$volume.json"
   jq -e --arg volume "$volume" 'length == 1 and .[0].Name == $volume and .[0].Driver == "local"' "$work/$volume.json" >/dev/null || fail "Wrong external volume: $volume"
-  if [[ $volume == opik-opik_* ]]; then
-    jq -e --arg logical "${volume#opik-opik_}" '.[0].Labels["com.docker.compose.project"] == "opik-opik" and .[0].Labels["com.docker.compose.volume"] == $logical' "$work/$volume.json" >/dev/null || fail "Unrelated owner of external volume: $volume"
-  elif (( reinstall )); then
+  if (( reinstall )); then
     jq -e 'any(.volumes[]; .external == true and .name == "grafana_data")' "$state_dir/compose.json" >/dev/null || fail 'Successful installer state does not own grafana_data.'
     if [[ -f $state_dir/grafana-volume.json ]]; then cmp -s "$state_dir/grafana-volume.json" "$work/$volume.json" || fail 'Installed Grafana volume identity changed.'; fi
     if jq -e --arg root "$root" '.[0].Labels["junco.telemetry.checkout"] == $root' "$work/$volume.json" >/dev/null; then
-      [[ -f $state_dir/grafana-volume.json && -d $state_dir/baseline ]] || fail 'Adopted Grafana volume is missing its successful volume/Opik baseline state.'
+      [[ -f $state_dir/grafana-volume.json ]] || fail 'Adopted Grafana volume is missing its successful volume state.'
     fi
   else
     jq -e '.[0].Labels["com.docker.compose.project"] == "grafana" and .[0].Labels["com.docker.compose.volume"] == "data"' "$work/$volume.json" >/dev/null || fail 'Unrelated owner of grafana_data.'
   fi
 done
-[[ $(jq '[.volumes[] | select(.external == true)] | length' "$work/new-compose.json") == 8 ]] || fail 'Compose declares unexpected external volumes.'
-jq -e --arg root "$opik_root" 'all(.[] | select(.Config.Labels["com.docker.compose.project"] == "opik-opik"); .Config.Labels["com.docker.compose.project.working_dir"] == ($root + "/deployment/docker-compose"))' "$work/containers.json" >/dev/null || fail 'An unrelated checkout owns the legacy Opik project.'
-if [[ ${old_present[opik.service]} == 1 ]]; then
-  start=$(systemctl show opik.service --property=ExecStart --value)
-  [[ $start == *"$opik_root/opik.sh"* ]] || fail 'Legacy opik.service does not own the inspected sibling deployment.'
+[[ $(jq '[.volumes[] | select(.external == true)] | length' "$work/new-compose.json") == 1 ]] || fail 'Compose declares unexpected external volumes.'
+if (( reinstall )); then
+  jq -e --slurpfile old "$state_dir/compose.json" --slurpfile new "$work/new-compose.json" '
+    all(.[] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == "junco-telemetry");
+      .Config.Labels["com.docker.compose.service"] as $s | ($old[0].services[$s] // $new[0].services[$s]) != null)
+  ' "$work/containers.json" >/dev/null || fail 'Unexpected active service in managed project.'
 fi
-# Inactive legacy orphans are inventoried and removed, never added to rollback's running-services.
-jq -e --argjson services "$(printf '%s\n' "${services[@]}" | jq -R . | jq -s .)" '
-  all(.[] | select(.Config.Labels["com.docker.compose.project"] | IN("opik-opik", "junco-telemetry"));
-    (.Config.Labels["com.docker.compose.service"] as $service | ($services | index($service)) != null)
-    or (.Config.Labels["com.docker.compose.project"] == "opik-opik" and .State.Running == false))
-' "$work/containers.json" >/dev/null || fail 'Unexpected active legacy or unknown managed service in a captured telemetry project.'
 if [[ -n $grafana_bind ]]; then
   jq -e --arg source "$grafana_bind" 'all(.[]; . as $container | all(.Mounts[]?; . as $mount | if .Type == "bind" and (.Source == $source or (.Source | startswith($source + "/")) or ($source | startswith($mount.Source + "/"))) then $container.Config.Labels["com.docker.compose.project"] == "grafana" and $container.Config.Labels["com.docker.compose.service"] == "grafana" else true end))' "$work/containers.json" >/dev/null || fail 'An unrelated container mounts the legacy Grafana bind.'
 fi
 # Never stop a writer from an unrelated project or permit it to share legacy stores.
-jq -e --argjson volumes "$(printf '%s\n' "${volumes[@]}" | jq -R . | jq -s .)" 'all(.[]; . as $container | all(.Mounts[]?; if .Type == "volume" and (.Name as $name | $volumes | index($name)) != null then ($container.Config.Labels["com.docker.compose.project"] as $project | ["grafana", "opik-opik", "junco-telemetry"] | index($project)) != null else true end))' "$work/containers.json" >/dev/null || fail 'An unrelated container mounts a preserved telemetry store.'
+jq -e --argjson volumes "$(printf '%s\n' "${volumes[@]}" | jq -R . | jq -s .)" 'all(.[]; . as $container | all(.Mounts[]?; if .Type == "volume" and (.Name as $name | $volumes | index($name)) != null then ($container.Config.Labels["com.docker.compose.project"] as $project | ["grafana", "junco-telemetry"] | index($project)) != null else true end))' "$work/containers.json" >/dev/null || fail 'An unrelated container mounts a preserved telemetry store.'
 # Compose labels alone are insufficient: reserve each public port for its actual service.
-jq -e 'all(.[] | select(.State.Running); . as $container | all(.NetworkSettings.Ports // {} | to_entries[] | .value[]?; if (.HostPort | IN("5173", "8000", "8001")) then ($container.Config.Labels as $l | ($l["com.docker.compose.project"] == "grafana" and $l["com.docker.compose.service"] == "grafana" and .HostPort == "8000") or ($l["com.docker.compose.project"] == "opik-opik" and ((.HostPort == "5173" and $l["com.docker.compose.service"] == "frontend") or (.HostPort == "8000" and $l["com.docker.compose.service"] == "python-backend"))) or ($l["com.docker.compose.project"] == "junco-telemetry" and ((.HostPort == "5173" and $l["com.docker.compose.service"] == "frontend") or (.HostPort == "8000" and $l["com.docker.compose.service"] == "grafana-proxy") or (.HostPort == "8001" and $l["com.docker.compose.service"] == "prometheus")))) else true end))' "$work/containers.json" >/dev/null || fail 'An unrelated container owns port 5173, 8000 or 8001.'
-ss -H -ltnp '( sport = :5173 or sport = :8000 or sport = :8001 )' > "$work/listeners"
+jq -e 'all(.[] | select(.State.Running); .Config.Labels as $l | all(.NetworkSettings.Ports // {} | to_entries[] | .value[]?;
+  if (.HostPort | IN("8000", "8001", "8090")) then
+    ($l["com.docker.compose.project"] == "grafana" and $l["com.docker.compose.service"] == "grafana" and .HostPort == "8000") or
+    ($l["com.docker.compose.project"] == "junco-telemetry" and $l["com.docker.compose.service"] == ({"8000":"grafana-proxy","8001":"prometheus","8090":"iggy"}[.HostPort]))
+  else true end))' "$work/containers.json" >/dev/null || fail 'An unrelated container owns port 8000, 8001 or 8090.'
+ss -H -ltnp '( sport = :8000 or sport = :8001 or sport = :8090 )' > "$work/listeners"
 while read -r _ _ _ address _ processes; do
   [[ -n ${address:-} ]] || continue
   port=${address##*:}
@@ -356,28 +320,6 @@ while read -r _ _ _ address _ processes; do
   if [[ -n ${processes:-} && $processes != *'"docker-proxy"'* && $processes != *'"dockerd"'* && $processes != *'"com.docker.backend"'* ]]; then fail "Unrelated host listener on port $port: $processes"; fi
 done < "$work/listeners"
 
-sdk_config=''
-if [[ -e $owner_home/.opik.config || -L $owner_home/.opik.config ]]; then
-  IFS= read -r -d '' sdk_config < <(realpath -ze -- "$owner_home/.opik.config")
-  [[ -f $sdk_config && $sdk_config != *$'\n'* && $sdk_config != *$'\r'* ]] || fail 'Unsupported .opik.config path.'
-fi
-if (( reinstall )) && [[ -d $state_dir/baseline ]]; then
-  [[ -z $baseline_receipt ]] || fail 'Reinstall must use its recorded Opik baseline, not a replacement receipt.'
-  baseline_receipt=$state_dir/baseline
-fi
-(( ! adopt_bind )) || [[ -n $baseline_receipt ]] || fail 'Bind adoption requires JUNCO_OPIK_BASELINE_RECEIPT with the preserved trace/eight spans.'
-if [[ -n $baseline_receipt ]]; then
-  [[ -d $baseline_receipt && ! -L $baseline_receipt ]] || fail 'Opik baseline receipt directory is missing or unsafe.'
-  install -d -m 0700 "$work/baseline-expected" "$work/baseline-current"
-  for kind in project traces spans; do
-    [[ -f $baseline_receipt/baseline-$kind.json ]] || fail "Missing Opik baseline receipt: baseline-$kind.json"
-    cp -- "$baseline_receipt/baseline-$kind.json" "$work/baseline-expected/"
-  done
-  normalize_baseline "$work/baseline-expected"
-  capture_baseline "$work/baseline-current"
-  normalize_baseline "$work/baseline-current"
-  compare_baseline "$work/baseline-expected" "$work/baseline-current"
-fi
 # Pull while existing writers still run; no network/image resolution belongs in downtime.
 compose pull --policy missing "${services[@]}"
 if ! docker_root image inspect alpine:3.22 >/dev/null 2>&1; then docker_root pull alpine:3.22; fi
@@ -386,14 +328,11 @@ install -d -o root -g root -m 0700 /var/backups/junco-telemetry
 backup=$(mktemp -d "/var/backups/junco-telemetry/$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 install -d -m 0700 "$backup/config" "$backup/volumes"
 cp -a -- "$compose_file" "$root/telemetry" "$backup/config/"
-cp -a -- "$opik_root/deployment/docker-compose" "$backup/config/opik-deployment"
 [[ ! -e $root/.env ]] || cp -a -- "$root/.env" "$backup/config/junco.env"
-[[ ! -e $opik_root/deployment/docker-compose/.env ]] || cp -a -- "$opik_root/deployment/docker-compose/.env" "$backup/config/opik.env"
 for volume in "${volumes[@]}"; do [[ ! -s $work/$volume.json ]] || cp -- "$work/$volume.json" "$backup/volumes/"; done
-[[ -z $baseline_receipt ]] || cp -a -- "$work/baseline-expected" "$backup/baseline"
 mapfile -t image_names < <(jq -r '[.services[].image] | unique[]' "$work/new-compose.json")
 docker_root image inspect "${image_names[@]}" > "$backup/selected-images.json"
-mapfile -t legacy_images < <(jq -r '[.[] | select(.Config.Labels["com.docker.compose.project"] | IN("grafana", "opik-opik", "junco-telemetry")) | .Image] | unique[]' "$work/containers.json")
+mapfile -t legacy_images < <(jq -r '[.[] | select(.Config.Labels["com.docker.compose.project"] | IN("grafana", "junco-telemetry")) | .Image] | unique[]' "$work/containers.json")
 if (( ${#legacy_images[@]} )); then docker_root image inspect "${legacy_images[@]}" > "$backup/previous-images.json"; fi
 cp -- "$work/new-compose.json" "$backup/new-compose.json"
 for image in "${image_names[@]}"; do
@@ -419,7 +358,7 @@ if (( ! reinstall )); then
   required_kib=$((archive_kib + archive_kib / 10 + copy_kib + 65536))
   (( available_kib >= required_kib )) || fail "Insufficient backup disk space: need $required_kib KiB, available $available_kib KiB."
   if (( adopt_bind )); then
-    docker_space=$(docker_root run --rm --pull never --network none --mount type=volume,source=opik-opik_minio-data,target=/source,readonly alpine:3.22 df -Pk /source)
+    docker_space=$(docker_root run --rm --pull never --network none --mount type=volume,target=/target alpine:3.22 df -Pk /target)
     read -r _ available_kib _ < <(printf '%s\n' "$docker_space" | { read -r _; read -r source blocks used available rest; printf '%s %s %s\n' "$source" "$available" "$rest"; })
     (( available_kib >= copy_kib + 65536 )) || fail 'Insufficient Docker volume disk space for Grafana adoption.'
   fi
@@ -429,30 +368,16 @@ for name in "${legacy_units[@]}" "$managed_unit"; do
   printf '%s\t%s\t%s\n' "$name" "${old_enabled[$name]}" "${old_active[$name]}" >> "$backup/unit-state.tsv"
   systemctl show "$name" > "$backup/$name.properties"
 done
-[[ -z $sdk_config ]] || cp --preserve=all -- "$sdk_config" "$backup/opik.config"
 cp --preserve=all -- "$work/containers.json" "$backup/containers.json"
 if (( reinstall )); then cp --preserve=all -- "$state_dir/compose.json" "$backup/old-managed-compose.json"; fi
-for project in grafana opik-opik; do
-  jq -r --arg project "$project" '[.[] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == $project) | .Config.Labels["com.docker.compose.service"]] | unique[]' "$work/containers.json" > "$backup/$project.running-services"
-  [[ ! -s $backup/$project.running-services ]] || printf '%s\n' "$project" >> "$backup/running-projects"
-done
+jq -r '[.[] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == "grafana") | .Config.Labels["com.docker.compose.service"]] | unique[]' "$work/containers.json" > "$backup/grafana.running-services"
 if [[ -f $legacy_grafana ]]; then
   cp --preserve=all -- "$legacy_grafana" "$backup/grafana-compose.yaml"
 fi
-old_nginx_port=$(jq -r '[.[] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == "opik-opik" and .Config.Labels["com.docker.compose.service"] == "frontend") | .Config.Env[]? | select(startswith("NGINX_PORT=")) | ltrimstr("NGINX_PORT=")] | unique | if length > 1 then error("multiple old frontend ports") else .[0] // "5173" end' "$work/containers.json")
-[[ $old_nginx_port =~ ^[0-9]+$ ]] || fail 'Invalid previous Opik frontend port.'
-docker_owner compose -p opik-opik -f "$upstream" --profile opik config --format json > "$work/opik-render.json"
 # Restore exact running images, environment and all published ports (including ephemeral ports).
-for project in grafana opik-opik; do
-  render=$work/grafana-render.json
-  [[ $project != opik-opik ]] || render=$work/opik-render.json
-  [[ -f $render ]] || continue
-  jq --slurpfile containers "$work/containers.json" --arg project "$project" --arg nginx "$old_nginx_port" '
-    if $project == "opik-opik" then
-      .services.frontend.environment.NGINX_PORT = $nginx |
-      .services.frontend.healthcheck.test = ["CMD", "curl", "--fail", ("http://localhost:" + $nginx + "/health")]
-    else . end |
-    reduce ($containers[0][] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == $project)) as $container (.;
+if [[ -f $work/grafana-render.json ]]; then
+  jq --slurpfile containers "$work/containers.json" '
+    reduce ($containers[0][] | select(.State.Running and .Config.Labels["com.docker.compose.project"] == "grafana")) as $container (.;
       ($container.Config.Labels["com.docker.compose.service"]) as $service |
       if .services[$service] == null then error("running legacy service absent from saved compose: " + $service) else
         .services[$service].image = $container.Image |
@@ -460,10 +385,9 @@ for project in grafana opik-opik; do
         .services[$service].ports = [($container.NetworkSettings.Ports // {} | to_entries[]) as $binding | $binding.value[]? | {target: ($binding.key | split("/")[0] | tonumber), protocol: ($binding.key | split("/")[1]), published: .HostPort, host_ip: .HostIp}] |
         del(.services[$service].build)
       end)
-  ' "$render" > "$backup/$project-compose.json"
-  docker_root compose -p "$project" -f "$backup/$project-compose.json" config -q
-done
-jq '[.[] | select(.Config.Labels["com.docker.compose.project"] == "opik-opik" and .Config.Labels["com.docker.compose.service"] == "frontend") | {name: .Name, ports: .NetworkSettings.Ports, environment: .Config.Env}]' "$work/containers.json" > "$backup/old-opik-frontend.json"
+  ' "$work/grafana-render.json" > "$backup/grafana-compose.json"
+  docker_root compose -p grafana -f "$backup/grafana-compose.json" config -q
+fi
 
 # Anonymous inspection must succeed before the first cutover; unknown state is not permission to overwrite it.
 curl -q --noproxy '*' --fail --silent --show-error --max-time 15 http://localhost:8000/api/datasources > "$backup/grafana-datasources.json" || fail 'Existing Grafana datasource state is unavailable; no workloads were stopped.'
@@ -479,7 +403,7 @@ unit_tmp=$(mktemp "$unit_dir/.junco-telemetry.XXXXXXXX.service")
 docker_wants=''
 [[ $(systemctl show docker.service --property=LoadState --value) == not-found ]] || docker_wants=' docker.service'
 {
-  printf '%s\n[Unit]\nDescription=Junco telemetry (Grafana, Prometheus, Opik)\n' "$marker"
+  printf '%s\n[Unit]\nDescription=Junco telemetry (Grafana, Prometheus, Iggy)\n' "$marker"
   printf 'Wants=network-online.target%s\nAfter=network-online.target docker.service\nStartLimitIntervalSec=0\n\n' "$docker_wants"
   printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nUser='
   unit_quote "$owner"
@@ -511,10 +435,13 @@ for name in "${legacy_units[@]}"; do
   systemctl disable "$name"
   systemctl stop "$name"
 done
-if (( managed_present )); then systemctl stop "$managed_unit"; fi
+if (( managed_present )); then
+  systemctl stop "$managed_unit"
+  # The unit reads today's checkout; retired services exist only in the previous render.
+  docker_root compose -p junco-telemetry -f "$backup/old-managed-compose.json" stop --timeout 120
+fi
 if (( ! reinstall )); then
   if [[ -f $backup/grafana-compose.json ]]; then docker_root compose -p grafana -f "$backup/grafana-compose.json" down --remove-orphans; fi
-  if [[ -f $backup/opik-opik-compose.json ]]; then docker_root compose -p opik-opik -f "$backup/opik-opik-compose.json" down --remove-orphans; fi
 fi
 # Reject any remaining writer, including a detached container not covered by a legacy service.
 for volume in "${volumes[@]}"; do
@@ -562,50 +489,9 @@ systemctl restart "$managed_unit"
 curl -q --noproxy '*' --fail --silent --show-error --max-time 15 http://localhost:8000/api/health > "$backup/grafana-health.json"
 jq -e '.database == "ok"' "$backup/grafana-health.json" >/dev/null
 curl -q --noproxy '*' --fail --silent --show-error --max-time 15 http://localhost:8001/-/ready > "$backup/prometheus-ready.txt"
-curl -q --noproxy '*' --fail --silent --show-error --max-time 15 http://localhost:5173/health > "$backup/opik-health.txt"
-curl -q --noproxy '*' --fail --silent --show-error --max-time 15 http://localhost:5173/api/health-check > "$backup/opik-api-health.txt"
+timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8090' || fail 'Iggy TCP listener is unavailable.'
 curl -q --noproxy '*' --fail --silent --show-error --max-time 15 --get http://localhost:8000/api/datasources/proxy/uid/junco-prometheus/api/v1/query --data-urlencode 'query=vector(1)' > "$backup/prometheus-query.json"
 jq -e '.status == "success" and .data.resultType == "vector" and (.data.result | length == 1) and (.data.result[0].value[1] | tonumber) == 1' "$backup/prometheus-query.json" >/dev/null
-if [[ -n $baseline_receipt ]]; then
-  install -d -m 0700 "$backup/baseline-after"
-  capture_baseline "$backup/baseline-after"
-  normalize_baseline "$backup/baseline-after"
-  compare_baseline "$backup/baseline" "$backup/baseline-after"
-fi
-
-if [[ -n $sdk_config ]]; then
-  cmp -s -- "$backup/opik.config" "$sdk_config" || fail '.opik.config changed during installation; refusing to overwrite it.'
-  config_tmp=$(mktemp "${sdk_config%/*}/.opik.config.junco.XXXXXXXX")
-  cp --preserve=all -- "$sdk_config" "$config_tmp"
-  in_opik=0
-  changed=0
-  url_pattern='^([[:blank:]]*url_override[[:blank:]]*=[[:blank:]]*)http://localhost:8888/api/?([[:blank:]]*([#;].*)?)$'
-  section_pattern='^[[:blank:]]*\[([^]]+)\][[:blank:]]*([#;].*)?$'
-  {
-    while true; do
-      terminated=1
-      IFS= read -r line || terminated=0
-      [[ -n $line || $terminated == 1 ]] || break
-      if [[ $line =~ $section_pattern ]]; then
-        in_opik=0
-        [[ ${BASH_REMATCH[1]} != opik ]] || in_opik=1
-      elif (( in_opik )) && [[ $line =~ $url_pattern ]]; then
-        line=${BASH_REMATCH[1]}http://localhost:5173/api/${BASH_REMATCH[2]}
-        changed=1
-      fi
-      printf '%s' "$line"
-      (( ! terminated )) || printf '\n'
-      (( terminated )) || break
-    done < "$sdk_config"
-  } > "$config_tmp"
-  if (( changed )); then
-    sdk_changed=1
-    mv -fT -- "$config_tmp" "$sdk_config"
-  else
-    rm -f -- "$config_tmp"
-  fi
-  config_tmp=''
-fi
 for name in "${legacy_units[@]}"; do
   [[ ${old_present[$name]} != 1 ]] || rm -f -- "$unit_dir/$name"
 done
@@ -614,9 +500,6 @@ for name in "${legacy_units[@]}"; do systemctl reset-failed "$name" 2>/dev/null 
 install -d -o root -g root -m 0700 "$state_dir"
 docker_root volume inspect grafana_data > "$work/grafana-volume.json"
 atomic_copy "$work/grafana-volume.json" "$state_dir/grafana-volume.json"
-if [[ -n $baseline_receipt ]]; then
-  [[ -d $state_dir/baseline ]] || cp -a -- "$backup/baseline" "$state_dir/baseline"
-fi
 state_changed=1
 state_tmp=$(mktemp "$state_dir/.compose.XXXXXXXX")
 cp --preserve=all -- "$backup/new-compose.json" "$state_tmp"
@@ -626,4 +509,4 @@ printf '%s\n' "$root" > "$state_tmp"
 mv -fT -- "$state_tmp" "$state_dir/installed"
 printf 'Installation completed at %s\n' "$(date -u +%FT%TZ)" > "$backup/success"
 complete=1
-printf 'Backups: %s\nGrafana: http://localhost:8000/\nPrometheus: http://localhost:8001/\nOpik: http://localhost:5173/\n' "$backup"
+printf 'Backups: %s\nGrafana: http://localhost:8000/\nPrometheus: http://localhost:8001/\nIggy TCP: 127.0.0.1:8090\n' "$backup"

@@ -24,7 +24,7 @@ sudo apt-get install --no-install-recommends \
 
 ### Prerequisites for observability
 
-Opik and Grafana run in Docker containers started by Docker Compose from [`docker-compose.yml`](docker-compose.yml). On Ubuntu, install Docker Engine and the Compose plugin from [Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/). Remove Ubuntu's `docker.io`, `docker-compose` and `docker-compose-v2` packages first if they are installed.
+Junco's [Compose stack](docker-compose.yml) runs Grafana, Prometheus and Apache Iggy. On Ubuntu, install Docker Engine and the Compose plugin from [Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/). Remove Ubuntu's `docker.io`, `docker-compose` and `docker-compose-v2` packages first if they are installed.
 
 ```sh
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -44,11 +44,15 @@ sudo usermod -aG docker "$USER"   # log out and back in to run docker without su
 docker compose version
 ```
 
-The Compose file includes Opik's own deployment from a checkout beside this one:
+Create Iggy's bootstrap credentials once as the user who runs Compose:
 
 ```sh
-git clone https://github.com/comet-ml/opik.git ../opik
+install -d -m 700 ~/.config/junco
+(umask 077; set -C; pw=$(openssl rand -hex 32) && printf 'IGGY_ROOT_USERNAME=iggy\nIGGY_ROOT_PASSWORD=%s\n' "$pw" > ~/.config/junco/iggy.env)
+docker compose up -d --wait iggy
 ```
+
+Iggy listens on `127.0.0.1:8090` (TCP) and persists messages in `iggy_data`. Changing the env file does not rotate an existing account's password. Workflows that export traces to Opik now need a separate Opik endpoint (`OPIK_URL_OVERRIDE`); Iggy does not accept Opik traces.
 
 ### Install
 
