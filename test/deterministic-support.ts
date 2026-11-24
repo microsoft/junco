@@ -163,7 +163,9 @@ export function addPromptRun(
   graph: JuncoGraph<typeof TaskSchema, AssistantMessage>,
   state: MockAgent | JuncoAgent,
   id: string,
-  prompt: string | ((view: ParentView<typeof TaskSchema, AssistantMessage>) => string) = id,
+  prompt:
+    | string
+    | ((view: ParentView<typeof TaskSchema, AssistantMessage>) => string) = id,
 ): NodeIdType {
   const work = Edge.message<typeof TaskSchema, AssistantMessage>(
     `$source~>${id}`,

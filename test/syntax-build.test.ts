@@ -3,16 +3,19 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
+import {
+  BACKGROUND_CONTEXT,
+  MemorySessionRepo,
+} from "@earendil-works/pi-agent-core";
 import {
   type AssistantMessage,
   type Context,
   contentText,
-  fauxAssistantMessage,
   type FauxResponseFactory,
   type FauxResponseStep,
-  getCurrentTools,
+  fauxAssistantMessage,
   fauxToolCall,
+  getCurrentTools,
   type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
@@ -33,21 +36,24 @@ import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { renderTask } from "../src/agent-node.ts";
 import {
-  type JuncoArgs,
-  type JuncoParameters,
   build,
   type CodeContext,
   type DeterministicNode,
+  type JuncoArgs,
+  type JuncoParameters,
   resolveAgents,
 } from "../src/syntax/build.ts";
 import { ValidationError } from "../src/syntax/errors.ts";
 import { parse } from "../src/syntax/parse.ts";
 import type { JuncoDocument } from "../src/syntax/schema.ts";
+import { assistant, userTexts } from "./deterministic-support.ts";
 import {
-  assistant,
-  userTexts,
-} from "./deterministic-support.ts";
-import { copyTreeNative, countedCollection, fauxRuntime, NATIVE_TOOL_BLOCK, offlineLadder } from "./support.ts";
+  copyTreeNative,
+  countedCollection,
+  fauxRuntime,
+  NATIVE_TOOL_BLOCK,
+  offlineLadder,
+} from "./support.ts";
 import {
   Collect,
   Constant,
@@ -102,32 +108,55 @@ function script(...steps: (string | FauxResponseStep)[]): RoleScript {
     const step = steps[requests.length];
     requests.push(structuredClone(args[0]));
     assert.notEqual(step, undefined, "unexpected extra model request");
-    return typeof step === "function" ? step(...args) :
-      typeof step === "string" ? fauxAssistantMessage(step) : step!;
+    return typeof step === "function"
+      ? step(...args)
+      : typeof step === "string"
+        ? fauxAssistantMessage(step)
+        : step!;
   };
   return { requests, respond };
 }
 
-const requestTexts = (requests: readonly Context[]) => requests.map(({ messages }) => userTexts(messages));
-const lastPrompts = ({ requests }: RoleScript) => requestTexts(requests).map(texts => texts.at(-1));
+const requestTexts = (requests: readonly Context[]) =>
+  requests.map(({ messages }) => userTexts(messages));
+const lastPrompts = ({ requests }: RoleScript) =>
+  requestTexts(requests).map((texts) => texts.at(-1));
 
-type Overrides = { args?: Partial<JuncoArgs>; parameters?: Partial<JuncoParameters> };
+type Overrides = {
+  args?: Partial<JuncoArgs>;
+  parameters?: Partial<JuncoParameters>;
+};
 
-async function offline(roles: Record<string, RoleScript>, overrides: Overrides = {}) {
+async function offline(
+  roles: Record<string, RoleScript>,
+  overrides: Overrides = {},
+) {
   // A short scripted "length" turn really reached its output cap, not the context window.
-  const ladder = await offlineLadder((...args) => {
-    const path = captureUsageContext()?.nodePath.join("/");
-    assert.ok(path && Object.hasOwn(roles, path), `unexpected model request from ${path}`);
-    return roles[path]!.respond(...args);
-  }, { id: "faux-1", maxTokens: 1 });
+  const ladder = await offlineLadder(
+    (...args) => {
+      const path = captureUsageContext()?.nodePath.join("/");
+      assert.ok(
+        path && Object.hasOwn(roles, path),
+        `unexpected model request from ${path}`,
+      );
+      return roles[path]!.respond(...args);
+    },
+    { id: "faux-1", maxTokens: 1 },
+  );
   const defaults = options();
   return {
     args: {
       ...defaults.args,
       collection: countedCollection().collection,
-      agentOptions: new Map(Object.keys(roles).map(path => [
-        graph.NodeId.create(path), { steeringMode: "all" as const, retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 } },
-      ])),
+      agentOptions: new Map(
+        Object.keys(roles).map((path) => [
+          graph.NodeId.create(path),
+          {
+            steeringMode: "all" as const,
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+          },
+        ]),
+      ),
       ...overrides.args,
     },
     parameters: { ...defaults.parameters, ladder, ...overrides.parameters },
@@ -162,7 +191,14 @@ const document = () =>
       },
       edges: [
         { from: "Start", to: "Inner", kind: "message", schema: prompt },
-        { from: "Inner", to: "Final", id: "Inner->Final", kind: "message", on: "return", schema: reply },
+        {
+          from: "Inner",
+          to: "Final",
+          id: "Inner->Final",
+          kind: "message",
+          on: "return",
+          schema: reply,
+        },
         { from: "Final", to: "$sink", schema: reply },
       ],
     },
@@ -176,12 +212,16 @@ const fauxLadder = schedules.uniformLadder({ model: "faux/faux-1" });
 for (const repeat of [0, 1, 2, undefined]) {
   test(`YAML repeat=${repeat} limits prompt runs, not model turns`, async () => {
     const role = script(
-      fauxAssistantMessage([fauxToolCall("yield", { reason: "continue this run" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage(
+        [fauxToolCall("yield", { reason: "continue this run" })],
+        { stopReason: "toolUse" },
+      ),
       "first",
       "second",
     );
     const config = await offline({ A: role });
-    const execution = await JuncoGraph.fromYaml(`graph:
+    const execution = await JuncoGraph.fromYaml(
+      `graph:
   nodes:
     Seed: {kind: emit, text: Begin, spec: Done}
     A:
@@ -193,15 +233,30 @@ for (const repeat of [0, 1, 2, undefined]) {
     - {from: Seed, to: A, kind: message, schema: {}}
     - {from: A, to: A, schema: {}}
     - {from: A, to: $sink, kind: message, on: return, id: product, schema: {}}
-`, config);
+`,
+      config,
+    );
     const g = execution.graph;
     const seedId = graph.NodeId.create("Seed");
-    const products = () => g.observe().inputs.get(g.sink.id)!.messages.get(graph.EdgeId.create("product")) ?? [];
+    const products = () =>
+      g
+        .observe()
+        .inputs.get(g.sink.id)!
+        .messages.get(graph.EdgeId.create("product")) ?? [];
     const expected = repeat ?? 2;
     try {
-      await stepUntil(execution, () => products().length >= expected && !g.available().has(seedId));
-      assert.deepEqual(products().map(x => contentText((x as AssistantMessage).content)), ["first", "second"].slice(0, expected));
-      assert.equal(g.available().has(graph.NodeId.create("A")), repeat === undefined);
+      await stepUntil(
+        execution,
+        () => products().length >= expected && !g.available().has(seedId),
+      );
+      assert.deepEqual(
+        products().map((x) => contentText((x as AssistantMessage).content)),
+        ["first", "second"].slice(0, expected),
+      );
+      assert.equal(
+        g.available().has(graph.NodeId.create("A")),
+        repeat === undefined,
+      );
       if (repeat !== undefined) await execution.run();
       assert.equal(role.requests.length, expected === 0 ? 0 : expected + 1);
     } finally {
@@ -213,28 +268,45 @@ for (const repeat of [0, 1, 2, undefined]) {
 
 test("YAML repeat lets a code node finish its last continuation", async () => {
   let calls = 0;
-  const execution = await JuncoGraph.fromYaml({
-    graph: {
-      nodes: { Work: { kind: "code", trigger: "always", repeat: 2 } },
-      sink: { stream: true },
-      edges: [{ from: "Work", to: "$sink", id: "out", kind: "message", schema: { type: "string" } }],
+  const execution = await JuncoGraph.fromYaml(
+    {
+      graph: {
+        nodes: { Work: { kind: "code", trigger: "always", repeat: 2 } },
+        sink: { stream: true },
+        edges: [
+          {
+            from: "Work",
+            to: "$sink",
+            id: "out",
+            kind: "message",
+            schema: { type: "string" },
+          },
+        ],
+      },
     },
-  }, options({ args: {
-    code: { Work: ({ edges, policy }) => new Deterministic<TSchema, unknown>(async function* () {
-      const out = edges.get("out")!;
-      yield [];
-      while (true) {
-        calls++;
-        yield { resume: [graph.Message.create(out, `start ${calls}`)] };
-        yield [graph.Message.create(out, `finish ${calls}`)];
-      }
-    }, policy) },
-  } }));
+    options({
+      args: {
+        code: {
+          Work: ({ edges, policy }) =>
+            new Deterministic<TSchema, unknown>(async function* () {
+              const out = edges.get("out")!;
+              yield [];
+              while (true) {
+                calls++;
+                yield { resume: [graph.Message.create(out, `start ${calls}`)] };
+                yield [graph.Message.create(out, `finish ${calls}`)];
+              }
+            }, policy),
+        },
+      },
+    }),
+  );
   try {
-    for (let i = 0; i < 12 && execution.graph.available().size; i++) await execution.step();
+    for (let i = 0; i < 12 && execution.graph.available().size; i++)
+      await execution.step();
     assert.equal(execution.graph.available().size, 0);
     const delivered: unknown[] = [];
-    execution.graph.sink.drain(m => delivered.push(m.payload));
+    execution.graph.sink.drain((m) => delivered.push(m.payload));
     assert.deepEqual(delivered, ["start 1", "finish 1", "start 2", "finish 2"]);
   } finally {
     await execution.graph.close();
@@ -243,21 +315,31 @@ test("YAML repeat lets a code node finish its last continuation", async () => {
 
 test("YAML repeat rejects non-counts at validation", () => {
   for (const repeat of [-1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1])
-    assert.throws(() => parse({
-      graph: { nodes: { A: { prompt: "Work", repeat } }, edges: [{ from: "A", to: "$sink", schema: {} }] },
-    }), ValidationError);
+    assert.throws(
+      () =>
+        parse({
+          graph: {
+            nodes: { A: { prompt: "Work", repeat } },
+            edges: [{ from: "A", to: "$sink", schema: {} }],
+          },
+        }),
+      ValidationError,
+    );
 });
 
 test("an agent present only in a nested graph still requires a ladder", async () => {
   const child = roundDoc("nested").graph;
-  const doc = parse({ graph: { nodes: { Child: { kind: "graph", graph: child } },
-    edges: [{ from: "Child", to: "$sink", schema: reply }] } });
+  const doc = parse({
+    graph: {
+      nodes: { Child: { kind: "graph", graph: child } },
+      edges: [{ from: "Child", to: "$sink", schema: reply }],
+    },
+  });
   await assert.rejects(
     build(doc, options()),
     (error) =>
       error instanceof graph.DataflowDefinitionError &&
-      error.message ===
-        "junco-syntax: a ladder is required for agent nodes",
+      error.message === "junco-syntax: a ladder is required for agent nodes",
   );
 });
 
@@ -308,27 +390,33 @@ test("decision strength switches each selected agent's model and thinking", asyn
     "p",
     ["s", "l", "m", "h", "x"].map((id) => ({ id, reasoning: true })),
   );
-  const execution = await build(document(), options({
-    args: { collection: countedCollection().collection },
-    parameters: {
-      ladder: new schedules.ModelLadder(models, {
-        smol: { model: "p/s", thinking: "low" },
-        low: { model: "p/l" },
-        med: { model: "p/m" },
-        high: { model: "p/h", thinking: "high" },
-        xhigh: { model: "p/x" },
-      }),
-      scheduler: () =>
-        schedules.strength(
-          (_, id) => (id === "Final" ? "high" : "smol"),
-          schedules.parallel(),
-        ),
-    },
-  }));
+  const execution = await build(
+    document(),
+    options({
+      args: { collection: countedCollection().collection },
+      parameters: {
+        ladder: new schedules.ModelLadder(models, {
+          smol: { model: "p/s", thinking: "low" },
+          low: { model: "p/l" },
+          med: { model: "p/m" },
+          high: { model: "p/h", thinking: "high" },
+          xhigh: { model: "p/x" },
+        }),
+        scheduler: () =>
+          schedules.strength(
+            (_, id) => (id === "Final" ? "high" : "smol"),
+            schedules.parallel(),
+          ),
+      },
+    }),
+  );
   try {
     await execution.run();
     assert.equal(resultText(execution.graph), "FINAL-OUT");
-    assert.deepEqual(calls, [["Inner/Worker", "s", "low"], ["Final", "h", "high"]]);
+    assert.deepEqual(calls, [
+      ["Inner/Worker", "s", "low"],
+      ["Final", "h", "high"],
+    ]);
   } finally {
     await execution.graph.close();
   }
@@ -348,9 +436,15 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
       schema: { type: object, required: [role], properties: { role: { const: assistant } } }
 `;
   const instance = script("done");
-  const execution = await JuncoGraph.fromYaml(source, await offline({ A: instance }, {
-    args: { params: { greeting: "hi" } },
-  }));
+  const execution = await JuncoGraph.fromYaml(
+    source,
+    await offline(
+      { A: instance },
+      {
+        args: { params: { greeting: "hi" } },
+      },
+    ),
+  );
   try {
     assert.equal(
       execution.graph.getNode(graph.NodeId.create("A"))?.description,
@@ -365,7 +459,10 @@ test("fromYaml substitutes text params and runs the workflow", async () => {
 });
 
 test("fromYaml accepts a parsed document and runs nested agents", async () => {
-  const execution = await JuncoGraph.fromYaml(document(), await offline({ "Inner/Worker": script("Worker"), Final: script("Final") }));
+  const execution = await JuncoGraph.fromYaml(
+    document(),
+    await offline({ "Inner/Worker": script("Worker"), Final: script("Final") }),
+  );
   try {
     await execution.run();
     assert.equal(resultText(execution.graph), "Final");
@@ -388,21 +485,30 @@ async function countedSession(failure?: Error) {
 
 test("fromYaml releases transferred sessions when parsing fails, preserving clean-up failures", async () => {
   const failure = new Error("session close failed");
-  const a = await countedSession(failure), b = await countedSession();
-  await assert.rejects(JuncoGraph.fromYaml("graph: [", options({ args: {
-    sourceName: "pipeline.yml",
-    agentOptions: new Map([
-      [graph.NodeId.create("A"), { session: a.session }],
-      [graph.NodeId.create("B"), { session: b.session }],
-    ]),
-  } })), (error) => {
-    assert.ok(error instanceof AggregateError);
-    assert.ok(error.errors[0] instanceof ValidationError);
-    assert.equal(error.errors[0].code, "yaml");
-    assert.match(error.errors[0].message, /pipeline.yml:1:9/);
-    assert.ok(error.errors.includes(failure));
-    return true;
-  });
+  const a = await countedSession(failure),
+    b = await countedSession();
+  await assert.rejects(
+    JuncoGraph.fromYaml(
+      "graph: [",
+      options({
+        args: {
+          sourceName: "pipeline.yml",
+          agentOptions: new Map([
+            [graph.NodeId.create("A"), { session: a.session }],
+            [graph.NodeId.create("B"), { session: b.session }],
+          ]),
+        },
+      }),
+    ),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.ok(error.errors[0] instanceof ValidationError);
+      assert.equal(error.errors[0].code, "yaml");
+      assert.match(error.errors[0].message, /pipeline.yml:1:9/);
+      assert.ok(error.errors.includes(failure));
+      return true;
+    },
+  );
   assert.deepEqual(a.contexts, [BACKGROUND_CONTEXT]);
   assert.deepEqual(b.contexts, [BACKGROUND_CONTEXT]);
 });
@@ -431,12 +537,18 @@ test("nested agent rejects a blank prompt before acquisition", async () => {
     nodes: { A: { system: "Not a prompt", prompt: " \t " } },
     edges: [{ from: "A", to: "$sink", schema: reply }],
   };
-  const source = JSON.stringify({ graph: {
-    nodes: { Child: { kind: "graph", graph: child } },
-    edges: [{ from: "Child", to: "$sink", schema: reply }],
-  } });
-  await assert.rejects(JuncoGraph.fromYaml(source, options()), (error) => error instanceof ValidationError &&
-    error.path === "/graph/nodes/Child/graph/nodes/A/prompt");
+  const source = JSON.stringify({
+    graph: {
+      nodes: { Child: { kind: "graph", graph: child } },
+      edges: [{ from: "Child", to: "$sink", schema: reply }],
+    },
+  });
+  await assert.rejects(
+    JuncoGraph.fromYaml(source, options()),
+    (error) =>
+      error instanceof ValidationError &&
+      error.path === "/graph/nodes/Child/graph/nodes/A/prompt",
+  );
 });
 
 /** Reads a settled result's text, failing the test when `id` has none. */
@@ -461,7 +573,6 @@ const enqueuePrompts = (
 const nodeFailure = (message: RegExp) => (error: unknown) =>
   error instanceof graph.DataflowNodeError &&
   message.test((error.error as Error).message);
-
 
 test("skills are loaded once, advertised and reject nonexistent registry paths", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "junco-yaml-skill-"));
@@ -563,7 +674,6 @@ test("resolution walks declarations depth-first and retains graph labels", async
   );
   assert.equal(unnamed[0]?.graph, "graph");
 });
-
 
 test("skills retain content, resolve same-directory symlinks and cache repeated registry references", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "junco-yaml-skill-resolution-"));
@@ -667,7 +777,10 @@ for (const row of [
 
 test("nested message ingress and final egress stage the owning agent's prompt", async () => {
   const final = script("FINAL-OUT");
-  const execution = await build(document(), await offline({ "Inner/Worker": script("WORKER-OUT"), Final: final }));
+  const execution = await build(
+    document(),
+    await offline({ "Inner/Worker": script("WORKER-OUT"), Final: final }),
+  );
   try {
     await execution.run();
     assert.equal(resultText(execution.graph), "FINAL-OUT");
@@ -701,11 +814,21 @@ const workMessage = (
   phase: "revise" | "retry",
   round: number,
   objectives = ["assignment"],
-) => JSON.stringify({ id: "RalphControl~>Ralph", payload: { phase, round, objectives } });
+) =>
+  JSON.stringify({
+    id: "RalphControl~>Ralph",
+    payload: { phase, round, objectives },
+  });
 
 test("Ralph runs its YAML prompt once per round and publishes only the last", async () => {
   const instance = script("draft-1", "draft-2", "draft-3");
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph({ rounds: 3 }) }));
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      { args: schedules.ralph({ rounds: 3 }) },
+    ),
+  );
   try {
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
@@ -740,7 +863,10 @@ test("Ralph runs its YAML prompt once per round and publishes only the last", as
 
 test("default rounds is two and a staged round survives graph steps", async () => {
   const instance = script("draft-1", "draft-2", "draft-3");
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph() }));
+  const execution = await build(
+    ralphDoc(),
+    await offline({ Ralph: instance }, { args: schedules.ralph() }),
+  );
   try {
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
@@ -775,7 +901,13 @@ for (const [name, draft, error] of [
 ] as const)
   test(`an invalid intermediate draft (${name}) fails Ralph before the next round`, async () => {
     const instance = script(assistant("draft-1"), draft, assistant("draft-3"));
-    const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph({ rounds: 3 }) }));
+    const execution = await build(
+      ralphDoc(),
+      await offline(
+        { Ralph: instance },
+        { args: schedules.ralph({ rounds: 3 }) },
+      ),
+    );
     try {
       enqueuePrompts(execution, "assignment", {
         kind: "prompt",
@@ -830,7 +962,10 @@ for (const [name, payloads] of [
 ] satisfies readonly (readonly [string, Task[]])[])
   test(`Ralph assignment admission rejects ${name}`, async () => {
     const instance = script();
-    const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph() }));
+    const execution = await build(
+      ralphDoc(),
+      await offline({ Ralph: instance }, { args: schedules.ralph() }),
+    );
     try {
       enqueuePrompts(execution, "assignment", ...payloads);
       await assert.rejects(execution.run(), {
@@ -849,14 +984,20 @@ for (const [name, payloads] of [
 test("several prompts on the assignment route are ordered objectives in every round and the check", async () => {
   const instance = script("draft-1", "draft-2");
   const judged: (readonly string[])[] = [];
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, {
-    args: schedules.ralph({
-      until: (_result, { objectives, round }) => {
-        judged.push(objectives);
-        return round === 2;
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      {
+        args: schedules.ralph({
+          until: (_result, { objectives, round }) => {
+            judged.push(objectives);
+            return round === 2;
+          },
+        }),
       },
-    }),
-  }));
+    ),
+  );
   try {
     enqueuePrompts(
       execution,
@@ -899,7 +1040,13 @@ test("several prompts on the assignment route are ordered objectives in every ro
 
 test("a provider-error result re-runs the round up to retries times", async () => {
   const instance = script(assistant("refused", "error"), "draft-1", "draft-2");
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph({ retries: 1 }) }));
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      { args: schedules.ralph({ retries: 1 }) },
+    ),
+  );
   try {
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
@@ -923,8 +1070,18 @@ test("a provider-error result re-runs the round up to retries times", async () =
 });
 
 test("an exhausted provider error cannot start a normal revision", async () => {
-  const instance = script(assistant("refused", "error"), assistant("refused again", "error"), "draft-1");
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph({ retries: 1 }) }));
+  const instance = script(
+    assistant("refused", "error"),
+    assistant("refused again", "error"),
+    "draft-1",
+  );
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      { args: schedules.ralph({ retries: 1 }) },
+    ),
+  );
   try {
     enqueuePrompts(execution, "assignment", {
       kind: "prompt",
@@ -945,10 +1102,21 @@ test("an exhausted provider error cannot start a normal revision", async () => {
 test("a fixed final round publishes its raw provider error after exhausting retries", async () => {
   const failure = assistant("refused", "error");
   const instance = script(failure, failure);
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, { args: schedules.ralph({ rounds: 1, retries: 1 }) }));
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      { args: schedules.ralph({ rounds: 1, retries: 1 }) },
+    ),
+  );
   try {
     enqueuePrompts(execution, "assignment", {
-      kind: "prompt", text: "assignment", taskId: "Ralph#1", spec: "", deps: [], history: [],
+      kind: "prompt",
+      text: "assignment",
+      taskId: "Ralph#1",
+      spec: "",
+      deps: [],
+      history: [],
     });
     const results = await execution.run();
     const published = results.get(execution.graph.sink.id);
@@ -998,20 +1166,28 @@ async function untilRalph(
 ) {
   const instance = script(...drafts);
   const calls: RalphCall[] = [];
-  const execution = await build(ralphDoc(), await offline({ Ralph: instance }, {
-    args: schedules.ralph({
-      rounds,
-      until: (result, context) => {
-        const text = contentText(result.content);
-        calls.push({
-          text,
-          ...context,
-          published: O.isSome(execution.graph.result(execution.graph.sink.id)),
-        });
-        return decide(text) as boolean;
+  const execution = await build(
+    ralphDoc(),
+    await offline(
+      { Ralph: instance },
+      {
+        args: schedules.ralph({
+          rounds,
+          until: (result, context) => {
+            const text = contentText(result.content);
+            calls.push({
+              text,
+              ...context,
+              published: O.isSome(
+                execution.graph.result(execution.graph.sink.id),
+              ),
+            });
+            return decide(text) as boolean;
+          },
+        }),
       },
-    }),
-  }));
+    ),
+  );
   enqueuePrompts(execution, "assignment", {
     kind: "prompt",
     text: "assignment",
@@ -1072,7 +1248,12 @@ test("Ralph judges identical settlements separately before admitting a queued se
     () => ++decisions === 2,
   );
   const second: Task = {
-    kind: "prompt", text: "too late", taskId: "Ralph#2", spec: "", deps: [], history: [],
+    kind: "prompt",
+    text: "too late",
+    taskId: "Ralph#2",
+    spec: "",
+    deps: [],
+    history: [],
   };
   try {
     enqueuePrompts(execution, "assignment", second);
@@ -1081,16 +1262,25 @@ test("Ralph judges identical settlements separately before admitting a queued se
     assert.equal(instance.requests.length, 2);
     assert.equal(decisions, 1);
     assert.equal(
-      execution.graph.source.peek()?.messages.get(graph.EdgeId.create("assignment"))?.[0],
+      execution.graph.source
+        .peek()
+        ?.messages.get(graph.EdgeId.create("assignment"))?.[0],
       second,
     );
     execution.graph.available();
     execution.graph.available();
     assert.equal(decisions, 1);
-    await assert.rejects(execution.run(), /Ralph accepts only one assignment batch/);
-    assert.deepEqual(calls.map(({ round, text }) => [round, text]), [
-      [1, "same"], [2, "same"],
-    ]);
+    await assert.rejects(
+      execution.run(),
+      /Ralph accepts only one assignment batch/,
+    );
+    assert.deepEqual(
+      calls.map(({ round, text }) => [round, text]),
+      [
+        [1, "same"],
+        [2, "same"],
+      ],
+    );
     assert.equal(instance.requests.length, 2);
   } finally {
     await execution.graph.close();
@@ -1215,7 +1405,10 @@ test("nested Ralph levels sharing one controller succeed independently", async (
     return {
       ...inner,
       name,
-      source: { ...inner.source, routes: { [`$source~>${name}`]: ["$source~>Ralph"] } },
+      source: {
+        ...inner.source,
+        routes: { [`$source~>${name}`]: ["$source~>Ralph"] },
+      },
     };
   };
   const final = script("final reply");
@@ -1236,22 +1429,32 @@ test("nested Ralph levels sharing one controller succeed independently", async (
           { from: "$source", to: "Left", kind: "message", schema: prompt },
           { from: "$source", to: "Right", kind: "message", schema: prompt },
           ...["Left", "Right"].map((from) => ({
-            from, to: "Final", id: `${from}->Final`, kind: "message", on: "return", schema: reply,
+            from,
+            to: "Final",
+            id: `${from}->Final`,
+            kind: "message",
+            on: "return",
+            schema: reply,
           })),
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
     }),
-    await offline({
-      "Left/Ralph": script("Left-1", "Left-2", "Left-3"), "Right/Ralph": script("Right-1", "Right-2"), Final: final,
-    }, {
-      args: schedules.ralph({
-        until: (result, { round, label }) => {
-          calls.push(`${label}:${round}:${contentText(result.content)}`);
-          return round === (label === "Left" ? 3 : 2);
-        },
-      }),
-    }),
+    await offline(
+      {
+        "Left/Ralph": script("Left-1", "Left-2", "Left-3"),
+        "Right/Ralph": script("Right-1", "Right-2"),
+        Final: final,
+      },
+      {
+        args: schedules.ralph({
+          until: (result, { round, label }) => {
+            calls.push(`${label}:${round}:${contentText(result.content)}`);
+            return round === (label === "Left" ? 3 : 2);
+          },
+        }),
+      },
+    ),
   );
   try {
     enqueuePrompts(execution, "seed", {
@@ -1309,11 +1512,20 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
     "Deep/Inner/Worker": "low",
     Final: "xhigh",
   };
-  const calls = new Map<string, { model: string; prompt: string | undefined }>();
+  const calls = new Map<
+    string,
+    { model: string; prompt: string | undefined }
+  >();
   const respond: FauxResponseFactory = (context, _options, _state, model) => {
     const path = captureUsageContext()?.nodePath.join("/");
-    assert.ok(path && Object.hasOwn(rungs, path), `unexpected request from ${path}`);
-    calls.set(path, { model: model.id, prompt: userTexts(context.messages).at(-1) });
+    assert.ok(
+      path && Object.hasOwn(rungs, path),
+      `unexpected request from ${path}`,
+    );
+    calls.set(path, {
+      model: model.id,
+      prompt: userTexts(context.messages).at(-1),
+    });
     return fauxAssistantMessage(`report:${path}`);
   };
   const levels: [string, string][] = [];
@@ -1353,14 +1565,24 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
               kind: "message" as const,
               schema: prompt,
             },
-            { from: id, to: "Final", id: `${id}->Final`, kind: "message", on: "return", schema: reply },
+            {
+              from: id,
+              to: "Final",
+              id: `${id}->Final`,
+              kind: "message",
+              on: "return",
+              schema: reply,
+            },
           ]),
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
     }),
     options({
-      args: { recorder: recorder.add_context("root"), collection: countedCollection().collection },
+      args: {
+        recorder: recorder.add_context("root"),
+        collection: countedCollection().collection,
+      },
       parameters: {
         ladder: new schedules.ModelLadder(models, {
           smol: { model: "p/s" },
@@ -1388,7 +1610,12 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
         state = state.getNode(graph.NodeId.create(id))?.state;
       }
       assert.ok(state instanceof agent.JuncoAgent);
-      state.recorder?.record({ kind: "probe", resource: "probe", edgeId: path, value: 1 });
+      state.recorder?.record({
+        kind: "probe",
+        resource: "probe",
+        edgeId: path,
+        value: 1,
+      });
     }
     assert.deepEqual(probes, [
       ["root::Left::Worker", "Left/Worker", 1],
@@ -1412,10 +1639,14 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
       ["Team", "Deep"],
       ["Team", "Deep/Inner"],
     ]);
-    assert.equal(calls.get("Final")?.prompt, "report:Left/Worker | report:Right/Worker | report:Deep/Inner/Worker");
+    assert.equal(
+      calls.get("Final")?.prompt,
+      "report:Left/Worker | report:Right/Worker | report:Deep/Inner/Worker",
+    );
     assert.equal(resultText(execution.graph), "report:Final");
     const models = { smol: "s", low: "l", med: "m", high: "h", xhigh: "x" };
-    for (const [path, rung] of Object.entries(rungs)) assert.equal(calls.get(path)?.model, models[rung], path);
+    for (const [path, rung] of Object.entries(rungs))
+      assert.equal(calls.get(path)?.model, models[rung], path);
   } finally {
     await execution.graph.close();
   }
@@ -1423,7 +1654,10 @@ test("same-named sibling and deep wrappers bind agents and strengths by unique p
 
 test("a nested Ralph level is driven while the outer sink is untouched", async () => {
   const inner = ralphDoc().graph;
-  inner.source = { ...inner.source, routes: { "$source~>Wrapper": ["$source~>Ralph"] } };
+  inner.source = {
+    ...inner.source,
+    routes: { "$source~>Wrapper": ["$source~>Ralph"] },
+  };
   const instance = script("draft-1", "draft-2");
   const final = script("final reply");
   const execution = await build(
@@ -1436,12 +1670,22 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
         },
         edges: [
           { from: "$source", to: "Wrapper", kind: "message", schema: prompt },
-          { from: "Wrapper", to: "Final", id: "Wrapper->Final", kind: "message", on: "return", schema: reply },
+          {
+            from: "Wrapper",
+            to: "Final",
+            id: "Wrapper->Final",
+            kind: "message",
+            on: "return",
+            schema: reply,
+          },
           { from: "Final", to: "$sink", schema: reply },
         ],
       },
     }),
-    await offline({ "Wrapper/Ralph": instance, Final: final }, { args: schedules.ralph({ rounds: 2 }) }),
+    await offline(
+      { "Wrapper/Ralph": instance, Final: final },
+      { args: schedules.ralph({ rounds: 2 }) },
+    ),
   );
   try {
     enqueuePrompts(execution, "seed", {
@@ -1467,29 +1711,32 @@ test("a nested Ralph level is driven while the outer sink is untouched", async (
 test("message-edge prompt placeholders fail before a model request", async () => {
   const instance = script();
   await assert.rejects(
-      build(
-        parse({
-          graph: {
-            nodes: {
-              Start: { kind: "emit", text: "data", spec: "done" },
-              Reader: { prompt: "{{Start~>Reader}}" },
-            },
-            edges: [
-              { from: "Start", to: "Reader", kind: "message", schema: prompt },
-              { from: "Reader", to: "$sink", schema: reply },
-            ],
+    build(
+      parse({
+        graph: {
+          nodes: {
+            Start: { kind: "emit", text: "data", spec: "done" },
+            Reader: { prompt: "{{Start~>Reader}}" },
           },
-        }),
-        await offline({ Reader: instance }),
-      ),
-      new graph.DataflowDefinitionError(
-        'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; placeholders require a value or on: return edge',
-      ),
-    );
+          edges: [
+            { from: "Start", to: "Reader", kind: "message", schema: prompt },
+            { from: "Reader", to: "$sink", schema: reply },
+          ],
+        },
+      }),
+      await offline({ Reader: instance }),
+    ),
+    new graph.DataflowDefinitionError(
+      'junco-syntax: prompt placeholder {{Start~>Reader}} of node "Reader" names message edge "Start~>Reader"; placeholders require a value or on: return edge',
+    ),
+  );
   assert.deepEqual(instance.requests, []);
 });
 
-async function stepUntil(execution: { step(): Promise<unknown> }, reached: () => boolean) {
+async function stepUntil(
+  execution: { step(): Promise<unknown> },
+  reached: () => boolean,
+) {
   for (let n = 0; n < 64 && !reached(); n++) await execution.step();
   assert.ok(reached(), "expected graph state within 64 decisions");
 }
@@ -1499,10 +1746,14 @@ for (const sameProduct of [false, true])
     const first = assistant("first");
     const second = sameProduct ? first : assistant("second");
     const instance = script(
-      fauxAssistantMessage(fauxToolCall("yield", { reason: "pause" }), { stopReason: "toolUse" }),
-      first, second,
+      fauxAssistantMessage(fauxToolCall("yield", { reason: "pause" }), {
+        stopReason: "toolUse",
+      }),
+      first,
+      second,
     );
-    const execution = await JuncoGraph.fromYaml(`graph:
+    const execution = await JuncoGraph.fromYaml(
+      `graph:
   nodes:
     A:
       prompt: Generate a new unit test
@@ -1510,22 +1761,37 @@ for (const sameProduct of [false, true])
   sink: { stream: true, trigger: never }
   edges:
     - { from: A, to: $sink, kind: message, on: return, schema: {type: object} }
-`, await offline({ A: instance }));
+`,
+      await offline({ A: instance }),
+    );
     const id = graph.NodeId.create("A");
     const member = execution.graph.getNode(id)!.state;
     assert.ok(member instanceof agent.JuncoAgent);
-    const queued = () => execution.graph.observe().inputs.get(execution.graph.sink.id)?.messages.get(graph.EdgeId.create("A~>$sink")) ?? [];
+    const queued = () =>
+      execution.graph
+        .observe()
+        .inputs.get(execution.graph.sink.id)
+        ?.messages.get(graph.EdgeId.create("A~>$sink")) ?? [];
     try {
-      for (let i = 0; i < 3; i++) assert.ok(execution.graph.available().has(id));
+      for (let i = 0; i < 3; i++)
+        assert.ok(execution.graph.available().has(id));
       assert.equal(member.status, "ready");
       await stepUntil(execution, () => instance.requests.length === 1);
-      assert.deepEqual(requestTexts(instance.requests)[0], ["Generate a new unit test"]);
+      assert.deepEqual(requestTexts(instance.requests)[0], [
+        "Generate a new unit test",
+      ]);
       assert.equal(queued().length, 0);
       await stepUntil(execution, () => queued().length === 2);
-      const published = queued().map(message => { assert.ok(Value.Check(agent.AssistantMessageSchema, message)); return contentText(message.content); });
+      const published = queued().map((message) => {
+        assert.ok(Value.Check(agent.AssistantMessageSchema, message));
+        return contentText(message.content);
+      });
       assert.deepEqual(published, ["first", sameProduct ? "first" : "second"]);
       assert.equal(O.toUndefined(execution.graph.result(id)), queued()[1]);
-      assert.deepEqual(requestTexts(instance.requests).at(-1), ["Generate a new unit test", "Generate a new unit test"]);
+      assert.deepEqual(requestTexts(instance.requests).at(-1), [
+        "Generate a new unit test",
+        "Generate a new unit test",
+      ]);
       assert.ok(execution.graph.available().has(id));
     } finally {
       await execution.graph.close();
@@ -1535,28 +1801,50 @@ for (const sameProduct of [false, true])
 for (const transport of ["value", "return"] as const)
   test(`one upstream settlement drives a ${transport} template`, async () => {
     const repeated = transport === "value";
-    const first = assistant("one"), second = assistant("two");
+    const first = assistant("one"),
+      second = assistant("two");
     const a = script("  answer  ");
     const b = script(first, second);
-    const execution = await build(parse({ graph: {
-      nodes: {
-        Start: { kind: "emit", text: "Provide an answer", spec: "done" },
-        A: { prompt: "Answer the assignment." },
-        B: { prompt: "value={{report}}", trigger: "report" },
-      },
-      edges: [
-        { from: "Start", to: "A", kind: "message", schema: prompt },
-        { from: "A", to: "B", id: "report", schema: reply, ...(repeated ? {} : {kind: "message", on: "return"}) },
-        { from: "B", to: "$sink", schema: reply },
-      ],
-    }}), await offline({ A: a, B: b }));
+    const execution = await build(
+      parse({
+        graph: {
+          nodes: {
+            Start: { kind: "emit", text: "Provide an answer", spec: "done" },
+            A: { prompt: "Answer the assignment." },
+            B: { prompt: "value={{report}}", trigger: "report" },
+          },
+          edges: [
+            { from: "Start", to: "A", kind: "message", schema: prompt },
+            {
+              from: "A",
+              to: "B",
+              id: "report",
+              schema: reply,
+              ...(repeated ? {} : { kind: "message", on: "return" }),
+            },
+            { from: "B", to: "$sink", schema: reply },
+          ],
+        },
+      }),
+      await offline({ A: a, B: b }),
+    );
     const id = graph.NodeId.create("B");
     try {
       await stepUntil(execution, () => O.isSome(execution.graph.result(id)));
       assert.equal(resultText(execution.graph, id), "one");
-      if (repeated) await stepUntil(execution, () => resultText(execution.graph, id) === "two");
-      else { await execution.run(); await execution.run(); }
-      assert.deepEqual(lastPrompts(b), repeated ? ["value=answer", "value=answer"] : ["value=answer"]);
+      if (repeated)
+        await stepUntil(
+          execution,
+          () => resultText(execution.graph, id) === "two",
+        );
+      else {
+        await execution.run();
+        await execution.run();
+      }
+      assert.deepEqual(
+        lastPrompts(b),
+        repeated ? ["value=answer", "value=answer"] : ["value=answer"],
+      );
       assert.deepEqual(requestTexts(b.requests)[0], ["value=answer"]);
       assert.equal(a.requests.length, 1);
       assert.equal(execution.graph.available().has(id), repeated);
@@ -1584,25 +1872,72 @@ for (const trigger of [
             Consumer: { trigger, prompt: "{{left}}/{{right}}" },
           },
           edges: [
-            { from: "$source", to: "Left", id: "seed-left", kind: "message", schema: prompt },
-            { from: "$source", to: "Right", id: "seed-right", kind: "message", schema: prompt },
-            { from: "Left", to: "Consumer", id: "left", kind: "message", on: "return", schema: reply },
-            { from: "Right", to: "Consumer", id: "right", kind: "message", on: "return", schema: reply },
+            {
+              from: "$source",
+              to: "Left",
+              id: "seed-left",
+              kind: "message",
+              schema: prompt,
+            },
+            {
+              from: "$source",
+              to: "Right",
+              id: "seed-right",
+              kind: "message",
+              schema: prompt,
+            },
+            {
+              from: "Left",
+              to: "Consumer",
+              id: "left",
+              kind: "message",
+              on: "return",
+              schema: reply,
+            },
+            {
+              from: "Right",
+              to: "Consumer",
+              id: "right",
+              kind: "message",
+              on: "return",
+              schema: reply,
+            },
             { from: "Consumer", to: "$sink", schema: reply },
           ],
         },
       }),
-      await offline({ Left: script("Left"), Right: script("Right"), Consumer: consumer }),
+      await offline({
+        Left: script("Left"),
+        Right: script("Right"),
+        Consumer: consumer,
+      }),
     );
     try {
-      enqueuePrompts(execution, "left", { kind: "prompt", text: "go", taskId: "seed", spec: "", deps: [], history: [] });
+      enqueuePrompts(execution, "left", {
+        kind: "prompt",
+        text: "go",
+        taskId: "seed",
+        spec: "",
+        deps: [],
+        history: [],
+      });
       await execution.run();
       const early = typeof trigger === "object" && "any" in trigger;
       assert.equal(consumer.requests.length, early ? 1 : 0);
       if (early) assert.deepEqual(lastPrompts(consumer), ["Left/"]);
-      enqueuePrompts(execution, "right", { kind: "prompt", text: "go", taskId: "seed", spec: "", deps: [], history: [] });
+      enqueuePrompts(execution, "right", {
+        kind: "prompt",
+        text: "go",
+        taskId: "seed",
+        spec: "",
+        deps: [],
+        history: [],
+      });
       await execution.run();
-      assert.equal(consumer.requests.length, trigger === "never" ? 0 : early ? 2 : 1);
+      assert.equal(
+        consumer.requests.length,
+        trigger === "never" ? 0 : early ? 2 : 1,
+      );
       if (early) assert.deepEqual(lastPrompts(consumer), ["Left/", "/Right"]);
       if (!early && trigger !== "never")
         assert.deepEqual(lastPrompts(consumer), ["Left/Right"]);
@@ -1632,7 +1967,9 @@ test("source fan-out preserves queued payloads and sink waits for both value res
         ],
       },
     }),
-    await offline(agents, { parameters: { scheduler: () => schedules.roundRobin() } }),
+    await offline(agents, {
+      parameters: { scheduler: () => schedules.roundRobin() },
+    }),
   );
   try {
     const payload = {
@@ -1647,7 +1984,9 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       ],
     };
     enqueuePrompts(execution, "seed", payload);
-    await stepUntil(execution, () => execution.graph.available().has(graph.NodeId.create("Left")));
+    await stepUntil(execution, () =>
+      execution.graph.available().has(graph.NodeId.create("Left")),
+    );
     const observation = execution.graph.observe();
     assert.equal(
       [...observation.nodes.values()].filter(
@@ -1684,7 +2023,9 @@ test("source fan-out preserves queued payloads and sink waits for both value res
       );
       assert.equal(agents[id].requests.length, 0);
     }
-    await stepUntil(execution, () => O.isSome(execution.graph.result(graph.NodeId.create("Left"))));
+    await stepUntil(execution, () =>
+      O.isSome(execution.graph.result(graph.NodeId.create("Left"))),
+    );
     assert.equal(
       execution.graph.result(graph.NodeId.create("Left"))._tag,
       "Some",
@@ -1736,10 +2077,17 @@ test("recursive graphs have fresh local ports and publish one final to messages 
     { from: "Sibling", to: "Final", id: "siblingValue", schema: reply },
     { from: "Fan", to: "$sink", schema: reply },
   );
-  const final = script("final"), fan = script("fan");
-  const execution = await build(parse(doc), await offline({
-    "Inner/Worker": script("CHILD"), "Sibling/Worker": script("SIBLING"), Fan: fan, Final: final,
-  }));
+  const final = script("final"),
+    fan = script("fan");
+  const execution = await build(
+    parse(doc),
+    await offline({
+      "Inner/Worker": script("CHILD"),
+      "Sibling/Worker": script("SIBLING"),
+      Fan: fan,
+      Final: final,
+    }),
+  );
   try {
     const sources = new Set(),
       sinks = new Set();
@@ -1949,95 +2297,98 @@ for (const text of ["", "   ", "bad-stop"])
   });
 
 for (const transport of ["value", "return"] as const)
-test(`repeated ${transport} placeholders preserve order and optional emptiness without duplicating messages`, async () => {
-  const edgeKind = transport === "return" ? { kind: "message", on: "return" } as const : {};
-  const consumer = script("done");
-  const execution = await build(
-    parse({
-      graph: {
-        source: { routes: { seed: ["m", "seed-a", "seed-optional"] } },
-        nodes: {
-          A: { prompt: "go" },
-          Optional: { prompt: "work", trigger: "never" },
-          B: {
-            trigger: { all: ["v", "m"] },
-            prompt: "{{v}}|{{v}}|{{optional}}",
+  test(`repeated ${transport} placeholders preserve order and optional emptiness without duplicating messages`, async () => {
+    const edgeKind =
+      transport === "return"
+        ? ({ kind: "message", on: "return" } as const)
+        : {};
+    const consumer = script("done");
+    const execution = await build(
+      parse({
+        graph: {
+          source: { routes: { seed: ["m", "seed-a", "seed-optional"] } },
+          nodes: {
+            A: { prompt: "go" },
+            Optional: { prompt: "work", trigger: "never" },
+            B: {
+              trigger: { all: ["v", "m"] },
+              prompt: "{{v}}|{{v}}|{{optional}}",
+            },
           },
+          edges: [
+            {
+              from: "$source",
+              to: "B",
+              kind: "message",
+              id: "m",
+              schema: prompt,
+            },
+            {
+              from: "$source",
+              to: "A",
+              kind: "message",
+              id: "seed-a",
+              schema: prompt,
+            },
+            {
+              from: "$source",
+              to: "Optional",
+              kind: "message",
+              id: "seed-optional",
+              schema: prompt,
+            },
+            { from: "A", to: "B", id: "v", schema: reply, ...edgeKind },
+            {
+              from: "Optional",
+              to: "B",
+              id: "optional",
+              schema: reply,
+              ...edgeKind,
+            },
+            { from: "B", to: "$sink", schema: reply },
+          ],
         },
-        edges: [
-          {
-            from: "$source",
-            to: "B",
-            kind: "message",
-            id: "m",
-            schema: prompt,
-          },
-          {
-            from: "$source",
-            to: "A",
-            kind: "message",
-            id: "seed-a",
-            schema: prompt,
-          },
-          {
-            from: "$source",
-            to: "Optional",
-            kind: "message",
-            id: "seed-optional",
-            schema: prompt,
-          },
-          { from: "A", to: "B", id: "v", schema: reply, ...edgeKind },
-          {
-            from: "Optional",
-            to: "B",
-            id: "optional",
-            schema: reply,
-            ...edgeKind,
-          },
-          { from: "B", to: "$sink", schema: reply },
-        ],
-      },
-    }),
-    await offline({ B: consumer, A: script("VALUE"), Optional: script() }),
-  );
-  try {
-    enqueuePrompts(
-      execution,
-      "seed",
-      {
-        kind: "prompt",
-        text: "first",
-        taskId: "B#1",
-        spec: "",
-        deps: [],
-        history: [],
-      },
-      {
-        kind: "appendMessage",
-        message: { role: "user", content: "not text", timestamp: 0 },
-      },
-      {
-        kind: "prompt",
-        text: "third",
-        taskId: "B#2",
-        spec: "",
-        deps: [],
-        history: [],
-      },
+      }),
+      await offline({ B: consumer, A: script("VALUE"), Optional: script() }),
     );
-    await execution.run();
-    assert.deepEqual(requestTexts(consumer.requests), [
-      [
-        "VALUE|VALUE|",
-        asTask("first", "B#1"),
-        '{"id":"m","payload":{"kind":"appendMessage","message":{"role":"user","content":"not text","timestamp":0}}}',
-        asTask("third", "B#2"),
-      ],
-    ]);
-  } finally {
-    await execution.graph.close();
-  }
-});
+    try {
+      enqueuePrompts(
+        execution,
+        "seed",
+        {
+          kind: "prompt",
+          text: "first",
+          taskId: "B#1",
+          spec: "",
+          deps: [],
+          history: [],
+        },
+        {
+          kind: "appendMessage",
+          message: { role: "user", content: "not text", timestamp: 0 },
+        },
+        {
+          kind: "prompt",
+          text: "third",
+          taskId: "B#2",
+          spec: "",
+          deps: [],
+          history: [],
+        },
+      );
+      await execution.run();
+      assert.deepEqual(requestTexts(consumer.requests), [
+        [
+          "VALUE|VALUE|",
+          asTask("first", "B#1"),
+          '{"id":"m","payload":{"kind":"appendMessage","message":{"role":"user","content":"not text","timestamp":0}}}',
+          asTask("third", "B#2"),
+        ],
+      ]);
+    } finally {
+      await execution.graph.close();
+    }
+  });
 
 test("explicit widths serialize real activations and nested work uses the shared tracer", async () => {
   const seen = new Set<unknown>();
@@ -2076,9 +2427,15 @@ test("explicit widths serialize real activations and nested work uses the shared
   assert.ok(inner?.kind === "graph");
   inner.graph.window = 1;
   inner.graph.threads = "unbounded";
-  const execution = await build(doc, await offline({ "Inner/Worker": script("Worker"), Final: script("Final") }, {
-    args: { tracer: observer },
-  }));
+  const execution = await build(
+    doc,
+    await offline(
+      { "Inner/Worker": script("Worker"), Final: script("Final") },
+      {
+        args: { tracer: observer },
+      },
+    ),
+  );
   try {
     await execution.run();
     const child = execution.graph.getNode(graph.NodeId.create("Inner"))!.state;
@@ -2116,7 +2473,10 @@ for (const nested of [false, true])
           }
         : child,
     });
-    const execution = await build(doc, options({ args: { code: { Terminal: Constant(null) } } }));
+    const execution = await build(
+      doc,
+      options({ args: { code: { Terminal: Constant(null) } } }),
+    );
     try {
       await execution.run();
       assert.equal(
@@ -2143,10 +2503,16 @@ test("default build uses real offline agents and releases only borrowed collecti
             prompt: "offline task",
           },
         },
-        edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
+        edges: [
+          { from: "Start", to: "A", kind: "message", schema: prompt },
+          { from: "A", to: "$sink", schema: reply },
+        ],
       },
     }),
-    options({ args: { collection }, parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) } }),
+    options({
+      args: { collection },
+      parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
+    }),
   );
   try {
     assert.deepEqual(active, { leases: 1, bindings: 1, creatorCloses: 0 });
@@ -2185,7 +2551,9 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
           args: {
             collection,
             signal: AbortSignal.abort(reason),
-            agentOptions: new Map([[graph.NodeId.create("A"), { session: transferred.session }]]),
+            agentOptions: new Map([
+              [graph.NodeId.create("A"), { session: transferred.session }],
+            ]),
           },
           parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
         }),
@@ -2199,11 +2567,15 @@ test("pre-aborted build preserves its reason without acquiring agents or graph l
   }
 });
 
-
 test("deleted construction options cannot invoke a factory, adopt a supplied agent or open a mux", async () => {
   const { models, faux } = await fauxRuntime([]);
   const { collection, active } = countedCollection();
-  const supplied = await agent.JuncoAgent.create({ provider: "faux", model: "faux-1", models, collection });
+  const supplied = await agent.JuncoAgent.create({
+    provider: "faux",
+    model: "faux-1",
+    models,
+    collection,
+  });
   const open = spyOn(tools.ToolCollection, "create");
   try {
     for (const [key, value] of [
@@ -2211,8 +2583,14 @@ test("deleted construction options cannot invoke a factory, adopt a supplied age
       ["createAgent", () => assert.fail("removed factory called")],
       ["createAgentOwnership", "caller"],
     ] as const) {
-      const config = options({ args: { [key]: value }, parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) } });
-      await assert.rejects(build(roundDoc("ignored"), config), new RegExp(`${key}.*no longer supported`));
+      const config = options({
+        args: { [key]: value },
+        parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
+      });
+      await assert.rejects(
+        build(roundDoc("ignored"), config),
+        new RegExp(`${key}.*no longer supported`),
+      );
       assert.equal(supplied.status, "idle");
       assert.equal(active.bindings, 1);
     }
@@ -2220,7 +2598,11 @@ test("deleted construction options cannot invoke a factory, adopt a supplied age
     assert.equal(faux.state.callCount, 0);
   } finally {
     open.mockRestore();
-    try { await supplied.return(); } finally { await collection.close(); }
+    try {
+      await supplied.return();
+    } finally {
+      await collection.close();
+    }
   }
 });
 
@@ -2229,30 +2611,77 @@ test("node maps reject non-agents, unknown paths and invalid values before acqui
   const ladder = await offlineLadder([]);
   const doc = document();
   doc.graph.nodes.Code = { kind: "code" };
-  doc.graph.edges!.push({ from: "Start", to: "Code", kind: "message", schema: prompt },
-    { from: "Code", to: "Final", schema: reply });
-  const { args, parameters } = options({ args: { collection, code: { Code: Constant(null) } }, parameters: { ladder } });
+  doc.graph.edges!.push(
+    { from: "Start", to: "Code", kind: "message", schema: prompt },
+    { from: "Code", to: "Final", schema: reply },
+  );
+  const { args, parameters } = options({
+    args: { collection, code: { Code: Constant(null) } },
+    parameters: { ladder },
+  });
   for (const name of ["tools", "agentOptions"] as const)
-    for (const path of ["Missing", "$sink", "Inner", "Inner/$source", "Start", "Code"]) {
+    for (const path of [
+      "Missing",
+      "$sink",
+      "Inner",
+      "Inner/$source",
+      "Start",
+      "Code",
+    ]) {
       const entry = await countedSession();
       const key = graph.NodeId.create(path);
       const map = new Map([[key, { session: entry.session }]]);
-      const overrides = name === "tools" ? { tools: new Map([[key, collection]]),
-        agentOptions: new Map([[graph.NodeId.create("Final"), { session: entry.session }]]) } : { agentOptions: map };
-      await assert.rejects(build(doc, { args: { ...args, ...overrides }, parameters }), (error) =>
-        error instanceof ValidationError && error.code === "node-map" && error.path === `/options/${name}` &&
-        error.message.includes(path));
+      const overrides =
+        name === "tools"
+          ? {
+              tools: new Map([[key, collection]]),
+              agentOptions: new Map([
+                [graph.NodeId.create("Final"), { session: entry.session }],
+              ]),
+            }
+          : { agentOptions: map };
+      await assert.rejects(
+        build(doc, { args: { ...args, ...overrides }, parameters }),
+        (error) =>
+          error instanceof ValidationError &&
+          error.code === "node-map" &&
+          error.path === `/options/${name}` &&
+          error.message.includes(path),
+      );
       assert.deepEqual(entry.contexts, [BACKGROUND_CONTEXT]);
     }
-  for (const invalid of [{}, { Final: collection }, new Map([[graph.NodeId.create("Final"), undefined]])])
-    await assert.rejects(build(doc, { args: { ...args, tools: invalid as JuncoArgs["tools"] }, parameters }), /map|ToolCollection/i);
+  for (const invalid of [
+    {},
+    { Final: collection },
+    new Map([[graph.NodeId.create("Final"), undefined]]),
+  ])
+    await assert.rejects(
+      build(doc, {
+        args: { ...args, tools: invalid as JuncoArgs["tools"] },
+        parameters,
+      }),
+      /map|ToolCollection/i,
+    );
   for (const field of [
-    "provider", "model", "models", "thinkingLevel", "prompt", "systemPrompt", "tools",
-    "recorder", "parallelToolCalls", "resources",
+    "provider",
+    "model",
+    "models",
+    "thinkingLevel",
+    "prompt",
+    "systemPrompt",
+    "tools",
+    "recorder",
+    "parallelToolCalls",
+    "resources",
   ]) {
     const value = field === "resources" ? { skills: [] } : null;
-    const config = new Map([[graph.NodeId.create("Final"), { [field]: value }]]);
-    await assert.rejects(build(doc, { args: { ...args, agentOptions: config }, parameters }), new RegExp(field));
+    const config = new Map([
+      [graph.NodeId.create("Final"), { [field]: value }],
+    ]);
+    await assert.rejects(
+      build(doc, { args: { ...args, agentOptions: config }, parameters }),
+      new RegExp(field),
+    );
   }
   assert.deepEqual(events, []);
 });
@@ -2261,43 +2690,94 @@ test("two paths cannot share a session, and promptless nodes cannot discard supp
   const ladder = await offlineLadder([]);
   const { collection, events } = countedCollection();
   const { session, contexts } = await countedSession();
-  await assert.rejects(build(document(), options({
-    args: { collection, agentOptions: new Map(
-      ["Inner/Worker", "Final"].map(path => [graph.NodeId.create(path), { session }]),
-    ) },
-    parameters: { ladder },
-  })), /same session/);
+  await assert.rejects(
+    build(
+      document(),
+      options({
+        args: {
+          collection,
+          agentOptions: new Map(
+            ["Inner/Worker", "Final"].map((path) => [
+              graph.NodeId.create(path),
+              { session },
+            ]),
+          ),
+        },
+        parameters: { ladder },
+      }),
+    ),
+    /same session/,
+  );
   assert.deepEqual(contexts, [BACKGROUND_CONTEXT]);
   const doc = roundDoc("omitted");
   doc.graph.nodes.A = {};
-  await assert.rejects(build(doc, options({
-    args: { collection, agentOptions: new Map([[
-      graph.NodeId.create("A"), { images: [{ type: "image", mimeType: "image/png", data: "AA==" }] },
-    ]]) },
-    parameters: { ladder },
-  })), /images.*prompt/);
+  await assert.rejects(
+    build(
+      doc,
+      options({
+        args: {
+          collection,
+          agentOptions: new Map([
+            [
+              graph.NodeId.create("A"),
+              {
+                images: [
+                  { type: "image", mimeType: "image/png", data: "AA==" },
+                ],
+              },
+            ],
+          ]),
+        },
+        parameters: { ladder },
+      }),
+    ),
+    /images.*prompt/,
+  );
   assert.deepEqual(events, []);
 });
 
 test("failure registering the second agent releases every graph, agent, binding and pending session", async () => {
-  const primary = new Error("second registration failed"), binding = new Error("binding close failed"), pending = new Error("pending close failed");
-  const { collection, active, events } = countedCollection({ binding: 2, error: binding });
-  const holders = [await countedSession(), await countedSession(), await countedSession(pending)];
+  const primary = new Error("second registration failed"),
+    binding = new Error("binding close failed"),
+    pending = new Error("pending close failed");
+  const { collection, active, events } = countedCollection({
+    binding: 2,
+    error: binding,
+  });
+  const holders = [
+    await countedSession(),
+    await countedSession(),
+    await countedSession(pending),
+  ];
   const paths = ["Child/A", "Child/B", "Later"];
-  const doc = parse({ graph: {
-    nodes: {
-      Child: { kind: "graph", graph: {
-        nodes: { A: { prompt: "first" }, B: { prompt: "second" } },
-        edges: [{ from: "A", to: "B", schema: reply }, { from: "B", to: "$sink", schema: reply }],
-      } },
-      Later: { prompt: "last" },
+  const doc = parse({
+    graph: {
+      nodes: {
+        Child: {
+          kind: "graph",
+          graph: {
+            nodes: { A: { prompt: "first" }, B: { prompt: "second" } },
+            edges: [
+              { from: "A", to: "B", schema: reply },
+              { from: "B", to: "$sink", schema: reply },
+            ],
+          },
+        },
+        Later: { prompt: "last" },
+      },
+      edges: [
+        { from: "Child", to: "Later", schema: reply },
+        { from: "Later", to: "$sink", schema: reply },
+      ],
     },
-    edges: [{ from: "Child", to: "Later", schema: reply }, { from: "Later", to: "$sink", schema: reply }],
-  } });
+  });
   const graphs = new Set<JuncoGraph<TSchema, unknown>>();
   const members: { readonly status: string }[] = [];
   const original = JuncoGraph.prototype.addNode;
-  const registration = spyOn(JuncoGraph.prototype, "addNode").mockImplementation(function(this: JuncoGraph<TSchema, unknown>, spec) {
+  const registration = spyOn(
+    JuncoGraph.prototype,
+    "addNode",
+  ).mockImplementation(function (this: JuncoGraph<TSchema, unknown>, spec) {
     graphs.add(this);
     if (spec.state instanceof agent.JuncoAgent) {
       members.push(spec.state);
@@ -2306,181 +2786,382 @@ test("failure registering the second agent releases every graph, agent, binding 
     return Reflect.apply(original, this, [spec]);
   });
   try {
-    await assert.rejects(build(doc, options({
-      args: { collection, agentOptions: new Map(paths.map((path, i) => [graph.NodeId.create(path), { session: holders[i]!.session }])) },
-      parameters: { ladder: await offlineLadder([]) },
-    })), (error) => {
-      assert.ok(error instanceof AggregateError);
-      const leaves = (e: unknown): unknown[] => e instanceof AggregateError ? e.errors.flatMap(leaves) : [e];
-      assert.deepEqual(leaves(error), [primary, binding, pending]);
-      return true;
-    });
-    assert.deepEqual(members.map(m => m.status), ["closed", "closed"]);
+    await assert.rejects(
+      build(
+        doc,
+        options({
+          args: {
+            collection,
+            agentOptions: new Map(
+              paths.map((path, i) => [
+                graph.NodeId.create(path),
+                { session: holders[i]!.session },
+              ]),
+            ),
+          },
+          parameters: { ladder: await offlineLadder([]) },
+        }),
+      ),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        const leaves = (e: unknown): unknown[] =>
+          e instanceof AggregateError ? e.errors.flatMap(leaves) : [e];
+        assert.deepEqual(leaves(error), [primary, binding, pending]);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      members.map((m) => m.status),
+      ["closed", "closed"],
+    );
     assert.equal(graphs.size, 2);
-    assert.ok([...graphs].every(g => g.signal.aborted));
-    assert.deepEqual(holders.map(h => h.contexts.length), [1, 1, 1]);
+    assert.ok([...graphs].every((g) => g.signal.aborted));
+    assert.deepEqual(
+      holders.map((h) => h.contexts.length),
+      [1, 1, 1],
+    );
     assert.deepEqual(active, { bindings: 0, leases: 0, creatorCloses: 0 });
-    assert.deepEqual(events.sort(), ["bind-close:1", "bind-close:2", "lease-close:1", "lease-close:2"]);
+    assert.deepEqual(events.sort(), [
+      "bind-close:1",
+      "bind-close:2",
+      "lease-close:1",
+      "lease-close:2",
+    ]);
   } finally {
     registration.mockRestore();
     await collection.close();
   }
 });
 
-
 test("nested agents request only their mapped tools, run them under their own paths, and share one native fallback", async () => {
   const native = await copyTreeNative();
   const root = await mkdtemp(join(tmpdir(), "junco-yaml-grants-"));
   const names = ["Left", "Right", "Default"] as const;
   const borrowed = new Map<graph.NodeIdType, tools.ToolCollection>();
-  const calls: string[] = [], traced: object[] = [], monitored: object[] = [];
+  const calls: string[] = [],
+    traced: object[] = [],
+    monitored: object[] = [];
   const toolReceipts: [string, string][] = [];
   const { recorder } = probeRecorder((path, event) => {
-    if (event.kind === "finish" && event.outcome === "success" && event.tool.startsWith("private_"))
+    if (
+      event.kind === "finish" &&
+      event.outcome === "success" &&
+      event.tool.startsWith("private_")
+    )
       toolReceipts.push([path, event.tool]);
   });
   const trace = Object.assign(new tracer.DummyTracer(), {
-    observeAgent(node: { state: object }) { traced.push(node.state); return () => {}; },
+    observeAgent(node: { state: object }) {
+      traced.push(node.state);
+      return () => {};
+    },
   });
-  const branch = (name: string) => ({ kind: "graph", graph: {
-    source: { routes: { [`Start~>${name}`]: ["$source~>Worker"] } },
-    nodes: { Worker: { prompt: `instruction:${name}`, system: `system:${name}`,
-      ...(name === "Left" ? { skills: ["guide"] } : {}), tool_block: [...NATIVE_TOOL_BLOCK, "task"] } },
-    edges: [{ from: "$source", to: "Worker", kind: "message", schema: prompt }, { from: "Worker", to: "$sink", schema: reply }],
-  } });
-  const doc = parse({ skills: { guide: "guide/SKILL.md" }, graph: {
-    nodes: { Start: { kind: "emit", text: "start", spec: "work" },
-      ...Object.fromEntries(names.map(name => [name, branch(name)])),
-      Final: { prompt: names.map(name => `{{${name}->Final}}`).join(" / "), tool_block: NATIVE_TOOL_BLOCK } },
-    edges: [...names.flatMap(name => [
-      { from: "Start", to: name, kind: "message", schema: prompt },
-      { from: name, to: "Final", id: `${name}->Final`, kind: "message", on: "return", schema: reply },
-    ]), { from: "Final", to: "$sink", schema: reply }],
-  } });
+  const branch = (name: string) => ({
+    kind: "graph",
+    graph: {
+      source: { routes: { [`Start~>${name}`]: ["$source~>Worker"] } },
+      nodes: {
+        Worker: {
+          prompt: `instruction:${name}`,
+          system: `system:${name}`,
+          ...(name === "Left" ? { skills: ["guide"] } : {}),
+          tool_block: [...NATIVE_TOOL_BLOCK, "task"],
+        },
+      },
+      edges: [
+        { from: "$source", to: "Worker", kind: "message", schema: prompt },
+        { from: "Worker", to: "$sink", schema: reply },
+      ],
+    },
+  });
+  const doc = parse({
+    skills: { guide: "guide/SKILL.md" },
+    graph: {
+      nodes: {
+        Start: { kind: "emit", text: "start", spec: "work" },
+        ...Object.fromEntries(names.map((name) => [name, branch(name)])),
+        Final: {
+          prompt: names.map((name) => `{{${name}->Final}}`).join(" / "),
+          tool_block: NATIVE_TOOL_BLOCK,
+        },
+      },
+      edges: [
+        ...names.flatMap((name) => [
+          { from: "Start", to: name, kind: "message", schema: prompt },
+          {
+            from: name,
+            to: "Final",
+            id: `${name}->Final`,
+            kind: "message",
+            on: "return",
+            schema: reply,
+          },
+        ]),
+        { from: "Final", to: "$sink", schema: reply },
+      ],
+    },
+  });
   const image = { type: "image", data: "AA==", mimeType: "image/png" } as const;
   const respond: FauxResponseFactory = (context, options, _state, model) => {
     const path = captureUsageContext()?.nodePath.join("/");
     assert.ok(path);
     calls.push(path);
     const [name] = path.split("/");
-    const granted = getCurrentTools(context.messages).map(t => t.name);
-    assert.deepEqual(granted.filter(t => t.startsWith("private_")),
-      name === "Left" || name === "Right" ? [`private_${name}`] : []);
+    const granted = getCurrentTools(context.messages).map((t) => t.name);
+    assert.deepEqual(
+      granted.filter((t) => t.startsWith("private_")),
+      name === "Left" || name === "Right" ? [`private_${name}`] : [],
+    );
     assert.ok(!granted.includes("bash"));
     if (name === "Final") {
-      assert.deepEqual(userTexts(context.messages), ["receipt:Left / receipt:Right / receipt:Default"]);
+      assert.deepEqual(userTexts(context.messages), [
+        "receipt:Left / receipt:Right / receipt:Default",
+      ]);
       return fauxAssistantMessage("joined");
     }
-    const first = context.messages.find(m => m.role === "user");
-    assert.ok(first && userTexts(context.messages)[0] === `instruction:${name}`);
-    const system = context.messages.filter(m => m.role === "system").map(m => contentText(m.content)).join("\n");
+    const first = context.messages.find((m) => m.role === "user");
+    assert.ok(
+      first && userTexts(context.messages)[0] === `instruction:${name}`,
+    );
+    const system = context.messages
+      .filter((m) => m.role === "system")
+      .map((m) => contentText(m.content))
+      .join("\n");
     assert.ok(system.includes(`system:${name}`));
-    assert.equal(system.includes("Role-specific skill description."), name === "Left");
+    assert.equal(
+      system.includes("Role-specific skill description."),
+      name === "Left",
+    );
     if (name === "Left") {
-      assert.ok(Array.isArray(first.content) && first.content.some(block => block.type === "image" && block.data === image.data));
+      assert.ok(
+        Array.isArray(first.content) &&
+          first.content.some(
+            (block) => block.type === "image" && block.data === image.data,
+          ),
+      );
       assert.equal(model.id, "large");
       assert.equal(options?.reasoning, "high");
     } else assert.equal(model.id, "small");
     if (name !== "Default") {
-      const result = context.messages.find(m => m.role === "toolResult");
-      if (!result) return fauxAssistantMessage(fauxToolCall(`private_${name}`, {}), { stopReason: "toolUse" });
+      const result = context.messages.find((m) => m.role === "toolResult");
+      if (!result)
+        return fauxAssistantMessage(fauxToolCall(`private_${name}`, {}), {
+          stopReason: "toolUse",
+        });
       assert.equal(result.isError, false);
       assert.equal(contentText(result.content), `tool:${name}`);
     }
     return fauxAssistantMessage(`receipt:${name}`);
   };
-  const { models } = await fauxRuntime(Array.from({ length: 6 }, () => respond), "faux", [
-    { id: "small" }, { id: "large", reasoning: true },
-  ]);
+  const { models } = await fauxRuntime(
+    Array.from({ length: 6 }, () => respond),
+    "faux",
+    [{ id: "small" }, { id: "large", reasoning: true }],
+  );
   const ladder = new schedules.ModelLadder(models, {
-    ...schedules.uniformLadder({ model: "faux/small" }), high: { model: "faux/large", thinking: "high" },
+    ...schedules.uniformLadder({ model: "faux/small" }),
+    high: { model: "faux/large", thinking: "high" },
   });
   try {
     await mkdir(join(root, "guide"));
-    await writeFile(join(root, "guide", "SKILL.md"), "---\nname: guide\ndescription: Role-specific skill description.\n---\nGuide.\n");
+    await writeFile(
+      join(root, "guide", "SKILL.md"),
+      "---\nname: guide\ndescription: Role-specific skill description.\n---\nGuide.\n",
+    );
     for (const name of ["Left", "Right"]) {
       const dir = join(root, name);
       await mkdir(dir);
-      borrowed.set(graph.NodeId.create(`${name}/Worker`), await tools.ToolCollection.create(dir, {
-        native, policy: tools.LockPolicy, recorder,
-        extend: async () => ({ tools: [{ name: `private_${name}`, label: name, description: name,
-          parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: `tool:${name}` }], details: {} }) }],
-          close: async () => {},
+      borrowed.set(
+        graph.NodeId.create(`${name}/Worker`),
+        await tools.ToolCollection.create(dir, {
+          native,
+          policy: tools.LockPolicy,
+          recorder,
+          extend: async () => ({
+            tools: [
+              {
+                name: `private_${name}`,
+                label: name,
+                description: name,
+                parameters: Type.Object({}),
+                execute: async () => ({
+                  content: [{ type: "text", text: `tool:${name}` }],
+                  details: {},
+                }),
+              },
+            ],
+            close: async () => {},
+          }),
         }),
-      }));
+      );
     }
     // Inject only the filesystem backend; creation, owner bindings and teardown are real.
     const create = tools.ToolCollection.create.bind(tools.ToolCollection);
-    const open = spyOn(tools.ToolCollection, "create").mockImplementation((cwd, init) => create(cwd, { ...init, native }));
+    const open = spyOn(tools.ToolCollection, "create").mockImplementation(
+      (cwd, init) => create(cwd, { ...init, native }),
+    );
     try {
-      const { args, parameters } = options({ args: { cwd: root, tools: borrowed, recorder, tracer: trace }, parameters: { ladder } });
-      await assert.rejects(build(doc, { args: { ...args, policy: tools.EmptyPolicy }, parameters }), /policy/i);
-      await assert.rejects(build(doc, { args: { ...args, recorder: probeRecorder().recorder }, parameters }), /recorder/i);
+      const { args, parameters } = options({
+        args: { cwd: root, tools: borrowed, recorder, tracer: trace },
+        parameters: { ladder },
+      });
+      await assert.rejects(
+        build(doc, {
+          args: { ...args, policy: tools.EmptyPolicy },
+          parameters,
+        }),
+        /policy/i,
+      );
+      await assert.rejects(
+        build(doc, {
+          args: { ...args, recorder: probeRecorder().recorder },
+          parameters,
+        }),
+        /recorder/i,
+      );
       assert.equal(open.mock.calls.length, 0);
       const execution = await build(doc, {
-        args: { ...args, agentOptions: new Map([[graph.NodeId.create("Left/Worker"), {
-          images: [image], tokenMonitor: { tokenThreshold: 1, onThreshold: (owner) => { monitored.push(owner); } },
-        }]]) },
-        parameters: { ...parameters, scheduler: (_label, path) => schedules.strength(() => path === "Left" ? "high" : "med", schedules.parallel()) },
+        args: {
+          ...args,
+          agentOptions: new Map([
+            [
+              graph.NodeId.create("Left/Worker"),
+              {
+                images: [image],
+                tokenMonitor: {
+                  tokenThreshold: 1,
+                  onThreshold: (owner) => {
+                    monitored.push(owner);
+                  },
+                },
+              },
+            ],
+          ]),
+        },
+        parameters: {
+          ...parameters,
+          scheduler: (_label, path) =>
+            schedules.strength(
+              () => (path === "Left" ? "high" : "med"),
+              schedules.parallel(),
+            ),
+        },
       });
       const fallback = execution.graph.collection;
       try {
         assert.equal(open.mock.calls.length, 1);
         assert.ok(fallback);
-        const actual = names.map(name => {
-          const child = execution.graph.getNode(graph.NodeId.create(name))?.state;
+        const actual = names.map((name) => {
+          const child = execution.graph.getNode(
+            graph.NodeId.create(name),
+          )?.state;
           assert.ok(child instanceof JuncoGraph);
           assert.equal(child.collection, fallback);
           const worker = child.getNode(graph.NodeId.create("Worker"))?.state;
           assert.ok(worker instanceof agent.JuncoAgent);
-          assert.equal(worker.collection, borrowed.get(graph.NodeId.create(`${name}/Worker`)) ?? fallback);
+          assert.equal(
+            worker.collection,
+            borrowed.get(graph.NodeId.create(`${name}/Worker`)) ?? fallback,
+          );
           return worker;
         });
         await execution.run();
         assert.equal(resultText(execution.graph), "joined");
-        assert.deepEqual(calls.sort(), ["Default/Worker", "Final", "Left/Worker", "Left/Worker", "Right/Worker", "Right/Worker"]);
-        assert.ok(monitored.length > 0 && monitored.every(owner => owner === actual[0]));
-        for (const worker of actual) assert.equal(traced.filter(owner => owner === worker).length, 1);
-        assert.deepEqual(toolReceipts.sort(), [["Left::Worker", "private_Left"], ["Right::Worker", "private_Right"]]);
+        assert.deepEqual(calls.sort(), [
+          "Default/Worker",
+          "Final",
+          "Left/Worker",
+          "Left/Worker",
+          "Right/Worker",
+          "Right/Worker",
+        ]);
+        assert.ok(
+          monitored.length > 0 &&
+            monitored.every((owner) => owner === actual[0]),
+        );
+        for (const worker of actual)
+          assert.equal(traced.filter((owner) => owner === worker).length, 1);
+        assert.deepEqual(toolReceipts.sort(), [
+          ["Left::Worker", "private_Left"],
+          ["Right::Worker", "private_Right"],
+        ]);
       } finally {
         await execution.graph.close();
       }
       assert.throws(() => fallback!.lease(), /closed/);
-      for (const collection of borrowed.values()) await collection.lease().close();
+      for (const collection of borrowed.values())
+        await collection.lease().close();
       const same = borrowed.get(graph.NodeId.create("Left/Worker"))!;
-      const fullyMapped = new Map([...borrowed, [graph.NodeId.create("Default/Worker"), same] as const, [graph.NodeId.create("Final"), same] as const]);
+      const fullyMapped = new Map([
+        ...borrowed,
+        [graph.NodeId.create("Default/Worker"), same] as const,
+        [graph.NodeId.create("Final"), same] as const,
+      ]);
       const mappedArgs = { ...args, tools: fullyMapped };
-      await assert.rejects(build(doc, { args: mappedArgs, parameters: { ...parameters, tool_pruning: true } }), /tool_pruning/);
+      await assert.rejects(
+        build(doc, {
+          args: mappedArgs,
+          parameters: { ...parameters, tool_pruning: true },
+        }),
+        /tool_pruning/,
+      );
       const mapped = await build(doc, { args: mappedArgs, parameters });
       try {
-        assert.equal(open.mock.calls.length, 1, "all paths mapped: no default opened");
+        assert.equal(
+          open.mock.calls.length,
+          1,
+          "all paths mapped: no default opened",
+        );
         assert.equal(mapped.graph.collection, undefined);
         const owners = new Set<string>();
         for (const name of ["Left", "Default"]) {
           const child = mapped.graph.getNode(graph.NodeId.create(name))!.state;
           assert.ok(child instanceof JuncoGraph);
           const worker = child.getNode(graph.NodeId.create("Worker"))!.state;
-          assert.ok(worker instanceof agent.JuncoAgent && worker.owner !== undefined);
+          assert.ok(
+            worker instanceof agent.JuncoAgent && worker.owner !== undefined,
+          );
           assert.equal(worker.collection, same);
           owners.add(worker.owner);
         }
         assert.equal(owners.size, 2);
-      } finally { await mapped.graph.close(); }
+      } finally {
+        await mapped.graph.close();
+      }
       doc.graph.nodes.Final = { kind: "code" };
       const primary = new Error("cannot register final");
       const rolledBack: tools.ToolCollection[] = [];
-      await assert.rejects(build(doc, { args: { ...args, code: { Final: ({ collection }) => {
-        assert.ok(collection);
-        rolledBack.push(collection);
-        throw primary;
-      } } }, parameters }), (error) => error === primary);
+      await assert.rejects(
+        build(doc, {
+          args: {
+            ...args,
+            code: {
+              Final: ({ collection }) => {
+                assert.ok(collection);
+                rolledBack.push(collection);
+                throw primary;
+              },
+            },
+          },
+          parameters,
+        }),
+        (error) => error === primary,
+      );
       assert.equal(rolledBack.length, 1);
       assert.throws(() => rolledBack[0]!.lease(), /closed/);
-      for (const collection of borrowed.values()) await collection.lease().close();
-    } finally { open.mockRestore(); }
+      for (const collection of borrowed.values())
+        await collection.lease().close();
+    } finally {
+      open.mockRestore();
+    }
   } finally {
-    try { await Promise.all([...borrowed.values()].map(collection => collection.close())); }
-    finally { await rm(root, { recursive: true, force: true }); }
+    try {
+      await Promise.all(
+        [...borrowed.values()].map((collection) => collection.close()),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -2524,7 +3205,10 @@ for (const row of [
               ...(row.skill === undefined ? {} : { skills: [row.skill] }),
             },
           },
-          edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
+          edges: [
+            { from: "Start", to: "A", kind: "message", schema: prompt },
+            { from: "A", to: "$sink", schema: reply },
+          ],
         },
       });
       let requests = 0;
@@ -2563,7 +3247,8 @@ for (const row of [
             }
             assert.ok(!system.includes("Hidden resource fixture description."));
             assert.ok(!system.includes("<name>hidden</name>"));
-            assert.equal(userTexts(context.messages)[0],
+            assert.equal(
+              userTexts(context.messages)[0],
               "Execute the resource fixture.",
             );
           };
@@ -2578,10 +3263,13 @@ for (const row of [
         assert.equal(spec?.skills[0]?.disableModelInvocation, true);
         assert.ok(spec?.skills[0]?.content.includes("hidden body fixture."));
       }
-      const execution = await build(doc, options({
-        args: { cwd, collection: counted.collection },
-        parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
-      }));
+      const execution = await build(
+        doc,
+        options({
+          args: { cwd, collection: counted.collection },
+          parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
+        }),
+      );
       try {
         assert.deepEqual(counted.active, {
           leases: 1,
@@ -2671,7 +3359,10 @@ test("builtin info exposes routes without receiver contracts", async () => {
           ],
         },
       }),
-      options({ args: { collection }, parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) } }),
+      options({
+        args: { collection },
+        parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
+      }),
     );
     await execution.run();
     assert.equal(inspected, true);
@@ -2748,14 +3439,22 @@ for (const nested of [false, true])
       });
       try {
         await assert.rejects(
-          build(doc, options({
-            args: { collection, code: {
-              Missing: () => {
-                throw primary;
+          build(
+            doc,
+            options({
+              args: {
+                collection,
+                code: {
+                  Missing: () => {
+                    throw primary;
+                  },
+                },
               },
-            } },
-            parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
-          })),
+              parameters: {
+                ladder: new schedules.ModelLadder(models, fauxLadder),
+              },
+            }),
+          ),
           (error: unknown) => {
             const cause =
               error instanceof AggregateError ? error.errors[0] : error;
@@ -2802,8 +3501,16 @@ const codeDocument = (id = "Emitter") =>
       edges: [{ from: id, to: "$sink", schema: reply }],
     },
   });
-const codeOptions = (log: string[], code: JuncoArgs<{ log: string[] }>["code"] = { Emitter }) => ({
-  args: { cwd: join(import.meta.dir, ".."), policy: tools.EmptyPolicy, context: { log }, code },
+const codeOptions = (
+  log: string[],
+  code: JuncoArgs<{ log: string[] }>["code"] = { Emitter },
+) => ({
+  args: {
+    cwd: join(import.meta.dir, ".."),
+    policy: tools.EmptyPolicy,
+    context: { log },
+    code,
+  },
   parameters: { scheduler: () => schedules.roundRobin() },
 });
 test("fromYaml resolves a code node from args.code without reading parameters.code", async () => {
@@ -2811,9 +3518,14 @@ test("fromYaml resolves a code node from args.code without reading parameters.co
   const config = codeOptions(log);
   const parameters = {
     ...config.parameters,
-    get code(): never { throw new Error("parameters.code must not be read"); },
+    get code(): never {
+      throw new Error("parameters.code must not be read");
+    },
   };
-  const execution = await JuncoGraph.fromYaml(codeDocument(), { args: config.args, parameters });
+  const execution = await JuncoGraph.fromYaml(codeDocument(), {
+    args: config.args,
+    parameters,
+  });
   try {
     assert.deepEqual(log, ["Codes/Emitter"]);
     await execution.run();
@@ -2830,10 +3542,18 @@ test("code factory returning a legacy registration is rejected by node name", as
   }, tools.EmptyPolicy);
   const legacy = () => ({ state });
   await assert.rejects(
-    build(codeDocument(), codeOptions([], { Emitter: legacy as unknown as DeterministicNode })),
-    (error) => error instanceof graph.DataflowDefinitionError && /Emitter/.test(error.message),
+    build(
+      codeDocument(),
+      codeOptions([], { Emitter: legacy as unknown as DeterministicNode }),
+    ),
+    (error) =>
+      error instanceof graph.DataflowDefinitionError &&
+      /Emitter/.test(error.message),
   );
-  assert.ok(state.signal.aborted, "unregistered deterministic state must be released");
+  assert.ok(
+    state.signal.aborted,
+    "unregistered deterministic state must be released",
+  );
 });
 
 test("nested code nodes resolve their configured definition by local node id", async () => {
@@ -2869,23 +3589,33 @@ test("code without a configured definition is a definition error", async () => {
 
 test("fromYaml collects only requested measurements, separately at each graph level", async () => {
   const measured = new Set<string>();
-  const { args, parameters: baseline } = await offline({
-    "Inner/Worker": script("leaf", "leaf"), Final: script("done", "done"),
-  }, {
-    parameters: { scheduler: (_, path) => (snapshot) => {
-      if (snapshot.history.length === 0) assert.equal(snapshot.measurements.size, 0);
-      for (const [id, resources] of snapshot.measurements) {
-        assert.ok(snapshot.nodes.has(id));
-        assert.deepEqual([...resources.keys()], ["runtime"]);
-        const samples = resources.get("runtime")!;
-        assert.equal(samples.length, 1);
-        assert.ok(Number.isSafeInteger(samples[0]) && samples[0]! >= 0);
-        measured.add(`${path}/${id}`);
-      }
-      return { selected: schedules.select(snapshot, snapshot.available) };
-    } },
-  });
-  const withWindow: JuncoParameters = { ...baseline, measurementWindows: new Map([["runtime", 1]]) };
+  const { args, parameters: baseline } = await offline(
+    {
+      "Inner/Worker": script("leaf", "leaf"),
+      Final: script("done", "done"),
+    },
+    {
+      parameters: {
+        scheduler: (_, path) => (snapshot) => {
+          if (snapshot.history.length === 0)
+            assert.equal(snapshot.measurements.size, 0);
+          for (const [id, resources] of snapshot.measurements) {
+            assert.ok(snapshot.nodes.has(id));
+            assert.deepEqual([...resources.keys()], ["runtime"]);
+            const samples = resources.get("runtime")!;
+            assert.equal(samples.length, 1);
+            assert.ok(Number.isSafeInteger(samples[0]) && samples[0]! >= 0);
+            measured.add(`${path}/${id}`);
+          }
+          return { selected: schedules.select(snapshot, snapshot.available) };
+        },
+      },
+    },
+  );
+  const withWindow: JuncoParameters = {
+    ...baseline,
+    measurementWindows: new Map([["runtime", 1]]),
+  };
   const doc = document();
   try {
     for (const parameters of [baseline, withWindow]) {
@@ -2911,18 +3641,43 @@ test("fromYaml collects only requested measurements, separately at each graph le
 test("native options apply only to a collection created by the builder", async () => {
   const { collection } = countedCollection();
   const ladder = await offlineLadder([]);
-  for (const extra of [{ resources: { pids: 1 } }, { onResourceEvent() {} }, { tool_pruning: true }])
-    await assert.rejects(build(document(), options({ args: { collection }, parameters: { ladder, ...extra } })), /apply|applies/);
+  for (const extra of [
+    { resources: { pids: 1 } },
+    { onResourceEvent() {} },
+    { tool_pruning: true },
+  ])
+    await assert.rejects(
+      build(
+        document(),
+        options({ args: { collection }, parameters: { ladder, ...extra } }),
+      ),
+      /apply|applies/,
+    );
   const loopGuard = new agent.LoopGuard();
-  const specs = await resolveAgents(document(), { cwd: process.cwd(), loopGuard });
-  assert.deepEqual(specs.map(({path, loopGuard: guard}) => [path, guard === loopGuard]), [["Inner/Worker", true], ["Final", true]]);
+  const specs = await resolveAgents(document(), {
+    cwd: process.cwd(),
+    loopGuard,
+  });
+  assert.deepEqual(
+    specs.map(({ path, loopGuard: guard }) => [path, guard === loopGuard]),
+    [
+      ["Inner/Worker", true],
+      ["Final", true],
+    ],
+  );
 });
 
 const roundDoc = (instruction: string) =>
   parse({
     graph: {
-      nodes: { Start: { kind: "emit", text: "Begin the task.", spec: "done" }, A: { prompt: instruction } },
-      edges: [{ from: "Start", to: "A", kind: "message", schema: prompt }, { from: "A", to: "$sink", schema: reply }],
+      nodes: {
+        Start: { kind: "emit", text: "Begin the task.", spec: "done" },
+        A: { prompt: instruction },
+      },
+      edges: [
+        { from: "Start", to: "A", kind: "message", schema: prompt },
+        { from: "A", to: "$sink", schema: reply },
+      ],
     },
   });
 
@@ -2938,10 +3693,13 @@ const codeBuild = (
   doc: JuncoDocument,
   code: JuncoArgs["code"],
   extra: Pick<JuncoArgs, "recorder"> = {},
-) => build(doc, options({ args: { policy: tools.EmptyPolicy, code, ...extra } }));
+) =>
+  build(doc, options({ args: { policy: tools.EmptyPolicy, code, ...extra } }));
 
 /** A session keeping each probe event with its interned context's path. */
-function probeRecorder(receipt?: (path: string, event: tools.ProfileEvent<string>) => void) {
+function probeRecorder(
+  receipt?: (path: string, event: tools.ProfileEvent<string>) => void,
+) {
   const probes: [path: string, edgeId: string, value: number][] = [];
   const views = new Map<string, tools.ProfileRecorder<string>>();
   const view = (path: string): tools.ProfileRecorder<string> => {
@@ -3061,10 +3819,9 @@ const streamingDocument = () => {
 };
 
 test("streaming sinks deliver every batch without a terminal result", async () => {
-  const execution = await codeBuild(
-    streamingDocument(),
-    { Echo: Relay("$source~>Echo", "Echo~>$sink") },
-  );
+  const execution = await codeBuild(streamingDocument(), {
+    Echo: Relay("$source~>Echo", "Echo~>$sink"),
+  });
   const root = execution.graph;
   const enqueue = (...payloads: object[]) =>
     root.source.enqueue({
@@ -3122,7 +3879,13 @@ test("probed edges record each publication once in their owning graph's context"
   let echo: CodeContext | undefined;
   const execution = await codeBuild(
     nestedNumbers(number, true),
-    { ...code, Echo(context) { echo = context; return code.Echo(context); } },
+    {
+      ...code,
+      Echo(context) {
+        echo = context;
+        return code.Echo(context);
+      },
+    },
     { recorder: recorder.add_context("root") },
   );
   try {
@@ -3142,7 +3905,13 @@ test("probed edges record each publication once in their owning graph's context"
     );
     assert.ok(echo);
     const context = echo;
-    const probe = () => context.recorder?.record({ kind: "probe", resource: "probe", edgeId: "placement", value: 7 });
+    const probe = () =>
+      context.recorder?.record({
+        kind: "probe",
+        resource: "probe",
+        edgeId: "placement",
+        value: 7,
+      });
     await context.graph.runWithRecorder(recorder.add_context("moved"), probe);
     probe();
     assert.deepEqual(probes.slice(-2), [
@@ -3357,7 +4126,15 @@ test("an agent sends a number through its edge schema", async () => {
           Tail: { kind: "code" },
         },
         edges: [
-          { from: "Seven", to: "Worker", id: "Seven->Worker", kind: "message", on: "return", schema: number, probe: true },
+          {
+            from: "Seven",
+            to: "Worker",
+            id: "Seven->Worker",
+            kind: "message",
+            on: "return",
+            schema: number,
+            probe: true,
+          },
           {
             from: "Worker",
             to: "Tail",
@@ -3370,7 +4147,11 @@ test("an agent sends a number through its edge schema", async () => {
       },
     }),
     options({
-      args: { code: { Seven: Constant(7), Tail: Increment("Worker~>Tail") }, collection: countedCollection().collection, recorder },
+      args: {
+        code: { Seven: Constant(7), Tail: Increment("Worker~>Tail") },
+        collection: countedCollection().collection,
+        recorder,
+      },
       parameters: { ladder: new schedules.ModelLadder(models, fauxLadder) },
     }),
   );
@@ -3484,7 +4265,10 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
   let execution: Awaited<ReturnType<typeof JuncoGraph.fromYaml>> | undefined;
   try {
     await mkdir(seed);
-    collection = await tools.ToolCollection.create(seed, { native: await copyTreeNative(), memory });
+    collection = await tools.ToolCollection.create(seed, {
+      native: await copyTreeNative(),
+      memory,
+    });
     const { models, faux } = await fauxRuntime(
       Array.from({ length: 12 }, () => respond),
     );
@@ -3542,7 +4326,11 @@ test("memory: YAML host NodeIds isolate Worker from worker through real agent ca
       await execution?.graph.close();
     } finally {
       try {
-        try { await collection?.close(); } finally { memory.close(); }
+        try {
+          await collection?.close();
+        } finally {
+          memory.close();
+        }
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

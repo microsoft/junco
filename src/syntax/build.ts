@@ -35,11 +35,10 @@ import {
 } from "../node-policy.js";
 import type * as tracer from "../std/tracer.js";
 import { ValidationError } from "./errors.js";
-import { parse, type ParseOptions } from "./parse.js";
-import { JuncoGraphValidator } from "./validator.js";
+import { type ParseOptions, parse } from "./parse.js";
 import {
-  edgeId,
   type EdgeSpec,
+  edgeId,
   type GraphSpec,
   inboundEdges,
   type JuncoDocument,
@@ -50,6 +49,7 @@ import {
   resolveTrigger,
   walk,
 } from "./schema.js";
+import { JuncoGraphValidator } from "./validator.js";
 
 /** YAML schemas are loaded at runtime: their payload/result domains are only known dynamically. */
 type Edge = graph.Edge<TSchema, unknown>;
@@ -67,17 +67,43 @@ type YamlAgent = agent.JuncoAgent<
   TSchema,
   unknown
 >;
-type CreateOptions = agent.JuncoAgentCreateOptions<Skill, PromptTemplate, AgentTool, TSchema, unknown>;
+type CreateOptions = agent.JuncoAgentCreateOptions<
+  Skill,
+  PromptTemplate,
+  AgentTool,
+  TSchema,
+  unknown
+>;
 const constructorFields = [
-  "session", "activeToolNames", "streamOptions", "retry", "compaction", "steeringMode",
-  "followUpMode", "toProviderMessages", "entryProjectors", "errorHandler", "tokenMonitor",
-  "loopGuard", "toolSource",
+  "session",
+  "activeToolNames",
+  "streamOptions",
+  "retry",
+  "compaction",
+  "steeringMode",
+  "followUpMode",
+  "toProviderMessages",
+  "entryProjectors",
+  "errorHandler",
+  "tokenMonitor",
+  "loopGuard",
+  "toolSource",
 ] as const satisfies readonly (keyof CreateOptions)[];
-const allowedOptions = new Set<string>([...constructorFields, "images", "resources"]);
+const allowedOptions = new Set<string>([
+  ...constructorFields,
+  "images",
+  "resources",
+]);
 
 /** Per-node harness settings; model, placement, permissions and instruction belong to the workflow. */
-export type YamlAgentOptions = Pick<CreateOptions, typeof constructorFields[number] | "images"> & {
-  readonly resources?: Pick<NonNullable<CreateOptions["resources"]>, "promptTemplates">;
+export type YamlAgentOptions = Pick<
+  CreateOptions,
+  (typeof constructorFields)[number] | "images"
+> & {
+  readonly resources?: Pick<
+    NonNullable<CreateOptions["resources"]>,
+    "promptTemplates"
+  >;
 };
 export type AgentSpec = {
   /** The enclosing graph's display label; labels may repeat across nested graphs. */
@@ -222,7 +248,8 @@ async function loadSkill(name: string, path: string): Promise<Skill> {
 
 export async function resolveAgents(
   doc: JuncoDocument,
-  options: Pick<JuncoArgs, "cwd" | "tools" | "collection" | "toolSource"> & Pick<JuncoParameters, "loopGuard">,
+  options: Pick<JuncoArgs, "cwd" | "tools" | "collection" | "toolSource"> &
+    Pick<JuncoParameters, "loopGuard">,
 ): Promise<readonly AgentSpec[]> {
   const loaded = new Map<string, Skill>();
   const result: AgentSpec[] = [];
@@ -276,7 +303,11 @@ export function createJuncoAgent(
     DEFAULT_MODEL_STRENGTH,
   );
   return agent.JuncoAgent.create({
-    ...Object.fromEntries(constructorFields.filter((key) => Object.hasOwn(init, key)).map((key) => [key, init[key]])),
+    ...Object.fromEntries(
+      constructorFields
+        .filter((key) => Object.hasOwn(init, key))
+        .map((key) => [key, init[key]]),
+    ),
     provider,
     model: modelId,
     models: ladder.models,
@@ -288,7 +319,10 @@ export function createJuncoAgent(
     collection: spec.collection,
     recorder: spec.recorder,
     loopGuard: init.loopGuard ?? spec.loopGuard,
-    resources: { skills: spec.skills, promptTemplates: init.resources?.promptTemplates },
+    resources: {
+      skills: spec.skills,
+      promptTemplates: init.resources?.promptTemplates,
+    },
   });
 }
 
@@ -378,7 +412,12 @@ function createSource(
     {
       id: graph.NodeId.create("$source"),
       description: spec.source?.description,
-      trigger: resolveTrigger(spec, "$source", edges, spec.source?.trigger ?? "always"),
+      trigger: resolveTrigger(
+        spec,
+        "$source",
+        edges,
+        spec.source?.trigger ?? "always",
+      ),
       schema: domain(
         Object.values(routes ?? {})
           .flat()
@@ -468,12 +507,21 @@ async function registerAgent<C>(
   registration: Registration,
   key: graph.NodeIdType,
 ): Promise<void> {
-  const compiled = node.prompt === undefined ? undefined : compilePrompt(node.prompt, id, inboundEdges(spec, id));
+  const compiled =
+    node.prompt === undefined
+      ? undefined
+      : compilePrompt(node.prompt, id, inboundEdges(spec, id));
   const specForNode = c.specs.get(key)!;
   const init = c.agentOptions.get(key);
-  const creating = createJuncoAgent({
-    ...specForNode, collection: specForNode.collection ?? c.collection, recorder: g.recorder?.add_context(id),
-  }, c.parameters.ladder!, init);
+  const creating = createJuncoAgent(
+    {
+      ...specForNode,
+      collection: specForNode.collection ?? c.collection,
+      recorder: g.recorder?.add_context(id),
+    },
+    c.parameters.ladder!,
+    init,
+  );
   if (init?.session !== undefined) c.sessions.delete(init.session);
   const instance = await creating;
   c.acquired.push(instance);
@@ -511,12 +559,8 @@ async function buildGraph<C>(
     recorder === undefined ? undefined : () => g.recorder,
   );
   const source = createSource(spec, label, edges);
-  const sink = createSink(
-    spec,
-    edges,
-    parentOutputs,
-    path === "",
-    (id) => g.result(graph.NodeId.create(id)),
+  const sink = createSink(spec, edges, parentOutputs, path === "", (id) =>
+    g.result(graph.NodeId.create(id)),
   );
   // The document validator checked these dynamic integers; Width.create only accepts numeric literals.
   const g = new JuncoGraph<TSchema, unknown>(
@@ -585,15 +629,20 @@ async function buildGraph<C>(
         edges,
         policy: c.policy,
         collection: c.collection,
-        get recorder() { return g.recorder?.add_context(id); },
+        get recorder() {
+          return g.recorder?.add_context(id);
+        },
         context: c.args.context!,
         signal: c.args.signal,
       });
       if (!(state instanceof Deterministic)) {
         // The old factory shape may already have acquired a collection lease.
         const unregistered =
-          typeof state === "object" && state !== null && "state" in state ? state.state : undefined;
-        if (unregistered instanceof Deterministic) c.acquired.push(unregistered);
+          typeof state === "object" && state !== null && "state" in state
+            ? state.state
+            : undefined;
+        if (unregistered instanceof Deterministic)
+          c.acquired.push(unregistered);
         throw new graph.DataflowDefinitionError(
           `junco-syntax: code node "${key}" must return a Deterministic directly; declare its admission with trigger`,
         );
@@ -671,12 +720,20 @@ function render(payload: unknown, id: string): string {
   );
 }
 
-function compilePrompt(text: string, node: string, inbound: readonly EdgeSpec[]) {
+function compilePrompt(
+  text: string,
+  node: string,
+  inbound: readonly EdgeSpec[],
+) {
   const parts = text.split(PLACEHOLDER);
   const head = parts[0]!;
   const promptReturnEdges = new Set<string>();
   if (parts.length === 1) return { prompt: head, promptReturnEdges };
-  const substitutions: { key: graph.EdgeIdType; returned: boolean; tail: string }[] = [];
+  const substitutions: {
+    key: graph.EdgeIdType;
+    returned: boolean;
+    tail: string;
+  }[] = [];
   for (let i = 1; i < parts.length; i += 2) {
     const id = parts[i]!;
     const edge = inbound.find((candidate) => edgeId(candidate) === id);
@@ -686,13 +743,21 @@ function compilePrompt(text: string, node: string, inbound: readonly EdgeSpec[])
       );
     const returned = edge.on === "return";
     if (returned) promptReturnEdges.add(id);
-    substitutions.push({ key: graph.EdgeId.create(id), returned, tail: parts[i + 1]! });
+    substitutions.push({
+      key: graph.EdgeId.create(id),
+      returned,
+      tail: parts[i + 1]!,
+    });
   }
   const prompt = (inputs: graph.ParentView<TSchema, unknown>): string => {
     let rendered = head;
     for (const { key, returned, tail } of substitutions) {
       if (returned)
-        rendered += inputs.messages.get(key)?.map((payload) => render(payload, key)).join("\n\n") ?? "";
+        rendered +=
+          inputs.messages
+            .get(key)
+            ?.map((payload) => render(payload, key))
+            .join("\n\n") ?? "";
       else if (inputs.values.has(key))
         rendered += render(inputs.values.get(key), key);
       rendered += tail;
@@ -728,7 +793,10 @@ export function build<C = unknown>(
   return construct(config, () => doc);
 }
 
-export function buildYaml<C>(source: string | object, config: FromYamlOptions<C>): Promise<Execution> {
+export function buildYaml<C>(
+  source: string | object,
+  config: FromYamlOptions<C>,
+): Promise<Execution> {
   return construct(config, (args) => parse(source, args));
 }
 
@@ -750,66 +818,114 @@ async function construct<C>(
       sessions.add(session);
     }
     const parameters = config?.parameters;
-    if (!args || typeof args !== "object" || Array.isArray(args) ||
-      !parameters || typeof parameters !== "object" || Array.isArray(parameters))
-      throw new graph.DataflowDefinitionError("junco-syntax: fromYaml requires { args, parameters }");
+    if (
+      !args ||
+      typeof args !== "object" ||
+      Array.isArray(args) ||
+      !parameters ||
+      typeof parameters !== "object" ||
+      Array.isArray(parameters)
+    )
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: fromYaml requires { args, parameters }",
+      );
     if (duplicate)
-      throw new graph.DataflowDefinitionError("junco-syntax: cannot assign the same session to multiple agent paths");
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: cannot assign the same session to multiple agent paths",
+      );
     args.signal?.throwIfAborted();
     for (const name of ["agents", "createAgent", "createAgentOwnership"])
       if (name in args)
-        throw new graph.DataflowDefinitionError(`junco-syntax: ${name} is no longer supported; YAML owns its agents`);
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: ${name} is no longer supported; YAML owns its agents`,
+        );
     const doc = document(args);
-    if ("available" in config || "available" in args || "available" in parameters)
+    if (
+      "available" in config ||
+      "available" in args ||
+      "available" in parameters
+    )
       throw new graph.DataflowDefinitionError(
         "junco-syntax: available is no longer supported; declare admission with trigger",
       );
     const maps = {
       ...(args.tools === undefined ? {} : { tools: { map: args.tools } }),
-      ...(args.agentOptions === undefined ? {} : { agentOptions: { map: args.agentOptions } }),
+      ...(args.agentOptions === undefined
+        ? {}
+        : { agentOptions: { map: args.agentOptions } }),
     };
     if (args.tools !== undefined || args.agentOptions !== undefined)
       JuncoGraphValidator.validateNodeMaps(doc, maps);
     const policy = args.policy ?? tools.LockPolicy;
     checkPolicy(policy, args.collection);
     checkRecorder(args.recorder, args.collection?.recorder);
-    const members = new Map<graph.NodeIdType, Extract<NodeSpec, { kind?: "agent" }>>();
+    const members = new Map<
+      graph.NodeIdType,
+      Extract<NodeSpec, { kind?: "agent" }>
+    >();
     for (const { id, node, key } of walk(doc.graph)) {
       if (isAgent(node)) members.set(key, node);
       else if (node.kind === "code" && args.code?.[id] === undefined)
-        throw new graph.DataflowDefinitionError(`junco-syntax: code node "${id}" has no definition in args.code`);
+        throw new graph.DataflowDefinitionError(
+          `junco-syntax: code node "${id}" has no definition in args.code`,
+        );
     }
     for (const [name, { map }] of Object.entries(maps))
       for (const key of map.keys())
         if (!members.has(key))
-          throw new ValidationError({ code: "node-map", path: `/options/${name}`,
-            message: `"${key}" is not an agent`, help: "configure only agent node paths" });
+          throw new ValidationError({
+            code: "node-map",
+            path: `/options/${name}`,
+            message: `"${key}" is not an agent`,
+            help: "configure only agent node paths",
+          });
     for (const [key, collection] of args.tools ?? []) {
       if (!(collection instanceof tools.ToolCollection))
-        throw new TypeError(`junco-syntax: tools for "${key}" must be a ToolCollection`);
+        throw new TypeError(
+          `junco-syntax: tools for "${key}" must be a ToolCollection`,
+        );
       checkPolicy(policy, collection);
       checkRecorder(args.recorder, collection.recorder);
     }
     const agentOptions = new Map<graph.NodeIdType, YamlAgentOptions>();
     for (const [key, init] of args.agentOptions ?? []) {
       if (typeof init !== "object" || init === null || Array.isArray(init))
-        throw new TypeError(`junco-syntax: agentOptions for "${key}" must be an object`);
+        throw new TypeError(
+          `junco-syntax: agentOptions for "${key}" must be an object`,
+        );
       for (const field of Object.keys(init))
         if (!allowedOptions.has(field))
-          throw new TypeError(`junco-syntax: unsupported agentOptions field "${field}" for "${key}"`);
-      if (init.resources !== undefined && (init.resources === null || typeof init.resources !== "object" ||
-        Array.isArray(init.resources) || Object.keys(init.resources).some((field) => field !== "promptTemplates")))
-        throw new TypeError(`junco-syntax: only resources.promptTemplates may be configured for "${key}"`);
+          throw new TypeError(
+            `junco-syntax: unsupported agentOptions field "${field}" for "${key}"`,
+          );
+      if (
+        init.resources !== undefined &&
+        (init.resources === null ||
+          typeof init.resources !== "object" ||
+          Array.isArray(init.resources) ||
+          Object.keys(init.resources).some(
+            (field) => field !== "promptTemplates",
+          ))
+      )
+        throw new TypeError(
+          `junco-syntax: only resources.promptTemplates may be configured for "${key}"`,
+        );
       if (init.images?.length && members.get(key)?.prompt === undefined)
-        throw new TypeError(`junco-syntax: images for "${key}" require a YAML prompt`);
+        throw new TypeError(
+          `junco-syntax: images for "${key}" require a YAML prompt`,
+        );
       agentOptions.set(key, { ...init, session: init.session });
     }
     if (members.size && parameters.ladder === undefined)
-      throw new graph.DataflowDefinitionError("junco-syntax: a ladder is required for agent nodes");
-    const creates = args.collection === undefined && members.size > (args.tools?.size ?? 0);
+      throw new graph.DataflowDefinitionError(
+        "junco-syntax: a ladder is required for agent nodes",
+      );
+    const creates =
+      args.collection === undefined && members.size > (args.tools?.size ?? 0);
     if (
       !creates &&
-      (parameters.resources !== undefined || parameters.onResourceEvent !== undefined)
+      (parameters.resources !== undefined ||
+        parameters.onResourceEvent !== undefined)
     )
       throw new graph.DataflowDefinitionError(
         "junco-syntax: resources and onResourceEvent apply to the collection build creates; open the supplied collection with them instead",
@@ -820,22 +936,47 @@ async function construct<C>(
       );
     // Skill loading can suspend; retain the grants we just checked, not a caller's mutable Map.
     const mapped = args.tools === undefined ? undefined : new Map(args.tools);
-    const specs = new Map((await resolveAgents(doc, {
-      cwd: args.cwd, tools: mapped, collection: args.collection, toolSource: args.toolSource,
-      loopGuard: parameters.loopGuard,
-    })).map((spec) => [spec.path, spec]));
+    const specs = new Map(
+      (
+        await resolveAgents(doc, {
+          cwd: args.cwd,
+          tools: mapped,
+          collection: args.collection,
+          toolSource: args.toolSource,
+          loopGuard: parameters.loopGuard,
+        })
+      ).map((spec) => [spec.path, spec]),
+    );
     args.signal?.throwIfAborted();
     if (creates)
       created = await tools.ToolCollection.create(args.cwd, {
-        policy, recorder: args.recorder, resources: parameters.resources,
-        onResourceEvent: parameters.onResourceEvent, tool_pruning: parameters.tool_pruning,
+        policy,
+        recorder: args.recorder,
+        resources: parameters.resources,
+        onResourceEvent: parameters.onResourceEvent,
+        tool_pruning: parameters.tool_pruning,
         measureMemory: (parameters.measurementWindows?.get("memory") ?? 0) > 0,
       });
     const c: Construction<C> = {
-      args, parameters, policy, collection: args.collection ?? created,
-      specs, agentOptions, sessions, acquired, partialRoots,
+      args,
+      parameters,
+      policy,
+      collection: args.collection ?? created,
+      specs,
+      agentOptions,
+      sessions,
+      acquired,
+      partialRoots,
     };
-    const execution = await buildGraph(c, doc.graph, doc.graph.name ?? "graph", args.tracer, [], "", args.recorder);
+    const execution = await buildGraph(
+      c,
+      doc.graph,
+      doc.graph.name ?? "graph",
+      args.tracer,
+      [],
+      "",
+      args.recorder,
+    );
     args.signal?.throwIfAborted();
     // This fallback has no extension; graph leases and agent bindings now hold it.
     const creator = created;

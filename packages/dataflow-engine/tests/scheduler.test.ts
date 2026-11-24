@@ -74,7 +74,15 @@ test("triggerInputs: `all` reads every rule edge whole, `any` reads only the fir
     [[b, "all"]],
   );
   assert.deepEqual(
-    [...triggerInputs({ view, trigger: disjunction, satisfied: [], status, continuationOnly: false })],
+    [
+      ...triggerInputs({
+        view,
+        trigger: disjunction,
+        satisfied: [],
+        status,
+        continuationOnly: false,
+      }),
+    ],
     [],
   );
 });

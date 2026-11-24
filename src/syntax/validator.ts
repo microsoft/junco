@@ -336,8 +336,12 @@ function checkGraphFields(spec: unknown, path: string, fail: Fail): void {
   for (const [id, node] of Object.entries(spec.nodes)) {
     if (!mapping(node)) continue;
     const at = `${path}/nodes/${pointer(id)}`;
-    if (node.kind === "graph") checkGraphFields(node.graph, `${at}/graph`, fail);
-    else if ((node.kind === undefined || node.kind === "agent") && !Value.Check(AgentNodeSchema, node))
+    if (node.kind === "graph")
+      checkGraphFields(node.graph, `${at}/graph`, fail);
+    else if (
+      (node.kind === undefined || node.kind === "agent") &&
+      !Value.Check(AgentNodeSchema, node)
+    )
       failTypeBox(Value.Errors(AgentNodeSchema, node), at, "document", fail);
   }
 }
@@ -427,7 +431,9 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
       const id = edgeId(edge);
       if (
         edge.to === "$source" &&
-        (edge.from === "$source" || edge.kind !== "message" || edge.on === "return")
+        (edge.from === "$source" ||
+          edge.kind !== "message" ||
+          edge.on === "return")
       )
         fail(
           `${at}/to`,
@@ -454,7 +460,11 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
         ["to", "$sink"],
       ] as const) {
         const node = edge[end];
-        if (node !== port && node !== "$source" && !Object.hasOwn(spec.nodes, node))
+        if (
+          node !== port &&
+          node !== "$source" &&
+          !Object.hasOwn(spec.nodes, node)
+        )
           fail(
             `${at}/${end}`,
             `edge "${id}" references unknown node "${node}"`,
@@ -546,7 +556,11 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
       }
     }
     if (wired || spec.source?.trigger !== undefined)
-      checkTrigger("$source", `${path}/source/trigger`, spec.source?.trigger ?? "always");
+      checkTrigger(
+        "$source",
+        `${path}/source/trigger`,
+        spec.source?.trigger ?? "always",
+      );
     const predecessors = [
       ...new Set((incoming.get("$sink") ?? []).map((e) => e.from)),
     ];
@@ -658,7 +672,11 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
               `declare "${name}" in the top-level skills registry, or use one of: ${list(Object.keys(doc.skills ?? {}))}`,
               "reference",
             );
-        unique(node.tool_block ?? [], `${nodePath}/tool_block`, `Node "${id}" tool_block`);
+        unique(
+          node.tool_block ?? [],
+          `${nodePath}/tool_block`,
+          `Node "${id}" tool_block`,
+        );
       }
     }
     const sourceEdges = (outgoing.get("$source") ?? []).map(edgeId);
@@ -778,10 +796,20 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
     const [first] = blocked;
     if (first !== undefined) {
       const sink = first === "$sink";
-      const at = first === "$source" ? `${path}/source`
-        : sink ? (spec.sink ? `${path}/sink` : path) : nodeAt(blocked);
-      const trigger = first === "$source" ? spec.source?.trigger
-        : sink ? spec.sink?.trigger : spec.nodes[first]?.trigger;
+      const at =
+        first === "$source"
+          ? `${path}/source`
+          : sink
+            ? spec.sink
+              ? `${path}/sink`
+              : path
+            : nodeAt(blocked);
+      const trigger =
+        first === "$source"
+          ? spec.source?.trigger
+          : sink
+            ? spec.sink?.trigger
+            : spec.nodes[first]?.trigger;
       fail(
         trigger === undefined ? at : `${at}/trigger`,
         `Cannot start under the declared triggers: ${list(blocked)}`,
@@ -803,7 +831,15 @@ function validate(value: unknown, fail: Fail = reject): JuncoDocument {
   return doc;
 }
 
-type NodeMaps = Readonly<Record<string, { readonly map: ReadonlyMap<NodeIdType, unknown>; readonly complete?: boolean }>>;
+type NodeMaps = Readonly<
+  Record<
+    string,
+    {
+      readonly map: ReadonlyMap<NodeIdType, unknown>;
+      readonly complete?: boolean;
+    }
+  >
+>;
 
 /** Validate config keys against runtime nodes, including both ports at every level. */
 function validateNodeMaps(document: JuncoDocument, maps: NodeMaps): void {
@@ -817,13 +853,32 @@ function validateNodeMaps(document: JuncoDocument, maps: NodeMaps): void {
   }
   for (const [name, { map, complete }] of Object.entries(maps)) {
     const path = `/options/${pointer(name)}`;
-    if (typeof map?.keys !== "function" || typeof map.has !== "function" || typeof map.get !== "function")
-      reject(path, "Expected a node-indexed map", "pass a Map keyed by qualified node ID", "node-map");
+    if (
+      typeof map?.keys !== "function" ||
+      typeof map.has !== "function" ||
+      typeof map.get !== "function"
+    )
+      reject(
+        path,
+        "Expected a node-indexed map",
+        "pass a Map keyed by qualified node ID",
+        "node-map",
+      );
     const unknown = [...map.keys()].filter((id) => !ids.has(id));
-    const missing = complete === true ? [...ids].filter((id) => !map.has(id)) : [];
+    const missing =
+      complete === true ? [...ids].filter((id) => !map.has(id)) : [];
     if (unknown.length || missing.length)
-      reject(path, [unknown.length && `unknown IDs: ${list(unknown)}`, missing.length && `missing IDs: ${list(missing)}`].filter(Boolean).join("; "),
-        "use qualified node IDs relative to the root graph", "node-map");
+      reject(
+        path,
+        [
+          unknown.length && `unknown IDs: ${list(unknown)}`,
+          missing.length && `missing IDs: ${list(missing)}`,
+        ]
+          .filter(Boolean)
+          .join("; "),
+        "use qualified node IDs relative to the root graph",
+        "node-map",
+      );
   }
 }
 

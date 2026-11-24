@@ -302,7 +302,11 @@ test("a node body's throw surfaces as DataflowNodeError and terminates that node
 });
 
 test("nested node errors print the leaf once", () => {
-  const { exitCode, stderr } = Bun.spawnSync([process.execPath, "-e", `
+  const { exitCode, stderr } = Bun.spawnSync(
+    [
+      process.execPath,
+      "-e",
+      `
     import assert from "node:assert/strict";
     import { DataflowNodeError } from "../src/errors.ts";
     const leaf = new Error(["provider", "leaf", "marker"].join("-"));
@@ -315,7 +319,10 @@ test("nested node errors print the leaf once", () => {
     assert.equal(outer.error, inner);
     assert.equal(outer.cause, inner);
     console.error(outer);
-  `], { cwd: import.meta.dir, stderr: "pipe" });
+  `,
+    ],
+    { cwd: import.meta.dir, stderr: "pipe" },
+  );
   const printed = stderr.toString();
   assert.equal(exitCode, 0, printed);
   assert.ok(printed.includes('Dataflow node "FrameworkTwp" failed'), printed);
@@ -791,9 +798,12 @@ test("an accumulator publishes one batch after its third input", async () => {
   const graph = newGraph();
   const execution = context({ graph, scheduler: parallel() });
   const batches: number[][] = [];
-  const source = graph.addNode(new StepNode<void, N, string>(() => [], {
-    state: undefined, trigger: TriggerRule.never(),
-  }));
+  const source = graph.addNode(
+    new StepNode<void, N, string>(() => [], {
+      state: undefined,
+      trigger: TriggerRule.never(),
+    }),
+  );
   const gather = graph.addNode({
     state: undefined,
     trigger: TriggerRule.when(feed),
@@ -803,10 +813,15 @@ test("an accumulator publishes one batch after its third input", async () => {
       return new FinalMessages(pending.map((n) => Message.create(output, n)));
     },
   });
-  const sink = graph.addNode(new StepNode<void, N, string>((_, view) => {
-    batches.push([...from(view, output)]);
-    return [];
-  }, { state: undefined, trigger: TriggerRule.when(output) }));
+  const sink = graph.addNode(
+    new StepNode<void, N, string>(
+      (_, view) => {
+        batches.push([...from(view, output)]);
+        return [];
+      },
+      { state: undefined, trigger: TriggerRule.when(output) },
+    ),
+  );
   graph.addEdge(source, gather, feed).addEdge(gather, sink, output);
   for (const n of [1, 2, 3]) {
     assert.deepEqual(batches, []);
@@ -879,11 +894,15 @@ test("native registrations, builders and ports reject obsolete options without r
     trigger: TriggerRule.always(),
     ret: "done",
     // biome-ignore lint/correctness/useYield: this body must never be registered.
-    async *step() { return "done"; },
+    async *step() {
+      return "done";
+    },
   };
   const legacy = {
     ...base,
-    get is_available(): never { return assert.fail("obsolete option was read"); },
+    get is_available(): never {
+      return assert.fail("obsolete option was read");
+    },
   };
   const graph = newGraph();
   const list = Edge.message("list", Type.Array(NumberSchema));
@@ -896,7 +915,11 @@ test("native registrations, builders and ports reject obsolete options without r
       () => new ConstFanin<void, N, string>([], list, options),
       () => new Source(() => [], options),
       () => new Sink(options.step, options),
-    ]) assert.throws(build, { name: "DataflowDefinitionError", message: /trigger/ });
+    ])
+      assert.throws(build, {
+        name: "DataflowDefinitionError",
+        message: /trigger/,
+      });
   }
   assert.equal(graph.getNode(base.id), undefined);
 });
@@ -905,13 +928,19 @@ test("a missing later trigger edge is validated even when the first operand is e
   const unwired = Edge.message<N, string>("unwired", NumberSchema);
   const empty = Edge.message<N, string>("empty", NumberSchema);
   const graph = newGraph();
-  const src = graph.addNode(new StepNode<void, N, string>(() => [], {
-    state: undefined, trigger: TriggerRule.never(),
-  }));
+  const src = graph.addNode(
+    new StepNode<void, N, string>(() => [], {
+      state: undefined,
+      trigger: TriggerRule.never(),
+    }),
+  );
   const dst = graph.addNode(
     new StepNode<void, N, string>(() => [], {
       state: undefined,
-      trigger: TriggerRule.allOf(TriggerEntry.on(empty), TriggerEntry.on(unwired)),
+      trigger: TriggerRule.allOf(
+        TriggerEntry.on(empty),
+        TriggerEntry.on(unwired),
+      ),
     }),
   );
   graph.addEdge(src, dst, empty);
@@ -1180,11 +1209,7 @@ test("resolveInputs keeps an `all` trigger atomic for a live actor: a lone reple
   const e1 = Edge.message<N, string>("e1", NumberSchema);
   const e2 = Edge.message<N, string>("e2", NumberSchema);
   const execution = scripted(
-    [
-      [["P"]],
-      [["X"]],
-      [["X", "X"], ["P"]],
-    ],
+    [[["P"]], [["X"]], [["X", "X"], ["P"]]],
     (_entry, live) => triggerInputs(live),
   );
   const { graph } = execution;
@@ -1202,14 +1227,17 @@ test("resolveInputs keeps an `all` trigger atomic for a live actor: a lone reple
   });
   const record = recorder([e1, e2], seen);
   const x = graph.addNode(
-    new StepNode<void, N, string>((state, view) => {
-      record(state, view);
-      return view.messages.has(e2.id) ? { resume: [] } : [];
-    }, {
-      id: NodeId.create("X"),
-      state: undefined,
-      trigger: TriggerRule.allOf(TriggerEntry.on(e1), TriggerEntry.on(e2)),
-    }),
+    new StepNode<void, N, string>(
+      (state, view) => {
+        record(state, view);
+        return view.messages.has(e2.id) ? { resume: [] } : [];
+      },
+      {
+        id: NodeId.create("X"),
+        state: undefined,
+        trigger: TriggerRule.allOf(TriggerEntry.on(e1), TriggerEntry.on(e2)),
+      },
+    ),
   );
   graph.addEdge(p, x, e1);
   graph.addEdge(p, x, e2);
@@ -2713,21 +2741,31 @@ test("schemas: Source and Sink admission are atomic and keep identity", () => {
 });
 
 test("Source credits admit one queued delivery and survive priming or an omitted read", async () => {
-  const graph = new DataflowGraph<Source<N, never> | undefined, N, never, never>(
-    Width.create(1), UNBOUNDED,
-  );
+  const graph = new DataflowGraph<
+    Source<N, never> | undefined,
+    N,
+    never,
+    never
+  >(Width.create(1), UNBOUNDED);
   const credit = Edge.message<N, never>("credit", NumberSchema);
   const output = Edge.message<N, never>("output", NumberSchema);
   const input = EdgeId.create("input");
   const source = new Source<N, never>(
-    (view) => (view.messages.get(input) ?? []).map((n) => Message.create(output, n)),
-    { id: NodeId.create("src"), schema: NumberSchema, trigger: TriggerRule.when(credit) },
+    (view) =>
+      (view.messages.get(input) ?? []).map((n) => Message.create(output, n)),
+    {
+      id: NodeId.create("src"),
+      schema: NumberSchema,
+      trigger: TriggerRule.when(credit),
+    },
   );
   const src = graph.addNode(source);
   const peer = graph.addNode({
     state: undefined,
     trigger: TriggerRule.never(),
-    step: async function* () { throw new Error("unreachable"); },
+    step() {
+      throw new Error("unreachable");
+    },
   });
   graph.addEdge(peer, src, credit).addEdge(src, peer, output);
   graph.emit(peer, Message.create(credit, 1));
@@ -2758,7 +2796,10 @@ test("Source credits hold each successive FIFO delivery until its release", asyn
   const input = EdgeId.create("in");
   const out = Edge.message<typeof NumberSchema, never>("out", NumberSchema);
   const routed: number[][] = [];
-  const credit = Edge.message<typeof NumberSchema, never>("release", NumberSchema);
+  const credit = Edge.message<typeof NumberSchema, never>(
+    "release",
+    NumberSchema,
+  );
   const source: Port = new Source<typeof NumberSchema, never>(
     (view) => {
       const batch = [...(view.messages.get(input) ?? [])];

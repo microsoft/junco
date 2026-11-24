@@ -21,8 +21,8 @@ export {
   type GraphSpec,
   type JuncoDocument,
   JuncoDocumentSchema,
-  nodeKey,
   type NodeSpec,
+  nodeKey,
   type TriggerSpec,
 } from "./schema.js";
 export { JuncoGraphValidator } from "./validator.js";

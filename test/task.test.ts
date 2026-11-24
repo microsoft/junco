@@ -47,7 +47,13 @@ import {
   terminalPorts,
   userTexts,
 } from "./deterministic-support.ts";
-import { countedCollection, NATIVE_TOOL_BLOCK, offlineLadder, toolTurn, waitingTool } from "./support.ts";
+import {
+  countedCollection,
+  NATIVE_TOOL_BLOCK,
+  offlineLadder,
+  toolTurn,
+  waitingTool,
+} from "./support.ts";
 
 // Real JuncoAgents on Pi's faux providers, driven as graph-registered agents on the parallel policy: a
 // `task` call runs fresh subagents natively in the background while the caller's node stays itself.
@@ -1054,11 +1060,7 @@ describe("native tasks on a graph-driven caller", () => {
       userTexts(finalContext.messages).filter(
         (text) => !text.startsWith('{"type":"task_'),
       ),
-      [
-        "Start",
-        renderTask(kickoff),
-        ...notes.map(renderTask),
-      ],
+      ["Start", renderTask(kickoff), ...notes.map(renderTask)],
     );
     const sendResults = finalContext.messages
       .filter((message) => message.role === "toolResult")
@@ -1514,18 +1516,28 @@ describe("native task lifecycle and complaints", () => {
   test("a persistent YAML caller starts each assignment with fresh task results and closes its children", async () => {
     const ladder = await offlineLadder((context) => {
       const users = userTexts(context.messages);
-      if (users[0] === `${TASK_CONTEXT}\n\na`) return fauxAssistantMessage("a-report");
+      if (users[0] === `${TASK_CONTEXT}\n\na`)
+        return fauxAssistantMessage("a-report");
       if (users.at(-1)?.startsWith("Again\n\nTask: ")) {
-        assert.ok(context.messages.some((m) => m.role === "assistant" && contentText(m.content) === "round 1 final"));
+        assert.ok(
+          context.messages.some(
+            (m) =>
+              m.role === "assistant" &&
+              contentText(m.content) === "round 1 final",
+          ),
+        );
         return fauxAssistantMessage("round 2 final");
       }
       if (!context.messages.some((m) => m.role === "assistant"))
         return toolTurn(taskCall([{ task: "a", tools: [] }]));
-      return fauxAssistantMessage(markersIn(context).length ? "round 1 final" : "interim");
+      return fauxAssistantMessage(
+        markersIn(context).length ? "round 1 final" : "interim",
+      );
     });
     const { collection } = countedCollection();
-    await using lifetime = { [Symbol.asyncDispose]: () => collection.close() };
-    const execution = await JuncoGraph.fromYaml(`graph:
+    await using _lifetime = { [Symbol.asyncDispose]: () => collection.close() };
+    const execution = await JuncoGraph.fromYaml(
+      `graph:
   source: { routes: { assignment: ["$source~>caller"] } }
   sink: { stream: true }
   nodes:
@@ -1534,10 +1546,12 @@ describe("native task lifecycle and complaints", () => {
     - { from: $source, to: caller, kind: message, schema: { type: object } }
     - { from: caller, to: caller, schema: &report { type: object, required: [role, content] } }
     - { from: caller, to: $sink, kind: message, on: return, schema: *report }
-`, {
-      args: { cwd: process.cwd(), tracer: quiet, collection },
-      parameters: { scheduler: () => schedules.parallel(), ladder },
-    });
+`,
+      {
+        args: { cwd: process.cwd(), tracer: quiet, collection },
+        parameters: { scheduler: () => schedules.parallel(), ladder },
+      },
+    );
     const id = graph.NodeId.create("caller");
     const caller = execution.graph.getNode(id)?.state;
     assert.ok(caller instanceof agentApi.JuncoAgent);
@@ -1546,9 +1560,19 @@ describe("native task lifecycle and complaints", () => {
     try {
       const round = async (text: string) => {
         execution.graph.source.enqueue({
-          messages: new Map([[graph.EdgeId.create("assignment"), [
-            Task.create({ kind: "prompt", text, spec: "Complete the round." }),
-          ]]]), values: new Map(),
+          messages: new Map([
+            [
+              graph.EdgeId.create("assignment"),
+              [
+                Task.create({
+                  kind: "prompt",
+                  text,
+                  spec: "Complete the round.",
+                }),
+              ],
+            ],
+          ]),
+          values: new Map(),
         });
         const result = (await execution.run()).get(id);
         assert.ok(Value.Check(AssistantMessageSchema, result));
@@ -1557,13 +1581,24 @@ describe("native task lifecycle and complaints", () => {
         assert.equal(published.length, 1);
         assert.equal(published[0], result);
         assert.equal(execution.graph.getNode(id)!.state, caller);
-        return { text: contentText(result.content), tasks: caller.getTaskResults().map(({ status, output }) => `${status}:${output}`) };
+        return {
+          text: contentText(result.content),
+          tasks: caller
+            .getTaskResults()
+            .map(({ status, output }) => `${status}:${output}`),
+        };
       };
-      assert.deepEqual(await round("Start"), { text: "round 1 final", tasks: ["completed:a-report"] });
+      assert.deepEqual(await round("Start"), {
+        text: "round 1 final",
+        tasks: ["completed:a-report"],
+      });
       assert.equal(children.length, 1);
       assert.equal(children[0]!.status, "closed");
       assert.notEqual(caller.status, "closed");
-      assert.deepEqual(await round("Again"), { text: "round 2 final", tasks: [] });
+      assert.deepEqual(await round("Again"), {
+        text: "round 2 final",
+        tasks: [],
+      });
       assert.equal(children.length, 1);
       assert.notEqual(caller.status, "closed");
     } finally {

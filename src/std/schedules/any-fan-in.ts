@@ -13,17 +13,27 @@ const selected = EdgeId.create("AnyFanIn->AnyFanInPublish");
 export function anyFanIn() {
   const AnyFanInInput: DeterministicNode = ({ graph, edges, policy }) => {
     const work = edges.get("AnyFanInInput~>AnyFanIn");
-    if (!work) throw new TypeError("AnyFanInInput requires a selector work edge");
+    if (!work)
+      throw new TypeError("AnyFanInInput requires a selector work edge");
     return new Deterministic<TSchema, unknown>(async function* (signal) {
       let view = yield [];
       while (true) {
         signal.throwIfAborted();
         const batch = view.messages.get(input) ?? [];
         for (const candidate of batch) {
-          if (!Value.Check(TaskSchema, candidate) || candidate.kind !== "prompt")
-            latchControllerFailure(graph, new TypeError("AnyFanIn requires prompt candidate messages"));
+          if (
+            !Value.Check(TaskSchema, candidate) ||
+            candidate.kind !== "prompt"
+          )
+            latchControllerFailure(
+              graph,
+              new TypeError("AnyFanIn requires prompt candidate messages"),
+            );
           if (!candidate.text.trim())
-            latchControllerFailure(graph, new Error("AnyFanIn candidate text must not be empty"));
+            latchControllerFailure(
+              graph,
+              new Error("AnyFanIn candidate text must not be empty"),
+            );
         }
         view = yield batch.map((candidate) => Message.create(work, candidate));
       }
@@ -32,7 +42,10 @@ export function anyFanIn() {
   const AnyFanInPublish: DeterministicNode = ({ graph, edges, policy }) => {
     const output = edges.get("AnyFanInPublish~>$sink");
     const ack = edges.get("ingress-ack");
-    if (!output || !ack) throw new TypeError("AnyFanInPublish requires output and ingress-ack edges");
+    if (!output || !ack)
+      throw new TypeError(
+        "AnyFanInPublish requires output and ingress-ack edges",
+      );
     return new Deterministic<TSchema, unknown>(async function* (signal) {
       let view = yield [];
       while (true) {
@@ -44,7 +57,10 @@ export function anyFanIn() {
           } catch (error) {
             latchControllerFailure(graph, error);
           }
-          messages.push(Message.create(output, result), Message.create(ack, true));
+          messages.push(
+            Message.create(output, result),
+            Message.create(ack, true),
+          );
         }
         view = yield messages;
       }

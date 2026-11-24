@@ -29,8 +29,8 @@ import {
   Message,
   NodeId,
   type NodeIdType,
-  Source,
   type ParentView,
+  Source,
   TriggerEntry,
   TriggerRule,
   UNBOUNDED,
@@ -328,7 +328,8 @@ for (const withhold of [false, true]) {
 
 test("YAML firings respect promptless input, a staged override, then the original return template", async () => {
   let round = 0;
-  let producer: string[] = [], reviewer: string[] = [];
+  let producer: string[] = [],
+    reviewer: string[] = [];
   let calledInfo = false;
   const ladder = await offlineLadder(({ messages }) => {
     const users = userTexts(messages);
@@ -345,30 +346,49 @@ test("YAML firings respect promptless input, a staged override, then the origina
   });
   const { collection } = countedCollection();
   closers.push(() => collection.close());
-  const execution = await JuncoGraph.fromYaml({
-    graph: {
-      source: { routes: { assignment: ["input"] } },
-      nodes: {
-        Worker: { trigger: "input" },
-        Reviewer: { trigger: "report", prompt: "Review: {{report}}" },
+  const execution = await JuncoGraph.fromYaml(
+    {
+      graph: {
+        source: { routes: { assignment: ["input"] } },
+        nodes: {
+          Worker: { trigger: "input" },
+          Reviewer: { trigger: "report", prompt: "Review: {{report}}" },
+        },
+        edges: [
+          {
+            from: "$source",
+            to: "Worker",
+            id: "input",
+            kind: "message",
+            schema: {},
+          },
+          { from: "Worker", to: "Worker", schema: {} },
+          {
+            from: "Worker",
+            to: "Reviewer",
+            id: "report",
+            kind: "message",
+            on: "return",
+            schema: {},
+          },
+          { from: "Reviewer", to: "Reviewer", schema: {} },
+          { from: "Reviewer", to: "$sink", schema: {} },
+        ],
       },
-      edges: [
-        { from: "$source", to: "Worker", id: "input", kind: "message", schema: {} },
-        { from: "Worker", to: "Worker", schema: {} },
-        { from: "Worker", to: "Reviewer", id: "report", kind: "message", on: "return", schema: {} },
-        { from: "Reviewer", to: "Reviewer", schema: {} },
-        { from: "Reviewer", to: "$sink", schema: {} },
-      ],
     },
-  }, {
-    args: { cwd: process.cwd(), collection, tracer: new DummyTracer() },
-    parameters: { ladder, scheduler: () => schedules.parallel() },
-  });
+    {
+      args: { cwd: process.cwd(), collection, tracer: new DummyTracer() },
+      parameters: { ladder, scheduler: () => schedules.parallel() },
+    },
+  );
   const graph = execution.graph;
   closers.push(() => graph.close());
   const worker = graph.getNode(NodeId.create("Worker"))!.state;
   const review = graph.getNode(NodeId.create("Reviewer"))!.state;
-  assert.ok(worker instanceof agentApi.JuncoAgent && review instanceof agentApi.JuncoAgent);
+  assert.ok(
+    worker instanceof agentApi.JuncoAgent &&
+      review instanceof agentApi.JuncoAgent,
+  );
   assert.equal(worker.stagedPrompt, undefined);
   assert.equal(typeof review.stagedPrompt, "function");
   for (round = 1; round <= 3; round++) {
@@ -376,9 +396,14 @@ test("YAML firings respect promptless input, a staged override, then the origina
       worker.stagePrompt("Controller assignment");
       review.stagePrompt("Controller review");
     }
-    const task = Task.create({ kind: "prompt", text: `work ${round}`, spec: "Produce a report." });
+    const task = Task.create({
+      kind: "prompt",
+      text: `work ${round}`,
+      spec: "Produce a report.",
+    });
     graph.source.enqueue({
-      messages: new Map([[EdgeId.create("assignment"), [task]]]), values: new Map(),
+      messages: new Map([[EdgeId.create("assignment"), [task]]]),
+      values: new Map(),
     });
     await execution.run();
     if (round === 1) {
@@ -387,8 +412,14 @@ test("YAML firings respect promptless input, a staged override, then the origina
       assert.deepEqual(reviewer, ["Review: report 1"]);
     } else if (round === 2) {
       assert.ok(producer.includes("Controller assignment"));
-      assert.deepEqual(reviewer.slice(0, 2), ["Review: report 1", "Controller review"]);
-      assert.equal(JSON.parse(reviewer[2]!).payload.content[0].text, "report 2");
+      assert.deepEqual(reviewer.slice(0, 2), [
+        "Review: report 1",
+        "Controller review",
+      ]);
+      assert.equal(
+        JSON.parse(reviewer[2]!).payload.content[0].text,
+        "report 2",
+      );
     } else assert.equal(reviewer.at(-1), "Review: report 3");
   }
 });
@@ -417,7 +448,10 @@ for (const strategy of STRATEGIES) {
         prompt: "use it",
         policy: LockPolicy,
         description: "dependent",
-        trigger: TriggerRule.allOf(TriggerEntry.on(edge), TriggerEntry.on(work)),
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(edge),
+          TriggerEntry.on(work),
+        ),
       });
       graph.addEdge(u, d, edge).addEdge(graph.source.id, d, work);
       graph.emit(
@@ -434,7 +468,9 @@ for (const strategy of STRATEGIES) {
       assert.equal(graph.getNode(d)!.status, "running");
       assert.equal(dependent.status, "idle");
       assert.ok(graph.available().has(d));
-      assert.ok(!dependent.calls.some(({ method }) => method === "stagePrompt"));
+      assert.ok(
+        !dependent.calls.some(({ method }) => method === "stagePrompt"),
+      );
       assert.deepEqual(dependent.requests, []);
       assert.deepEqual(dependent.history, []);
       await graphContext.run();
@@ -664,7 +700,10 @@ for (const strategy of STRATEGIES) {
       graph.addEdge(s, m, edge);
 
       graphPorts.connect(graph, m);
-      await stepUntil(graphContext, () => graph.getNode(m)!.status === "running");
+      await stepUntil(
+        graphContext,
+        () => graph.getNode(m)!.status === "running",
+      );
       assert.deepEqual(member.requests, []);
       const result = (await graphContext.run()).get(m);
       assert.ok(result && textOf(result) === "later");
@@ -766,12 +805,19 @@ for (const strategy of STRATEGIES) {
       const context = plainContext(ports.source, ports.sink, strategy);
       closers.push(() => context.graph.close());
       const id = context.graph.addNode({
-        state: agent, prompt: undefined, policy: LockPolicy, trigger: TriggerRule.always(),
+        state: agent,
+        prompt: undefined,
+        policy: LockPolicy,
+        trigger: TriggerRule.always(),
       });
       ports.connect(context.graph, id);
-      await assert.rejects(context.run(), (error) =>
-        error instanceof DataflowDefinitionError &&
-        error.message.includes(`Agent node "${id}" needs a staged prompt or a delivered message`),
+      await assert.rejects(
+        context.run(),
+        (error) =>
+          error instanceof DataflowDefinitionError &&
+          error.message.includes(
+            `Agent node "${id}" needs a staged prompt or a delivered message`,
+          ),
       );
       assert.equal(agent.requests.length, 0);
     });
@@ -847,7 +893,10 @@ for (const strategy of STRATEGIES) {
         },
         policy: LockPolicy,
         description: "member",
-        trigger: TriggerRule.allOf(TriggerEntry.on(edge), TriggerEntry.on(work)),
+        trigger: TriggerRule.allOf(
+          TriggerEntry.on(edge),
+          TriggerEntry.on(work),
+        ),
       });
       first
         .addEdge(upstreamId, firstId, edge)
@@ -912,10 +961,12 @@ for (const strategy of STRATEGIES) {
         assert.ok(graph.available().has(id));
         await context.step();
         assert.equal(member.status, status);
-        await assert.rejects(context.step(), (error) =>
-          error instanceof DataflowNodeError &&
-          error.error instanceof JuncoAgentError &&
-          error.error.code === "busy",
+        await assert.rejects(
+          context.step(),
+          (error) =>
+            error instanceof DataflowNodeError &&
+            error.error instanceof JuncoAgentError &&
+            error.error.code === "busy",
         );
         assert.ok(O.isNone(graph.result(id)));
         assert.deepEqual(member.requests, requests);
@@ -963,7 +1014,10 @@ for (const strategy of STRATEGIES) {
       const agentId = graph.addNode({
         state: receiver.agent,
         prompt: (inputs) => {
-          seen.push([inputs.messages.get(notes.id), inputs.values.get(seed.id)]);
+          seen.push([
+            inputs.messages.get(notes.id),
+            inputs.values.get(seed.id),
+          ]);
           return "Use note with seed";
         },
         id: NodeId.create("agent"),
@@ -990,7 +1044,10 @@ for (const strategy of STRATEGIES) {
       assert.equal(receiver.faux.state.callCount, 0);
       assert.equal(receiver.agent.status, "idle");
       assert.ok(graph.available().has(agentId));
-      await stepUntil(graphContext, () => receiver.agent.status === "suspended");
+      await stepUntil(
+        graphContext,
+        () => receiver.agent.status === "suspended",
+      );
       assert.equal(graph.available().get(agentId)?.continuationOnly, true);
       assert.equal(seen.length, 1);
 
@@ -1183,7 +1240,10 @@ for (const strategy of STRATEGIES) {
       });
       graph.addEdge(a, c, fromAgent);
       const releases = [
-        [a, toAgent], [d, toCoroutine], [g, toGraph], [c, toConsumer],
+        [a, toAgent],
+        [d, toCoroutine],
+        [g, toGraph],
+        [c, toConsumer],
       ] as const;
       for (const [target, edge] of releases)
         graph.addEdge(graph.source.id, target, edge);
@@ -1473,7 +1533,11 @@ for (const strategy of STRATEGIES) {
         }, LockPolicy),
       });
       const ids = (
-        [["P", p, fromF], ["Q", q, fromFQ], ["R", r, fromFR]] as const
+        [
+          ["P", p, fromF],
+          ["Q", q, fromFQ],
+          ["R", r, fromFR],
+        ] as const
       ).map(([id, { agent }, edge]) =>
         graph.addNode({
           id: NodeId.create(id),

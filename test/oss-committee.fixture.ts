@@ -156,8 +156,12 @@ export async function scriptedCommittee(
             id: "Librarian~>DesignAssignment",
             payload: { kind: "prompt", text: librarianReport },
             // Hand the received assignment on: its id is the `Task:` line of the latest user input.
-            task: JSON.parse(memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!).taskId,
-            spec: JSON.parse(memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!).spec,
+            task: JSON.parse(
+              memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!,
+            ).taskId,
+            spec: JSON.parse(
+              memberInputs.Librarian.at(-1)!.split("\n\nTask: ").at(-1)!,
+            ).spec,
             handoff: "partial research after a failed lookup",
           },
           { id: `librarian-send-${librarianRound + 1}` },
@@ -168,7 +172,11 @@ export async function scriptedCommittee(
   const librarian: FauxResponseFactory = (context) => {
     modelRequests.push("Librarian");
     const last = context.messages.at(-1);
-    if (last?.role === "user" && latestUserText(context) === JSON.stringify({ id: "architect-finished", payload: true })) {
+    if (
+      last?.role === "user" &&
+      latestUserText(context) ===
+        JSON.stringify({ id: "architect-finished", payload: true })
+    ) {
       return fauxAssistantMessage(
         librarianStopReason === "length"
           ? librarianReport.slice(0, 4)
@@ -396,42 +404,92 @@ export async function scriptedCommittee(
     return fauxAssistantMessage(committeePlan(reducerInput, reducerRound + 1));
   };
 
-  const scripts = { Librarian: librarian, Architect: architect, Reducer: reducer };
+  const scripts = {
+    Librarian: librarian,
+    Architect: architect,
+    Reducer: reducer,
+  };
   const { models, faux } = await fauxRuntime([], "faux", [
-    { id: "committee", ...(librarianStopReason === "length" ? { maxTokens: 1 } : {}) },
+    {
+      id: "committee",
+      ...(librarianStopReason === "length" ? { maxTokens: 1 } : {}),
+    },
   ]);
   const respond: FauxResponseFactory = (context, ...rest) => {
-    const system = context.messages.filter(m => m.role === "system").map(m =>
-      typeof m.content === "string" ? m.content : contentText(m.content)).join("\n");
-    const role = Object.keys(scripts).find(id => system.includes(`You are the ${id}`)) as MemberId | undefined;
+    const system = context.messages
+      .filter((m) => m.role === "system")
+      .map((m) =>
+        typeof m.content === "string" ? m.content : contentText(m.content),
+      )
+      .join("\n");
+    const role = Object.keys(scripts).find((id) =>
+      system.includes(`You are the ${id}`),
+    ) as MemberId | undefined;
     if (!role) throw new Error("Unknown committee role");
     faux.appendResponses([respond]);
     return scripts[role](context, ...rest);
   };
   faux.setResponses([respond]);
-  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "faux/committee" }));
+  const ladder = new schedules.ModelLadder(
+    models,
+    schedules.uniformLadder({ model: "faux/committee" }),
+  );
   await using setup = new AsyncDisposableStack();
-  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "committee-")), dir => rm(dir, { recursive: true, force: true }));
+  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "committee-")), (dir) =>
+    rm(dir, { recursive: true, force: true }),
+  );
   const native = await copyTreeNative();
   const collections = new Map<NodeIdType, ToolCollection>();
   for (const role of ["Librarian", "Architect", "Reducer"] as const) {
-    const extra: AgentTool[] = role === "Reducer" ? [review.tool] : role === "Librarian" ? [search.tool] : [];
-    if (role === "Librarian" && script.policyPauseBeforeSend) extra.push(guardedTool);
-    collections.set(NodeId.create(role), setup.adopt(await ToolCollection.create(cwd, {
-      native, extend: async () => ({ tools: extra, close: async () => {} }),
-    }), c => c.close()));
+    const extra: AgentTool[] =
+      role === "Reducer"
+        ? [review.tool]
+        : role === "Librarian"
+          ? [search.tool]
+          : [];
+    if (role === "Librarian" && script.policyPauseBeforeSend)
+      extra.push(guardedTool);
+    collections.set(
+      NodeId.create(role),
+      setup.adopt(
+        await ToolCollection.create(cwd, {
+          native,
+          extend: async () => ({ tools: extra, close: async () => {} }),
+        }),
+        (c) => c.close(),
+      ),
+    );
   }
-  const options = { cwd, tools: collections, ladder, tracer: new DummyTracer() };
+  const options = {
+    cwd,
+    tools: collections,
+    ladder,
+    tracer: new DummyTracer(),
+  };
   const resources = setup.move();
-  return { search, review, memberInputs, searchQueries, modelRequests,
+  return {
+    search,
+    review,
+    memberInputs,
+    searchQueries,
+    modelRequests,
     async open() {
       const round = await createCommittee(request, search, options);
       resources.use(round.execution.graph);
-      const librarian = round.execution.graph.getNode(NodeId.create("Librarian"))!.state;
-      if (!(librarian instanceof agent.JuncoAgent)) throw new Error("Missing built Librarian");
+      const librarian = round.execution.graph.getNode(
+        NodeId.create("Librarian"),
+      )!.state;
+      if (!(librarian instanceof agent.JuncoAgent))
+        throw new Error("Missing built Librarian");
       return { ...round, librarian };
     },
-    run: (observer = options.tracer, signal?: AbortSignal) => convene(request, { ...options, tracer: observer, signal }, search, review),
+    run: (observer = options.tracer, signal?: AbortSignal) =>
+      convene(
+        request,
+        { ...options, tracer: observer, signal },
+        search,
+        review,
+      ),
     [Symbol.asyncDispose]: () => resources.disposeAsync(),
   };
 }

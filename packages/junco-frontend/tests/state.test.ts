@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { EMPTY, isTask, latestRoot, reduce, type State } from "../client/state.ts";
+import {
+  EMPTY,
+  isTask,
+  latestRoot,
+  reduce,
+  type State,
+} from "../client/state.ts";
 import type { FrontendEvent, FrontendEventBody } from "../server/index.ts";
 
 let seq = 0;
@@ -21,10 +27,15 @@ test("the diagram follows the latest root run, not a child or a late completion"
   const graphs: State["graphs"] = {};
   expect(latestRoot(graphs)).toBeUndefined();
   const node = { id: "work", status: "ready", live: "ready" } as const;
-  const first = (graphs[2] = { nodes: { work: node }, links: [] });
+  const first = { nodes: { work: node }, links: [] };
+  graphs[2] = first;
   expect(latestRoot(graphs)).toBe(2);
   graphs[2] = { ...first, run: { run: 1, phase: "end" } };
-  graphs[11] = { nodes: { work: { ...node, child: 12 } }, links: [], run: { run: 2, phase: "start" } };
+  graphs[11] = {
+    nodes: { work: { ...node, child: 12 } },
+    links: [],
+    run: { run: 2, phase: "start" },
+  };
   graphs[12] = { ...first, run: { run: 3, phase: "start" } };
   expect(latestRoot(graphs)).toBe(11);
   graphs[2] = { ...first, run: { run: 1, phase: "end" } };
@@ -99,12 +110,19 @@ test("a handed-off task's card moves queued → running → waiting, and a retur
 
 test("a final publication completes the producer and queues its task downstream", () => {
   const state = step(EMPTY, {
-    kind: "graph", graph: 1,
-    nodes: [{ id: "a", status: "running" }, { id: "b", status: "ready" }],
+    kind: "graph",
+    graph: 1,
+    nodes: [
+      { id: "a", status: "running" },
+      { id: "b", status: "ready" },
+    ],
     links: [{ from: "a", to: "b", id: "e", kind: "message" }],
   });
   const end = step(state, {
-    kind: "step", ...where, node: "a", outcome: "final",
+    kind: "step",
+    ...where,
+    node: "a",
+    outcome: "final",
     messages: [{ edge: "e", payload: task }],
   });
   expect(end.graphs[1]?.nodes.a?.live).toBe("done");

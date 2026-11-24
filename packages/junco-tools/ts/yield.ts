@@ -20,7 +20,10 @@ const yieldParameters = Type.Object(
 );
 
 /** A completed explicit yield, optionally parked until the next graph input. */
-export type YieldToolDetails = { readonly reason: string; readonly waitForInput?: true };
+export type YieldToolDetails = {
+  readonly reason: string;
+  readonly waitForInput?: true;
+};
 
 /** Tools this module created. Only these are scheduling primitives; a same-named tool is not. */
 const yieldTools = new WeakSet<object>();
@@ -68,7 +71,9 @@ export const YieldTool: new (
           const { reason } = params;
           return {
             content: [{ type: "text", text: reason }],
-            details: params.waitForInput ? { reason, waitForInput: params.waitForInput } : { reason },
+            details: params.waitForInput
+              ? { reason, waitForInput: params.waitForInput }
+              : { reason },
           };
         },
       );

@@ -236,23 +236,43 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       sendSchema = declared(context.messages, "send")?.parameters;
     }
     // Pi coerces numeric strings, so send a word before retrying with a number.
-    return fauxAssistantMessage(fauxToolCall("send", {
-      id: "numbers", payload: previous ? 7 : "seven", handoff: "", task: "", spec: "",
-    }, { id: previous ? "s2" : "s1" }), { stopReason: "toolUse" });
+    return fauxAssistantMessage(
+      fauxToolCall(
+        "send",
+        {
+          id: "numbers",
+          payload: previous ? 7 : "seven",
+          handoff: "",
+          task: "",
+          spec: "",
+        },
+        { id: previous ? "s2" : "s1" },
+      ),
+      { stopReason: "toolUse" },
+    );
   });
   const { collection } = countedCollection();
-  await using lifetime = { [Symbol.asyncDispose]: () => collection.close() };
+  await using _lifetime = { [Symbol.asyncDispose]: () => collection.close() };
   const execution = await JuncoGraph.fromYaml(
     yamlInput({
       graph: {
         sink: { returns: "Consumer" },
         nodes: {
-          Start: { kind: "emit", text: "Send seven.", spec: "One numeric delivery." },
+          Start: {
+            kind: "emit",
+            text: "Send seven.",
+            spec: "One numeric delivery.",
+          },
           Producer: { prompt: "Send the number seven on your route." },
           Consumer: { prompt: "Receive your numbers." },
         },
         edges: [
-          { from: "Start", to: "Producer", kind: "message", schema: { type: "object" } },
+          {
+            from: "Start",
+            to: "Producer",
+            kind: "message",
+            schema: { type: "object" },
+          },
           {
             from: "Producer",
             to: "Consumer",
@@ -265,11 +285,17 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
       },
     }),
     {
-      args: { cwd: process.cwd(), collection, tracer: new tracer.DummyTracer() },
+      args: {
+        cwd: process.cwd(),
+        collection,
+        tracer: new tracer.DummyTracer(),
+      },
       parameters: { scheduler: () => schedules.parallel(), ladder },
     },
   );
-  const agents = ["Producer", "Consumer"].map((id) => execution.graph.getNode(NodeId.create(id))?.state);
+  const agents = ["Producer", "Consumer"].map(
+    (id) => execution.graph.getNode(NodeId.create(id))?.state,
+  );
   try {
     await execution.run();
   } finally {
@@ -307,8 +333,10 @@ export async function runNumericMessagingFixture(): Promise<NumericMessagingSumm
   assert.ok(O.isSome(result));
   assert.ok(Value.Check(AssistantMessageSchema, result.value));
   assert.equal(textOf(result.value), "consumed");
-  const closed =
-    agents.every((member) => member instanceof agent.JuncoAgent && member.status === "closed");
+  const closed = agents.every(
+    (member) =>
+      member instanceof agent.JuncoAgent && member.status === "closed",
+  );
   assert.ok(closed);
   return {
     scenario: "numeric-messaging",

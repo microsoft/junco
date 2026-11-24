@@ -33,16 +33,7 @@ const UPDATE = EdgeId.create("$source~>MemoryUpdate");
 const OUTPUT = "Memory~>$sink";
 const FAN_OUT_INPUTS = [RECALL, UPDATE] as const;
 const TOPOLOGIES = [
-  [
-    "ralph",
-    [
-      ASSIGNMENT,
-      PREPARED,
-      COMPLETE,
-      "Ralph->$sink",
-      OUTPUT,
-    ],
-  ],
+  ["ralph", [ASSIGNMENT, PREPARED, COMPLETE, "Ralph->$sink", OUTPUT]],
   ["fan-in", [CANDIDATES, "Memory~>Select", SELECTED, OUTPUT]],
   ["fan-out", [RECALL, UPDATE, OUTPUT]],
 ] as const;
@@ -105,13 +96,7 @@ export function memory(options: MemoryScheduleOptions) {
         "Memory requires save_memory and search_memory tools",
       );
     const save = async (text: string, signal: AbortSignal) => {
-      await invokeMemoryTool(
-        saveTool,
-        node,
-        saveTool.name,
-        { text },
-        signal,
-      );
+      await invokeMemoryTool(saveTool, node, saveTool.name, { text }, signal);
       signal.throwIfAborted();
     };
     const recall = async (
@@ -168,16 +153,24 @@ export function memory(options: MemoryScheduleOptions) {
               current = { assignment, tasks };
             } else if (completed?.length) {
               if (!current || completed.length !== 1)
-                throw new Error("MemoryRalphLoop requires exactly one settlement for its assignment");
+                throw new Error(
+                  "MemoryRalphLoop requires exactly one settlement for its assignment",
+                );
               const product = completed[0];
               if (rounds.retry(product)) phase = "retry";
               else {
                 const answer = finalText(product, "Ralph");
-                await save(JSON.stringify({ assignment: current.assignment, answer }), signal);
+                await save(
+                  JSON.stringify({ assignment: current.assignment, answer }),
+                  signal,
+                );
                 if (rounds.accept(product)) {
                   signal.throwIfAborted();
                   view = yield [
-                    Message.create(output, { ...current.tasks[0], text: "saved" }),
+                    Message.create(output, {
+                      ...current.tasks[0],
+                      text: "saved",
+                    }),
                     ack,
                   ];
                   continue;
@@ -189,11 +182,14 @@ export function memory(options: MemoryScheduleOptions) {
               continue;
             }
             const { assignment, tasks } = current;
-            const batch = phase ? [Message.create(work, rounds.work(phase))] : [];
+            const batch = phase
+              ? [Message.create(work, rounds.work(phase))]
+              : [];
             for (const [i, task] of tasks.entries()) {
-              const payload = phase !== "retry" && i === tasks.length - 1
-                ? await recall(task, assignment, signal)
-                : task;
+              const payload =
+                phase !== "retry" && i === tasks.length - 1
+                  ? await recall(task, assignment, signal)
+                  : task;
               batch.push(Message.create(work, payload));
             }
             view = yield batch;
@@ -209,18 +205,26 @@ export function memory(options: MemoryScheduleOptions) {
             const selected = view.messages.get(SELECTED);
             if (batch?.length) {
               // Validate the entire delivery before making any persistent write.
-              const tasks = batch.map((candidate) => promptTask(candidate, "MemoryFanIn"));
+              const tasks = batch.map((candidate) =>
+                promptTask(candidate, "MemoryFanIn"),
+              );
               for (const { text } of tasks) await save(text, signal);
               choices = winner ? [winner, ...tasks] : tasks;
-              view = yield choices.map((task) => Message.create(selection, task));
+              view = yield choices.map((task) =>
+                Message.create(selection, task),
+              );
             } else if (selected?.length) {
               if (selected.length !== 1)
-                throw new Error("MemoryFanIn requires exactly one selected assistant message");
+                throw new Error(
+                  "MemoryFanIn requires exactly one selected assistant message",
+                );
               const product = selected[0];
               const text = finalText(product, "MemoryFanIn");
               const chosen = choices.find((task) => task.text.trim() === text);
               if (!chosen)
-                throw new Error("MemoryFanIn selected text outside the candidate set");
+                throw new Error(
+                  "MemoryFanIn selected text outside the candidate set",
+                );
               winner = chosen.text === text ? chosen : { ...chosen, text };
               choices = [];
               view = yield [Message.create(output, product), ack];
@@ -228,12 +232,16 @@ export function memory(options: MemoryScheduleOptions) {
           }
         }
 
-        const pending: { id: typeof RECALL | typeof UPDATE; payload: unknown }[] = [];
+        const pending: {
+          id: typeof RECALL | typeof UPDATE;
+          payload: unknown;
+        }[] = [];
         let head = 0;
         while (true) {
           signal.throwIfAborted();
           for (const id of FAN_OUT_INPUTS)
-            for (const payload of view.messages.get(id) ?? []) pending.push({ id, payload });
+            for (const payload of view.messages.get(id) ?? [])
+              pending.push({ id, payload });
           const next = pending[head];
           if (!next) {
             view = yield [];

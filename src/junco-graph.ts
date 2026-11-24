@@ -229,7 +229,10 @@ function startActivation<S, N extends TSchema, T, EH>(
   inputs: ParentView<N, T> | undefined,
 ):
   | ((
-      end: IteratorResult<readonly unknown[], T | FinalMessages<N>> | "error" | "cancelled",
+      end:
+        | IteratorResult<readonly unknown[], T | FinalMessages<N>>
+        | "error"
+        | "cancelled",
     ) => void)
   | undefined {
   const view = graphView?.add_context(String(id));
@@ -281,7 +284,10 @@ function startActivation<S, N extends TSchema, T, EH>(
       ...operation,
       counters: end.done
         ? end.value instanceof FinalMessages
-          ? { activations_returned: 1, output_messages: end.value.messages.length }
+          ? {
+              activations_returned: 1,
+              output_messages: end.value.messages.length,
+            }
           : { activations_returned: 1, output_values: 1 }
         : { activations_yielded: 1, output_messages: end.value.length },
     });
@@ -527,8 +533,11 @@ export class JuncoGraph<
         if (mapped instanceof JuncoGraph)
           throw new TypeError("Nested graph node requires a SchedulerContext");
         if (mapped instanceof JuncoAgent || mapped instanceof MockAgent)
-          throw new DataflowDefinitionError("Map a prompt agent with its state, prompt, policy and trigger");
-        const spec = mapped instanceof Deterministic ? { state: mapped } : mapped;
+          throw new DataflowDefinitionError(
+            "Map a prompt agent with its state, prompt, policy and trigger",
+          );
+        const spec =
+          mapped instanceof Deterministic ? { state: mapped } : mapped;
         graph.addNode({
           trigger:
             inputs.length === 0
@@ -786,13 +795,17 @@ export class JuncoGraph<
   }
 
   /** Register native work, preserving its actual state and this registration's sender identity. */
-  override addNode(spec: Extract<AgenticNode<N, T>, { readonly prompt: unknown }>): NodeIdType;
+  override addNode(
+    spec: Extract<AgenticNode<N, T>, { readonly prompt: unknown }>,
+  ): NodeIdType;
   override addNode(spec: AgenticNode<N, T>): NodeIdType;
   // The complete-spec branch alone keeps this override compatible with the native signature.
   override addNode(spec: CompleteNode<N, T>): NodeIdType;
   override addNode(spec: AgenticNode<N, T>): NodeIdType {
     if ("is_available" in spec)
-      throw new DataflowDefinitionError("is_available was removed; declare a trigger instead");
+      throw new DataflowDefinitionError(
+        "is_available was removed; declare a trigger instead",
+      );
     const state = spec.state;
     const nested = isNestedContext<N, T>(state);
     const policy = JuncoGraph.#nodePolicy(spec, this.policy);
@@ -820,7 +833,9 @@ export class JuncoGraph<
       complete = this.#graphNode(spec as NestedNode<N, T>, policy);
     else if (state instanceof JuncoAgent || state instanceof MockAgent) {
       if (!("prompt" in spec))
-        throw new DataflowDefinitionError("A graph-managed agent requires a prompt");
+        throw new DataflowDefinitionError(
+          "A graph-managed agent requires a prompt",
+        );
       complete = AgentDriver.node<N, T>(state, { ...spec, policy });
       repeatOnReturn = true;
     } else throw new TypeError("An agentic node requires a step");
@@ -1119,8 +1134,7 @@ export class JuncoGraph<
         stack.push(children[index]);
     }
     for (const member of resources) {
-      if (kind === "close")
-        requests.push(() => member[Symbol.asyncDispose]());
+      if (kind === "close") requests.push(() => member[Symbol.asyncDispose]());
       else if (member instanceof Deterministic)
         requests.push(() => member.abort(reason));
       else if (member.status !== "closed") requests.push(() => member.abort());

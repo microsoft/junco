@@ -155,8 +155,15 @@ export const nodePolicies = new WeakMap<object, NodePolicy>();
 // A controller cannot replay a consumed settlement. Keep even a thrown undefined for later drives.
 const controllerFailures = new WeakMap<object, { readonly cause: unknown }>();
 
-export function latchControllerFailure(graph: { readonly signal: AbortSignal }, cause: unknown): never {
-  if (graph.signal.aborted || cause instanceof DataflowDefinitionError || holdsUsageFailure(cause))
+export function latchControllerFailure(
+  graph: { readonly signal: AbortSignal },
+  cause: unknown,
+): never {
+  if (
+    graph.signal.aborted ||
+    cause instanceof DataflowDefinitionError ||
+    holdsUsageFailure(cause)
+  )
     throw cause;
   const failure = controllerFailures.get(graph) ?? { cause };
   controllerFailures.set(graph, failure);
@@ -166,7 +173,8 @@ export function latchControllerFailure(graph: { readonly signal: AbortSignal }, 
 export function rethrowControllerFailure(graph: object, parent?: object): void {
   const failure = controllerFailures.get(graph);
   if (failure === undefined) return;
-  if (parent && !controllerFailures.has(parent)) controllerFailures.set(parent, failure);
+  if (parent && !controllerFailures.has(parent))
+    controllerFailures.set(parent, failure);
   throw failure.cause;
 }
 

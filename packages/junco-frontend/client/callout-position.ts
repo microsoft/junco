@@ -15,7 +15,10 @@ export function calloutPosition(
 
   const margin = 8;
   const center = (left + right) / 2;
-  const x = Math.max(margin, Math.min(center - width / 2, viewportWidth - width - margin));
+  const x = Math.max(
+    margin,
+    Math.min(center - width / 2, viewportWidth - width - margin),
+  );
   const above = top >= viewportHeight - bottom;
   const maxHeight = (above ? top : viewportHeight - bottom) - 2 * margin;
   if (maxHeight <= 0) return undefined;

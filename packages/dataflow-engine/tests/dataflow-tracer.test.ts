@@ -80,9 +80,15 @@ class RecordingTracer implements DataflowTracer {
         return {
           end(step) {
             if (!step.done)
-              activation.outcome = { done: false, messages: step.value.map((m) => m.payload) };
+              activation.outcome = {
+                done: false,
+                messages: step.value.map((m) => m.payload),
+              };
             else if (step.value instanceof FinalMessages)
-              activation.outcome = { done: true, messages: step.value.messages.map((m) => m.payload) };
+              activation.outcome = {
+                done: true,
+                messages: step.value.messages.map((m) => m.payload),
+              };
             else activation.outcome = { done: true, value: step.value };
           },
           fail(error) {
@@ -176,22 +182,32 @@ test("primes receive no view; resumes receive exactly the scheduler-sized delive
 test("a terminal batch is traced as completed messages, not as a result", async () => {
   const tracer = new RecordingTracer();
   const graph = new DataflowGraph<void, typeof NumberSchema, string, never>(
-    Width.create(1), UNBOUNDED, tracer,
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
   );
   const out = Edge.message("out", NumberSchema);
   const src = graph.addNode({
     state: undefined,
     trigger: TriggerRule.always(),
     // biome-ignore lint/correctness/useYield: the source finishes at prime.
-    async *step() { return new FinalMessages([Message.create(out, 7)]); },
+    async *step() {
+      return new FinalMessages([Message.create(out, 7)]);
+    },
   });
-  const dst = graph.addNode(new StepNode<void, typeof NumberSchema, string>(() => [], {
-    state: undefined, trigger: TriggerRule.never(),
-  }));
+  const dst = graph.addNode(
+    new StepNode<void, typeof NumberSchema, string>(() => [], {
+      state: undefined,
+      trigger: TriggerRule.never(),
+    }),
+  );
   graph.addEdge(src, dst, out);
   await context({ graph, scheduler: parallel() }).run();
   const [run] = tracer.runs;
-  assert.deepEqual(run!.activations.map((a) => a.outcome), [{ done: true, messages: [7] }]);
+  assert.deepEqual(
+    run!.activations.map((a) => a.outcome),
+    [{ done: true, messages: [7] }],
+  );
   assert.deepEqual(graph.observe().inputs.get(dst)?.messages.get(out.id), [7]);
   assert.equal(run!.results!.has(src), false);
 });
@@ -199,18 +215,32 @@ test("a terminal batch is traced as completed messages, not as a result", async 
 test("a sink continuation and final batch are traced and delivered through its outbox", async () => {
   const tracer = new RecordingTracer();
   type Port = Sink<typeof NumberSchema, number>;
-  const graph = new DataflowGraph<Port, typeof NumberSchema, number, never>(Width.create(1), UNBOUNDED, tracer);
+  const graph = new DataflowGraph<Port, typeof NumberSchema, number, never>(
+    Width.create(1),
+    UNBOUNDED,
+    tracer,
+  );
   const external = Edge.message("outside", NumberSchema);
-  const sink = new Sink<typeof NumberSchema, number>(async function* () {
-    yield { resume: [Message.create(external, 4)] };
-    return new FinalMessages([Message.create(external, 5)]);
-  }, { id: NodeId.create("egress"), trigger: TriggerRule.always(), schema: NumberSchema });
+  const sink = new Sink<typeof NumberSchema, number>(
+    async function* () {
+      yield { resume: [Message.create(external, 4)] };
+      return new FinalMessages([Message.create(external, 5)]);
+    },
+    {
+      id: NodeId.create("egress"),
+      trigger: TriggerRule.always(),
+      schema: NumberSchema,
+    },
+  );
   graph.addNode(sink);
   await context({ graph, scheduler: parallel() }).run();
-  assert.deepEqual(tracer.runs[0]?.activations.map((a) => a.outcome), [
-    { done: false, messages: [4] },
-    { done: true, messages: [5] },
-  ]);
+  assert.deepEqual(
+    tracer.runs[0]?.activations.map((a) => a.outcome),
+    [
+      { done: false, messages: [4] },
+      { done: true, messages: [5] },
+    ],
+  );
   const delivered: number[] = [];
   sink.drain((message) => delivered.push(message.payload));
   assert.deepEqual(delivered, [4, 5]);

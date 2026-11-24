@@ -321,7 +321,11 @@ export function everyKindSharesOneNodeOptions(
   ];
   const ids: NodeIdType[] = nodes.map((node) => graph.addNode(node));
   // @ts-expect-error every node spec carries its policy
-  void graph.addNode({ trigger: TriggerRule.always(), state: mock, prompt: "go" });
+  void graph.addNode({
+    trigger: TriggerRule.always(),
+    state: mock,
+    prompt: "go",
+  });
   // @ts-expect-error raw node specs carry their policy too
   void graph.addNode({
     trigger: TriggerRule.always(),
@@ -1604,28 +1608,44 @@ export async function schemaDomainsStayExact(
   const id = EdgeId.create("numbers");
   const policy = { trigger: TriggerRule.always(), policy: LockPolicy };
   // Registered prompts read the exact message and parent value domains.
-  const numericNode = numeric.addNode({ ...policy, state: numericAgent, prompt: (inputs) => {
-    const payloads = inputs.messages.get(id);
-    exact<typeof payloads, readonly number[] | undefined>(true);
-    const parent = inputs.values.get(id);
-    exact<typeof parent, AssistantMessage | undefined>(true);
-    return `${payloads?.length}`;
-  } });
-  const mockNode = numeric.addNode({ ...policy, state: numericMock, prompt: (inputs) => {
-    const payloads = inputs.messages.get(id);
-    exact<typeof payloads, readonly number[] | undefined>(true);
-    return `${payloads?.[0]}`;
-  } });
+  const numericNode = numeric.addNode({
+    ...policy,
+    state: numericAgent,
+    prompt: (inputs) => {
+      const payloads = inputs.messages.get(id);
+      exact<typeof payloads, readonly number[] | undefined>(true);
+      const parent = inputs.values.get(id);
+      exact<typeof parent, AssistantMessage | undefined>(true);
+      return `${payloads?.length}`;
+    },
+  });
+  const mockNode = numeric.addNode({
+    ...policy,
+    state: numericMock,
+    prompt: (inputs) => {
+      const payloads = inputs.messages.get(id);
+      exact<typeof payloads, readonly number[] | undefined>(true);
+      return `${payloads?.[0]}`;
+    },
+  });
   // @ts-expect-error a callback over another input domain is rejected
-  numeric.addNode({ ...policy, state: numericAgent, prompt: (_inputs: ParentView<Str, AssistantMessage>) => "" });
+  numeric.addNode({
+    ...policy,
+    state: numericAgent,
+    prompt: (_inputs: ParentView<Str, AssistantMessage>) => "",
+  });
   // Dynamic YAML inputs stay unknown until narrowed.
-  const yamlNode = yaml.addNode({ ...policy, state: yamlAgent, prompt: (inputs) => {
-    const payloads = inputs.messages.get(id);
-    exact<typeof payloads, readonly unknown[] | undefined>(true);
-    const parent = inputs.values.get(id);
-    exact<typeof parent, unknown>(true);
-    return typeof parent === "number" ? `${parent + 1}` : "";
-  } });
+  const yamlNode = yaml.addNode({
+    ...policy,
+    state: yamlAgent,
+    prompt: (inputs) => {
+      const payloads = inputs.messages.get(id);
+      exact<typeof payloads, readonly unknown[] | undefined>(true);
+      const parent = inputs.values.get(id);
+      exact<typeof parent, unknown>(true);
+      return typeof parent === "number" ? `${parent + 1}` : "";
+    },
+  });
   // Native agents join result domains containing AssistantMessage, unknown included.
   const registered: NodeIdType[] = [
     numericNode,
@@ -1661,7 +1681,9 @@ export async function schemaDomainsStayExact(
       code: {
         Review: ({ context, policy }) => {
           exact<typeof context, { topic: string }>(true);
-          return new Deterministic<TSchema, unknown>(async function* () { return context.topic; }, policy);
+          return new Deterministic<TSchema, unknown>(async function* () {
+            return context.topic;
+          }, policy);
         },
       },
     },

@@ -30,16 +30,21 @@ const edge = Type.Object(
 const common = {
   description: Type.Optional(Type.String()),
   trigger: Type.Optional(trigger),
-  repeat: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  repeat: Type.Optional(
+    Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
 };
-export const AgentNodeSchema = Type.Object({
-  ...common,
-  kind: Type.Optional(Type.Literal("agent")),
-  system: Type.Optional(Type.String()),
-  tool_block: Type.Optional(strings),
-  skills: Type.Optional(strings),
-  prompt: Type.Optional(Type.String({ pattern: "\\S" })),
-}, strict);
+export const AgentNodeSchema = Type.Object(
+  {
+    ...common,
+    kind: Type.Optional(Type.Literal("agent")),
+    system: Type.Optional(Type.String()),
+    tool_block: Type.Optional(strings),
+    skills: Type.Optional(strings),
+    prompt: Type.Optional(Type.String({ pattern: "\\S" })),
+  },
+  strict,
+);
 // TypeBox 1.x spells recursive schemas Cyclic (Recursive was removed).
 const graphSchema = Type.Cyclic(
   {
@@ -128,12 +133,21 @@ export const nodeKey = (parent: string, id: string): graph.NodeIdType =>
   graph.NodeId.create(parent ? `${parent}/${pointer(id)}` : pointer(id));
 
 /** Declared nodes in construction order; keys escape individual path segments. */
-export function* walk(spec: GraphSpec, label = spec.name ?? "graph", path = ""):
-  Generator<{ id: string; node: NodeSpec; key: graph.NodeIdType; label: string }> {
+export function* walk(
+  spec: GraphSpec,
+  label = spec.name ?? "graph",
+  path = "",
+): Generator<{
+  id: string;
+  node: NodeSpec;
+  key: graph.NodeIdType;
+  label: string;
+}> {
   for (const [id, node] of Object.entries(spec.nodes)) {
     const key = nodeKey(path, id);
     yield { id, node, key, label };
-    if (node.kind === "graph") yield* walk(node.graph, node.graph.name ?? id, key);
+    if (node.kind === "graph")
+      yield* walk(node.graph, node.graph.name ?? id, key);
   }
 }
 

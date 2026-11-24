@@ -3,7 +3,12 @@ import { calloutPosition } from "../callout-position.ts";
 
 type Trigger = HTMLButtonElement | SVGGElement;
 
-export function DetailCallout({ selector, label, onDismiss, children }: {
+export function DetailCallout({
+  selector,
+  label,
+  onDismiss,
+  children,
+}: {
   selector: string;
   label: "Task details" | "Node details";
   onDismiss: () => void;
@@ -36,8 +41,11 @@ export function DetailCallout({ selector, label, onDismiss, children }: {
         resize.observe(trigger);
       }
       const pos = calloutPosition(
-        trigger.getBoundingClientRect(), panel.getBoundingClientRect(),
-        bubble.getBoundingClientRect().width, window.innerWidth, window.innerHeight,
+        trigger.getBoundingClientRect(),
+        panel.getBoundingClientRect(),
+        bubble.getBoundingClientRect().width,
+        window.innerWidth,
+        window.innerHeight,
       );
       if (!pos) {
         onDismiss();
@@ -55,7 +63,11 @@ export function DetailCallout({ selector, label, onDismiss, children }: {
     resize.observe(panel);
     resize.observe(trigger);
     const mutations = new MutationObserver(position);
-    mutations.observe(panel, { childList: true, characterData: true, subtree: true });
+    mutations.observe(panel, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
     if (position()) button.focus({ preventScroll: true });
 
     const dismissToTrigger = () => {
@@ -69,7 +81,11 @@ export function DetailCallout({ selector, label, onDismiss, children }: {
       }
     };
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !bubble.contains(event.target) && !trigger.contains(event.target)) {
+      if (
+        event.target instanceof Node &&
+        !bubble.contains(event.target) &&
+        !trigger.contains(event.target)
+      ) {
         onDismiss();
       }
     };
@@ -92,7 +108,9 @@ export function DetailCallout({ selector, label, onDismiss, children }: {
   return (
     <div ref={surface} className="callout" role="dialog" aria-label={label}>
       <div className="callout-body">
-        <button type="button" ref={close} className="callout-close">Close details</button>
+        <button type="button" ref={close} className="callout-close">
+          Close details
+        </button>
         {children}
       </div>
     </div>

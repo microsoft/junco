@@ -23,15 +23,15 @@ import {
   type SnapshotRefresher,
   VerdictRecorder,
 } from "../examples/yak-shaver/yak-shaver.ts";
-import { agent, Deterministic, graph, tracer } from "../src/index.ts";
+import { type agent, Deterministic, graph, tracer } from "../src/index.ts";
 import { flushMacrotasks, waitingTool } from "./support.ts";
 import {
   allPass,
   barrier,
   type LaneScript,
   type NodeInput,
-  type ScriptedLane,
   runScriptedBatch,
+  type ScriptedLane,
   scriptedLane,
   snapshotOf,
   wiring,
@@ -646,7 +646,9 @@ const keysScript = (
 
 /** One real batch of Keys lanes (ranks 1…n, one per script) with a recording applier. */
 async function keysBatch(scripts: readonly LaneScript[]) {
-  const lanes = scripts.map((script, index) => scriptedLane({ ...keysWork, rank: index + 1 }, keysSources, script));
+  const lanes = scripts.map((script, index) =>
+    scriptedLane({ ...keysWork, rank: index + 1 }, keysSources, script),
+  );
   const recorder = recordingApplier();
   const outcomes = await runScriptedBatch({
     snapshot: keysSnapshot,
@@ -1125,14 +1127,20 @@ describe("candidate batch graph", () => {
       { readAssigned: true },
       { failures: { Search3: 1 } },
     ];
-    const lanes = laneWorks().map((work, index) => scriptedLane(work, laneSources, {
-      ...scripts[index], onResearched, barrier: proposers.enter,
-      hold: {
-        shard: "Search2",
-        entered: () => { if (++waiting === 4) heldEntered.resolve(); },
-        gate: held.promise,
-      },
-    }));
+    const lanes = laneWorks().map((work, index) =>
+      scriptedLane(work, laneSources, {
+        ...scripts[index],
+        onResearched,
+        barrier: proposers.enter,
+        hold: {
+          shard: "Search2",
+          entered: () => {
+            if (++waiting === 4) heldEntered.resolve();
+          },
+          gate: held.promise,
+        },
+      }),
+    );
     const recorder = recordingApplier();
     const running = runScriptedBatch({
       snapshot: laneSnapshot,
@@ -1174,7 +1182,9 @@ describe("candidate batch graph", () => {
       assert.ok(assignment!.includes(lane.work.candidate.definition.id));
       assert.ok(assignment!.includes(`summary:${lane.work.rank}`));
       for (const shard of lane.work.shards)
-        assert.ok(assignment!.includes(`${shard.name} (${shard.files.length} files)`));
+        assert.ok(
+          assignment!.includes(`${shard.name} (${shard.files.length} files)`),
+        );
     }
     assert.equal(
       lanes.reduce((sum, { log }) => sum + log.researchers, 0),
@@ -1213,11 +1223,15 @@ describe("candidate batch graph", () => {
       );
       assert.match(input![0]!, /judge_refactor/);
       assert.ok(!input![0]!.includes(own));
-      const assignment = input!.slice(1).find((text) => text.startsWith("Proposer:"));
-      assert.ok(assignment && assignment.includes(own));
+      const assignment = input!
+        .slice(1)
+        .find((text) => text.startsWith("Proposer:"));
+      assert.ok(assignment?.includes(own));
       assert.ok(assignment.includes('final summary: "result recorded"'));
       assert.ok(input?.every((text) => !text.includes(other)));
-      assert.ok(assignment.includes("6 projected net nonblank source lines removed"));
+      assert.ok(
+        assignment.includes("6 projected net nonblank source lines removed"),
+      );
       assert.ok(!assignment.includes("waiting for researchers"));
     }
 
@@ -1256,7 +1270,9 @@ describe("candidate batch graph", () => {
       { beforeResearchYields: 20 },
       {},
     ];
-    const lanes = laneWorks().map((work, index) => scriptedLane(work, laneSources, scripts[index]));
+    const lanes = laneWorks().map((work, index) =>
+      scriptedLane(work, laneSources, scripts[index]),
+    );
     const delayed = lanes[2]!;
     const observed: { id: string; yields: number; handles: number }[] = [];
     const recorder = recordingApplier((refactor) => {
@@ -1328,7 +1344,11 @@ describe("candidate batch graph", () => {
       `applied before the delayed lane researched (${observed[0]!.yields} yields)`,
     );
     assert.equal(delayed.log.yields, 20);
-    assert.deepEqual([...startedJudges].sort(), ["Judge:1", "Judge:2"], "even queued summaries never admit a no-proposal judge");
+    assert.deepEqual(
+      [...startedJudges].sort(),
+      ["Judge:1", "Judge:2"],
+      "even queued summaries never admit a no-proposal judge",
+    );
     assert.deepEqual(
       outcomes.map((outcome) => outcome.status),
       ["applied", "rejected", "no-proposal", "no-proposal"],
@@ -1356,17 +1376,34 @@ describe("candidate batch graph", () => {
     const lanes = laneWorks().map((work) => scriptedLane(work, laneSources));
     const recorder = recordingApplier();
     const failure = new Error("cancel before acquisition");
-    await assert.rejects(runScriptedBatch({
-      snapshot: laneSnapshot, lanes, observer: quiet(), apply: recorder.apply,
-    }, AbortSignal.abort(failure)), (error) => error === failure);
-    assert.ok(lanes.every(({ members, log }) => !members.length && !log.proposerInput.length));
+    await assert.rejects(
+      runScriptedBatch(
+        {
+          snapshot: laneSnapshot,
+          lanes,
+          observer: quiet(),
+          apply: recorder.apply,
+        },
+        AbortSignal.abort(failure),
+      ),
+      (error) => error === failure,
+    );
+    assert.ok(
+      lanes.every(
+        ({ members, log }) => !members.length && !log.proposerInput.length,
+      ),
+    );
     assert.equal(recorder.applied.length, 0);
   });
 
   test("an application failure stops the batch, keeps the earlier application, and closes every lane", async () => {
-    const lanes = laneWorks().slice(0, 2).map((work) => scriptedLane(work, laneSources, {
-      proposal: dupProposal(work.rank),
-    }));
+    const lanes = laneWorks()
+      .slice(0, 2)
+      .map((work) =>
+        scriptedLane(work, laneSources, {
+          proposal: dupProposal(work.rank),
+        }),
+      );
     const recorder = recordingApplier(() => {
       if (recorder.applied.length === 1) throw new Error("stage failed");
     });
@@ -1503,7 +1540,9 @@ describe("candidate batch graph", () => {
         five,
         async (snapshot, batch, signal) => {
           calls++;
-          const lanes = batch.map((work) => scriptedLane(work, sources, { proposerFails: work.rank === 1 }));
+          const lanes = batch.map((work) =>
+            scriptedLane(work, sources, { proposerFails: work.rank === 1 }),
+          );
           created.push(...lanes);
           return runScriptedBatch(
             {
@@ -1627,9 +1666,14 @@ describe("admission cancellation", () => {
       five,
       async (snapshot, batch, signal) => {
         calls++;
-        const lanes = batch.map((work) => scriptedLane(
-          work, sources, work.rank === 1 ? { hang: { shard: "Search1", tool: "hang" } } : {}, [hang.tool],
-        ));
+        const lanes = batch.map((work) =>
+          scriptedLane(
+            work,
+            sources,
+            work.rank === 1 ? { hang: { shard: "Search1", tool: "hang" } } : {},
+            [hang.tool],
+          ),
+        );
         created.push(...lanes);
         return runScriptedBatch(
           {

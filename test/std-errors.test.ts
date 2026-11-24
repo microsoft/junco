@@ -206,7 +206,10 @@ for (const strategy of STRATEGIES) {
       });
       const { context, id } = setup(agent);
       assert.equal(textOf((await context.run()).get(id)!), "ok");
-      assert.equal(agent.calls.filter(({ method }) => method === "steer").length, 1);
+      assert.equal(
+        agent.calls.filter(({ method }) => method === "steer").length,
+        1,
+      );
       assert.deepEqual(
         agent.calls.flatMap((call) =>
           call.method === "stagePrompt" ? call.args : [],

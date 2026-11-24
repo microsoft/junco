@@ -25,7 +25,12 @@ import {
 } from "junco";
 import { Value } from "typebox/value";
 import { userTexts } from "./deterministic-support.ts";
-import { countedCollection, offlineLadder, NATIVE_TOOL_BLOCK, scripted } from "./support.ts";
+import {
+  countedCollection,
+  NATIVE_TOOL_BLOCK,
+  offlineLadder,
+  scripted,
+} from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
 function workflowPrompt(source: string, id: string): string {
@@ -34,8 +39,11 @@ function workflowPrompt(source: string, id: string): string {
   return role.prompt;
 }
 
-function assertTaskMessage(message: string, task: ReturnType<typeof graphApi.nodes.Task.create>): void {
-  const prefix = task.text + "\n\nTask: ";
+function assertTaskMessage(
+  message: string,
+  task: ReturnType<typeof graphApi.nodes.Task.create>,
+): void {
+  const prefix = `${task.text}\n\nTask: `;
   assert.ok(message.startsWith(prefix));
   assert.deepEqual(JSON.parse(message.slice(prefix.length)), {
     taskId: task.taskId,
@@ -136,14 +144,18 @@ try {
     }
     selections.push({ users });
     const candidate = users.at(-1)!;
-    return fauxAssistantMessage(candidate.startsWith("{")
-      ? contentText(JSON.parse(candidate).payload.content)
-      : candidate.split("\n\nTask: ")[0]!);
+    return fauxAssistantMessage(
+      candidate.startsWith("{")
+        ? contentText(JSON.parse(candidate).payload.content)
+        : candidate.split("\n\nTask: ")[0]!,
+    );
   });
   const judged: number[] = [];
   const execution = await JuncoGraph.fromYaml(workflows.ralph, {
     args: {
-      cwd: process.cwd(), collection, tracer: new tracerApi.DummyTracer(),
+      cwd: process.cwd(),
+      collection,
+      tracer: new tracerApi.DummyTracer(),
       // Uncapped: only the predicate ends the loop; the window watchdog below is the fixture's guard.
       ...schedules.ralph({
         until: (result, { round }) => {
@@ -209,7 +221,11 @@ try {
   );
 
   const fanInOptions = {
-    args: { cwd: process.cwd(), collection, tracer: new tracerApi.DummyTracer() },
+    args: {
+      cwd: process.cwd(),
+      collection,
+      tracer: new tracerApi.DummyTracer(),
+    },
     parameters: { scheduler: () => schedules.parallel(), ladder },
   };
   const candidates = graphApi.EdgeId.create("candidates");
@@ -217,14 +233,19 @@ try {
   const all = await JuncoGraph.fromYaml(workflows.allFanIn, {
     args: {
       ...fanInOptions.args,
-      agentOptions: new Map([[graphApi.NodeId.create("AllFanIn"), { steeringMode: "all" }]]),
+      agentOptions: new Map([
+        [graphApi.NodeId.create("AllFanIn"), { steeringMode: "all" }],
+      ]),
     },
     parameters: fanInOptions.parameters,
   });
   try {
     all.graph.source.enqueue({
       messages: new Map([
-        [candidates, ["worse", "best"].map((text) => fauxAssistantMessage(text))],
+        [
+          candidates,
+          ["worse", "best"].map((text) => fauxAssistantMessage(text)),
+        ],
       ]),
       values: new Map(),
     });
@@ -234,7 +255,10 @@ try {
     assert.ok(Value.Check(AssistantMessageSchema, selected.value));
     assert.equal(contentText(selected.value.content), "best");
     assert.equal(selections[0]?.users.length, 3);
-    assert.equal(selections[0]?.users[0], workflowPrompt(workflows.allFanIn, "AllFanIn"));
+    assert.equal(
+      selections[0]?.users[0],
+      workflowPrompt(workflows.allFanIn, "AllFanIn"),
+    );
     assert.deepEqual(
       selections[0]?.users
         .slice(1)
@@ -251,7 +275,9 @@ try {
   const any = await JuncoGraph.fromYaml(workflows.anyFanIn, {
     args: {
       ...fanInOptions.args,
-      agentOptions: new Map([[graphApi.NodeId.create("AnyFanIn"), { steeringMode: "all" }]]),
+      agentOptions: new Map([
+        [graphApi.NodeId.create("AnyFanIn"), { steeringMode: "all" }],
+      ]),
       ...schedules.anyFanIn(),
     },
     parameters: fanInOptions.parameters,
@@ -279,7 +305,10 @@ try {
       const users = selections.at(-1)!.users;
       const batchUsers = users.slice(previousUsers);
       assert.equal(batchUsers.length, 1 + tasks.length);
-      assert.equal(batchUsers[0], workflowPrompt(workflows.anyFanIn, "AnyFanIn"));
+      assert.equal(
+        batchUsers[0],
+        workflowPrompt(workflows.anyFanIn, "AnyFanIn"),
+      );
       for (const [index, task] of tasks.entries()) {
         assertTaskMessage(batchUsers[index + 1]!, task);
       }

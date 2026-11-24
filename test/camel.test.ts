@@ -4,7 +4,12 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AssistantMessage, type Context, contentText, fauxAssistantMessage as assistant } from "@earendil-works/pi-ai";
+import {
+  type AssistantMessage,
+  fauxAssistantMessage as assistant,
+  type Context,
+  contentText,
+} from "@earendil-works/pi-ai";
 import { agent, graph, JuncoGraph, schedules, tools, tracer } from "junco";
 import {
   BOB_QUERY,
@@ -74,12 +79,24 @@ async function build(plan: AssistantMessage, reply = bobReply) {
     return reply;
   });
   await using setup = new AsyncDisposableStack();
-  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "camel-")), (p) => rm(p, { recursive: true, force: true }));
-  const collection = setup.adopt(await tools.ToolCollection.create(cwd, { native: await copyTreeNative(), sandbox: "always" }), (c) => c.close());
+  const cwd = setup.adopt(await mkdtemp(join(tmpdir(), "camel-")), (p) =>
+    rm(p, { recursive: true, force: true }),
+  );
+  const collection = setup.adopt(
+    await tools.ToolCollection.create(cwd, {
+      native: await copyTreeNative(),
+      sandbox: "always",
+    }),
+    (c) => c.close(),
+  );
   const execution = await JuncoGraph.fromYaml(source, {
     args: {
-      cwd, collection, tracer: new tracer.DummyTracer(),
-      code: { Interpreter, Executor }, context, params: { query: BOB_QUERY },
+      cwd,
+      collection,
+      tracer: new tracer.DummyTracer(),
+      code: { Interpreter, Executor },
+      context,
+      params: { query: BOB_QUERY },
     },
     parameters: { scheduler: () => schedules.parallel(), ladder },
   });
@@ -128,7 +145,10 @@ test("reminder to Bob is granted and sent", async () => {
     assert.equal(requests.PLLM.length, 1);
     assert.equal(requests.QLLM.length, 1);
     const plannerInput = requests.PLLM[0]!.messages.at(-1)!;
-    assert.ok(plannerInput.role === "user" && contentText(plannerInput.content).startsWith(`${BOB_QUERY}\n\nTask: `));
+    assert.ok(
+      plannerInput.role === "user" &&
+        contentText(plannerInput.content).startsWith(`${BOB_QUERY}\n\nTask: `),
+    );
     for (const request of requests.PLLM)
       for (const message of request.messages)
         assert.ok(!JSON.stringify(message).includes("bob.wilson@example.com"));

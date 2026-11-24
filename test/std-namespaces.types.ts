@@ -1458,18 +1458,30 @@ export function yamlConstructorOptions(
   collection: tools.ToolCollection,
   template: PromptTemplate,
 ) {
-  const init: syntax.YamlAgentOptions = { session, steeringMode: "all", resources: { promptTemplates: [template] } };
+  const init: syntax.YamlAgentOptions = {
+    session,
+    steeringMode: "all",
+    resources: { promptTemplates: [template] },
+  };
   const args: syntax.JuncoArgs = {
     cwd: ".",
     agentOptions: new Map([[node, init]]),
     tools: new Map([[node, collection]]),
   };
-  const parameters: syntax.JuncoParameters = { scheduler: () => schedules.parallel() };
+  const parameters: syntax.JuncoParameters = {
+    scheduler: () => schedules.parallel(),
+  };
   const config: syntax.FromYamlOptions = { args, parameters };
   // @ts-expect-error the scheduler belongs to parameters
-  graph.JuncoGraph.fromYaml("", { args: { ...args, scheduler: parameters.scheduler }, parameters });
+  graph.JuncoGraph.fromYaml("", {
+    args: { ...args, scheduler: parameters.scheduler },
+    parameters,
+  });
   // @ts-expect-error code is a program capability
-  graph.JuncoGraph.fromYaml("", { args, parameters: { ...parameters, code: {} } });
+  graph.JuncoGraph.fromYaml("", {
+    args,
+    parameters: { ...parameters, code: {} },
+  });
   // @ts-expect-error execution parameters are required
   graph.JuncoGraph.fromYaml("", { args });
   // @ts-expect-error program arguments are required
@@ -1477,9 +1489,15 @@ export function yamlConstructorOptions(
   // @ts-expect-error the old flat configuration is not a supported overload
   graph.JuncoGraph.fromYaml("", { cwd: ".", scheduler: parameters.scheduler });
   // @ts-expect-error admission is declared by a YAML trigger, not by program arguments
-  graph.JuncoGraph.fromYaml("", { args: { ...args, available: true }, parameters });
+  graph.JuncoGraph.fromYaml("", {
+    args: { ...args, available: true },
+    parameters,
+  });
   // @ts-expect-error tuning parameters cannot override admission
-  graph.JuncoGraph.fromYaml("", { args, parameters: { ...parameters, available: true } });
+  graph.JuncoGraph.fromYaml("", {
+    args,
+    parameters: { ...parameters, available: true },
+  });
   // @ts-expect-error a caller cannot replace the YAML agent's ladder model
   const wrongModel: syntax.YamlAgentOptions = { model: "other" };
   // @ts-expect-error skill grants belong to the YAML document

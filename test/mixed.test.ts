@@ -21,7 +21,12 @@ import { Value } from "typebox/value";
 import { goalsPrompt, MixedGraph } from "../examples/mixed/mixed.ts";
 import type { YamlAgent } from "../examples/support.ts";
 import { renderTask } from "../src/agent-node.ts";
-import { AssistantMessageSchema, Deterministic, JuncoGraph, syntax } from "../src/index.ts";
+import {
+  AssistantMessageSchema,
+  Deterministic,
+  JuncoGraph,
+  syntax,
+} from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
 import { countedCollection, offlineLadder } from "./support.ts";
 
@@ -58,10 +63,14 @@ class ReviewerInbox extends DummyTracer {
       ...run,
       startNode: (id, phase, inputs) => {
         if (String(id) === "ValidateDraft")
-          this.validated.push(...(inputs?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? []));
+          this.validated.push(
+            ...(inputs?.messages.get(EdgeId.create("Ralph~>Reviewer")) ?? []),
+          );
         if (String(id) === "Reviewer")
           this.received.push(
-            ...(inputs?.messages.get(EdgeId.create("ValidateDraft~>Reviewer")) ?? []),
+            ...(inputs?.messages.get(
+              EdgeId.create("ValidateDraft~>Reviewer"),
+            ) ?? []),
           );
         return run.startNode(id, phase, inputs);
       },
@@ -106,11 +115,15 @@ async function mixedWorkflow(
     if (first.startsWith("On the first round,")) {
       if (!prompts.Ralph.length) {
         assert.equal(texts.length, 2);
-        assert.equal(first, 'On the first round, achieve the objectives in the following task messages, in order. On phase "revise", take another try at the ordered objectives, building on your last answer in this session. On phase "retry", the previous attempt ended with a provider error: continue the same round from where you left off. Focus on depth: finish objectives well rather than attempting more of them. Return the complete answer.');
+        assert.equal(
+          first,
+          'On the first round, achieve the objectives in the following task messages, in order. On phase "revise", take another try at the ordered objectives, building on your last answer in this session. On phase "retry", the previous attempt ended with a provider error: continue the same round from where you left off. Focus on depth: finish objectives well rather than attempting more of them. Return the complete answer.',
+        );
         goalsTaskId(texts[1]!);
       }
       prompts.Ralph.push(latestUserText(context));
-      if (failSecond && prompts.Ralph.length === 2) throw new Error("second Ralph round failed");
+      if (failSecond && prompts.Ralph.length === 2)
+        throw new Error("second Ralph round failed");
       return fauxAssistantMessage(`draft-${prompts.Ralph.length}`);
     }
     assert.equal(texts.length, 2);
@@ -128,9 +141,13 @@ async function mixedWorkflow(
   };
   const inbox = new ReviewerInbox();
   await using setup = new AsyncDisposableStack();
-  const collection = setup.adopt(countedCollection().collection, (c) => c.close());
+  const collection = setup.adopt(countedCollection().collection, (c) =>
+    c.close(),
+  );
   const { execution, reviewerId } = await MixedGraph.create({
-    ladder: await offlineLadder(respond), collection, tracer: inbox,
+    ladder: await offlineLadder(respond),
+    collection,
+    tracer: inbox,
   });
   setup.defer(() => execution.graph.close());
   const nested = execution.graph.getNode(ralphId)!.state;
@@ -144,7 +161,14 @@ async function mixedWorkflow(
     return member;
   });
   const owned = setup.move();
-  return { execution, reviewerId, agents, prompts, inbox, [Symbol.asyncDispose]: () => owned.disposeAsync() };
+  return {
+    execution,
+    reviewerId,
+    agents,
+    prompts,
+    inbox,
+    [Symbol.asyncDispose]: () => owned.disposeAsync(),
+  };
 }
 
 /** Step the graph until `done`, failing instead of spinning once nothing can run. */
@@ -194,7 +218,8 @@ test("Ralph runs two full-assignment rounds and only its final draft is reviewed
     assert.equal(prompts.Ralph.length, 2);
     const taskId = goalsTaskId(prompts.Ralph[0]!);
     assert.deepEqual(JSON.parse(prompts.Ralph[1]!), {
-      id: "RalphControl~>Ralph", payload: { phase: "revise", round: 2, objectives: [goalsPrompt] },
+      id: "RalphControl~>Ralph",
+      payload: { phase: "revise", round: 2, objectives: [goalsPrompt] },
     });
     assert.equal(prompts.Direct.length, 1);
     // Goals broadcasts one task: both competitors receive the same id.
@@ -228,7 +253,10 @@ test("a failed second Ralph round forwards its raw abnormal draft, which the Rev
   );
   assert.ok(failure instanceof DataflowNodeError);
   assert.equal(failure.nodeId, NodeId.create("ValidateDraft"));
-  assert.match(String(failure.cause), /Ralph~>Reviewer did not finish normally: error/);
+  assert.match(
+    String(failure.cause),
+    /Ralph~>Reviewer did not finish normally: error/,
+  );
   assert.equal(prompts.Ralph.length, 2);
   const [draft] = flow.inbox.validated;
   assert.equal(flow.inbox.received.length, 0);

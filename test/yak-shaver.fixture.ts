@@ -21,8 +21,8 @@ import {
   type GraftSnapshot,
   parseSnapshot,
   type RefactorVerdict,
-  type SearchReport,
   runCandidateBatch,
+  type SearchReport,
 } from "../examples/yak-shaver/yak-shaver.ts";
 import { agent, graph, tools, tracer } from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
@@ -163,7 +163,6 @@ function latestResults(context: Context) {
   }
   return results;
 }
-
 
 /** How one scripted lane behaves. */
 export type LaneScript = {
@@ -338,21 +337,35 @@ export function scriptedLane(
   const dispatch = async (context: Context) => {
     const texts = userTexts(context.messages);
     const prompt = texts[0] ?? "";
-    const granted = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
-    for (const denied of ["bash", "edit", "ast_edit", "release"]) assert.ok(!granted.has(denied), denied);
+    const granted = new Set(
+      getCurrentTools(context.messages).map((tool) => tool.name),
+    );
+    for (const denied of ["bash", "edit", "ast_edit", "release"])
+      assert.ok(!granted.has(denied), denied);
     if (prompt.startsWith("You are a read-only researcher")) {
-      for (const denied of ["submit_refactor", "judge_refactor", "task"]) assert.ok(!granted.has(denied), denied);
+      for (const denied of ["submit_refactor", "judge_refactor", "task"])
+        assert.ok(!granted.has(denied), denied);
       assert.ok(granted.has("read"));
       return researcher(context, prompt);
     }
     if (prompt.startsWith("Judge the checked proposal")) {
-      assert.ok(granted.has("judge_refactor") && !granted.has("submit_refactor") && !granted.has("task"));
-      if (latestResults(context).some((result) => result.toolName === "judge_refactor" && !result.isError))
+      assert.ok(
+        granted.has("judge_refactor") &&
+          !granted.has("submit_refactor") &&
+          !granted.has("task"),
+      );
+      if (
+        latestResults(context).some(
+          (result) => result.toolName === "judge_refactor" && !result.isError,
+        )
+      )
         return fauxAssistantMessage("verdict recorded");
       log.judgeCalls++;
       script.onJudge?.();
       log.judgeInputs.push(texts);
-      log.received.push(...texts.filter((text) => text.startsWith('{"id":"summary:')));
+      log.received.push(
+        ...texts.filter((text) => text.startsWith('{"id":"summary:')),
+      );
       if (script.skipVerdict) return fauxAssistantMessage("verdict omitted");
       return toolTurn(call("judge_refactor", script.verdict ?? allPass));
     }
@@ -376,7 +389,9 @@ export function scriptedLane(
           errorMessage: "proposer exploded",
         });
       await script.barrier?.();
-      const { taskId, spec } = JSON.parse(log.proposerInput[1]!.split("\n\nTask: ").at(-1)!);
+      const { taskId, spec } = JSON.parse(
+        log.proposerInput[1]!.split("\n\nTask: ").at(-1)!,
+      );
       return toolTurn(
         call("send", {
           id: `summary:${work.rank}`,
@@ -478,18 +493,34 @@ export function scriptedLane(
     return toolTurn(call("submit_refactor", args));
   };
 
-  return { lane: { work, readSource: async (path) => sources.get(path), research: extraTools }, log, members: [], respond: dispatch };
+  return {
+    lane: {
+      work,
+      readSource: async (path) => sources.get(path),
+      research: extraTools,
+    },
+    log,
+    members: [],
+    respond: dispatch,
+  };
 }
 
 /** Run the actual lane builder on a temporary CopyTree seed and one transcript-dispatched ladder. */
 export async function runScriptedBatch(
-  options: Omit<Parameters<typeof runCandidateBatch>[0], "root" | "collection" | "ladder" | "lanes"> & { lanes: readonly ScriptedLane[] },
+  options: Omit<
+    Parameters<typeof runCandidateBatch>[0],
+    "root" | "collection" | "ladder" | "lanes"
+  > & { lanes: readonly ScriptedLane[] },
   signal?: AbortSignal,
 ) {
   const { lanes, observer = new tracer.DummyTracer() } = options;
-  const byRank = new Map(lanes.map((script) => [script.lane.work.rank, script]));
+  const byRank = new Map(
+    lanes.map((script) => [script.lane.work.rank, script]),
+  );
   const ladder = await offlineLadder((ctx) => {
-    const rank = userTexts(ctx.messages).map((text) => /Candidate \(rank (\d+)\):/.exec(text)?.[1]).find(Boolean);
+    const rank = userTexts(ctx.messages)
+      .map((text) => /Candidate \(rank (\d+)\):/.exec(text)?.[1])
+      .find(Boolean);
     const script = byRank.get(Number(rank));
     assert.ok(script, `missing candidate rank ${rank} in transcript`);
     return script.respond(ctx);
@@ -503,26 +534,41 @@ export async function runScriptedBatch(
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), source);
   }
-  const collection = owned.adopt(await tools.ToolCollection.create(root, {
-    native: await copyTreeNative(), policy: tools.LockPolicy, sandbox: "always",
-  }), (collection) => collection.close());
-  return await runCandidateBatch({
-    ...options, root, collection, ladder, lanes: lanes.map(({ lane }) => lane),
-    observer: {
-      startRun(workflow) {
-        if (workflow.getNode(graph.NodeId.create("FinalizeBatch"))) {
-          for (const { members, lane } of lanes) if (!members.length) {
-            for (const role of ["Proposer", "Judge"]) {
-              const member = workflow.getNode(graph.NodeId.create(`${role}:${lane.work.rank}`))?.state;
-              assert.ok(member instanceof agent.JuncoAgent);
-              members.push(member);
-            }
+  const collection = owned.adopt(
+    await tools.ToolCollection.create(root, {
+      native: await copyTreeNative(),
+      policy: tools.LockPolicy,
+      sandbox: "always",
+    }),
+    (collection) => collection.close(),
+  );
+  return await runCandidateBatch(
+    {
+      ...options,
+      root,
+      collection,
+      ladder,
+      lanes: lanes.map(({ lane }) => lane),
+      observer: {
+        startRun(workflow) {
+          if (workflow.getNode(graph.NodeId.create("FinalizeBatch"))) {
+            for (const { members, lane } of lanes)
+              if (!members.length) {
+                for (const role of ["Proposer", "Judge"]) {
+                  const member = workflow.getNode(
+                    graph.NodeId.create(`${role}:${lane.work.rank}`),
+                  )?.state;
+                  assert.ok(member instanceof agent.JuncoAgent);
+                  members.push(member);
+                }
+              }
           }
-        }
-        return observer.startRun(workflow);
+          return observer.startRun(workflow);
+        },
       },
     },
-  }, signal);
+    signal,
+  );
 }
 
 /** A barrier every `size` callers enter before any of them continues. */

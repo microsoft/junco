@@ -10,6 +10,7 @@ import {
   type DataflowStepTrace,
   type DataflowTracer,
   FinalMessages,
+  type Message,
   type NodeIdType,
 } from "dataflow-engine";
 import express, { type Express, type Response } from "express";
@@ -175,11 +176,14 @@ export class JuncoFrontend implements DataflowTracer {
         this.#push({ kind: "activation", ...at, phase, messages, values });
         return {
           end: (step) => {
-            let messages;
+            let messages: readonly Message<N>[];
             if (step.done) {
               if (!(step.value instanceof FinalMessages)) {
                 this.#push({
-                  kind: "step", ...at, outcome: "return", value: capture(step.value),
+                  kind: "step",
+                  ...at,
+                  outcome: "return",
+                  value: capture(step.value),
                 });
                 return;
               }
@@ -191,7 +195,10 @@ export class JuncoFrontend implements DataflowTracer {
               kind: "step",
               ...at,
               outcome: step.done ? "final" : "yield",
-              messages: messages.map((m) => ({ edge: m.id, payload: capture(m.payload) })),
+              messages: messages.map((m) => ({
+                edge: m.id,
+                payload: capture(m.payload),
+              })),
             });
           },
           fail: (error) => {

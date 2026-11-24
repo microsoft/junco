@@ -51,7 +51,11 @@ import { errorGraph, MARSH_POLICY_DENIED } from "junco-tools/errors";
 import { redirectLog } from "junco-tools/log";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
-import { createJuncoAgent, parse, resolveAgents } from "../../../src/syntax/index.ts";
+import {
+  createJuncoAgent,
+  parse,
+  resolveAgents,
+} from "../../../src/syntax/index.ts";
 import { userTexts } from "../../../test/deterministic-support.ts";
 import {
   fauxRuntime,
@@ -197,7 +201,13 @@ test("the same yield tool is isolated between agents, and a later prompt retains
   const history: string[][] = [];
   const first = await newAgent(
     [
-      toolTurn(fauxToolCall("yield", { reason: "mine", waitForInput: true }, { id: "y1" })),
+      toolTurn(
+        fauxToolCall(
+          "yield",
+          { reason: "mine", waitForInput: true },
+          { id: "y1" },
+        ),
+      ),
       fauxAssistantMessage("first done"),
       (context) => {
         history.push(userTexts(context.messages));
@@ -217,7 +227,13 @@ test("the same yield tool is isolated between agents, and a later prompt retains
     assert.deepEqual(step(await first.agent.next()), {
       kind: "yield",
       reasons: [
-        { kind: "tool", toolCallId: "y1", toolName: "yield", reason: "mine", waitForInput: true },
+        {
+          kind: "tool",
+          toolCallId: "y1",
+          toolName: "yield",
+          reason: "mine",
+          waitForInput: true,
+        },
       ],
     });
     assert.deepEqual(step(await second.agent.next()), {
@@ -1056,7 +1072,16 @@ test("a failed or spoofed yield never pauses the provider", async () => {
   );
   await spoofed.setTools([fake.tool], ["yield"]);
   const { agent: blocked } = await newAgent(
-    [toolTurn(fauxToolCall("yield", { reason: "denied", waitForInput: true }, { id: "y2" })), fauxAssistantMessage("continued")],
+    [
+      toolTurn(
+        fauxToolCall(
+          "yield",
+          { reason: "denied", waitForInput: true },
+          { id: "y2" },
+        ),
+      ),
+      fauxAssistantMessage("continued"),
+    ],
     { tools: [new YieldTool()], prompt: "go" },
   );
   blocked.hooks.on("before_tool", ({ toolName }) =>

@@ -171,6 +171,8 @@ pi                                                      # once: `/login`, pick G
 cd "$HOME/work/seed" && bun run /path/to/junco/examples/first/first.ts
 ```
 
+`bun run build:examples` bundles the root examples from workspace sources without building the native addon. To run the [offline recursive example](examples/recursive-agency/recursive-agency.ts) elsewhere, copy all of `examples/dist` (including its shared chunks), make the three `@earendil-works/pi-*` peers and the built `junco-tools/native` export available to the bundle, and run `bun /path/to/bundle/recursive-agency/recursive-agency.js` from a writable Btrfs seed. Its models need no credentials; its agent collection still uses the native lock policy.
+
 ### Junco Monitor
 
 The [web monitor](packages/junco-frontend/) shows Graph and Tool calls above a full-width Tasks board. Row labels show the last eight characters of the task ID; hover a label to see the full ID. Click a card or graph node, or focus it and press Enter or Space, to open its live details without moving the board. Escape closes the details and returns focus to the trigger.

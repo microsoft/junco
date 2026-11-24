@@ -1,12 +1,24 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { BACKGROUND_CONTEXT, MemorySessionRepo } from "@earendil-works/pi-agent-core";
-import { Deterministic, graph, JuncoGraph, schedules, syntax, tracer } from "junco";
+import {
+  BACKGROUND_CONTEXT,
+  MemorySessionRepo,
+} from "@earendil-works/pi-agent-core";
+import {
+  Deterministic,
+  graph,
+  JuncoGraph,
+  schedules,
+  syntax,
+  tracer,
+} from "junco";
 import type { TSchema } from "typebox";
 import { countedCollection, offlineLadder } from "./support.ts";
 
 const args = { cwd: process.cwd(), tracer: new tracer.DummyTracer() };
-const parameters: syntax.JuncoParameters = { scheduler: () => schedules.parallel() };
+const parameters: syntax.JuncoParameters = {
+  scheduler: () => schedules.parallel(),
+};
 
 const nested = (worker: object) => ({
   graph: {
@@ -23,7 +35,8 @@ const nested = (worker: object) => ({
   },
 });
 const promptError = (error: unknown) =>
-  error instanceof syntax.ValidationError && error.code === "document" &&
+  error instanceof syntax.ValidationError &&
+  error.code === "document" &&
   error.path === "/graph/nodes/Child/graph/nodes/Worker/prompt";
 
 test("explicit and implicit agents may omit a prompt but cannot supply a blank one", async () => {
@@ -31,8 +44,15 @@ test("explicit and implicit agents may omit a prompt but cannot supply a blank o
   for (const kind of [{}, { kind: "agent" }]) {
     syntax.JuncoGraphValidator.validate(nested(kind));
     for (const field of [{ prompt: "" }, { prompt: " \n\t" }]) {
-      const doc = nested({ ...kind, ...field, system: "Not an instruction to run" });
-      assert.throws(() => syntax.JuncoGraphValidator.validate(doc), promptError);
+      const doc = nested({
+        ...kind,
+        ...field,
+        system: "Not an instruction to run",
+      });
+      assert.throws(
+        () => syntax.JuncoGraphValidator.validate(doc),
+        promptError,
+      );
       const source = JSON.stringify(doc);
       assert.throws(() => syntax.parse(source), promptError);
       await assert.rejects(
@@ -53,41 +73,64 @@ test("explicit and implicit agents may omit a prompt but cannot supply a blank o
 });
 
 for (const [failure, stale] of [
-  ["invalid prompt"], ["missing parameters"],
-  ["available in envelope", "envelope"], ["available in args", "args"], ["available in parameters", "parameters"],
+  ["invalid prompt"],
+  ["missing parameters"],
+  ["available in envelope", "envelope"],
+  ["available in args", "args"],
+  ["available in parameters", "parameters"],
 ] as const)
   test(`${failure} releases the transferred session once without a request`, async () => {
     const repo = new MemorySessionRepo();
     const session = await repo.create({}, BACKGROUND_CONTEXT);
     const close = session.close.bind(session);
-    let disposals = 0, requests = 0;
-    session.close = async (context) => { disposals++; return close(context); };
+    let disposals = 0,
+      requests = 0;
+    session.close = async (context) => {
+      disposals++;
+      return close(context);
+    };
     const { collection, events, active } = countedCollection();
     const config = {
       args: {
-        ...args, collection,
-        agentOptions: new Map([[graph.NodeId.create("Child/Worker"), { session }]]),
+        ...args,
+        collection,
+        agentOptions: new Map([
+          [graph.NodeId.create("Child/Worker"), { session }],
+        ]),
       },
       parameters: {
         ...parameters,
-        ladder: await offlineLadder(() => { requests++; assert.fail("unexpected request"); }),
+        ladder: await offlineLadder(() => {
+          requests++;
+          assert.fail("unexpected request");
+        }),
       },
     };
     if (failure === "missing parameters")
       Reflect.deleteProperty(config, "parameters");
     else if (stale)
-      Object.defineProperty(stale === "envelope" ? config : config[stale], "available", {
-        enumerable: true,
-        get: () => assert.fail("legacy options must not be read or invoked"),
-      });
+      Object.defineProperty(
+        stale === "envelope" ? config : config[stale],
+        "available",
+        {
+          enumerable: true,
+          get: () => assert.fail("legacy options must not be read or invoked"),
+        },
+      );
     try {
-      const doc = nested({ prompt: failure === "invalid prompt" ? "  " : "Work" });
+      const doc = nested({
+        prompt: failure === "invalid prompt" ? "  " : "Work",
+      });
       await assert.rejects(
         JuncoGraph.fromYaml(doc, config),
-        failure === "invalid prompt" ? promptError : (error) =>
-          error instanceof graph.DataflowDefinitionError && (failure === "missing parameters"
-            ? error.message === "junco-syntax: fromYaml requires { args, parameters }"
-            : /available.*trigger/.test(error.message)),
+        failure === "invalid prompt"
+          ? promptError
+          : (error) =>
+              error instanceof graph.DataflowDefinitionError &&
+              (failure === "missing parameters"
+                ? error.message ===
+                  "junco-syntax: fromYaml requires { args, parameters }"
+                : /available.*trigger/.test(error.message)),
       );
       assert.equal(disposals, 1);
       assert.equal(requests, 0);
@@ -105,6 +148,7 @@ test("a stale factory registration is rejected by node name and releases its unr
   let disposals = 0;
   let activations = 0;
   const legacy = ({ policy }: syntax.CodeContext) => {
+    // biome-ignore lint/correctness/useYield: this stale registration must not run even its first activation.
     state = new Deterministic<TSchema, unknown>(async function* () {
       activations++;
       return 1;
@@ -125,7 +169,9 @@ test("a stale factory registration is rejected by node name and releases its unr
       },
       parameters,
     }),
-    (error) => error instanceof graph.DataflowDefinitionError && /Child\/Worker.*Deterministic/.test(error.message),
+    (error) =>
+      error instanceof graph.DataflowDefinitionError &&
+      /Child\/Worker.*Deterministic/.test(error.message),
   );
   assert.equal(state?.signal.aborted, true);
   assert.equal(disposals, 1);
@@ -136,7 +182,9 @@ test("a never-triggered emit stays parked", async () => {
   const execution = await JuncoGraph.fromYaml(
     {
       graph: {
-        nodes: { Seed: { kind: "emit", trigger: "never", text: "Go", spec: "Done" } },
+        nodes: {
+          Seed: { kind: "emit", trigger: "never", text: "Go", spec: "Done" },
+        },
         sink: { stream: true, trigger: "never" },
         edges: [{ from: "Seed", to: "$sink", kind: "message", schema: {} }],
       },

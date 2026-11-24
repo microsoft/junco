@@ -318,7 +318,12 @@ test("wire snapshots only disclose available owned nodes' metadata and raw measu
       state: { secret: STATE },
       description: name === "worker" ? "" : undefined,
       trigger: name === "dormant" ? TriggerRule.never() : TriggerRule.always(),
-      step: name === "plain" ? async function* () { return name; } : twoStep([], name),
+      step:
+        name === "plain"
+          ? async function* () {
+              return name;
+            }
+          : twoStep([], name),
     });
   const queued = Edge.message<typeof StringSchema, string>(
     "private-queue",

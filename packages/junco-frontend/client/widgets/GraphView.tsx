@@ -1,5 +1,13 @@
 import mermaid from "mermaid";
-import { type KeyboardEvent, type MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { fitDirection, type Size, validSize } from "../graph-fit.ts";
 import { latestRoot, type State } from "../state.ts";
 
@@ -74,9 +82,16 @@ export function GraphView({
   state: State;
   onSelect: (ref: NodeRef, token: string) => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const { root, body, ids } = useMemo(() => mermaidOf(state.graphs), [state.graphs]);
-  const [selection, setSelection] = useState<{ root: number; body: string; result: SVGSVGElement | string }>();
+  const ref = useRef<HTMLElement>(null);
+  const { root, body, ids } = useMemo(
+    () => mermaidOf(state.graphs),
+    [state.graphs],
+  );
+  const [selection, setSelection] = useState<{
+    root: number;
+    body: string;
+    result: SVGSVGElement | string;
+  }>();
   useEffect(() => {
     const mount = ref.current;
     if (root === undefined || !mount) return;
@@ -88,7 +103,11 @@ export function GraphView({
     let drawings: Drawings | undefined;
 
     const choose = (cached: Drawings) => {
-      const direction = fitDirection(panel, cached.LR?.viewBox.baseVal, cached.TB?.viewBox.baseVal);
+      const direction = fitDirection(
+        panel,
+        cached.LR?.viewBox.baseVal,
+        cached.TB?.viewBox.baseVal,
+      );
       const svg = direction && cached[direction];
       if (svg && svg !== selected) {
         selected = svg;
@@ -101,12 +120,16 @@ export function GraphView({
       let firstError: string | undefined;
       for (const direction of ["LR", "TB"] as const) {
         try {
-          const { svg } = await mermaid.render(`junco-graph-${++renders}`, `flowchart ${direction}\n${body}`);
+          const { svg } = await mermaid.render(
+            `junco-graph-${++renders}`,
+            `flowchart ${direction}\n${body}`,
+          );
           if (cancelled || ref.current !== mount) return;
           const container = document.createElement("div");
           container.innerHTML = svg;
           const drawing = container.querySelector("svg");
-          if (drawing && validSize(drawing.viewBox.baseVal)) candidates[direction] = drawing;
+          if (drawing && validSize(drawing.viewBox.baseVal))
+            candidates[direction] = drawing;
           else firstError ??= "Mermaid returned no usable SVG viewBox";
         } catch (error) {
           if (cancelled || ref.current !== mount) return;
@@ -115,7 +138,8 @@ export function GraphView({
       }
       drawings = candidates;
       if (candidates.LR || candidates.TB) choose(candidates);
-      else if (firstError !== undefined) setSelection({ root, body, result: firstError });
+      else if (firstError !== undefined)
+        setSelection({ root, body, result: firstError });
     };
 
     const observer = new ResizeObserver(([entry]) => {
@@ -134,7 +158,10 @@ export function GraphView({
     };
   }, [root, body]);
 
-  const result = selection && selection.root === root && selection.body === body ? selection.result : undefined;
+  const result =
+    selection && selection.root === root && selection.body === body
+      ? selection.result
+      : undefined;
   useLayoutEffect(() => {
     const mount = ref.current;
     if (!mount) return;
@@ -161,9 +188,17 @@ export function GraphView({
     }
     if (mount.firstElementChild === result) return;
     const focus = document.activeElement;
-    const token = focus && mount.contains(focus) && focus.closest<SVGGElement>("g[data-node-anchor]")?.dataset.nodeAnchor;
+    const token =
+      focus &&
+      mount.contains(focus) &&
+      focus.closest<SVGGElement>("g[data-node-anchor]")?.dataset.nodeAnchor;
     mount.replaceChildren(result);
-    if (token) result.querySelector<SVGGElement>(`g[data-node-anchor="${CSS.escape(token)}"]`)?.focus({ preventScroll: true });
+    if (token)
+      result
+        .querySelector<SVGGElement>(
+          `g[data-node-anchor="${CSS.escape(token)}"]`,
+        )
+        ?.focus({ preventScroll: true });
   }, [result, ids, state.graphs]);
 
   function activate(event: MouseEvent | KeyboardEvent) {
@@ -187,7 +222,14 @@ export function GraphView({
       <div className="muted">
         g{root} {run && `run #${run.run} ${run.phase}`}
       </div>
-      <div key={root} ref={ref} className="graph-viewport" onClick={activate} onKeyDown={activate} />
+      <figure
+        key={root}
+        ref={ref}
+        aria-label={`Graph ${root}`}
+        className="graph-viewport"
+        onClick={activate}
+        onKeyDown={activate}
+      />
     </>
   );
 }

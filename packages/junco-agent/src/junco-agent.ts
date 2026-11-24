@@ -1493,9 +1493,12 @@ export class JuncoAgent<
       const placement = this.#request ?? this.#usagePlacement;
       let stream: AssistantMessageEventStream;
       try {
-        stream = placement === undefined || captureUsageContext() === placement.context
-          ? models.streamSimple(model, context, options)
-          : runWithUsageContext(placement.context, () => models.streamSimple(model, context, options));
+        stream =
+          placement === undefined || captureUsageContext() === placement.context
+            ? models.streamSimple(model, context, options)
+            : runWithUsageContext(placement.context, () =>
+                models.streamSimple(model, context, options),
+              );
       } catch (error) {
         finish?.("error");
         throw error;
@@ -2267,7 +2270,10 @@ export class JuncoAgent<
       throw new JuncoAgentError("busy", "A node context is already bound");
     const placement = context.recorder;
     // One profiling session per hierarchy: a placed agent records into the graph's session.
-    if (placement !== undefined && placement.root !== this.#options.recorder?.root)
+    if (
+      placement !== undefined &&
+      placement.root !== this.#options.recorder?.root
+    )
       throw new JuncoAgentError(
         "invalid_argument",
         "ProfileRecorder instance mismatch",

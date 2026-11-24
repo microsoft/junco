@@ -419,7 +419,13 @@ test("a tools-owned yield continues in a bare Pi agent without a scheduler", {
   const capture = {};
   faux.setResponses([
     fauxAssistantMessage(
-      [fauxToolCall("yield", { reason: "review", waitForInput: true }, { id: "standalone-yield" })],
+      [
+        fauxToolCall(
+          "yield",
+          { reason: "review", waitForInput: true },
+          { id: "standalone-yield" },
+        ),
+      ],
       { stopReason: "toolUse" },
     ),
     (context) => {

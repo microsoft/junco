@@ -144,7 +144,10 @@ async function compactionFixture() {
     ...node(agents.c, "c"),
     trigger: TriggerRule.when(never),
   });
-  ids.d = graph.addNode({ ...node(agents.d, "d"), trigger: TriggerRule.never() });
+  ids.d = graph.addNode({
+    ...node(agents.d, "d"),
+    trigger: TriggerRule.never(),
+  });
   ids.e = eId;
   ids.f = addPromptRun(graph, agents.f, "f");
   graph.addEdge(ids.d, ids.c, never);
@@ -368,7 +371,10 @@ describe("policy boundaries", () => {
     );
     const graph = graphContext.graph;
     const earlyId = addPromptRun(graph, early, "early");
-    const release = Edge.message<typeof TaskSchema, AssistantMessage>("release", TaskSchema);
+    const release = Edge.message<typeof TaskSchema, AssistantMessage>(
+      "release",
+      TaskSchema,
+    );
     const lateId = graph.addNode({
       ...node(late, "late"),
       trigger: TriggerRule.when(release),
@@ -379,9 +385,17 @@ describe("policy boundaries", () => {
     await measuring.promise;
     await graphContext.step(); // prime early
     await graphContext.step(); // consume its only assignment
-    graph.emit(graph.source.id, Message.create(release, {
-      kind: "prompt", text: "start", taskId: "late", spec: "", deps: [], history: [],
-    }));
+    graph.emit(
+      graph.source.id,
+      Message.create(release, {
+        kind: "prompt",
+        text: "start",
+        taskId: "late",
+        spec: "",
+        deps: [],
+        history: [],
+      }),
+    );
     assert.ok(!graph.available().has(earlyId) && graph.available().has(lateId));
     gate.resolve();
     assert.equal(await compaction, undefined);

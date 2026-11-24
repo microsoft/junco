@@ -69,7 +69,8 @@ const json = <T>(results: Result[], name: string): T[] =>
   results.filter((r) => r.name === name).map((r) => JSON.parse(r.text) as T);
 
 const releaseNotice = "src/a.ts edited and released";
-const isReleaseNotice = (text: string) => text.startsWith(`${releaseNotice}\n\nTask: `);
+const isReleaseNotice = (text: string) =>
+  text.startsWith(`${releaseNotice}\n\nTask: `);
 
 const A_SCRIPT = [
   () => call("bash", { command: hold(16) }),
@@ -92,7 +93,9 @@ const A_SCRIPT = [
     const info = json<{ children: Route[] }>(results, "info").at(-1)!;
     const route = info.children.find((child) => child.kind === "message");
     if (!route) throw new Error("A has no message route");
-    const task = JSON.parse(userMessages.A!.at(-1)!.split("\n\nTask: ").at(-1)!);
+    const task = JSON.parse(
+      userMessages.A!.at(-1)!.split("\n\nTask: ").at(-1)!,
+    );
     return call("send", {
       id: route.edgeId,
       payload: { kind: "prompt", text: releaseNotice },
@@ -110,7 +113,8 @@ const b = (results: Result[]) => {
   if (!names.includes("bash")) return call("bash", { command: hold(32) });
   if (!userMessages.B!.some(isReleaseNotice))
     return call("yield", { reason: "waiting for A", waitForInput: true });
-  if (!names.includes("yield")) return call("yield", { reason: "ready to map" });
+  if (!names.includes("yield"))
+    return call("yield", { reason: "ready to map" });
   const graphs = results.filter((r) => r.name === "code_graph");
   type List = { clusters: { cluster: { id: string } }[] };
   const clusterId = () => {
@@ -153,10 +157,16 @@ const bStep = step("B", b);
 const respond: FauxResponseFactory = (context, ...args) => {
   const first = context.messages.find((m) => m.role === "user");
   assert.ok(first);
-  const instruction = typeof first.content === "string" ? first.content : contentText(first.content);
+  const instruction =
+    typeof first.content === "string"
+      ? first.content
+      : contentText(first.content);
   if (instruction === "Allocate, wait for A, then map the code graph.")
     return bStep(context, ...args);
-  assert.equal(instruction, "Allocate, edit src/a.ts, release it, and notify B.");
+  assert.equal(
+    instruction,
+    "Allocate, edit src/a.ts, release it, and notify B.",
+  );
   const next = A_SCRIPT.shift();
   assert.ok(next, "A's script is exhausted");
   return next(context, ...args);
@@ -214,11 +224,21 @@ try {
   });
   try {
     const execution = await JuncoGraph.fromYaml(yaml, {
-      args: { cwd: seed, collection, recorder, tracer: new tracer.DummyTracer() },
-      parameters: { scheduler: () => schedules.parallel(), ladder: await offlineLadder(respond) },
+      args: {
+        cwd: seed,
+        collection,
+        recorder,
+        tracer: new tracer.DummyTracer(),
+      },
+      parameters: {
+        scheduler: () => schedules.parallel(),
+        ladder: await offlineLadder(respond),
+      },
     });
     try {
-      const outer = execution.graph.getNode(graph.NodeId.create("nodeId1"))?.state;
+      const outer = execution.graph.getNode(
+        graph.NodeId.create("nodeId1"),
+      )?.state;
       assert.ok(outer instanceof JuncoGraph);
       const inner = outer.getNode(graph.NodeId.create("nodeId2"))?.state;
       assert.ok(inner instanceof JuncoGraph);
@@ -227,7 +247,9 @@ try {
         assert.ok(member instanceof JuncoAgent);
         assert.ok(member.owner);
         owners.add(member.owner);
-        member.events.on("usage", ({ row }) => { tokens[id]! += row.usage.totalTokens; });
+        member.events.on("usage", ({ row }) => {
+          tokens[id]! += row.usage.totalTokens;
+        });
       }
       await execution.run();
     } finally {
@@ -250,10 +272,7 @@ try {
     await readFile(join(seed, "src/a.ts"), "utf8"),
     "export function ping() { return 22; }\n",
   );
-  assert.equal(
-    userMessages.B!.filter(isReleaseNotice).length,
-    1,
-  );
+  assert.equal(userMessages.B!.filter(isReleaseNotice).length, 1);
   const count = (node: string, name: string) =>
     seen[node]!.filter((r) => r.name === name).length;
   assert.equal(count("A", "ast_edit"), 2);

@@ -18,8 +18,8 @@ import {
   DummyTracer,
   Edge,
   gigabytes,
-  NodeId,
   Message,
+  NodeId,
   TriggerEntry,
   TriggerRule,
   tokens,
@@ -51,7 +51,11 @@ type Policy = schedules.Scheduler<
   AssistantMessage,
   schedules.AgencyNodeMetadata
 >;
-function addMember(graph: JuncoGraph, name: string, agent: MockAgent | JuncoAgent) {
+function addMember(
+  graph: JuncoGraph,
+  name: string,
+  agent: MockAgent | JuncoAgent,
+) {
   const start = Edge.message(`${name}:start`, TaskSchema);
   const id = graph.addNode({
     id: NodeId.create(name),
@@ -61,7 +65,13 @@ function addMember(graph: JuncoGraph, name: string, agent: MockAgent | JuncoAgen
     trigger: TriggerRule.when(start),
   });
   graph.addEdge(graph.source.id, id, start);
-  graph.emit(graph.source.id, Message.create(start, Task.create({ kind: "prompt", text: "go", spec: "" })));
+  graph.emit(
+    graph.source.id,
+    Message.create(
+      start,
+      Task.create({ kind: "prompt", text: "go", spec: "" }),
+    ),
+  );
   return id;
 }
 function recorded(inner: Policy): {
@@ -127,9 +137,8 @@ test("memory admission packs calibrated floors and isolates unmeasured mock memb
           ["C"],
         ]);
       else assert.ok(waves.every((wave) => wave.length === 1));
-      members.forEach((id, i) =>
-        assert.equal(textOf(results.get(id)!), names[i]),
-      );
+      for (const [i, id] of members.entries())
+        assert.equal(textOf(results.get(id)!), names[i]);
       assert.equal(textOf(results.get(ports.sink.id)!), "D");
     } finally {
       await graph.close();

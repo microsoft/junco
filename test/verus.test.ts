@@ -7,9 +7,9 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
   type Context,
   contentText,
-  fauxAssistantMessage,
   type FauxResponseFactory,
   type FauxResponseStep,
+  fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
@@ -24,7 +24,14 @@ import {
   type VerusRole,
   type VerusWorkspace,
 } from "../examples/verus/verus.ts";
-import { agent, graph, schedules, syntax, tools, tracer } from "../src/index.ts";
+import {
+  agent,
+  graph,
+  schedules,
+  syntax,
+  tools,
+  tracer,
+} from "../src/index.ts";
 import { userTexts } from "./deterministic-support.ts";
 import { copyTreeNative, fauxRuntime, waitingTool } from "./support.ts";
 
@@ -54,7 +61,8 @@ const verifyCall = (id: string) =>
     },
   );
 
-const latestInput = (context: Context): string => userTexts(context.messages).at(-1)!;
+const latestInput = (context: Context): string =>
+  userTexts(context.messages).at(-1)!;
 
 function rootCause(error: unknown): unknown {
   while (error instanceof DataflowNodeError) error = error.cause;
@@ -63,14 +71,26 @@ function rootCause(error: unknown): unknown {
 
 type Scripts = Record<VerusRole, readonly FauxResponseStep[]>;
 /** The YAML system prompt, not parallel request order, selects each persistent role's script. */
-async function runScript(scripts: Scripts, tool: AgentTool, observer: tracer.DataflowTracer, signal?: AbortSignal, maxTokens?: number) {
+async function runScript(
+  scripts: Scripts,
+  tool: AgentTool,
+  observer: tracer.DataflowTracer,
+  signal?: AbortSignal,
+  maxTokens?: number,
+) {
   const roles = ["Verifier", "Reviewer", "Cleanup"] as const;
   const next = { Verifier: 0, Reviewer: 0, Cleanup: 0 };
-  const { models, faux } = await fauxRuntime([], "faux", [{ id: "verus", maxTokens }]);
+  const { models, faux } = await fauxRuntime([], "faux", [
+    { id: "verus", maxTokens },
+  ]);
   const respond: FauxResponseFactory = (context, ...rest) => {
-    const system = context.messages.filter(m => m.role === "system").map(m =>
-      typeof m.content === "string" ? m.content : contentText(m.content)).join("\n");
-    const role = roles.find(role => system.includes(`You are ${role}`));
+    const system = context.messages
+      .filter((m) => m.role === "system")
+      .map((m) =>
+        typeof m.content === "string" ? m.content : contentText(m.content),
+      )
+      .join("\n");
+    const role = roles.find((role) => system.includes(`You are ${role}`));
     if (!role) throw new Error("Unknown Verus role");
     const answer = scripts[role][next[role]++];
     if (!answer) throw new Error(`Unexpected ${role} turn`);
@@ -78,17 +98,29 @@ async function runScript(scripts: Scripts, tool: AgentTool, observer: tracer.Dat
     return typeof answer === "function" ? answer(context, ...rest) : answer;
   };
   faux.setResponses([respond]);
-  const ladder = new schedules.ModelLadder(models, schedules.uniformLadder({ model: "faux/verus" }));
+  const ladder = new schedules.ModelLadder(
+    models,
+    schedules.uniformLadder({ model: "faux/verus" }),
+  );
   await using resources = new AsyncDisposableStack();
   const native = await copyTreeNative();
   const collections = new Map<graph.NodeIdType, tools.ToolCollection>();
   for (const role of roles) {
     const collection = await tools.ToolCollection.create(seed, {
-      native, extend: async () => ({ tools: [tool], close: async () => {} }),
+      native,
+      extend: async () => ({ tools: [tool], close: async () => {} }),
     });
-    collections.set(graph.NodeId.create(role), resources.adopt(collection, c => c.close()));
+    collections.set(
+      graph.NodeId.create(role),
+      resources.adopt(collection, (c) => c.close()),
+    );
   }
-  await runVerusLoop(workspace, { tools: collections, ladder, tracer: observer, signal });
+  await runVerusLoop(workspace, {
+    tools: collections,
+    ladder,
+    tracer: observer,
+    signal,
+  });
 }
 
 /** Script compiler/prover feedback without treating proof failures as MCP transport failures. */
@@ -151,7 +183,16 @@ class RoleTracer extends tracer.DummyTracer {
             const members = this.members.get(role) ?? new Set();
             members.add(graph.getNode(id)!.state);
             this.members.set(role, members);
-          } else if (!(role.startsWith("Prepare") && !step.done && Array.isArray(step.value) && step.value.length) && role !== "$sink") return;
+          } else if (
+            !(
+              role.startsWith("Prepare") &&
+              !step.done &&
+              Array.isArray(step.value) &&
+              step.value.length
+            ) &&
+            role !== "$sink"
+          )
+            return;
           this.completed.push(role);
           this.onComplete(role);
         },
@@ -185,32 +226,54 @@ describe("Verus loop", () => {
       const verifier: FauxResponseFactory = (context) => {
         activated.push("Verifier");
         verifierPrompts.push(latestInput(context));
-        assert.equal(userTexts(context.messages).filter(text => text.startsWith("Translate or repair the current output")).length, verifierPrompts.length);
+        assert.equal(
+          userTexts(context.messages).filter((text) =>
+            text.startsWith("Translate or repair the current output"),
+          ).length,
+          verifierPrompts.length,
+        );
         if (verifierPrompts.length === 2)
-          assert.ok(context.messages.some(m => m.role === "assistant" && contentText(m.content).includes("translated round 1")));
-        return fauxAssistantMessage(`max.rs: translated round ${verifierPrompts.length}`);
+          assert.ok(
+            context.messages.some(
+              (m) =>
+                m.role === "assistant" &&
+                contentText(m.content).includes("translated round 1"),
+            ),
+          );
+        return fauxAssistantMessage(
+          `max.rs: translated round ${verifierPrompts.length}`,
+        );
       };
       const scripts: Scripts = {
         Verifier: [verifier, verifier],
-        Reviewer: [0, 1].flatMap(round => [
-          () => { activated.push("Reviewer"); return verifyCall(`review-${round}`); },
+        Reviewer: [0, 1].flatMap((round) => [
+          () => {
+            activated.push("Reviewer");
+            return verifyCall(`review-${round}`);
+          },
           (context: Context) => {
             const result = context.messages.at(-1);
             assert.ok(result?.role === "toolResult");
             reviewerResults.push(contentText(result.content));
-            return fauxAssistantMessage(round === 0
-              ? "max.rs: verification passed; review approved, strengthen membership specification."
-              : "max.rs: nonzero proof failure: postcondition not satisfied; retain the strict contract.");
+            return fauxAssistantMessage(
+              round === 0
+                ? "max.rs: verification passed; review approved, strengthen membership specification."
+                : "max.rs: nonzero proof failure: postcondition not satisfied; retain the strict contract.",
+            );
           },
         ]),
-        Cleanup: [0, 1].map(round => (context: Context) => {
+        Cleanup: [0, 1].map((round) => (context: Context) => {
           activated.push("Cleanup");
           cleanupPrompts.push(latestInput(context));
-          return fauxAssistantMessage(`max.rs: cleanup round ${round + 1}; preserve both lower-bound obligations.`);
+          return fauxAssistantMessage(
+            `max.rs: cleanup round ${round + 1}; preserve both lower-bound obligations.`,
+          );
         }),
       };
-      await assert.rejects(runScript(scripts, verification.tool, observer, controller.signal),
-        (error: unknown) => rootCause(error) === reason);
+      await assert.rejects(
+        runScript(scripts, verification.tool, observer, controller.signal),
+        (error: unknown) => rootCause(error) === reason,
+      );
       const expected = [
         "Verifier",
         "Reviewer",
@@ -245,7 +308,9 @@ describe("Verus loop", () => {
         const members = observer.members.get(role)!;
         assert.equal(members.size, 1, `${role} was replaced between rounds`);
         const [member] = members;
-        assert.ok(member instanceof agent.JuncoAgent && member.status === "closed");
+        assert.ok(
+          member instanceof agent.JuncoAgent && member.status === "closed",
+        );
       }
     },
     TIMEOUT_MS,
@@ -259,14 +324,30 @@ describe("Verus loop", () => {
       let cleanupActivations = 0;
       const observer = new RoleTracer();
       await assert.rejects(
-        runScript({
-          Verifier: [verifyCall("writer-check"), fauxAssistantMessage("max.rs: writer verified the translation.")],
-          Reviewer: [() => {
-            reviewerActivations++;
-            return fauxAssistantMessage("max.rs: looks verified; no independent tool invocation.");
-          }],
-          Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("must not activate"); }],
-        }, verification.tool, observer),
+        runScript(
+          {
+            Verifier: [
+              verifyCall("writer-check"),
+              fauxAssistantMessage("max.rs: writer verified the translation."),
+            ],
+            Reviewer: [
+              () => {
+                reviewerActivations++;
+                return fauxAssistantMessage(
+                  "max.rs: looks verified; no independent tool invocation.",
+                );
+              },
+            ],
+            Cleanup: [
+              () => {
+                cleanupActivations++;
+                return fauxAssistantMessage("must not activate");
+              },
+            ],
+          },
+          verification.tool,
+          observer,
+        ),
         (error: unknown) =>
           rootCause(error) instanceof Error &&
           (rootCause(error) as Error).message ===
@@ -290,31 +371,60 @@ describe("Verus loop", () => {
       const verification = scriptedVerification([0]);
       const controller = new AbortController();
       const reason = new Error("one round complete");
-      const observer = new RoleTracer(role => { if (role === "Cleanup") controller.abort(reason); });
+      const observer = new RoleTracer((role) => {
+        if (role === "Cleanup") controller.abort(reason);
+      });
       let assignment = "";
-      await assert.rejects(runScript({
-        Verifier: [(context: Context) => {
-          const text = latestInput(context);
-          assignment = text.split("\n\nTask: ")[0]!;
-          assert.ok(assignment.includes(workspace.spec));
-          assert.ok(assignment.includes(workspace.outputDir));
-          return fauxAssistantMessage("max.rs: translation ready.");
-        }],
-        Reviewer: [(context: Context) => {
-          const work = JSON.parse(latestInput(context));
-          assert.equal(work.id, "PrepareReviewer~>Reviewer");
-          assert.equal(work.payload.assignment.trimEnd(), assignment.trimEnd());
-          assert.equal(syntax.finalText(work.payload.report, "Verifier"), "max.rs: translation ready.");
-          return verifyCall("fresh-review");
-        }, fauxAssistantMessage("max.rs: independent review ready.")],
-        Cleanup: [(context: Context) => {
-          const work = JSON.parse(latestInput(context));
-          assert.equal(work.id, "PrepareCleanup~>Cleanup");
-          assert.equal(work.payload.assignment.trimEnd(), assignment.trimEnd());
-          assert.equal(syntax.finalText(work.payload.report, "Reviewer"), "max.rs: independent review ready.");
-          return fauxAssistantMessage("max.rs: cleanup ready.");
-        }],
-      }, verification.tool, observer, controller.signal), (error: unknown) => rootCause(error) === reason);
+      await assert.rejects(
+        runScript(
+          {
+            Verifier: [
+              (context: Context) => {
+                const text = latestInput(context);
+                assignment = text.split("\n\nTask: ")[0]!;
+                assert.ok(assignment.includes(workspace.spec));
+                assert.ok(assignment.includes(workspace.outputDir));
+                return fauxAssistantMessage("max.rs: translation ready.");
+              },
+            ],
+            Reviewer: [
+              (context: Context) => {
+                const work = JSON.parse(latestInput(context));
+                assert.equal(work.id, "PrepareReviewer~>Reviewer");
+                assert.equal(
+                  work.payload.assignment.trimEnd(),
+                  assignment.trimEnd(),
+                );
+                assert.equal(
+                  syntax.finalText(work.payload.report, "Verifier"),
+                  "max.rs: translation ready.",
+                );
+                return verifyCall("fresh-review");
+              },
+              fauxAssistantMessage("max.rs: independent review ready."),
+            ],
+            Cleanup: [
+              (context: Context) => {
+                const work = JSON.parse(latestInput(context));
+                assert.equal(work.id, "PrepareCleanup~>Cleanup");
+                assert.equal(
+                  work.payload.assignment.trimEnd(),
+                  assignment.trimEnd(),
+                );
+                assert.equal(
+                  syntax.finalText(work.payload.report, "Reviewer"),
+                  "max.rs: independent review ready.",
+                );
+                return fauxAssistantMessage("max.rs: cleanup ready.");
+              },
+            ],
+          },
+          verification.tool,
+          observer,
+          controller.signal,
+        ),
+        (error: unknown) => rootCause(error) === reason,
+      );
       assert.deepEqual(verification.observed, [0]);
     },
     TIMEOUT_MS,
@@ -327,12 +437,30 @@ describe("Verus loop", () => {
       let cleanupActivations = 0;
       const observer = new RoleTracer();
       await assert.rejects(
-        runScript({
-          Verifier: [0, 1].map(() => fauxAssistantMessage("max.rs: translation ready.")),
-          Reviewer: [verifyCall("first-round-only"), fauxAssistantMessage("max.rs: independently verified first round."),
-            fauxAssistantMessage("max.rs: reusing the prior round's diagnostics.")],
-          Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("max.rs: first cleanup ready."); }],
-        }, verification.tool, observer),
+        runScript(
+          {
+            Verifier: [0, 1].map(() =>
+              fauxAssistantMessage("max.rs: translation ready."),
+            ),
+            Reviewer: [
+              verifyCall("first-round-only"),
+              fauxAssistantMessage(
+                "max.rs: independently verified first round.",
+              ),
+              fauxAssistantMessage(
+                "max.rs: reusing the prior round's diagnostics.",
+              ),
+            ],
+            Cleanup: [
+              () => {
+                cleanupActivations++;
+                return fauxAssistantMessage("max.rs: first cleanup ready.");
+              },
+            ],
+          },
+          verification.tool,
+          observer,
+        ),
         (error: unknown) => {
           assert.ok(error instanceof DataflowNodeError);
           assert.equal(String(error.nodeId), "PrepareCleanup");
@@ -379,11 +507,32 @@ describe("Verus loop", () => {
           let reviewerActivations = 0;
           let cleanupActivations = 0;
           await assert.rejects(
-            runScript({
-              Verifier: [role === "Verifier" ? invalid.message : fauxAssistantMessage("max.rs: translation ready.")],
-              Reviewer: [() => { reviewerActivations++; return verifyCall("invalid-review"); }, invalid.message],
-              Cleanup: [() => { cleanupActivations++; return fauxAssistantMessage("must not activate"); }],
-            }, verification.tool, new RoleTracer(), undefined, invalid.message.stopReason === "length" ? 1 : undefined),
+            runScript(
+              {
+                Verifier: [
+                  role === "Verifier"
+                    ? invalid.message
+                    : fauxAssistantMessage("max.rs: translation ready."),
+                ],
+                Reviewer: [
+                  () => {
+                    reviewerActivations++;
+                    return verifyCall("invalid-review");
+                  },
+                  invalid.message,
+                ],
+                Cleanup: [
+                  () => {
+                    cleanupActivations++;
+                    return fauxAssistantMessage("must not activate");
+                  },
+                ],
+              },
+              verification.tool,
+              new RoleTracer(),
+              undefined,
+              invalid.message.stopReason === "length" ? 1 : undefined,
+            ),
             (error: unknown) => {
               assert.ok(error instanceof DataflowNodeError);
               assert.equal(
@@ -453,11 +602,20 @@ describe("Verus loop", () => {
         },
       };
       await assert.rejects(
-        runScript({
-          Verifier: [fauxAssistantMessage("max.rs: translation ready.")],
-          Reviewer: [verifyCall("failed-diagnostics"), fauxAssistantMessage("max.rs: completed despite the failed bridge.")],
-          Cleanup: [],
-        }, tool, new RoleTracer()),
+        runScript(
+          {
+            Verifier: [fauxAssistantMessage("max.rs: translation ready.")],
+            Reviewer: [
+              verifyCall("failed-diagnostics"),
+              fauxAssistantMessage(
+                "max.rs: completed despite the failed bridge.",
+              ),
+            ],
+            Cleanup: [],
+          },
+          tool,
+          new RoleTracer(),
+        ),
         (error: unknown) =>
           rootCause(error) instanceof Error &&
           /bridge disconnected/.test((rootCause(error) as Error).message),
@@ -497,11 +655,31 @@ describe("Verus loop", () => {
       };
       const activated: VerusRole[] = [];
       const observer = new RoleTracer();
-      const running = runScript({
-        Verifier: [() => { activated.push("Verifier"); return fauxAssistantMessage("max.rs: translation ready."); }],
-        Reviewer: [() => { activated.push("Reviewer"); return verifyCall("blocked-review"); }],
-        Cleanup: [() => { activated.push("Cleanup"); return fauxAssistantMessage("must not activate"); }],
-      }, verify, observer, controller.signal).then(
+      const running = runScript(
+        {
+          Verifier: [
+            () => {
+              activated.push("Verifier");
+              return fauxAssistantMessage("max.rs: translation ready.");
+            },
+          ],
+          Reviewer: [
+            () => {
+              activated.push("Reviewer");
+              return verifyCall("blocked-review");
+            },
+          ],
+          Cleanup: [
+            () => {
+              activated.push("Cleanup");
+              return fauxAssistantMessage("must not activate");
+            },
+          ],
+        },
+        verify,
+        observer,
+        controller.signal,
+      ).then(
         () => undefined,
         (error: unknown) => error,
       );

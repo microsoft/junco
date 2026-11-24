@@ -1,5 +1,9 @@
 import { parse } from "../../syntax/parse.js";
-import { edgeId, type GraphSpec, type JuncoDocument } from "../../syntax/schema.js";
+import {
+  edgeId,
+  type GraphSpec,
+  type JuncoDocument,
+} from "../../syntax/schema.js";
 import anyFanInSource from "./any-fan-in.yml" with { type: "text" };
 import ralphSource from "./ralph.yml" with { type: "text" };
 
@@ -17,7 +21,8 @@ const credits = [
   { ...edge(selector, "ingress-ack"), from: "Memory" },
 ];
 const IngressOpen = selector.nodes.IngressOpen;
-if (IngressOpen?.kind !== "emit") throw new TypeError("AnyFanIn requires IngressOpen");
+if (IngressOpen?.kind !== "emit")
+  throw new TypeError("AnyFanIn requires IngressOpen");
 const broadcast = { anyOf: [prompt, assistant] };
 const ralphAgent = ralph.nodes.Ralph;
 const selectorAgent = selector.nodes.AnyFanIn;
@@ -80,7 +85,10 @@ const ralphDocument: JuncoDocument = {
 const fanInDocument: JuncoDocument = {
   graph: {
     name: "MemoryFanIn",
-    source: { ...selector.source, routes: { candidates: ["$source~>MemoryCandidates"] } },
+    source: {
+      ...selector.source,
+      routes: { candidates: ["$source~>MemoryCandidates"] },
+    },
     sink: { stream: true },
     nodes: {
       IngressOpen,

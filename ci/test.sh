@@ -12,6 +12,10 @@ bun install --frozen-lockfile --ignore-scripts
 step "Build Junco runtime packages and standard library"
 bun run build
 
+step "Relocated recursive agency example with native tools and a Btrfs seed"
+bun run build:examples
+bun --no-install ci/smoke-example-bundles.mjs native
+
 step "Build Graft native grammar bindings"
 (
   node_prefix=$(node -p 'require("node:path").resolve(process.execPath, "../..")')

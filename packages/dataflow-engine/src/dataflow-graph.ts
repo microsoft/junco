@@ -15,8 +15,19 @@ import { checkPayload, type Edge } from "./edges.js";
 import { DataflowDefinitionError, DataflowNodeError } from "./errors.js";
 import type { EdgeId } from "./identity.js";
 import { NodeId } from "./identity.js";
-import type { Lookup, Message, Node, NodeSpec, NodeYield, ParentView } from "./node.js";
-import { FinalMessages, rejectLegacyAvailability, snapshotView } from "./node.js";
+import type {
+  Lookup,
+  Message,
+  Node,
+  NodeSpec,
+  NodeYield,
+  ParentView,
+} from "./node.js";
+import {
+  FinalMessages,
+  rejectLegacyAvailability,
+  snapshotView,
+} from "./node.js";
 import type { Pretty } from "./pretty.js";
 import type { Queue } from "./queue.js";
 import type {
@@ -225,10 +236,18 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     return this.registerNode(spec, false);
   }
 
-  protected registerNode(spec: NodeSpec<S, N, T>, repeatOnReturn: boolean): NodeId {
+  protected registerNode(
+    spec: NodeSpec<S, N, T>,
+    repeatOnReturn: boolean,
+  ): NodeId {
     rejectLegacyAvailability(spec);
-    if (spec.repeat !== undefined && (!Number.isSafeInteger(spec.repeat) || spec.repeat < 0))
-      throw new DataflowDefinitionError("repeat must be a nonnegative safe integer");
+    if (
+      spec.repeat !== undefined &&
+      (!Number.isSafeInteger(spec.repeat) || spec.repeat < 0)
+    )
+      throw new DataflowDefinitionError(
+        "repeat must be a nonnegative safe integer",
+      );
     let id: NodeId;
     if (spec.id === undefined) {
       id = NodeId.create(String(this.#nextNodeIndex++));
@@ -293,18 +312,29 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       );
     }
     if (edge.onReturn && E.isRight(edge.transport))
-      throw new DataflowDefinitionError(`Return notifications require a message edge: "${edge.id}"`);
+      throw new DataflowDefinitionError(
+        `Return notifications require a message edge: "${edge.id}"`,
+      );
     const ingress = this.#runtimeOf(to).source;
-    if (ingress && (from === to || edge.onReturn || E.isRight(edge.transport) ||
-        !ingress.trigger.rule.some((credit) => credit === edge.id)))
+    if (
+      ingress &&
+      (from === to ||
+        edge.onReturn ||
+        E.isRight(edge.transport) ||
+        !ingress.trigger.rule.some((credit) => credit === edge.id))
+    )
       throw new DataflowDefinitionError(
         `Graph source inbound edge "${edge.id}" must be an ordinary message credit from another node named in the source trigger`,
       );
     if (this.#runtimeOf(from).source) {
       if (E.isRight(edge.transport))
-        throw new DataflowDefinitionError("Graph source cannot produce value edges");
+        throw new DataflowDefinitionError(
+          "Graph source cannot produce value edges",
+        );
       if (edge.onReturn)
-        throw new DataflowDefinitionError(`Node "${from}" cannot produce return messages`);
+        throw new DataflowDefinitionError(
+          `Node "${from}" cannot produce return messages`,
+        );
     }
 
     for (const link of this.#graph.getLinks(from) ?? []) {
@@ -493,10 +523,15 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       const { trigger } = node;
       const satisfied = satisfiedEdges(trigger, runtime.inbound, node.id);
       const triggered =
-        runtime.remaining !== 0 && (trigger.kind === "all"
+        runtime.remaining !== 0 &&
+        (trigger.kind === "all"
           ? satisfied.length === trigger.rule.length
           : satisfied.length > 0);
-      if ((!triggered && !runtime.continuation) || (runtime.source && !runtime.source.peek())) return;
+      if (
+        (!triggered && !runtime.continuation) ||
+        (runtime.source && !runtime.source.peek())
+      )
+        return;
       available.set(node.id, {
         view: runtime.probe,
         trigger,
@@ -664,16 +699,22 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           availability.trigger.rule.length > 0 &&
           this.#runtimeOf(entry.id).source
         ) {
-          const readsCredit = (id: EdgeId) => (inputs.get(id) ?? "none") !== "none";
-          const valid = availability.trigger.kind === "all"
-            ? availability.satisfied.every(readsCredit)
-            : availability.satisfied.some(readsCredit);
+          const readsCredit = (id: EdgeId) =>
+            (inputs.get(id) ?? "none") !== "none";
+          const valid =
+            availability.trigger.kind === "all"
+              ? availability.satisfied.every(readsCredit)
+              : availability.satisfied.some(readsCredit);
           if (!valid)
             throw new DataflowDefinitionError(
               `Source "${entry.id}" must read the credits required by its trigger`,
             );
         }
-        column.push({ id: entry.id, inputs, continuationOnly: availability.continuationOnly });
+        column.push({
+          id: entry.id,
+          inputs,
+          continuationOnly: availability.continuationOnly,
+        });
       }
       for (const { id, inputs } of column) this.#assertInputs(id, inputs);
       if (column.length === 0) continue;
@@ -865,7 +906,10 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         node.status = "running";
         step = await node.generator.next();
         // An empty priming yield only asks for the first delivery; a source may publish immediately.
-        newAdmission = step.done === true || !Array.isArray(step.value) || step.value.length > 0;
+        newAdmission =
+          step.done === true ||
+          !Array.isArray(step.value) ||
+          step.value.length > 0;
         assertUsageAllowed();
         inBody = false;
       } else {
@@ -875,9 +919,13 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
           );
         }
         // Synchronous before this branch's first `await`, so concurrent lanes consume in lane order.
-        const batch = continuationOnly ? undefined : this.#consume(runtime, inputs);
+        const batch = continuationOnly
+          ? undefined
+          : this.#consume(runtime, inputs);
         newAdmission = !runtime.continuation || batch !== undefined;
-        const view = continuationOnly ? emptyView : viewOf<N, T>(batch, runtime.probe.values);
+        const view = continuationOnly
+          ? emptyView
+          : viewOf<N, T>(batch, runtime.probe.values);
         if (execution !== undefined)
           activation = this.#observe(() =>
             execution.startNode(id, "resume", view),
@@ -890,7 +938,10 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
       }
       // A prompt (including a wait for input) is one run through settlement. A coroutine
       // admits work on a trigger delivery, not on an input-free continuation of that work.
-      if (runtime.remaining !== undefined && (runtime.repeatOnReturn ? step.done : newAdmission))
+      if (
+        runtime.remaining !== undefined &&
+        (runtime.repeatOnReturn ? step.done : newAdmission)
+      )
         runtime.remaining--;
 
       const finished = activation;
@@ -910,7 +961,8 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
         const messages = Array.isArray(yielded) ? yielded : yielded.resume;
         this.#publish(node, messages);
         runtime.continuation = !Array.isArray(yielded);
-        if (finished !== undefined) this.#settle(() => finished.end({ done: false, value: messages }));
+        if (finished !== undefined)
+          this.#settle(() => finished.end({ done: false, value: messages }));
       }
     } catch (cause) {
       runtime.continuation = false;
@@ -1025,7 +1077,11 @@ export class DataflowGraph<S, N extends TSchema, T, EH> implements Pretty {
     const nodeId = node.id;
     const links = this.#graph.getLinks(nodeId) ?? [];
     for (const link of links) {
-      if (link.fromId !== nodeId || (E.isLeft(link.data.transport) && !link.data.onReturn)) continue;
+      if (
+        link.fromId !== nodeId ||
+        (E.isLeft(link.data.transport) && !link.data.onReturn)
+      )
+        continue;
       checkPayload(
         link.data.schema,
         value,

@@ -62,9 +62,20 @@ test("speculative unavailable IDs are filtered and reconsidered from a fresh dec
   });
   const graph = context.graph;
   const edge = Edge.value("producer->consumer", AssistantMessageSchema);
-  const p = addPromptOnce(graph, "producer", producer.agent, "produce", "producer");
+  const p = addPromptOnce(
+    graph,
+    "producer",
+    producer.agent,
+    "produce",
+    "producer",
+  );
   const c = addPromptOnce(
-    graph, "consumer", consumer.agent, "consume", "consumer", edge,
+    graph,
+    "consumer",
+    consumer.agent,
+    "consume",
+    "consumer",
+    edge,
   );
   graph.addEdge(p, c, edge);
   ports.connect(graph, c);
@@ -98,11 +109,21 @@ test("a node added between decisions is described with fresh typed metadata", as
   });
   const graph = context.graph;
   const firstId = addPromptOnce(
-    graph, MEMBER, first.agent, "first", "first member",
+    graph,
+    MEMBER,
+    first.agent,
+    "first",
+    "first member",
   );
   ports.connect(graph, firstId);
   await context.step();
-  const lateId = addPromptOnce(graph, "late", late.agent, "late", "late member");
+  const lateId = addPromptOnce(
+    graph,
+    "late",
+    late.agent,
+    "late",
+    "late member",
+  );
   try {
     await context.run();
     const request = requests.find((entry) =>
@@ -141,7 +162,12 @@ test("a nested context publishes its sink result after all child decisions", asy
     state: child.context,
   });
   const c = addPromptOnce(
-    graph, "consumer", consumer.agent, "consume", "consumer", edge,
+    graph,
+    "consumer",
+    consumer.agent,
+    "consume",
+    "consumer",
+    edge,
   );
   graph.addEdge(nested, c, edge);
   ports.connect(graph, c);

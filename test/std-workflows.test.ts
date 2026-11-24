@@ -27,10 +27,7 @@ import {
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { renderTask } from "../src/agent-node.ts";
-import {
-  assistant,
-  userTexts,
-} from "./deterministic-support.ts";
+import { assistant, userTexts } from "./deterministic-support.ts";
 import { countedCollection, offlineLadder } from "./support.ts";
 
 const assignment = "Cover every section.\nKeep the original constraints.";
@@ -47,17 +44,6 @@ const taskBatches = (node: string, batches: string[][], first = 1) =>
 /** Expected selector batches of `[text, taskId]` pairs; memory fan-in forwards each candidate's own id. */
 const tasksOf = (batches: [text: string, taskId: string][][]) =>
   batches.map((batch) => batch.map(([text, taskId]) => asTask(text, taskId)));
-/** `value` with each distinct `Task.create` UUID renamed `${node}#n` in order of first appearance. */
-const renumbered = <T>(node: string, value: T): T => {
-  const ids = new Map<string, string>();
-  return JSON.parse(
-    JSON.stringify(value).replace(
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,
-      (uuid) =>
-        ids.get(uuid) ?? ids.set(uuid, `${node}#${ids.size + 1}`).get(uuid)!,
-    ),
-  );
-};
 function rolePrompt(source: string, role: string): string {
   const node = syntax.parse(source).graph.nodes[role];
   assert.ok(node && "prompt" in node && typeof node.prompt === "string");
@@ -160,7 +146,11 @@ test("rounds: 1 asks once and rejects a second assignment", async () => {
     const results = await execution.run();
     assert.deepEqual(prompts, [asTask(assignment, "Ralph#1")]);
     assert.equal(textOf(results.get(execution.graph.sink.id)), "draft-1");
-    enqueueRoute(execution, "assignment", prompt("unexpected assignment", "Ralph#2"));
+    enqueueRoute(
+      execution,
+      "assignment",
+      prompt("unexpected assignment", "Ralph#2"),
+    );
     await assert.rejects(execution.run(), /only one assignment batch/);
     assert.equal(prompts.length, 1);
   } finally {
@@ -244,21 +234,27 @@ test("Ralph retries in the same round and replays a falsy decision failure witho
   const draft = assistant("complete draft");
   const agent = selectorOf(assistant("refused", "error"), draft);
   const judged: [AssistantMessage, number][] = [];
-  const execution = await scriptedWorkflow(workflows.ralph, { Ralph: agent }, {
-    ...schedules.ralph({
-      retries: 1,
-      until: (product, { round }) => {
-        judged.push([product, round]);
-        throw undefined;
-      },
-    }),
-  });
+  const execution = await scriptedWorkflow(
+    workflows.ralph,
+    { Ralph: agent },
+    {
+      ...schedules.ralph({
+        retries: 1,
+        until: (product, { round }) => {
+          judged.push([product, round]);
+          throw undefined;
+        },
+      }),
+    },
+  );
   try {
     const task = {
       ...prompt(assignment),
       spec: "Preserve both constraints",
       deps: ["notes"],
-      history: [{ node: "Planner", desc: "Read notes", handoff: "Ready to draft" }],
+      history: [
+        { node: "Planner", desc: "Read notes", handoff: "Ready to draft" },
+      ],
     };
     enqueueRoute(execution, "assignment", task);
     enqueueRoute(execution, "assignment", prompt("not admitted", "later"));
@@ -282,7 +278,9 @@ test("Ralph retries in the same round and replays a falsy decision failure witho
     assert.deepEqual(extra, []);
     assert.deepEqual(queued(execution, "$source", "ingress-ack"), []);
     assert.deepEqual(
-      execution.graph.source.peek()?.messages.get(graph.EdgeId.create("assignment")),
+      execution.graph.source
+        .peek()
+        ?.messages.get(graph.EdgeId.create("assignment")),
       [prompt("not admitted", "later")],
     );
     assert.ok(O.isNone(execution.graph.result(execution.graph.sink.id)));
@@ -299,14 +297,22 @@ type RoleScript = {
 };
 type Execution = Awaited<ReturnType<typeof JuncoGraph.fromYaml>>;
 const OUT = "AnyFanInPublish~>$sink";
-const yamlOptions = (args: Partial<syntax.JuncoArgs>, parameters: Partial<syntax.JuncoParameters> = {}) => ({
+const yamlOptions = (
+  args: Partial<syntax.JuncoArgs>,
+  parameters: Partial<syntax.JuncoParameters> = {},
+) => ({
   args: { cwd: process.cwd(), tracer: new tracer.DummyTracer(), ...args },
   parameters: { scheduler: () => schedules.parallel(), ...parameters },
 });
-const selectorOf = (...steps: FauxResponseStep[]): RoleScript =>
-  ({ steps, requests: [], turns: [] });
+const selectorOf = (...steps: FauxResponseStep[]): RoleScript => ({
+  steps,
+  requests: [],
+  turns: [],
+});
 const yieldTurn = (reason: string, id: string) =>
-  fauxAssistantMessage(fauxToolCall("yield", { reason }, { id }), { stopReason: "toolUse" });
+  fauxAssistantMessage(fauxToolCall("yield", { reason }, { id }), {
+    stopReason: "toolUse",
+  });
 
 // These workflows exercise coordination and storage, not shell or host-file tools.
 const { collection, active } = countedCollection();
@@ -326,16 +332,34 @@ async function scriptedWorkflow(
     const role = path === undefined ? undefined : roles[path];
     assert.ok(role, `unexpected model request at ${path}`);
     const step = role.steps[role.requests.length];
-    assert.ok(step, `unexpected request ${role.requests.length + 1} at ${path}`);
+    assert.ok(
+      step,
+      `unexpected request ${role.requests.length + 1} at ${path}`,
+    );
     role.requests.push(userTexts(context.messages));
-    return typeof step === "function" ? step(context, options, state, model) : step;
+    return typeof step === "function"
+      ? step(context, options, state, model)
+      : step;
   });
-  const execution = await JuncoGraph.fromYaml(source, yamlOptions({
-    ...controller, collection,
-    agentOptions: new Map(Object.keys(roles).map((path) => [
-      graph.NodeId.create(path), { steeringMode: "all", retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 } },
-    ])),
-  }, { ladder }));
+  const execution = await JuncoGraph.fromYaml(
+    source,
+    yamlOptions(
+      {
+        ...controller,
+        collection,
+        agentOptions: new Map(
+          Object.keys(roles).map((path) => [
+            graph.NodeId.create(path),
+            {
+              steeringMode: "all",
+              retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+            },
+          ]),
+        ),
+      },
+      { ladder },
+    ),
+  );
   try {
     for (const [path, script] of Object.entries(roles)) {
       const parts = path.split("/");
@@ -353,7 +377,8 @@ async function scriptedWorkflow(
       const next = member.next.bind(member);
       member.next = async (inputs) => {
         const step = await next(inputs);
-        if (!step.done && step.value.kind === "settled") script.turns.push(step.value.message);
+        if (!step.done && step.value.kind === "settled")
+          script.turns.push(step.value.message);
         return step;
       };
     }
@@ -434,7 +459,9 @@ test("allFanIn waits for every candidate and rejects blank or abnormal answers b
     const execution = await scriptedWorkflow(
       syntax.parse({
         graph: {
-          source: { routes: { left: ["$source~>Left"], right: ["$source~>Right"] } },
+          source: {
+            routes: { left: ["$source~>Left"], right: ["$source~>Right"] },
+          },
           nodes: {
             Left: {
               prompt: "Answer the assignment in the following user message.",
@@ -449,8 +476,18 @@ test("allFanIn waits for every candidate and rejects blank or abnormal answers b
             },
           },
           edges: [
-            { from: "$source", to: "Left", kind: "message", schema: taskSchema },
-            { from: "$source", to: "Right", kind: "message", schema: taskSchema },
+            {
+              from: "$source",
+              to: "Left",
+              kind: "message",
+              schema: taskSchema,
+            },
+            {
+              from: "$source",
+              to: "Right",
+              kind: "message",
+              schema: taskSchema,
+            },
             { from: "Left", to: "Select", schema: answer },
             { from: "Right", to: "Select", schema: answer },
             { from: "Select", to: "$sink", schema: answer },
@@ -500,15 +537,25 @@ test("allFanIn waits for every candidate and rejects blank or abnormal answers b
 test("allFanIn consumes its only source credit for the first batch", async () => {
   const selected = assistant("first winner");
   const selector = selectorOf(selected);
-  const execution = await scriptedWorkflow(workflows.allFanIn, { AllFanIn: selector });
+  const execution = await scriptedWorkflow(workflows.allFanIn, {
+    AllFanIn: selector,
+  });
   try {
     const second = assistant("later");
     enqueueRoute(execution, "candidates", selected);
     enqueueRoute(execution, "candidates", second);
     await execution.run();
     assert.equal(selector.requests.length, 1);
-    assert.equal(O.toUndefined(execution.graph.result(execution.graph.sink.id)), selector.turns[0]);
-    assert.deepEqual(execution.graph.source.peek()?.messages.get(graph.EdgeId.create("candidates")), [second]);
+    assert.equal(
+      O.toUndefined(execution.graph.result(execution.graph.sink.id)),
+      selector.turns[0],
+    );
+    assert.deepEqual(
+      execution.graph.source
+        .peek()
+        ?.messages.get(graph.EdgeId.create("candidates")),
+      [second],
+    );
     assert.equal(execution.graph.available().size, 0);
   } finally {
     await execution.graph.close();
@@ -537,8 +584,16 @@ async function embeddedAnyFanIn(
   right: readonly string[],
 ) {
   const inner = syntax.parse(workflows.anyFanIn).graph;
-  const candidate = schemaBetween(workflows.anyFanIn, "$source", "AnyFanInInput");
-  const selection = schemaBetween(workflows.anyFanIn, "AnyFanInPublish", "$sink");
+  const candidate = schemaBetween(
+    workflows.anyFanIn,
+    "$source",
+    "AnyFanInInput",
+  );
+  const selection = schemaBetween(
+    workflows.anyFanIn,
+    "AnyFanInPublish",
+    "$sink",
+  );
   inner.source = {
     ...inner.source,
     routes: {
@@ -551,7 +606,10 @@ async function embeddedAnyFanIn(
     syntax.parse({
       graph: {
         source: {
-          routes: { left: ["$source~>Left"], both: ["$source~>Left", "$source~>Right"] },
+          routes: {
+            left: ["$source~>Left"],
+            both: ["$source~>Left", "$source~>Right"],
+          },
         },
         sink: { stream: true },
         nodes: {
@@ -640,7 +698,9 @@ test("anyFanIn admits ready parents one queue at a time in trigger order", async
     ]);
     const delivered = drainSink(execution).map(([, payload]) => payload);
     assert.equal(delivered.length, 2);
-    assert.ok(delivered[0] === selector.turns[0] && delivered[1] === selector.turns[1]);
+    assert.ok(
+      delivered[0] === selector.turns[0] && delivered[1] === selector.turns[1],
+    );
   } finally {
     await execution.graph.close();
   }
@@ -650,13 +710,14 @@ test("anyFanIn judges each batch alone, even when the next arrives mid-selection
   // Mid-selection arrival, then both views queued before the first drive.
   for (const early of [false, true]) {
     const [a, b] = [assistant("a-complete"), assistant("b-complete")];
-    const selector = selectorOf(
-      yieldTurn("still comparing", "p1"), a,
-      b,
+    const selector = selectorOf(yieldTurn("still comparing", "p1"), a, b);
+    const execution = await scriptedWorkflow(
+      workflows.anyFanIn,
+      { AnyFanIn: selector },
+      {
+        ...schedules.anyFanIn(),
+      },
     );
-    const execution = await scriptedWorkflow(workflows.anyFanIn, { AnyFanIn: selector }, {
-      ...schedules.anyFanIn(),
-    });
     try {
       enqueueCandidates(execution, "a-incomplete", "a-complete");
       if (early) enqueueCandidates(execution, "b-incomplete", "b-complete");
@@ -664,9 +725,13 @@ test("anyFanIn judges each batch alone, even when the next arrives mid-selection
       assert.deepEqual(drainSink(execution), []);
       if (!early) enqueueCandidates(execution, "b-incomplete", "b-complete");
       const waiting = execution.graph.source.peek();
-      assert.deepEqual(waiting?.messages.get(graph.EdgeId.create("candidates")), [
-        prompt("b-incomplete", "AnyFanIn#3"), prompt("b-complete", "AnyFanIn#4"),
-      ]);
+      assert.deepEqual(
+        waiting?.messages.get(graph.EdgeId.create("candidates")),
+        [
+          prompt("b-incomplete", "AnyFanIn#3"),
+          prompt("b-complete", "AnyFanIn#4"),
+        ],
+      );
       // Inspect each scheduling turn up to publication, including the native continuation.
       await driveUntil(execution, () => {
         assert.equal(execution.graph.source.peek(), waiting);
@@ -688,7 +753,10 @@ test("anyFanIn judges each batch alone, even when the next arrives mid-selection
         delivered.map(([edge]) => edge),
         [OUT, OUT],
       );
-      assert.ok(delivered[0]?.[1] === selector.turns[0] && delivered[1]?.[1] === selector.turns[1]);
+      assert.ok(
+        delivered[0]?.[1] === selector.turns[0] &&
+          delivered[1]?.[1] === selector.turns[1],
+      );
     } finally {
       await execution.graph.close();
     }
@@ -703,16 +771,26 @@ function replaySelections(spec: syntax.GraphSpec) {
   delete edge.on;
   spec.nodes.Replay = { kind: "code", trigger: "AnyFanIn->Replay" };
   spec.edges!.push({
-    id: "AnyFanIn->Replay", from: "AnyFanIn", to: "Replay", kind: "message", on: "return", schema: edge.schema,
+    id: "AnyFanIn->Replay",
+    from: "AnyFanIn",
+    to: "Replay",
+    kind: "message",
+    on: "return",
+    schema: edge.schema,
   });
 }
 const Replay: syntax.DeterministicNode = ({ edges, policy }) =>
   new Deterministic<TSchema, unknown>(async function* () {
     const output = edges.get("AnyFanIn->AnyFanInPublish")!;
     let view = yield [];
-    const first = view.messages.get(graph.EdgeId.create("AnyFanIn->Replay"))![0];
+    const first = view.messages.get(
+      graph.EdgeId.create("AnyFanIn->Replay"),
+    )![0];
     while (true) {
-      assert.equal(view.messages.get(graph.EdgeId.create("AnyFanIn->Replay"))?.length, 1);
+      assert.equal(
+        view.messages.get(graph.EdgeId.create("AnyFanIn->Replay"))?.length,
+        1,
+      );
       view = yield [graph.Message.create(output, first)];
     }
   }, policy);
@@ -722,13 +800,19 @@ test("anyFanIn publishes every selection, even the same result object twice", as
   const selector = selectorOf(same, same);
   const doc = syntax.parse(workflows.anyFanIn);
   replaySelections(doc.graph);
-  const execution = await scriptedWorkflow(doc, { AnyFanIn: selector }, {
-    code: { ...schedules.anyFanIn().code, Replay },
-  });
+  const execution = await scriptedWorkflow(
+    doc,
+    { AnyFanIn: selector },
+    {
+      code: { ...schedules.anyFanIn().code, Replay },
+    },
+  );
   try {
     enqueueCandidates(execution, "shared", "other-1");
     enqueueCandidates(execution, "other-2", "shared");
-    await driveUntil(execution, () => execution.graph.available().has(graph.NodeId.create("AnyFanIn")));
+    await driveUntil(execution, () =>
+      execution.graph.available().has(graph.NodeId.create("AnyFanIn")),
+    );
     for (let probe = 0; probe < 3; probe++) execution.graph.available();
     assert.equal(selector.state!.status, "ready");
     assert.equal(selector.requests.length, 0);
@@ -816,7 +900,11 @@ test("anyFanIn fails on bad candidates or selections without publishing or admit
     const input = doc.graph.edges?.find(({ id }) => id === "$source~>AnyFanIn");
     assert.ok(input);
     input.schema = {} as TSchema;
-    const execution = await scriptedWorkflow(doc, { AnyFanIn: selector }, schedules.anyFanIn());
+    const execution = await scriptedWorkflow(
+      doc,
+      { AnyFanIn: selector },
+      schedules.anyFanIn(),
+    );
     try {
       execution.graph.source.enqueue({
         messages: new Map([[graph.EdgeId.create("candidates"), candidates]]),
@@ -854,15 +942,32 @@ test("one code registry keeps sibling selectors independent alongside finite wor
   const any = (name: string) => {
     const inner = syntax.parse(workflows.anyFanIn).graph;
     inner.name = name;
-    inner.source = { ...inner.source, routes: { [`$source~>${name}`]: ["$source~>AnyFanIn"] } };
+    inner.source = {
+      ...inner.source,
+      routes: { [`$source~>${name}`]: ["$source~>AnyFanIn"] },
+    };
     return inner;
   };
   const all = syntax.parse(workflows.allFanIn).graph;
-  all.source = { ...all.source, routes: { "$source~>All": ["$source~>AllFanIn"] } };
+  all.source = {
+    ...all.source,
+    routes: { "$source~>All": ["$source~>AllFanIn"] },
+  };
   const revise = syntax.parse(workflows.ralph).graph;
-  revise.source = { ...revise.source, routes: { "$source~>Revise": ["$source~>Ralph"] } };
-  const candidate = schemaBetween(workflows.anyFanIn, "$source", "AnyFanInInput");
-  const selection = schemaBetween(workflows.anyFanIn, "AnyFanInPublish", "$sink");
+  revise.source = {
+    ...revise.source,
+    routes: { "$source~>Revise": ["$source~>Ralph"] },
+  };
+  const candidate = schemaBetween(
+    workflows.anyFanIn,
+    "$source",
+    "AnyFanInInput",
+  );
+  const selection = schemaBetween(
+    workflows.anyFanIn,
+    "AnyFanInPublish",
+    "$sink",
+  );
   const assignment = schemaBetween(workflows.ralph, "$source", "RalphControl");
   const [o1, o2, t1, t2] = [
     assistant("o1b"),
@@ -934,7 +1039,8 @@ test("one code registry keeps sibling selectors independent alongside finite wor
         ],
       },
     }),
-    agents, {
+    agents,
+    {
       code: { ...ralph.code, ...controller.code },
     },
   );
@@ -982,9 +1088,14 @@ test("one code registry keeps sibling selectors independent alongside finite wor
       asTask("revise this", "Ralph#1"),
       asTask("preserve these constraints", "Ralph#2"),
     ]);
-    assert.deepEqual(revised[1]?.slice(0, -1), [...revised[0]!, revised[0]![0]]);
-    assert.deepEqual(JSON.parse(revised[1]!.at(-1)!),
-      revision(2, ["revise this", "preserve these constraints"]));
+    assert.deepEqual(revised[1]?.slice(0, -1), [
+      ...revised[0]!,
+      revised[0]![0],
+    ]);
+    assert.deepEqual(
+      JSON.parse(revised[1]!.at(-1)!),
+      revision(2, ["revise this", "preserve these constraints"]),
+    );
     const delivered = drainSink(execution);
     const on = (edge: string) =>
       delivered.filter(([id]) => id === edge).map(([, payload]) => payload);
@@ -1318,9 +1429,13 @@ test("memory: Ralph rejects malformed, blank and abnormal drafts without saving 
   for (const bad of badDrafts) {
     await using fixture = await realMemory();
     const agent = selectorOf(assistant("committed junco draft"), bad);
-    const execution = await scriptedWorkflow(workflows.memoryRalphLoop, { Ralph: agent }, {
-      ...schedules.memory({ memory: fixture.memory, ralph: { rounds: 2 } }),
-    });
+    const execution = await scriptedWorkflow(
+      workflows.memoryRalphLoop,
+      { Ralph: agent },
+      {
+        ...schedules.memory({ memory: fixture.memory, ralph: { rounds: 2 } }),
+      },
+    );
     try {
       enqueueRoute(execution, "assignment", prompt("junco assignment"));
       const error = underlying(await rejection(execution.run()));
@@ -1346,24 +1461,30 @@ test("memory: a provider-error draft re-runs the round without saving it", async
     ...prompt("junco assignment", "origin-42"),
     spec: "Cover both sections",
     deps: ["section-one"],
-    history: [{ node: "Lead", desc: "Write two sections", handoff: "Keep their order" }],
+    history: [
+      { node: "Lead", desc: "Write two sections", handoff: "Keep their order" },
+    ],
   };
   const draft = assistant("junco completed draft");
   const judged: number[] = [];
   const agent = selectorOf(assistant("refused", "error"), draft, draft);
-  const execution = await scriptedWorkflow(workflows.memoryRalphLoop, { Ralph: agent }, {
-    ...schedules.memory({
-      memory: fixture.memory,
-      ralph: {
-        retries: 1,
-        until: (result, { round }) => {
-          assert.equal(result, agent.turns[round]);
-          judged.push(round);
-          return round === 2;
+  const execution = await scriptedWorkflow(
+    workflows.memoryRalphLoop,
+    { Ralph: agent },
+    {
+      ...schedules.memory({
+        memory: fixture.memory,
+        ralph: {
+          retries: 1,
+          until: (result, { round }) => {
+            assert.equal(result, agent.turns[round]);
+            judged.push(round);
+            return round === 2;
+          },
         },
-      },
-    }),
-  });
+      }),
+    },
+  );
   try {
     enqueueRoute(execution, "assignment", task);
     await execution.run();
@@ -1504,9 +1625,13 @@ test("memory: Ralph requires nonblank objectives before recall or any model call
   for (const inputs of [[prompt(" ")]]) {
     await using fixture = await realMemory();
     const agent = selectorOf(assistant("unused"));
-    const execution = await scriptedWorkflow(workflows.memoryRalphLoop, { Ralph: agent }, {
-      ...schedules.memory({ memory: fixture.memory }),
-    });
+    const execution = await scriptedWorkflow(
+      workflows.memoryRalphLoop,
+      { Ralph: agent },
+      {
+        ...schedules.memory({ memory: fixture.memory }),
+      },
+    );
     try {
       enqueueRoute(execution, "assignment", ...inputs);
       const error = underlying(await rejection(execution.run()));
@@ -1528,16 +1653,24 @@ async function memoryFanIn(
   selector: RoleScript,
   controller = schedules.memory({ memory: fixture.memory }),
 ) {
-  return scriptedWorkflow(workflows.memoryFanIn, { "Select/AnyFanIn": selector }, controller);
+  return scriptedWorkflow(
+    workflows.memoryFanIn,
+    { "Select/AnyFanIn": selector },
+    controller,
+  );
 }
 
 function memoryWorkflow(source: string, role: RoleScript, fixture: RealMemory) {
   const controller = schedules.memory({ memory: fixture.memory });
   if (source === workflows.memoryFanOut)
     return JuncoGraph.fromYaml(source, yamlOptions(controller));
-  return scriptedWorkflow(source, {
-    [source === workflows.memoryFanIn ? "Select/AnyFanIn" : "Ralph"]: role,
-  }, controller);
+  return scriptedWorkflow(
+    source,
+    {
+      [source === workflows.memoryFanIn ? "Select/AnyFanIn" : "Ralph"]: role,
+    },
+    controller,
+  );
 }
 
 test("memory: fan-in persists candidates in order and republishes a retained winner before replacing it", async () => {
@@ -1549,7 +1682,10 @@ test("memory: fan-in persists candidates in order and republishes a retained win
   let aborts = 0;
   const member = selector.state!;
   const abort = member.abort.bind(member);
-  member.abort = (...args) => { aborts++; return abort(...args); };
+  member.abort = (...args) => {
+    aborts++;
+    return abort(...args);
+  };
   try {
     await execution.run();
     assert.deepEqual(fixture.calls, []);
@@ -1609,7 +1745,8 @@ test("memory: fan-in holds later source deliveries through selection and publica
   const first = assistant("junco first");
   const second = assistant("junco second");
   const selector = selectorOf(
-    yieldTurn("held comparison", "held"), first,
+    yieldTurn("held comparison", "held"),
+    first,
     second,
   );
   const execution = await memoryFanIn(fixture, selector);
@@ -1627,8 +1764,14 @@ test("memory: fan-in holds later source deliveries through selection and publica
       tasksOf([[["junco first", "AnyFanIn#1"]]]),
     );
     assert.equal(memoryCalls(fixture, "save_memory").length, 1);
-    await driveUntil(execution, () => queued(execution, "$sink", "Memory~>$sink").length > 0);
-    assert.equal(queued(execution, "$sink", "Memory~>$sink")[0], selector.turns[0]);
+    await driveUntil(
+      execution,
+      () => queued(execution, "$sink", "Memory~>$sink").length > 0,
+    );
+    assert.equal(
+      queued(execution, "$sink", "Memory~>$sink")[0],
+      selector.turns[0],
+    );
     assert.equal(execution.graph.source.peek(), waiting);
     assert.equal(memoryCalls(fixture, "save_memory").length, 1);
     await execution.run();
@@ -1659,12 +1802,20 @@ test("memory: a fast nested selector reply is queued for Memory's next activatio
   const execution = await memoryFanIn(fixture, selector);
   try {
     enqueueCandidates(execution, "junco fast reply");
-    await driveUntil(execution, () => queued(execution, "Memory", "Select~>Memory").length > 0);
-    assert.equal(queued(execution, "Memory", "Select~>Memory")[0], selector.turns[0]);
+    await driveUntil(
+      execution,
+      () => queued(execution, "Memory", "Select~>Memory").length > 0,
+    );
+    assert.equal(
+      queued(execution, "Memory", "Select~>Memory")[0],
+      selector.turns[0],
+    );
     assert.equal(selector.requests.length, 1);
     assert.deepEqual(drainSink(execution), []);
     await execution.run();
-    assert.deepEqual(drainSink(execution), [["Memory~>$sink", selector.turns[0]]]);
+    assert.deepEqual(drainSink(execution), [
+      ["Memory~>$sink", selector.turns[0]],
+    ]);
     assert.equal(memoryCalls(fixture, "save_memory").length, 1);
   } finally {
     await closeWorkflow(execution);
@@ -1704,9 +1855,10 @@ test("memory: fan-in rejects synthesized selections and validates a complete bat
       assert.equal(memoryCalls(fixture, "save_memory").length, expectedSaves);
       assert.equal((await fixture.recall("junco")).length, expectedSaves);
       const waiting = execution.graph.source.peek();
-      assert.deepEqual(waiting?.messages.get(graph.EdgeId.create("candidates")), [
-        prompt("junco later", "AnyFanIn#1"),
-      ]);
+      assert.deepEqual(
+        waiting?.messages.get(graph.EdgeId.create("candidates")),
+        [prompt("junco later", "AnyFanIn#1")],
+      );
       const calls = fixture.calls.length;
       const requests = selector.requests.length;
       assert.equal(underlying(await rejection(execution.run())), error);
@@ -1741,7 +1893,9 @@ test("memory: fan-in accepts boundary whitespace and publishes the exact selecte
     );
     const delivered = drainSink(execution);
     assert.equal(delivered.length, 2);
-    assert.ok(delivered.every(([, message], i) => message === selector.turns[i]));
+    assert.ok(
+      delivered.every(([, message], i) => message === selector.turns[i]),
+    );
     assert.deepEqual(
       memoryCalls(fixture, "save_memory").map(({ params }) => params),
       [{ text: "  junco selected  " }, { text: "junco weaker" }],
@@ -1771,7 +1925,10 @@ async function memorySiblings(
   };
   const candidate = schemaBetween(source, "$source", "Memory");
   const selection = schemaBetween(workflows.memoryFanIn, "Memory", "$sink");
-  const controller = schedules.memory({ memory: fixture.memory, ...(ralph ? { ralph } : {}) });
+  const controller = schedules.memory({
+    memory: fixture.memory,
+    ...(ralph ? { ralph } : {}),
+  });
   return scriptedWorkflow(
     syntax.parse({
       graph: {
@@ -1797,9 +1954,12 @@ async function memorySiblings(
         ],
       },
     }),
-    Object.fromEntries([...agents].map(([name, script]) => [
-      `${name}/${source === workflows.memoryFanIn ? "Select/AnyFanIn" : "Ralph"}`, script,
-    ])),
+    Object.fromEntries(
+      [...agents].map(([name, script]) => [
+        `${name}/${source === workflows.memoryFanIn ? "Select/AnyFanIn" : "Ralph"}`,
+        script,
+      ]),
+    ),
     { code: { ...controller.code, Replay } },
   );
 }
@@ -1845,7 +2005,11 @@ test("memory: sibling Ralph loops keep revision counts and original assignments 
       assert.equal(second?.at(-3), memoryPrompt);
       assert.deepEqual(JSON.parse(second!.at(-2)!), {
         id: "Memory~>Ralph",
-        payload: { phase: "revise", round: 2, objectives: [`junco assignment ${name.toLowerCase()}`] },
+        payload: {
+          phase: "revise",
+          round: 2,
+          objectives: [`junco assignment ${name.toLowerCase()}`],
+        },
       });
       assert.deepEqual(
         judged
@@ -1916,7 +2080,9 @@ test("memory: sibling fan-in phases and choices do not leak even with shared res
     );
     const one = drainSink(execution).filter(([edge]) => edge === "One~>$sink");
     assert.equal(one.length, 2);
-    assert.ok(one.every(([, message]) => message === agents.get("One")!.turns[0]));
+    assert.ok(
+      one.every(([, message]) => message === agents.get("One")!.turns[0]),
+    );
   } finally {
     await closeWorkflow(execution);
   }
@@ -1932,7 +2098,10 @@ test("memory: fan-out recalls only on assignments, preserves update identity and
     await fixture.invoke("forget_memory", { id: saved.id }, "Worker"),
     { id: saved.id, forgotten: false },
   );
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
+  const execution = await JuncoGraph.fromYaml(
+    workflows.memoryFanOut,
+    yamlOptions(schedules.memory({ memory: fixture.memory })),
+  );
   try {
     await execution.run();
     for (let probe = 0; probe < 4; probe++) execution.graph.available();
@@ -2005,7 +2174,10 @@ test("memory: fan-out recalls only on assignments, preserves update identity and
 
 test("memory: fan-out consumes both routes in declared order without losing views during flush", async () => {
   await using fixture = await realMemory();
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
+  const execution = await JuncoGraph.fromYaml(
+    workflows.memoryFanOut,
+    yamlOptions(schedules.memory({ memory: fixture.memory })),
+  );
   const initial = prompt("junco initial assignment");
   const next = prompt("junco second assignment", "Memory#2");
   const update = assistant("junco selected update");
@@ -2020,11 +2192,20 @@ test("memory: fan-out consumes both routes in declared order without losing view
       values: new Map(),
     });
     enqueueRoute(execution, "updates", later);
-    await driveUntil(execution, () => queued(execution, "$sink", "Memory~>$sink").length > 0);
+    await driveUntil(
+      execution,
+      () => queued(execution, "$sink", "Memory~>$sink").length > 0,
+    );
     const waiting = execution.graph.source.peek();
-    assert.equal(waiting?.messages.get(graph.EdgeId.create("updates"))?.[0], later);
+    assert.equal(
+      waiting?.messages.get(graph.EdgeId.create("updates"))?.[0],
+      later,
+    );
     assert.deepEqual(queued(execution, "$source", "ingress-ack"), []);
-    await driveUntil(execution, () => queued(execution, "$source", "ingress-ack").length > 0);
+    await driveUntil(
+      execution,
+      () => queued(execution, "$source", "ingress-ack").length > 0,
+    );
     assert.equal(execution.graph.source.peek(), waiting);
     assert.equal(queued(execution, "$sink", "Memory~>$sink").at(-1), update);
     await execution.run();
@@ -2106,7 +2287,9 @@ test("memory: pre-aborted tools and deterministic bodies cannot mutate or forwar
   const selector = selectorOf(assistant("junco unreachable"));
   const execution = await memoryFanIn(fixture, selector);
   try {
-    const component = execution.graph.getNode(graph.NodeId.create("Memory"))?.state;
+    const component = execution.graph.getNode(
+      graph.NodeId.create("Memory"),
+    )?.state;
     assert.ok(component instanceof Deterministic);
     await component.abort(reason);
     const before = fixture.calls.length;
@@ -2124,11 +2307,14 @@ test("memory: pre-aborted tools and deterministic bodies cannot mutate or forwar
 test("memory: close aborts and joins persistent Memory and nested selector while leaving SQLite reusable", async () => {
   await using fixture = await realMemory();
   const selector = selectorOf(
-    yieldTurn("still comparing", "close-yield"), assistant("junco closing candidate"),
+    yieldTurn("still comparing", "close-yield"),
+    assistant("junco closing candidate"),
   );
   const execution = await memoryFanIn(fixture, selector);
   try {
-    const component = execution.graph.getNode(graph.NodeId.create("Memory"))?.state;
+    const component = execution.graph.getNode(
+      graph.NodeId.create("Memory"),
+    )?.state;
     assert.ok(component instanceof Deterministic);
     enqueueCandidates(execution, "junco closing candidate");
     await driveUntil(execution, () => selector.requests.length === 1);
@@ -2174,7 +2360,9 @@ async function memoryRace(
   return scriptedWorkflow(
     syntax.parse({
       graph: {
-        source: { routes: { left: ["$source~>Left"], right: ["$source~>Right"] } },
+        source: {
+          routes: { left: ["$source~>Left"], right: ["$source~>Right"] },
+        },
         sink: { stream: true },
         nodes: {
           Left: { kind: "code" },
@@ -2204,7 +2392,8 @@ async function memoryRace(
         ],
       },
     }),
-    { "Select/Select/AnyFanIn": selector }, {
+    { "Select/Select/AnyFanIn": selector },
+    {
       code: {
         ...controller.code,
         Left: sender("Left~>Select", "junco Left candidate"),
@@ -2260,7 +2449,9 @@ test("memory: all-trigger waits for each worker message while any-trigger stream
               ],
         ),
       );
-      assert.deepEqual(drainSink(execution), [["Select~>$sink", selector.turns.at(-1)]]);
+      assert.deepEqual(drainSink(execution), [
+        ["Select~>$sink", selector.turns.at(-1)],
+      ]);
       assert.equal((await fixture.recall("junco")).length, 2);
       for (const id of ["Left", "Right"]) {
         const node = execution.graph.getNode(graph.NodeId.create(id));
@@ -2318,7 +2509,9 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
       assert.ok(incoming && outgoing && release);
       const seen: unknown[] = [];
       received.set(name, seen);
-      const state = new Deterministic<TSchema, unknown>(async function* (signal) {
+      const state = new Deterministic<TSchema, unknown>(async function* (
+        signal,
+      ) {
         let view = yield [];
         while (true) {
           signal.throwIfAborted();
@@ -2350,8 +2543,14 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
             trigger: { any: ["$source~>Broadcast", "Join~>Broadcast"] },
             graph: fanOut,
           },
-          Left: { kind: "code", trigger: { any: ["Broadcast~>Left", "$source~>Left"] } },
-          Right: { kind: "code", trigger: { any: ["Broadcast~>Right", "$source~>Right"] } },
+          Left: {
+            kind: "code",
+            trigger: { any: ["Broadcast~>Left", "$source~>Left"] },
+          },
+          Right: {
+            kind: "code",
+            trigger: { any: ["Broadcast~>Right", "$source~>Right"] },
+          },
           Done: {
             prompt: "Carry out the assignment in the following user message.",
           },
@@ -2370,7 +2569,10 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
           },
           { from: "$source", to: "Join", kind: "message", schema: candidate },
           ...["Left", "Right", "Done"].map((to) => ({
-            from: "$source", to, kind: "message", schema: candidate,
+            from: "$source",
+            to,
+            kind: "message",
+            schema: candidate,
           })),
           ...["Left", "Right", "Done"].map((to) => ({
             from: "Broadcast",
@@ -2390,7 +2592,8 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
         ],
       },
     }),
-    { Done: done, "Join/Select/AnyFanIn": selector }, {
+    { Done: done, "Join/Select/AnyFanIn": selector },
+    {
       code: {
         ...controller.code,
         Left: worker("Left", "junco strong candidate"),
@@ -2426,13 +2629,19 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
     assert.equal(memoryCalls(fixture, "search_memory").length, 1);
     enqueueRoute(execution, "left", prompt("send Left's candidate"));
     await execution.run();
-    assert.deepEqual(drainSink(execution), [["Join~>$sink", selector.turns[0]]]);
+    assert.deepEqual(drainSink(execution), [
+      ["Join~>$sink", selector.turns[0]],
+    ]);
     enqueueRoute(execution, "right", prompt("send Right's candidate"));
     await execution.run();
-    assert.deepEqual(drainSink(execution), [["Join~>$sink", selector.turns[1]]]);
+    assert.deepEqual(drainSink(execution), [
+      ["Join~>$sink", selector.turns[1]],
+    ]);
     enqueueCandidates(execution, "junco strongest replacement");
     await execution.run();
-    assert.deepEqual(drainSink(execution), [["Join~>$sink", selector.turns[2]]]);
+    assert.deepEqual(drainSink(execution), [
+      ["Join~>$sink", selector.turns[2]],
+    ]);
     assert.deepEqual(
       stagedBatches(selector),
       tasksOf([
@@ -2460,9 +2669,7 @@ test("memory: composed fan-out and fan-in broadcast durable best-so-far selectio
     for (const name of ["Left", "Right"]) {
       const updates = received.get(name)!.slice(1);
       assert.equal(updates.length, 3);
-      assert.ok(
-        updates.every((update, i) => update === selector.turns[i]),
-      );
+      assert.ok(updates.every((update, i) => update === selector.turns[i]));
       assert.equal(workers.get(name)?.signal.aborted, false);
       assert.equal(
         execution.graph.getNode(graph.NodeId.create(name))?.status,
@@ -2501,7 +2708,10 @@ test("memory: availability probes do not validate queued text, call SQLite, or s
     const execution = await memoryWorkflow(source, agent, fixture);
     try {
       enqueueRoute(execution, route, prompt("  "));
-      await driveUntil(execution, () => execution.graph.source.peek() === undefined);
+      await driveUntil(
+        execution,
+        () => execution.graph.source.peek() === undefined,
+      );
       for (let probe = 0; probe < 4; probe++) execution.graph.available();
       assert.deepEqual(fixture.calls, []);
       assert.deepEqual(agent.requests, []);
@@ -2526,7 +2736,10 @@ test("memory: missing persistence tools fail before execution", async () => {
     let execution: Execution | undefined;
     try {
       await assert.rejects(async () => {
-        execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
+        execution = await JuncoGraph.fromYaml(
+          workflows.memoryFanOut,
+          yamlOptions(schedules.memory({ memory: fixture.memory })),
+        );
       }, TypeError);
       assert.deepEqual(fixture.calls, []);
     } finally {
@@ -2572,19 +2785,30 @@ test("memory: malformed schema inputs fail before storage without weakening work
 
 test("memory: a later invalid fan-out item leaves earlier publication intact and holds ingress", async () => {
   await using fixture = await realMemory();
-  const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
+  const execution = await JuncoGraph.fromYaml(
+    workflows.memoryFanOut,
+    yamlOptions(schedules.memory({ memory: fixture.memory })),
+  );
   const good = assistant("valid update");
   const later = assistant("later delivery");
   try {
     enqueueRoute(execution, "updates", good, assistant(" "));
     enqueueRoute(execution, "updates", later);
-    await driveUntil(execution, () => queued(execution, "$sink", "Memory~>$sink").length > 0);
+    await driveUntil(
+      execution,
+      () => queued(execution, "$sink", "Memory~>$sink").length > 0,
+    );
     assert.equal(queued(execution, "$sink", "Memory~>$sink")[0], good);
     assert.deepEqual(queued(execution, "$source", "ingress-ack"), []);
     const error = underlying(await rejection(execution.run()));
     assert.ok(error instanceof Error);
     assert.equal(underlying(await rejection(execution.run())), error);
-    assert.equal(execution.graph.source.peek()?.messages.get(graph.EdgeId.create("updates"))?.[0], later);
+    assert.equal(
+      execution.graph.source
+        .peek()
+        ?.messages.get(graph.EdgeId.create("updates"))?.[0],
+      later,
+    );
     assert.deepEqual(fixture.calls, []);
   } finally {
     await closeWorkflow(execution);
@@ -2597,7 +2821,10 @@ test("memory: fan-out rejects abnormal and blank updates without saving, searchi
     assistant("junco abnormal update", "error"),
   ]) {
     await using fixture = await realMemory();
-    const execution = await JuncoGraph.fromYaml(workflows.memoryFanOut, yamlOptions(schedules.memory({ memory: fixture.memory })));
+    const execution = await JuncoGraph.fromYaml(
+      workflows.memoryFanOut,
+      yamlOptions(schedules.memory({ memory: fixture.memory })),
+    );
     try {
       enqueueRoute(execution, "updates", update);
       const error = underlying(await rejection(execution.run()));
@@ -2626,11 +2853,17 @@ test("memory: Ralph rejects another assignment after completing without another 
       "assignment",
       prompt("junco unexpected second assignment"),
     );
-    await driveUntil(execution, () => queued(execution, "$sink", "Memory~>$sink").length > 0);
+    await driveUntil(
+      execution,
+      () => queued(execution, "$sink", "Memory~>$sink").length > 0,
+    );
     assert.deepEqual(queued(execution, "$source", "ingress-ack"), [true]);
-    assert.deepEqual(execution.graph.source.peek()?.messages.get(graph.EdgeId.create("assignment")), [
-      prompt("junco unexpected second assignment"),
-    ]);
+    assert.deepEqual(
+      execution.graph.source
+        .peek()
+        ?.messages.get(graph.EdgeId.create("assignment")),
+      [prompt("junco unexpected second assignment")],
+    );
     const calls = fixture.calls.length;
     const error = underlying(await rejection(execution.run()));
     assert.ok(error instanceof Error);
@@ -2687,19 +2920,38 @@ test("memory: real native workers read selected broadcasts during a run and neve
         const delivered = userTexts(context.messages);
         assert.equal(delivered.filter((text) => text === turn).length, 1);
         const users = delivered.filter((text) => text !== turn);
-        assert.equal(users[0], "Carry out the assignment in the following user message.");
+        assert.equal(
+          users[0],
+          "Carry out the assignment in the following user message.",
+        );
         initial.set(name, users.slice(1));
-        const task = JSON.parse(users[1]!.slice(users[1]!.lastIndexOf("\n\nTask: ") + 8));
+        const task = JSON.parse(
+          users[1]!.slice(users[1]!.lastIndexOf("\n\nTask: ") + 8),
+        );
         return fauxAssistantMessage(
           fauxToolCall("send", {
-            id: `${name}~>Join`, handoff: "sent my candidate", task: task.taskId, spec: task.spec,
-            payload: { kind: "prompt", text: name === "WorkerA" ? "junco native stronger candidate" : "junco native weaker candidate" },
-          }), { stopReason: "toolUse" },
+            id: `${name}~>Join`,
+            handoff: "sent my candidate",
+            task: task.taskId,
+            spec: task.spec,
+            payload: {
+              kind: "prompt",
+              text:
+                name === "WorkerA"
+                  ? "junco native stronger candidate"
+                  : "junco native weaker candidate",
+            },
+          }),
+          { stopReason: "toolUse" },
         );
       },
-      fauxAssistantMessage(fauxToolCall("yield", {
-        reason: "wait for shared winner", waitForInput: true,
-      }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(
+        fauxToolCall("yield", {
+          reason: "wait for shared winner",
+          waitForInput: true,
+        }),
+        { stopReason: "toolUse" },
+      ),
       (context) => {
         const delivered = userTexts(context.messages);
         assert.equal(delivered.filter((text) => text === turn).length, 2);
@@ -2794,17 +3046,25 @@ test("memory: real native workers read selected broadcasts during a run and neve
           ],
         },
       }),
-      { ...workers, "Join/Select/AnyFanIn": selector }, controller,
+      { ...workers, "Join/Select/AnyFanIn": selector },
+      controller,
     );
     enqueueRoute(execution, "assignment", prompt("junco native assignment"));
     enqueueRoute(execution, "turn", true);
     const active = execution;
-    await driveUntil(active, () => workerNames.every((name) =>
-      selector.turns.length === 1 && queued(active, name, `Broadcast~>${name}`)[0] === selector.turns[0],
-    ));
+    await driveUntil(active, () =>
+      workerNames.every(
+        (name) =>
+          selector.turns.length === 1 &&
+          queued(active, name, `Broadcast~>${name}`)[0] === selector.turns[0],
+      ),
+    );
     for (const name of workerNames) {
       assert.equal(workers[name]!.requests.length, 2);
-      assert.equal(queued(execution, name, `Broadcast~>${name}`)[0], selector.turns[0]);
+      assert.equal(
+        queued(execution, name, `Broadcast~>${name}`)[0],
+        selector.turns[0],
+      );
     }
     enqueueRoute(execution, "turn", true);
     await execution.run();
@@ -2824,7 +3084,9 @@ test("memory: real native workers read selected broadcasts during a run and neve
         "ready",
       );
     }
-    assert.deepEqual(drainSink(execution), [["Join~>$sink", selector.turns[0]]]);
+    assert.deepEqual(drainSink(execution), [
+      ["Join~>$sink", selector.turns[0]],
+    ]);
     const [staged, ...restBatches] = stagedBatches(selector);
     assert.deepEqual(restBatches, []);
     // Each worker hands off the assignment task: same id, one history entry of its own.
@@ -2878,7 +3140,9 @@ test("memory: real native workers read selected broadcasts during a run and neve
   } finally {
     if (execution) await closeWorkflow(execution);
   }
-  assert.ok(Object.values(workers).every(({ state }) => state!.status === "closed"));
+  assert.ok(
+    Object.values(workers).every(({ state }) => state!.status === "closed"),
+  );
 }, 15_000);
 
 test("memory: public workflow strings preserve exact component markers and compose the unchanged selector", () => {
@@ -2892,7 +3156,9 @@ test("memory: public workflow strings preserve exact component markers and compo
   ] as const) {
     assert.equal(document.name, name);
     assert.equal(document.nodes.IngressOpen?.kind, "emit");
-    assert.deepEqual(document.source?.trigger, { any: ["ingress-open", "ingress-ack"] });
+    assert.deepEqual(document.source?.trigger, {
+      any: ["ingress-open", "ingress-ack"],
+    });
     assert.equal(document.nodes.Memory?.kind, "code");
     assert.deepEqual(
       Object.entries(document.nodes)
@@ -2915,8 +3181,13 @@ test("memory: public workflow strings preserve exact component markers and compo
       ["Memory~>$sink", "Memory", "$sink", "message"],
     ].sort(),
   );
-  assert.deepEqual(ralph.nodes.Memory?.trigger, { any: ["$source~>Memory", "ralph-complete"] });
-  assert.equal(ralph.edges?.find(({ id }) => id === "ralph-complete")?.on, "return");
+  assert.deepEqual(ralph.nodes.Memory?.trigger, {
+    any: ["$source~>Memory", "ralph-complete"],
+  });
+  assert.equal(
+    ralph.edges?.find(({ id }) => id === "ralph-complete")?.on,
+    "return",
+  );
   assert.equal(ralph.nodes.Ralph?.trigger, "Memory~>Ralph");
   assert.equal(ralph.sink?.returns, "Ralph");
   assert.deepEqual(ralph.sink?.trigger, {
@@ -2927,7 +3198,10 @@ test("memory: public workflow strings preserve exact component markers and compo
   assert.ok(baseRalph && actualRalph);
   assert.deepEqual({ ...actualRalph, trigger: baseRalph.trigger }, baseRalph);
   const selector = syntax.parse(workflows.anyFanIn).graph;
-  selector.source = { ...selector.source, routes: { "Memory~>Select": ["$source~>AnyFanIn"] } };
+  selector.source = {
+    ...selector.source,
+    routes: { "Memory~>Select": ["$source~>AnyFanIn"] },
+  };
   const selectingAgent = selector.nodes.AnyFanIn;
   assert.ok(
     selectingAgent &&

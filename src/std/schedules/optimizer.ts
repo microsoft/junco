@@ -26,10 +26,10 @@ import {
   DummyTracer,
   type Edge,
   EdgeId,
-  Message,
-  NodeId,
-  type NodeGenerator,
   FinalMessages,
+  Message,
+  type NodeGenerator,
+  NodeId,
   type ParentView,
 } from "dataflow-engine";
 import { roundRobin } from "junco-scheduler";
@@ -44,10 +44,7 @@ import {
   ModelLadder,
   uniformLadder,
 } from "../../node-policy.js";
-import {
-  type DeterministicNode,
-  finalText,
-} from "../../syntax/build.js";
+import { type DeterministicNode, finalText } from "../../syntax/build.js";
 import { parse } from "../../syntax/parse.js";
 import source from "../workflows/optimizer.yml" with { type: "text" };
 import {
@@ -1263,9 +1260,7 @@ class OptimizerController {
   }
 
   /** Evaluate's decision for one inbound state. */
-  async advance(
-    input: OptimizationState,
-  ): Promise<Route> {
+  async advance(input: OptimizationState): Promise<Route> {
     if (input.stop !== null)
       throw new Error("Evaluate received a stopped state");
     try {
@@ -1378,6 +1373,7 @@ class OptimizerController {
     context,
   }) => {
     const out = context.#edgeOf(edges, EDGES.initial);
+    // biome-ignore lint/correctness/useYield: publish the initial state and finish on the first activation.
     return new Deterministic<TSchema, unknown>(async function* () {
       return new FinalMessages([Message.create(out, context.#session.initial)]);
     }, policy);
@@ -1434,9 +1430,7 @@ class OptimizerController {
           const state = context.#onlyState(inputs, schema, [EDGES.awaiting]);
           const turn = context.#turn;
           if (turn === undefined || state.editTicket !== turn.ticket)
-            throw new Error(
-              "Feedback received a state for an inactive ticket",
-            );
+            throw new Error("Feedback received a state for an inactive ticket");
           const results = inputs.messages.get(complete);
           if (results?.length !== 1)
             throw new Error("Feedback requires exactly one editor settlement");
@@ -1659,9 +1653,7 @@ class OptimizerController {
   }
 
   /** Arm the next editor turn on the anchor's bytes and route the same ticketed state to Editor and Feedback. */
-  async #stage(
-    input: OptimizationState,
-  ): Promise<Route> {
+  async #stage(input: OptimizationState): Promise<Route> {
     const session = this.#session;
     const halted = session.services.halted(this.#runCount(input));
     if (halted !== undefined) return this.#terminal(input, halted);
@@ -1684,9 +1676,7 @@ class OptimizerController {
     return { state: await this.#session.settle(state, stop), route: "final" };
   }
 
-  async #baseline(
-    input: OptimizationState,
-  ): Promise<Route> {
+  async #baseline(input: OptimizationState): Promise<Route> {
     const { request } = input;
     const measured = await this.#measure(
       input,
@@ -1732,9 +1722,7 @@ class OptimizerController {
   }
 
   /** A completed all-axis cycle: confirm when every predicate holds, else remeasure and continue. */
-  async #completeCycle(
-    input: OptimizationState,
-  ): Promise<Route> {
+  async #completeCycle(input: OptimizationState): Promise<Route> {
     let state = input;
     const { request } = state;
     if (this.#predicatesHold(state)) {
@@ -2048,7 +2036,10 @@ class OptimizerCampaign implements SessionServices {
       editor = await ToolCollection.create(request.sessionDir, {
         policy: LockPolicy,
         recorder,
-        extend: async () => ({ tools: controller.tools(), close: async () => {} }),
+        extend: async () => ({
+          tools: controller.tools(),
+          close: async () => {},
+        }),
       });
       const execution = await JuncoGraph.fromYaml<OptimizerController>(source, {
         args: {

@@ -28,18 +28,14 @@ import * as O from "fp-ts/lib/Option.js";
 import { JuncoAgent } from "junco-agent";
 import { JuncoMcpTools, McpBuilder } from "junco-mcp";
 import { pi } from "junco-scheduler/agent";
-import {
-  LockPolicy,
-  TaskTool,
-  ToolCollection,
-} from "junco-tools";
+import { LockPolicy, TaskTool, ToolCollection } from "junco-tools";
 import { JuncoGraph, schedules, syntax } from "../src/index.ts";
 import { TriggerRule } from "../src/std/trigger.ts";
 import { terminalPorts } from "./deterministic-support.ts";
 import { withNativeCleanup } from "./native-support.ts";
 import {
-  addPromptOnce,
   type AgencyContext,
+  addPromptOnce,
   copyTreeNative,
   NATIVE_TOOL_BLOCK,
   nativeOptions,
@@ -248,17 +244,29 @@ test(
       const forgetBuilt = defer(() => built.close());
       const runs = [];
       const ladder = await offlineLadder((context) =>
-        context.messages.at(-1)?.role === "toolResult" ? readPid[1](context) : readPid[0]);
-      const document = { graph: {
-        nodes: {
-          Start: { kind: "emit", text: "Read the fixture pid", spec: "Return the server process id." },
-          Member: { prompt: "Read the server pid.", tool_block: NATIVE_TOOL_BLOCK },
+        context.messages.at(-1)?.role === "toolResult"
+          ? readPid[1](context)
+          : readPid[0],
+      );
+      const document = {
+        graph: {
+          nodes: {
+            Start: {
+              kind: "emit",
+              text: "Read the fixture pid",
+              spec: "Return the server process id.",
+            },
+            Member: {
+              prompt: "Read the server pid.",
+              tool_block: NATIVE_TOOL_BLOCK,
+            },
+          },
+          edges: [
+            { from: "Start", to: "Member", kind: "message", schema: {} },
+            { from: "Member", to: "$sink", schema: {} },
+          ],
         },
-        edges: [
-          { from: "Start", to: "Member", kind: "message", schema: {} },
-          { from: "Member", to: "$sink", schema: {} },
-        ],
-      } };
+      };
       for (let index = 0; index < 2; index++) {
         const context = await JuncoGraph.fromYaml(document, {
           args: { cwd: seed, collection: built, tracer: new DummyTracer() },
@@ -268,7 +276,14 @@ test(
         runs.push({ context, forgetGraph });
       }
       const pids = await Promise.all(
-        runs.map(async ({ context }) => Number(syntax.finalText((await context.run()).get(context.graph.sink.id), "Member"))),
+        runs.map(async ({ context }) =>
+          Number(
+            syntax.finalText(
+              (await context.run()).get(context.graph.sink.id),
+              "Member",
+            ),
+          ),
+        ),
       );
       expect(Number.isInteger(pids[0]) && pids[0]! > 0).toBe(true);
       expect(pids[1]).toBe(pids[0]);

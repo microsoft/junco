@@ -29,8 +29,8 @@ import {
   type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
-  getCurrentTools,
   fauxToolCall,
+  getCurrentTools,
   InMemoryCredentialStore,
   type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -890,9 +890,12 @@ function editorTurn(turn: EditorTurn, log: EditorLog): FauxResponseStep[] {
         ]);
   const steps: FauxResponseStep[] = [
     (context) => {
-      const granted = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
+      const granted = new Set(
+        getCurrentTools(context.messages).map((tool) => tool.name),
+      );
       assert.ok(granted.has("read_target") && granted.has("edit_tuning"));
-      for (const blocked of ["bash", "edit", "read", "release", "task"]) assert.ok(!granted.has(blocked));
+      for (const blocked of ["bash", "edit", "read", "release", "task"])
+        assert.ok(!granted.has(blocked));
       const message = context.messages.at(-1);
       assert.ok(message?.role === "user", "the editor received no assignment");
       const assignment = JSON.parse(
@@ -1080,7 +1083,7 @@ function checkCoordinates(state: State, log: EditorLog): void {
 // --- numeric convergence -------------------------------------------------------------------------
 
 /** Check the on-disk ticket and trial directories while the successful tool result awaits settlement. */
-async function holdSettlement(target: {sessionDir: string}, info: Info) {
+async function holdSettlement(target: { sessionDir: string }, info: Info) {
   const before = await runDirs(target.sessionDir);
   await sleep(300);
   const checkpoint = await readState(target.sessionDir);
@@ -1105,7 +1108,11 @@ async function numericScenario(dir: string): Promise<void> {
       log,
     ),
     ...editorTurn(
-      { axis: "scheduler", source: SCHED.choose, afterEdit: (_, info) => holdSettlement(target, info) },
+      {
+        axis: "scheduler",
+        source: SCHED.choose,
+        afterEdit: (_, info) => holdSettlement(target, info),
+      },
       log,
     ),
     ...editorTurn(
@@ -2679,7 +2686,9 @@ process.stderr.write("NODE_BOUNDARY_OK");
 
 const main = async () => {
   // The editor needs a seed subvolume, not an ordinary directory on the CI mount.
-  const { createBtrfsFixture }: {
+  const {
+    createBtrfsFixture,
+  }: {
     createBtrfsFixture(): Promise<{ seed: string; close(): Promise<void> }>;
   } = require("../packages/junco-tools/tests/btrfs-fixture.mjs");
   const { seed: root, close } = await createBtrfsFixture();
@@ -2689,7 +2698,11 @@ const main = async () => {
     await mkdir(modules);
     await symlink(ROOT, join(modules, "junco"), "dir");
     for (const dependency of ["dataflow-engine", "@earendil-works"])
-      await symlink(join(ROOT, "node_modules", dependency), join(modules, dependency), "dir");
+      await symlink(
+        join(ROOT, "node_modules", dependency),
+        join(modules, dependency),
+        "dir",
+      );
     await checkMetrics(join(root, "metrics"));
     checkStatistics();
     await boundaryChecks(join(root, "boundaries"));

@@ -28,7 +28,9 @@ export function TaskBoard({
       ))}
       {rows.map((taskId) => (
         <Fragment key={taskId}>
-          <div className="board-row" title={taskId}>{taskId.slice(-8)}</div>
+          <div className="board-row" title={taskId}>
+            {taskId.slice(-8)}
+          </div>
           {columns.map((node) => {
             const card = cards[cardId(taskId, node)];
             return (

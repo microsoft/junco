@@ -46,7 +46,9 @@ export type DataflowRunTrace<N extends TSchema, T> = {
 /** Observer for one generator activation. */
 export type DataflowStepTrace<N extends TSchema, T> = {
   /** Called after routing: yields expose the published batch, terminal publications retain their marker. */
-  end(step: IteratorResult<readonly Message<N>[], T | FinalMessages<N>>): void | Promise<void>;
+  end(
+    step: IteratorResult<readonly Message<N>[], T | FinalMessages<N>>,
+  ): void | Promise<void>;
   /** The generator threw, or its yield could not be routed; `error` is the raw cause. */
   fail(error: unknown): void | Promise<void>;
 };

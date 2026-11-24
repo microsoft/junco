@@ -215,22 +215,47 @@ async function pair(
     for (const name of ["Agent1", "Agent2"]) {
       const node = workflow.graph.nodes[name]!;
       assert.ok(node.kind === undefined || node.kind === "agent");
-      node.tool_block = node.tool_block?.filter((tool) => tool !== "task") ?? [];
+      node.tool_block =
+        node.tool_block?.filter((tool) => tool !== "task") ?? [];
     }
   }
   await using setup = new AsyncDisposableStack();
-  const directory = setup.adopt(mkdtempSync(join(tmpdir(), "cooperbench-native-")), (p) => rmSync(p, { recursive: true, force: true }));
-  const collection = setup.adopt(await tools.ToolCollection.create(directory, {
-    ...marshOptions, native: copyTree,
-  }), (c) => c.close());
+  const directory = setup.adopt(
+    mkdtempSync(join(tmpdir(), "cooperbench-native-")),
+    (p) => rmSync(p, { recursive: true, force: true }),
+  );
+  const collection = setup.adopt(
+    await tools.ToolCollection.create(directory, {
+      ...marshOptions,
+      native: copyTree,
+    }),
+    (c) => c.close(),
+  );
   const events: Record<string, unknown>[] = [];
-  const created = await createPair(req, {
-    ladder, tracer: new tracer.DummyTracer(), recorder, signal, collection, cwd: directory,
-    emit: (record) => { events.push(record); },
-  }, workflow);
+  const created = await createPair(
+    req,
+    {
+      ladder,
+      tracer: new tracer.DummyTracer(),
+      recorder,
+      signal,
+      collection,
+      cwd: directory,
+      emit: (record) => {
+        events.push(record);
+      },
+    },
+    workflow,
+  );
   setup.defer(() => created.execution.graph.close());
   const owned = setup.move();
-  return { ...created, calls, events, directory, close: () => owned.disposeAsync() };
+  return {
+    ...created,
+    calls,
+    events,
+    directory,
+    close: () => owned.disposeAsync(),
+  };
 }
 
 async function closed<T>(
@@ -340,11 +365,18 @@ test.each([false, true])(
           const deadline = Date.now() + 10_000;
           for (;;) {
             await recorder!.flush().catch(() => undefined);
-            const usage = jsonl(join(directory, "profile_events.jsonl"))
-              .filter(({ event }) => event.kind === "usage" && event.resource === "tokens");
-            if (usage.filter(({ node_ids }) => node_ids.length === 2).length === 3) break;
+            const usage = jsonl(join(directory, "profile_events.jsonl")).filter(
+              ({ event }) =>
+                event.kind === "usage" && event.resource === "tokens",
+            );
+            if (
+              usage.filter(({ node_ids }) => node_ids.length === 2).length === 3
+            )
+              break;
             if (Date.now() >= deadline)
-              assert.fail(`Expected three native child usage rows, got paths: ${JSON.stringify(usage.map(({ node_ids }) => node_ids))}`);
+              assert.fail(
+                `Expected three native child usage rows, got paths: ${JSON.stringify(usage.map(({ node_ids }) => node_ids))}`,
+              );
             await Bun.sleep(1);
           }
         } finally {
@@ -450,7 +482,12 @@ test.each([false, true])(
         tokens.reduce((total, row) => total + row.event.usage.totalTokens, 0),
       ).toBeGreaterThan(0);
       // These tools report operations, not per-pipeline memory; no container sampler was started here.
-      expect(rows.filter(({ event }) => event.kind === "resource" || event.operation === "container_memory")).toEqual([]);
+      expect(
+        rows.filter(
+          ({ event }) =>
+            event.kind === "resource" || event.operation === "container_memory",
+        ),
+      ).toEqual([]);
       const after = JSON.parse(
         readFileSync(join(directory, "telemetry.json"), "utf8"),
       );
@@ -905,44 +942,85 @@ test("the Architect receives both assignments, teams receive only theirs, and pe
     expect(delivered.split(NOTE[other]).length - 1).toBe(1);
     expect(delivered).not.toContain(NOTE[key]);
   }
-  const owners = new Set(events.map(({ agent_id, node_id }) => `${agent_id}:${node_id}`));
-  expect(owners).toEqual(new Set([
-    "agent1:Architect", "agent1:Tester1", "agent1:Implementer1", "agent1:Agent1",
-    "agent2:Tester2", "agent2:Implementer2", "agent2:Agent2",
-  ]));
+  const owners = new Set(
+    events.map(({ agent_id, node_id }) => `${agent_id}:${node_id}`),
+  );
+  expect(owners).toEqual(
+    new Set([
+      "agent1:Architect",
+      "agent1:Tester1",
+      "agent1:Implementer1",
+      "agent1:Agent1",
+      "agent2:Tester2",
+      "agent2:Implementer2",
+      "agent2:Agent2",
+    ]),
+  );
 }, 20_000);
 
 test("same-named agents in nested teams emit under separate qualified paths", async () => {
-  const nested = (id: string): syntax.NodeSpec => ({ kind: "graph", graph: {
-    source: { routes: { [`$source~>${id}`]: ["deliver"] } },
-    nodes: { "Worker/Report": { prompt: `Return the ${id} report.` } },
-    edges: [
-      { from: "$source", to: "Worker/Report", kind: "message", id: "deliver", schema: {} },
-      { from: "Worker/Report", to: "$sink", schema: {} },
-    ],
-  } });
-  const workflow: syntax.JuncoDocument = { graph: {
-    source: { routes: { "assignment-1": ["$source~>Team~1"], "assignment-2": ["$source~>Team~2"] } },
-    nodes: { "Team~1": nested("Team~1"), "Team~2": nested("Team~2") },
-    sink: { returns: "Team~1" },
-    edges: [
-      { from: "$source", to: "Team~1", kind: "message", schema: {} },
-      { from: "$source", to: "Team~2", kind: "message", schema: {} },
-      { from: "Team~1", to: "$sink", schema: {} }, { from: "Team~2", to: "$sink", schema: {} },
-    ],
-  } };
-  const ladder = await offlineLadder((context) => done(userTexts(context.messages)[0]!));
+  const nested = (id: string): syntax.NodeSpec => ({
+    kind: "graph",
+    graph: {
+      source: { routes: { [`$source~>${id}`]: ["deliver"] } },
+      nodes: { "Worker/Report": { prompt: `Return the ${id} report.` } },
+      edges: [
+        {
+          from: "$source",
+          to: "Worker/Report",
+          kind: "message",
+          id: "deliver",
+          schema: {},
+        },
+        { from: "Worker/Report", to: "$sink", schema: {} },
+      ],
+    },
+  });
+  const workflow: syntax.JuncoDocument = {
+    graph: {
+      source: {
+        routes: {
+          "assignment-1": ["$source~>Team~1"],
+          "assignment-2": ["$source~>Team~2"],
+        },
+      },
+      nodes: { "Team~1": nested("Team~1"), "Team~2": nested("Team~2") },
+      sink: { returns: "Team~1" },
+      edges: [
+        { from: "$source", to: "Team~1", kind: "message", schema: {} },
+        { from: "$source", to: "Team~2", kind: "message", schema: {} },
+        { from: "Team~1", to: "$sink", schema: {} },
+        { from: "Team~2", to: "$sink", schema: {} },
+      ],
+    },
+  };
+  const ladder = await offlineLadder((context) =>
+    done(userTexts(context.messages)[0]!),
+  );
   await using lifetime = new AsyncDisposableStack();
-  const collection = lifetime.adopt(countedCollection().collection, (c) => c.close());
+  const collection = lifetime.adopt(countedCollection().collection, (c) =>
+    c.close(),
+  );
   const owners = new Set<string>();
-  const { execution, stats } = await createPair(request(), {
-    ladder, collection, tracer: new tracer.DummyTracer(), signal: new AbortController().signal,
-    emit: ({ agent_id, node_id }) => { owners.add(`${agent_id}:${node_id}`); },
-  }, workflow);
+  const { execution, stats } = await createPair(
+    request(),
+    {
+      ladder,
+      collection,
+      tracer: new tracer.DummyTracer(),
+      signal: new AbortController().signal,
+      emit: ({ agent_id, node_id }) => {
+        owners.add(`${agent_id}:${node_id}`);
+      },
+    },
+    workflow,
+  );
   lifetime.defer(() => execution.graph.close());
   await execution.run();
   expect(stats).toEqual({ agents: 2, workers: 0 });
-  expect(owners).toEqual(new Set(["agent1:Team~01/Worker~1Report", "agent2:Team~02/Worker~1Report"]));
+  expect(owners).toEqual(
+    new Set(["agent1:Team~01/Worker~1Report", "agent2:Team~02/Worker~1Report"]),
+  );
 });
 
 test("a late peer note cannot start a second integrator run", async () => {
@@ -951,11 +1029,15 @@ test("a late peer note cannot start a second integrator run", async () => {
     Agent2: steps(
       () => call("yield", { reason: "still integrating" }),
       (context) => {
-        const assignment = userTexts(context.messages).find((text) => text.includes("\n\nTask: "))!;
+        const assignment = userTexts(context.messages).find((text) =>
+          text.includes("\n\nTask: "),
+        )!;
         return call("send", {
-          id: "agent2-to-agent1", payload: "late peer note",
+          id: "agent2-to-agent1",
+          payload: "late peer note",
           task: JSON.parse(assignment.split("\n\nTask: ").at(-1)!).taskId,
-          spec: "", handoff: "",
+          spec: "",
+          handoff: "",
         });
       },
       (context) => {
@@ -967,8 +1049,12 @@ test("a late peer note cannot start a second integrator run", async () => {
   const { execution, calls } = run;
   await closed(run, async () => {
     const results = await execution.run();
-    expect(syntax.finalText(results.get(graph.NodeId.create("Agent1")), "Agent1")).toBe("already finished");
-    expect(syntax.finalText(results.get(graph.NodeId.create("Agent2")), "Agent2")).toBe("peer finished");
+    expect(
+      syntax.finalText(results.get(graph.NodeId.create("Agent1")), "Agent1"),
+    ).toBe("already finished");
+    expect(
+      syntax.finalText(results.get(graph.NodeId.create("Agent2")), "Agent2"),
+    ).toBe("peer finished");
     expect(calls.filter((c) => c.agent === "Agent1")).toHaveLength(1);
     expect(execution.graph.available().size).toBe(0);
   });
@@ -1200,16 +1286,27 @@ test("leaders deny competing writes, keep disjoint files, and release permits ha
     ),
   });
   const drive = async (name: string) => {
-    const agentState = run.execution.graph.getNode(graph.NodeId.create(name))!.state;
+    const agentState = run.execution.graph.getNode(
+      graph.NodeId.create(name),
+    )!.state;
     assert.ok(agentState instanceof agent.JuncoAgent);
     const values = new Map([
-      [graph.EdgeId.create(`Architect->${name}`), done("Coordinate file ownership")],
-      [graph.EdgeId.create(`Implementer${name.slice(-1)}->${name}`), done("Ready for review")],
+      [
+        graph.EdgeId.create(`Architect->${name}`),
+        done("Coordinate file ownership"),
+      ],
+      [
+        graph.EdgeId.create(`Implementer${name.slice(-1)}->${name}`),
+        done("Ready for review"),
+      ],
     ]);
     if (agentState.status === "idle")
-      agentState.stagePrompt(`You are ${name}; exercise the ownership boundary.`);
+      agentState.stagePrompt(
+        `You are ${name}; exercise the ownership boundary.`,
+      );
     for (;;) {
-      const step: IteratorResult<agent.AgenticStep, void> = await agentState.next({ values, messages: new Map() });
+      const step: IteratorResult<agent.AgenticStep, void> =
+        await agentState.next({ values, messages: new Map() });
       assert.equal(step.done, false);
       if (step.value?.kind === "failed") throw step.value.error;
       if (step.value?.kind === "settled")
@@ -1246,7 +1343,11 @@ test("native descendants use the worker model and common thinking, inherit polic
       () => call("release", { file: "owned.txt" }),
       () => done("Agent1 done"),
     ),
-    Agent2: steps(() => task("CHILD-peer"), () => done("Agent2 interim"), () => done("Agent2 done")),
+    Agent2: steps(
+      () => task("CHILD-peer"),
+      () => done("Agent2 interim"),
+      () => done("Agent2 done"),
+    ),
     "CHILD-peer": steps(() => done("peer child completed")),
     "CHILD-worker": steps(
       () => bash("printf overwritten > owned.txt"),
@@ -1273,11 +1374,17 @@ test("native descendants use the worker model and common thinking, inherit polic
     expect(grandchildRead).toBe(true);
     expect(run.stats.workers).toBe(3);
     for (const [report, team] of [
-      ["child interim", "agent1"], ["grandchild read completed", "agent1"], ["peer child completed", "agent2"],
+      ["child interim", "agent1"],
+      ["grandchild read completed", "agent1"],
+      ["peer child completed", "agent2"],
     ]) {
       const reports = run.events.filter(({ type, message }) => {
         const msg = message as Message | undefined;
-        return type === "message" && msg?.role === "assistant" && contentText(msg.content) === report;
+        return (
+          type === "message" &&
+          msg?.role === "assistant" &&
+          contentText(msg.content) === report
+        );
       });
       expect(reports.map((r) => r.agent_id)).toEqual([team]);
     }

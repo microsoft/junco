@@ -15,8 +15,8 @@ import { LockPolicy } from "junco-tools";
 import { tools } from "../src/index.ts";
 import { resultText, terminalPorts } from "./deterministic-support.ts";
 import {
-  addPromptOnce,
   type AgencyContext,
+  addPromptOnce,
   agencyGraph,
   drive,
   flushMacrotasks,

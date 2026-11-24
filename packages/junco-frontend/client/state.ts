@@ -213,7 +213,12 @@ export function reduce(state: State, event: FrontendEvent): State {
       }
       return {
         ...base,
-        graphs: withLive(state.graphs, graph, node, event.outcome === "final" ? "done" : "waiting"),
+        graphs: withLive(
+          state.graphs,
+          graph,
+          node,
+          event.outcome === "final" ? "done" : "waiting",
+        ),
         cards,
       };
     }

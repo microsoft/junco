@@ -116,7 +116,10 @@ export class AgentDriver<N extends TSchema, V> {
    */
   readonly #received = new Map<string, HeldTask>();
 
-  private constructor(agent: DrivenAgent<N, V>, prompt: DrivenAgent<N, V>["stagedPrompt"]) {
+  private constructor(
+    agent: DrivenAgent<N, V>,
+    prompt: DrivenAgent<N, V>["stagedPrompt"],
+  ) {
     this.#agent = agent;
     this.#prompt = prompt;
     this.#policy = {
@@ -286,9 +289,10 @@ export class AgentDriver<N extends TSchema, V> {
   ): Promise<AssistantMessage | undefined> {
     const agent = this.#agent;
     const staged = agent.stagedPrompt;
-    const interpolated = staged !== undefined && staged === this.#prompt
-      ? this.#policy.promptReturnEdges
-      : undefined;
+    const interpolated =
+      staged !== undefined && staged === this.#prompt
+        ? this.#policy.promptReturnEdges
+        : undefined;
     let needsPrompt = !this.#started && staged === undefined;
     for (const { id, payload: input } of messages) {
       const payload: unknown = input;
@@ -352,9 +356,10 @@ export class AgentDriver<N extends TSchema, V> {
    */
   static node<N extends TSchema, V>(
     agent: DrivenAgent<N, V>,
-    options: NodeOptions<N, V> & Pick<ToolCollection, "policy"> & {
-      readonly prompt: DrivenAgent<N, V>["stagedPrompt"];
-    },
+    options: NodeOptions<N, V> &
+      Pick<ToolCollection, "policy"> & {
+        readonly prompt: DrivenAgent<N, V>["stagedPrompt"];
+      },
   ): NodeSpec<Agentic<N, V>, N, V> & Pick<ToolCollection, "policy"> {
     const { prompt } = options;
     if (
@@ -362,7 +367,9 @@ export class AgentDriver<N extends TSchema, V> {
       typeof prompt !== "function" &&
       (typeof prompt !== "string" || !prompt.trim())
     )
-      throw new DataflowDefinitionError("A prompt agent requires a nonblank prompt");
+      throw new DataflowDefinitionError(
+        "A prompt agent requires a nonblank prompt",
+      );
     const driver = new AgentDriver<N, V>(agent, prompt);
     const step: StepFn<Agentic<N, V>, N, V> = async function* (): NodeGenerator<
       N,
@@ -375,15 +382,12 @@ export class AgentDriver<N extends TSchema, V> {
       // Manual registrations stage their own prompt; YAML already staged its first firing.
       if (
         prompt !== undefined &&
-        (driver.#policy.promptReturnEdges === undefined || agent.stagedPrompt === undefined)
+        (driver.#policy.promptReturnEdges === undefined ||
+          agent.stagedPrompt === undefined)
       )
         agent.stagePrompt(prompt);
       while (true) {
-        const result = await driver.#recovering(
-          this,
-          view,
-          messagesOf(view),
-        );
+        const result = await driver.#recovering(this, view, messagesOf(view));
         if (result !== undefined) {
           driver.#attempt = 0;
           // The native result; the step-less registration admits AssistantMessage into V.

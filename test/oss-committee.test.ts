@@ -3,16 +3,16 @@ import assert from "node:assert/strict";
 import { contentText, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
   type DataflowGraph,
-  type DataflowRunTrace,
   DataflowNodeError,
+  type DataflowRunTrace,
   DummyTracer,
   EdgeId,
   NodeId,
 } from "dataflow-engine";
 import * as O from "fp-ts/lib/Option.js";
 import { AssistantMessageSchema, Deterministic, type Task } from "junco";
-import { Value } from "typebox/value";
 import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import {
   approvedPlan,
   OssSearchTool,
@@ -129,7 +129,9 @@ test("a failed lookup sends partial research to the Architect before the Librari
   const { execution, available, run, librarian } = await committee.open();
   const { graph } = execution;
   let librarianRuns = 0;
-  librarian.events.on("run_start", () => { librarianRuns++; });
+  librarian.events.on("run_start", () => {
+    librarianRuns++;
+  });
   await execution.step(); // prepare the research assignment
   await execution.step(); // prime the Librarian
   await execution.step(); // failed lookup, then info, send and the real yield tool
@@ -209,7 +211,10 @@ test("a truncated closing report after a handoff never reaches the Reducer", asy
     lookups: [[rateLimited()]],
     librarianStopReason: "length",
   });
-  const { execution: { graph }, run } = await committee.open();
+  const {
+    execution: { graph },
+    run,
+  } = await committee.open();
   const error = await run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "ReviewAssignment",
@@ -232,7 +237,10 @@ test("a truncated research report never reaches the Architect", async () => {
   await using committee = await scriptedCommittee({
     librarianStopReason: "length",
   });
-  const { execution: { graph }, run } = await committee.open();
+  const {
+    execution: { graph },
+    run,
+  } = await committee.open();
   const error = await run().catch((thrown: unknown) => thrown);
   assert.ok(
     error instanceof DataflowNodeError && error.nodeId === "DesignAssignment",
@@ -301,16 +309,16 @@ test("the design code node rejects missing searches and malformed partial handof
     await using committee = await scriptedCommittee({
       lookups: [[rateLimited()]],
     });
-    const { execution: { graph } } = await committee.open();
+    const {
+      execution: { graph },
+    } = await committee.open();
     if (entry.failed)
       await assert.rejects(
         committee.search.tool.execute("failed-search", {
           query: "terminal UI",
         }),
       );
-    const state = graph.getNode(
-      NodeId.create("DesignAssignment"),
-    )!.state;
+    const state = graph.getNode(NodeId.create("DesignAssignment"))!.state;
     assert.ok(state instanceof Deterministic);
     const body = state.step();
     await body.next(); // prime the actual registered code node, not a replacement test implementation
@@ -537,18 +545,29 @@ test("a failed lookup in one round does not block a later normal round", async (
   });
   const sinks: unknown[] = [];
   const sessions = new Map<string, Set<unknown>>();
-  const observer = new class extends DummyTracer {
-    override startRun<S, N extends TSchema, T, EH>(graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T> {
-      return { startNode: id => {
-        if (["Librarian", "Architect", "Reducer"].includes(id)) {
-          const seen = sessions.get(id) ?? new Set();
-          seen.add(graph.getNode(id)!.state);
-          sessions.set(id, seen);
-        }
-        return { end: step => { if (id === "$sink" && step.done) sinks.push(step.value); }, fail() {} };
-      }, end() {}, fail() {} };
+  const observer = new (class extends DummyTracer {
+    override startRun<S, N extends TSchema, T, EH>(
+      graph: DataflowGraph<S, N, T, EH>,
+    ): DataflowRunTrace<N, T> {
+      return {
+        startNode: (id) => {
+          if (["Librarian", "Architect", "Reducer"].includes(id)) {
+            const seen = sessions.get(id) ?? new Set();
+            seen.add(graph.getNode(id)!.state);
+            sessions.set(id, seen);
+          }
+          return {
+            end: (step) => {
+              if (id === "$sink" && step.done) sinks.push(step.value);
+            },
+            fail() {},
+          };
+        },
+        end() {},
+        fail() {},
+      };
     }
-  };
+  })();
   const plan = await committee.run(observer);
   assert.equal(sessions.size, 3);
   for (const seen of sessions.values()) assert.equal(seen.size, 1);
@@ -562,15 +581,24 @@ test("a failed lookup in one round does not block a later normal round", async (
 test("a second-round partial waits for this round's Architect even when the Librarian requested immediate resumption", async () => {
   const feedback = "Retry the public search and account for missing evidence.";
   await using committee = await scriptedCommittee({
-    lookups: [[emptySearch()], [rateLimited()]], reviews: [revise(feedback), approved], waitForInput: false,
+    lookups: [[emptySearch()], [rateLimited()]],
+    reviews: [revise(feedback), approved],
+    waitForInput: false,
   });
   const plan = await committee.run();
   const requests = committee.modelRequests;
   assert.equal(committee.memberInputs.Architect.length, 2);
-  assert.match(committee.memberInputs.Architect[1]!, /Partial research:.*\n.*HTTP 403/s);
+  assert.match(
+    committee.memberInputs.Architect[1]!,
+    /Partial research:.*\n.*HTTP 403/s,
+  );
   assert.ok(committee.memberInputs.Architect[1]!.includes(feedback));
-  assert.ok(requests.lastIndexOf("Architect") < requests.lastIndexOf("Librarian"));
-  assert.ok(requests.lastIndexOf("Librarian") < requests.lastIndexOf("Reducer"));
+  assert.ok(
+    requests.lastIndexOf("Architect") < requests.lastIndexOf("Librarian"),
+  );
+  assert.ok(
+    requests.lastIndexOf("Librarian") < requests.lastIndexOf("Reducer"),
+  );
   assert.ok(plan.includes("Review round: 2"));
   assert.ok(plan.includes("HTTP 403"));
   assert.ok(!plan.includes("Review round: 1"));
@@ -581,17 +609,27 @@ test("cancellation at Reducer settlement does not publish or start another round
   const controller = new AbortController();
   const reason = new Error("stop before publication");
   let published = false;
-  const observer = new class extends DummyTracer {
-    override startRun<S, N extends TSchema, T, EH>(_graph: DataflowGraph<S, N, T, EH>): DataflowRunTrace<N, T> {
-      return { startNode: id => ({
-        end: step => {
-          if (id === "Reducer" && step.done) controller.abort(reason);
-          if (id === "$sink") published = true;
-        }, fail() {},
-      }), end() {}, fail() {} };
+  const observer = new (class extends DummyTracer {
+    override startRun<S, N extends TSchema, T, EH>(
+      _graph: DataflowGraph<S, N, T, EH>,
+    ): DataflowRunTrace<N, T> {
+      return {
+        startNode: (id) => ({
+          end: (step) => {
+            if (id === "Reducer" && step.done) controller.abort(reason);
+            if (id === "$sink") published = true;
+          },
+          fail() {},
+        }),
+        end() {},
+        fail() {},
+      };
     }
-  };
-  await assert.rejects(committee.run(observer, controller.signal), error => error === reason);
+  })();
+  await assert.rejects(
+    committee.run(observer, controller.signal),
+    (error) => error === reason,
+  );
   assert.equal(published, false);
   assert.equal(committee.memberInputs.Reducer.length, 1);
 }, 5_000);

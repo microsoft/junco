@@ -81,10 +81,13 @@ export function context<
         if (candidates.size === 0) break;
         const observation = graph.observe();
         const plans = new Map(
-          [...candidates].map(([id, candidate]) => [
-            id,
-            candidate.continuationOnly ? new Map() : inputs(id, candidate),
-          ] as const),
+          [...candidates].map(
+            ([id, candidate]) =>
+              [
+                id,
+                candidate.continuationOnly ? new Map() : inputs(id, candidate),
+              ] as const,
+          ),
         );
         const metadata = new Map<NodeIdType, C>();
         if (describeNode !== undefined) {

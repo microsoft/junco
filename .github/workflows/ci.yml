@@ -41,16 +41,14 @@ jobs:
         run: bun run check:ci
 
       # Root and engine examples bundled from workspace sources before any producer build: a
-      # missing Bun source export fails here. The relocated root bundles resolve only the vendor
-      # externals; the engine's traced mode is built but not executed.
+      # missing Bun source export fails here. Smoke the relocated root bundles with only their
+      # Pi peers; the native recursive workflow runs in ci/test.sh. Do not execute the Opik build.
       - name: Bundle and smoke workspace examples from source
         run: |
           bun --no-install --eval '
           import assert from "node:assert/strict";
           import { existsSync } from "node:fs";
-          import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
-          import { tmpdir } from "node:os";
-          import { dirname, join } from "node:path";
+          import { join } from "node:path";
 
           const root = process.cwd();
           const producerOutputs = [
@@ -99,44 +97,8 @@ jobs:
           ]);
           assertNoProducers();
           console.log("deterministic-examples: ok");
-
-          const consumer = await mkdtemp(join(tmpdir(), "junco-example-consumer-"));
-          try {
-            await cp(join(root, "examples/dist"), consumer, { recursive: true });
-            await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
-            for (const name of [
-              "@earendil-works/pi-agent-core",
-              "@earendil-works/pi-ai",
-              "@earendil-works/pi-coding-agent",
-            ]) {
-              const destination = join(consumer, "node_modules", name);
-              await mkdir(dirname(destination), { recursive: true });
-              await symlink(await realpath(join(root, "node_modules", name)), destination, "dir");
-            }
-            async function run(name) {
-              const child = Bun.spawn([process.execPath, "--no-install", join(consumer, name)], {
-                cwd: consumer, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-              });
-              const [stdout, stderr, code] = await Promise.all([
-                new Response(child.stdout).text(),
-                new Response(child.stderr).text(),
-                child.exited,
-              ]);
-              return { stdout, stderr, code };
-            }
-            const recursive = await run("recursive-agency/recursive-agency.js");
-            assert.equal(recursive.code, 0, recursive.stderr);
-            assert.equal(recursive.stderr, "");
-            assert.match(recursive.stdout, /^root complete; leaf-result \+ sibling-result; \d+ root decisions\n$/);
-            const committee = await run("oss-committee/oss-committee.js");
-            assert.equal(committee.code, 1);
-            assert.equal(committee.stdout, "");
-            assert.match(committee.stderr, /^Usage:/);
-            console.log("source-example-bundles: ok");
-          } finally {
-            await rm(consumer, { recursive: true, force: true });
-          }
           '
+          bun --no-install ci/smoke-example-bundles.mjs core
 
       # In-memory MCP protocol tests against workspace sources: no native addon is built or loaded.
       - name: junco-mcp core tests from source

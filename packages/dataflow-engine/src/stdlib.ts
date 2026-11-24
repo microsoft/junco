@@ -4,12 +4,13 @@ import { EmitOnce, from } from "./builders.js";
 import { checkPayload, type Edge } from "./edges.js";
 import { DataflowDefinitionError } from "./errors.js";
 import type { NodeId } from "./identity.js";
-import type { NodeGenerator, NodeOptions, NodeSpec, ParentView } from "./node.js";
-import {
-  Message,
-  rejectLegacyAvailability,
-  snapshotView,
+import type {
+  NodeGenerator,
+  NodeOptions,
+  NodeSpec,
+  ParentView,
 } from "./node.js";
+import { Message, rejectLegacyAvailability, snapshotView } from "./node.js";
 import { TriggerEntry, TriggerRule } from "./trigger.js";
 import { assertUsageAllowed } from "./usage-limits.js";
 
@@ -194,7 +195,9 @@ export class ConstFanin<S, C extends TSchema, T>
         }
       }
       // `TArray<C>` admits exactly an array of `Static<C>`; TypeScript cannot unfold the generic.
-      yield { resume: [Message.create(output, collected as Static<TArray<C>>)] };
+      yield {
+        resume: [Message.create(output, collected as Static<TArray<C>>)],
+      };
       return ret;
     }
 

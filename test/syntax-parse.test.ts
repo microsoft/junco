@@ -99,35 +99,83 @@ const rejectsAt = (value: unknown, path: string) => {
 };
 
 test("node maps validate each sparse or complete domain, including escaped names and nested ports", () => {
-  const child = (route: string) => ({ kind: "graph", graph: {
-    nodes: { Worker: { prompt: "work" } },
-    source: { routes: { [route]: ["$source~>Worker"] } },
-    edges: [{ from: "$source", to: "Worker", kind: "message", schema }, { from: "Worker", to: "$sink", schema }],
-  } });
-  const doc = parse({ graph: {
-    nodes: { Start: { kind: "emit", text: "work", spec: "done" }, Left: child("Start~>Left"),
-      Right: child("Start~>Right"), "Left/Worker": { kind: "code" } },
-    edges: [
-      ...["Left", "Right"].map((to) => ({ from: "Start", to, kind: "message", schema })),
-      ...["Left", "Right"].map((from) => ({ from, to: "Left/Worker", schema })),
-      { from: "Left/Worker", to: "$sink", schema },
-    ],
-  } });
+  const child = (route: string) => ({
+    kind: "graph",
+    graph: {
+      nodes: { Worker: { prompt: "work" } },
+      source: { routes: { [route]: ["$source~>Worker"] } },
+      edges: [
+        { from: "$source", to: "Worker", kind: "message", schema },
+        { from: "Worker", to: "$sink", schema },
+      ],
+    },
+  });
+  const doc = parse({
+    graph: {
+      nodes: {
+        Start: { kind: "emit", text: "work", spec: "done" },
+        Left: child("Start~>Left"),
+        Right: child("Start~>Right"),
+        "Left/Worker": { kind: "code" },
+      },
+      edges: [
+        ...["Left", "Right"].map((to) => ({
+          from: "Start",
+          to,
+          kind: "message",
+          schema,
+        })),
+        ...["Left", "Right"].map((from) => ({
+          from,
+          to: "Left/Worker",
+          schema,
+        })),
+        { from: "Left/Worker", to: "$sink", schema },
+      ],
+    },
+  });
   const id = graph.NodeId.create;
   const sparse = new Map([[id("Left/Worker"), "left"]]);
-  const full = new Map(["$source", "$sink", "Start", "Left", "Right", "Left~1Worker",
-    "Left/$source", "Left/$sink", "Right/$source", "Right/$sink", "Left/Worker"].map((key) => [id(key), true]));
-  const check = () => JuncoGraphValidator.validateNodeMaps(doc, {
-    "sparse/map": { map: sparse, complete: false }, full: { map: full, complete: true },
+  const full = new Map(
+    [
+      "$source",
+      "$sink",
+      "Start",
+      "Left",
+      "Right",
+      "Left~1Worker",
+      "Left/$source",
+      "Left/$sink",
+      "Right/$source",
+      "Right/$sink",
+      "Left/Worker",
+    ].map((key) => [id(key), true]),
+  );
+  const check = () =>
+    JuncoGraphValidator.validateNodeMaps(doc, {
+      "sparse/map": { map: sparse, complete: false },
+      full: { map: full, complete: true },
+    });
+  assert.throws(check, {
+    code: "node-map",
+    path: "/options/full",
+    message: /missing IDs: "Right\/Worker"/,
   });
-  assert.throws(check, { code: "node-map", path: "/options/full", message: /missing IDs: "Right\/Worker"/ });
   full.set(id("Right/Worker"), false);
   check();
   sparse.set(id("Typo"), "unused");
-  assert.throws(check, { code: "node-map", path: "/options/sparse~1map", message: /unknown IDs: "Typo"/ });
+  assert.throws(check, {
+    code: "node-map",
+    path: "/options/sparse~1map",
+    message: /unknown IDs: "Typo"/,
+  });
   sparse.clear();
   full.delete(id("Left/$source"));
-  assert.throws(check, { code: "node-map", path: "/options/full", message: /Left\/\$source/ });
+  assert.throws(check, {
+    code: "node-map",
+    path: "/options/full",
+    message: /Left\/\$source/,
+  });
 });
 
 for (const id of ["$source", "$sink"])
@@ -156,7 +204,10 @@ test("source credits must be explicit, reachable ordinary messages", () => {
   ];
   const doc = (trigger?: TriggerSpec, credit: object = edges[0]!) => ({
     graph: {
-      source: { ...(trigger === undefined ? {} : { trigger }), routes: { input: ["delivery"] } },
+      source: {
+        ...(trigger === undefined ? {} : { trigger }),
+        routes: { input: ["delivery"] },
+      },
       nodes: { Seed: { kind: "code" }, Worker: { kind: "code" } },
       edges: [credit, ...edges.slice(1)],
     },
@@ -168,7 +219,11 @@ test("source credits must be explicit, reachable ordinary messages", () => {
   rejectsAt(doc({ any: ["open", "missing"] }), "/graph/source/trigger/any/1");
   rejectsAt(doc({ any: ["open", "open"] }), "/graph/source/trigger/any/1");
   assert.equal(failure(doc({ all: any.any })).code, "unstartable-trigger");
-  for (const override of [{ from: "$source" }, { kind: "value" }, { on: "return" }])
+  for (const override of [
+    { from: "$source" },
+    { kind: "value" },
+    { on: "return" },
+  ])
     rejectsAt(doc(any, { ...edges[0]!, ...override }), "/graph/edges/0/to");
 });
 test("return notifications require a message edge from a returning node", () => {
@@ -1036,7 +1091,8 @@ graph:
           tool_block: ["read", "custom"],
           skills: ["guide"],
           trigger: { any: ["ingress", "seed"] },
-          prompt: "Inspect the delivered input.\nExplain what should happen next.",
+          prompt:
+            "Inspect the delivered input.\nExplain what should happen next.",
         },
         Ralph: {
           description: "revises the seeded assignment",
@@ -1402,10 +1458,7 @@ test("agents reject YAML tools at the field and validate tool_block exclusions",
       edges: [{ from: "Child", to: "$sink", schema }],
     },
   });
-  assert.equal(
-    nestedError.path,
-    "/graph/nodes/Child/graph/nodes/Worker/tools",
-  );
+  assert.equal(nestedError.path, "/graph/nodes/Child/graph/nodes/Worker/tools");
 });
 
 test("recursive validation accepts connected graphs with cycles", () => {
@@ -1496,7 +1549,8 @@ test("graph topology needs one entry, one exit and full connectivity", () => {
   const g = (edges: [string, string][], extra: JsonObject = {}) => {
     const nodes: Record<string, JsonObject> = {};
     for (const [from, to] of edges)
-      for (const id of [from, to]) if (!id.startsWith("$")) nodes[id] ??= { prompt: "Work" };
+      for (const id of [from, to])
+        if (!id.startsWith("$")) nodes[id] ??= { prompt: "Work" };
     return {
       graph: {
         ...extra,

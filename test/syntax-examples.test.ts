@@ -2,7 +2,12 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import {
+  type AssistantMessage,
+  type FauxResponseFactory,
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 import { graph, JuncoGraph, schedules, syntax, tracer } from "junco";
 import { Reports } from "../examples/mcp/mcp.ts";
 import { userTexts } from "./deterministic-support.ts";
@@ -16,10 +21,20 @@ const mcpYamlText = readFileSync(
 
 async function build(source: string, respond: FauxResponseFactory) {
   await using setup = new AsyncDisposableStack();
-  const collection = setup.adopt(countedCollection().collection, (c) => c.close());
+  const collection = setup.adopt(countedCollection().collection, (c) =>
+    c.close(),
+  );
   const execution = await JuncoGraph.fromYaml(source, {
-    args: { cwd, collection, tracer: new tracer.DummyTracer(), code: { Reports } },
-    parameters: { scheduler: () => schedules.parallel(), ladder: await offlineLadder(respond) },
+    args: {
+      cwd,
+      collection,
+      tracer: new tracer.DummyTracer(),
+      code: { Reports },
+    },
+    parameters: {
+      scheduler: () => schedules.parallel(),
+      ladder: await offlineLadder(respond),
+    },
   });
   setup.defer(() => execution.graph.close());
   const owned = setup.move();
@@ -27,16 +42,23 @@ async function build(source: string, respond: FauxResponseFactory) {
 }
 
 test("First waits for both browsers and renders each completed report once", async () => {
-  const source = readFileSync(new URL("../examples/first/first.yml", import.meta.url), "utf8");
+  const source = readFileSync(
+    new URL("../examples/first/first.yml", import.meta.url),
+    "utf8",
+  );
   const reviews: string[][] = [];
   let rustTurns = 0;
   const respond: FauxResponseFactory = (context) => {
     const texts = userTexts(context.messages);
     const prompt = texts[0]!;
-    if (prompt.includes("for Bun only")) return fauxAssistantMessage("Bun release");
+    if (prompt.includes("for Bun only"))
+      return fauxAssistantMessage("Bun release");
     if (prompt.includes("for Rust only")) {
       return ++rustTurns === 1
-        ? fauxAssistantMessage(fauxToolCall("yield", { reason: "checking release" }), { stopReason: "toolUse" })
+        ? fauxAssistantMessage(
+            fauxToolCall("yield", { reason: "checking release" }),
+            { stopReason: "toolUse" },
+          )
         : fauxAssistantMessage("Rust release");
     }
     assert.ok(prompt.startsWith("Merge the two answers"));
@@ -55,10 +77,14 @@ test("First waits for both browsers and renders each completed report once", asy
   assert.match(reviews[0]![0]!, /Bun:\nBun release\n\nRust:\nRust release$/);
 });
 
-function mcpResponse(dependency: AssistantMessage, requests: string[][] = []): FauxResponseFactory {
+function mcpResponse(
+  dependency: AssistantMessage,
+  requests: string[][] = [],
+): FauxResponseFactory {
   return (context) => {
     const texts = userTexts(context.messages);
-    if (texts[0]!.startsWith("Complete the assignment")) return fauxAssistantMessage("research-evidence");
+    if (texts[0]!.startsWith("Complete the assignment"))
+      return fauxAssistantMessage("research-evidence");
     assert.ok(texts[0]!.startsWith("The research report below"));
     requests.push(texts);
     return dependency;
@@ -67,16 +93,29 @@ function mcpResponse(dependency: AssistantMessage, requests: string[][] = []): F
 
 test("MCP report code publishes the exact dependency result after validating both reports", async () => {
   const requests: string[][] = [];
-  const respond = mcpResponse(fauxAssistantMessage("dependency-evidence"), requests);
+  const respond = mcpResponse(
+    fauxAssistantMessage("dependency-evidence"),
+    requests,
+  );
   await using flow = await build(mcpYamlText, respond);
   const { execution } = flow;
   const results = await execution.run();
   const dependency = results.get(graph.NodeId.create("Dependencies"));
-  assert.equal(syntax.finalText(dependency, "Dependencies"), "dependency-evidence");
+  assert.equal(
+    syntax.finalText(dependency, "Dependencies"),
+    "dependency-evidence",
+  );
   assert.equal(results.get(execution.graph.sink.id), dependency);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0]!.length, 1, "the interpolated report must not also be steered");
-  assert.match(requests[0]![0]!, /<research-report>\s*research-evidence\s*<\/research-report>/);
+  assert.equal(
+    requests[0]!.length,
+    1,
+    "the interpolated report must not also be steered",
+  );
+  assert.match(
+    requests[0]![0]!,
+    /<research-report>\s*research-evidence\s*<\/research-report>/,
+  );
 });
 
 for (const [message, expected] of [

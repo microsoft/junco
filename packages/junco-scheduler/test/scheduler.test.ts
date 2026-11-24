@@ -11,8 +11,8 @@ import {
   EmitOnce,
   from,
   Message,
-  messageInputs,
   type MessageSchedule,
+  messageInputs,
   NodeId,
   type NodeIdType,
   type ParentView,
@@ -1269,12 +1269,21 @@ for (const mutation of ["addNode", "emit"] as const) {
 test("mutation during read planning invalidates the decision before activation", async () => {
   const ran: string[] = [];
   const graph: Graph = new DataflowGraph(Width.create(1), UNBOUNDED);
-  graph.addNode({ id: id("a"), state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+  graph.addNode({
+    id: id("a"),
+    state: undefined,
+    trigger: TriggerRule.always(),
+    step: actor(ran),
+  });
   const execution = context({
     graph,
     scheduler: (view) => ({ selected: select(view, ids(["a"])) }),
     readInputs: () => {
-      graph.addNode({ state: undefined, trigger: TriggerRule.always(), step: actor(ran) });
+      graph.addNode({
+        state: undefined,
+        trigger: TriggerRule.always(),
+        step: actor(ran),
+      });
       return new Map();
     },
   });

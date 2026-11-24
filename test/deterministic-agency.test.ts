@@ -437,7 +437,10 @@ for (const strategy of STRATEGIES) {
       );
       const child = childContext.graph;
       const innerId = child.addNode({
-        state: inner, prompt: "inner", policy: LockPolicy, trigger: TriggerRule.when(innerWork),
+        state: inner,
+        prompt: "inner",
+        policy: LockPolicy,
+        trigger: TriggerRule.when(innerWork),
       });
       child.addEdge(childSource.id, innerId, innerWork);
       childPorts.connect(child, innerId);
@@ -862,7 +865,8 @@ for (const strategy of STRATEGIES) {
       const childPorts = terminalPorts();
       const childContext = policyContext(
         new Source<typeof TaskSchema, AssistantMessage>(
-          (view) => from(view, toNested).map((task) => Message.create(toInner, task)),
+          (view) =>
+            from(view, toNested).map((task) => Message.create(toInner, task)),
           { schema: TaskSchema, id: childPorts.source.id },
         ),
         childPorts.sink,
@@ -870,7 +874,10 @@ for (const strategy of STRATEGIES) {
       );
       const child = childContext.graph;
       const innerId = child.addNode({
-        state: inner, prompt: "inner", policy: LockPolicy, trigger: TriggerRule.when(toInner),
+        state: inner,
+        prompt: "inner",
+        policy: LockPolicy,
+        trigger: TriggerRule.when(toInner),
       });
       child.addEdge(child.source.id, innerId, toInner);
       childPorts.connect(child, innerId);
@@ -898,7 +905,8 @@ for (const strategy of STRATEGIES) {
         id: NodeId.create("nested"),
         state: childContext,
       });
-      graph.addEdge(graph.source.id, a, toAgent)
+      graph
+        .addEdge(graph.source.id, a, toAgent)
         .addEdge(graph.source.id, d, toCoroutine)
         .addEdge(graph.source.id, n, toNested);
 
@@ -1073,10 +1081,7 @@ for (const strategy of STRATEGIES) {
 
     test("a plain drive observes graph abort, and later work runs under a fresh signal", async () => {
       const gate = barrier({ endOnAbort: true });
-      const worker = gated(
-        new MockAgent({ runs: [gatedRun("unused")] }),
-        gate,
-      );
+      const worker = gated(new MockAgent({ runs: [gatedRun("unused")] }), gate);
       const graphPorts = terminalPorts();
       const graphContext = policyContext(
         graphPorts.source,
@@ -1122,10 +1127,7 @@ for (const strategy of STRATEGIES) {
       graphPorts.connect(graph, f);
       await graphContext.run();
       const gate = barrier({ endOnAbort: true });
-      const worker = gated(
-        new MockAgent({ runs: [gatedRun("unused")] }),
-        gate,
-      );
+      const worker = gated(new MockAgent({ runs: [gatedRun("unused")] }), gate);
       addPromptRun(graph, worker, "worker", "go");
       const signal = graph.signal;
       const running = outcome(graphContext.run());
@@ -1201,7 +1203,9 @@ for (const strategy of STRATEGIES) {
       const members = agents.map((agent, index) => {
         const ports = terminalPorts();
         const context = policyContext(ports.source, ports.sink, strategy);
-        const id = context.graph.addNode(parkedMember(agent, `member ${index}`));
+        const id = context.graph.addNode(
+          parkedMember(agent, `member ${index}`),
+        );
         ports.connect(context.graph, id);
         return { context, graph: context.graph };
       });
@@ -1461,10 +1465,7 @@ describe("nested graphs", () => {
 
   test("cancellation uses the activation's captured child signal after abort resets it", async () => {
     const gate = barrier({ endOnAbort: true });
-    const worker = gated(
-      new MockAgent({ runs: [gatedRun("unused")] }),
-      gate,
-    );
+    const worker = gated(new MockAgent({ runs: [gatedRun("unused")] }), gate);
     const childPorts = terminalPorts();
     const childContext = policyContext(
       childPorts.source,
@@ -1528,7 +1529,8 @@ describe("round-robin", () => {
         }),
       ]),
     );
-    for (const [id, agent] of agents) addPromptRun(graph, agent, id, `go ${id}`);
+    for (const [id, agent] of agents)
+      addPromptRun(graph, agent, id, `go ${id}`);
     graphPorts.connect(graph, NodeId.create("2"));
     const statuses = () =>
       [...agents].map(([id, agent]) => [
